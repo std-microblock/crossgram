@@ -10,12 +10,15 @@ import type { AuthKeyStore } from './auth-key-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
 import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
-import type { RpcDispatcher, ServerRpcContext, RpcResult } from '../rpc/dispatcher.js'
+import { isBareVector } from '../rpc/dispatcher.js'
+import type { RpcDispatcher, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
 
 // TL constructor IDs for MTProto service messages
 const RPC_RESULT_ID = 0xF35C6D01
 const BOOL_TRUE_ID = 0x997275B5
 const BOOL_FALSE_ID = 0xBC799737
+// Bare Vector<X> prefix (https://core.telegram.org/type/Vector%20X)
+const VECTOR_ID = 0x1CB5C415
 
 /** Serialize a Long to 8 little-endian bytes (matches an 8-byte auth key id). */
 function longToBytesLE(v: Long): Uint8Array {
@@ -613,12 +616,19 @@ export class ServerSession {
   }
 
   private _sendRpcResult(reqMsgId: Long, result: RpcResult): void {
-    // Bare Bool results aren't in mtcute's writer map (Bool is modeled as a JS
-    // boolean), so serialize their constructor id directly.
     const kind = (result as { _: string })._
-    const resultBytes = kind === 'boolTrue' || kind === 'boolFalse'
-      ? boolBytes(kind === 'boolTrue')
-      : TlBinaryWriter.serializeObject(this._writerMap, result)
+
+    let resultBytes: Uint8Array
+    if (kind === 'boolTrue' || kind === 'boolFalse') {
+      // Bare Bool results aren't in mtcute's writer map (Bool is modeled as a JS
+      // boolean), so serialize their constructor id directly.
+      resultBytes = boolBytes(kind === 'boolTrue')
+    } else if (isBareVector(result)) {
+      // Bare Vector<X>: 0x1cb5c415 + count + items (no wrapping object).
+      resultBytes = this._serializeBareVector(result)
+    } else {
+      resultBytes = TlBinaryWriter.serializeObject(this._writerMap, result)
+    }
 
     // Build rpc_result: id(4) + req_msg_id(8) + result
     const writer = TlBinaryWriter.manual(4 + 8 + resultBytes.length)
@@ -628,6 +638,22 @@ export class ServerSession {
 
     this._sendEncryptedMessage(writer.result(), true)
     this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), kind)
+  }
+
+  /** Serialize a bare `Vector<X>`: `0x1cb5c415` + count + each item. */
+  private _serializeBareVector(vec: BareVector): Uint8Array {
+    const serialized: Uint8Array[] = []
+    let size = 8 // constructor id + count
+    for (const item of vec.items) {
+      const b = TlBinaryWriter.serializeObject(this._writerMap, item)
+      serialized.push(b)
+      size += b.length
+    }
+    const writer = TlBinaryWriter.manual(size)
+    writer.uint(VECTOR_ID)
+    writer.uint(vec.items.length)
+    for (const b of serialized) writer.raw(b)
+    return writer.result()
   }
 
   /**

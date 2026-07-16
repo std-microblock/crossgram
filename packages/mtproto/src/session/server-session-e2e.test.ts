@@ -21,6 +21,7 @@ import { Context } from 'cordis'
 import { Mtproto } from '../service.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import { generateRsaKeyPair } from '../crypto/rsa-keygen.js'
+import { bareVector } from '../rpc/dispatcher.js'
 
 /**
  * Full-stack e2e test: drives a real MtprotoServer over a real TCP socket using
@@ -255,6 +256,13 @@ async function startServer(): Promise<{ port: number, pubKey: any, stop: () => P
     reactionsDefault: { _: 'reactionEmpty' }, autologinToken: '',
   }))
 
+  // A handler returning a bare Vector<X> (0x1cb5c415 + count + items) — the shape
+  // users.getUsers and the legacy messages.getDialogFilters return.
+  ctx.mtproto.register('users.getUsers', async () => bareVector([
+    { _: 'userEmpty', id: 1 },
+    { _: 'userEmpty', id: 2 },
+  ]))
+
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
   return { port: ctx.mtproto.port, pubKey, stop: () => Promise.resolve(fiber.dispose()) }
 }
@@ -277,6 +285,18 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const config = await readRpcResult(client, perm)
       expect(config._).toBe('config')
       expect(config.thisDc).toBe(1)
+
+      const getUsers = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'users.getUsers',
+        id: [{ _: 'inputUserSelf' }],
+      })
+      await client.send(clientEncrypt(perm, getUsers, perm.salt, sessionLong, 6))
+
+      const users = await readRpcResult(client, perm)
+      expect(users).toEqual([
+        { _: 'userEmpty', id: 1 },
+        { _: 'userEmpty', id: 2 },
+      ])
       client.close()
     } finally {
       await stop()
@@ -381,6 +401,7 @@ async function readRpcResult(client: TestClient, key: ClientKey): Promise<any> {
       // Bool results aren't in mtcute's reader map (it models Bool as a JS boolean).
       if (resultId === 0x997275b5) return { _: 'boolTrue' }
       if (resultId === 0xbc799737) return { _: 'boolFalse' }
+      if (resultId === 0x1cb5c415) return reader.vector(reader.object, true)
       reader.pos -= 4
       return reader.object()
     }

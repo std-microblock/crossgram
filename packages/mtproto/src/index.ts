@@ -1,8 +1,8 @@
 export { Mtproto, default } from './service.js'
 export type { MtprotoConfig } from './service.js'
 
-export { RpcDispatcher } from './rpc/dispatcher.js'
-export type { RpcHandler, RpcResult } from './rpc/dispatcher.js'
+export { RpcDispatcher, bareVector, isBareVector } from './rpc/dispatcher.js'
+export type { RpcHandler, RpcResult, BareVector } from './rpc/dispatcher.js'
 export type { ServerRpcContext } from './rpc/context.js'
 export { RpcError, RpcErrors, toRpcError, isRpcError } from './rpc/errors.js'
 

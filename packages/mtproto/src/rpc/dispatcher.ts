@@ -2,14 +2,38 @@ import type { mtp, tl } from '@mtcute/core'
 import type { ServerRpcContext } from './context.js'
 import { RpcError, RpcErrors, isRpcError, toRpcError } from './errors.js'
 
-/** Result of an RPC call — either a TL response object or an MTProto rpc_error */
-export type RpcResult = tl.TlObject | mtp.RawMt_rpc_error
+/**
+ * A bare `Vector<X>` RPC result. Serialized as `0x1cb5c415` + count + items,
+ * with no wrapping object — this is what `users.getUsers`, the legacy
+ * `messages.getDialogFilters`, etc. return. Use {@link bareVector} to build one.
+ */
+export interface BareVector {
+  /** Marker discriminant — distinguishes a bare vector from a TL object. */
+  readonly _: 'vector'
+  readonly items: readonly tl.TlObject[]
+}
+
+/** Result of an RPC call — a TL response object, a bare vector, or an MTProto rpc_error. */
+export type RpcResult = tl.TlObject | BareVector | mtp.RawMt_rpc_error
+
+/** Build a bare `Vector<X>` RPC result (e.g. for `users.getUsers`). */
+export function bareVector(items: readonly tl.TlObject[]): BareVector {
+  return { _: 'vector', items }
+}
+
+/** Type guard for a {@link BareVector} result. */
+export function isBareVector(result: unknown): result is BareVector {
+  return typeof result === 'object'
+    && result !== null
+    && (result as { _: string })._ === 'vector'
+    && Array.isArray((result as { items?: unknown }).items)
+}
 
 /**
  * An RPC handler receives the deserialized TL request and context,
- * and returns a TL response object (or throws an RpcError).
+ * and returns an RPC result (or throws an RpcError).
  */
-export type RpcHandler = (ctx: ServerRpcContext, request: tl.RpcMethod) => Promise<tl.TlObject>
+export type RpcHandler = (ctx: ServerRpcContext, request: tl.RpcMethod) => Promise<RpcResult>
 
 /**
  * Dispatches incoming RPC calls to registered handlers by method name.
