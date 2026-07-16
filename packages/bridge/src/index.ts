@@ -5,6 +5,7 @@ import { RpcError, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import { StaticDemoPlatform, type IMPlatform, type PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
+import { DialogRpc, stableId } from './dialogs.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
@@ -19,6 +20,11 @@ export interface BridgeConfig {
   apiPrefix?: string
 }
 
+interface BridgeSessionState {
+  session: PlatformSession
+  dialogs: DialogRpc
+}
+
 /**
  * Bridge backend — a native cordis plugin. Translates MTProto RPC to an IM
  * platform. Auth is out-of-band: an HTTP endpoint mints a virtual phone + login
@@ -30,9 +36,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const apiPrefix = config.apiPrefix ?? '/api'
 
   defineModels(ctx)
-
-  // Per-connection resolved platform session (keyed by the RPC context object).
-  const sessions = new WeakMap<ServerRpcContext, PlatformSession>()
 
   // ── HTTP auth: mint a virtual phone + login code for a platform identity ──
   ctx.server.post(`${apiPrefix}/auth/:platform/complete`, async (req, res) => {
@@ -117,12 +120,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       credentials: ps.credentials,
       metadata: ps.metadata,
     }
-    sessions.set(rpc, session)
-    rpc.setPlatformData(session)
+    rpc.setPlatformData({ session, dialogs: new DialogRpc(platform, session) } satisfies BridgeSessionState)
     await platform.subscribe(session, () => {})
 
     const user = makeUser({
-      id: parseInt(ps.userId, 36) || 1,
+      id: stableId(`self:${ps.id}`),
       self: true,
       firstName: (ps.metadata.firstName as string) ?? 'Bridge',
       phone: phoneNumber,
@@ -130,10 +132,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
   })
 
-  // ── Messages (dialogs stub — fleshed out with real TL next) ──
-  ctx.mtproto.register('messages.getDialogs', async () => ({
-    _: 'messages.dialogs', dialogs: [], messages: [], chats: [], users: [],
-  } as unknown as tl.TlObject))
+  // ── Messages ──
+  ctx.mtproto.register('messages.getDialogs', async (rpc, req) =>
+    requireSession(rpc).dialogs.getDialogs(req as tl.messages.RawGetDialogsRequest))
+  ctx.mtproto.register('messages.getHistory', async (rpc, req) =>
+    requireSession(rpc).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
+  ctx.mtproto.register('messages.getMessages', async (rpc, req) =>
+    requireSession(rpc).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
 
   // ── Updates ──
   ctx.mtproto.register('updates.getState', async () => ({
@@ -176,4 +181,10 @@ function randomHex(bytes: number): string {
 /** Normalize a phone to digits only — clients send '+' for sendCode but not for signIn. */
 function normPhone(p: string): string {
   return p.replace(/\D/g, '')
+}
+
+function requireSession(rpc: ServerRpcContext): BridgeSessionState {
+  const session = rpc.getPlatformData<BridgeSessionState | null>()
+  if (!session) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+  return session
 }

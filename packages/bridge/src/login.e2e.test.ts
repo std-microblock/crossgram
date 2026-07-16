@@ -257,6 +257,42 @@ describe('bridge login e2e', () => {
       expect(countries._).toBe('help.countriesList')
       dbg('post-login sync ok:', state._, status._, filters._, countries._)
 
+      // Real bridge data: dialog list → peer history → lookup by message ID.
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 16)
+      expect(dialogs._).toBe('messages.dialogs')
+      expect(dialogs.dialogs).toHaveLength(2)
+      expect(dialogs.messages.map((message: any) => message.message)).toEqual([
+        'Meeting at 3?', 'How are you?',
+      ])
+      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Bob', 'Alice'])
+
+      const alice = dialogs.users.find((user: any) => user.firstName === 'Alice')
+      const history = await callRpc(client, key, sid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 18)
+      expect(history._).toBe('messages.messages')
+      expect(history.messages.map((message: any) => message.message)).toEqual([
+        'How are you?', 'Hey there!',
+      ])
+      expect(history.users.some((user: any) => user.self && user.firstName === 'Alice')).toBe(true)
+
+      const message = await callRpc(client, key, sid, {
+        _: 'messages.getMessages',
+        id: [{ _: 'inputMessageID', id: history.messages[0].id }],
+      }, 20)
+      expect(message._).toBe('messages.messages')
+      expect(message.messages).toHaveLength(1)
+      expect(message.messages[0]).toMatchObject({
+        _: 'message', id: history.messages[0].id, message: 'How are you?',
+      })
+      dbg('bridge dialogs/history/messages ok')
+
       client.close()
     } finally {
       await stop()
