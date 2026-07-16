@@ -63,7 +63,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     })
 
     const platformCode = String(platformId.length % 100).padStart(2, '0')
-    const virtualPhone = `+999${platformCode}${String(Math.floor(Math.random() * 1e10)).padStart(10, '0')}`
+    // Store digits only — clients send the phone with '+' for sendCode but
+    // WITHOUT '+' for signIn, so we normalize to digits everywhere.
+    const virtualPhone = `999${platformCode}${String(Math.floor(Math.random() * 1e10)).padStart(10, '0')}`
     const loginCode = String(Math.floor(100000 + Math.random() * 900000))
     await ctx.database.create('mtproto_auth_session', {
       id: randomHex(16),
@@ -74,7 +76,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       used: false,
     })
 
-    return res.json({ sessionId, virtualPhone, loginCode, platform: platformId, userId })
+    return res.json({ sessionId, virtualPhone: `+${virtualPhone}`, loginCode, platform: platformId, userId })
   })
 
   // ── Synthetic / config ──
@@ -86,7 +88,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   // ── Auth ──
   ctx.mtproto.register('auth.sendCode', async (_rpc, req) => {
-    const phone = (req as unknown as { phoneNumber: string }).phoneNumber
+    const phone = normPhone((req as unknown as { phoneNumber: string }).phoneNumber)
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
     if (auth.used) throw new RpcError(400, 'AUTH_KEY_ALREADY_REGISTERED')
@@ -100,7 +102,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   ctx.mtproto.register('auth.signIn', async (rpc, req) => {
     const { phoneNumber, phoneCode } = req as unknown as { phoneNumber: string, phoneCode: string }
-    const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phoneNumber })
+    const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: normPhone(phoneNumber) })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
     if (auth.loginCode !== phoneCode) throw new RpcError(400, 'PHONE_CODE_INVALID')
 
@@ -116,6 +118,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       metadata: ps.metadata,
     }
     sessions.set(rpc, session)
+    rpc.setPlatformData(session)
     await platform.subscribe(session, () => {})
 
     const user = makeUser({
@@ -138,6 +141,29 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     pts: 1, qts: 0, date: Math.floor(Date.now() / 1000), seq: 0, unreadCount: 0,
   } as unknown as tl.TlObject))
 
+  ctx.mtproto.register('updates.getDifference', async () => ({
+    _: 'updates.differenceEmpty', date: Math.floor(Date.now() / 1000), seq: 0,
+  } as unknown as tl.TlObject))
+
+  // ── Post-login misc (keep the client's initial sync from stalling) ──
+  ctx.mtproto.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))
+  ctx.mtproto.register('help.getCountriesList', async () => ({
+    _: 'help.countriesList', countries: [], hash: 0,
+  } as unknown as tl.TlObject))
+  ctx.mtproto.register('messages.getDialogFilters', async () => ({
+    _: 'messages.dialogFilters', flags: 0, filters: [],
+  } as unknown as tl.TlObject))
+  ctx.mtproto.register('auth.resendCode', async (_rpc, req) => {
+    const phone = normPhone((req as unknown as { phoneNumber: string }).phoneNumber)
+    const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
+    if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
+    return {
+      _: 'auth.sentCode', flags: 0,
+      type: { _: 'auth.sentCodeTypeApp', length: 6 },
+      phoneCodeHash: `hash_${auth.id}`,
+    } as unknown as tl.TlObject
+  })
+
   ctx.logger('bridge').info('bridge backend registered (platform: %s)', platform.id)
 }
 
@@ -145,4 +171,9 @@ function randomHex(bytes: number): string {
   let s = ''
   for (let i = 0; i < bytes; i++) s += Math.floor(Math.random() * 256).toString(16).padStart(2, '0')
   return s
+}
+
+/** Normalize a phone to digits only — clients send '+' for sendCode but not for signIn. */
+function normPhone(p: string): string {
+  return p.replace(/\D/g, '')
 }

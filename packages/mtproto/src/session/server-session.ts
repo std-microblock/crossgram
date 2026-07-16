@@ -15,6 +15,7 @@ import type { RpcDispatcher, ServerRpcContext, RpcResult } from '../rpc/dispatch
 // TL constructor IDs for MTProto service messages
 const RPC_RESULT_ID = 0xF35C6D01
 const BOOL_TRUE_ID = 0x997275B5
+const BOOL_FALSE_ID = 0xBC799737
 
 /** Serialize a Long to 8 little-endian bytes (matches an 8-byte auth key id). */
 function longToBytesLE(v: Long): Uint8Array {
@@ -22,6 +23,13 @@ function longToBytesLE(v: Long): Uint8Array {
   const dv = new DataView(b.buffer)
   dv.setInt32(0, v.low, true)
   dv.setInt32(4, v.high, true)
+  return b
+}
+
+/** Serialize a bare Bool result (4-byte constructor id, little-endian). */
+function boolBytes(value: boolean): Uint8Array {
+  const b = new Uint8Array(4)
+  new DataView(b.buffer).setUint32(0, value ? BOOL_TRUE_ID : BOOL_FALSE_ID, true)
   return b
 }
 
@@ -605,7 +613,12 @@ export class ServerSession {
   }
 
   private _sendRpcResult(reqMsgId: Long, result: RpcResult): void {
-    const resultBytes = TlBinaryWriter.serializeObject(this._writerMap, result)
+    // Bare Bool results aren't in mtcute's writer map (Bool is modeled as a JS
+    // boolean), so serialize their constructor id directly.
+    const kind = (result as { _: string })._
+    const resultBytes = kind === 'boolTrue' || kind === 'boolFalse'
+      ? boolBytes(kind === 'boolTrue')
+      : TlBinaryWriter.serializeObject(this._writerMap, result)
 
     // Build rpc_result: id(4) + req_msg_id(8) + result
     const writer = TlBinaryWriter.manual(4 + 8 + resultBytes.length)
@@ -614,7 +627,7 @@ export class ServerSession {
     writer.raw(resultBytes)
 
     this._sendEncryptedMessage(writer.result(), true)
-    this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), (result as { _: string })._)
+    this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), kind)
   }
 
   /**
