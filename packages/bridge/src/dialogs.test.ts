@@ -31,6 +31,15 @@ function getHistoryRequest(peerId: number, overrides: Partial<tl.messages.RawGet
   }
 }
 
+function sendMessageRequest(peerId: number, overrides: Partial<tl.messages.RawSendMessageRequest> = {}): tl.messages.RawSendMessageRequest {
+  return {
+    _: 'messages.sendMessage',
+    peer: { _: 'inputPeerUser', userId: peerId, accessHash: Long.ZERO },
+    message: 'Hello from bridge', randomId: Long.fromNumber(1234),
+    ...overrides,
+  }
+}
+
 function wireRoundTrip<T>(object: T): T {
   const bytes = TlBinaryWriter.serializeObject(__tlWriterMap, object as tl.TlObject)
   return new TlBinaryReader(__tlReaderMap, bytes).object() as T
@@ -73,7 +82,9 @@ describe('DialogRpc', () => {
 
   it('returns filtered history and includes peer plus current user metadata', async () => {
     const rpc = new DialogRpc(new StaticDemoPlatform(), session)
-    const aliceId = rpc.peerTlId('alice')
+    // A resumed client can use its cached stable user ID before getDialogs has
+    // hydrated this DialogRpc instance.
+    const aliceId = stableId('peer:alice')
     const full = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
 
     expect(full.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual([
@@ -102,6 +113,89 @@ describe('DialogRpc', () => {
     expect(result.messages[0]).toMatchObject({ _: 'message', id: knownId, message: 'Meeting at 3?' })
     expect(result.messages[1]).toEqual({ _: 'messageEmpty', id: 987654321 })
     expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('builds contacts plus basic and full users with contact metadata', async () => {
+    const rpc = new DialogRpc(new StaticDemoPlatform(), session)
+    const contacts = await rpc.getContacts()
+    expect(contacts.contacts).toEqual([
+      { _: 'contact', userId: rpc.peerTlId('alice'), mutual: true },
+      { _: 'contact', userId: rpc.peerTlId('bob'), mutual: true },
+    ])
+    expect(contacts.users).toHaveLength(2)
+    expect(contacts.users[0]).toMatchObject({
+      _: 'user', firstName: 'Alice', contact: true, mutualContact: true,
+    })
+
+    const users = await rpc.getUsers({
+      _: 'users.getUsers',
+      id: [
+        { _: 'inputUserSelf' },
+        { _: 'inputUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO },
+      ],
+    })
+    expect(users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual(['Current', 'Alice'])
+
+    const full = await rpc.getFullUser({
+      _: 'users.getFullUser',
+      id: { _: 'inputUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO },
+    })
+    expect(full).toMatchObject({
+      _: 'users.userFull',
+      fullUser: { _: 'userFull', id: rpc.peerTlId('alice'), commonChatsCount: 0 },
+      users: [{ _: 'user', firstName: 'Alice' }],
+    })
+    expect(() => wireRoundTrip(contacts)).not.toThrow()
+    expect(() => wireRoundTrip(full)).not.toThrow()
+  })
+
+  it('sends exactly once per random ID and exposes the outgoing message in history', async () => {
+    const platform = new StaticDemoPlatform()
+    const rpc = new DialogRpc(platform, session)
+    const aliceId = stableId('peer:alice')
+    const request = sendMessageRequest(aliceId)
+
+    const first = await rpc.sendMessage(request)
+    const duplicate = await rpc.sendMessage(request)
+    expect(duplicate).toEqual(first)
+    expect(first).toMatchObject({
+      _: 'updateShortSentMessage', out: true, ptsCount: 1,
+    })
+
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const sent = history.messages.filter((message) => message._ === 'message' && message.message === request.message)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ _: 'message', id: first.id, out: true })
+    expect(() => wireRoundTrip(first)).not.toThrow()
+  })
+
+  it('validates send capabilities, text length, scheduling, and unknown peers', async () => {
+    const platform = new StaticDemoPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getContacts()
+    const aliceId = rpc.peerTlId('alice')
+
+    await expect(rpc.sendMessage(sendMessageRequest(aliceId, { message: '' })))
+      .rejects.toMatchObject({ code: 400, text: 'MESSAGE_EMPTY' })
+    await expect(rpc.sendMessage(sendMessageRequest(aliceId, { message: 'x'.repeat(4097), randomId: Long.fromNumber(2) })))
+      .rejects.toMatchObject({ code: 400, text: 'MESSAGE_TOO_LONG' })
+    await expect(rpc.sendMessage(sendMessageRequest(aliceId, { scheduleDate: 1_800_000_000, randomId: Long.fromNumber(3) })))
+      .rejects.toMatchObject({ code: 400, text: 'SCHEDULED_MESSAGES_UNAVAILABLE' })
+    await expect(rpc.sendMessage(sendMessageRequest(123456, { randomId: Long.fromNumber(4) })))
+      .rejects.toMatchObject({ code: 400, text: 'PEER_ID_INVALID' })
+
+    const disabled: IMPlatform = {
+      ...platform,
+      id: 'disabled',
+      capabilities: { ...platform.capabilities, sendMessage: false },
+      subscribe: platform.subscribe.bind(platform),
+      sendMessage: platform.sendMessage.bind(platform),
+      getDialogs: platform.getDialogs.bind(platform),
+      getHistory: platform.getHistory.bind(platform),
+      getUser: platform.getUser.bind(platform),
+    }
+    await expect(new DialogRpc(disabled, session).sendMessage(sendMessageRequest(aliceId)))
+      .rejects.toMatchObject({ code: 400, text: 'MESSAGE_SEND_UNAVAILABLE' })
   })
 
   it('rejects unknown peers and platforms without history support', async () => {

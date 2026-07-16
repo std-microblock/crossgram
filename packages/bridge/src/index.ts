@@ -1,7 +1,7 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
-import { RpcError, type ServerRpcContext } from '@mtproto-relay/mtproto'
+import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import { StaticDemoPlatform, type IMPlatform, type PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
@@ -34,6 +34,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const platform = config.platform ?? new StaticDemoPlatform()
   const dcId = config.dcId ?? 1
   const apiPrefix = config.apiPrefix ?? '/api'
+  const requireBridgeSession = createSessionResolver(ctx, platform)
 
   defineModels(ctx)
 
@@ -120,6 +121,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       credentials: ps.credentials,
       metadata: ps.metadata,
     }
+    if (ps.platformId !== platform.id) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
+    if (!rpc.authKeyId) throw new RpcError(500, 'AUTH_KEY_ID_MISSING')
+    await ctx.database.upsert('mtproto_auth_binding', [{
+      authKeyId: authKeyHex(rpc.authKeyId),
+      platformId: ps.platformId,
+      platformSessionId: ps.id,
+    }])
     rpc.setPlatformData({ session, dialogs: new DialogRpc(platform, session) } satisfies BridgeSessionState)
     await platform.subscribe(session, () => {})
 
@@ -134,11 +142,21 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   // ── Messages ──
   ctx.mtproto.register('messages.getDialogs', async (rpc, req) =>
-    requireSession(rpc).dialogs.getDialogs(req as tl.messages.RawGetDialogsRequest))
+    (await requireBridgeSession(rpc)).dialogs.getDialogs(req as tl.messages.RawGetDialogsRequest))
   ctx.mtproto.register('messages.getHistory', async (rpc, req) =>
-    requireSession(rpc).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
+    (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
   ctx.mtproto.register('messages.getMessages', async (rpc, req) =>
-    requireSession(rpc).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
+    (await requireBridgeSession(rpc)).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
+  ctx.mtproto.register('messages.sendMessage', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.sendMessage(req as tl.messages.RawSendMessageRequest))
+
+  // ── Contacts / users ──
+  ctx.mtproto.register('contacts.getContacts', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getContacts())
+  ctx.mtproto.register('users.getUsers', async (rpc, req) =>
+    bareVector(await (await requireBridgeSession(rpc)).dialogs.getUsers(req as tl.users.RawGetUsersRequest)))
+  ctx.mtproto.register('users.getFullUser', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getFullUser(req as tl.users.RawGetFullUserRequest))
 
   // ── Updates ──
   ctx.mtproto.register('updates.getState', async () => ({
@@ -152,6 +170,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
   ctx.mtproto.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))
+  ctx.mtproto.register('account.getNotifySettings', async () => ({
+    _: 'peerNotifySettings',
+  } as unknown as tl.TlObject))
   ctx.mtproto.register('help.getCountriesList', async () => ({
     _: 'help.countriesList', countries: [], hash: 0,
   } as unknown as tl.TlObject))
@@ -183,8 +204,48 @@ function normPhone(p: string): string {
   return p.replace(/\D/g, '')
 }
 
-function requireSession(rpc: ServerRpcContext): BridgeSessionState {
-  const session = rpc.getPlatformData<BridgeSessionState | null>()
-  if (!session) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-  return session
+function createSessionResolver(ctx: Context, platform: IMPlatform) {
+  const loading = new Map<string, Promise<BridgeSessionState>>()
+
+  return async (rpc: ServerRpcContext): Promise<BridgeSessionState> => {
+    const cached = rpc.getPlatformData<BridgeSessionState | null>()
+    if (cached) return cached
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+
+    const authKeyId = authKeyHex(rpc.authKeyId)
+    let pending = loading.get(authKeyId)
+    if (!pending) {
+      pending = (async () => {
+        const [binding] = await ctx.database.get('mtproto_auth_binding', { authKeyId })
+        if (!binding) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+        if (binding.platformId !== platform.id) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
+        const [row] = await ctx.database.get('mtproto_platform_session', {
+          id: binding.platformSessionId,
+          active: true,
+        })
+        if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
+        const session: PlatformSession = {
+          platformSessionId: row.id,
+          platformId: row.platformId,
+          userId: row.userId,
+          credentials: row.credentials,
+          metadata: row.metadata,
+        }
+        await platform.subscribe(session, () => {})
+        return { session, dialogs: new DialogRpc(platform, session) }
+      })()
+      loading.set(authKeyId, pending)
+      pending.finally(() => loading.delete(authKeyId)).catch(() => {})
+    }
+
+    const session = await pending
+    rpc.setPlatformData(session)
+    return session
+  }
+}
+
+function authKeyHex(authKeyId: Uint8Array): string {
+  let result = ''
+  for (const byte of authKeyId) result += byte.toString(16).padStart(2, '0')
+  return result
 }

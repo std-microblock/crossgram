@@ -21,10 +21,18 @@ export interface PlatformSessionRow {
   createdAt: Date
 }
 
+/** Durable mapping used to restore bridge identity from a resumed auth key. */
+export interface AuthBindingRow {
+  authKeyId: string
+  platformId: string
+  platformSessionId: string
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
     mtproto_platform_session: PlatformSessionRow
+    mtproto_auth_binding: AuthBindingRow
   }
 }
 
@@ -48,4 +56,10 @@ export function defineModels(ctx: Context): void {
     active: 'boolean',
     createdAt: 'timestamp',
   }, { primary: 'id' })
+
+  ctx.model.extend('mtproto_auth_binding', {
+    authKeyId: 'string',
+    platformId: 'string',
+    platformSessionId: 'string',
+  }, { primary: 'authKeyId' })
 }

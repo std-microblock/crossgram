@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest'
 import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
@@ -20,7 +24,7 @@ import * as bridge from './index.js'
 
 const crypto = new NodeCryptoProvider()
 const log = new LogManager('e2e', new NodePlatform())
-log.level = LogManager.VERBOSE
+log.level = LogManager.OFF
 const clientLog = log.create('client')
 const dbg = (...a: unknown[]) => console.error('[test]', ...a)
 
@@ -183,6 +187,10 @@ async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj:
       const rid = reader.uint()
       if (rid === 0x997275b5) return { _: 'boolTrue' }
       if (rid === 0xbc799737) return { _: 'boolFalse' }
+      if (rid === 0x1cb5c415) {
+        const count = reader.uint()
+        return Array.from({ length: count }, () => reader.object())
+      }
       reader.pos -= 4
       return reader.object()
     }
@@ -192,26 +200,33 @@ async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj:
   throw new Error('no rpc_result')
 }
 
-async function startApp() {
-  const rsaKey = generateRsaKeyPair()
+async function startApp(options: {
+  rsaKey?: ReturnType<typeof generateRsaKeyPair>
+  databasePath?: string
+  authKeyStorePath?: string
+} = {}) {
+  const rsaKey = options.rsaKey ?? generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
   const ctx = new Context()
   const fibers = [
     ctx.plugin(Database),
-    ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ctx.plugin(SQLiteDriver, { path: options.databasePath ?? ':memory:' }),
     ctx.plugin(Server, { port: 0 }),
-    ctx.plugin(Mtproto, { port: 0, host: '127.0.0.1', rsaKey, log }),
+    ctx.plugin(Mtproto, {
+      port: 0, host: '127.0.0.1', rsaKey, log,
+      authKeyStorePath: options.authKeyStorePath,
+    }),
     ctx.plugin(bridge, {}),
   ]
   await Promise.all(fibers)
   await new Promise((r) => setTimeout(r, 100)) // let fibers settle
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
   const stop = async () => { for (const f of fibers.reverse()) await Promise.resolve((f as any).dispose?.()) }
-  return { ctx, port: ctx.mtproto.port, pubKey, stop }
+  return { ctx, port: ctx.mtproto.port, pubKey, rsaKey, stop }
 }
 
 describe('bridge login e2e', () => {
-  it('logs in with a virtual phone (sendCode → signIn → auth.authorization)', async () => {
+  it('logs in, resumes on a fresh connection, reads contacts/history, and sends a message', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     dbg('app started, mtproto port', port)
     try {
@@ -245,23 +260,57 @@ describe('bridge login e2e', () => {
       dbg('signIn result', auth._)
       expect(auth._).toBe('auth.authorization')
       expect((auth as any).user.firstName).toBe('Alice')
+      const [binding] = await ctx.database.get('mtproto_auth_binding', {
+        authKeyId: Buffer.from(key.authKeyId).toString('hex'),
+      })
+      expect(binding).toMatchObject({ platformId: 'static-demo', platformSessionId: 'ps1' })
+
+      // Telegram Desktop opens a fresh main connection after login. Reuse only
+      // the permanent auth key; all bridge identity and dialog ID maps must
+      // follow it to this transport.
+      client.close()
+      const resumed = await TestClient.connect(port)
+      const resumedSid = new Long(0x23456789, 0x2abc, false)
 
       // Post-login initial-sync calls (must not stall the client).
-      const state = await callRpc(client, key, sid, { _: 'updates.getState' }, 8)
+      const state = await callRpc(resumed, key, resumedSid, { _: 'updates.getState' }, 8)
       expect(state._).toBe('updates.state')
-      const status = await callRpc(client, key, sid, { _: 'account.updateStatus', offline: false }, 10)
+      const status = await callRpc(resumed, key, resumedSid, { _: 'account.updateStatus', offline: false }, 10)
       expect(status._).toBe('boolTrue')
-      const filters = await callRpc(client, key, sid, { _: 'messages.getDialogFilters' }, 12)
+      const filters = await callRpc(resumed, key, resumedSid, { _: 'messages.getDialogFilters' }, 12)
       expect(filters._).toBe('messages.dialogFilters')
-      const countries = await callRpc(client, key, sid, { _: 'help.getCountriesList', langCode: 'en', hash: 0 }, 14)
+      const countries = await callRpc(resumed, key, resumedSid, { _: 'help.getCountriesList', langCode: 'en', hash: 0 }, 14)
       expect(countries._).toBe('help.countriesList')
       dbg('post-login sync ok:', state._, status._, filters._, countries._)
 
+      const contacts = await callRpc(resumed, key, resumedSid, {
+        _: 'contacts.getContacts', hash: Long.ZERO,
+      }, 16)
+      expect(contacts._).toBe('contacts.contacts')
+      expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
+      expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
+      const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+
+      const users = await callRpc(resumed, key, resumedSid, {
+        _: 'users.getUsers',
+        id: [{ _: 'inputUser', userId: alice.id, accessHash: Long.ZERO }],
+      }, 18)
+      expect(users).toMatchObject([{ _: 'user', id: alice.id, firstName: 'Alice' }])
+
+      const fullUser = await callRpc(resumed, key, resumedSid, {
+        _: 'users.getFullUser',
+        id: { _: 'inputUser', userId: alice.id, accessHash: Long.ZERO },
+      }, 20)
+      expect(fullUser).toMatchObject({
+        _: 'users.userFull',
+        fullUser: { _: 'userFull', id: alice.id },
+      })
+
       // Real bridge data: dialog list → peer history → lookup by message ID.
-      const dialogs = await callRpc(client, key, sid, {
+      const dialogs = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
-      }, 16)
+      }, 22)
       expect(dialogs._).toBe('messages.dialogs')
       expect(dialogs.dialogs).toHaveLength(2)
       expect(dialogs.messages.map((message: any) => message.message)).toEqual([
@@ -269,33 +318,103 @@ describe('bridge login e2e', () => {
       ])
       expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Bob', 'Alice'])
 
-      const alice = dialogs.users.find((user: any) => user.firstName === 'Alice')
-      const history = await callRpc(client, key, sid, {
+      const history = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 18)
+      }, 24)
       expect(history._).toBe('messages.messages')
       expect(history.messages.map((message: any) => message.message)).toEqual([
         'How are you?', 'Hey there!',
       ])
       expect(history.users.some((user: any) => user.self && user.firstName === 'Alice')).toBe(true)
 
-      const message = await callRpc(client, key, sid, {
+      const message = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessages',
         id: [{ _: 'inputMessageID', id: history.messages[0].id }],
-      }, 20)
+      }, 26)
       expect(message._).toBe('messages.messages')
       expect(message.messages).toHaveLength(1)
       expect(message.messages[0]).toMatchObject({
         _: 'message', id: history.messages[0].id, message: 'How are you?',
       })
-      dbg('bridge dialogs/history/messages ok')
+      const sentMessage = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        message: 'Sent through MTProto', randomId: Long.fromNumber(987654321),
+      }, 28)
+      expect(sentMessage).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
 
-      client.close()
+      const updatedHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 30)
+      expect(updatedHistory.messages[0]).toMatchObject({
+        _: 'message', id: sentMessage.id, out: true, message: 'Sent through MTProto',
+      })
+      dbg('bridge contacts/dialogs/history/send ok')
+
+      resumed.close()
     } finally {
       await stop()
+    }
+  }, 15000)
+
+  it('restores the platform binding from the database after a full service restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mtproto-bridge-e2e-'))
+    const databasePath = pathToFileURL(join(directory, 'bridge.db')).href
+    const authKeyStorePath = join(directory, 'auth-keys.json')
+    const rsaKey = generateRsaKeyPair()
+    let first: Awaited<ReturnType<typeof startApp>> | undefined
+    let second: Awaited<ReturnType<typeof startApp>> | undefined
+    let client: TestClient | undefined
+
+    try {
+      first = await startApp({ rsaKey, databasePath, authKeyStorePath })
+      await first.ctx.database.create('mtproto_platform_session', {
+        id: 'persisted-ps', platformId: 'static-demo', userId: 'persisted-user',
+        credentials: { token: 'persisted' }, metadata: { firstName: 'Persisted' },
+        active: true, createdAt: new Date(),
+      })
+      await first.ctx.database.create('mtproto_auth_session', {
+        id: 'persisted-auth', virtualPhone: '99900456', loginCode: '654321',
+        platformId: 'static-demo', platformSessionId: 'persisted-ps', used: false,
+      })
+
+      client = await TestClient.connect(first.port)
+      const key = await doClientHandshake(client, first.pubKey)
+      const sid = new Long(0x3456789a, 0x3abc, false)
+      const sentCode = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: '+99900456', apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 4)
+      const authorization = await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: '99900456',
+        phoneCodeHash: sentCode.phoneCodeHash, phoneCode: '654321',
+      }, 6)
+      expect(authorization._).toBe('auth.authorization')
+      client.close()
+      client = undefined
+      await first.stop()
+      first = undefined
+
+      second = await startApp({ rsaKey, databasePath, authKeyStorePath })
+      client = await TestClient.connect(second.port)
+      const resumedSid = new Long(0x456789ab, 0x4abc, false)
+      const dialogs = await callRpc(client, key, resumedSid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 8)
+      expect(dialogs._).toBe('messages.dialogs')
+      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Bob', 'Alice'])
+    } finally {
+      client?.close()
+      await second?.stop()
+      await first?.stop()
+      await rm(directory, { recursive: true, force: true })
     }
   }, 15000)
 })

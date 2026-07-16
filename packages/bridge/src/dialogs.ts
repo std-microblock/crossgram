@@ -6,6 +6,7 @@ import { makeUser } from './synthetic.js'
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
 type GetMessagesRequest = tl.messages.RawGetMessagesRequest
+type SendMessageRequest = tl.messages.RawSendMessageRequest
 
 interface MessageRef {
   peerId: string
@@ -22,6 +23,8 @@ export class DialogRpc {
   private readonly _messageToTl = new Map<string, number>()
   private readonly _tlToMessage = new Map<number, MessageRef>()
   private _nextMessageId = 1
+  private _pts = 1
+  private readonly _sentByRandomId = new Map<string, Promise<tl.RawUpdateShortSentMessage>>()
   private readonly _selfId: number
 
   constructor(
@@ -68,6 +71,7 @@ export class DialogRpc {
   }
 
   async getHistory(req: GetHistoryRequest): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
     const all = await this._loadHistory(peerId)
     const filtered = all.filter((item) => {
@@ -120,8 +124,75 @@ export class DialogRpc {
     } as unknown as tl.messages.TypeMessages
   }
 
+  async getContacts(): Promise<tl.contacts.RawContacts> {
+    const dialogs = await this._loadDialogs()
+    const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.peerId, dialog.title)))
+    return {
+      _: 'contacts.contacts',
+      contacts: users.map((user) => ({ _: 'contact', userId: user.id, mutual: true })),
+      savedCount: users.length,
+      users: uniqueUsers(users),
+    }
+  }
+
+  async getUsers(req: tl.users.RawGetUsersRequest): Promise<tl.TypeUser[]> {
+    await this._hydratePeers()
+    return Promise.all(req.id.map((input) => this._getInputUser(input)))
+  }
+
+  async getFullUser(req: tl.users.RawGetFullUserRequest): Promise<tl.users.RawUserFull> {
+    await this._hydratePeers()
+    const user = await this._getInputUser(req.id)
+    return {
+      _: 'users.userFull',
+      fullUser: {
+        _: 'userFull',
+        id: user.id,
+        settings: { _: 'peerSettings' },
+        notifySettings: { _: 'peerNotifySettings' },
+        commonChatsCount: 0,
+      },
+      chats: [],
+      users: [user],
+    }
+  }
+
+  async sendMessage(req: SendMessageRequest): Promise<tl.RawUpdateShortSentMessage> {
+    const randomId = req.randomId.toString()
+    const existing = this._sentByRandomId.get(randomId)
+    if (existing) return existing
+
+    const pending = this._sendMessage(req)
+    this._sentByRandomId.set(randomId, pending)
+    try {
+      return await pending
+    } catch (error) {
+      this._sentByRandomId.delete(randomId)
+      throw error
+    }
+  }
+
   peerTlId(peerId: string): number {
     return this._peerId(peerId)
+  }
+
+  private async _sendMessage(req: SendMessageRequest): Promise<tl.RawUpdateShortSentMessage> {
+    if (!this._platform.capabilities.sendMessage) throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
+    if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
+    if (Array.from(req.message).length > this._platform.capabilities.maxMessageLength) {
+      throw new RpcError(400, 'MESSAGE_TOO_LONG')
+    }
+    if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
+
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    const sent = await this._platform.sendMessage(this._session, peerId, req.message)
+    const source: IMMessage = { ...sent, peerId, outgoing: true }
+    const id = this._messageId(peerId, source.id)
+    const pts = ++this._pts
+    return {
+      _: 'updateShortSentMessage', out: true, id, pts, ptsCount: 1, date: source.timestamp,
+    }
   }
 
   private async _materializeDialog(source: IMDialog) {
@@ -156,9 +227,26 @@ export class DialogRpc {
   }
 
   private async _hydrateAllMessages(): Promise<void> {
-    const getDialogs = this._requireHistory(this._platform.getDialogs)
-    const dialogs = await getDialogs.call(this._platform, this._session)
+    const dialogs = await this._loadDialogs()
     await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.peerId)))
+  }
+
+  private async _hydratePeers(): Promise<void> {
+    const dialogs = await this._loadDialogs()
+    for (const dialog of dialogs) this._peerId(dialog.peerId)
+  }
+
+  private async _loadDialogs(): Promise<IMDialog[]> {
+    const getDialogs = this._requireHistory(this._platform.getDialogs)
+    return getDialogs.call(this._platform, this._session)
+  }
+
+  private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {
+    if (input._ === 'inputUserSelf') return this._makeSelfUser()
+    if (input._ !== 'inputUser') throw new RpcError(400, 'USER_ID_INVALID')
+    const peerId = this._tlToPeer.get(input.userId)
+    if (!peerId) throw new RpcError(400, 'USER_ID_INVALID')
+    return this._getPeerUser(peerId)
   }
 
   private _makeMessage(source: IMMessage, tlId: number): tl.RawMessage {
@@ -183,6 +271,7 @@ export class DialogRpc {
     return makeUser({
       id: this._peerId(user.id), firstName: user.firstName,
       lastName: user.lastName, username: user.username,
+      contact: true, mutualContact: true,
     })
   }
 

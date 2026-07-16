@@ -35,6 +35,8 @@ export function makeAppConfig(): tl.TlObject {
 export function makeUser(opts: {
   id: number
   self?: boolean
+  contact?: boolean
+  mutualContact?: boolean
   firstName: string
   lastName?: string | null
   username?: string | null
@@ -44,6 +46,8 @@ export function makeUser(opts: {
     _: 'user',
     flags: 0,
     self: opts.self,
+    contact: opts.contact,
+    mutualContact: opts.mutualContact,
     id: opts.id,
     accessHash: Long.ZERO,
     firstName: opts.firstName,
