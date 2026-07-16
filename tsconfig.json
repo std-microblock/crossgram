@@ -1,0 +1,36 @@
+{
+  "extends": "./tsconfig.base",
+  "compilerOptions": {
+    "paths": {
+      "@mtproto-relay/*": ["./packages/*/src"],
+      // cordis
+      "@cordisjs/plugin-database-*": ["./external/database/packages/*/src"],
+      "@cordisjs/plugin-*": [
+        "./external/*/packages/core/src",
+        "./external/http/packages/*/src",
+        "./external/server/packages/*/src",
+        "./external/webui/plugins/*/src",
+      ],
+      "@cordisjs/*/lib": [
+        "./external/webui/packages/*/src",
+      ],
+      "@cordisjs/database-*": ["./external/database/packages/*/src"],
+      "@cordisjs/*": [
+        "./external/database/packages/*/src",
+        "./external/webui/packages/*/src",
+      ],
+      "cordis-plugin-*": [
+        "./external/*/src",
+        "./external/*/packages/core/src",
+        "./packages/*/src",
+      ],
+
+      "*": [
+        "./external/*/packages/core/src",
+        "./external/*/src",
+        "./packages/*/src",
+      ],
+    },
+  },
+  "files": [],
+}

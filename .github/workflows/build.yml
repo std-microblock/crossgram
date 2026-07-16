@@ -1,0 +1,81 @@
+name: build
+
+on:
+  release:
+    types:
+      - created
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - runs-on: windows-latest
+            platform: windows
+          - runs-on: ubuntu-latest
+            platform: linux
+          - runs-on: ubuntu-latest
+            platform: linux
+            emulate: arm64
+          - runs-on: macos-latest
+            platform: darwin
+
+    runs-on: ${{ matrix.target.runs-on }}
+
+    steps:
+      - name: Set up variables
+        id: vars
+        shell: bash
+        run: |
+          echo "NODE_VERSION=${{ matrix.target.node || '24' }}" >> $GITHUB_OUTPUT
+          echo "ARCH=${{ matrix.target.emulate || 'amd64' }}" >> $GITHUB_OUTPUT
+
+      - name: Install nix (for arm64)
+        if: ${{ matrix.target.emulate }}
+        uses: cachix/install-nix-action@v20
+
+      - name: Set up qemu and binfmt (for arm64)
+        if: ${{ matrix.target.emulate }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.target.emulate }}
+
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        if: ${{ !matrix.target.emulate }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.vars.outputs.NODE_VERSION }}
+
+      - name: Set up Node (for arm64)
+        if: ${{ matrix.target.emulate == 'arm64' }}
+        run: |
+          nix profile install github:NixOS/nixpkgs/ac62194c3917d5f474c1a844b6fd6da2db95077d#nodejs_${{ steps.vars.outputs.NODE_VERSION }} --option system aarch64-linux
+
+      - name: Install zip (for windows)
+        if: ${{ matrix.target.platform == 'windows' }}
+        run: choco install zip
+
+      - name: Prepare
+        run: bash .github/workflows/prepare.sh
+
+      - name: Install dependencies
+        run: yarn --no-immutable
+
+      - name: Pack file
+        run: bash .github/workflows/pack.sh
+
+      - name: Upload asset
+        shell: bash
+        run: >
+          bash .github/workflows/upload.sh
+          '${{ matrix.target.platform }}-${{ steps.vars.outputs.ARCH }}-node${{ steps.vars.outputs.NODE_VERSION }}'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

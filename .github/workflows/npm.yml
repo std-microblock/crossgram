@@ -1,0 +1,43 @@
+name: npm
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - v*
+  release:
+    types:
+      - created
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          registry-url: https://registry.npmjs.org/
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn --no-immutable
+
+      - name: Publish
+        run: bash .github/workflows/npm.sh
+        env:
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

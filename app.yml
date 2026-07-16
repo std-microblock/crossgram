@@ -1,0 +1,92 @@
+- id: 312edd83
+  name: '@cordisjs/plugin-timer'
+- id: 0a9ec786
+  name: '@cordisjs/plugin-http'
+- id: 4cd8d0ee
+  name: '@cordisjs/plugin-http-socks'
+- id: mtproto01
+  name: '@mtproto-relay/mtproto'
+  config:
+    port: 4430
+    host: 127.0.0.1
+    rsaKeyPath: ./data/rsa-key.json
+    authKeyStorePath: ./data/auth-keys.json
+- id: bridge01
+  name: '@mtproto-relay/bridge'
+  config: {}
+- id: fa2b056a
+  name: '@cordisjs/plugin-server'
+  config:
+    port: 3140
+- id: aa143c36
+  name: '@cordisjs/plugin-server-acl'
+- id: 8357f09b
+  label: Database
+  name: '@cordisjs/plugin-group'
+  config:
+    - id: 5b69b05e
+      name: '@cordisjs/plugin-database'
+    - id: 07c0d352
+      name: '@cordisjs/plugin-database-sqlite'
+      config:
+        path: ./data/cordis.db
+    - id: 0cb55d6c
+      name: '@cordisjs/plugin-database-mysql'
+      disabled: true
+    - id: ae5ffd0d
+      name: '@cordisjs/plugin-database-postgres'
+      disabled: true
+    - id: 5c1993ac
+      name: '@cordisjs/plugin-database-mongo'
+      disabled: true
+- id: 7bf6f701
+  name: '@cordisjs/plugin-group'
+  label: SSO
+  config:
+    - id: ee017963
+      name: '@cordisjs/plugin-sso'
+    - id: 8d3a0f12
+      name: '@cordisjs/plugin-sso-server'
+    - id: 45bc2d91
+      name: '@cordisjs/plugin-sso-password'
+    - id: 03dd4465
+      name: '@cordisjs/plugin-sso-webauthn'
+      disabled: true
+    - id: dcff0bd1
+      name: '@cordisjs/plugin-sso-oauth'
+      disabled: true
+- id: 0c9db8e2
+  label: WebUI
+  name: '@cordisjs/plugin-group'
+  config:
+    - id: 4430a808
+      name: '@cordisjs/plugin-webui'
+    - id: f64a9366
+      name: '@cordisjs/plugin-database-webui'
+    - id: 03ebc689
+      name: '@cordisjs/plugin-http-webui'
+    - id: 8a9b6184
+      name: '@cordisjs/plugin-insight'
+    - id: 7c7aff7a
+      name: '@cordisjs/plugin-loader-webui'
+    - id: 7adac547
+      name: '@cordisjs/plugin-logger-webui'
+    - id: afe4937f
+      name: '@cordisjs/plugin-market'
+    - id: 539bc93a
+      name: '@cordisjs/plugin-notifier'
+    - id: 126b4c42
+      name: '@cordisjs/plugin-server-webui'
+    - id: f9c1a8b2
+      name: '@cordisjs/plugin-webui-sso'
+- id: 375b963c
+  label: Development
+  name: '@cordisjs/plugin-group'
+  config:
+    - id: e1e36558
+      name: '@cordisjs/plugin-hmr'
+      config:
+        root:
+          - external
+          - packages
+          - app.yml

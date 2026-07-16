@@ -1,0 +1,71 @@
+{
+  "name": "mtproto-relay-cordis",
+  "version": "0.6.0",
+  "private": false,
+  "files": [
+    ".env",
+    "cordis.yml"
+  ],
+  "license": "MIT",
+  "workspaces": [
+    "external/*",
+    "external/*/external/*",
+    "external/*/external/*/packages/*",
+    "external/*/packages/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "yakumo build",
+    "dev": "cross-env NODE_ENV=development NODE_OPTIONS=\"--import tsx --import @cordisjs/unyaml\" cordis run",
+    "start": "cordis run"
+  },
+  "devDependencies": {
+    "@cordisjs/client": "^0.8.1",
+    "@cordisjs/unyaml": "^2.0.3",
+    "@types/node": "^25.3.5",
+    "cross-env": "^10.1.0",
+    "esbuild": "^0.28.0",
+    "tsx": "npm:@cordiverse/tsx@4.19.3-fix.3",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9",
+    "yakumo": "^3.2.1",
+    "yakumo-esbuild": "^3.0.2",
+    "yakumo-tsc": "^3.0.1"
+  },
+  "dependencies": {
+    "@cordisjs/plugin-cli": "^1.1.2",
+    "@cordisjs/plugin-cli-cordis": "^1.0.5",
+    "@cordisjs/plugin-database": "^4.0.2",
+    "@cordisjs/plugin-database-sqlite": "^5.0.5",
+    "@cordisjs/plugin-database-webui": "^0.5.0",
+    "@cordisjs/plugin-env": "^1.0.1",
+    "@cordisjs/plugin-group": "^1.0.0",
+    "@cordisjs/plugin-hmr": "^1.0.15",
+    "@cordisjs/plugin-http": "^1.5.1",
+    "@cordisjs/plugin-http-socks": "^1.0.0",
+    "@cordisjs/plugin-http-webui": "^0.5.0",
+    "@cordisjs/plugin-include": "^1.0.4",
+    "@cordisjs/plugin-insight": "^4.5.1",
+    "@cordisjs/plugin-loader": "^1.0.0-rc.4",
+    "@cordisjs/plugin-loader-webui": "^0.10.1",
+    "@cordisjs/plugin-logger-console": "^1.0.0",
+    "@cordisjs/plugin-logger-webui": "^0.6.1",
+    "@cordisjs/plugin-market": "^0.5.1",
+    "@cordisjs/plugin-notifier": "^0.8.0",
+    "@cordisjs/plugin-server": "^1.6.2",
+    "@cordisjs/plugin-server-acl": "^1.0.1",
+    "@cordisjs/plugin-server-webui": "^0.5.0",
+    "@cordisjs/plugin-sso": "^0.2.2",
+    "@cordisjs/plugin-sso-oauth": "^0.2.3",
+    "@cordisjs/plugin-sso-password": "^0.2.2",
+    "@cordisjs/plugin-sso-server": "^0.2.2",
+    "@cordisjs/plugin-timer": "^1.1.2",
+    "@cordisjs/plugin-webui": "^0.8.1",
+    "@cordisjs/plugin-webui-sso": "^0.2.6",
+    "cordis": "^4.0.0-rc.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cordiverse/boilerplate.git"
+  }
+}

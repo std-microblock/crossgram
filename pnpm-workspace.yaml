@@ -1,0 +1,9 @@
+packages:
+  - "packages/*"
+  - "external/*"
+  - "external/*/packages/*"
+allowBuilds:
+  '@parcel/watcher': false
+  better-sqlite3: set this to true or false
+  esbuild: false
+  vue-demi: false

@@ -1,0 +1,39 @@
+name: tag
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    permissions:
+      actions: write
+      contents: write
+
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - id: version
+        name: Check version
+        run: bash .github/workflows/tag.sh
+
+      - name: Create release
+        if: ${{ steps.version.outputs.tag }}
+        run: gh release create ${{ steps.version.outputs.tag }} --title ${{ steps.version.outputs.tag }}
+
+      - name: Build
+        if: ${{ steps.version.outputs.tag }}
+        run: gh workflow run build --ref ${{ steps.version.outputs.tag }}
+
+      - name: Publish
+        if: ${{ steps.version.outputs.tag }}
+        run: gh workflow run npm --ref ${{ steps.version.outputs.tag }}

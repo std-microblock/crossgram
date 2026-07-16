@@ -1,0 +1,11 @@
+- name: '@cordisjs/plugin-cli'
+  config:
+    name: cordis
+- name: '@cordisjs/plugin-cli-cordis'
+  config:
+    path: ./app.yml
+    daemon:
+      enabled: true
+    prelude:
+      - name: '@cordisjs/plugin-env'
+      - name: '@cordisjs/plugin-logger-console'
