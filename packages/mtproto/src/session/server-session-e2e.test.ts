@@ -263,6 +263,19 @@ async function startServer(): Promise<{ port: number, pubKey: any, stop: () => P
     { _: 'userEmpty', id: 2 },
   ]))
 
+  // Backend data must follow the permanent auth key, not an individual TCP
+  // connection. The reconnect test below observes this counter from a fresh
+  // transport using the same key.
+  ctx.mtproto.register('help.getAppConfig', async (rpc) => {
+    const state = rpc.getPlatformData<{ calls: number } | null>() ?? { calls: 0 }
+    state.calls += 1
+    rpc.setPlatformData(state)
+    return {
+      _: 'help.appConfig', hash: state.calls,
+      config: { _: 'jsonObject', value: [] },
+    }
+  })
+
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
   return { port: ctx.mtproto.port, pubKey, stop: () => Promise.resolve(fiber.dispose()) }
 }
@@ -367,6 +380,11 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       // Connection 1: full handshake — the server persists the perm key.
       const c1 = await TestClient.connect(port)
       const perm = await doClientHandshake(c1, pubKey, false)
+      const firstSession = new Long(0x11111111, 0x11111111)
+      const appConfigReq = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getAppConfig', hash: 0 })
+      await c1.send(clientEncrypt(perm, appConfigReq, perm.salt, firstSession, 4))
+      const firstConfig = await readRpcResult(c1, perm)
+      expect(firstConfig).toMatchObject({ _: 'help.appConfig', hash: 1 })
       c1.close()
 
       // Connection 2: a fresh transport, but reuse the perm key from c1 and send
@@ -377,10 +395,9 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const sdv = typed.toDataView(sessionId)
       const sessionLong = new Long(sdv.getInt32(0, true), sdv.getInt32(4, true))
 
-      const req = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' })
-      await c2.send(clientEncrypt(perm, req, perm.salt, sessionLong, 4))
+      await c2.send(clientEncrypt(perm, appConfigReq, perm.salt, sessionLong, 4))
       const config = await readRpcResult(c2, perm)
-      expect(config._).toBe('config')
+      expect(config).toMatchObject({ _: 'help.appConfig', hash: 2 })
       c2.close()
     } finally {
       await stop()

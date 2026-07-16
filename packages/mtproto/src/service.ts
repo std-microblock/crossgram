@@ -11,6 +11,7 @@ import { getServerReaderMap } from './rpc/server-reader-map.js'
 import { ServerConnection } from './transport/server-connection.js'
 import { ServerSession } from './session/server-session.js'
 import { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './session/auth-key-store.js'
+import { AuthKeyDataStore } from './session/auth-key-data-store.js'
 import { RpcDispatcher, type RpcHandler } from './rpc/dispatcher.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
 
@@ -60,6 +61,7 @@ export class Mtproto extends Service {
   private readonly _readerMap: TlReaderMap
   private readonly _writerMap: TlWriterMap
   private readonly _authKeyStore: AuthKeyStore
+  private readonly _authKeyData = new AuthKeyDataStore()
   private readonly _log: Logger
   private readonly _sessions = new Set<ServerSession>()
   private readonly _sockets = new Set<Socket>()
@@ -156,6 +158,7 @@ export class Mtproto extends Service {
       this.rsaKey.privateKeyPem,
       Long.fromString(this.rsaKey.fingerprint, true, 16),
       this.dispatcher,
+      this._authKeyData,
       this._authKeyStore,
     )
     this._sessions.add(session)

@@ -7,6 +7,7 @@ import { createAesIgeForMessageOld } from '@mtcute/core/utils.js'
 import Long from 'long'
 import { ServerAuthKey } from './server-auth-key.js'
 import type { AuthKeyStore } from './auth-key-store.js'
+import type { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
 import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
@@ -61,7 +62,6 @@ export class ServerSession {
   private _sessionIdSet = false
   private _serverSalt = Long.ZERO
   private _authorized = false
-  private _platformData: unknown = null
   private _queuedAcks: Long[] = []
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
@@ -75,6 +75,7 @@ export class ServerSession {
     private readonly _rsaPrivateKeyPem: string,
     private readonly _rsaKeyFingerprint: Long,
     private readonly _dispatcher: RpcDispatcher,
+    private readonly _authKeyData: AuthKeyDataStore,
     private readonly _keyStore?: AuthKeyStore,
   ) {
     this._permAuthKey = new ServerAuthKey(_crypto, _log, _readerMap)
@@ -584,8 +585,8 @@ export class ServerSession {
       sessionId: this._sessionId,
       isAuthorized: this._authorized,
       sendUpdate: (update) => this.sendUpdate(update),
-      getPlatformData: <T>() => this._platformData as T,
-      setPlatformData: (data) => { this._platformData = data },
+      getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
+      setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),
     }
 
     try {

@@ -18,8 +18,8 @@ export interface ServerRpcContext {
   isAuthorized: boolean
   /** Push a server-initiated update to this client. */
   sendUpdate: (update: tl.TypeUpdates) => void
-  /** Read backend-specific per-session data (e.g. a platform session). */
+  /** Read backend-specific data shared by all connections using this auth key. */
   getPlatformData: <T>() => T
-  /** Store backend-specific per-session data. */
+  /** Store backend-specific data for this permanent auth key. */
   setPlatformData: (data: unknown) => void
 }
