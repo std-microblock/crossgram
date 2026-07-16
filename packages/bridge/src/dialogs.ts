@@ -124,6 +124,16 @@ export class DialogRpc {
     } as unknown as tl.messages.TypeMessages
   }
 
+  getPinnedDialogs(): tl.messages.RawPeerDialogs {
+    return {
+      _: 'messages.peerDialogs', dialogs: [], messages: [], chats: [], users: [],
+      state: {
+        _: 'updates.state', pts: this._pts, qts: 0,
+        date: Math.floor(Date.now() / 1000), seq: 0, unreadCount: 0,
+      },
+    }
+  }
+
   async getContacts(): Promise<tl.contacts.RawContacts> {
     const dialogs = await this._loadDialogs()
     const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.peerId, dialog.title)))

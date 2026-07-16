@@ -6,6 +6,7 @@ import { StaticDemoPlatform, type IMPlatform, type PlatformSession } from './pla
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
+import { startupRpcHandlers } from './startup.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
@@ -147,6 +148,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
   ctx.mtproto.register('messages.getMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
+  ctx.mtproto.register('messages.getPinnedDialogs', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getPinnedDialogs())
   ctx.mtproto.register('messages.sendMessage', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMessage(req as tl.messages.RawSendMessageRequest))
 
@@ -189,6 +192,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       phoneCodeHash: `hash_${auth.id}`,
     } as unknown as tl.TlObject
   })
+
+  for (const [method, handler] of Object.entries(startupRpcHandlers)) {
+    ctx.mtproto.register(method, async () => handler())
+  }
 
   ctx.logger('bridge').info('bridge backend registered (platform: %s)', platform.id)
 }

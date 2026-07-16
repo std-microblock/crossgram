@@ -80,6 +80,15 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(second)).not.toThrow()
   })
 
+  it('returns a serializable empty pinned-dialog page for folder merging', () => {
+    const result = new DialogRpc(new StaticDemoPlatform(), session).getPinnedDialogs()
+    expect(result).toMatchObject({
+      _: 'messages.peerDialogs', dialogs: [], messages: [], chats: [], users: [],
+      state: { _: 'updates.state', pts: 1, qts: 0, seq: 0, unreadCount: 0 },
+    })
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('returns filtered history and includes peer plus current user metadata', async () => {
     const rpc = new DialogRpc(new StaticDemoPlatform(), session)
     // A resumed client can use its cached stable user ID before getDialogs has

@@ -308,7 +308,8 @@ describe('bridge login e2e', () => {
 
       // Real bridge data: dialog list → peer history → lookup by message ID.
       const dialogs = await callRpc(resumed, key, resumedSid, {
-        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0,
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 22)
       expect(dialogs._).toBe('messages.dialogs')
@@ -318,12 +319,20 @@ describe('bridge login e2e', () => {
       ])
       expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Bob', 'Alice'])
 
+      const pinned = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getPinnedDialogs', folderId: 0,
+      }, 24)
+      expect(pinned).toMatchObject({
+        _: 'messages.peerDialogs', dialogs: [], messages: [], chats: [], users: [],
+        state: { _: 'updates.state', pts: 1 },
+      })
+
       const history = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 24)
+      }, 26)
       expect(history._).toBe('messages.messages')
       expect(history.messages.map((message: any) => message.message)).toEqual([
         'How are you?', 'Hey there!',
@@ -333,7 +342,7 @@ describe('bridge login e2e', () => {
       const message = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessages',
         id: [{ _: 'inputMessageID', id: history.messages[0].id }],
-      }, 26)
+      }, 28)
       expect(message._).toBe('messages.messages')
       expect(message.messages).toHaveLength(1)
       expect(message.messages[0]).toMatchObject({
@@ -343,7 +352,7 @@ describe('bridge login e2e', () => {
         _: 'messages.sendMessage',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         message: 'Sent through MTProto', randomId: Long.fromNumber(987654321),
-      }, 28)
+      }, 30)
       expect(sentMessage).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
 
       const updatedHistory = await callRpc(resumed, key, resumedSid, {
@@ -351,7 +360,7 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 30)
+      }, 32)
       expect(updatedHistory.messages[0]).toMatchObject({
         _: 'message', id: sentMessage.id, out: true, message: 'Sent through MTProto',
       })
