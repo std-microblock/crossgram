@@ -33,9 +33,16 @@ const availableLayers = Object.values(manifest.layers)
   .filter((record): record is SchemaRecord & { file: string, sha256: string } => !!record.file && !!record.sha256)
   .sort((a, b) => a.requestedLayer - b.requestedLayer)
 const writerCache = new WeakMap<TlWriterMap, Map<number, TlWriterMap>>()
+const schemaWriterCache = new WeakMap<TlWriterMap, Map<number, TlWriterMap>>()
 const readerCache = new Map<number, TlReaderMap>()
 const entriesCache = new Map<number, TlEntry[]>()
 let historicalReaderMap: TlReaderMap | null = null
+
+// Telegram Desktop/Materialgram currently uses a mixed schema: its Message is
+// the official schema version, while Dialog/User/UserFull already use newer
+// constructors. Keep the current mtcute map as the base and apply only this
+// code-generated compatibility delta.
+const RESPONSE_COMPATIBILITY_TYPES = ['message'] as const
 
 const int53Fields = new Set(
   currentSchema.e.flatMap(entry => (entry.arguments ?? [])
@@ -74,12 +81,26 @@ export function getApiLayerWriterMap(base: TlWriterMap, layer: number | null): T
   const cached = layers.get(schemaLayer)
   if (cached) return cached
 
+  const generated = getApiLayerSchemaWriterMap(base, schemaLayer)
+  const writerMap = Object.assign(Object.create(null), base) as TlWriterMap
+  for (const type of RESPONSE_COMPATIBILITY_TYPES) writerMap[type] = generated[type]
+  layers.set(schemaLayer, writerMap)
+  return writerMap
+}
+
+/** Generate the complete writer map for tooling/tests that speak one historical schema exactly. */
+export function getApiLayerSchemaWriterMap(base: TlWriterMap, layer: number): TlWriterMap {
+  const schemaLayer = resolveApiSchemaLayer(layer)
+  if (schemaLayer === null) return base
+  let layers = schemaWriterCache.get(base)
+  if (!layers) schemaWriterCache.set(base, layers = new Map())
+  const cached = layers.get(schemaLayer)
+  if (cached) return cached
   const code = generateWriterCodeForTlEntries(loadSchemaEntries(schemaLayer), {
     variableName: 'm',
     includePrelude: true,
     includeStaticSizes: true,
   })
-  // Generated code is derived exclusively from the checked-in, hash-verified TL snapshot.
   // eslint-disable-next-line no-new-func
   const generated = new Function(`${code};return m`)() as TlWriterMap
   const writerMap = Object.assign(Object.create(null), base, generated) as TlWriterMap

@@ -620,7 +620,7 @@ export class ServerSession {
     this._apiLayer = layer
     this._responseWriterMap = getApiLayerWriterMap(this._writerMap, layer)
     this._log.info(
-      'client API layer negotiated: %d (response schema layer: %d)',
+      'client API layer negotiated: %d (response compatibility schema layer: %d)',
       layer ?? 0,
       layer === null ? 0 : resolveApiSchemaLayer(layer) ?? 0,
     )

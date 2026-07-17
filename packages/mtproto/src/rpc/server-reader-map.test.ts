@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { getApiLayerWriterMap } from './api-layer.js'
+import { getApiLayerSchemaWriterMap } from './api-layer.js'
 import { getServerReaderMap } from './server-reader-map.js'
 
 describe('historical server reader map', () => {
@@ -18,7 +18,7 @@ describe('historical server reader map', () => {
       minId: 0,
       hash: Long.ZERO,
     }
-    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 105), request)
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerSchemaWriterMap(__tlWriterMap, 105), request)
     expect(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)).toBe(0xdcbb8260)
 
     const decoded = new TlBinaryReader(getServerReaderMap(), bytes).object() as any

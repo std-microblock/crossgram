@@ -7,6 +7,7 @@ export type { ServerRpcContext } from './rpc/context.js'
 export {
   CURRENT_API_LAYER,
   getApiLayerReaderMap,
+  getApiLayerSchemaWriterMap,
   getApiLayerWriterMap,
   getHistoricalApiLayerReaderMap,
   resolveApiSchemaLayer,

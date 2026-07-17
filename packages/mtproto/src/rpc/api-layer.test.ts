@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
-import { CURRENT_API_LAYER, getApiLayerReaderMap, getApiLayerWriterMap, resolveApiSchemaLayer } from './api-layer.js'
+import { CURRENT_API_LAYER, getApiLayerWriterMap, resolveApiSchemaLayer } from './api-layer.js'
 
 const schemaDirectory = fileURLToPath(new URL('../../schema/api/', import.meta.url))
 const schemaManifest = JSON.parse(readFileSync(resolve(schemaDirectory, 'manifest.json'), 'utf8'))
@@ -63,14 +63,14 @@ describe('API layer response writers', () => {
     }
 
     const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 223), result)
-    const decoded = new TlBinaryReader(getApiLayerReaderMap(223)!, bytes).object() as tl.messages.RawDialogs
+    const decoded = new TlBinaryReader(__tlReaderMapWithCompat, bytes).object() as tl.messages.RawDialogs
 
     expect(decoded.dialogs).toHaveLength(1)
     expect(decoded.messages).toMatchObject([{ _: 'message', id: 7, message: 'legacy wire message' }])
     expect(decoded.users).toMatchObject([{ _: 'user', id: 42, firstName: 'Alice' }])
   })
 
-  it('writes the mandatory synthetic UserFull core for older layers', () => {
+  it('keeps UserFull on the current constructor for the mixed desktop schema', () => {
     const full: tl.RawUserFull = {
       _: 'userFull', id: 42,
       settings: { _: 'peerSettings' },
@@ -78,11 +78,14 @@ describe('API layer response writers', () => {
       commonChatsCount: 0,
     }
     const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 223), full)
+    const currentBytes = TlBinaryWriter.serializeObject(__tlWriterMap, full)
+    expect(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true))
+      .toBe(new DataView(currentBytes.buffer, currentBytes.byteOffset, currentBytes.byteLength).getUint32(0, true))
     const decoded = new TlBinaryReader(__tlReaderMapWithCompat, bytes).object() as tl.RawUserFull
     expect(decoded).toMatchObject({ _: 'userFull', id: 42, commonChatsCount: 0 })
   })
 
-  it('code-generates the historical MessageService writer', () => {
+  it('keeps MessageService on the current constructor', () => {
     const service: tl.RawMessageService = {
       _: 'messageService', id: 8,
       fromId: { _: 'peerUser', userId: 42 },
@@ -91,8 +94,9 @@ describe('API layer response writers', () => {
       action: { _: 'messageActionEmpty' },
     }
     const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 223), service)
+    const currentBytes = TlBinaryWriter.serializeObject(__tlWriterMap, service)
     expect(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true))
-      .toBe(constructorFromLocalSchema(223, 'messageService'))
+      .toBe(new DataView(currentBytes.buffer, currentBytes.byteOffset, currentBytes.byteLength).getUint32(0, true))
     expect(new TlBinaryReader(__tlReaderMapWithCompat, bytes).object()).toMatchObject({
       _: 'messageService', id: 8, peerId: { _: 'peerUser', userId: 42 },
     })

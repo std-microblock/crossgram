@@ -3,7 +3,7 @@ import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter, type TlReaderMap } from '@mtcute/tl-runtime'
-import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
+import { __tlReaderMap, __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import {
   LogManager,
@@ -22,7 +22,6 @@ import { Mtproto } from '../service.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import { generateRsaKeyPair } from '../crypto/rsa-keygen.js'
 import { bareVector } from '../rpc/dispatcher.js'
-import { getApiLayerReaderMap } from '../rpc/api-layer.js'
 
 /**
  * Full-stack e2e test: drives a real MtprotoServer over a real TCP socket using
@@ -281,6 +280,18 @@ async function startServer(): Promise<{ port: number, pubKey: any, stop: () => P
     users: [{ _: 'user', id: 42, firstName: 'Alice', contact: true, mutualContact: true }],
   }))
 
+  ctx.mtproto.register('users.getFullUser', async () => ({
+    _: 'users.userFull',
+    fullUser: {
+      _: 'userFull', id: 42,
+      settings: { _: 'peerSettings' },
+      notifySettings: { _: 'peerNotifySettings' },
+      commonChatsCount: 0,
+    },
+    chats: [],
+    users: [{ _: 'user', id: 42, firstName: 'Alice', contact: true, mutualContact: true }],
+  }))
+
   // Backend data must follow the permanent auth key, not an individual TCP
   // connection. The reconnect test below observes this counter from a fresh
   // transport using the same key.
@@ -407,15 +418,23 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         _: 'invokeWithLayer', layer: 223, query: getDialogs,
       })
       await client.send(clientEncrypt(perm, wrapped, perm.salt, sessionLong, 8))
-      const layerReader = getApiLayerReaderMap(223)!
-      const first = await readRpcResult(client, perm, layerReader)
+      const first = await readRpcResult(client, perm, __tlReaderMapWithCompat)
       expect(first.messages).toMatchObject([{ _: 'message', message: 'layer:223' }])
       expect(first.users).toMatchObject([{ _: 'user', firstName: 'Alice' }])
 
       const unwrapped = TlBinaryWriter.serializeObject(__tlWriterMap, getDialogs)
       await client.send(clientEncrypt(perm, unwrapped, perm.salt, sessionLong, 12))
-      const second = await readRpcResult(client, perm, layerReader)
+      const second = await readRpcResult(client, perm, __tlReaderMapWithCompat)
       expect(second.messages).toMatchObject([{ _: 'message', message: 'layer:223' }])
+
+      const getFullUser = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'users.getFullUser', id: { _: 'inputUserSelf' },
+      })
+      await client.send(clientEncrypt(perm, getFullUser, perm.salt, sessionLong, 16))
+      const fullUser = await readRpcResult(client, perm, __tlReaderMapWithCompat)
+      expect(fullUser).toMatchObject({
+        _: 'users.userFull', fullUser: { _: 'userFull', id: 42, commonChatsCount: 0 },
+      })
       client.close()
     } finally {
       await stop()
