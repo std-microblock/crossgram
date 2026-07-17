@@ -5,7 +5,6 @@ import { __tlWriterMap, LogManager, type ICryptoProvider, type Logger } from '@m
 import type { tl } from '@mtcute/core'
 import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
-import { NodePlatform } from '@mtcute/node'
 import Long from 'long'
 import { getServerReaderMap } from './rpc/server-reader-map.js'
 import { ServerConnection } from './transport/server-connection.js'
@@ -14,6 +13,7 @@ import { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './sessi
 import { AuthKeyDataStore } from './session/auth-key-data-store.js'
 import { RpcDispatcher, type RpcHandler } from './rpc/dispatcher.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
+import { createCordisLogManager } from './cordis-logger.js'
 
 declare module 'cordis' {
   interface Context {
@@ -40,7 +40,7 @@ export interface MtprotoConfig {
   authKeyStorePath?: string
   /** Auth-key store instance (overrides authKeyStorePath). */
   authKeyStore?: AuthKeyStore
-  /** mtcute Logger/LogManager for the protocol layer (default: a new LogManager). */
+  /** Optional mtcute logger override (default: routed through ctx.logger). */
   log?: Logger | LogManager
 }
 
@@ -86,9 +86,7 @@ export class Mtproto extends Service {
         ? config.log.create('mtproto')
         : config.log as Logger
     } else {
-      const mgr = new LogManager('mtproto', new NodePlatform())
-      mgr.level = LogManager.VERBOSE
-      this._log = mgr.create('mtproto')
+      this._log = createCordisLogManager(ctx.logger)
     }
   }
 

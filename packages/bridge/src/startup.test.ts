@@ -21,15 +21,22 @@ describe('post-login startup responses', () => {
       'help.getTermsOfServiceUpdate',
       'messages.getAllStickers',
       'messages.getAttachMenuBots',
+      'messages.getAvailableEffects',
       'messages.getAvailableReactions',
+      'messages.getDefaultTagReactions',
       'messages.getEmojiGroups',
       'messages.getEmojiStickerGroups',
       'messages.getFavedStickers',
       'messages.getFeaturedStickers',
+      'messages.getRecentReactions',
       'messages.getRecentStickers',
+      'messages.getSavedReactionTags',
       'messages.getStickerSet',
       'messages.getStickers',
+      'messages.getTopReactions',
+      'payments.getStarGiftActiveAuctions',
       'stories.getAllStories',
+      'stories.getStoriesArchive',
     ])
   })
 

@@ -246,6 +246,12 @@ describe('bridge login e2e', () => {
       dbg('handshake done, authKeyId', Buffer.from(key.authKeyId).toString('hex'))
       const sid = new Long(0x12345678, 0x1abc, false)
 
+      const loginToken = await callRpc(client, key, sid, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 2)
+      expect(loginToken).toMatchObject({ _: 'auth.loginToken' })
+      expect(loginToken.token).toHaveLength(32)
+
       const sent = await callRpc(client, key, sid, {
         _: 'auth.sendCode', phoneNumber: '+99900123', apiId: 1, apiHash: 'x',
         settings: { _: 'codeSettings' },
@@ -364,6 +370,42 @@ describe('bridge login e2e', () => {
       expect(updatedHistory.messages[0]).toMatchObject({
         _: 'message', id: sentMessage.id, out: true, message: 'Sent through MTProto',
       })
+
+      const desktopStartupBatch: Array<[object, string]> = [
+        [{ _: 'help.getPeerColors', hash: 0 }, 'help.peerColors'],
+        [{ _: 'help.getPeerProfileColors', hash: 0 }, 'help.peerColors'],
+        [{ _: 'messages.getAvailableReactions', hash: 0 }, 'messages.availableReactions'],
+        [{ _: 'account.getDefaultEmojiStatuses', hash: Long.ZERO }, 'account.emojiStatuses'],
+        [{ _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetAnimatedEmoji' }, hash: 0 }, 'messages.stickerSetNotModified'],
+        [{ _: 'help.getPromoData' }, 'help.promoDataEmpty'],
+        [{ _: 'help.getTermsOfServiceUpdate' }, 'help.termsOfServiceUpdateEmpty'],
+        [{ _: 'messages.getEmojiGroups', hash: 0 }, 'messages.emojiGroups'],
+        [{ _: 'messages.getEmojiStickerGroups', hash: 0 }, 'messages.emojiGroups'],
+        [{ _: 'messages.getAttachMenuBots', hash: Long.ZERO }, 'attachMenuBots'],
+        [{ _: 'stories.getAllStories' }, 'stories.allStories'],
+        [{ _: 'messages.getAllStickers', hash: Long.ZERO }, 'messages.allStickers'],
+        [{ _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO }, 'messages.recentStickers'],
+        [{ _: 'messages.getFavedStickers', hash: Long.ZERO }, 'messages.favedStickers'],
+        [{ _: 'messages.getFeaturedStickers', hash: Long.ZERO }, 'messages.featuredStickers'],
+        [{ _: 'help.getPremiumPromo' }, 'help.premiumPromo'],
+        [{ _: 'messages.getStickers', emoticon: '🙂', hash: Long.ZERO }, 'messages.stickers'],
+        [{ _: 'account.getReactionsNotifySettings' }, 'reactionsNotifySettings'],
+        [{ _: 'messages.getTopReactions', limit: 100, hash: Long.ZERO }, 'messages.reactions'],
+        [{ _: 'messages.getRecentReactions', limit: 100, hash: Long.ZERO }, 'messages.reactions'],
+        [{ _: 'messages.getSavedReactionTags', hash: Long.ZERO }, 'messages.savedReactionTags'],
+        [{ _: 'messages.getDefaultTagReactions', hash: Long.ZERO }, 'messages.reactions'],
+        [{ _: 'messages.getAvailableEffects', hash: 0 }, 'messages.availableEffects'],
+        [{ _: 'payments.getStarGiftActiveAuctions', hash: Long.ZERO }, 'payments.starGiftActiveAuctions'],
+        [{
+          _: 'stories.getStoriesArchive', peer: { _: 'inputPeerSelf' }, offsetId: 0, limit: 100,
+        }, 'stories.stories'],
+      ]
+      let startupSub = 40
+      for (const [request, expected] of desktopStartupBatch) {
+        const response = await callRpc(resumed, key, resumedSid, request, startupSub)
+        expect(response._).toBe(expected)
+        startupSub += 2
+      }
       dbg('bridge contacts/dialogs/history/send ok')
 
       resumed.close()

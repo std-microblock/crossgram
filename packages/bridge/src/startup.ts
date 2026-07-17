@@ -66,6 +66,27 @@ export const startupRpcHandlers: Readonly<Record<string, StartupHandler>> = {
   'account.getReactionsNotifySettings': () => ({
     _: 'reactionsNotifySettings', sound: { _: 'notificationSoundDefault' }, showPreviews: true,
   } as unknown as tl.TlObject),
+  'messages.getTopReactions': () => ({
+    _: 'messages.reactions', hash: Long.ZERO, reactions: [],
+  } as unknown as tl.TlObject),
+  'messages.getRecentReactions': () => ({
+    _: 'messages.reactions', hash: Long.ZERO, reactions: [],
+  } as unknown as tl.TlObject),
+  'messages.getSavedReactionTags': () => ({
+    _: 'messages.savedReactionTags', tags: [], hash: Long.ZERO,
+  } as unknown as tl.TlObject),
+  'messages.getDefaultTagReactions': () => ({
+    _: 'messages.reactions', hash: Long.ZERO, reactions: [],
+  } as unknown as tl.TlObject),
+  'messages.getAvailableEffects': () => ({
+    _: 'messages.availableEffects', hash: 0, effects: [], documents: [],
+  } as unknown as tl.TlObject),
+  'payments.getStarGiftActiveAuctions': () => ({
+    _: 'payments.starGiftActiveAuctions', auctions: [], users: [], chats: [],
+  } as unknown as tl.TlObject),
+  'stories.getStoriesArchive': () => ({
+    _: 'stories.stories', count: 0, stories: [], chats: [], users: [],
+  } as unknown as tl.TlObject),
 }
 
 function futureDate(): number {

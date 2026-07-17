@@ -638,7 +638,15 @@ export class ServerSession {
     writer.raw(resultBytes)
 
     this._sendEncryptedMessage(writer.result(), true)
-    this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), kind)
+    if (kind === 'mt_rpc_error') {
+      const error = result as mtp.RawMt_rpc_error
+      this._log.warn(
+        '>>> rpc_error for %s: %d %s',
+        reqMsgId.toString(16), error.errorCode, error.errorMessage,
+      )
+    } else {
+      this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), kind)
+    }
   }
 
   /** Serialize a bare `Vector<X>`: `0x1cb5c415` + count + each item. */

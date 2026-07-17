@@ -1,5 +1,6 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
+import { randomBytes } from 'node:crypto'
 import Long from 'long'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import { StaticDemoPlatform, type IMPlatform, type PlatformSession } from './platform.js'
@@ -192,6 +193,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       phoneCodeHash: `hash_${auth.id}`,
     } as unknown as tl.TlObject
   })
+  ctx.mtproto.register('auth.exportLoginToken', async () => ({
+    _: 'auth.loginToken',
+    expires: Math.floor(Date.now() / 1000) + 60,
+    token: randomBytes(32),
+  } as unknown as tl.TlObject))
 
   for (const [method, handler] of Object.entries(startupRpcHandlers)) {
     ctx.mtproto.register(method, async () => handler())
