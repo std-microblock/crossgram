@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gunzipSync } from 'node:zlib'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
@@ -15,7 +14,7 @@ function constructorFromLocalSchema(layer: number, name: string): number {
   const resolvedLayer = resolveApiSchemaLayer(layer)
   if (resolvedLayer === null) throw new Error(`no local schema for layer ${layer}`)
   const record = schemaManifest.layers[String(resolvedLayer)]
-  const schema = gunzipSync(readFileSync(resolve(schemaDirectory, record.file))).toString('utf8')
+  const schema = readFileSync(resolve(schemaDirectory, record.file), 'utf8')
   const match = schema.match(new RegExp(`^${name.replace('.', '\\.') }#([0-9a-f]{1,8})\\b`, 'm'))
   if (!match) throw new Error(`${name} is missing from schema layer ${resolvedLayer}`)
   return Number.parseInt(match[1], 16)

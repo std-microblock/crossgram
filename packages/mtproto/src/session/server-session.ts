@@ -11,7 +11,7 @@ import type { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
 import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
-import { isBareVector } from '../rpc/dispatcher.js'
+import { isBareVector, unwrapRpcRequest } from '../rpc/dispatcher.js'
 import type { RpcDispatcher, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
 import { getApiLayerWriterMap, resolveApiSchemaLayer } from '../rpc/api-layer.js'
 
@@ -583,6 +583,12 @@ export class ServerSession {
   // ── RPC call handling ──
 
   private async _handleRpcCall(msgId: Long, request: tl.RpcMethod): Promise<void> {
+    // invokeWithLayer is the one authoritative source of the client's API layer.
+    // Capture it on the MTProto session before constructing the handler context
+    // or serializing this request's response. Later unwrapped requests reuse it.
+    const unwrapped = unwrapRpcRequest(request)
+    if (unwrapped.apiLayer !== null) this._setApiLayer(unwrapped.apiLayer)
+
     const ctx: ServerRpcContext = {
       connection: this._connection,
       apiLayer: this._apiLayer,
@@ -595,8 +601,7 @@ export class ServerSession {
     }
 
     try {
-      const result = await this._dispatcher.dispatch(ctx, request)
-      this._setApiLayer(ctx.apiLayer)
+      const result = await this._dispatcher.dispatch(ctx, unwrapped.request)
       this._sendRpcResult(msgId, result)
     } catch (err) {
       this._log.error('RPC dispatch error for %s: %s', request._, err instanceof Error ? err.stack : err)

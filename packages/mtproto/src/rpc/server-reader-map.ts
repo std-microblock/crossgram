@@ -1,11 +1,9 @@
 import type { TlReaderMap } from '@mtcute/tl-runtime'
-import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { parseFullTlSchema, parseTlToEntries, generateReaderCodeForTlEntries } from '@mtcute/tl-utils'
 import { __tlReaderMap } from '@mtcute/core/utils.js'
+import apiSchemaRaw from '@mtcute/core/tl/api-schema.json' with { type: 'json' }
+import mtpSchemaRaw from '@mtcute/core/tl/mtp-schema.json' with { type: 'json' }
 import { getHistoricalApiLayerReaderMap } from './api-layer.js'
-
-const require = createRequire(import.meta.url)
 
 let _serverReaderMap: TlReaderMap | null = null
 
@@ -36,9 +34,6 @@ req_pq#60469778 nonce:int128 = ResPQ;
  */
 export function getServerReaderMap(): TlReaderMap {
   if (_serverReaderMap) return _serverReaderMap
-
-  const apiSchemaRaw = JSON.parse(readFileSync(require.resolve('@mtcute/core/tl/api-schema.json'), 'utf-8'))
-  const mtpSchemaRaw = JSON.parse(readFileSync(require.resolve('@mtcute/core/tl/mtp-schema.json'), 'utf-8'))
 
   const apiSchema = parseFullTlSchema(apiSchemaRaw.e ?? apiSchemaRaw)
   const mtpSchema = parseFullTlSchema(mtpSchemaRaw)

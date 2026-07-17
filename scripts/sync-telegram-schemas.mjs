@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto'
-import { gzipSync } from 'node:zlib'
 import { mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -172,8 +171,8 @@ export async function syncSchemas(options) {
         return { requestedLayer, reportedLayer: page.reportedLayer, unavailable: reason }
       }
       const sha256 = createHash('sha256').update(page.schema).digest('hex')
-      const file = `layer-${requestedLayer}.tl.gz`
-      await atomicWrite(resolve(options.out, file), gzipSync(page.schema, { level: 9 }))
+      const file = `layer-${requestedLayer}.tl`
+      await atomicWrite(resolve(options.out, file), page.schema)
       process.stdout.write(`[${index + 1}/${layers.length}] layer ${requestedLayer} -> ${page.reportedLayer ?? '?'} (${page.schema.length} bytes)\n`)
       return {
         requestedLayer,
@@ -202,7 +201,7 @@ export async function syncSchemas(options) {
 
   const expectedFiles = new Set(records.flatMap(record => record.file ? [record.file] : []))
   for (const file of await readdir(options.out)) {
-    if (/^layer-\d+\.tl\.gz$/.test(file) && !expectedFiles.has(file)) await unlink(resolve(options.out, file))
+    if (/^layer-\d+\.tl(?:\.gz)?$/.test(file) && !expectedFiles.has(file)) await unlink(resolve(options.out, file))
   }
   return manifest
 }

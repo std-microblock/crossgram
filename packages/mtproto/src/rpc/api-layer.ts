@@ -1,11 +1,9 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { gunzipSync } from 'node:zlib'
 import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { generateReaderCodeForTlEntries, generateWriterCodeForTlEntries, parseTlToEntries, type TlEntry } from '@mtcute/tl-utils'
+import currentSchemaJson from '@mtcute/core/tl/api-schema.json' with { type: 'json' }
+import manifestJson from '../../schema/api/manifest.json' with { type: 'json' }
 
 interface SchemaRecord {
   requestedLayer: number
@@ -22,10 +20,8 @@ interface SchemaManifest {
   layers: Record<string, SchemaRecord>
 }
 
-const require = createRequire(import.meta.url)
-const schemaDirectory = fileURLToPath(new URL('../../schema/api/', import.meta.url))
-const manifest = JSON.parse(readFileSync(resolve(schemaDirectory, 'manifest.json'), 'utf8')) as SchemaManifest
-const currentSchema = JSON.parse(readFileSync(require.resolve('@mtcute/core/tl/api-schema.json'), 'utf8')) as {
+const manifest = manifestJson as SchemaManifest
+const currentSchema = currentSchemaJson as {
   l: number
   e: Array<{ name: string, arguments?: Array<{ name: string, type: string }> }>
 }
@@ -135,7 +131,7 @@ function loadSchemaEntries(schemaLayer: number): TlEntry[] {
   if (cached) return cached
   const record = manifest.layers[String(schemaLayer)]
   if (!record?.file || !record.sha256) throw new Error(`missing local Telegram schema for layer ${schemaLayer}`)
-  const schema = gunzipSync(readFileSync(resolve(schemaDirectory, record.file))).toString('utf8')
+  const schema = readFileSync(new URL(`../../schema/api/${record.file}`, import.meta.url), 'utf8')
   const digest = createHash('sha256').update(schema).digest('hex')
   if (digest !== record.sha256) throw new Error(`Telegram schema layer ${schemaLayer} failed SHA-256 validation`)
   const entries = parseTlToEntries(schema, { panicOnError: true })

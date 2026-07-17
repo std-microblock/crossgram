@@ -29,6 +29,36 @@ export function isBareVector(result: unknown): result is BareVector {
     && Array.isArray((result as { items?: unknown }).items)
 }
 
+export interface UnwrappedRpcRequest {
+  request: tl.RpcMethod
+  /** Layer declared by invokeWithLayer, if this request negotiated one. */
+  apiLayer: number | null
+}
+
+/** Unwrap Telegram RPC envelopes while explicitly returning invokeWithLayer.layer. */
+export function unwrapRpcRequest(request: tl.RpcMethod): UnwrappedRpcRequest {
+  let req = request
+  let apiLayer: number | null = null
+  for (;;) {
+    const method = req._
+    if (method === 'invokeWithLayer') {
+      const wrapper = req as unknown as { layer: number, query: tl.RpcMethod }
+      if (Number.isInteger(wrapper.layer) && wrapper.layer > 0) apiLayer = wrapper.layer
+      req = wrapper.query
+      continue
+    }
+    if (method === 'initConnection' || method === 'invokeWithoutUpdates') {
+      req = (req as unknown as { query: tl.RpcMethod }).query
+      continue
+    }
+    if (method === 'invokeAfterMsg' || method === 'invokeAfterMsgs' || method === 'invokeWithMessagesRange' || method === 'invokeWithTakeout') {
+      req = (req as unknown as { query: tl.RpcMethod }).query
+      continue
+    }
+    return { request: req, apiLayer }
+  }
+}
+
 /**
  * An RPC handler receives the deserialized TL request and context,
  * and returns an RPC result (or throws an RpcError).
@@ -81,30 +111,7 @@ export class RpcDispatcher {
    * automatically. Returns the TL response object, or an `rpc_error` on failure.
    */
   async dispatch(ctx: ServerRpcContext, request: tl.RpcMethod): Promise<RpcResult> {
-    // Unwrap common wrappers
-    let req = request
-    for (;;) {
-      const m = req._
-      if (m === 'invokeWithLayer') {
-        const wrapper = req as unknown as { layer: number, query: tl.RpcMethod }
-        if (Number.isInteger(wrapper.layer) && wrapper.layer > 0) ctx.apiLayer = wrapper.layer
-        req = wrapper.query
-        continue
-      }
-      if (m === 'initConnection') {
-        req = (req as unknown as { query: tl.RpcMethod }).query
-        continue
-      }
-      if (m === 'invokeWithoutUpdates') {
-        req = (req as unknown as { query: tl.RpcMethod }).query
-        continue
-      }
-      if (m === 'invokeAfterMsg' || m === 'invokeAfterMsgs' || m === 'invokeWithMessagesRange' || m === 'invokeWithTakeout') {
-        req = (req as unknown as { query: tl.RpcMethod }).query
-        continue
-      }
-      break
-    }
+    const req = unwrapRpcRequest(request).request
 
     const method = req._
     const handler = this._handlers.get(method) ?? this._fallback

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import type { ServerRpcContext } from './context.js'
-import { RpcDispatcher } from './dispatcher.js'
+import { RpcDispatcher, unwrapRpcRequest } from './dispatcher.js'
 
 function makeContext(): ServerRpcContext {
   return {
@@ -18,28 +18,18 @@ function makeContext(): ServerRpcContext {
 }
 
 describe('RpcDispatcher API layers', () => {
-  it('retains invokeWithLayer on the session context before invoking the handler', async () => {
-    const dispatcher = new RpcDispatcher()
-    const context = makeContext()
-    let observedLayer: number | null = null
-    dispatcher.register('help.getAppConfig', async (ctx) => {
-      observedLayer = ctx.apiLayer
-      return { _: 'help.appConfig', hash: 0, config: { _: 'jsonObject', value: [] } }
-    })
-
-    await dispatcher.dispatch(context, {
+  it('returns invokeWithLayer explicitly while unwrapping the request', () => {
+    const unwrapped = unwrapRpcRequest({
       _: 'invokeWithLayer', layer: 225,
       query: { _: 'help.getAppConfig', hash: 0 },
     } as tl.RpcMethod)
-
-    expect(observedLayer).toBe(225)
-    expect(context.apiLayer).toBe(225)
+    expect(unwrapped.apiLayer).toBe(225)
+    expect(unwrapped.request).toEqual({ _: 'help.getAppConfig', hash: 0 })
   })
 
   it('does not erase a retained layer for later unwrapped calls', async () => {
     const dispatcher = new RpcDispatcher()
-    const context = makeContext()
-    context.apiLayer = 224
+    const context = { ...makeContext(), apiLayer: 224 }
     dispatcher.register('help.getAppConfig', async (ctx) => ({
       _: 'help.appConfig', hash: ctx.apiLayer ?? 0, config: { _: 'jsonObject', value: [] },
     }))
