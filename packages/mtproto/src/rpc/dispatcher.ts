@@ -86,7 +86,9 @@ export class RpcDispatcher {
     for (;;) {
       const m = req._
       if (m === 'invokeWithLayer') {
-        req = (req as unknown as { query: tl.RpcMethod }).query
+        const wrapper = req as unknown as { layer: number, query: tl.RpcMethod }
+        if (Number.isInteger(wrapper.layer) && wrapper.layer > 0) ctx.apiLayer = wrapper.layer
+        req = wrapper.query
         continue
       }
       if (m === 'initConnection') {

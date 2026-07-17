@@ -10,6 +10,8 @@ import type { ServerConnection } from '../transport/server-connection.js'
 export interface ServerRpcContext {
   /** The underlying client connection. */
   connection: ServerConnection
+  /** API layer declared by invokeWithLayer, retained for the whole MTProto session. */
+  apiLayer: number | null
   /** The permanent auth key id (8 bytes), or null before authorization. */
   authKeyId: Uint8Array | null
   /** The client's MTProto session id. */

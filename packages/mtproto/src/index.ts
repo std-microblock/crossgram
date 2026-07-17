@@ -4,6 +4,13 @@ export type { MtprotoConfig } from './service.js'
 export { RpcDispatcher, bareVector, isBareVector } from './rpc/dispatcher.js'
 export type { RpcHandler, RpcResult, BareVector } from './rpc/dispatcher.js'
 export type { ServerRpcContext } from './rpc/context.js'
+export {
+  CURRENT_API_LAYER,
+  getApiLayerReaderMap,
+  getApiLayerWriterMap,
+  getHistoricalApiLayerReaderMap,
+  resolveApiSchemaLayer,
+} from './rpc/api-layer.js'
 export { RpcError, RpcErrors, toRpcError, isRpcError } from './rpc/errors.js'
 
 export { ServerConnection } from './transport/server-connection.js'

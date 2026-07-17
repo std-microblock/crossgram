@@ -17,7 +17,9 @@
   "scripts": {
     "build": "yakumo build",
     "dev": "cross-env NODE_ENV=development NODE_OPTIONS=\"--import tsx --import @cordisjs/unyaml\" cordis run",
-    "start": "cordis run"
+    "start": "cordis run",
+    "schema:sync": "node scripts/sync-telegram-schemas.mjs",
+    "schema:test": "node --test scripts/sync-telegram-schemas.test.mjs"
   },
   "devDependencies": {
     "@cordisjs/client": "^0.8.1",

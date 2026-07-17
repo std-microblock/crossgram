@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
-import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
+import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter, type TlReaderMap } from '@mtcute/tl-runtime'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import {
@@ -22,6 +22,7 @@ import { Mtproto } from '../service.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import { generateRsaKeyPair } from '../crypto/rsa-keygen.js'
 import { bareVector } from '../rpc/dispatcher.js'
+import { getApiLayerReaderMap } from '../rpc/api-layer.js'
 
 /**
  * Full-stack e2e test: drives a real MtprotoServer over a real TCP socket using
@@ -218,14 +219,14 @@ function clientEncrypt(key: ClientKey, body: Uint8Array, salt: Long, sessionId: 
 }
 
 /** Decrypt a server→client message, returning the inner object reader positioned at the body. */
-function clientDecrypt(key: ClientKey, data: Uint8Array): TlBinaryReader {
+function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap = __tlReaderMap): TlBinaryReader {
   expect(typed.equal(data.subarray(0, 8), key.authKeyId)).toBe(true)
   const messageKey = data.subarray(8, 24)
   let ct = data.subarray(24)
   if (ct.byteLength % 16) ct = ct.subarray(0, ct.byteLength - (ct.byteLength % 16))
   const ige = createAesIgeForMessage(crypto, key.authKey, messageKey, false)
   const plain = ige.decrypt(ct)
-  const reader = new TlBinaryReader(__tlReaderMap, plain)
+  const reader = new TlBinaryReader(readerMap, plain)
   reader.seek(16) // salt(8) + session_id(8)
   reader.long(true) // msg_id
   reader.uint() // seq_no
@@ -262,6 +263,23 @@ async function startServer(): Promise<{ port: number, pubKey: any, stop: () => P
     { _: 'userEmpty', id: 1 },
     { _: 'userEmpty', id: 2 },
   ]))
+
+  ctx.mtproto.register('messages.getDialogs', async (rpc) => ({
+    _: 'messages.dialogs',
+    dialogs: [{
+      _: 'dialog', peer: { _: 'peerUser', userId: 42 }, topMessage: 7,
+      readInboxMaxId: 7, readOutboxMaxId: 7, unreadCount: 0,
+      unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
+      notifySettings: { _: 'peerNotifySettings' },
+    }],
+    messages: [{
+      _: 'message', id: 7, fromId: { _: 'peerUser', userId: 42 },
+      peerId: { _: 'peerUser', userId: 42 }, date: nowSec(),
+      message: `layer:${rpc.apiLayer ?? 0}`,
+    }],
+    chats: [],
+    users: [{ _: 'user', id: 42, firstName: 'Alice', contact: true, mutualContact: true }],
+  }))
 
   // Backend data must follow the permanent auth key, not an individual TCP
   // connection. The reconnect test below observes this counter from a fresh
@@ -373,6 +391,37 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('serializes nested dialogs for invokeWithLayer and retains the layer for later calls', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionLong = new Long(0x22302230, 0x22302230)
+      const getDialogs = {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 20, hash: Long.ZERO,
+      }
+
+      const wrapped = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'invokeWithLayer', layer: 223, query: getDialogs,
+      })
+      await client.send(clientEncrypt(perm, wrapped, perm.salt, sessionLong, 8))
+      const layerReader = getApiLayerReaderMap(223)!
+      const first = await readRpcResult(client, perm, layerReader)
+      expect(first.messages).toMatchObject([{ _: 'message', message: 'layer:223' }])
+      expect(first.users).toMatchObject([{ _: 'user', firstName: 'Alice' }])
+
+      const unwrapped = TlBinaryWriter.serializeObject(__tlWriterMap, getDialogs)
+      await client.send(clientEncrypt(perm, unwrapped, perm.salt, sessionLong, 12))
+      const second = await readRpcResult(client, perm, layerReader)
+      expect(second.messages).toMatchObject([{ _: 'message', message: 'layer:223' }])
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
   it('resumes a returning client from the stored auth key without re-handshaking', async () => {
     await crypto.initialize?.()
     const { port, pubKey, stop } = await startServer()
@@ -406,10 +455,10 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
 })
 
 /** Read encrypted frames until an rpc_result is found; return the inner result object. */
-async function readRpcResult(client: TestClient, key: ClientKey): Promise<any> {
+async function readRpcResult(client: TestClient, key: ClientKey, readerMap: TlReaderMap = __tlReaderMap): Promise<any> {
   for (let i = 0; i < 10; i++) {
     const frame = await client.read()
-    const reader = clientDecrypt(key, frame)
+    const reader = clientDecrypt(key, frame, readerMap)
     const saved = reader.pos
     const id = reader.uint()
     if (id === 0xf35c6d01) { // rpc_result

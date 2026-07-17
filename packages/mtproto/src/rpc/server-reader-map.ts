@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { parseFullTlSchema, parseTlToEntries, generateReaderCodeForTlEntries } from '@mtcute/tl-utils'
 import { __tlReaderMap } from '@mtcute/core/utils.js'
+import { getHistoricalApiLayerReaderMap } from './api-layer.js'
 
 const require = createRequire(import.meta.url)
 
@@ -70,7 +71,12 @@ export function getServerReaderMap(): TlReaderMap {
   const generated = new Function(code)() as TlReaderMap
 
   // Merge: start with mtcute's built-in map, then add generated method readers
-  _serverReaderMap = Object.assign(Object.create(null), __tlReaderMap, generated) as TlReaderMap
+  _serverReaderMap = Object.assign(
+    Object.create(null),
+    __tlReaderMap,
+    getHistoricalApiLayerReaderMap(),
+    generated,
+  ) as TlReaderMap
 
   return _serverReaderMap
 }

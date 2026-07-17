@@ -13,6 +13,7 @@ import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector } from '../rpc/dispatcher.js'
 import type { RpcDispatcher, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
+import { getApiLayerWriterMap, resolveApiSchemaLayer } from '../rpc/api-layer.js'
 
 // TL constructor IDs for MTProto service messages
 const RPC_RESULT_ID = 0xF35C6D01
@@ -62,6 +63,8 @@ export class ServerSession {
   private _sessionIdSet = false
   private _serverSalt = Long.ZERO
   private _authorized = false
+  private _apiLayer: number | null = null
+  private _responseWriterMap: TlWriterMap
   private _queuedAcks: Long[] = []
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
@@ -80,6 +83,7 @@ export class ServerSession {
   ) {
     this._permAuthKey = new ServerAuthKey(_crypto, _log, _readerMap)
     this._msgIdGen = new ServerMessageIdGenerator()
+    this._responseWriterMap = _writerMap
     // Session ID is set from the client's first encrypted message (MTProto convention)
   }
 
@@ -111,7 +115,7 @@ export class ServerSession {
    */
   sendUpdate(update: tl.TypeUpdates): void {
     if (!this._authorized) return
-    const serialized = TlBinaryWriter.serializeObject(this._writerMap, update)
+    const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
     this._sendEncryptedMessage(serialized, true)
   }
 
@@ -581,6 +585,7 @@ export class ServerSession {
   private async _handleRpcCall(msgId: Long, request: tl.RpcMethod): Promise<void> {
     const ctx: ServerRpcContext = {
       connection: this._connection,
+      apiLayer: this._apiLayer,
       authKeyId: this._permAuthKey.ready ? this._permAuthKey.id : null,
       sessionId: this._sessionId,
       isAuthorized: this._authorized,
@@ -591,6 +596,7 @@ export class ServerSession {
 
     try {
       const result = await this._dispatcher.dispatch(ctx, request)
+      this._setApiLayer(ctx.apiLayer)
       this._sendRpcResult(msgId, result)
     } catch (err) {
       this._log.error('RPC dispatch error for %s: %s', request._, err instanceof Error ? err.stack : err)
@@ -603,6 +609,17 @@ export class ServerSession {
   }
 
   // ── Sending ──
+
+  private _setApiLayer(layer: number | null): void {
+    if (layer === this._apiLayer) return
+    this._apiLayer = layer
+    this._responseWriterMap = getApiLayerWriterMap(this._writerMap, layer)
+    this._log.info(
+      'client API layer negotiated: %d (response schema layer: %d)',
+      layer ?? 0,
+      layer === null ? 0 : resolveApiSchemaLayer(layer) ?? 0,
+    )
+  }
 
   private _sendNewSessionCreated(): void {
     const msg: mtp.RawMt_new_session_created = {
@@ -628,7 +645,7 @@ export class ServerSession {
       // Bare Vector<X>: 0x1cb5c415 + count + items (no wrapping object).
       resultBytes = this._serializeBareVector(result)
     } else {
-      resultBytes = TlBinaryWriter.serializeObject(this._writerMap, result)
+      resultBytes = TlBinaryWriter.serializeObject(this._responseWriterMap, result)
     }
 
     // Build rpc_result: id(4) + req_msg_id(8) + result
@@ -654,7 +671,7 @@ export class ServerSession {
     const serialized: Uint8Array[] = []
     let size = 8 // constructor id + count
     for (const item of vec.items) {
-      const b = TlBinaryWriter.serializeObject(this._writerMap, item)
+      const b = TlBinaryWriter.serializeObject(this._responseWriterMap, item)
       serialized.push(b)
       size += b.length
     }
