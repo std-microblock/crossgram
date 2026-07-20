@@ -60,6 +60,7 @@ export interface IMMessageRow {
   content: JsonValue
   timestamp: number
   outgoing: boolean
+  deleted: boolean
   platformGroupId: string | null
   metadata: JsonObject
   createdAt: Date
@@ -116,7 +117,7 @@ export interface UpdateStateRow {
 }
 
 export interface UpdateDeliveryRow {
-  messageId: number
+  eventKey: string
   platformSessionId: string
   pts: number
   ptsCount: number
@@ -182,7 +183,7 @@ export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_im_message', {
     id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
     primaryPlatformMessageId: 'text', senderPlatformUserId: 'text', text: 'text', content: 'json', timestamp: 'integer',
-    outgoing: 'boolean', platformGroupId: { type: 'text', nullable: true }, metadata: 'json',
+    outgoing: 'boolean', deleted: 'boolean', platformGroupId: { type: 'text', nullable: true }, metadata: 'json',
     createdAt: 'timestamp', updatedAt: 'timestamp',
   }, {
     primary: 'id', autoInc: true,
@@ -229,7 +230,7 @@ export function defineModels(ctx: Context): void {
   }, { primary: 'platformSessionId' })
 
   ctx.model.extend('mtproto_update_delivery', {
-    messageId: 'unsigned', platformSessionId: 'string', pts: 'unsigned', ptsCount: 'unsigned',
+    eventKey: 'text', platformSessionId: 'string', pts: 'unsigned', ptsCount: 'unsigned',
     seq: 'unsigned', date: 'unsigned', published: 'boolean',
-  }, { primary: 'messageId', indexes: ['platformSessionId'] })
+  }, { primary: 'eventKey', indexes: ['platformSessionId'] })
 }

@@ -10,7 +10,14 @@ import {
 export interface IngestResult {
   message: IMMessageRow
   created: boolean
+  changed: boolean
   projection: TlMessagePartRow[]
+}
+
+export interface DeleteResult {
+  changed: boolean
+  messageIds: number[]
+  tlMessageIds: number[]
 }
 
 export interface ProjectedMessage {
@@ -80,6 +87,15 @@ export class MessageStore {
       }
 
       const created = !message
+      const changed = !message || (!message.deleted && (
+        message.senderPlatformUserId !== source.senderId
+        || message.text !== messageText(source)
+        || JSON.stringify(message.content) !== JSON.stringify(source.content)
+        || message.timestamp !== source.timestamp
+        || message.outgoing !== (source.outgoing ?? false)
+        || message.platformGroupId !== (source.groupId ?? null)
+        || JSON.stringify(message.metadata) !== JSON.stringify(source.metadata ?? {})
+      ))
       if (!message) {
         message = await database.create('mtproto_im_message', {
           platformSessionId: session.platformSessionId,
@@ -90,6 +106,7 @@ export class MessageStore {
           content: source.content as unknown as JsonValue,
           timestamp: source.timestamp,
           outgoing: source.outgoing ?? false,
+          deleted: false,
           platformGroupId: source.groupId ?? null,
           metadata: source.metadata ?? {},
           createdAt: now,
@@ -144,7 +161,45 @@ export class MessageStore {
         options.allocation ?? 'live',
       )
 
-      return { message, created, projection }
+      return { message, created, changed, projection }
+    }))
+  }
+
+  async deleteMessages(
+    session: PlatformSession,
+    conversation: IMConversation,
+    platformMessageIds: readonly string[],
+  ): Promise<DeleteResult> {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const conversationRow = await this._upsertConversation(database, session, conversation, undefined, new Date())
+      const messageIds = new Set<number>()
+      for (const platformMessageId of new Set(platformMessageIds)) {
+        const [alias] = await database.get('mtproto_im_message_alias', {
+          platformSessionId: session.platformSessionId,
+          conversationId: conversationRow.id,
+          platformMessageId,
+        })
+        if (alias) messageIds.add(alias.messageId)
+      }
+
+      const deletedMessageIds: number[] = []
+      const tlMessageIds: number[] = []
+      for (const messageId of messageIds) {
+        const [message] = await database.get('mtproto_im_message', { id: messageId })
+        if (!message) continue
+        if (!message.deleted) {
+          await database.set('mtproto_im_message', { id: messageId }, { deleted: true, updatedAt: new Date() })
+          deletedMessageIds.push(messageId)
+        }
+        const parts = await database.select('mtproto_tl_message_part', { messageId })
+          .orderBy('ordinal').execute()
+        tlMessageIds.push(...parts.map((part) => part.tlMessageId))
+      }
+      return {
+        changed: deletedMessageIds.length > 0,
+        messageIds: deletedMessageIds,
+        tlMessageIds,
+      }
     }))
   }
 
@@ -174,7 +229,9 @@ export class MessageStore {
     if (anchor) conversations = conversations.filter((item) => item.id !== anchor.id)
     conversations = conversations.slice(0, limit)
     return Promise.all(conversations.map(async (conversation) => {
-      const [latest] = await this._database.select('mtproto_im_message', { conversationId: conversation.id })
+      const [latest] = await this._database.select('mtproto_im_message', {
+        conversationId: conversation.id, deleted: false,
+      })
         .orderBy('timestamp', 'desc').limit(1).execute()
       return {
         conversation: toConversation(conversation),
@@ -195,6 +252,7 @@ export class MessageStore {
     if (!conversation) return []
     const rows = await this._database.select('mtproto_im_message', {
       conversationId: conversation.id,
+      deleted: false,
       ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
       ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
     }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
@@ -212,6 +270,7 @@ export class MessageStore {
     if (!conversation) return []
     const rows = await this._database.select('mtproto_im_message', {
       conversationId: conversation.id,
+      deleted: false,
       ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
       ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
     }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
@@ -244,7 +303,7 @@ export class MessageStore {
     })
     if (!part) return
     const [row] = await this._database.get('mtproto_im_message', { id: part.messageId })
-    if (!row) return
+    if (!row || row.deleted) return
     return {
       source: await this._hydrateMessage(row),
       parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
@@ -298,9 +357,9 @@ export class MessageStore {
     }))
   }
 
-  async prepareUpdateDelivery(messageId: number, platformSessionId: string, ptsCount: number, date: number) {
+  async prepareUpdateDelivery(eventKey: string, platformSessionId: string, ptsCount: number, date: number) {
     return this._write(() => this._database.withTransaction(async (database) => {
-      const [existing] = await database.get('mtproto_update_delivery', { messageId })
+      const [existing] = await database.get('mtproto_update_delivery', { eventKey })
       if (existing) return existing
       const [current] = await database.get('mtproto_update_state', { platformSessionId })
       const state = {
@@ -312,14 +371,19 @@ export class MessageStore {
       }
       await database.upsert('mtproto_update_state', [state])
       return database.create('mtproto_update_delivery', {
-        messageId, platformSessionId, pts: state.pts, ptsCount, seq: state.seq, date, published: false,
+        eventKey, platformSessionId, pts: state.pts, ptsCount, seq: state.seq, date, published: false,
       })
     }))
   }
 
-  async markUpdatePublished(messageId: number): Promise<void> {
+  async getUpdateDelivery(eventKey: string) {
+    const [delivery] = await this._database.get('mtproto_update_delivery', { eventKey })
+    return delivery
+  }
+
+  async markUpdatePublished(eventKey: string): Promise<void> {
     await this._write(async () => {
-      await this._database.set('mtproto_update_delivery', { messageId }, { published: true })
+      await this._database.set('mtproto_update_delivery', { eventKey }, { published: true })
     })
   }
 

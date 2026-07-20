@@ -65,7 +65,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (error, session) => ctx.logger('bridge').warn(
       'platform subscription failed (%s): %s', session?.platformId ?? 'unknown', String(error),
     ),
-    (session, event, result) => updates.publish(session, event, result),
+    (session, event) => updates.publish(session, event),
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, store, subscriptions, uploads, config.onTransferProgress,

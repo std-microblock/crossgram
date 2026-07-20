@@ -1,7 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
-import { MessageStore, type IngestResult } from './message-store.js'
+import { MessageStore, type DeleteResult, type IngestResult } from './message-store.js'
 import type {
   IMConversation, IMDialog, IMEvent, IMHistoryPage, IMHistoryQuery, IMPlatform, PlatformSession, Unsubscribe,
 } from './platform.js'
@@ -110,11 +110,7 @@ export class PlatformSubscriptionManager {
     private readonly _registry: PlatformRegistry,
     private readonly _store: MessageStore,
     private readonly _onError: (error: unknown, session?: PlatformSession) => void = () => {},
-    private readonly _onMessage?: (
-      session: PlatformSession,
-      event: Extract<IMEvent, { type: 'message' }>,
-      result: IngestResult,
-    ) => void | Promise<void>,
+    private readonly _onEvent?: (session: PlatformSession, event: CommittedPlatformEvent) => void | Promise<void>,
   ) {}
 
   async startActiveSessions(platformId?: string): Promise<void> {
@@ -188,10 +184,21 @@ export class PlatformSubscriptionManager {
       await this._store.upsertConversation(session, event.conversation)
     } else if (event.type === 'message') {
       const result = await this._store.ingest(session, event.conversation, event.message)
-      await this._onMessage?.(session, event, result)
+      await this._onEvent?.(session, { event, result })
+    } else if (event.type === 'message-edit') {
+      const result = await this._store.ingest(session, event.conversation, event.message)
+      await this._onEvent?.(session, { event, result })
+    } else if (event.type === 'message-delete') {
+      const result = await this._store.deleteMessages(session, event.conversation, event.messageIds)
+      await this._onEvent?.(session, { event, result })
     }
   }
 }
+
+export type CommittedPlatformEvent =
+  | { event: Extract<IMEvent, { type: 'message' }>, result: IngestResult }
+  | { event: Extract<IMEvent, { type: 'message-edit' }>, result: IngestResult }
+  | { event: Extract<IMEvent, { type: 'message-delete' }>, result: DeleteResult }
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {

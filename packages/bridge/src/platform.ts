@@ -167,6 +167,14 @@ export interface IMDownloadOptions extends IMTransferOptions {
 
 export type IMEvent =
   | { type: 'message', message: IMMessage, conversation: IMConversation }
+  | { type: 'message-edit', eventId: string, message: IMMessage, conversation: IMConversation }
+  | {
+      type: 'message-delete'
+      eventId: string
+      conversation: IMConversation
+      messageIds: string[]
+      timestamp: number
+    }
   | { type: 'conversation', conversation: IMConversation }
   | { type: 'read', conversationId: string, upToMessageId: string }
 

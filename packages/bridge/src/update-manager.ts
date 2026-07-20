@@ -2,10 +2,10 @@ import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { makeTlMessageMedia, stableId } from './dialogs.js'
-import type { IngestResult, MessageStore } from './message-store.js'
-import type { IMConversation, IMEvent, IMMessage, PlatformSession } from './platform.js'
+import type { MessageStore } from './message-store.js'
+import type { IMConversation, IMMessage, PlatformSession } from './platform.js'
 import { messageText } from './platform.js'
-import type { PlatformRegistry } from './platform-manager.js'
+import type { CommittedPlatformEvent, PlatformRegistry } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
 
 /** Converts committed platform events to account-scoped MTProto updates. */
@@ -19,11 +19,34 @@ export class UpdateManager {
 
   async publish(
     session: PlatformSession,
-    event: Extract<IMEvent, { type: 'message' }>,
-    result: IngestResult,
+    committed: CommittedPlatformEvent,
   ): Promise<void> {
-    const delivery = await this._store.prepareUpdateDelivery(
-      result.message.id, session.platformSessionId, result.projection.length, event.message.timestamp,
+    if (committed.event.type === 'message-delete') {
+      await this._publishDelete(
+        session,
+        committed as Extract<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+      )
+      return
+    }
+    await this._publishMessage(
+      session,
+      committed as Exclude<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+    )
+  }
+
+  private async _publishMessage(
+    session: PlatformSession,
+    committed: Exclude<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+  ): Promise<void> {
+    const { event, result } = committed
+    const isEdit = event.type === 'message-edit'
+    const eventKey = isEdit
+      ? `${session.platformSessionId}:edit:${event.eventId}`
+      : `${session.platformSessionId}:message:${result.message.id}`
+    let delivery = await this._store.getUpdateDelivery(eventKey)
+    if (!delivery && isEdit && !result.changed) return
+    delivery ??= await this._store.prepareUpdateDelivery(
+      eventKey, session.platformSessionId, result.projection.length, event.message.timestamp,
     )
     if (delivery.published) return
     let pts = delivery.pts - delivery.ptsCount
@@ -39,7 +62,9 @@ export class UpdateManager {
         part.groupedId ?? undefined, media,
       )
       updates.push({
-        _: event.conversation.kind === 'channel' ? 'updateNewChannelMessage' : 'updateNewMessage',
+        _: isEdit
+          ? event.conversation.kind === 'channel' ? 'updateEditChannelMessage' : 'updateEditMessage'
+          : event.conversation.kind === 'channel' ? 'updateNewChannelMessage' : 'updateNewMessage',
         message,
         pts: ++pts,
         ptsCount: 1,
@@ -68,7 +93,50 @@ export class UpdateManager {
     for (const binding of bindings) {
       this._sendUpdate(hexBytes(binding.authKeyId), payload)
     }
-    await this._store.markUpdatePublished(result.message.id)
+    await this._store.markUpdatePublished(eventKey)
+  }
+
+  private async _publishDelete(
+    session: PlatformSession,
+    committed: Extract<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+  ): Promise<void> {
+    const { event, result } = committed
+    const eventKey = `${session.platformSessionId}:delete:${event.eventId}`
+    let delivery = await this._store.getUpdateDelivery(eventKey)
+    if (!delivery && !result.changed) return
+    if (!result.tlMessageIds.length) return
+    delivery ??= await this._store.prepareUpdateDelivery(
+      eventKey, session.platformSessionId, result.tlMessageIds.length, event.timestamp,
+    )
+    if (delivery.published) return
+    const update = event.conversation.kind === 'channel'
+      ? {
+          _: 'updateDeleteChannelMessages',
+          channelId: stableId(`peer:${event.conversation.id}`),
+          messages: result.tlMessageIds,
+          pts: delivery.pts,
+          ptsCount: delivery.ptsCount,
+        }
+      : {
+          _: 'updateDeleteMessages',
+          messages: result.tlMessageIds,
+          pts: delivery.pts,
+          ptsCount: delivery.ptsCount,
+        }
+    const payload: tl.RawUpdates = {
+      _: 'updates', updates: [update as tl.TypeUpdate],
+      users: [],
+      chats: event.conversation.kind === 'direct' ? [] : [makeUpdateChat(event.conversation)],
+      date: delivery.date,
+      seq: delivery.seq,
+    }
+    await this._send(session.platformSessionId, payload)
+    await this._store.markUpdatePublished(eventKey)
+  }
+
+  private async _send(platformSessionId: string, payload: tl.RawUpdates): Promise<void> {
+    const bindings = await this._database.get('mtproto_auth_binding', { platformSessionId })
+    for (const binding of bindings) this._sendUpdate(hexBytes(binding.authKeyId), payload)
   }
 
   async getState(platformSessionId: string): Promise<tl.updates.RawState> {
