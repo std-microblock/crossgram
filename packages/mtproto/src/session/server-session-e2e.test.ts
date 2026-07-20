@@ -22,6 +22,7 @@ import { Mtproto } from '../service.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import { generateRsaKeyPair } from '../crypto/rsa-keygen.js'
 import { bareVector } from '../rpc/dispatcher.js'
+import { getApiLayerReaderMap } from '../rpc/api-layer.js'
 
 /**
  * Full-stack e2e test: drives a real MtprotoServer over a real TCP socket using
@@ -402,36 +403,38 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
-  it('serializes nested dialogs for invokeWithLayer and retains the layer for later calls', async () => {
+  it('uses the complete AyuGram layer 224 profile and retains it for later calls', async () => {
     await crypto.initialize?.()
     const { port, pubKey, stop } = await startServer()
     try {
       const client = await TestClient.connect(port)
       const perm = await doClientHandshake(client, pubKey, false)
       const sessionLong = new Long(0x22302230, 0x22302230)
+      const ayugramReaderMap = getApiLayerReaderMap(224)
+      expect(ayugramReaderMap).not.toBeNull()
       const getDialogs = {
         _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 20, hash: Long.ZERO,
       }
 
       const wrapped = TlBinaryWriter.serializeObject(__tlWriterMap, {
-        _: 'invokeWithLayer', layer: 223, query: getDialogs,
+        _: 'invokeWithLayer', layer: 224, query: getDialogs,
       })
       await client.send(clientEncrypt(perm, wrapped, perm.salt, sessionLong, 8))
-      const first = await readRpcResult(client, perm, __tlReaderMapWithCompat)
-      expect(first.messages).toMatchObject([{ _: 'message', message: 'layer:223' }])
+      const first = await readRpcResult(client, perm, ayugramReaderMap!)
+      expect(first.messages).toMatchObject([{ _: 'message', message: 'layer:224' }])
       expect(first.users).toMatchObject([{ _: 'user', firstName: 'Alice' }])
 
       const unwrapped = TlBinaryWriter.serializeObject(__tlWriterMap, getDialogs)
       await client.send(clientEncrypt(perm, unwrapped, perm.salt, sessionLong, 12))
-      const second = await readRpcResult(client, perm, __tlReaderMapWithCompat)
-      expect(second.messages).toMatchObject([{ _: 'message', message: 'layer:223' }])
+      const second = await readRpcResult(client, perm, ayugramReaderMap!)
+      expect(second.messages).toMatchObject([{ _: 'message', message: 'layer:224' }])
 
       const getFullUser = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'users.getFullUser', id: { _: 'inputUserSelf' },
       })
       await client.send(clientEncrypt(perm, getFullUser, perm.salt, sessionLong, 16))
-      const fullUser = await readRpcResult(client, perm, __tlReaderMapWithCompat)
+      const fullUser = await readRpcResult(client, perm, ayugramReaderMap!)
       expect(fullUser).toMatchObject({
         _: 'users.userFull', fullUser: { _: 'userFull', id: 42, commonChatsCount: 0 },
       })

@@ -13,7 +13,7 @@ import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector, unwrapRpcRequest } from '../rpc/dispatcher.js'
 import type { RpcDispatcher, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
-import { getApiLayerWriterMap, resolveApiSchemaLayer } from '../rpc/api-layer.js'
+import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
 
 // TL constructor IDs for MTProto service messages
 const RPC_RESULT_ID = 0xF35C6D01
@@ -620,8 +620,9 @@ export class ServerSession {
     this._apiLayer = layer
     this._responseWriterMap = getApiLayerWriterMap(this._writerMap, layer)
     this._log.info(
-      'client API layer negotiated: %d (response compatibility schema layer: %d)',
+      'client API layer negotiated: %d (response schema: %s layer %d)',
       layer ?? 0,
+      layer === null ? 'none' : resolveApiSchemaProfile(layer) ?? 'none',
       layer === null ? 0 : resolveApiSchemaLayer(layer) ?? 0,
     )
   }

@@ -5,7 +5,13 @@ import { fileURLToPath } from 'node:url'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
-import { CURRENT_API_LAYER, getApiLayerWriterMap, resolveApiSchemaLayer } from './api-layer.js'
+import {
+  CURRENT_API_LAYER,
+  getApiLayerReaderMap,
+  getApiLayerWriterMap,
+  resolveApiSchemaLayer,
+  resolveApiSchemaProfile,
+} from './api-layer.js'
 
 const schemaDirectory = fileURLToPath(new URL('../../schema/api/', import.meta.url))
 const schemaManifest = JSON.parse(readFileSync(resolve(schemaDirectory, 'manifest.json'), 'utf8'))
@@ -48,7 +54,7 @@ describe('API layer response writers', () => {
     expect(getApiLayerWriterMap(__tlWriterMap, null)).toBe(__tlWriterMap)
   })
 
-  it('recursively downgrades messages and users without desynchronizing dialogs vectors', () => {
+  it('serializes a complete AyuGram layer 224 object graph with its generated reader and writer', () => {
     const result: tl.messages.RawDialogs = {
       _: 'messages.dialogs',
       dialogs: [{
@@ -62,30 +68,23 @@ describe('API layer response writers', () => {
       users: [{ _: 'user', id: 42, firstName: 'Alice', contact: true, mutualContact: true }],
     }
 
-    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 223), result)
-    const decoded = new TlBinaryReader(__tlReaderMapWithCompat, bytes).object() as tl.messages.RawDialogs
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 224), result)
+    const readerMap = getApiLayerReaderMap(224)
+    expect(readerMap).not.toBeNull()
+    const decoded = new TlBinaryReader(readerMap!, bytes).object() as tl.messages.RawDialogs
 
     expect(decoded.dialogs).toHaveLength(1)
     expect(decoded.messages).toMatchObject([{ _: 'message', id: 7, message: 'legacy wire message' }])
     expect(decoded.users).toMatchObject([{ _: 'user', id: 42, firstName: 'Alice' }])
   })
 
-  it('keeps UserFull on the current constructor for the mixed desktop schema', () => {
+  it('selects every constructor from the complete AyuGram layer 224 profile', () => {
     const full: tl.RawUserFull = {
       _: 'userFull', id: 42,
       settings: { _: 'peerSettings' },
       notifySettings: { _: 'peerNotifySettings' },
       commonChatsCount: 0,
     }
-    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 223), full)
-    const currentBytes = TlBinaryWriter.serializeObject(__tlWriterMap, full)
-    expect(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true))
-      .toBe(new DataView(currentBytes.buffer, currentBytes.byteOffset, currentBytes.byteLength).getUint32(0, true))
-    const decoded = new TlBinaryReader(__tlReaderMapWithCompat, bytes).object() as tl.RawUserFull
-    expect(decoded).toMatchObject({ _: 'userFull', id: 42, commonChatsCount: 0 })
-  })
-
-  it('keeps MessageService on the current constructor', () => {
     const service: tl.RawMessageService = {
       _: 'messageService', id: 8,
       fromId: { _: 'peerUser', userId: 42 },
@@ -93,12 +92,40 @@ describe('API layer response writers', () => {
       date: 1_800_000_000,
       action: { _: 'messageActionEmpty' },
     }
-    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 223), service)
-    const currentBytes = TlBinaryWriter.serializeObject(__tlWriterMap, service)
-    expect(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true))
-      .toBe(new DataView(currentBytes.buffer, currentBytes.byteOffset, currentBytes.byteLength).getUint32(0, true))
-    expect(new TlBinaryReader(__tlReaderMapWithCompat, bytes).object()).toMatchObject({
-      _: 'messageService', id: 8, peerId: { _: 'peerUser', userId: 42 },
-    })
+    const dialog: tl.RawDialog = {
+      _: 'dialog', peer: { _: 'peerUser', userId: 42 }, topMessage: 7,
+      readInboxMaxId: 7, readOutboxMaxId: 7, unreadCount: 0,
+      unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
+      notifySettings: { _: 'peerNotifySettings' },
+    }
+    const writerMap = getApiLayerWriterMap(__tlWriterMap, 224)
+    const constructor = (value: { _: string }) => {
+      const bytes = TlBinaryWriter.serializeObject(writerMap, value)
+      return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
+    }
+
+    expect(resolveApiSchemaProfile(224)).toBe('tdlib-history')
+    expect(constructor(message)).toBe(0x3ae56482)
+    expect(constructor(dialog)).toBe(0xfc89f7f3)
+    expect(constructor(full)).toBe(0x06cbe645)
+    expect(constructor(service)).toBe(0x7a800e0a)
+    expect(constructor(full)).toBe(constructorFromLocalSchema(224, 'userFull'))
+    expect(writerMap.message).not.toBe(__tlWriterMap.message)
+    expect(writerMap.userFull).not.toBe(__tlWriterMap.userFull)
+    expect(writerMap.messageService).not.toBe(__tlWriterMap.messageService)
+  })
+
+  it('keeps historical layer 223 as its own complete Git snapshot', () => {
+    const full: tl.RawUserFull = {
+      _: 'userFull', id: 42,
+      settings: { _: 'peerSettings' },
+      notifySettings: { _: 'peerNotifySettings' },
+      commonChatsCount: 0,
+    }
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 223), full)
+    const constructor = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
+    expect(resolveApiSchemaProfile(223)).toBe('tdlib-history')
+    expect(constructor).toBe(0xa02bc13e)
+    expect(constructor).toBe(constructorFromLocalSchema(223, 'userFull'))
   })
 })
