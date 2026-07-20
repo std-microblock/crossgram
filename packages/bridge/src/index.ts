@@ -257,6 +257,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipants(req as tl.channels.RawGetParticipantsRequest))
   ctx.mtproto.register('channels.getSendAs', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getSendAs(req as tl.channels.RawGetSendAsRequest))
+  ctx.mtproto.register('messages.getForumTopics', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsRequest))
+  ctx.mtproto.register('messages.getForumTopicsByID', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsByIDRequest))
+  ctx.mtproto.register('messages.getReplies', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getReplies(req as tl.messages.RawGetRepliesRequest))
 
   // ── Updates ──
   ctx.mtproto.register('updates.getState', async (rpc) =>

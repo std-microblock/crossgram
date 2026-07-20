@@ -57,6 +57,8 @@ export class DialogRpc {
   private readonly _store?: MessageStore
   private readonly _historyCache = new Map<string, MaterializedMessage[]>()
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
+  private readonly _topicToConversation = new Map<number, string>()
+  private readonly _conversationToTopic = new Map<string, number>()
 
   constructor(
     private readonly _platform: IMPlatform,
@@ -292,6 +294,64 @@ export class DialogRpc {
     }
   }
 
+  async getForumTopics(
+    req: tl.messages.RawGetForumTopicsRequest | tl.messages.RawGetForumTopicsByIDRequest,
+  ): Promise<tl.messages.RawForumTopics> {
+    await this._hydratePeers()
+    const parentId = this._resolvePeer(req.peer)
+    const parent = this._conversation(parentId)
+    if (parent.kind !== 'channel') throw new RpcError(400, 'CHANNEL_FORUM_MISSING')
+    const children = this._subchannels(parentId)
+    await this._ensureTopics(parentId)
+    const selected = req._ === 'messages.getForumTopicsByID'
+      ? children.filter((child) => req.topics.includes(this._conversationToTopic.get(child.id) ?? -1))
+      : children.filter((child) => !req.q || child.title.toLowerCase().includes(req.q.toLowerCase()))
+    const materialized = await Promise.all(selected.map((child) => this._materializeTopic(parent, child)))
+    const offset = req._ === 'messages.getForumTopics'
+      ? Math.max(0, materialized.findIndex((item) => item.topic.id === req.offsetTopic) + 1)
+      : 0
+    const limit = req._ === 'messages.getForumTopics' ? clampLimit(req.limit) : materialized.length
+    const page = materialized.slice(offset, offset + limit)
+    const users = await Promise.all([...new Set(page.map((item) => item.top.source.senderId))]
+      .map((senderId) => this._getPeerUser(senderId)))
+    return {
+      _: 'messages.forumTopics', count: materialized.length,
+      topics: page.map((item) => item.topic),
+      messages: page.map((item) => this._makeMessage(item.top)),
+      chats: [this._makeChat(parent)], users: uniqueUsers([...users, this._makeSelfUser()]), pts: this._pts,
+    }
+  }
+
+  async getReplies(req: tl.messages.RawGetRepliesRequest): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    const parentId = this._resolvePeer(req.peer)
+    await this._ensureTopics(parentId)
+    const childId = this._topicToConversation.get(req.msgId)
+    const child = childId ? this._conversation(childId) : undefined
+    if (!child || child.parentId !== parentId) throw new RpcError(400, 'MSG_ID_INVALID')
+    const all = await this._loadHistory(child.id, {
+      offsetId: req.offsetId, offsetDate: req.offsetDate, addOffset: req.addOffset,
+      limit: req.limit, maxId: req.maxId, minId: req.minId,
+    })
+    const filtered = all.filter((item) => {
+      if (req.offsetId > 0 && item.tlId >= req.offsetId) return false
+      if (req.offsetDate > 0 && item.source.timestamp >= req.offsetDate) return false
+      if (req.maxId > 0 && item.tlId >= req.maxId) return false
+      if (req.minId > 0 && item.tlId <= req.minId) return false
+      return true
+    })
+    const page = filtered.slice(Math.max(0, req.addOffset), Math.max(0, req.addOffset) + clampLimit(req.limit))
+    const topic = (await this._materializeTopic(this._conversation(parentId), child)).topic
+    const users = await Promise.all([...new Set(page.map((item) => item.source.senderId))]
+      .map((senderId) => this._getPeerUser(senderId)))
+    return {
+      _: 'messages.channelMessages', pts: this._pts, count: filtered.length,
+      messages: page.map((item) => this._makeMessage(item)), topics: [topic],
+      chats: [this._makeChat(this._conversation(parentId))],
+      users: uniqueUsers([...users, this._makeSelfUser()]),
+    }
+  }
+
   async getChannelParticipant(
     req: tl.channels.RawGetParticipantRequest,
   ): Promise<tl.channels.RawChannelParticipant> {
@@ -352,7 +412,7 @@ export class DialogRpc {
       const parts: IMMessageInput['parts'] = []
       if (req.message) parts.push({ type: 'text', text: req.message })
       parts.push({ type: 'media', media: resolved.media })
-      return this._sendRichContent(req.peer, { parts }, [resolved.upload])
+      return this._sendRichContent(req.peer, { parts }, [resolved.upload], req.replyTo)
     })
   }
 
@@ -365,7 +425,7 @@ export class DialogRpc {
       const captions = req.multiMedia.map((item) => item.message).filter(Boolean)
       if (captions.length) parts.push({ type: 'text', text: captions.join('\n') })
       for (const item of resolved) parts.push({ type: 'media', media: item.media })
-      return this._sendRichContent(req.peer, { parts }, resolved.map((item) => item.upload))
+      return this._sendRichContent(req.peer, { parts }, resolved.map((item) => item.upload), req.replyTo)
     })
   }
 
@@ -435,7 +495,7 @@ export class DialogRpc {
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
 
     await this._hydratePeers()
-    const peerId = this._resolvePeer(req.peer)
+    const peerId = this._resolveMessageTarget(req.peer, req.replyTo)
     const sent = await this._platform.sendMessage(
       this._session,
       { id: peerId },
@@ -519,6 +579,7 @@ export class DialogRpc {
     inputPeer: tl.TypeInputPeer,
     content: IMMessageInput,
     uploads: UploadedFile[],
+    replyTo?: tl.TypeInputReplyTo,
   ): Promise<tl.TypeUpdates> {
     const media = content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
@@ -537,7 +598,7 @@ export class DialogRpc {
     }
 
     await this._hydratePeers()
-    const peerId = this._resolvePeer(inputPeer)
+    const peerId = this._resolveMessageTarget(inputPeer, replyTo)
     const sent = await this._platform.sendMessage(this._session, { id: peerId }, content, {
       onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
     })
@@ -675,7 +736,7 @@ export class DialogRpc {
       ? await this._data.getDialogs(query)
       : (await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)).dialogs
     for (const dialog of dialogs) this._conversations.set(dialog.conversation.id, dialog.conversation)
-    return dialogs
+    return dialogs.filter((dialog) => !this._isSubchannel(dialog.conversation))
   }
 
   private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {
@@ -698,6 +759,7 @@ export class DialogRpc {
       id: tlId,
       fromId: { _: 'peerUser', userId: source.outgoing ? this._selfId : this._peerId(source.senderId) },
       peerId: this._conversationPeer(conversation),
+      replyTo: this._topicReplyHeader(conversation, tlId),
       date: source.timestamp,
       message: item.ordinal === 0 ? messageText(source) : '',
       media: item.media ? makeTlMessageMedia(item.media, source.timestamp, this._dcId) : undefined,
@@ -759,14 +821,25 @@ export class DialogRpc {
     return conversation
   }
 
+  private _resolveMessageTarget(peer: tl.TypeInputPeer, replyTo?: tl.TypeInputReplyTo): string {
+    const parentId = this._resolvePeer(peer)
+    if (replyTo?._ !== 'inputReplyToMessage') return parentId
+    const topicId = replyTo.topMsgId ?? replyTo.replyToMsgId
+    const childId = this._topicToConversation.get(topicId)
+    return childId && this._conversation(childId).parentId === parentId ? childId : parentId
+  }
+
   private _conversation(peerId: string): import('./platform.js').IMConversation {
     return this._conversations.get(peerId) ?? { id: peerId, kind: 'direct', title: peerId }
   }
 
   private _conversationPeer(conversation: import('./platform.js').IMConversation): tl.TypePeer {
-    const id = this._peerId(conversation.id)
-    if (conversation.kind === 'group') return { _: 'peerChat', chatId: id }
-    if (conversation.kind === 'channel') return { _: 'peerChannel', channelId: id }
+    const target = this._isSubchannel(conversation)
+      ? this._conversation(conversation.parentId!)
+      : conversation
+    const id = this._peerId(target.id)
+    if (target.kind === 'group') return { _: 'peerChat', chatId: id }
+    if (target.kind === 'channel') return { _: 'peerChannel', channelId: id }
     return { _: 'peerUser', userId: id }
   }
 
@@ -782,8 +855,65 @@ export class DialogRpc {
     return {
       _: 'channel', id, accessHash: Long.ZERO, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
+      forum: !broadcast && this._subchannels(conversation.id).length > 0 || undefined,
       photo: { _: 'chatPhotoEmpty' }, date: 0,
       participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
+    }
+  }
+
+  private _isSubchannel(conversation: import('./platform.js').IMConversation): boolean {
+    return conversation.kind === 'channel'
+      && !!conversation.parentId
+      && this._conversations.get(conversation.parentId)?.kind === 'channel'
+  }
+
+  private _subchannels(parentId: string): import('./platform.js').IMConversation[] {
+    return [...this._conversations.values()]
+      .filter((conversation) => conversation.kind === 'channel' && conversation.parentId === parentId)
+      .sort((left, right) => left.title.localeCompare(right.title))
+  }
+
+  private async _ensureTopics(parentId: string): Promise<void> {
+    const parent = this._conversation(parentId)
+    for (const child of this._subchannels(parentId)) await this._materializeTopic(parent, child)
+  }
+
+  private async _materializeTopic(
+    parent: import('./platform.js').IMConversation,
+    child: import('./platform.js').IMConversation,
+  ): Promise<{ topic: tl.RawForumTopic, top: MaterializedMessage }> {
+    const history = await this._loadHistory(child.id, { limit: 100 })
+    const top = history[0]
+    const oldest = history.at(-1)
+    if (!top || !oldest) throw new RpcError(500, 'FORUM_TOPIC_EMPTY')
+    const topicId = await this._store?.getOldestTlMessageId(this._session.platformSessionId, child.id)
+      ?? oldest.tlId
+    this._topicToConversation.set(topicId, child.id)
+    this._conversationToTopic.set(child.id, topicId)
+    return {
+      top,
+      topic: {
+        _: 'forumTopic', id: topicId, date: oldest.source.timestamp,
+        peer: { _: 'peerChannel', channelId: this._peerId(parent.id) },
+        title: child.title, iconColor: 0x6fb9f0, topMessage: top.tlId,
+        readInboxMaxId: top.tlId, readOutboxMaxId: top.tlId,
+        unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
+        fromId: { _: 'peerUser', userId: this._peerId(oldest.source.senderId) },
+        notifySettings: { _: 'peerNotifySettings' },
+      },
+    }
+  }
+
+  private _topicReplyHeader(
+    conversation: import('./platform.js').IMConversation,
+    messageId: number,
+  ): tl.RawMessageReplyHeader | undefined {
+    if (!this._isSubchannel(conversation)) return
+    const topicId = this._conversationToTopic.get(conversation.id)
+    if (!topicId || topicId === messageId) return
+    return {
+      _: 'messageReplyHeader', forumTopic: true,
+      replyToMsgId: topicId, replyToTopId: topicId,
     }
   }
 

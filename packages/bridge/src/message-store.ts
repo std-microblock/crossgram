@@ -313,6 +313,23 @@ export class MessageStore {
     }
   }
 
+  async getOldestTlMessageId(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<number | undefined> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return
+    const [message] = await this._database.select('mtproto_im_message', {
+      conversationId: conversation.id, deleted: false,
+    }).orderBy('timestamp').limit(1).execute()
+    if (!message) return
+    const [part] = await this._database.select('mtproto_tl_message_part', { messageId: message.id })
+      .orderBy('ordinal').limit(1).execute()
+    return part?.tlMessageId
+  }
+
   async getMedia(platformSessionId: string, mediaId: number): Promise<StoredMedia | undefined> {
     const [row] = await this._database.get('mtproto_im_media', { id: mediaId })
     if (!row) return
@@ -461,7 +478,7 @@ export class MessageStore {
   ): Promise<TlMessagePartRow[]> {
     const count = Math.max(1, media.length)
     const scope = conversation.kind === 'channel'
-      ? `channel:${platformSessionId}:${conversation.id}`
+      ? `channel:${platformSessionId}:${conversation.parentPlatformConversationId ?? conversation.platformConversationId}`
       : `account:${platformSessionId}`
     const existing = await database.select('mtproto_tl_message_part', { messageId: message.id })
       .orderBy('ordinal').execute()

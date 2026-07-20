@@ -5,6 +5,7 @@ import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
+import { stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
@@ -114,6 +115,46 @@ describe('UpdateManager', () => {
     expect(messages[0].groupedId?.toString()).toBe(messages[1].groupedId?.toString())
     expect(messages.map((item) => item.message)).toEqual(['caption', ''])
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 3, seq: 1 })
+  })
+
+  it('publishes subchannel events through the parent forum and topic root', async () => {
+    const { store, manager, sent } = await createHarness()
+    const parent: IMConversation = { id: 'general', kind: 'channel', title: 'General' }
+    const thread: IMConversation = {
+      id: 'support', kind: 'channel', title: 'Support', parentId: parent.id, spaceId: 'guild',
+    }
+    await store.upsertConversation(session, parent)
+    const root: IMMessage = {
+      id: 'thread-root', conversationId: thread.id, senderId: 'alice', timestamp: 10,
+      content: { parts: [{ type: 'text', text: 'root' }] },
+    }
+    const rootResult = await store.ingest(session, thread, root)
+    await manager.publish(session, { event: { type: 'message', conversation: thread, message: root }, result: rootResult })
+    const reply: IMMessage = {
+      id: 'thread-reply', conversationId: thread.id, senderId: 'alice', timestamp: 11,
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const replyResult = await store.ingest(session, thread, reply)
+    await manager.publish(session, { event: { type: 'message', conversation: thread, message: reply }, result: replyResult })
+
+    const rootId = rootResult.projection[0].tlMessageId
+    expect(sent[0].update).toMatchObject({
+      updates: [{
+        _: 'updateNewChannelMessage',
+        message: { id: rootId, peerId: { _: 'peerChannel', channelId: stableId('peer:general') } },
+      }],
+      chats: [{ _: 'channel', id: stableId('peer:general'), title: 'General', forum: true }],
+    })
+    expect(sent[1].update).toMatchObject({
+      updates: [{
+        _: 'updateNewChannelMessage',
+        message: {
+          peerId: { _: 'peerChannel', channelId: stableId('peer:general') },
+          replyTo: { _: 'messageReplyHeader', forumTopic: true, replyToTopId: rootId },
+        },
+      }],
+    })
+    expect(() => roundTrip(sent[1].update)).not.toThrow()
   })
 
   it('persists edits, tombstones deletes, and publishes each mutation exactly once', async () => {

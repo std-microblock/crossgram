@@ -19,7 +19,11 @@ const conversations: IMConversation[] = [
   { id: 'direct', kind: 'direct', title: 'Direct' },
   { id: 'group', kind: 'group', title: 'QQ Group', metadata: { participantsCount: 23 } },
   {
-    id: 'subchannel', kind: 'channel', title: 'Discord / support', parentId: 'category', spaceId: 'guild',
+    id: 'parent-channel', kind: 'channel', title: 'Discord / general', parentId: 'category', spaceId: 'guild',
+    metadata: { participantsCount: 42 },
+  },
+  {
+    id: 'subchannel', kind: 'channel', title: 'Discord / support', parentId: 'parent-channel', spaceId: 'guild',
     metadata: { participantsCount: 42 },
   },
 ]
@@ -104,15 +108,15 @@ describe('conversation kinds', () => {
     const result = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
     expect(result.dialogs.map((dialog) => dialog.peer._)).toEqual(['peerChannel', 'peerChat', 'peerUser'])
     expect(result.chats).toMatchObject([
-      { _: 'channel', title: 'Discord / support', megagroup: true, participantsCount: 42 },
+      { _: 'channel', title: 'Discord / general', megagroup: true, forum: true, participantsCount: 42 },
       { _: 'chat', title: 'QQ Group', participantsCount: 23 },
     ])
     expect(result.users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual([
-      'sender-subchannel', 'sender-group', 'direct',
+      'sender-parent-channel', 'sender-group', 'direct',
     ])
     const [stored] = await ctx.database.get('mtproto_im_conversation', { platformConversationId: 'subchannel' })
     expect(stored).toMatchObject({
-      kind: 'channel', parentPlatformConversationId: 'category', spacePlatformId: 'guild',
+      kind: 'channel', parentPlatformConversationId: 'parent-channel', spacePlatformId: 'guild',
     })
     expect(() => roundTrip(result)).not.toThrow()
   })
@@ -121,7 +125,7 @@ describe('conversation kinds', () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())
     const groupId = stableId('peer:group')
-    const channelId = stableId('peer:subchannel')
+    const channelId = stableId('peer:parent-channel')
     const group = await rpc.getHistory(historyRequest({ _: 'inputPeerChat', chatId: groupId })) as tl.messages.RawMessages
     const channel = await rpc.getHistory(historyRequest({
       _: 'inputPeerChannel', channelId, accessHash: Long.ZERO,
@@ -129,7 +133,7 @@ describe('conversation kinds', () => {
     expect((group.messages[0] as tl.RawMessage).peerId).toEqual({ _: 'peerChat', chatId: groupId })
     expect((channel.messages[0] as tl.RawMessage).peerId).toEqual({ _: 'peerChannel', channelId })
     expect(group.users).toMatchObject([{ _: 'user', firstName: 'sender-group' }, { _: 'user' }])
-    expect(channel.chats).toMatchObject([{ _: 'channel', title: 'Discord / support' }])
+    expect(channel.chats).toMatchObject([{ _: 'channel', title: 'Discord / general' }])
 
     await rpc.sendMessage({
       _: 'messages.sendMessage', peer: { _: 'inputPeerChat', chatId: groupId },
@@ -139,7 +143,7 @@ describe('conversation kinds', () => {
       _: 'messages.sendMessage', peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ZERO },
       message: 'to channel', randomId: Long.fromNumber(2),
     })
-    expect(sentTargets).toEqual(['group', 'subchannel'])
+    expect(sentTargets).toEqual(['group', 'parent-channel'])
     await expect(rpc.getHistory(historyRequest({
       _: 'inputPeerUser', userId: groupId, accessHash: Long.ZERO,
     }))).rejects.toMatchObject({ text: 'PEER_ID_INVALID' })
@@ -156,7 +160,7 @@ describe('conversation kinds', () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())
     const groupId = stableId('peer:group')
-    const channelId = stableId('peer:subchannel')
+    const channelId = stableId('peer:parent-channel')
     const channel = { _: 'inputChannel' as const, channelId, accessHash: Long.ZERO }
 
     const groupSettings = await rpc.getPeerSettings({
@@ -188,5 +192,40 @@ describe('conversation kinds', () => {
     for (const result of [groupSettings, fullGroup, fullChannel, self, participants, sendAs]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
+  })
+
+  it('projects known child channels as forum topics and routes topic sends to the child', async () => {
+    const { rpc } = await createRpc()
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const parent = dialogs.chats.find((chat) => chat._ === 'channel' && chat.title === 'Discord / general')
+    if (!parent || parent._ !== 'channel') throw new Error('forum parent missing')
+    const peer = { _: 'inputPeerChannel' as const, channelId: parent.id, accessHash: Long.ZERO }
+    const topics = await rpc.getForumTopics({
+      _: 'messages.getForumTopics', peer, offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+    })
+    expect(topics).toMatchObject({
+      _: 'messages.forumTopics', count: 1,
+      topics: [{ _: 'forumTopic', title: 'Discord / support' }],
+      messages: [{ _: 'message', peerId: { _: 'peerChannel', channelId: parent.id } }],
+      chats: [{ _: 'channel', id: parent.id, forum: true }],
+    })
+    const topic = topics.topics[0] as tl.RawForumTopic
+    const byId = await rpc.getForumTopics({ _: 'messages.getForumTopicsByID', peer, topics: [topic.id] })
+    expect(byId.topics).toMatchObject([{ id: topic.id, title: 'Discord / support' }])
+    const replies = await rpc.getReplies({
+      _: 'messages.getReplies', peer, msgId: topic.id,
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawChannelMessages
+    expect(replies).toMatchObject({
+      _: 'messages.channelMessages', topics: [{ id: topic.id }],
+      messages: [{ _: 'message', message: 'Discord / support', peerId: { _: 'peerChannel', channelId: parent.id } }],
+    })
+
+    await rpc.sendMessage({
+      _: 'messages.sendMessage', peer, message: 'to topic', randomId: Long.fromNumber(3),
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId: topic.id, topMsgId: topic.id },
+    })
+    expect(sentTargets.at(-1)).toBe('subchannel')
+    for (const result of [topics, byId, replies]) expect(() => roundTrip(result)).not.toThrow()
   })
 })

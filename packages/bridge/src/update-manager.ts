@@ -50,6 +50,13 @@ export class UpdateManager {
       eventKey, session.platformSessionId, result.projection.length, event.message.timestamp,
     )
     if (delivery.published) return
+    const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
+      ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
+        ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
+      : event.conversation
+    const topicId = event.conversation.kind === 'channel' && event.conversation.parentId
+      ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
+      : undefined
     let pts = delivery.pts - delivery.ptsCount
     const updates: tl.TypeUpdate[] = []
     for (const part of result.projection) {
@@ -59,8 +66,8 @@ export class UpdateManager {
       if (!projected) continue
       const media = projected.media.find((item) => item.id === part.mediaId)
       const message = makeUpdateMessage(
-        session.platformSessionId, event.conversation, projected.source, part.tlMessageId, part.ordinal,
-        part.groupedId ?? undefined, media, this._dcId,
+        session.platformSessionId, displayConversation, projected.source, part.tlMessageId, part.ordinal,
+        part.groupedId ?? undefined, media, this._dcId, topicId,
       )
       updates.push({
         _: isEdit
@@ -84,7 +91,9 @@ export class UpdateManager {
         username: sender?.username,
       }),
     ]
-    const chats = event.conversation.kind === 'direct' ? [] : [makeUpdateChat(event.conversation)]
+    const chats = displayConversation.kind === 'direct'
+      ? []
+      : [makeUpdateChat(displayConversation, topicId !== undefined)]
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
@@ -110,10 +119,14 @@ export class UpdateManager {
       eventKey, session.platformSessionId, result.tlMessageIds.length, event.timestamp,
     )
     if (delivery.published) return
+    const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
+      ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
+        ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
+      : event.conversation
     const update = event.conversation.kind === 'channel'
       ? {
           _: 'updateDeleteChannelMessages',
-          channelId: stableId(`peer:${event.conversation.id}`),
+          channelId: stableId(`peer:${displayConversation.id}`),
           messages: result.tlMessageIds,
           pts: delivery.pts,
           ptsCount: delivery.ptsCount,
@@ -127,7 +140,7 @@ export class UpdateManager {
     const payload: tl.RawUpdates = {
       _: 'updates', updates: [update as tl.TypeUpdate],
       users: [],
-      chats: event.conversation.kind === 'direct' ? [] : [makeUpdateChat(event.conversation)],
+      chats: displayConversation.kind === 'direct' ? [] : [makeUpdateChat(displayConversation, !!event.conversation.parentId)],
       date: delivery.date,
       seq: delivery.seq,
     }
@@ -158,6 +171,7 @@ function makeUpdateMessage(
   groupedId?: string,
   media?: import('./models.js').IMMediaRow,
   dcId = 1,
+  topicId?: number,
 ): tl.RawMessage {
   const peerId = stableId(`peer:${conversation.id}`)
   const peer: tl.TypePeer = conversation.kind === 'group'
@@ -172,6 +186,9 @@ function makeUpdateMessage(
       userId: source.outgoing ? stableId(`self:${platformSessionId}`) : stableId(`peer:${source.senderId}`),
     },
     peerId: peer,
+    replyTo: topicId && topicId !== id ? {
+      _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
+    } : undefined,
     date: source.timestamp,
     message: ordinal === 0 ? messageText(source) : '',
     media: media ? makeTlMessageMedia(media, source.timestamp, dcId) : undefined,
@@ -179,7 +196,7 @@ function makeUpdateMessage(
   } as tl.RawMessage
 }
 
-function makeUpdateChat(conversation: IMConversation): tl.TypeChat {
+function makeUpdateChat(conversation: IMConversation, forum = false): tl.TypeChat {
   const id = stableId(`peer:${conversation.id}`)
   if (conversation.kind === 'group') {
     return {
@@ -191,6 +208,7 @@ function makeUpdateChat(conversation: IMConversation): tl.TypeChat {
   return {
     _: 'channel', id, accessHash: Long.ZERO, title: conversation.title,
     broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
+    forum: forum || undefined,
     photo: { _: 'chatPhotoEmpty' }, date: 0,
     participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
   }

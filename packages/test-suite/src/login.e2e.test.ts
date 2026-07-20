@@ -346,22 +346,23 @@ describe('bridge login e2e', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 22)
       expect(dialogs._).toBe('messages.dialogs')
-      expect(dialogs.dialogs).toHaveLength(9)
+      expect(dialogs.dialogs).toHaveLength(8)
       expect(dialogs.dialogs.map((dialog: any) => dialog.peer._)).toEqual([
-        'peerChat', 'peerChat', 'peerChat', 'peerChat', 'peerChannel',
+        'peerChat', 'peerChat', 'peerChat', 'peerChat',
         'peerChannel', 'peerUser', 'peerUser', 'peerChat',
       ])
       expect(new Set(dialogs.users.map((user: any) => user.firstName)))
         .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
       expect(dialogs.chats.map((chat: any) => chat.title)).toEqual([
         'Group A - Live Mutations', 'Static QQ Group', 'Group C - Mirror Target',
-        'Group B - Mirror Source', 'support thread', 'general', 'Group D - Long History',
+        'Group B - Mirror Source', 'general', 'Group D - Long History',
       ])
       const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
       const mirrorSourceGroup = dialogs.chats.find((chat: any) => chat.title === 'Group B - Mirror Source')
       const mirrorTargetGroup = dialogs.chats.find((chat: any) => chat.title === 'Group C - Mirror Target')
       const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')
       const generalChannel = dialogs.chats.find((chat: any) => chat.title === 'general')
+      expect(generalChannel).toMatchObject({ _: 'channel', megagroup: true, forum: true })
       const [supportConversation] = await ctx.database.get('mtproto_im_conversation', {
         platformSessionId: 'ps1', platformConversationId: 'discord-support',
       })
@@ -617,6 +618,44 @@ describe('bridge login e2e', () => {
       }, 69)
       expect(sendAs).toMatchObject({ _: 'channels.sendAsPeers', peers: [{ peer: { _: 'peerUser' } }] })
 
+      const forum = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getForumTopics',
+        peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+      }, 71)
+      expect(forum).toMatchObject({
+        _: 'messages.forumTopics', count: 1,
+        topics: [{ _: 'forumTopic', title: 'support thread' }],
+        messages: [{ _: 'message', peerId: { _: 'peerChannel', channelId: generalChannel.id } }],
+      })
+      const topic = forum.topics[0]
+      const topicHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getReplies',
+        peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        msgId: topic.id, offsetId: 0, offsetDate: 0, addOffset: 0,
+        limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 73)
+      expect(topicHistory).toMatchObject({
+        _: 'messages.channelMessages', topics: [{ id: topic.id, title: 'support thread' }],
+        messages: [{ message: 'Support thread message' }],
+      })
+      await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        replyTo: { _: 'inputReplyToMessage', replyToMsgId: topic.id, topMsgId: topic.id },
+        message: 'sent to Discord thread', randomId: Long.fromNumber(804),
+      }, 75)
+      const updatedTopic = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getReplies',
+        peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        msgId: topic.id, offsetId: 0, offsetDate: 0, addOffset: 0,
+        limit: 1, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 77)
+      expect(updatedTopic.messages[0]).toMatchObject({
+        message: 'sent to Discord thread',
+        replyTo: { _: 'messageReplyHeader', forumTopic: true, replyToTopId: topic.id },
+      })
+
       const desktopStartupBatch: Array<[object, string]> = [
         [{ _: 'help.getPeerColors', hash: 0 }, 'help.peerColors'],
         [{ _: 'help.getPeerProfileColors', hash: 0 }, 'help.peerColors'],
@@ -646,7 +685,7 @@ describe('bridge login e2e', () => {
           _: 'stories.getStoriesArchive', peer: { _: 'inputPeerSelf' }, offsetId: 0, limit: 100,
         }, 'stories.stories'],
       ]
-      let startupSub = 70
+      let startupSub = 100
       for (const [request, expected] of desktopStartupBatch) {
         const response = await callRpc(resumed, key, resumedSid, request, startupSub)
         expect(response._).toBe(expected)

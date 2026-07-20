@@ -74,7 +74,7 @@ interface IMConversation {
 - QQ/微信群使用 `group`。
 - Discord guild/workspace ID 放入 `spaceId`。
 - Discord category、parent channel 或 thread owner 放入 `parentId`。
-- Discord channel/thread 使用 `channel`。当前 Telegram 表现层将子 channel 展平为 synthetic channel，但父子关系不会丢失。
+- Discord channel/thread 使用 `channel`。当 `parentId` 指向同一 session 中另一个 channel 时，父 channel 映射为 Telegram forum，子 channel 映射为 `ForumTopic`；其他层级（例如 category ID）继续作为 opaque parent 信息保存。
 - `metadata.broadcast: true` 会生成 Telegram broadcast channel；其他 channel 生成 megagroup。
 
 消息事件必须携带完整 conversation，不能只给 conversation ID。这样 push-only 平台首次收到群消息时也能独立完成入库。
