@@ -1,4 +1,5 @@
 import type { Database } from '@cordisjs/plugin-database'
+import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type IngestResult } from './message-store.js'
 import type {
@@ -9,9 +10,14 @@ export class PlatformRegistry {
   private readonly _platforms = new Map<string, IMPlatform>()
 
   constructor(platforms: readonly IMPlatform[]) {
-    for (const platform of platforms) {
-      if (this._platforms.has(platform.id)) throw new Error(`duplicate IM platform ID: ${platform.id}`)
-      this._platforms.set(platform.id, platform)
+    for (const platform of platforms) this.register(platform)
+  }
+
+  register(platform: IMPlatform): Unsubscribe {
+    if (this._platforms.has(platform.id)) throw new Error(`duplicate IM platform ID: ${platform.id}`)
+    this._platforms.set(platform.id, platform)
+    return () => {
+      if (this._platforms.get(platform.id) === platform) this._platforms.delete(platform.id)
     }
   }
 
@@ -30,9 +36,61 @@ export class PlatformRegistry {
   }
 }
 
+export type PlatformRegistryEvent = 'register' | 'unregister'
+export type PlatformRegistryListener = (event: PlatformRegistryEvent, platform: IMPlatform) => void
+
+/** Cordis-owned adapter registry exposed as `ctx.imPlatform`. */
+export class IMPlatformService extends Service {
+  readonly registry: PlatformRegistry
+  private readonly _listeners = new Set<PlatformRegistryListener>()
+
+  constructor(ctx: Context, initialPlatforms: readonly IMPlatform[] = []) {
+    super(ctx, 'imPlatform')
+    this.registry = new PlatformRegistry(initialPlatforms)
+  }
+
+  get(id: string): IMPlatform | undefined {
+    return this.registry.get(id)
+  }
+
+  require(id: string): IMPlatform {
+    return this.registry.require(id)
+  }
+
+  get ids(): string[] {
+    return this.registry.ids
+  }
+
+  /** Register an adapter for the lifetime of the calling Cordis plugin fiber. */
+  register(platform: IMPlatform): Unsubscribe {
+    return this.ctx.effect(() => {
+      const unregister = this.registry.register(platform)
+      this._emit('register', platform)
+      return () => {
+        unregister()
+        this._emit('unregister', platform)
+      }
+    }, `imPlatform.register(${platform.id})`)
+  }
+
+  onChange(listener: PlatformRegistryListener): Unsubscribe {
+    return this.ctx.effect(() => {
+      this._listeners.add(listener)
+      return () => this._listeners.delete(listener)
+    }, 'imPlatform.onChange')
+  }
+
+  private _emit(event: PlatformRegistryEvent, platform: IMPlatform): void {
+    for (const listener of this._listeners) listener(event, platform)
+  }
+}
+
 /** Owns one durable event subscription per active platform session. */
 export class PlatformSubscriptionManager {
-  private readonly _subscriptions = new Map<string, Promise<Unsubscribe>>()
+  private readonly _subscriptions = new Map<string, {
+    platformId: string
+    pending: Promise<Unsubscribe>
+  }>()
   private readonly _eventQueues = new Map<string, Promise<void>>()
 
   constructor(
@@ -47,8 +105,11 @@ export class PlatformSubscriptionManager {
     ) => void | Promise<void>,
   ) {}
 
-  async startActiveSessions(): Promise<void> {
-    const rows = await this._database.get('mtproto_platform_session', { active: true })
+  async startActiveSessions(platformId?: string): Promise<void> {
+    const rows = await this._database.get('mtproto_platform_session', {
+      active: true,
+      ...(platformId ? { platformId } : {}),
+    })
     await Promise.all(rows.map(async (row) => {
       const session = sessionFromRow(row)
       try {
@@ -62,24 +123,34 @@ export class PlatformSubscriptionManager {
   async ensure(session: PlatformSession): Promise<void> {
     const existing = this._subscriptions.get(session.platformSessionId)
     if (existing) {
-      await existing
+      await existing.pending
       return
     }
     const platform = this._registry.require(session.platformId)
     const pending = platform.subscribe(session, (event) => this._enqueue(session, event))
-    this._subscriptions.set(session.platformSessionId, pending)
+    this._subscriptions.set(session.platformSessionId, { platformId: session.platformId, pending })
     try {
       await pending
     } catch (error) {
-      if (this._subscriptions.get(session.platformSessionId) === pending) {
+      if (this._subscriptions.get(session.platformSessionId)?.pending === pending) {
         this._subscriptions.delete(session.platformSessionId)
       }
       throw error
     }
   }
 
+  async stopPlatform(platformId: string): Promise<void> {
+    const selected = [...this._subscriptions.entries()]
+      .filter(([, subscription]) => subscription.platformId === platformId)
+    for (const [sessionId] of selected) this._subscriptions.delete(sessionId)
+    const unsubscribes = await Promise.allSettled(selected.map(([, subscription]) => subscription.pending))
+    await Promise.allSettled(unsubscribes.map(async (result) => {
+      if (result.status === 'fulfilled') await result.value()
+    }))
+  }
+
   async stop(): Promise<void> {
-    const subscriptions = [...this._subscriptions.values()]
+    const subscriptions = [...this._subscriptions.values()].map((subscription) => subscription.pending)
     this._subscriptions.clear()
     const queues = [...this._eventQueues.values()]
     await Promise.allSettled(queues)

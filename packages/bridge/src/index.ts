@@ -10,7 +10,9 @@ import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
 import { MessageStore } from './message-store.js'
-import { PlatformRegistry, PlatformSubscriptionManager, sessionFromRow } from './platform-manager.js'
+import {
+  IMPlatformService, PlatformSubscriptionManager, sessionFromRow, type PlatformRegistry,
+} from './platform-manager.js'
 import { UploadManager } from './upload-manager.js'
 import { UpdateManager } from './update-manager.js'
 
@@ -46,7 +48,8 @@ interface BridgeSessionState {
  * code (stored via minato), which the client enters to log in.
  */
 export function apply(ctx: Context, config: BridgeConfig = {}): void {
-  const registry = new PlatformRegistry(config.platforms ?? [])
+  const platforms = new IMPlatformService(ctx, config.platforms ?? [])
+  const registry = platforms.registry
   const dcId = config.dcId ?? 1
   const apiPrefix = config.apiPrefix ?? '/api'
 
@@ -69,6 +72,22 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const requireBridgeSession = createSessionResolver(
     ctx, registry, store, subscriptions, uploads, config.onTransferProgress,
   )
+
+  platforms.onChange((event, platform) => {
+    if (event === 'register') {
+      ctx.logger('bridge').info('IM platform registered: %s', platform.id)
+      void ctx.database.prepared()
+        .then(() => subscriptions.startActiveSessions(platform.id))
+        .catch((error) => ctx.logger('bridge').warn(
+          'failed to start platform sessions (%s): %s', platform.id, String(error),
+        ))
+    } else {
+      ctx.logger('bridge').info('IM platform unregistered: %s', platform.id)
+      void subscriptions.stopPlatform(platform.id).catch((error) => ctx.logger('bridge').warn(
+        'failed to stop platform sessions (%s): %s', platform.id, String(error),
+      ))
+    }
+  })
 
   ctx.effect(async () => {
     await ctx.database.prepared()

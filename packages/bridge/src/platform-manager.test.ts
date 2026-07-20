@@ -40,7 +40,7 @@ async function createDatabase() {
 }
 
 class PushPlatform implements IMPlatform {
-  readonly id = 'push'
+  constructor(readonly id = 'push') {}
   readonly capabilities: PlatformCapabilities = {
     ...capabilities,
     send: { ...capabilities.send },
@@ -82,7 +82,7 @@ function incoming(id: string, conversationId = 'room'): IMMessage {
 }
 
 describe('PlatformSubscriptionManager', () => {
-  it('subscribes once, persists message events before resolving, and unsubscribes on stop', async () => {
+  it('subscribes once, persists before resolving, and can stop and restart one platform', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     const store = new MessageStore(database)
@@ -96,8 +96,12 @@ describe('PlatformSubscriptionManager', () => {
     expect(await store.readHistory(session.platformSessionId, conversation.id)).toMatchObject([
       { id: 'event-1', conversationId: 'room', content: { parts: [{ type: 'text', text: 'message-event-1' }] } },
     ])
-    await manager.stop()
+    await manager.stopPlatform(platform.id)
     expect(platform.unsubscribeCalls).toBe(1)
+    await manager.ensure(session)
+    expect(platform.subscribeCalls).toBe(2)
+    await manager.stop()
+    expect(platform.unsubscribeCalls).toBe(2)
   })
 
   it('serializes concurrent callback deliveries and deduplicates repeated platform IDs', async () => {
@@ -203,7 +207,14 @@ describe('PlatformRegistry', () => {
   it('rejects duplicate IDs and resolves independent adapters', () => {
     const first = new PushPlatform()
     expect(() => new PlatformRegistry([first, new PushPlatform()])).toThrow('duplicate IM platform ID')
-    expect(new PlatformRegistry([first]).require('push')).toBe(first)
-    expect(() => new PlatformRegistry([first]).require('missing')).toThrow('not registered')
+    const registry = new PlatformRegistry([first])
+    expect(registry.require('push')).toBe(first)
+    expect(() => registry.require('missing')).toThrow('not registered')
+
+    const second = new PushPlatform('second')
+    const unregister = registry.register(second)
+    expect(registry.ids).toEqual(['push', 'second'])
+    unregister()
+    expect(registry.get('second')).toBeUndefined()
   })
 })
