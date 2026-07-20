@@ -11,7 +11,7 @@ import type {
 
 const session: PlatformSession = {
   platformSessionId: 'session-1',
-  platformId: 'static-demo',
+  platformId: 'dialog-test',
   userId: 'me',
   credentials: { token: 'test' },
   metadata: { firstName: 'Current', lastName: 'User' },
