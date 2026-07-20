@@ -176,6 +176,25 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(full)).not.toThrow()
   })
 
+  it('serves desktop search, read-state, and scheduled-history requests', async () => {
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
+    const peer = { _: 'inputPeerUser' as const, userId: stableId('peer:alice'), accessHash: Long.ZERO }
+    const request: tl.messages.RawSearchRequest = {
+      _: 'messages.search', peer, q: 'how', filter: { _: 'inputMessagesFilterEmpty' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 100,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    }
+    const search = await rpc.search(request) as tl.messages.RawMessages
+    expect(search.messages).toMatchObject([{ _: 'message', message: 'How are you?' }])
+    const pinned = await rpc.search({ ...request, q: '', filter: { _: 'inputMessagesFilterPinned' } })
+    expect(pinned).toMatchObject({ _: 'messages.messages', messages: [] })
+    await expect(rpc.readHistory({ _: 'messages.readHistory', peer, maxId: 123 }))
+      .resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
+    await expect(rpc.getScheduledHistory({ _: 'messages.getScheduledHistory', peer, hash: Long.ZERO }))
+      .resolves.toMatchObject({ _: 'messages.messages', messages: [] })
+    for (const result of [search, pinned]) expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('hydrates messages by synthetic ID and returns messageEmpty for unknown IDs', async () => {
     const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs

@@ -411,8 +411,7 @@ describe('bridge login e2e', () => {
       expect(groupHistory.messages.map((item: any) => item.media?._)).toEqual([
         'messageMediaDocument', 'messageMediaPhoto',
       ])
-      expect(groupHistory.messages[0].groupedId.toString())
-        .toBe(groupHistory.messages[1].groupedId.toString())
+      expect(groupHistory.messages.map((item: any) => item.groupedId)).toEqual([undefined, undefined])
       const seededDocument = groupHistory.messages[0].media.document
       const seededPhoto = groupHistory.messages[1].media.photo
       const seededFile = await callRpc(resumed, key, resumedSid, {
@@ -512,7 +511,7 @@ describe('bridge login e2e', () => {
       expect(sentAlbumMessages.map((item: any) => item.media?._)).toEqual([
         'messageMediaPhoto', 'messageMediaDocument',
       ])
-      expect(sentAlbumMessages[0].groupedId.toString()).toBe(sentAlbumMessages[1].groupedId.toString())
+      expect(sentAlbumMessages.map((item: any) => item.groupedId)).toEqual([undefined, undefined])
 
       const sentToMirrorSource = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMessage',
@@ -655,6 +654,38 @@ describe('bridge login e2e', () => {
         message: 'sent to Discord thread',
         replyTo: { _: 'messageReplyHeader', forumTopic: true, replyToTopId: topic.id },
       })
+
+      const documentSearch = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.search', peer: { _: 'inputPeerChat', chatId: group.id }, q: '',
+        filter: { _: 'inputMessagesFilterDocument' }, minDate: 0, maxDate: 0,
+        offsetId: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 79)
+      expect(documentSearch.messages).toEqual(expect.arrayContaining([expect.objectContaining({
+        _: 'message',
+        media: expect.objectContaining({
+          _: 'messageMediaDocument',
+          document: expect.objectContaining({
+            mimeType: 'text/plain',
+            attributes: [expect.objectContaining({ fileName: 'seed.txt' })],
+          }),
+        }),
+      })]))
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.readHistory', peer: { _: 'inputPeerChat', chatId: group.id }, maxId: 0x40000010,
+      }, 81)).toMatchObject({ _: 'messages.affectedMessages', ptsCount: 0 })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getScheduledHistory', peer: { _: 'inputPeerChat', chatId: group.id }, hash: Long.ZERO,
+      }, 83)).toMatchObject({ _: 'messages.messages', messages: [] })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'updates.getChannelDifference', force: true,
+        channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+      }, 85)).toMatchObject({ _: 'updates.channelDifferenceEmpty', final: true })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'channels.toggleViewForumAsMessages',
+        channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        enabled: false,
+      }, 87)).toMatchObject({ _: 'updates', updates: [] })
 
       const desktopStartupBatch: Array<[object, string]> = [
         [{ _: 'help.getPeerColors', hash: 0 }, 'help.peerColors'],

@@ -502,8 +502,12 @@ export class MessageStore {
       : `account:${platformSessionId}`
     const existing = await database.select('mtproto_tl_message_part', { messageId: message.id })
       .orderBy('ordinal').execute()
+    const groupable = count > 1 && new Set(media.map((item) => item.kind)).size === 1
     let groupedId = existing.find((part) => part.groupedId)?.groupedId ?? null
-    if (count > 1 && !groupedId) {
+    if (!groupable && groupedId) {
+      groupedId = null
+      await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId: null })
+    } else if (groupable && !groupedId) {
       groupedId = String((await this._allocateIds(database, `group:${platformSessionId}`, 1))[0])
       if (existing.length) await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId })
     }

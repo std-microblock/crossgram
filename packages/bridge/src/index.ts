@@ -37,6 +37,7 @@ export interface BridgeConfig {
 }
 
 interface BridgeSessionState {
+  generation: object
   session: PlatformSession
   dialogs: DialogRpc
 }
@@ -47,6 +48,7 @@ interface BridgeSessionState {
  * code (stored via minato), which the client enters to log in.
  */
 export function apply(ctx: Context, config: BridgeConfig = {}): void {
+  const generation = {}
   const platforms = new IMPlatformService(ctx)
   const registry = platforms.registry
   const dcId = config.dcId ?? 1
@@ -70,7 +72,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, event) => updates.publish(session, event),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, store, subscriptions, uploads, config.onTransferProgress, dcId,
+    ctx, registry, store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
   )
 
   platforms.onChange((event, platformId) => {
@@ -191,7 +193,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platformSessionId: ps.id,
     }])
     rpc.setPlatformData({
-      session,
+      generation, session,
       dialogs: new DialogRpc(platform, session, store, uploads, config.onTransferProgress, dcId),
     } satisfies BridgeSessionState)
     await subscriptions.ensure(session)
@@ -212,6 +214,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
   ctx.mtproto.register('messages.getMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
+  ctx.mtproto.register('messages.search', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
+  ctx.mtproto.register('messages.readHistory', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.readHistory(req as tl.messages.RawReadHistoryRequest))
+  ctx.mtproto.register('messages.getScheduledHistory', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getScheduledHistory(req as tl.messages.RawGetScheduledHistoryRequest))
   ctx.mtproto.register('messages.getPinnedDialogs', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getPinnedDialogs())
   ctx.mtproto.register('messages.sendMessage', async (rpc, req) =>
@@ -263,6 +271,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsByIDRequest))
   ctx.mtproto.register('messages.getReplies', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getReplies(req as tl.messages.RawGetRepliesRequest))
+  ctx.mtproto.register('channels.toggleViewForumAsMessages', async () => ({
+    _: 'updates', updates: [], users: [], chats: [], date: Math.floor(Date.now() / 1000), seq: 0,
+  } as tl.RawUpdates))
 
   // ── Updates ──
   ctx.mtproto.register('updates.getState', async (rpc) =>
@@ -273,6 +284,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       (await requireBridgeSession(rpc)).session.platformSessionId,
       req as tl.updates.RawGetDifferenceRequest,
     ))
+  ctx.mtproto.register('updates.getChannelDifference', async (rpc) => {
+    const state = await updates.getState((await requireBridgeSession(rpc)).session.platformSessionId)
+    return { _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts } as tl.updates.RawChannelDifferenceEmpty
+  })
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
   ctx.mtproto.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))
@@ -325,6 +340,7 @@ function createSessionResolver(
   store: MessageStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
+  generation: object,
   onTransferProgress?: BridgeConfig['onTransferProgress'],
   dcId = 1,
 ) {
@@ -332,7 +348,7 @@ function createSessionResolver(
 
   return async (rpc: ServerRpcContext): Promise<BridgeSessionState> => {
     const cached = rpc.getPlatformData<BridgeSessionState | null>()
-    if (cached) return cached
+    if (cached?.generation === generation) return cached
     if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
 
     const authKeyId = authKeyHex(rpc.authKeyId)
@@ -350,7 +366,10 @@ function createSessionResolver(
         if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
         const session = sessionFromRow(row)
         await subscriptions.ensure(session)
-        return { session, dialogs: new DialogRpc(platform, session, store, uploads, onTransferProgress, dcId) }
+        return {
+          generation, session,
+          dialogs: new DialogRpc(platform, session, store, uploads, onTransferProgress, dcId),
+        }
       })()
       loading.set(authKeyId, pending)
       pending.finally(() => loading.delete(authKeyId)).catch(() => {})

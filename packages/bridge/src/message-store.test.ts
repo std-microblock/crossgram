@@ -86,8 +86,8 @@ describe('MessageStore', () => {
       platformGroupId: message.groupId,
     })
     expect(first.projection).toMatchObject([
-      { tlMessageId: 0x40000000, groupedId: '1', ordinal: 0 },
-      { tlMessageId: 0x40000001, groupedId: '1', ordinal: 1 },
+      { tlMessageId: 0x40000000, groupedId: null, ordinal: 0 },
+      { tlMessageId: 0x40000001, groupedId: null, ordinal: 1 },
     ])
 
     const [storedConversation] = await ctx.database.get('mtproto_im_conversation', {

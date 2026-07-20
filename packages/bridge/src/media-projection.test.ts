@@ -90,7 +90,7 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('rich-media projection', () => {
-  it('expands one logical album into consecutive grouped Telegram messages', async () => {
+  it('expands mixed media into consecutive ungrouped Telegram messages', async () => {
     const store = await createStore()
     const rpc = new DialogRpc(platform, session, store)
     const result = await rpc.getHistory(historyRequest()) as tl.messages.RawMessages
@@ -98,7 +98,7 @@ describe('rich-media projection', () => {
 
     expect(messages).toHaveLength(2)
     expect(messages.map((message) => message.id)).toEqual([0x40000001, 0x40000000])
-    expect(messages[0].groupedId?.toString()).toBe(messages[1].groupedId?.toString())
+    expect(messages.map((message) => message.groupedId)).toEqual([undefined, undefined])
     expect(messages.map((message) => message.message)).toEqual(['', 'album caption'])
     expect(messages.map((message) => message.media?._)).toEqual([
       'messageMediaDocument', 'messageMediaPhoto',
@@ -111,6 +111,29 @@ describe('rich-media projection', () => {
       _: 'photo', sizes: [{ _: 'photoSize', w: 800, h: 600, size: 1234 }],
     })
     expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('keeps same-kind media grouped as a Telegram album', async () => {
+    const store = await createStore()
+    const imageAlbum: IMMessage = {
+      ...album,
+      id: 'image-album',
+      content: {
+        parts: [
+          { type: 'media', media: { id: 'one', kind: 'image', locator: null } },
+          { type: 'media', media: { id: 'two', kind: 'image', locator: null } },
+        ],
+      },
+    }
+    const imagePlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: imageAlbum }] } },
+      async getHistory() { return { messages: [imageAlbum] } },
+    }
+    const result = await new DialogRpc(imagePlatform, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
+    const messages = result.messages as tl.RawMessage[]
+    expect(messages[0].groupedId?.toString()).toBe(messages[1].groupedId?.toString())
+    expect(messages[0].groupedId).toBeDefined()
   })
 
   it('reuses message and grouped IDs in a fresh DialogRpc instance', async () => {

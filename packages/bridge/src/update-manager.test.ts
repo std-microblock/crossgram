@@ -91,7 +91,7 @@ describe('UpdateManager', () => {
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 1 })
   })
 
-  it('emits one update per media projection with a shared grouped ID', async () => {
+  it('emits one update per mixed-media projection without an invalid Telegram album', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'channel', kind: 'channel', title: 'Channel' }
     const message: IMMessage = {
@@ -112,7 +112,7 @@ describe('UpdateManager', () => {
       'updateNewChannelMessage', 'updateNewChannelMessage',
     ])
     const messages = payload.updates.map((update) => (update as tl.RawUpdateNewChannelMessage).message as tl.RawMessage)
-    expect(messages[0].groupedId?.toString()).toBe(messages[1].groupedId?.toString())
+    expect(messages.map((item) => item.groupedId)).toEqual([undefined, undefined])
     expect(messages.map((item) => item.message)).toEqual(['caption', ''])
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 3, seq: 1 })
   })

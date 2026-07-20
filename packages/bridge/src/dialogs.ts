@@ -145,6 +145,52 @@ export class DialogRpc {
     } as unknown as tl.messages.TypeMessages
   }
 
+  async search(req: tl.messages.RawSearchRequest): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    const conversation = this._conversation(peerId)
+    if (req.filter._ === 'inputMessagesFilterPinned') return this._emptyMessages(conversation)
+    const all = await this._loadHistory(peerId, {
+      offsetId: req.offsetId, offsetDate: req.maxDate, addOffset: req.addOffset,
+      limit: req.limit, maxId: req.maxId, minId: req.minId,
+    })
+    const query = req.q.toLocaleLowerCase()
+    const filtered = all.filter((item) => {
+      if (req.offsetId > 0 && item.tlId >= req.offsetId) return false
+      if (req.minDate > 0 && item.source.timestamp <= req.minDate) return false
+      if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
+      if (req.maxId > 0 && item.tlId >= req.maxId) return false
+      if (req.minId > 0 && item.tlId <= req.minId) return false
+      if (query && !messageText(item.source).toLocaleLowerCase().includes(query)) return false
+      return matchesMessageFilter(item, req.filter)
+    })
+    const start = Math.max(0, req.addOffset)
+    const page = filtered.slice(start, start + clampLimit(req.limit))
+    const users = await Promise.all([...new Set(page.map((item) => item.source.senderId))]
+      .map((senderId) => this._getPeerUser(senderId)))
+    return {
+      _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
+      ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
+      messages: page.map((item) => this._makeMessage(item)), topics: [],
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      users: uniqueUsers([...users, this._makeSelfUser()]),
+    } as unknown as tl.messages.TypeMessages
+  }
+
+  async readHistory(req: tl.messages.RawReadHistoryRequest): Promise<tl.messages.RawAffectedMessages> {
+    await this._hydratePeers()
+    this._resolvePeer(req.peer)
+    const state = await this._store?.getUpdateState(this._session.platformSessionId)
+    return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
+  }
+
+  async getScheduledHistory(
+    req: tl.messages.RawGetScheduledHistoryRequest,
+  ): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    return this._emptyMessages(this._conversation(this._resolvePeer(req.peer)))
+  }
+
   async getMessages(req: GetMessagesRequest): Promise<tl.messages.TypeMessages> {
     await this._hydrateAllMessages()
     const users = new Map<number, tl.RawUser>()
@@ -777,6 +823,14 @@ export class DialogRpc {
     })
   }
 
+  private _emptyMessages(conversation: import('./platform.js').IMConversation): tl.messages.RawMessages {
+    return {
+      _: 'messages.messages', messages: [], topics: [],
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      users: [this._makeSelfUser()],
+    }
+  }
+
   private async _getPeerUser(peerId: string, fallbackName?: string): Promise<tl.RawUser> {
     const user = await this._platform.getUser?.(this._session, peerId)
     return this._makePeerUser(user ?? { id: peerId, firstName: fallbackName ?? peerId })
@@ -953,6 +1007,15 @@ export class DialogRpc {
 
 function clampLimit(limit: number): number {
   return Math.max(0, Math.min(Math.trunc(limit), 100))
+}
+
+function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessagesFilter): boolean {
+  if (filter._ === 'inputMessagesFilterEmpty') return true
+  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterPhotoVideo') {
+    return item.media?.kind === 'image'
+  }
+  if (filter._ === 'inputMessagesFilterDocument') return item.media?.kind === 'file'
+  return false
 }
 
 /** Stable positive signed-int ID used for synthetic Telegram entities. */
