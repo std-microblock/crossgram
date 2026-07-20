@@ -74,7 +74,7 @@ export interface IMMedia {
 
 export interface IMMediaSource {
   size?: number
-  stream(): AsyncIterable<Uint8Array>
+  stream(options?: { signal?: AbortSignal }): AsyncIterable<Uint8Array>
 }
 
 export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
@@ -160,6 +160,11 @@ export interface IMTransferOptions {
   onProgress?: (progress: IMTransferProgress) => void | Promise<void>
 }
 
+export interface IMDownloadOptions extends IMTransferOptions {
+  offset?: number
+  limit?: number
+}
+
 export type IMEvent =
   | { type: 'message', message: IMMessage, conversation: IMConversation }
   | { type: 'conversation', conversation: IMConversation }
@@ -190,7 +195,7 @@ export interface IMPlatform {
   downloadMedia?(
     session: PlatformSession,
     media: IMMedia,
-    options?: IMTransferOptions,
+    options?: IMDownloadOptions,
   ): AsyncIterable<Uint8Array>
 }
 

@@ -19,6 +19,11 @@ export interface ProjectedMessage {
   media: IMMediaRow[]
 }
 
+export interface StoredMedia {
+  media: import('./platform.js').IMMedia
+  timestamp: number
+}
+
 export interface IngestOptions {
   allocation?: 'live' | 'history'
 }
@@ -246,6 +251,28 @@ export class MessageStore {
         .orderBy('ordinal').execute(),
       media: await this._database.select('mtproto_im_media', { messageId: row.id })
         .orderBy('ordinal').execute(),
+    }
+  }
+
+  async getMedia(platformSessionId: string, mediaId: number): Promise<StoredMedia | undefined> {
+    const [row] = await this._database.get('mtproto_im_media', { id: mediaId })
+    if (!row) return
+    const [message] = await this._database.get('mtproto_im_message', {
+      id: row.messageId, platformSessionId,
+    })
+    if (!message) return
+    return {
+      media: {
+        id: row.platformMediaId,
+        kind: row.kind,
+        name: row.name ?? undefined,
+        mimeType: row.mimeType ?? undefined,
+        size: row.size ?? undefined,
+        width: row.width ?? undefined,
+        height: row.height ?? undefined,
+        locator: row.locator,
+      },
+      timestamp: message.timestamp,
     }
   }
 

@@ -1,6 +1,7 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
 import { randomBytes } from 'node:crypto'
+import { resolve } from 'node:path'
 import Long from 'long'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import { StaticDemoPlatform, type IMPlatform, type JsonValue, type PlatformSession } from './platform.js'
@@ -10,10 +11,12 @@ import { DialogRpc, stableId } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
 import { MessageStore } from './message-store.js'
 import { PlatformRegistry, PlatformSubscriptionManager, sessionFromRow } from './platform-manager.js'
+import { UploadManager } from './upload-manager.js'
 
 export * from './platform.js'
 export * from './message-store.js'
 export * from './platform-manager.js'
+export * from './upload-manager.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
@@ -26,6 +29,8 @@ export interface BridgeConfig {
   serverPort?: number
   /** HTTP path prefix for the auth API (default: /api). */
   apiPrefix?: string
+  uploadPath?: string
+  onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
 interface BridgeSessionState {
@@ -45,6 +50,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database)
+  const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
     registry,
@@ -53,7 +59,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       'platform subscription failed (%s): %s', session?.platformId ?? 'unknown', String(error),
     ),
   )
-  const requireBridgeSession = createSessionResolver(ctx, registry, store, subscriptions)
+  const requireBridgeSession = createSessionResolver(
+    ctx, registry, store, subscriptions, uploads, config.onTransferProgress,
+  )
 
   ctx.effect(async () => {
     await ctx.database.prepared()
@@ -152,7 +160,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platformId: ps.platformId,
       platformSessionId: ps.id,
     }])
-    rpc.setPlatformData({ session, dialogs: new DialogRpc(platform, session, store) } satisfies BridgeSessionState)
+    rpc.setPlatformData({
+      session,
+      dialogs: new DialogRpc(platform, session, store, uploads, config.onTransferProgress),
+    } satisfies BridgeSessionState)
     await subscriptions.ensure(session)
 
     const user = makeUser({
@@ -175,6 +186,24 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getPinnedDialogs())
   ctx.mtproto.register('messages.sendMessage', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMessage(req as tl.messages.RawSendMessageRequest))
+  ctx.mtproto.register('messages.sendMedia', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.sendMedia(req as tl.messages.RawSendMediaRequest))
+  ctx.mtproto.register('messages.sendMultiMedia', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.sendMultiMedia(req as tl.messages.RawSendMultiMediaRequest))
+  ctx.mtproto.register('upload.saveFilePart', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const input = req as tl.upload.RawSaveFilePartRequest
+    await uploads.savePart(state.session.platformSessionId, input.fileId.toString(), input.filePart, input.bytes)
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  })
+  ctx.mtproto.register('upload.saveBigFilePart', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const input = req as tl.upload.RawSaveBigFilePartRequest
+    await uploads.savePart(state.session.platformSessionId, input.fileId.toString(), input.filePart, input.bytes)
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  })
+  ctx.mtproto.register('upload.getFile', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getFile(req as tl.upload.RawGetFileRequest))
 
   // ── Contacts / users ──
   ctx.mtproto.register('contacts.getContacts', async (rpc) =>
@@ -244,6 +273,8 @@ function createSessionResolver(
   registry: PlatformRegistry,
   store: MessageStore,
   subscriptions: PlatformSubscriptionManager,
+  uploads: UploadManager,
+  onTransferProgress?: BridgeConfig['onTransferProgress'],
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
@@ -267,7 +298,7 @@ function createSessionResolver(
         if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
         const session = sessionFromRow(row)
         await subscriptions.ensure(session)
-        return { session, dialogs: new DialogRpc(platform, session, store) }
+        return { session, dialogs: new DialogRpc(platform, session, store, uploads, onTransferProgress) }
       })()
       loading.set(authKeyId, pending)
       pending.finally(() => loading.delete(authKeyId)).catch(() => {})

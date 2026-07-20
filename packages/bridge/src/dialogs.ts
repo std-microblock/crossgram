@@ -1,16 +1,22 @@
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
-import { messageText, type IMDialog, type IMMessage, type IMPlatform, type IMUser, type PlatformSession } from './platform.js'
+import {
+  messageText, type IMDialog, type IMMediaInput, type IMMessage, type IMMessageInput,
+  type IMPlatform, type IMTransferProgress, type IMUser, type PlatformSession,
+} from './platform.js'
 import { makeUser } from './synthetic.js'
 import type { MessageStore } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
 import type { IMMediaRow } from './models.js'
+import type { UploadedFile, UploadManager } from './upload-manager.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
 type GetMessagesRequest = tl.messages.RawGetMessagesRequest
 type SendMessageRequest = tl.messages.RawSendMessageRequest
+type SendMediaRequest = tl.messages.RawSendMediaRequest
+type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 
 interface MessageRef {
@@ -39,6 +45,7 @@ export class DialogRpc {
   private _nextMessageId = 1
   private _pts = 1
   private readonly _sentByRandomId = new Map<string, Promise<tl.RawUpdateShortSentMessage>>()
+  private readonly _sentMediaByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
   private readonly _selfId: number
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
@@ -48,6 +55,8 @@ export class DialogRpc {
     private readonly _platform: IMPlatform,
     private readonly _session: PlatformSession,
     store?: MessageStore,
+    private readonly _uploads?: UploadManager,
+    private readonly _onTransferProgress?: (session: PlatformSession, progress: IMTransferProgress) => void | Promise<void>,
   ) {
     this._selfId = this._allocate(`self:${_session.platformSessionId}`, new Map())
     if (store) {
@@ -236,6 +245,66 @@ export class DialogRpc {
     }
   }
 
+  async sendMedia(req: SendMediaRequest): Promise<tl.TypeUpdates> {
+    return this._sendMediaOnce(req.randomId.toString(), async () => {
+      const resolved = await this._resolveUploadedMedia(req.media)
+      try {
+        const parts: IMMessageInput['parts'] = []
+        if (req.message) parts.push({ type: 'text', text: req.message })
+        parts.push({ type: 'media', media: resolved.media })
+        return await this._sendRichContent(req.peer, { parts }, [resolved.upload])
+      } catch (error) {
+        throw error
+      }
+    })
+  }
+
+  async sendMultiMedia(req: SendMultiMediaRequest): Promise<tl.TypeUpdates> {
+    const randomId = req.multiMedia.map((item) => item.randomId.toString()).join(':')
+    return this._sendMediaOnce(randomId, async () => {
+      if (!req.multiMedia.length) throw new RpcError(400, 'MEDIA_EMPTY')
+      const resolved = await Promise.all(req.multiMedia.map((item) => this._resolveUploadedMedia(item.media)))
+      const parts: IMMessageInput['parts'] = []
+      const captions = req.multiMedia.map((item) => item.message).filter(Boolean)
+      if (captions.length) parts.push({ type: 'text', text: captions.join('\n') })
+      for (const item of resolved) parts.push({ type: 'media', media: item.media })
+      return this._sendRichContent(req.peer, { parts }, resolved.map((item) => item.upload))
+    })
+  }
+
+  async getFile(req: tl.upload.RawGetFileRequest): Promise<tl.upload.TypeFile> {
+    if (!this._store || !this._platform.downloadMedia) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
+    if (req.offset < 0 || req.limit <= 0) throw new RpcError(400, 'OFFSET_INVALID')
+    if (req.location._ !== 'inputDocumentFileLocation' && req.location._ !== 'inputPhotoFileLocation') {
+      throw new RpcError(400, 'LOCATION_INVALID')
+    }
+    const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
+    if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
+    const chunks: Uint8Array[] = []
+    let size = 0
+    const stream = this._platform.downloadMedia(this._session, stored.media, {
+      offset: req.offset,
+      limit: req.limit,
+      onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
+    })
+    for await (const chunk of stream) {
+      const remaining = req.limit - size
+      if (remaining <= 0) break
+      const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk
+      chunks.push(accepted)
+      size += accepted.length
+    }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.length
+    }
+    return {
+      _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp, bytes,
+    }
+  }
+
   peerTlId(peerId: string): number {
     return this._peerId(peerId)
   }
@@ -267,6 +336,109 @@ export class DialogRpc {
     const pts = ++this._pts
     return {
       _: 'updateShortSentMessage', out: true, id, pts, ptsCount: 1, date: source.timestamp,
+    }
+  }
+
+  private async _sendMediaOnce(randomId: string, send: () => Promise<tl.TypeUpdates>): Promise<tl.TypeUpdates> {
+    const existing = this._sentMediaByRandomId.get(randomId)
+    if (existing) return existing
+    const pending = send()
+    this._sentMediaByRandomId.set(randomId, pending)
+    try {
+      return await pending
+    } catch (error) {
+      this._sentMediaByRandomId.delete(randomId)
+      throw error
+    }
+  }
+
+  private async _resolveUploadedMedia(media: tl.TypeInputMedia): Promise<{
+    media: IMMediaInput
+    upload: UploadedFile
+  }> {
+    if (!this._uploads) throw new RpcError(400, 'MEDIA_UPLOAD_UNAVAILABLE')
+    if (media._ !== 'inputMediaUploadedPhoto' && media._ !== 'inputMediaUploadedDocument') {
+      throw new RpcError(400, 'MEDIA_INVALID')
+    }
+    const file = media.file
+    if (file._ !== 'inputFile' && file._ !== 'inputFileBig') throw new RpcError(400, 'FILE_ID_INVALID')
+    const upload = await this._uploads.open(
+      this._session.platformSessionId,
+      file.id.toString(),
+      file.parts,
+    ).catch((error) => {
+      throw new RpcError(400, `FILE_PARTS_INVALID: ${String(error)}`)
+    })
+    const kind = media._ === 'inputMediaUploadedPhoto' ? 'image' : 'file'
+    const attribute = media._ === 'inputMediaUploadedDocument'
+      ? media.attributes.find((item) => item._ === 'documentAttributeFilename')
+      : undefined
+    return {
+      media: {
+        kind,
+        name: attribute?._ === 'documentAttributeFilename' ? attribute.fileName : file.name,
+        mimeType: media._ === 'inputMediaUploadedDocument' ? media.mimeType : inferImageMime(file.name),
+        size: upload.source.size,
+        source: upload.source,
+      },
+      upload,
+    }
+  }
+
+  private async _sendRichContent(
+    inputPeer: tl.TypeInputPeer,
+    content: IMMessageInput,
+    uploads: UploadedFile[],
+  ): Promise<tl.TypeUpdates> {
+    const media = content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
+    const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
+    if (media.length > this._platform.capabilities.send.maxMedia) throw new RpcError(400, 'MEDIA_TOO_MANY')
+    if (media.some((item) => item.kind === 'image') && !this._platform.capabilities.send.images) {
+      throw new RpcError(400, 'PHOTO_SEND_UNAVAILABLE')
+    }
+    if (media.some((item) => item.kind === 'file') && !this._platform.capabilities.send.files) {
+      throw new RpcError(400, 'FILE_SEND_UNAVAILABLE')
+    }
+    if (text && media.length && !this._platform.capabilities.send.mixed) {
+      throw new RpcError(400, 'MIXED_SEND_UNAVAILABLE')
+    }
+    if (Array.from(text).length > this._platform.capabilities.send.maxTextLength) {
+      throw new RpcError(400, 'MESSAGE_TOO_LONG')
+    }
+
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(inputPeer)
+    const sent = await this._platform.sendMessage(this._session, { id: peerId }, content, {
+      onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
+    })
+    const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
+    if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
+      ?? { id: peerId, kind: 'direct' as const, title: peerId }
+    const persisted = await this._store.ingest(this._session, conversation, source)
+    await Promise.all(uploads.map((upload) => upload.cleanup()))
+
+    const updates: tl.TypeUpdate[] = []
+    for (const part of persisted.projection) {
+      const projected = await this._store.findProjectedByTlId(
+        this._session.platformSessionId, part.tlMessageId, peerId,
+      )
+      if (!projected) throw new RpcError(500, 'MESSAGE_PROJECTION_NOT_FOUND')
+      const item: MaterializedMessage = {
+        source: projected.source,
+        tlId: part.tlMessageId,
+        ordinal: part.ordinal,
+        groupedId: part.groupedId ?? undefined,
+        media: projected.media.find((entry) => entry.id === part.mediaId),
+      }
+      this._rememberMessage(item)
+      updates.push({
+        _: 'updateNewMessage', message: this._makeMessage(item), pts: ++this._pts, ptsCount: 1,
+      } as tl.RawUpdateNewMessage)
+    }
+    return {
+      _: 'updates', updates, users: [this._makeSelfUser(), await this._getPeerUser(peerId)], chats: [],
+      date: source.timestamp, seq: 0,
     }
   }
 
@@ -500,4 +672,12 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number): tl.Typ
       attributes: [{ _: 'documentAttributeFilename', fileName: media.name ?? 'file' }],
     },
   }
+}
+
+function inferImageMime(name: string): string {
+  const extension = name.toLowerCase().split('.').pop()
+  if (extension === 'png') return 'image/png'
+  if (extension === 'webp') return 'image/webp'
+  if (extension === 'gif') return 'image/gif'
+  return 'image/jpeg'
 }
