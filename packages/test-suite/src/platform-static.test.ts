@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import { IMPlatformService } from '@mtproto-relay/bridge'
 import type {
@@ -79,24 +79,106 @@ describe('StaticPlatform', () => {
       send: { text: true, images: true, files: true, mixed: true },
       conversations: { groups: true, channels: true, subchannels: true },
     })
-    const first = await platform.getDialogs(session, { limit: 2 })
-    expect(first.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['qq-group', 'discord-support'])
-    expect(first.nextCursor).toBe('2')
-    const second = await platform.getDialogs(session, { cursor: first.nextCursor, limit: 2 })
-    expect(second.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['discord-general', 'bob'])
-    const after = await platform.getDialogs(session, { afterId: 'discord-support', limit: 2 })
-    expect(after.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['discord-general', 'bob'])
-
-    const all = [
-      ...first.dialogs,
-      ...second.dialogs,
-      ...(await platform.getDialogs(session, { cursor: second.nextCursor, limit: 2 })).dialogs,
-    ]
-    expect(all.map((dialog) => dialog.conversation.kind)).toEqual([
-      'group', 'channel', 'channel', 'direct', 'direct',
+    const all: Awaited<ReturnType<StaticPlatform['getDialogs']>>['dialogs'] = []
+    let cursor: string | undefined
+    do {
+      const page = await platform.getDialogs(session, { cursor, limit: 3 })
+      expect(page.dialogs.length).toBeLessThanOrEqual(3)
+      all.push(...page.dialogs)
+      cursor = page.nextCursor
+    } while (cursor)
+    expect(all).toHaveLength(9)
+    expect(all.map((dialog) => dialog.conversation.id)).toEqual([
+      'group-a', 'qq-group', 'group-c', 'group-b', 'discord-support',
+      'discord-general', 'bob', 'alice', 'group-d',
     ])
+    const after = await platform.getDialogs(session, { afterId: 'group-c', limit: 2 })
+    expect(after.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['group-b', 'discord-support'])
     expect(all.find((dialog) => dialog.conversation.id === 'discord-support')?.conversation)
       .toMatchObject({ parentId: 'discord-general', spaceId: 'discord-guild' })
+  })
+
+  it('runs Group A new, edit, and delete events in order and mutates history', async () => {
+    const platform = new StaticPlatform({ now: () => 1_900_000_000 })
+    const events: import('@mtproto-relay/bridge').IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await platform.tick(session)
+
+    expect(events.map((event) => event.type)).toEqual(['message', 'message-edit', 'message-delete'])
+    expect(events[0]).toMatchObject({
+      type: 'message', conversation: { id: 'group-a' },
+      message: { senderId: 'alice', content: { parts: [{ text: 'Group A live message 1' }] } },
+    })
+    expect(events[1]).toMatchObject({
+      type: 'message-edit', eventId: 'group-a:edit:1',
+      message: { id: 'group-a:seed:3', content: { parts: [{ text: 'Group A edited message 1' }] } },
+    })
+    expect(events[2]).toMatchObject({
+      type: 'message-delete', eventId: 'group-a:delete:1', messageIds: ['group-a:seed:1'],
+    })
+    const history = await platform.getHistory(session, { id: 'group-a' }, { limit: 10 })
+    expect(history.messages.map((message) => message.id)).toEqual([
+      expect.stringContaining('group-a:live:1'), 'group-a:seed:3', 'group-a:seed:2',
+    ])
+    expect(history.messages[1].content.parts).toEqual([{ type: 'text', text: 'Group A edited message 1' }])
+    await unsubscribe()
+  })
+
+  it('ticks Group A every 1000ms while subscribed and stops after unsubscribe', async () => {
+    vi.useFakeTimers()
+    try {
+      const platform = new StaticPlatform({ eventIntervalMs: 1_000, now: () => 1_900_000_000 })
+      const events: import('@mtproto-relay/bridge').IMEvent[] = []
+      const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(events.map((event) => event.type)).toEqual([
+        'message', 'message-edit', 'message-delete',
+        'message', 'message-edit', 'message-delete',
+      ])
+      await unsubscribe()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(events).toHaveLength(6)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('mirrors messages sent to Group B into Group C as another user', async () => {
+    const platform = new StaticPlatform({ now: () => 1_900_000_100 })
+    const events: import('@mtproto-relay/bridge').IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    const sent = await platform.sendMessage(session, { id: 'group-b' }, {
+      parts: [{ type: 'text', text: 'mirror this' }],
+    })
+
+    expect(sent).toMatchObject({ conversationId: 'group-b', senderId: 'self', outgoing: true })
+    expect(events).toMatchObject([{
+      type: 'message',
+      conversation: { id: 'group-c' },
+      message: {
+        conversationId: 'group-c', senderId: 'mirror-user',
+        content: { parts: [{ type: 'text', text: 'mirror this' }] },
+        metadata: { mirroredFromConversationId: 'group-b', mirroredFromMessageId: sent.id },
+      },
+    }])
+    const history = await platform.getHistory(session, { id: 'group-c' }, { limit: 1 })
+    expect(history.messages[0]).toMatchObject({ senderId: 'mirror-user', content: sent.content })
+    await unsubscribe()
+  })
+
+  it('serves Group D ten-thousand-message history through bounded deep pages', async () => {
+    const platform = new StaticPlatform({ historySize: 10_000 })
+    const first = await platform.getHistory(session, { id: 'group-d' }, { limit: 50 })
+    expect(first.messages).toHaveLength(50)
+    expect(first.messages[0].content.parts).toEqual([{ type: 'text', text: 'Group D history message 10000' }])
+    expect(first.nextCursor).toBe('50')
+    const second = await platform.getHistory(session, { id: 'group-d' }, { cursor: first.nextCursor, limit: 50 })
+    expect(second.messages).toHaveLength(50)
+    expect(second.messages[0].content.parts).toEqual([{ type: 'text', text: 'Group D history message 9950' }])
+    const deep = await platform.getHistory(session, { id: 'group-d' }, { cursor: '9990', limit: 50 })
+    expect(deep.messages).toHaveLength(10)
+    expect(deep.messages.at(-1)?.content.parts).toEqual([{ type: 'text', text: 'Group D history message 1' }])
+    expect(deep.nextCursor).toBeUndefined()
   })
 
   it('paginates group history with cursor, before, and after anchors without returning the full list', async () => {

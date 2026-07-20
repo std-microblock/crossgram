@@ -236,7 +236,7 @@ async function startApp(options: {
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
     options.platform
       ? ctx.plugin(makePlatformPlugin(options.platform.id, options.platform.adapter))
-      : ctx.plugin(staticPlatformPlugin),
+      : ctx.plugin(staticPlatformPlugin, { eventIntervalMs: 0, historySize: 10_000 }),
   ]
   await Promise.all(fibers)
   await new Promise((r) => setTimeout(r, 100)) // let fibers settle
@@ -346,20 +346,19 @@ describe('bridge login e2e', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 22)
       expect(dialogs._).toBe('messages.dialogs')
-      expect(dialogs.dialogs).toHaveLength(5)
-      expect(dialogs.messages.map((message: any) => message.message)).toEqual([
-        '', 'Support thread message', 'General channel message', 'Meeting at 3?', 'How are you?',
-      ])
+      expect(dialogs.dialogs).toHaveLength(9)
       expect(dialogs.dialogs.map((dialog: any) => dialog.peer._)).toEqual([
-        'peerChat', 'peerChannel', 'peerChannel', 'peerUser', 'peerUser',
+        'peerChat', 'peerChat', 'peerChat', 'peerChat', 'peerChannel',
+        'peerChannel', 'peerUser', 'peerUser', 'peerChat',
       ])
-      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Carol', 'Alice', 'Bob'])
-      expect(dialogs.chats.map((chat: any) => [chat._, chat.title])).toEqual([
-        ['chat', 'Static QQ Group'],
-        ['channel', 'support thread'],
-        ['channel', 'general'],
+      expect(new Set(dialogs.users.map((user: any) => user.firstName)))
+        .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
+      expect(dialogs.chats.map((chat: any) => chat.title)).toEqual([
+        'Group A - Live Mutations', 'Static QQ Group', 'Group C - Mirror Target',
+        'Group B - Mirror Source', 'support thread', 'general', 'Group D - Long History',
       ])
       const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
+      const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')
       const [supportConversation] = await ctx.database.get('mtproto_im_conversation', {
         platformSessionId: 'ps1', platformConversationId: 'discord-support',
       })
@@ -419,6 +418,36 @@ describe('bridge login e2e', () => {
         },
       }, 32)
       expect(new TextDecoder().decode(seededFile.bytes)).toBe('static seeded file')
+
+      const longHistoryFirst = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChat', chatId: longHistoryGroup.id },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 33)
+      expect(longHistoryFirst.messages).toHaveLength(100)
+      expect(longHistoryFirst.messages[0].message).toBe('Group D history message 10000')
+      const longHistorySecond = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChat', chatId: longHistoryGroup.id },
+        offsetId: longHistoryFirst.messages.at(-1).id,
+        offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 35)
+      expect(longHistorySecond.messages).toHaveLength(100)
+      expect(longHistorySecond.messages[0].message).toBe('Group D history message 9900')
+      expect(new Set([
+        ...longHistoryFirst.messages.map((item: any) => item.id),
+        ...longHistorySecond.messages.map((item: any) => item.id),
+      ]).size).toBe(200)
+      const [longConversation] = await ctx.database.get('mtproto_im_conversation', {
+        platformSessionId: 'ps1', platformConversationId: 'group-d',
+      })
+      const persistedLongHistory = await ctx.database.get('mtproto_im_message', {
+        conversationId: longConversation.id,
+      })
+      expect(persistedLongHistory.length).toBeGreaterThanOrEqual(200)
+      expect(persistedLongHistory.length).toBeLessThanOrEqual(205)
 
       const sentMessage = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMessage',
@@ -624,7 +653,41 @@ describe('bridge login e2e', () => {
       })
       const [stored] = await ctx.database.get('mtproto_im_message', {})
       expect(stored).toMatchObject({ primaryPlatformMessageId: message.id, text: 'arrived by subscribe' })
-      expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ pts: 2, seq: 1 })
+
+      const editedMessage: bridge.IMMessage = {
+        ...message,
+        content: { parts: [{ type: 'text', text: 'edited by subscribe' }] },
+        metadata: { revision: 2 },
+      }
+      await handler!({
+        type: 'message-edit', eventId: 'push-edit-2', conversation, message: editedMessage,
+      })
+      const editedPush = await readPush(client, key)
+      expect(editedPush).toMatchObject({
+        _: 'updates', seq: 2,
+        updates: [{
+          _: 'updateEditMessage', pts: 3, ptsCount: 1,
+          message: { id: pushed.updates[0].message.id, message: 'edited by subscribe' },
+        }],
+      })
+      const [editedStored] = await ctx.database.get('mtproto_im_message', { id: stored.id })
+      expect(editedStored).toMatchObject({ text: 'edited by subscribe', deleted: false })
+
+      await handler!({
+        type: 'message-delete', eventId: 'push-delete-1', conversation,
+        messageIds: [message.id], timestamp: 1_800_000_102,
+      })
+      const deletedPush = await readPush(client, key)
+      expect(deletedPush).toMatchObject({
+        _: 'updates', seq: 3,
+        updates: [{
+          _: 'updateDeleteMessages', pts: 4, ptsCount: 1,
+          messages: [pushed.updates[0].message.id],
+        }],
+      })
+      const [deletedStored] = await ctx.database.get('mtproto_im_message', { id: stored.id })
+      expect(deletedStored.deleted).toBe(true)
+      expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ pts: 4, seq: 3 })
 
       const chatId = pushed.chats[0].id
       expect(await callRpc(client, key, sid, {
@@ -716,7 +779,8 @@ describe('bridge login e2e', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 8)
       expect(dialogs._).toBe('messages.dialogs')
-      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Carol', 'Alice', 'Bob'])
+      expect(new Set(dialogs.users.map((user: any) => user.firstName)))
+        .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
     } finally {
       client?.close()
       await second?.stop()

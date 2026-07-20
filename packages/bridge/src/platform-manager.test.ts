@@ -121,6 +121,27 @@ describe('PlatformSubscriptionManager', () => {
     await manager.stop()
   })
 
+  it('serializes one thousand concurrent pushed messages without dropping database projections', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), new MessageStore(database),
+    )
+    const conversation: IMConversation = { id: 'burst-group', kind: 'group', title: 'Burst Group' }
+    await manager.ensure(session)
+
+    await Promise.all(Array.from({ length: 1_000 }, (_, index) => platform.emit({
+      type: 'message',
+      conversation,
+      message: incoming(String(index + 1), conversation.id),
+    })))
+
+    expect(await database.get('mtproto_im_message', {})).toHaveLength(1_000)
+    expect(await database.get('mtproto_im_message_alias', {})).toHaveLength(1_000)
+    expect(await database.get('mtproto_tl_message_part', {})).toHaveLength(1_000)
+    await manager.stop()
+  }, 15_000)
+
   it('starts subscriptions for active persisted sessions only', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

@@ -9,10 +9,14 @@ import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 export interface StaticPlatformOptions {
   now?: () => number
   transferChunkSize?: number
+  eventIntervalMs?: number
+  historySize?: number
 }
 
 export interface Config {
   transferChunkSize?: number
+  eventIntervalMs?: number
+  historySize?: number
 }
 export const name = 'im-platform-static'
 export const inject = ['imPlatform']
@@ -20,7 +24,11 @@ export const inject = ['imPlatform']
 /** Cordis plugin entrypoint. Each plugin instance registers one isolated adapter. */
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'static')
-  ctx.imPlatform.register(new StaticPlatform(config), id)
+  ctx.imPlatform.register(new StaticPlatform({
+    ...config,
+    eventIntervalMs: config.eventIntervalMs ?? 1_000,
+    historySize: config.historySize ?? 10_000,
+  }), id)
 }
 
 /** Complete in-memory reference adapter used for development and conformance tests. */
@@ -40,16 +48,23 @@ export class StaticPlatform implements IMPlatform {
 
   private readonly _now: () => number
   private readonly _transferChunkSize: number
+  private readonly _eventIntervalMs: number
+  private readonly _historySize: number
   private readonly _users = new Map<string, IMUser>()
   private readonly _conversations = new Map<string, IMConversation>()
   private readonly _messages = new Map<string, IMMessage[]>()
   private readonly _media = new Map<string, Uint8Array>()
   private readonly _subscribers = new Map<string, Set<(event: IMEvent) => void | Promise<void>>>()
+  private readonly _timers = new Map<string, ReturnType<typeof setInterval>>()
+  private readonly _tickTails = new Map<string, Promise<void>>()
   private _sequence = 1_000
+  private _demoSequence = 0
 
   constructor(options: StaticPlatformOptions = {}) {
     this._now = options.now ?? (() => Math.floor(Date.now() / 1000))
     this._transferChunkSize = options.transferChunkSize ?? 64 * 1024
+    this._eventIntervalMs = options.eventIntervalMs ?? 0
+    this._historySize = Math.max(0, Math.trunc(options.historySize ?? 10_000))
     this._seed()
   }
 
@@ -60,9 +75,16 @@ export class StaticPlatform implements IMPlatform {
     const handlers = this._subscribers.get(session.platformSessionId) ?? new Set()
     handlers.add(handler)
     this._subscribers.set(session.platformSessionId, handlers)
+    this._startTimer(session)
     return () => {
       handlers.delete(handler)
-      if (!handlers.size) this._subscribers.delete(session.platformSessionId)
+      if (!handlers.size) {
+        this._subscribers.delete(session.platformSessionId)
+        const timer = this._timers.get(session.platformSessionId)
+        if (timer) clearInterval(timer)
+        this._timers.delete(session.platformSessionId)
+        this._tickTails.delete(session.platformSessionId)
+      }
     }
   }
 
@@ -85,8 +107,7 @@ export class StaticPlatform implements IMPlatform {
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage> {
     this._requireConversation(conversation.id)
-    const newestFirst = [...(this._messages.get(conversation.id) ?? [])]
-      .sort((left, right) => right.timestamp - left.timestamp || right.id.localeCompare(left.id))
+    const newestFirst = [...(this._messages.get(conversation.id) ?? [])].reverse()
     let start = pageStart(newestFirst.map((message) => message.id), query.cursor, query.before?.id)
     let candidates = newestFirst
     if (query.after) {
@@ -150,6 +171,22 @@ export class StaticPlatform implements IMPlatform {
       groupId: mediaIndex > 1 ? `${messageId}:group` : undefined,
     }
     this._append(message)
+    if (target.id === 'group-b') {
+      const mirror: IMMessage = {
+        id: `${messageId}:mirror:${'c'.repeat(128)}`,
+        sourceIds: message.sourceIds?.map((id) => `${id}:mirror`),
+        conversationId: 'group-c',
+        senderId: 'mirror-user',
+        content: clone(message.content),
+        timestamp: message.timestamp,
+        groupId: message.groupId ? `${message.groupId}:mirror` : undefined,
+        metadata: { mirroredFromConversationId: target.id, mirroredFromMessageId: message.id },
+      }
+      this._append(mirror)
+      await this._dispatch(session, {
+        type: 'message', conversation: clone(this._requireConversation('group-c')), message: clone(mirror),
+      })
+    }
     return clone(message)
   }
 
@@ -187,10 +224,50 @@ export class StaticPlatform implements IMPlatform {
   ): Promise<void> {
     this._conversations.set(conversation.id, clone(conversation))
     this._append(clone(message))
-    const handlers = [...(this._subscribers.get(session.platformSessionId) ?? [])]
-    await Promise.all(handlers.map((handler) => handler({
+    await this._dispatch(session, {
       type: 'message', conversation: clone(conversation), message: clone(message),
-    })))
+    })
+  }
+
+  /** Run one deterministic Group A new/edit/delete cycle. */
+  async tick(session: PlatformSession): Promise<void> {
+    const conversation = this._requireConversation('group-a')
+    const active = [...(this._messages.get(conversation.id) ?? [])]
+    const sequence = ++this._demoSequence
+    const timestamp = this._now()
+    const created = textMessage(
+      `group-a:live:${sequence}:${'n'.repeat(128)}`,
+      conversation.id,
+      sequence % 2 ? 'alice' : 'bob',
+      `Group A live message ${sequence}`,
+      timestamp,
+    )
+    this._append(created)
+    await this._dispatch(session, { type: 'message', conversation: clone(conversation), message: clone(created) })
+
+    const editTarget = active.at(-1)
+    if (editTarget) {
+      const edited: IMMessage = {
+        ...clone(editTarget),
+        content: { parts: [{ type: 'text', text: `Group A edited message ${sequence}` }] },
+        metadata: { ...(editTarget.metadata ?? {}), revision: sequence },
+      }
+      this._append(edited)
+      await this._dispatch(session, {
+        type: 'message-edit', eventId: `group-a:edit:${sequence}`,
+        conversation: clone(conversation), message: clone(edited),
+      })
+    }
+
+    const deleteTarget = active[0]
+    if (deleteTarget) {
+      this._messages.set(conversation.id, (this._messages.get(conversation.id) ?? [])
+        .filter((message) => message.id !== deleteTarget.id))
+      await this._dispatch(session, {
+        type: 'message-delete', eventId: `group-a:delete:${sequence}`,
+        conversation: clone(conversation), messageIds: [deleteTarget.id], timestamp,
+      })
+    }
   }
 
   mediaBytes(mediaId: string): Uint8Array | undefined {
@@ -204,6 +281,26 @@ export class StaticPlatform implements IMPlatform {
     else messages.push(message)
     messages.sort((left, right) => left.timestamp - right.timestamp || left.id.localeCompare(right.id))
     this._messages.set(message.conversationId, messages)
+  }
+
+  private _startTimer(session: PlatformSession): void {
+    if (this._eventIntervalMs <= 0 || this._timers.has(session.platformSessionId)) return
+    const timer = setInterval(() => {
+      const previous = this._tickTails.get(session.platformSessionId) ?? Promise.resolve()
+      const current = previous.catch(() => {}).then(() => this.tick(session))
+      this._tickTails.set(session.platformSessionId, current)
+      current.finally(() => {
+        if (this._tickTails.get(session.platformSessionId) === current) {
+          this._tickTails.delete(session.platformSessionId)
+        }
+      }).catch(() => {})
+    }, this._eventIntervalMs)
+    this._timers.set(session.platformSessionId, timer)
+  }
+
+  private async _dispatch(session: PlatformSession, event: IMEvent): Promise<void> {
+    const handlers = [...(this._subscribers.get(session.platformSessionId) ?? [])]
+    await Promise.all(handlers.map((handler) => handler(clone(event))))
   }
 
   private _requireConversation(id: string): IMConversation {
@@ -229,6 +326,7 @@ export class StaticPlatform implements IMPlatform {
       { id: 'alice', firstName: 'Alice', username: 'alice' },
       { id: 'bob', firstName: 'Bob', username: 'bob' },
       { id: 'carol', firstName: 'Carol', username: 'carol' },
+      { id: 'mirror-user', firstName: 'Mirror User', username: 'mirror_user' },
       { id: 'self', firstName: 'Static User', username: 'static_user' },
     ]
     for (const user of users) this._users.set(user.id, user)
@@ -236,6 +334,13 @@ export class StaticPlatform implements IMPlatform {
       { id: 'alice', kind: 'direct', title: 'Alice' },
       { id: 'bob', kind: 'direct', title: 'Bob' },
       { id: 'qq-group', kind: 'group', title: 'Static QQ Group', metadata: { participantsCount: 3 } },
+      { id: 'group-a', kind: 'group', title: 'Group A - Live Mutations', metadata: { participantsCount: 3 } },
+      { id: 'group-b', kind: 'group', title: 'Group B - Mirror Source', metadata: { participantsCount: 3 } },
+      {
+        id: 'group-c', kind: 'group', title: 'Group C - Mirror Target',
+        metadata: { participantsCount: 4, linkedConversationId: 'group-b' },
+      },
+      { id: 'group-d', kind: 'group', title: 'Group D - Long History', metadata: { participantsCount: 3 } },
       {
         id: 'discord-general', kind: 'channel', title: 'general',
         parentId: 'discord-category-chat', spaceId: 'discord-guild', metadata: { participantsCount: 12 },
@@ -253,6 +358,18 @@ export class StaticPlatform implements IMPlatform {
     this._append(textMessage('group:2', 'qq-group', 'bob', 'Group history works', 1_700_000_400))
     this._append(textMessage('channel:1', 'discord-general', 'carol', 'General channel message', 1_700_000_500))
     this._append(textMessage('channel:2', 'discord-support', 'alice', 'Support thread message', 1_700_000_600))
+    this._append(textMessage('group-a:seed:1', 'group-a', 'alice', 'Group A seed 1', 1_700_000_710))
+    this._append(textMessage('group-a:seed:2', 'group-a', 'bob', 'Group A seed 2', 1_700_000_720))
+    this._append(textMessage('group-a:seed:3', 'group-a', 'carol', 'Group A seed 3', 1_700_000_730))
+    this._append(textMessage('group-b:seed:1', 'group-b', 'alice', 'Messages sent here mirror to Group C', 1_700_000_610))
+    this._append(textMessage('group-c:seed:1', 'group-c', 'mirror-user', 'Waiting for Group B messages', 1_700_000_620))
+    this._messages.set('group-d', Array.from({ length: this._historySize }, (_, index) => textMessage(
+      `group-d:${String(index + 1).padStart(8, '0')}:${'h'.repeat(96)}`,
+      'group-d',
+      index % 2 ? 'alice' : 'bob',
+      `Group D history message ${index + 1}`,
+      1_600_000_000 + index,
+    )))
     const imageId = 'seed:image'
     const fileId = 'seed:file'
     this._media.set(imageId, new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]))
