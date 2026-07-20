@@ -82,6 +82,7 @@ describe('MessageStore', () => {
     expect(first.message).toMatchObject({
       primaryPlatformMessageId: logicalId,
       text: 'caption',
+      content: message.content,
       platformGroupId: message.groupId,
     })
 

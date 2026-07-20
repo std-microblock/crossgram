@@ -35,6 +35,7 @@ export interface IMConversationRow {
   parentPlatformConversationId: string | null
   spacePlatformId: string | null
   metadata: JsonObject
+  unreadCount: number
   updatedAt: Date
 }
 
@@ -56,6 +57,7 @@ export interface IMMessageRow {
   primaryPlatformMessageId: string
   senderPlatformUserId: string
   text: string
+  content: JsonValue
   timestamp: number
   outgoing: boolean
   platformGroupId: string | null
@@ -147,6 +149,7 @@ export function defineModels(ctx: Context): void {
     id: 'unsigned', platformSessionId: 'string', platformConversationId: 'text', kind: 'string', title: 'text',
     parentPlatformConversationId: { type: 'text', nullable: true },
     spacePlatformId: { type: 'text', nullable: true }, metadata: 'json', updatedAt: 'timestamp',
+    unreadCount: 'unsigned',
   }, {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'platformConversationId']],
@@ -165,7 +168,7 @@ export function defineModels(ctx: Context): void {
 
   ctx.model.extend('mtproto_im_message', {
     id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
-    primaryPlatformMessageId: 'text', senderPlatformUserId: 'text', text: 'text', timestamp: 'integer',
+    primaryPlatformMessageId: 'text', senderPlatformUserId: 'text', text: 'text', content: 'json', timestamp: 'integer',
     outgoing: 'boolean', platformGroupId: { type: 'text', nullable: true }, metadata: 'json',
     createdAt: 'timestamp', updatedAt: 'timestamp',
   }, {

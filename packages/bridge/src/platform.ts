@@ -147,7 +147,7 @@ export interface IMTransferOptions {
 }
 
 export type IMEvent =
-  | { type: 'message', message: IMMessage, conversation?: IMConversation }
+  | { type: 'message', message: IMMessage, conversation: IMConversation }
   | { type: 'conversation', conversation: IMConversation }
   | { type: 'read', conversationId: string, upToMessageId: string }
 

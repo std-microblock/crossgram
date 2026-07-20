@@ -2,6 +2,8 @@ import type { tl } from '@mtcute/core'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { messageText, type IMDialog, type IMMessage, type IMPlatform, type IMUser, type PlatformSession } from './platform.js'
 import { makeUser } from './synthetic.js'
+import type { MessageStore } from './message-store.js'
+import { PlatformDataService } from './platform-manager.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
@@ -26,17 +28,23 @@ export class DialogRpc {
   private _pts = 1
   private readonly _sentByRandomId = new Map<string, Promise<tl.RawUpdateShortSentMessage>>()
   private readonly _selfId: number
+  private readonly _data?: PlatformDataService
+  private readonly _store?: MessageStore
 
   constructor(
     private readonly _platform: IMPlatform,
     private readonly _session: PlatformSession,
+    store?: MessageStore,
   ) {
     this._selfId = this._allocate(`self:${_session.platformSessionId}`, new Map())
+    if (store) {
+      this._store = store
+      this._data = new PlatformDataService(_platform, _session, store)
+    }
   }
 
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
-    const getDialogs = this._requireHistory(this._platform.getDialogs)
-    const all = (await getDialogs.call(this._platform, this._session)).dialogs
+    const all = (await this._loadDialogs())
       .slice()
       .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0))
 
@@ -135,7 +143,8 @@ export class DialogRpc {
   }
 
   async getContacts(): Promise<tl.contacts.RawContacts> {
-    const dialogs = await this._loadDialogs()
+    const dialogs = (await this._loadDialogs()).sort((left, right) =>
+      left.conversation.title.localeCompare(right.conversation.title))
     const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
     return {
       _: 'contacts.contacts',
@@ -202,6 +211,11 @@ export class DialogRpc {
       { parts: [{ type: 'text', text: req.message }] },
     )
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
+    if (this._store) {
+      const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
+        ?? { id: peerId, kind: 'direct' as const, title: peerId }
+      await this._store.ingest(this._session, conversation, source)
+    }
     const id = this._messageId(peerId, source.id)
     const pts = ++this._pts
     return {
@@ -231,8 +245,11 @@ export class DialogRpc {
   }
 
   private async _loadHistory(peerId: string) {
-    const getHistory = this._requireHistory(this._platform.getHistory)
-    const history = (await getHistory.call(this._platform, this._session, { id: peerId })).messages
+    const history = this._data
+      ? (await this._data.getHistory(peerId)).messages
+      : (await this._requireHistory(this._platform.getHistory).call(
+          this._platform, this._session, { id: peerId },
+        )).messages
     for (const source of history.slice().sort((a, b) => a.timestamp - b.timestamp)) {
       this._messageId(peerId, source.id)
     }
@@ -252,6 +269,7 @@ export class DialogRpc {
   }
 
   private async _loadDialogs(): Promise<IMDialog[]> {
+    if (this._data) return this._data.getDialogs()
     const getDialogs = this._requireHistory(this._platform.getDialogs)
     return (await getDialogs.call(this._platform, this._session)).dialogs
   }

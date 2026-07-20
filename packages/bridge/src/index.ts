@@ -8,16 +8,19 @@ import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
+import { MessageStore } from './message-store.js'
+import { PlatformRegistry, PlatformSubscriptionManager, sessionFromRow } from './platform-manager.js'
 
 export * from './platform.js'
 export * from './message-store.js'
+export * from './platform-manager.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
 
 export interface BridgeConfig {
-  /** IM platform adapter (default: StaticDemoPlatform). */
-  platform?: IMPlatform
+  /** Registered IM adapters (default: one StaticDemoPlatform). */
+  platforms?: IMPlatform[]
   dcId?: number
   serverHost?: string
   serverPort?: number
@@ -36,12 +39,27 @@ interface BridgeSessionState {
  * code (stored via minato), which the client enters to log in.
  */
 export function apply(ctx: Context, config: BridgeConfig = {}): void {
-  const platform = config.platform ?? new StaticDemoPlatform()
+  const registry = new PlatformRegistry(config.platforms ?? [new StaticDemoPlatform()])
   const dcId = config.dcId ?? 1
   const apiPrefix = config.apiPrefix ?? '/api'
-  const requireBridgeSession = createSessionResolver(ctx, platform)
 
   defineModels(ctx)
+  const store = new MessageStore(ctx.database)
+  const subscriptions = new PlatformSubscriptionManager(
+    ctx.database,
+    registry,
+    store,
+    (error, session) => ctx.logger('bridge').warn(
+      'platform subscription failed (%s): %s', session?.platformId ?? 'unknown', String(error),
+    ),
+  )
+  const requireBridgeSession = createSessionResolver(ctx, registry, store, subscriptions)
+
+  ctx.effect(async () => {
+    await ctx.database.prepared()
+    await subscriptions.startActiveSessions()
+    return () => subscriptions.stop()
+  })
 
   // ── HTTP auth: mint a virtual phone + login code for a platform identity ──
   ctx.server.post(`${apiPrefix}/auth/:platform/complete`, async (req, res) => {
@@ -50,6 +68,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       metadata?: { firstName?: string, lastName?: string, username?: string, userId?: string }
     }
     const platformId = (req.params as { platform: string }).platform
+    if (!registry.get(platformId)) {
+      res.status = 404
+      res.json({ error: 'platform not available' })
+      return
+    }
     if (!body.credentials) {
       res.status = 400
       res.json({ error: 'credentials required' })
@@ -120,22 +143,17 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const [ps] = await ctx.database.get('mtproto_platform_session', { id: auth.platformSessionId })
     if (!ps) throw new RpcError(500, 'PLATFORM_SESSION_NOT_FOUND')
 
-    const session: PlatformSession = {
-      platformSessionId: ps.id,
-      platformId: ps.platformId,
-      userId: ps.userId,
-      credentials: ps.credentials,
-      metadata: ps.metadata,
-    }
-    if (ps.platformId !== platform.id) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
+    const session = sessionFromRow(ps)
+    const platform = registry.get(ps.platformId)
+    if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
     if (!rpc.authKeyId) throw new RpcError(500, 'AUTH_KEY_ID_MISSING')
     await ctx.database.upsert('mtproto_auth_binding', [{
       authKeyId: authKeyHex(rpc.authKeyId),
       platformId: ps.platformId,
       platformSessionId: ps.id,
     }])
-    rpc.setPlatformData({ session, dialogs: new DialogRpc(platform, session) } satisfies BridgeSessionState)
-    await platform.subscribe(session, () => {})
+    rpc.setPlatformData({ session, dialogs: new DialogRpc(platform, session, store) } satisfies BridgeSessionState)
+    await subscriptions.ensure(session)
 
     const user = makeUser({
       id: stableId(`self:${ps.id}`),
@@ -207,7 +225,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx.mtproto.register(method, async () => handler())
   }
 
-  ctx.logger('bridge').info('bridge backend registered (platform: %s)', platform.id)
+  ctx.logger('bridge').info('bridge backend registered (platforms: %s)', registry.ids.join(', '))
 }
 
 function randomHex(bytes: number): string {
@@ -221,7 +239,12 @@ function normPhone(p: string): string {
   return p.replace(/\D/g, '')
 }
 
-function createSessionResolver(ctx: Context, platform: IMPlatform) {
+function createSessionResolver(
+  ctx: Context,
+  registry: PlatformRegistry,
+  store: MessageStore,
+  subscriptions: PlatformSubscriptionManager,
+) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
   return async (rpc: ServerRpcContext): Promise<BridgeSessionState> => {
@@ -235,21 +258,16 @@ function createSessionResolver(ctx: Context, platform: IMPlatform) {
       pending = (async () => {
         const [binding] = await ctx.database.get('mtproto_auth_binding', { authKeyId })
         if (!binding) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-        if (binding.platformId !== platform.id) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
+        const platform = registry.get(binding.platformId)
+        if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
         const [row] = await ctx.database.get('mtproto_platform_session', {
           id: binding.platformSessionId,
           active: true,
         })
         if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
-        const session: PlatformSession = {
-          platformSessionId: row.id,
-          platformId: row.platformId,
-          userId: row.userId,
-          credentials: row.credentials,
-          metadata: row.metadata,
-        }
-        await platform.subscribe(session, () => {})
-        return { session, dialogs: new DialogRpc(platform, session) }
+        const session = sessionFromRow(row)
+        await subscriptions.ensure(session)
+        return { session, dialogs: new DialogRpc(platform, session, store) }
       })()
       loading.set(authKeyId, pending)
       pending.finally(() => loading.delete(authKeyId)).catch(() => {})

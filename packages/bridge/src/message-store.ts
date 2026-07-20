@@ -1,6 +1,9 @@
 import type { Database } from '@cordisjs/plugin-database'
-import type { IMMessageAliasRow, IMMessageRow } from './models.js'
-import { messageMedia, messageText, type IMConversation, type IMMessage, type PlatformSession } from './platform.js'
+import type { IMConversationRow, IMMessageAliasRow, IMMessageRow } from './models.js'
+import {
+  messageMedia, messageText,
+  type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type JsonValue, type PlatformSession,
+} from './platform.js'
 
 export interface IngestResult {
   message: IMMessageRow
@@ -9,7 +12,7 @@ export interface IngestResult {
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
-  private readonly _counterLocks = new Map<string, Promise<void>>()
+  private _writeTail = Promise.resolve()
 
   constructor(private readonly _database: Database) {}
 
@@ -22,22 +25,9 @@ export class MessageStore {
       throw new Error('message conversation does not match ingestion target')
     }
 
-    return this._database.withTransaction(async (database) => {
+    return this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
-      await database.upsert('mtproto_im_conversation', [{
-        platformSessionId: session.platformSessionId,
-        platformConversationId: conversation.id,
-        kind: conversation.kind,
-        title: conversation.title,
-        parentPlatformConversationId: conversation.parentId ?? null,
-        spacePlatformId: conversation.spaceId ?? null,
-        metadata: conversation.metadata ?? {},
-        updatedAt: now,
-      }], ['platformSessionId', 'platformConversationId'])
-      const [conversationRow] = await database.get('mtproto_im_conversation', {
-        platformSessionId: session.platformSessionId,
-        platformConversationId: conversation.id,
-      })
+      const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
       if (!conversationRow) throw new Error('failed to persist conversation')
 
       const sourceIds = [...new Set([source.id, ...(source.sourceIds ?? [])])]
@@ -70,6 +60,7 @@ export class MessageStore {
           primaryPlatformMessageId: source.id,
           senderPlatformUserId: source.senderId,
           text: messageText(source),
+          content: source.content as unknown as JsonValue,
           timestamp: source.timestamp,
           outgoing: source.outgoing ?? false,
           platformGroupId: source.groupId ?? null,
@@ -81,6 +72,7 @@ export class MessageStore {
         await database.set('mtproto_im_message', { id: message.id }, {
           senderPlatformUserId: source.senderId,
           text: messageText(source),
+          content: source.content as unknown as JsonValue,
           timestamp: source.timestamp,
           outgoing: source.outgoing ?? false,
           platformGroupId: source.groupId ?? null,
@@ -120,7 +112,50 @@ export class MessageStore {
       }
 
       return { message, created }
+    }))
+  }
+
+  async upsertConversation(
+    session: PlatformSession,
+    conversation: IMConversation,
+    unreadCount?: number,
+  ): Promise<IMConversationRow> {
+    return this._write(() => this._database.withTransaction((database) =>
+      this._upsertConversation(database, session, conversation, unreadCount, new Date())))
+  }
+
+  async listDialogs(platformSessionId: string): Promise<IMDialog[]> {
+    const conversations = await this._database.select('mtproto_im_conversation', { platformSessionId })
+      .orderBy('updatedAt', 'desc').execute()
+    return Promise.all(conversations.map(async (conversation) => {
+      const [latest] = await this._database.select('mtproto_im_message', { conversationId: conversation.id })
+        .orderBy('timestamp', 'desc').limit(1).execute()
+      return {
+        conversation: toConversation(conversation),
+        unreadCount: conversation.unreadCount,
+        lastMessage: latest ? await this._hydrateMessage(latest) : undefined,
+      }
+    }))
+  }
+
+  async readHistory(platformSessionId: string, platformConversationId: string): Promise<IMMessage[]> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
     })
+    if (!conversation) return []
+    const rows = await this._database.select('mtproto_im_message', { conversationId: conversation.id })
+      .orderBy('timestamp', 'desc').execute()
+    return Promise.all(rows.map((row) => this._hydrateMessage(row)))
+  }
+
+  async getConversation(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<IMConversation | undefined> {
+    const [row] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    return row ? toConversation(row) : undefined
   }
 
   async findByExternalId(
@@ -142,24 +177,88 @@ export class MessageStore {
 
   async allocateIds(scope: string, count: number): Promise<number[]> {
     if (!Number.isSafeInteger(count) || count <= 0) throw new RangeError('count must be a positive integer')
-    const previous = this._counterLocks.get(scope) ?? Promise.resolve()
-    let release!: () => void
-    const current = new Promise<void>((resolve) => { release = resolve })
-    const tail = previous.then(() => current)
-    this._counterLocks.set(scope, tail)
-    await previous
-    try {
-      return await this._database.withTransaction(async (database) => {
+    return this._write(() => this._database.withTransaction(async (database) => {
         const [counter] = await database.get('mtproto_id_counter', { scope })
         const first = counter?.nextId ?? 1
         const nextId = first + count
         if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
         await database.upsert('mtproto_id_counter', [{ scope, nextId }])
         return Array.from({ length: count }, (_, index) => first + index)
-      })
+    }))
+  }
+
+  private async _upsertConversation(
+    database: Database,
+    session: PlatformSession,
+    conversation: IMConversation,
+    unreadCount: number | undefined,
+    now: Date,
+  ): Promise<IMConversationRow> {
+    const [existing] = await database.get('mtproto_im_conversation', {
+      platformSessionId: session.platformSessionId,
+      platformConversationId: conversation.id,
+    })
+    await database.upsert('mtproto_im_conversation', [{
+      platformSessionId: session.platformSessionId,
+      platformConversationId: conversation.id,
+      kind: conversation.kind,
+      title: conversation.title,
+      parentPlatformConversationId: conversation.parentId ?? null,
+      spacePlatformId: conversation.spaceId ?? null,
+      metadata: conversation.metadata ?? {},
+      unreadCount: unreadCount ?? existing?.unreadCount ?? 0,
+      updatedAt: now,
+    }], ['platformSessionId', 'platformConversationId'])
+    const [row] = await database.get('mtproto_im_conversation', {
+      platformSessionId: session.platformSessionId,
+      platformConversationId: conversation.id,
+    })
+    if (!row) throw new Error('failed to persist conversation')
+    return row
+  }
+
+  private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
+    const aliases = await this._database.select('mtproto_im_message_alias', { messageId: row.id })
+      .orderBy('ordinal').execute()
+    return {
+      id: row.primaryPlatformMessageId,
+      sourceIds: aliases.map((alias) => alias.platformMessageId),
+      conversationId: (await this._conversationId(row.conversationId)),
+      senderId: row.senderPlatformUserId,
+      content: row.content as unknown as IMMessageContent,
+      timestamp: row.timestamp,
+      outgoing: row.outgoing,
+      groupId: row.platformGroupId ?? undefined,
+      metadata: row.metadata,
+    }
+  }
+
+  private async _conversationId(id: number): Promise<string> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', { id })
+    if (!conversation) throw new Error(`message references missing conversation ${id}`)
+    return conversation.platformConversationId
+  }
+
+  private async _write<T>(callback: () => Promise<T>): Promise<T> {
+    const previous = this._writeTail
+    let release!: () => void
+    this._writeTail = new Promise<void>((resolve) => { release = resolve })
+    await previous.catch(() => {})
+    try {
+      return await callback()
     } finally {
       release()
-      if (this._counterLocks.get(scope) === tail) this._counterLocks.delete(scope)
     }
+  }
+}
+
+function toConversation(row: IMConversationRow): IMConversation {
+  return {
+    id: row.platformConversationId,
+    kind: row.kind,
+    title: row.title,
+    parentId: row.parentPlatformConversationId ?? undefined,
+    spaceId: row.spacePlatformId ?? undefined,
+    metadata: row.metadata,
   }
 }
