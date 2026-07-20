@@ -151,4 +151,42 @@ describe('conversation kinds', () => {
     expect(contacts.contacts).toHaveLength(1)
     expect(contacts.users).toMatchObject([{ _: 'user', firstName: 'direct' }])
   })
+
+  it('serves the peer metadata RPCs required by desktop group and channel views', async () => {
+    const { rpc } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const groupId = stableId('peer:group')
+    const channelId = stableId('peer:subchannel')
+    const channel = { _: 'inputChannel' as const, channelId, accessHash: Long.ZERO }
+
+    const groupSettings = await rpc.getPeerSettings({
+      _: 'messages.getPeerSettings', peer: { _: 'inputPeerChat', chatId: groupId },
+    })
+    const fullGroup = await rpc.getFullChat({ _: 'messages.getFullChat', chatId: groupId })
+    const fullChannel = await rpc.getFullChannel({ _: 'channels.getFullChannel', channel })
+    const self = await rpc.getChannelParticipant({
+      _: 'channels.getParticipant', channel, participant: { _: 'inputPeerSelf' },
+    })
+    const participants = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel, filter: { _: 'channelParticipantsRecent' },
+      offset: 0, limit: 200, hash: Long.ZERO,
+    })
+    const sendAs = await rpc.getSendAs({
+      _: 'channels.getSendAs', peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ZERO },
+    })
+
+    expect(groupSettings).toMatchObject({ _: 'messages.peerSettings', chats: [{ title: 'QQ Group' }] })
+    expect(fullGroup).toMatchObject({ _: 'messages.chatFull', fullChat: { _: 'chatFull', id: groupId } })
+    expect(fullChannel).toMatchObject({
+      _: 'messages.chatFull', fullChat: { _: 'channelFull', id: channelId, participantsCount: 42 },
+    })
+    expect(self).toMatchObject({
+      _: 'channels.channelParticipant', participant: { _: 'channelParticipantSelf' },
+    })
+    expect(participants).toMatchObject({ _: 'channels.channelParticipants', count: 1 })
+    expect(sendAs).toMatchObject({ _: 'channels.sendAsPeers', peers: [{ peer: { _: 'peerUser' } }] })
+    for (const result of [groupSettings, fullGroup, fullChannel, self, participants, sendAs]) {
+      expect(() => roundTrip(result)).not.toThrow()
+    }
+  })
 })

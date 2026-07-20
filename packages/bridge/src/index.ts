@@ -245,6 +245,18 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     bareVector(await (await requireBridgeSession(rpc)).dialogs.getUsers(req as tl.users.RawGetUsersRequest)))
   ctx.mtproto.register('users.getFullUser', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullUser(req as tl.users.RawGetFullUserRequest))
+  ctx.mtproto.register('messages.getPeerSettings', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getPeerSettings(req as tl.messages.RawGetPeerSettingsRequest))
+  ctx.mtproto.register('messages.getFullChat', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getFullChat(req as tl.messages.RawGetFullChatRequest))
+  ctx.mtproto.register('channels.getFullChannel', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getFullChannel(req as tl.channels.RawGetFullChannelRequest))
+  ctx.mtproto.register('channels.getParticipant', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getChannelParticipant(req as tl.channels.RawGetParticipantRequest))
+  ctx.mtproto.register('channels.getParticipants', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getChannelParticipants(req as tl.channels.RawGetParticipantsRequest))
+  ctx.mtproto.register('channels.getSendAs', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getSendAs(req as tl.channels.RawGetSendAsRequest))
 
   // ── Updates ──
   ctx.mtproto.register('updates.getState', async (rpc) =>

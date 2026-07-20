@@ -245,6 +245,92 @@ export class DialogRpc {
     }
   }
 
+  async getPeerSettings(req: tl.messages.RawGetPeerSettingsRequest): Promise<tl.messages.RawPeerSettings> {
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    const conversation = this._conversation(peerId)
+    return {
+      _: 'messages.peerSettings', settings: { _: 'peerSettings' },
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      users: conversation.kind === 'direct' ? [await this._getPeerUser(peerId)] : [],
+    }
+  }
+
+  async getFullChat(req: tl.messages.RawGetFullChatRequest): Promise<tl.messages.RawChatFull> {
+    await this._hydratePeers()
+    const peerId = this._tlToPeer.get(req.chatId)
+    const conversation = peerId ? this._conversation(peerId) : undefined
+    if (!conversation || conversation.kind !== 'group') throw new RpcError(400, 'CHAT_ID_INVALID')
+    return {
+      _: 'messages.chatFull',
+      fullChat: {
+        _: 'chatFull', id: req.chatId, about: '',
+        participants: {
+          _: 'chatParticipants', chatId: req.chatId,
+          participants: [{ _: 'chatParticipantCreator', userId: this._selfId }], version: 1,
+        },
+        notifySettings: { _: 'peerNotifySettings' },
+      },
+      chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
+    }
+  }
+
+  async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
+    await this._hydratePeers()
+    const conversation = this._resolveChannel(req.channel)
+    return {
+      _: 'messages.chatFull',
+      fullChat: {
+        _: 'channelFull', id: this._peerId(conversation.id), about: '',
+        canViewParticipants: true,
+        participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
+        readInboxMaxId: 0, readOutboxMaxId: 0, unreadCount: 0,
+        chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
+        notifySettings: { _: 'peerNotifySettings' }, botInfo: [], pts: this._pts,
+      },
+      chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
+    }
+  }
+
+  async getChannelParticipant(
+    req: tl.channels.RawGetParticipantRequest,
+  ): Promise<tl.channels.RawChannelParticipant> {
+    await this._hydratePeers()
+    const conversation = this._resolveChannel(req.channel)
+    if (req.participant._ !== 'inputPeerSelf') throw new RpcError(400, 'USER_NOT_PARTICIPANT')
+    return {
+      _: 'channels.channelParticipant',
+      participant: {
+        _: 'channelParticipantSelf', userId: this._selfId, inviterId: this._selfId, date: 0,
+      },
+      chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
+    }
+  }
+
+  async getChannelParticipants(
+    req: tl.channels.RawGetParticipantsRequest,
+  ): Promise<tl.channels.RawChannelParticipants> {
+    await this._hydratePeers()
+    const conversation = this._resolveChannel(req.channel)
+    const includeSelf = req.filter._ === 'channelParticipantsRecent'
+    return {
+      _: 'channels.channelParticipants', count: includeSelf ? 1 : 0,
+      participants: includeSelf ? [{
+        _: 'channelParticipantSelf', userId: this._selfId, inviterId: this._selfId, date: 0,
+      }] : [],
+      chats: [this._makeChat(conversation)], users: includeSelf ? [this._makeSelfUser()] : [],
+    }
+  }
+
+  async getSendAs(req: tl.channels.RawGetSendAsRequest): Promise<tl.channels.RawSendAsPeers> {
+    await this._hydratePeers()
+    this._resolvePeer(req.peer)
+    return {
+      _: 'channels.sendAsPeers', peers: [{ _: 'sendAsPeer', peer: { _: 'peerUser', userId: this._selfId } }],
+      chats: [], users: [this._makeSelfUser()],
+    }
+  }
+
   async sendMessage(req: SendMessageRequest): Promise<tl.RawUpdateShortSentMessage> {
     const randomId = req.randomId.toString()
     const existing = this._sentByRandomId.get(randomId)
@@ -594,7 +680,9 @@ export class DialogRpc {
 
   private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {
     if (input._ === 'inputUserSelf') return this._makeSelfUser()
-    if (input._ !== 'inputUser') throw new RpcError(400, 'USER_ID_INVALID')
+    if (input._ !== 'inputUser' && input._ !== 'inputUserFromMessage') {
+      throw new RpcError(400, 'USER_ID_INVALID')
+    }
     const peerId = this._tlToPeer.get(input.userId)
     if (!peerId) throw new RpcError(400, 'USER_ID_INVALID')
     if (this._conversations.get(peerId)?.kind !== 'direct') throw new RpcError(400, 'USER_ID_INVALID')
@@ -661,6 +749,14 @@ export class DialogRpc {
     if (peer._ === 'inputPeerChat' && kind !== 'group') throw new RpcError(400, 'PEER_ID_INVALID')
     if (peer._ === 'inputPeerChannel' && kind !== 'channel') throw new RpcError(400, 'PEER_ID_INVALID')
     return id
+  }
+
+  private _resolveChannel(channel: tl.TypeInputChannel): import('./platform.js').IMConversation {
+    if (channel._ !== 'inputChannel') throw new RpcError(400, 'CHANNEL_INVALID')
+    const peerId = this._tlToPeer.get(channel.channelId)
+    const conversation = peerId ? this._conversation(peerId) : undefined
+    if (!conversation || conversation.kind !== 'channel') throw new RpcError(400, 'CHANNEL_INVALID')
+    return conversation
   }
 
   private _conversation(peerId: string): import('./platform.js').IMConversation {

@@ -361,6 +361,7 @@ describe('bridge login e2e', () => {
       const mirrorSourceGroup = dialogs.chats.find((chat: any) => chat.title === 'Group B - Mirror Source')
       const mirrorTargetGroup = dialogs.chats.find((chat: any) => chat.title === 'Group C - Mirror Target')
       const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')
+      const generalChannel = dialogs.chats.find((chat: any) => chat.title === 'general')
       const [supportConversation] = await ctx.database.get('mtproto_im_conversation', {
         platformSessionId: 'ps1', platformConversationId: 'discord-support',
       })
@@ -587,6 +588,34 @@ describe('bridge login e2e', () => {
         },
       }, 61)
       expect(new TextDecoder().decode(finalFile.bytes)).toBe('desktop-upload')
+
+      const peerSettings = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getPeerSettings',
+        peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+      }, 63)
+      expect(peerSettings).toMatchObject({
+        _: 'messages.peerSettings', chats: [{ _: 'channel', id: generalChannel.id }],
+      })
+      const fullChannel = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getFullChannel',
+        channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+      }, 65)
+      expect(fullChannel).toMatchObject({
+        _: 'messages.chatFull', fullChat: { _: 'channelFull', id: generalChannel.id },
+      })
+      const participant = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getParticipant',
+        channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        participant: { _: 'inputPeerSelf' },
+      }, 67)
+      expect(participant).toMatchObject({
+        _: 'channels.channelParticipant', participant: { _: 'channelParticipantSelf' },
+      })
+      const sendAs = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getSendAs',
+        peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+      }, 69)
+      expect(sendAs).toMatchObject({ _: 'channels.sendAsPeers', peers: [{ peer: { _: 'peerUser' } }] })
 
       const desktopStartupBatch: Array<[object, string]> = [
         [{ _: 'help.getPeerColors', hash: 0 }, 'help.peerColors'],
