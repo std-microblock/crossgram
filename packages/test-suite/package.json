@@ -1,0 +1,21 @@
+{
+  "name": "@mtproto-relay/test-suite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
+    "@cordisjs/plugin-database-sqlite": "^5.0.0",
+    "@cordisjs/plugin-server": "^1.6.0",
+    "@fuman/io": "^0.0.20",
+    "@fuman/utils": "^0.0.20",
+    "@mtcute/core": "^0.30.3",
+    "@mtcute/node": "^0.30.3",
+    "@mtcute/tl-runtime": "^0.30.3",
+    "@mtproto-relay/bridge": "workspace:*",
+    "@mtproto-relay/mtproto": "workspace:*",
+    "@mtproto-relay/platform-static": "workspace:*",
+    "cordis": "^4.0.0-rc.5",
+    "long": "^5.3.0"
+  }
+}

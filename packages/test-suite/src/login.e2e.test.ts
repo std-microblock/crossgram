@@ -18,7 +18,8 @@ import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import { Mtproto, AbridgedPacketCodec, generateRsaKeyPair } from '@mtproto-relay/mtproto'
-import * as bridge from './index.js'
+import * as bridge from '@mtproto-relay/bridge'
+import { StaticPlatform } from '@mtproto-relay/platform-static'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
@@ -231,7 +232,7 @@ async function startApp(options: {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,
     }),
-    ctx.plugin(bridge, options.bridgeConfig ?? {}),
+    ctx.plugin(bridge, options.bridgeConfig ?? { platforms: [new StaticPlatform()] }),
   ]
   await Promise.all(fibers)
   await new Promise((r) => setTimeout(r, 100)) // let fibers settle
@@ -247,12 +248,12 @@ describe('bridge login e2e', () => {
     try {
       // Seed a virtual phone directly via minato (bypass HTTP).
       await ctx.database.create('mtproto_platform_session', {
-        id: 'ps1', platformId: 'static-demo', userId: 'alice',
+        id: 'ps1', platformId: 'static', userId: 'alice',
         credentials: { t: 'x' }, metadata: { firstName: 'Alice' }, active: true, createdAt: new Date(),
       })
       await ctx.database.create('mtproto_auth_session', {
         id: 'as1', virtualPhone: '99900123', loginCode: '123456',
-        platformId: 'static-demo', platformSessionId: 'ps1', used: false,
+        platformId: 'static', platformSessionId: 'ps1', used: false,
       })
       dbg('seeded phone')
 
@@ -284,7 +285,7 @@ describe('bridge login e2e', () => {
       const [binding] = await ctx.database.get('mtproto_auth_binding', {
         authKeyId: Buffer.from(key.authKeyId).toString('hex'),
       })
-      expect(binding).toMatchObject({ platformId: 'static-demo', platformSessionId: 'ps1' })
+      expect(binding).toMatchObject({ platformId: 'static', platformSessionId: 'ps1' })
 
       // Telegram Desktop opens a fresh main connection after login. Reuse only
       // the permanent auth key; all bridge identity and dialog ID maps must
@@ -327,18 +328,34 @@ describe('bridge login e2e', () => {
         fullUser: { _: 'userFull', id: alice.id },
       })
 
-      // Real bridge data: dialog list → peer history → lookup by message ID.
+      // Real reference-adapter data: every conversation kind, grouped media,
+      // range download, direct history, and sends over the MTProto socket.
       const dialogs = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getDialogs', excludePinned: true, folderId: 0,
         offsetDate: 0, offsetId: 0,
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 22)
       expect(dialogs._).toBe('messages.dialogs')
-      expect(dialogs.dialogs).toHaveLength(2)
+      expect(dialogs.dialogs).toHaveLength(5)
       expect(dialogs.messages.map((message: any) => message.message)).toEqual([
-        'Meeting at 3?', 'How are you?',
+        '', 'Support thread message', 'General channel message', 'Meeting at 3?', 'How are you?',
       ])
-      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Bob', 'Alice'])
+      expect(dialogs.dialogs.map((dialog: any) => dialog.peer._)).toEqual([
+        'peerChat', 'peerChannel', 'peerChannel', 'peerUser', 'peerUser',
+      ])
+      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Carol', 'Alice', 'Bob'])
+      expect(dialogs.chats.map((chat: any) => [chat._, chat.title])).toEqual([
+        ['chat', 'Static QQ Group'],
+        ['channel', 'support thread'],
+        ['channel', 'general'],
+      ])
+      const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
+      const [supportConversation] = await ctx.database.get('mtproto_im_conversation', {
+        platformSessionId: 'ps1', platformConversationId: 'discord-support',
+      })
+      expect(supportConversation).toMatchObject({
+        kind: 'channel', parentPlatformConversationId: 'discord-general', spacePlatformId: 'discord-guild',
+      })
 
       const pinned = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getPinnedDialogs', folderId: 0,
@@ -369,11 +386,35 @@ describe('bridge login e2e', () => {
       expect(message.messages[0]).toMatchObject({
         _: 'message', id: history.messages[0].id, message: 'How are you?',
       })
+
+      const groupHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChat', chatId: group.id },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 2,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 30)
+      expect(groupHistory._).toBe('messages.messagesSlice')
+      expect(groupHistory.messages.map((item: any) => item.message)).toEqual(['', 'Seeded image and file'])
+      expect(groupHistory.messages.map((item: any) => item.media?._)).toEqual([
+        'messageMediaDocument', 'messageMediaPhoto',
+      ])
+      expect(groupHistory.messages[0].groupedId.toString())
+        .toBe(groupHistory.messages[1].groupedId.toString())
+      const seededDocument = groupHistory.messages[0].media.document
+      const seededFile = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 64,
+        location: {
+          _: 'inputDocumentFileLocation', id: seededDocument.id, accessHash: seededDocument.accessHash,
+          fileReference: seededDocument.fileReference, thumbSize: '',
+        },
+      }, 32)
+      expect(new TextDecoder().decode(seededFile.bytes)).toBe('static seeded file')
+
       const sentMessage = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMessage',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         message: 'Sent through MTProto', randomId: Long.fromNumber(987654321),
-      }, 30)
+      }, 34)
       expect(sentMessage).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
 
       const updatedHistory = await callRpc(resumed, key, resumedSid, {
@@ -381,10 +422,45 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 32)
+      }, 36)
       expect(updatedHistory.messages[0]).toMatchObject({
         _: 'message', id: sentMessage.id, out: true, message: 'Sent through MTProto',
       })
+
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(800), filePart: 0,
+        bytes: new Uint8Array([137, 80, 78, 71, 9, 8, 7]),
+      }, 38)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(801), filePart: 0,
+        bytes: new TextEncoder().encode('static socket file'),
+      }, 40)).toEqual({ _: 'boolTrue' })
+      const sentAlbum = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMultiMedia', peer: { _: 'inputPeerChat', chatId: group.id },
+        multiMedia: [
+          {
+            _: 'inputSingleMedia', randomId: Long.fromNumber(800), message: 'socket album',
+            media: {
+              _: 'inputMediaUploadedPhoto',
+              file: { _: 'inputFile', id: Long.fromNumber(800), parts: 1, name: 'socket.png', md5Checksum: '' },
+            },
+          },
+          {
+            _: 'inputSingleMedia', randomId: Long.fromNumber(801), message: '',
+            media: {
+              _: 'inputMediaUploadedDocument',
+              file: { _: 'inputFile', id: Long.fromNumber(801), parts: 1, name: 'socket.txt', md5Checksum: '' },
+              mimeType: 'text/plain', attributes: [{ _: 'documentAttributeFilename', fileName: 'socket.txt' }],
+            },
+          },
+        ],
+      }, 42)
+      const sentAlbumMessages = sentAlbum.updates.map((update: any) => update.message)
+      expect(sentAlbumMessages.map((item: any) => item.message)).toEqual(['socket album', ''])
+      expect(sentAlbumMessages.map((item: any) => item.media?._)).toEqual([
+        'messageMediaPhoto', 'messageMediaDocument',
+      ])
+      expect(sentAlbumMessages[0].groupedId.toString()).toBe(sentAlbumMessages[1].groupedId.toString())
 
       const desktopStartupBatch: Array<[object, string]> = [
         [{ _: 'help.getPeerColors', hash: 0 }, 'help.peerColors'],
@@ -415,7 +491,7 @@ describe('bridge login e2e', () => {
           _: 'stories.getStoriesArchive', peer: { _: 'inputPeerSelf' }, offsetId: 0, limit: 100,
         }, 'stories.stories'],
       ]
-      let startupSub = 40
+      let startupSub = 50
       for (const [request, expected] of desktopStartupBatch) {
         const response = await callRpc(resumed, key, resumedSid, request, startupSub)
         expect(response._).toBe(expected)
@@ -595,13 +671,13 @@ describe('bridge login e2e', () => {
     try {
       first = await startApp({ rsaKey, databasePath, authKeyStorePath })
       await first.ctx.database.create('mtproto_platform_session', {
-        id: 'persisted-ps', platformId: 'static-demo', userId: 'persisted-user',
+        id: 'persisted-ps', platformId: 'static', userId: 'persisted-user',
         credentials: { token: 'persisted' }, metadata: { firstName: 'Persisted' },
         active: true, createdAt: new Date(),
       })
       await first.ctx.database.create('mtproto_auth_session', {
         id: 'persisted-auth', virtualPhone: '99900456', loginCode: '654321',
-        platformId: 'static-demo', platformSessionId: 'persisted-ps', used: false,
+        platformId: 'static', platformSessionId: 'persisted-ps', used: false,
       })
 
       client = await TestClient.connect(first.port)
@@ -629,7 +705,7 @@ describe('bridge login e2e', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 8)
       expect(dialogs._).toBe('messages.dialogs')
-      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Bob', 'Alice'])
+      expect(dialogs.users.map((user: any) => user.firstName)).toEqual(['Carol', 'Alice', 'Bob'])
     } finally {
       client?.close()
       await second?.stop()
