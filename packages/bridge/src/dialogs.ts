@@ -50,6 +50,7 @@ export class DialogRpc {
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
   private readonly _historyCache = new Map<string, MaterializedMessage[]>()
+  private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
 
   constructor(
     private readonly _platform: IMPlatform,
@@ -81,8 +82,8 @@ export class DialogRpc {
     await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
     const materialized = await Promise.all(all.map((dialog) => this._materializeDialog(dialog)))
     let start = 0
-    if (req.offsetPeer._ === 'inputPeerUser') {
-      const offsetPeer = this._tlToPeer.get(req.offsetPeer.userId)
+    if (req.offsetPeer._ !== 'inputPeerEmpty') {
+      const offsetPeer = this._tlToPeer.get(inputPeerId(req.offsetPeer))
       const index = offsetPeer === undefined ? -1 : materialized.findIndex((item) => item.source.conversation.id === offsetPeer)
       if (index >= 0) start = index + 1
     } else if (req.offsetId > 0 || req.offsetDate > 0) {
@@ -100,8 +101,8 @@ export class DialogRpc {
       ...(start > 0 || page.length < all.length ? { count: all.length } : {}),
       dialogs: page.map((item) => item.dialog),
       messages: page.flatMap((item) => item.message ? [item.message] : []),
-      chats: [],
-      users: uniqueUsers(page.map((item) => item.user)),
+      chats: uniqueChats(page.flatMap((item) => item.chat ? [item.chat] : [])),
+      users: uniqueUsers(page.flatMap((item) => item.users)),
     }
     return result as unknown as tl.messages.TypeDialogs
   }
@@ -119,14 +120,19 @@ export class DialogRpc {
     })
     const start = Math.max(0, req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
-    const peer = await this._getPeerUser(peerId)
+    const conversation = this._conversation(peerId)
+    const senderIds = [...new Set(page.map((item) => item.source.senderId))]
+    const senders = await Promise.all(senderIds.map((senderId) => this._getPeerUser(senderId)))
+    const peerUser = conversation.kind === 'direct'
+      ? [await this._getPeerUser(peerId, conversation.title)]
+      : []
     return {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
       messages: page.map((item) => this._makeMessage(item)),
       topics: [],
-      chats: [],
-      users: uniqueUsers([peer, this._makeSelfUser()]),
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      users: uniqueUsers([...peerUser, ...senders, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
   }
 
@@ -175,8 +181,8 @@ export class DialogRpc {
         continue
       }
       messages.push(this._makeMessage(found))
-      const user = await this._getPeerUser(ref.peerId)
-      users.set(user.id, user)
+      const sender = await this._getPeerUser(found.source.senderId)
+      users.set(sender.id, sender)
     }
 
     const self = this._makeSelfUser()
@@ -197,7 +203,9 @@ export class DialogRpc {
   }
 
   async getContacts(): Promise<tl.contacts.RawContacts> {
-    const dialogs = (await this._loadDialogs({ limit: 500 })).sort((left, right) =>
+    const dialogs = (await this._loadDialogs({ limit: 500 }))
+      .filter((dialog) => dialog.conversation.kind === 'direct')
+      .sort((left, right) =>
       left.conversation.title.localeCompare(right.conversation.title))
     const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
     return {
@@ -436,16 +444,27 @@ export class DialogRpc {
         _: 'updateNewMessage', message: this._makeMessage(item), pts: ++this._pts, ptsCount: 1,
       } as tl.RawUpdateNewMessage)
     }
+    const target = this._conversation(peerId)
     return {
-      _: 'updates', updates, users: [this._makeSelfUser(), await this._getPeerUser(peerId)], chats: [],
+      _: 'updates', updates,
+      users: target.kind === 'direct'
+        ? uniqueUsers([this._makeSelfUser(), await this._getPeerUser(peerId)])
+        : [this._makeSelfUser()],
+      chats: target.kind === 'direct' ? [] : [this._makeChat(target)],
       date: source.timestamp, seq: 0,
     }
   }
 
   private async _materializeDialog(source: IMDialog) {
     const platformPeerId = source.conversation.id
-    const peerId = this._peerId(platformPeerId)
-    const user = await this._getPeerUser(platformPeerId, source.conversation.title)
+    this._conversations.set(platformPeerId, source.conversation)
+    const peer = this._conversationPeer(source.conversation)
+    const users = source.conversation.kind === 'direct'
+      ? [await this._getPeerUser(platformPeerId, source.conversation.title)]
+      : source.lastMessage
+        ? [await this._getPeerUser(source.lastMessage.senderId)]
+        : []
+    const chat = source.conversation.kind === 'direct' ? undefined : this._makeChat(source.conversation)
     const projected = source.lastMessage
       ? this._historyCache.get(platformPeerId)?.filter((item) =>
           item.source.id === source.lastMessage!.id || item.source.sourceIds?.includes(source.lastMessage!.id))
@@ -457,7 +476,7 @@ export class DialogRpc {
       : undefined
     const dialog: tl.RawDialog = {
       _: 'dialog',
-      peer: { _: 'peerUser', userId: peerId },
+      peer,
       topMessage,
       readInboxMaxId: source.unreadCount > 0 ? 0 : topMessage,
       readOutboxMaxId: topMessage,
@@ -467,7 +486,7 @@ export class DialogRpc {
       unreadPollVotesCount: 0,
       notifySettings: { _: 'peerNotifySettings' },
     }
-    return { source, dialog, message, user }
+    return { source, dialog, message, users, chat }
   }
 
   private async _loadHistory(peerId: string, request: HistoryWindow = { limit: 1 }): Promise<MaterializedMessage[]> {
@@ -523,13 +542,18 @@ export class DialogRpc {
 
   private async _hydratePeers(): Promise<void> {
     const dialogs = await this._loadDialogs()
-    for (const dialog of dialogs) this._peerId(dialog.conversation.id)
+    for (const dialog of dialogs) {
+      this._conversations.set(dialog.conversation.id, dialog.conversation)
+      this._peerId(dialog.conversation.id)
+    }
   }
 
   private async _loadDialogs(query: { limit?: number, afterId?: string } = { limit: 100 }): Promise<IMDialog[]> {
-    if (this._data) return this._data.getDialogs(query)
-    const getDialogs = this._requireHistory(this._platform.getDialogs)
-    return (await getDialogs.call(this._platform, this._session, query)).dialogs
+    const dialogs = this._data
+      ? await this._data.getDialogs(query)
+      : (await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)).dialogs
+    for (const dialog of dialogs) this._conversations.set(dialog.conversation.id, dialog.conversation)
+    return dialogs
   }
 
   private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {
@@ -537,18 +561,19 @@ export class DialogRpc {
     if (input._ !== 'inputUser') throw new RpcError(400, 'USER_ID_INVALID')
     const peerId = this._tlToPeer.get(input.userId)
     if (!peerId) throw new RpcError(400, 'USER_ID_INVALID')
+    if (this._conversations.get(peerId)?.kind !== 'direct') throw new RpcError(400, 'USER_ID_INVALID')
     return this._getPeerUser(peerId)
   }
 
   private _makeMessage(item: MaterializedMessage): tl.RawMessage {
     const { source, tlId } = item
-    const peerId = this._peerId(source.conversationId)
+    const conversation = this._conversation(source.conversationId)
     return {
       _: 'message',
       out: source.outgoing || undefined,
       id: tlId,
       fromId: { _: 'peerUser', userId: source.outgoing ? this._selfId : this._peerId(source.senderId) },
-      peerId: { _: 'peerUser', userId: peerId },
+      peerId: this._conversationPeer(conversation),
       date: source.timestamp,
       message: item.ordinal === 0 ? messageText(source) : '',
       media: item.media ? makeTlMessageMedia(item.media, source.timestamp) : undefined,
@@ -590,10 +615,44 @@ export class DialogRpc {
   }
 
   private _resolvePeer(peer: tl.TypeInputPeer): string {
-    if (peer._ !== 'inputPeerUser') throw new RpcError(400, 'PEER_ID_INVALID')
-    const id = this._tlToPeer.get(peer.userId)
+    if (peer._ !== 'inputPeerUser' && peer._ !== 'inputPeerChat' && peer._ !== 'inputPeerChannel') {
+      throw new RpcError(400, 'PEER_ID_INVALID')
+    }
+    const id = this._tlToPeer.get(inputPeerId(peer))
     if (!id) throw new RpcError(400, 'PEER_ID_INVALID')
+    const kind = this._conversation(id).kind
+    if (peer._ === 'inputPeerUser' && kind !== 'direct') throw new RpcError(400, 'PEER_ID_INVALID')
+    if (peer._ === 'inputPeerChat' && kind !== 'group') throw new RpcError(400, 'PEER_ID_INVALID')
+    if (peer._ === 'inputPeerChannel' && kind !== 'channel') throw new RpcError(400, 'PEER_ID_INVALID')
     return id
+  }
+
+  private _conversation(peerId: string): import('./platform.js').IMConversation {
+    return this._conversations.get(peerId) ?? { id: peerId, kind: 'direct', title: peerId }
+  }
+
+  private _conversationPeer(conversation: import('./platform.js').IMConversation): tl.TypePeer {
+    const id = this._peerId(conversation.id)
+    if (conversation.kind === 'group') return { _: 'peerChat', chatId: id }
+    if (conversation.kind === 'channel') return { _: 'peerChannel', channelId: id }
+    return { _: 'peerUser', userId: id }
+  }
+
+  private _makeChat(conversation: import('./platform.js').IMConversation): tl.TypeChat {
+    const id = this._peerId(conversation.id)
+    if (conversation.kind === 'group') {
+      return {
+        _: 'chat', id, title: conversation.title, photo: { _: 'chatPhotoEmpty' },
+        participantsCount: Number(conversation.metadata?.participantsCount ?? 0), date: 0, version: 1,
+      }
+    }
+    const broadcast = conversation.metadata?.broadcast === true
+    return {
+      _: 'channel', id, accessHash: Long.ZERO, title: conversation.title,
+      broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
+      photo: { _: 'chatPhotoEmpty' }, date: 0,
+      participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
+    }
   }
 
   private _peerId(peerId: string): number {
@@ -646,6 +705,17 @@ export function stableId(value: string): number {
 
 function uniqueUsers(users: tl.RawUser[]): tl.RawUser[] {
   return [...new Map(users.map((user) => [user.id, user])).values()]
+}
+
+function uniqueChats(chats: tl.TypeChat[]): tl.TypeChat[] {
+  return [...new Map(chats.map((chat) => [chat.id, chat])).values()]
+}
+
+function inputPeerId(peer: tl.TypeInputPeer): number {
+  if (peer._ === 'inputPeerUser') return peer.userId
+  if (peer._ === 'inputPeerChat') return peer.chatId
+  if (peer._ === 'inputPeerChannel') return peer.channelId
+  return 0
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number): tl.TypeMessageMedia {
