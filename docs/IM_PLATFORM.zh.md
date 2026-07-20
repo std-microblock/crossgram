@@ -4,23 +4,47 @@
 
 ## 1. 注册与生命周期
 
-配置通过 `BridgeConfig.platforms` 一次注册多个 adapter，`id` 必须全局唯一：
+bridge 通过 `ctx.imPlatform` 暴露 Cordis registry service。平台实现本身也是 Cordis 插件，registry key 直接使用配置项的 `id`；`IMPlatform` 不再维护第二个 ID。
 
-```ts
-ctx.plugin(bridge, {
-  platforms: [qqPlatform, wechatPlatform, telegramPlatform, discordPlatform],
-})
+静态参考平台的单实例配置：
+
+```yaml
+- id: bridge01
+  name: '@mtproto-relay/bridge'
+- id: static
+  name: '@mtproto-relay/platform-static'
 ```
 
-bridge 不注册默认 adapter。开发或测试时也必须显式传入平台实例，避免生产配置缺失时静默连接到 demo 数据。仓库中的完整参考实现是 `@mtproto-relay/platform-static`：
+同一个平台包可以加载多次，每个 Cordis entry 是完全独立的 adapter 实例：
 
-```ts
-import { StaticPlatform } from '@mtproto-relay/platform-static'
-
-ctx.plugin(bridge, { platforms: [new StaticPlatform()] })
+```yaml
+- id: static-primary
+  name: '@mtproto-relay/platform-static'
+  config:
+    transferChunkSize: 65536
+- id: static-secondary
+  name: '@mtproto-relay/platform-static'
+  config:
+    transferChunkSize: 262144
 ```
 
-每个 `PlatformSession.platformId` 决定实际 adapter。bridge 启动时会为数据库中所有 active session 调用一次 `subscribe()`；同一 session 的多个 MTProto 连接不会重复订阅。插件停止时会等待 `Unsubscribe`。
+此处的 `static-primary` / `static-secondary` 就是写入 `PlatformSession.platformId`、HTTP 路径和数据库绑定的唯一平台 ID。不要在 adapter 配置中再定义 ID。
+
+自定义平台包的入口保持同样结构：
+
+```ts
+import type { Context } from 'cordis'
+import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
+
+export const inject = ['imPlatform']
+
+export function apply(ctx: Context, config: Config) {
+  const id = resolvePlatformPluginId(ctx)
+  ctx.imPlatform.register(new QQPlatform(config), id)
+}
+```
+
+bridge 不注册默认 adapter。平台插件注册后，bridge 会自动为该 ID 下数据库中已有的 active session 补订阅；同一 session 的多个 MTProto 连接不会重复订阅。平台插件卸载时只停止该平台的订阅，其他实例不受影响。
 
 `subscribe()` handler 返回的 Promise 有背压语义。adapter 应等待它结束再确认/提交自己的消费游标，否则进程在入库前退出可能丢消息。
 
@@ -155,7 +179,7 @@ test-suite -> platform-static -> bridge -> mtproto
            -> bridge -----------^
 ```
 
-- `platform-static.test.ts` 直接验证分页、四类 conversation、混合媒体、逐 chunk 进度、range 下载、subscribe 背压、去重、超长 opaque ID、取消和错误行为。
+- `platform-static.test.ts` 直接验证 Cordis 多例注册/独立卸载、分页、四类 conversation、混合媒体、逐 chunk 进度、range 下载、subscribe 背压、去重、超长 opaque ID、取消和错误行为。
 - `login.e2e.test.ts` 通过真实 MTProto socket 验证登录/重连/重启、IMMessage 入库、群相册 TL 投影、文件上传下载、channel/subchannel 持久化和 push-only 平台。
 
 运行 adapter 契约与跨包 e2e：
