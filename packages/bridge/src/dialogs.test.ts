@@ -5,7 +5,9 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
-import { StaticDemoPlatform, type IMPlatform, type PlatformSession } from './platform.js'
+import type {
+  IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMPlatform, IMUser, PlatformSession,
+} from './platform.js'
 
 const session: PlatformSession = {
   platformSessionId: 'session-1',
@@ -13,6 +15,71 @@ const session: PlatformSession = {
   userId: 'me',
   credentials: { token: 'test' },
   metadata: { firstName: 'Current', lastName: 'User' },
+}
+
+class DialogTestPlatform implements IMPlatform {
+  readonly id = 'dialog-test'
+  readonly capabilities = {
+    history: true,
+    send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+    conversations: { groups: false, channels: false, subchannels: false },
+  }
+  private readonly _users: Record<string, IMUser> = {
+    alice: { id: 'alice', firstName: 'Alice', username: 'alice' },
+    bob: { id: 'bob', firstName: 'Bob', username: 'bob' },
+  }
+  private readonly _messages: Record<string, IMMessage[]> = {
+    alice: [
+      this._message('1', 'alice', 'Hey there!', 1_700_000_000),
+      this._message('2', 'alice', 'How are you?', 1_700_000_100),
+    ],
+    bob: [this._message('1', 'bob', 'Meeting at 3?', 1_700_000_200)],
+  }
+  private _sequence = 100
+
+  async subscribe() { return () => {} }
+
+  async sendMessage(
+    _session: PlatformSession,
+    conversation: { id: string },
+    content: IMMessageInput,
+  ): Promise<IMMessage> {
+    const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
+    const message = this._message(String(++this._sequence), conversation.id, text, Math.floor(Date.now() / 1000), true)
+    ;(this._messages[conversation.id] ??= []).push(message)
+    return message
+  }
+
+  async getDialogs(): Promise<IMDialogPage> {
+    return {
+      dialogs: Object.values(this._users).map((user) => ({
+        conversation: { id: user.id, kind: 'direct', title: user.firstName },
+        unreadCount: 0,
+        lastMessage: this._messages[user.id].at(-1),
+      })),
+    }
+  }
+
+  async getHistory(_session: PlatformSession, conversation: { id: string }): Promise<IMHistoryPage> {
+    return { messages: this._messages[conversation.id] ?? [] }
+  }
+
+  async getUser(_session: PlatformSession, id: string): Promise<IMUser | null> {
+    return this._users[id] ?? null
+  }
+
+  private _message(
+    id: string,
+    conversationId: string,
+    text: string,
+    timestamp: number,
+    outgoing = false,
+  ): IMMessage {
+    return {
+      id, conversationId, senderId: outgoing ? 'self' : conversationId,
+      timestamp, outgoing: outgoing || undefined, content: { parts: [{ type: 'text', text }] },
+    }
+  }
 }
 
 function getDialogsRequest(overrides: Partial<tl.messages.RawGetDialogsRequest> = {}): tl.messages.RawGetDialogsRequest {
@@ -47,7 +114,7 @@ function wireRoundTrip<T>(object: T): T {
 
 describe('DialogRpc', () => {
   it('builds serializable dialogs, users, and top messages in newest-first order', async () => {
-    const rpc = new DialogRpc(new StaticDemoPlatform(), session)
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const result = await rpc.getDialogs(getDialogsRequest())
     const decoded = wireRoundTrip(result) as tl.messages.RawDialogs
 
@@ -64,7 +131,7 @@ describe('DialogRpc', () => {
   })
 
   it('paginates dialogs using limit and offset peer', async () => {
-    const rpc = new DialogRpc(new StaticDemoPlatform(), session)
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const first = await rpc.getDialogs(getDialogsRequest({ limit: 1 })) as tl.messages.RawDialogsSlice
     expect(first._).toBe('messages.dialogsSlice')
     expect(first.count).toBe(2)
@@ -81,7 +148,7 @@ describe('DialogRpc', () => {
   })
 
   it('returns a serializable empty pinned-dialog page for folder merging', () => {
-    const result = new DialogRpc(new StaticDemoPlatform(), session).getPinnedDialogs()
+    const result = new DialogRpc(new DialogTestPlatform(), session).getPinnedDialogs()
     expect(result).toMatchObject({
       _: 'messages.peerDialogs', dialogs: [], messages: [], chats: [], users: [],
       state: { _: 'updates.state', pts: 1, qts: 0, seq: 0, unreadCount: 0 },
@@ -90,7 +157,7 @@ describe('DialogRpc', () => {
   })
 
   it('returns filtered history and includes peer plus current user metadata', async () => {
-    const rpc = new DialogRpc(new StaticDemoPlatform(), session)
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
     // A resumed client can use its cached stable user ID before getDialogs has
     // hydrated this DialogRpc instance.
     const aliceId = stableId('peer:alice')
@@ -111,7 +178,7 @@ describe('DialogRpc', () => {
   })
 
   it('hydrates messages by synthetic ID and returns messageEmpty for unknown IDs', async () => {
-    const rpc = new DialogRpc(new StaticDemoPlatform(), session)
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
     const knownId = (dialogs.messages[0] as tl.RawMessage).id
     const result = await rpc.getMessages({
@@ -125,7 +192,7 @@ describe('DialogRpc', () => {
   })
 
   it('builds contacts plus basic and full users with contact metadata', async () => {
-    const rpc = new DialogRpc(new StaticDemoPlatform(), session)
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const contacts = await rpc.getContacts()
     expect(contacts.contacts).toEqual([
       { _: 'contact', userId: rpc.peerTlId('alice'), mutual: true },
@@ -159,7 +226,7 @@ describe('DialogRpc', () => {
   })
 
   it('sends exactly once per random ID and exposes the outgoing message in history', async () => {
-    const platform = new StaticDemoPlatform()
+    const platform = new DialogTestPlatform()
     const rpc = new DialogRpc(platform, session)
     const aliceId = stableId('peer:alice')
     const request = sendMessageRequest(aliceId)
@@ -179,7 +246,7 @@ describe('DialogRpc', () => {
   })
 
   it('validates send capabilities, text length, scheduling, and unknown peers', async () => {
-    const platform = new StaticDemoPlatform()
+    const platform = new DialogTestPlatform()
     const rpc = new DialogRpc(platform, session)
     await rpc.getContacts()
     const aliceId = rpc.peerTlId('alice')
@@ -208,7 +275,7 @@ describe('DialogRpc', () => {
   })
 
   it('rejects unknown peers and platforms without history support', async () => {
-    const rpc = new DialogRpc(new StaticDemoPlatform(), session)
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
     await expect(rpc.getHistory(getHistoryRequest(123456))).rejects.toMatchObject({
       code: 400, text: 'PEER_ID_INVALID',
     } satisfies Partial<RpcError>)

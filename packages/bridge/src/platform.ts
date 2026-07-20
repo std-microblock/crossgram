@@ -199,99 +199,10 @@ export interface IMPlatform {
   ): AsyncIterable<Uint8Array>
 }
 
-/** In-memory adapter used by unit tests and the default development config. */
-export class StaticDemoPlatform implements IMPlatform {
-  readonly id = 'static-demo'
-  readonly capabilities: PlatformCapabilities = {
-    history: true,
-    send: {
-      text: true,
-      images: false,
-      files: false,
-      mixed: false,
-      maxTextLength: 4096,
-      maxMedia: 0,
-    },
-    conversations: { groups: false, channels: false, subchannels: false },
-  }
-
-  private _users: Record<string, IMUser> = {
-    alice: { id: 'alice', firstName: 'Alice', username: 'alice' },
-    bob: { id: 'bob', firstName: 'Bob', username: 'bob' },
-  }
-
-  private _messages: Record<string, IMMessage[]> = {
-    alice: [
-      makeDemoMessage('1', 'alice', 'Hey there!', 1_700_000_000),
-      makeDemoMessage('2', 'alice', 'How are you?', 1_700_000_100),
-    ],
-    bob: [makeDemoMessage('1', 'bob', 'Meeting at 3?', 1_700_000_200)],
-  }
-
-  private _seq = 100
-
-  async subscribe(_session: PlatformSession, _handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe> {
-    return () => {}
-  }
-
-  async sendMessage(
-    _session: PlatformSession,
-    conversation: IMConversationRef,
-    content: IMMessageInput,
-  ): Promise<IMMessage> {
-    const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
-    const message: IMMessage = {
-      id: String(++this._seq),
-      conversationId: conversation.id,
-      senderId: 'self',
-      content: { parts: [{ type: 'text', text }] },
-      timestamp: Math.floor(Date.now() / 1000),
-      outgoing: true,
-    }
-    ;(this._messages[conversation.id] ??= []).push(message)
-    return message
-  }
-
-  async getDialogs(_session: PlatformSession): Promise<IMDialogPage> {
-    return {
-      dialogs: Object.keys(this._users).map((conversationId) => {
-        const messages = this._messages[conversationId] ?? []
-        return {
-          conversation: {
-            id: conversationId,
-            kind: 'direct',
-            title: this._users[conversationId].firstName,
-          },
-          unreadCount: 0,
-          lastMessage: messages[messages.length - 1],
-        }
-      }),
-    }
-  }
-
-  async getHistory(_session: PlatformSession, conversation: IMConversationRef): Promise<IMHistoryPage> {
-    return { messages: this._messages[conversation.id] ?? [] }
-  }
-
-  async getUser(_session: PlatformSession, userId: string): Promise<IMUser | null> {
-    return this._users[userId] ?? null
-  }
-}
-
 export function messageText(message: IMMessage): string {
   return message.content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
 }
 
 export function messageMedia(message: IMMessage): IMMedia[] {
   return message.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
-}
-
-function makeDemoMessage(id: string, conversationId: string, text: string, timestamp: number): IMMessage {
-  return {
-    id,
-    conversationId,
-    senderId: conversationId,
-    content: { parts: [{ type: 'text', text }] },
-    timestamp,
-  }
 }
