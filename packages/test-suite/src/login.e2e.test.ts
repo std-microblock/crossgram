@@ -358,6 +358,8 @@ describe('bridge login e2e', () => {
         'Group B - Mirror Source', 'support thread', 'general', 'Group D - Long History',
       ])
       const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
+      const mirrorSourceGroup = dialogs.chats.find((chat: any) => chat.title === 'Group B - Mirror Source')
+      const mirrorTargetGroup = dialogs.chats.find((chat: any) => chat.title === 'Group C - Mirror Target')
       const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')
       const [supportConversation] = await ctx.database.get('mtproto_im_conversation', {
         platformSessionId: 'ps1', platformConversationId: 'discord-support',
@@ -500,6 +502,25 @@ describe('bridge login e2e', () => {
         'messageMediaPhoto', 'messageMediaDocument',
       ])
       expect(sentAlbumMessages[0].groupedId.toString()).toBe(sentAlbumMessages[1].groupedId.toString())
+
+      const sentToMirrorSource = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerChat', chatId: mirrorSourceGroup.id },
+        message: 'bridge mirror check', randomId: Long.fromNumber(802),
+      }, 44)
+      expect(sentToMirrorSource).toMatchObject({ _: 'updateShortSentMessage', out: true })
+      const mirroredHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChat', chatId: mirrorTargetGroup.id },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 46)
+      expect(mirroredHistory.messages).toMatchObject([{
+        _: 'message', message: 'bridge mirror check', peerId: { _: 'peerChat', chatId: mirrorTargetGroup.id },
+      }])
+      expect(mirroredHistory.users).toContainEqual(expect.objectContaining({
+        firstName: 'Mirror User',
+      }))
 
       const desktopStartupBatch: Array<[object, string]> = [
         [{ _: 'help.getPeerColors', hash: 0 }, 'help.peerColors'],
