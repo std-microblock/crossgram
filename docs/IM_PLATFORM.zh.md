@@ -121,11 +121,28 @@ bridge 会把 Telegram `offsetId/offsetDate/limit` 解析成平台 anchor，并�
 ```ts
 type IMEvent =
   | { type: 'message', conversation: IMConversation, message: IMMessage }
+  | {
+      type: 'message-edit'
+      eventId: string
+      conversation: IMConversation
+      message: IMMessage
+    }
+  | {
+      type: 'message-delete'
+      eventId: string
+      conversation: IMConversation
+      messageIds: string[]
+      timestamp: number
+    }
   | { type: 'conversation', conversation: IMConversation }
   | { type: 'read', conversationId: string, upToMessageId: string }
 ```
 
-message 事件先事务入库并生成投影，再通过持久化 delivery/outbox 保留 `pts/seq`，最后只向绑定该 platform session 的 auth key 推送 update。发送失败时平台重投会复用原 `pts/seq`；发送成功后重复出现同一 source ID 不会重复推送。
+`message-edit` 必须携带编辑后的完整 `IMMessage`，并保持原 message ID；`message-delete.messageIds` 可以使用主 ID 或任意 `sourceIds` alias。mutation 的 `eventId` 是平台侧 opaque 操作 ID，同一 edit/delete 重投时必须保持不变。
+
+message 和 mutation 事件先事务入库并生成/复用投影，再通过持久化 delivery/outbox 保留 `pts/seq`，最后只向绑定该 platform session 的 auth key 推送 `updateNew*`、`updateEdit*` 或 `updateDelete*`。发送失败时平台重投会复用原 `pts/seq`；已成功发布的 event ID 不会重复推送。
+
+撤回采用 tombstone：消息不会再出现在 dialogs/history/getMessages，但外部 ID、alias 和 Telegram message ID 映射继续保留，确保撤回 update、重试和重启后的 ID 都稳定。
 
 adapter 可以提供 at-least-once 事件；不要求自己实现 exactly-once。事件 handler 抛错时不得静默推进不可恢复的远端 cursor。
 
@@ -169,6 +186,9 @@ adapter 必须准确声明 `send.text/images/files/mixed/maxTextLength/maxMedia`
 7. direct/group/channel/subchannel sender 与层级信息完整。
 8. history 与 subscribe 同时返回同一消息时只保留一条。
 9. 服务重启后相同外部 ID 对应相同 Telegram message/group ID。
+10. edit 保持 message/TL ID，delete 从 history 隐藏且重复 mutation 不重复推进 pts。
+11. 至少 1000 条并发 subscribe 事件不丢 message、alias 或 TL projection。
+12. 万级历史只返回请求窗口，深分页不在单次 RPC 中全量入库。
 
 bridge 内部行为测试位于 `packages/bridge/src`，包括 `message-store.test.ts`、`platform-manager.test.ts`、`media-projection.test.ts`、`media-send.test.ts` 和 `conversation-kinds.test.ts`。
 
@@ -179,8 +199,8 @@ test-suite -> platform-static -> bridge -> mtproto
            -> bridge -----------^
 ```
 
-- `platform-static.test.ts` 直接验证 Cordis 多例注册/独立卸载、分页、四类 conversation、混合媒体、逐 chunk 进度、range 下载、subscribe 背压、去重、超长 opaque ID、取消和错误行为。
-- `login.e2e.test.ts` 通过真实 MTProto socket 验证登录/重连/重启、IMMessage 入库、群相册 TL 投影、文件上传下载、channel/subchannel 持久化和 push-only 平台。
+- `platform-static.test.ts` 直接验证 Cordis 多例、Group A 每秒 new/edit/delete、Group B→C 用户镜像、Group D 万级分页、混合媒体、传输进度、subscribe 背压和错误行为。
+- `login.e2e.test.ts` 通过真实 MTProto socket 验证登录/重连/重启、new/edit/delete 推送和 tombstone、B→C bridge history、万级历史窗口入库、群相册、文件传输及 channel/subchannel。
 
 运行 adapter 契约与跨包 e2e：
 
