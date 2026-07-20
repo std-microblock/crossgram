@@ -1,7 +1,6 @@
 import type { Context } from 'cordis'
-import type { JsonObject, JsonValue } from './platform.js'
+import type { IMConversationKind, IMMediaKind, JsonObject, JsonValue } from './platform.js'
 
-/** A pending virtual-phone login (created by the HTTP auth flow, consumed by auth.signIn). */
 export interface AuthSessionRow {
   id: string
   virtualPhone: string
@@ -11,7 +10,6 @@ export interface AuthSessionRow {
   used: boolean
 }
 
-/** An authenticated IM-platform session. */
 export interface PlatformSessionRow {
   id: string
   platformId: string
@@ -22,11 +20,95 @@ export interface PlatformSessionRow {
   createdAt: Date
 }
 
-/** Durable mapping used to restore bridge identity from a resumed auth key. */
 export interface AuthBindingRow {
   authKeyId: string
   platformId: string
   platformSessionId: string
+}
+
+export interface IMConversationRow {
+  id: number
+  platformSessionId: string
+  platformConversationId: string
+  kind: IMConversationKind
+  title: string
+  parentPlatformConversationId: string | null
+  spacePlatformId: string | null
+  metadata: JsonObject
+  updatedAt: Date
+}
+
+export interface IMUserRow {
+  id: number
+  platformSessionId: string
+  platformUserId: string
+  firstName: string
+  lastName: string | null
+  username: string | null
+  metadata: JsonObject
+  updatedAt: Date
+}
+
+export interface IMMessageRow {
+  id: number
+  platformSessionId: string
+  conversationId: number
+  primaryPlatformMessageId: string
+  senderPlatformUserId: string
+  text: string
+  timestamp: number
+  outgoing: boolean
+  platformGroupId: string | null
+  metadata: JsonObject
+  createdAt: Date
+  updatedAt: Date
+}
+
+export interface IMMessageAliasRow {
+  id: number
+  platformSessionId: string
+  conversationId: number
+  platformMessageId: string
+  messageId: number
+  ordinal: number
+}
+
+export interface IMMediaRow {
+  id: number
+  messageId: number
+  ordinal: number
+  partIndex: number
+  platformMediaId: string
+  kind: IMMediaKind
+  name: string | null
+  mimeType: string | null
+  size: number | null
+  width: number | null
+  height: number | null
+  locator: JsonValue
+}
+
+export interface TlMessagePartRow {
+  id: number
+  messageId: number
+  mediaId: number | null
+  scope: string
+  tlMessageId: number
+  groupedId: string | null
+  ordinal: number
+}
+
+export interface IdCounterRow {
+  scope: string
+  nextId: number
+}
+
+export interface UpdateStateRow {
+  platformSessionId: string
+  pts: number
+  qts: number
+  seq: number
+  date: number
 }
 
 declare module '@cordisjs/plugin-database' {
@@ -34,33 +116,98 @@ declare module '@cordisjs/plugin-database' {
     mtproto_auth_session: AuthSessionRow
     mtproto_platform_session: PlatformSessionRow
     mtproto_auth_binding: AuthBindingRow
+    mtproto_im_conversation: IMConversationRow
+    mtproto_im_user: IMUserRow
+    mtproto_im_message: IMMessageRow
+    mtproto_im_message_alias: IMMessageAliasRow
+    mtproto_im_media: IMMediaRow
+    mtproto_tl_message_part: TlMessagePartRow
+    mtproto_id_counter: IdCounterRow
+    mtproto_update_state: UpdateStateRow
   }
 }
 
-/** Register the bridge's minato models on `ctx.model`. */
+/** Register all bridge models. The project is pre-release, so these are the canonical schemas. */
 export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_auth_session', {
-    id: 'string',
-    virtualPhone: 'string',
-    loginCode: 'string',
-    platformId: 'string',
-    platformSessionId: 'string',
-    used: 'boolean',
+    id: 'string', virtualPhone: 'string', loginCode: 'string', platformId: 'string',
+    platformSessionId: 'string', used: 'boolean',
   }, { primary: 'id' })
 
   ctx.model.extend('mtproto_platform_session', {
-    id: 'string',
-    platformId: 'string',
-    userId: 'string',
-    credentials: 'json',
-    metadata: 'json',
-    active: 'boolean',
-    createdAt: 'timestamp',
+    id: 'string', platformId: 'string', userId: 'string', credentials: 'json', metadata: 'json',
+    active: 'boolean', createdAt: 'timestamp',
   }, { primary: 'id' })
 
   ctx.model.extend('mtproto_auth_binding', {
-    authKeyId: 'string',
-    platformId: 'string',
-    platformSessionId: 'string',
+    authKeyId: 'string', platformId: 'string', platformSessionId: 'string',
   }, { primary: 'authKeyId' })
+
+  ctx.model.extend('mtproto_im_conversation', {
+    id: 'unsigned', platformSessionId: 'string', platformConversationId: 'text', kind: 'string', title: 'text',
+    parentPlatformConversationId: { type: 'text', nullable: true },
+    spacePlatformId: { type: 'text', nullable: true }, metadata: 'json', updatedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'platformConversationId']],
+    indexes: ['platformSessionId'],
+  })
+
+  ctx.model.extend('mtproto_im_user', {
+    id: 'unsigned', platformSessionId: 'string', platformUserId: 'text', firstName: 'text',
+    lastName: { type: 'text', nullable: true }, username: { type: 'text', nullable: true },
+    metadata: 'json', updatedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'platformUserId']],
+    indexes: ['platformSessionId'],
+  })
+
+  ctx.model.extend('mtproto_im_message', {
+    id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
+    primaryPlatformMessageId: 'text', senderPlatformUserId: 'text', text: 'text', timestamp: 'integer',
+    outgoing: 'boolean', platformGroupId: { type: 'text', nullable: true }, metadata: 'json',
+    createdAt: 'timestamp', updatedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'conversationId', 'primaryPlatformMessageId']],
+    indexes: [['conversationId', 'timestamp']],
+  })
+
+  ctx.model.extend('mtproto_im_message_alias', {
+    id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned', platformMessageId: 'text',
+    messageId: 'unsigned', ordinal: 'unsigned',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'conversationId', 'platformMessageId']],
+    indexes: ['messageId'],
+  })
+
+  ctx.model.extend('mtproto_im_media', {
+    id: 'unsigned', messageId: 'unsigned', ordinal: 'unsigned', partIndex: 'unsigned', platformMediaId: 'text',
+    kind: 'string', name: { type: 'text', nullable: true }, mimeType: { type: 'text', nullable: true },
+    size: { type: 'unsigned', nullable: true }, width: { type: 'unsigned', nullable: true },
+    height: { type: 'unsigned', nullable: true }, locator: 'json',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['messageId', 'ordinal']],
+    indexes: ['messageId'],
+  })
+
+  ctx.model.extend('mtproto_tl_message_part', {
+    id: 'unsigned', messageId: 'unsigned', mediaId: { type: 'unsigned', nullable: true }, scope: 'string',
+    tlMessageId: 'unsigned', groupedId: { type: 'string', nullable: true }, ordinal: 'unsigned',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['scope', 'tlMessageId'], ['messageId', 'ordinal']],
+    indexes: ['messageId'],
+  })
+
+  ctx.model.extend('mtproto_id_counter', {
+    scope: 'string', nextId: 'unsigned',
+  }, { primary: 'scope' })
+
+  ctx.model.extend('mtproto_update_state', {
+    platformSessionId: 'string', pts: 'unsigned', qts: 'unsigned', seq: 'unsigned', date: 'unsigned',
+  }, { primary: 'platformSessionId' })
 }

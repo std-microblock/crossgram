@@ -9,6 +9,9 @@ import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
 
+export * from './platform.js'
+export * from './message-store.js'
+
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
 

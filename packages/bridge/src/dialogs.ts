@@ -1,6 +1,6 @@
 import type { tl } from '@mtcute/core'
 import { RpcError } from '@mtproto-relay/mtproto'
-import type { IMDialog, IMMessage, IMPlatform, IMUser, PlatformSession } from './platform.js'
+import { messageText, type IMDialog, type IMMessage, type IMPlatform, type IMUser, type PlatformSession } from './platform.js'
 import { makeUser } from './synthetic.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
@@ -36,18 +36,18 @@ export class DialogRpc {
 
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
     const getDialogs = this._requireHistory(this._platform.getDialogs)
-    const all = (await getDialogs.call(this._platform, this._session))
+    const all = (await getDialogs.call(this._platform, this._session)).dialogs
       .slice()
       .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0))
 
     // Allocate each peer's message IDs oldest-first before exposing topMessage.
     // This preserves Telegram's monotonic ID semantics for offset/max/min filters.
-    await Promise.all(all.map((dialog) => this._loadHistory(dialog.peerId)))
+    await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
     const materialized = await Promise.all(all.map((dialog) => this._materializeDialog(dialog)))
     let start = 0
     if (req.offsetPeer._ === 'inputPeerUser') {
       const offsetPeer = this._tlToPeer.get(req.offsetPeer.userId)
-      const index = offsetPeer === undefined ? -1 : materialized.findIndex((item) => item.source.peerId === offsetPeer)
+      const index = offsetPeer === undefined ? -1 : materialized.findIndex((item) => item.source.conversation.id === offsetPeer)
       if (index >= 0) start = index + 1
     } else if (req.offsetId > 0 || req.offsetDate > 0) {
       const index = materialized.findIndex((item) =>
@@ -136,7 +136,7 @@ export class DialogRpc {
 
   async getContacts(): Promise<tl.contacts.RawContacts> {
     const dialogs = await this._loadDialogs()
-    const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.peerId, dialog.title)))
+    const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
     return {
       _: 'contacts.contacts',
       contacts: users.map((user) => ({ _: 'contact', userId: user.id, mutual: true })),
@@ -187,17 +187,21 @@ export class DialogRpc {
   }
 
   private async _sendMessage(req: SendMessageRequest): Promise<tl.RawUpdateShortSentMessage> {
-    if (!this._platform.capabilities.sendMessage) throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
+    if (!this._platform.capabilities.send.text) throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
     if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
-    if (Array.from(req.message).length > this._platform.capabilities.maxMessageLength) {
+    if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
       throw new RpcError(400, 'MESSAGE_TOO_LONG')
     }
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
 
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
-    const sent = await this._platform.sendMessage(this._session, peerId, req.message)
-    const source: IMMessage = { ...sent, peerId, outgoing: true }
+    const sent = await this._platform.sendMessage(
+      this._session,
+      { id: peerId },
+      { parts: [{ type: 'text', text: req.message }] },
+    )
+    const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     const id = this._messageId(peerId, source.id)
     const pts = ++this._pts
     return {
@@ -206,9 +210,10 @@ export class DialogRpc {
   }
 
   private async _materializeDialog(source: IMDialog) {
-    const peerId = this._peerId(source.peerId)
-    const user = await this._getPeerUser(source.peerId, source.title)
-    const topMessage = source.lastMessage ? this._messageId(source.peerId, source.lastMessage.id) : 0
+    const platformPeerId = source.conversation.id
+    const peerId = this._peerId(platformPeerId)
+    const user = await this._getPeerUser(platformPeerId, source.conversation.title)
+    const topMessage = source.lastMessage ? this._messageId(platformPeerId, source.lastMessage.id) : 0
     const message = source.lastMessage ? this._makeMessage(source.lastMessage, topMessage) : undefined
     const dialog: tl.RawDialog = {
       _: 'dialog',
@@ -227,7 +232,7 @@ export class DialogRpc {
 
   private async _loadHistory(peerId: string) {
     const getHistory = this._requireHistory(this._platform.getHistory)
-    const history = await getHistory.call(this._platform, this._session, peerId)
+    const history = (await getHistory.call(this._platform, this._session, { id: peerId })).messages
     for (const source of history.slice().sort((a, b) => a.timestamp - b.timestamp)) {
       this._messageId(peerId, source.id)
     }
@@ -238,17 +243,17 @@ export class DialogRpc {
 
   private async _hydrateAllMessages(): Promise<void> {
     const dialogs = await this._loadDialogs()
-    await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.peerId)))
+    await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
   }
 
   private async _hydratePeers(): Promise<void> {
     const dialogs = await this._loadDialogs()
-    for (const dialog of dialogs) this._peerId(dialog.peerId)
+    for (const dialog of dialogs) this._peerId(dialog.conversation.id)
   }
 
   private async _loadDialogs(): Promise<IMDialog[]> {
     const getDialogs = this._requireHistory(this._platform.getDialogs)
-    return getDialogs.call(this._platform, this._session)
+    return (await getDialogs.call(this._platform, this._session)).dialogs
   }
 
   private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {
@@ -260,7 +265,7 @@ export class DialogRpc {
   }
 
   private _makeMessage(source: IMMessage, tlId: number): tl.RawMessage {
-    const peerId = this._peerId(source.peerId)
+    const peerId = this._peerId(source.conversationId)
     return {
       _: 'message',
       out: source.outgoing || undefined,
@@ -268,7 +273,7 @@ export class DialogRpc {
       fromId: { _: 'peerUser', userId: source.outgoing ? this._selfId : this._peerId(source.senderId) },
       peerId: { _: 'peerUser', userId: peerId },
       date: source.timestamp,
-      message: source.text ?? '',
+      message: messageText(source),
     } as tl.RawMessage
   }
 

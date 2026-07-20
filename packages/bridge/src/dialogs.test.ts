@@ -196,7 +196,7 @@ describe('DialogRpc', () => {
     const disabled: IMPlatform = {
       ...platform,
       id: 'disabled',
-      capabilities: { ...platform.capabilities, sendMessage: false },
+      capabilities: { ...platform.capabilities, send: { ...platform.capabilities.send, text: false } },
       subscribe: platform.subscribe.bind(platform),
       sendMessage: platform.sendMessage.bind(platform),
       getDialogs: platform.getDialogs.bind(platform),
@@ -215,7 +215,11 @@ describe('DialogRpc', () => {
 
     const platform: IMPlatform = {
       id: 'push-only',
-      capabilities: { history: false, sendMessage: true, groups: false, maxMessageLength: 100 },
+      capabilities: {
+        history: false,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 100, maxMedia: 0 },
+        conversations: { groups: false, channels: false, subchannels: false },
+      },
       async subscribe() { return () => {} },
       async sendMessage() { throw new Error('unused') },
     }

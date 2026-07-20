@@ -1,23 +1,28 @@
-/**
- * IM platform abstraction. Auth is handled out-of-band via the HTTP API
- * (virtual phone + login code), so a platform only implements messaging + push
- * (required) and history (optional, per capabilities).
- */
-
-export interface PlatformCapabilities {
-  /** Can fetch dialog list / message history. */
-  history: boolean
-  /** Can send messages. */
-  sendMessage: boolean
-  /** Supports group chats. */
-  groups: boolean
-  maxMessageLength: number
-}
+/** Platform-neutral IM contract used by the bridge domain layer. */
 
 export type JsonValue = boolean | number | string | null | JsonObject | JsonValue[]
 
 export interface JsonObject {
   [key: string]: JsonValue
+}
+
+export type IMConversationKind = 'direct' | 'group' | 'channel'
+
+export interface PlatformCapabilities {
+  history: boolean
+  send: {
+    text: boolean
+    images: boolean
+    files: boolean
+    mixed: boolean
+    maxTextLength: number
+    maxMedia: number
+  }
+  conversations: {
+    groups: boolean
+    channels: boolean
+    subchannels: boolean
+  }
 }
 
 /** An authenticated platform session (created by the HTTP auth flow). */
@@ -34,59 +39,161 @@ export interface IMUser {
   firstName: string
   lastName?: string
   username?: string
+  avatarUrl?: string
+  metadata?: JsonObject
+}
+
+export interface IMConversationRef {
+  id: string
+}
+
+export interface IMConversation extends IMConversationRef {
+  kind: IMConversationKind
+  title: string
+  /** Parent channel/category/thread owner on hierarchical platforms such as Discord. */
+  parentId?: string
+  /** Guild, workspace, or other top-level platform container. */
+  spaceId?: string
+  metadata?: JsonObject
+}
+
+export type IMMediaKind = 'image' | 'file'
+
+export interface IMMedia {
+  /** Opaque platform media ID. It is never parsed or truncated by the bridge. */
+  id: string
+  kind: IMMediaKind
+  name?: string
+  mimeType?: string
+  size?: number
+  width?: number
+  height?: number
+  /** Opaque data needed by downloadMedia(). */
+  locator?: JsonValue
+}
+
+export interface IMMediaSource {
+  size?: number
+  stream(): AsyncIterable<Uint8Array>
+}
+
+export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
+  source: IMMediaSource
+}
+
+export type IMMessagePart =
+  | { type: 'text', text: string }
+  | { type: 'media', media: IMMedia }
+
+export type IMMessageInputPart =
+  | { type: 'text', text: string }
+  | { type: 'media', media: IMMediaInput }
+
+export interface IMMessageContent {
+  parts: IMMessagePart[]
+}
+
+export interface IMMessageInput {
+  parts: IMMessageInputPart[]
+  replyToId?: string
 }
 
 export interface IMMessage {
+  /** Logical platform message ID. Strings may be arbitrarily long. */
   id: string
-  peerId: string
+  /** Physical platform IDs represented by this logical message, for example a Telegram album. */
+  sourceIds?: string[]
+  conversationId: string
   senderId: string
-  text?: string
+  content: IMMessageContent
   timestamp: number
   outgoing?: boolean
+  /** Opaque platform grouping key, retained for album reconciliation. */
+  groupId?: string
+  metadata?: JsonObject
 }
 
 export interface IMDialog {
-  peerId: string
-  title: string
+  conversation: IMConversation
   unreadCount: number
   lastMessage?: IMMessage
 }
 
-export type IMEvent =
-  | { type: 'message', message: IMMessage }
-  | { type: 'read', peerId: string, upToMessageId: string }
+export interface IMPageQuery {
+  cursor?: string
+  limit?: number
+}
 
-export type Unsubscribe = () => void
+export interface IMDialogPage {
+  dialogs: IMDialog[]
+  nextCursor?: string
+}
+
+export interface IMHistoryPage {
+  messages: IMMessage[]
+  nextCursor?: string
+}
+
+export interface IMTransferProgress {
+  phase: 'upload' | 'download'
+  mediaIndex: number
+  transferredBytes: number
+  totalBytes?: number
+}
+
+export interface IMTransferOptions {
+  signal?: AbortSignal
+  onProgress?: (progress: IMTransferProgress) => void | Promise<void>
+}
+
+export type IMEvent =
+  | { type: 'message', message: IMMessage, conversation?: IMConversation }
+  | { type: 'conversation', conversation: IMConversation }
+  | { type: 'read', conversationId: string, upToMessageId: string }
+
+export type Unsubscribe = () => void | Promise<void>
 
 export interface IMPlatform {
   readonly id: string
   readonly capabilities: PlatformCapabilities
 
-  /** Subscribe to push events (required). */
   subscribe(session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe>
 
-  /** Send a message (required). */
-  sendMessage(session: PlatformSession, peerId: string, text: string): Promise<IMMessage>
+  sendMessage(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    content: IMMessageInput,
+    options?: IMTransferOptions,
+  ): Promise<IMMessage>
 
-  /** Fetch dialogs (only if capabilities.history). */
-  getDialogs?(session: PlatformSession): Promise<IMDialog[]>
-  /** Fetch history for a peer (only if capabilities.history). */
-  getHistory?(session: PlatformSession, peerId: string): Promise<IMMessage[]>
-  /** Look up a user. */
+  getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage>
+  getHistory?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    query?: IMPageQuery,
+  ): Promise<IMHistoryPage>
   getUser?(session: PlatformSession, userId: string): Promise<IMUser | null>
+  downloadMedia?(
+    session: PlatformSession,
+    media: IMMedia,
+    options?: IMTransferOptions,
+  ): AsyncIterable<Uint8Array>
 }
 
-/**
- * In-memory demo platform with two prefilled dialogs (Alice, Bob). Used to
- * exercise the full bridge flow (login → dialogs → send) without a real backend.
- */
+/** In-memory adapter used by unit tests and the default development config. */
 export class StaticDemoPlatform implements IMPlatform {
   readonly id = 'static-demo'
   readonly capabilities: PlatformCapabilities = {
     history: true,
-    sendMessage: true,
-    groups: false,
-    maxMessageLength: 4096,
+    send: {
+      text: true,
+      images: false,
+      files: false,
+      mixed: false,
+      maxTextLength: 4096,
+      maxMedia: 0,
+    },
+    conversations: { groups: false, channels: false, subchannels: false },
   }
 
   private _users: Record<string, IMUser> = {
@@ -96,51 +203,76 @@ export class StaticDemoPlatform implements IMPlatform {
 
   private _messages: Record<string, IMMessage[]> = {
     alice: [
-      { id: '1', peerId: 'alice', senderId: 'alice', text: 'Hey there!', timestamp: 1_700_000_000 },
-      { id: '2', peerId: 'alice', senderId: 'alice', text: 'How are you?', timestamp: 1_700_000_100 },
+      makeDemoMessage('1', 'alice', 'Hey there!', 1_700_000_000),
+      makeDemoMessage('2', 'alice', 'How are you?', 1_700_000_100),
     ],
-    bob: [
-      { id: '1', peerId: 'bob', senderId: 'bob', text: 'Meeting at 3?', timestamp: 1_700_000_200 },
-    ],
+    bob: [makeDemoMessage('1', 'bob', 'Meeting at 3?', 1_700_000_200)],
   }
 
   private _seq = 100
 
   async subscribe(_session: PlatformSession, _handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe> {
-    // Static platform pushes nothing; return a no-op unsubscribe.
     return () => {}
   }
 
-  async sendMessage(_session: PlatformSession, peerId: string, text: string): Promise<IMMessage> {
-    const msg: IMMessage = {
+  async sendMessage(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    content: IMMessageInput,
+  ): Promise<IMMessage> {
+    const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
+    const message: IMMessage = {
       id: String(++this._seq),
-      peerId,
+      conversationId: conversation.id,
       senderId: 'self',
-      text,
+      content: { parts: [{ type: 'text', text }] },
       timestamp: Math.floor(Date.now() / 1000),
       outgoing: true,
     }
-    ;(this._messages[peerId] ??= []).push(msg)
-    return msg
+    ;(this._messages[conversation.id] ??= []).push(message)
+    return message
   }
 
-  async getDialogs(_session: PlatformSession): Promise<IMDialog[]> {
-    return Object.keys(this._users).map((peerId) => {
-      const msgs = this._messages[peerId] ?? []
-      return {
-        peerId,
-        title: this._users[peerId].firstName,
-        unreadCount: 0,
-        lastMessage: msgs[msgs.length - 1],
-      }
-    })
+  async getDialogs(_session: PlatformSession): Promise<IMDialogPage> {
+    return {
+      dialogs: Object.keys(this._users).map((conversationId) => {
+        const messages = this._messages[conversationId] ?? []
+        return {
+          conversation: {
+            id: conversationId,
+            kind: 'direct',
+            title: this._users[conversationId].firstName,
+          },
+          unreadCount: 0,
+          lastMessage: messages[messages.length - 1],
+        }
+      }),
+    }
   }
 
-  async getHistory(_session: PlatformSession, peerId: string): Promise<IMMessage[]> {
-    return this._messages[peerId] ?? []
+  async getHistory(_session: PlatformSession, conversation: IMConversationRef): Promise<IMHistoryPage> {
+    return { messages: this._messages[conversation.id] ?? [] }
   }
 
   async getUser(_session: PlatformSession, userId: string): Promise<IMUser | null> {
     return this._users[userId] ?? null
+  }
+}
+
+export function messageText(message: IMMessage): string {
+  return message.content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
+}
+
+export function messageMedia(message: IMMessage): IMMedia[] {
+  return message.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
+}
+
+function makeDemoMessage(id: string, conversationId: string, text: string, timestamp: number): IMMessage {
+  return {
+    id,
+    conversationId,
+    senderId: conversationId,
+    content: { parts: [{ type: 'text', text }] },
+    timestamp,
   }
 }
