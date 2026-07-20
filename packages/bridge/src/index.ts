@@ -3,7 +3,7 @@ import type { tl } from '@mtcute/core'
 import { randomBytes } from 'node:crypto'
 import Long from 'long'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
-import { StaticDemoPlatform, type IMPlatform, type PlatformSession } from './platform.js'
+import { StaticDemoPlatform, type IMPlatform, type JsonValue, type PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
@@ -43,13 +43,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   // ── HTTP auth: mint a virtual phone + login code for a platform identity ──
   ctx.server.post(`${apiPrefix}/auth/:platform/complete`, async (req, res) => {
     const body = (await req.json().catch(() => ({}))) as {
-      credentials?: unknown
+      credentials?: JsonValue
       metadata?: { firstName?: string, lastName?: string, username?: string, userId?: string }
     }
     const platformId = (req.params as { platform: string }).platform
     if (!body.credentials) {
       res.status = 400
-      return res.json({ error: 'credentials required' })
+      res.json({ error: 'credentials required' })
+      return
     }
 
     const sessionId = randomHex(16)
@@ -82,7 +83,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       used: false,
     })
 
-    return res.json({ sessionId, virtualPhone: `+${virtualPhone}`, loginCode, platform: platformId, userId })
+    res.json({ sessionId, virtualPhone: `+${virtualPhone}`, loginCode, platform: platformId, userId })
   })
 
   // ── Synthetic / config ──

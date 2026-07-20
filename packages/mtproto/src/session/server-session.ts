@@ -320,7 +320,7 @@ export class ServerSession {
     // so we handle it manually.
     const savedPos = reader.pos
     const constructorId = reader.uint()
-    let obj: { _: string, [key: string]: unknown }
+    let obj: { _: string }
 
     if (constructorId === 0x73f1f8dc) {
       // msg_container: vector of { msg_id, seqno, length, body }
@@ -338,7 +338,7 @@ export class ServerSession {
 
     // Not a container — restore position and read normally
     reader.pos = savedPos
-    obj = reader.object() as mtp.TlObject
+    obj = reader.object() as { _: string }
     const objId = obj._
 
     this._log.verbose('<<< %s (msg_id=%s, seq=%d)', objId, msgId.toString(16), seqNo)
@@ -349,26 +349,26 @@ export class ServerSession {
 
     switch (objId) {
       case 'mt_ping':
-        this._handlePing(obj as mtp.RawMt_ping)
+        this._handlePing(obj as unknown as mtp.RawMt_ping)
         break
 
       case 'mt_ping_delay_disconnect':
-        this._handlePingDelayDisconnect(obj as mtp.RawMt_ping_delay_disconnect)
+        this._handlePingDelayDisconnect(obj as unknown as mtp.RawMt_ping_delay_disconnect)
         break
 
       case 'mt_msgs_ack':
         break
 
       case 'mt_get_future_salts':
-        this._handleGetFutureSalts(msgId, obj as mtp.RawMt_get_future_salts)
+        this._handleGetFutureSalts(msgId, obj as unknown as mtp.RawMt_get_future_salts)
         break
 
       case 'mt_msgs_state_req':
-        this._handleMsgsStateReq(msgId, obj as mtp.RawMt_msgs_state_req)
+        this._handleMsgsStateReq(msgId, obj as unknown as mtp.RawMt_msgs_state_req)
         break
 
       case 'mt_destroy_session':
-        this._handleDestroySession(msgId, obj as mtp.RawMt_destroy_session)
+        this._handleDestroySession(msgId, obj as unknown as mtp.RawMt_destroy_session)
         break
 
       case 'mt_destroy_auth_key':

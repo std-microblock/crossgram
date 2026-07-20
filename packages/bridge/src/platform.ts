@@ -14,13 +14,19 @@ export interface PlatformCapabilities {
   maxMessageLength: number
 }
 
+export type JsonValue = boolean | number | string | null | JsonObject | JsonValue[]
+
+export interface JsonObject {
+  [key: string]: JsonValue
+}
+
 /** An authenticated platform session (created by the HTTP auth flow). */
 export interface PlatformSession {
   platformSessionId: string
   platformId: string
   userId: string
-  credentials: unknown
-  metadata: Record<string, unknown>
+  credentials: JsonValue
+  metadata: JsonObject
 }
 
 export interface IMUser {

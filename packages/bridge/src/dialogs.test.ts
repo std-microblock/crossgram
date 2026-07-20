@@ -103,9 +103,9 @@ describe('DialogRpc', () => {
     const newest = full.messages[0] as tl.RawMessage
     const oldest = full.messages[1] as tl.RawMessage
     expect(newest.id).toBeGreaterThan(oldest.id)
-    const olderOnly = await rpc.getHistory(getHistoryRequest(aliceId, { offsetDate: newest.date }))
+    const olderOnly = await rpc.getHistory(getHistoryRequest(aliceId, { offsetDate: newest.date })) as tl.messages.RawMessages
     expect(olderOnly.messages).toHaveLength(1)
-    const afterNewest = await rpc.getHistory(getHistoryRequest(aliceId, { offsetId: newest.id }))
+    const afterNewest = await rpc.getHistory(getHistoryRequest(aliceId, { offsetId: newest.id })) as tl.messages.RawMessages
     expect(afterNewest.messages).toEqual([oldest])
     expect(() => wireRoundTrip(full)).not.toThrow()
   })

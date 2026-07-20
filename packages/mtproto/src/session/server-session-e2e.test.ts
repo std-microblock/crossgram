@@ -332,7 +332,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const getUsers = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'users.getUsers',
         id: [{ _: 'inputUserSelf' }],
-      })
+      } as { _: string })
       await client.send(clientEncrypt(perm, getUsers, perm.salt, sessionLong, 6))
 
       const users = await readRpcResult(client, perm)
@@ -419,7 +419,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
 
       const wrapped = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'invokeWithLayer', layer: 224, query: getDialogs,
-      })
+      } as { _: string })
       await client.send(clientEncrypt(perm, wrapped, perm.salt, sessionLong, 8))
       const first = await readRpcResult(client, perm, ayugramReaderMap!)
       expect(first.messages).toMatchObject([{ _: 'message', message: 'layer:224' }])
@@ -432,7 +432,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
 
       const getFullUser = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'users.getFullUser', id: { _: 'inputUserSelf' },
-      })
+      } as { _: string })
       await client.send(clientEncrypt(perm, getFullUser, perm.salt, sessionLong, 16))
       const fullUser = await readRpcResult(client, perm, ayugramReaderMap!)
       expect(fullUser).toMatchObject({
@@ -452,7 +452,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const c1 = await TestClient.connect(port)
       const perm = await doClientHandshake(c1, pubKey, false)
       const firstSession = new Long(0x11111111, 0x11111111)
-      const appConfigReq = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getAppConfig', hash: 0 })
+      const appConfigReq = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getAppConfig', hash: 0 } as { _: string })
       await c1.send(clientEncrypt(perm, appConfigReq, perm.salt, firstSession, 4))
       const firstConfig = await readRpcResult(c1, perm)
       expect(firstConfig).toMatchObject({ _: 'help.appConfig', hash: 1 })

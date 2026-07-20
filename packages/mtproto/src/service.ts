@@ -15,12 +15,6 @@ import { RpcDispatcher, type RpcHandler } from './rpc/dispatcher.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
 import { createCordisLogManager } from './cordis-logger.js'
 
-declare module 'cordis' {
-  interface Context {
-    mtproto: Mtproto
-  }
-}
-
 export interface MtprotoConfig {
   /** TCP port to listen on (default: 4430; 0 = ephemeral) */
   port?: number

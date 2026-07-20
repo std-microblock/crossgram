@@ -1,4 +1,5 @@
 import type { Context } from 'cordis'
+import type { JsonObject, JsonValue } from './platform.js'
 
 /** A pending virtual-phone login (created by the HTTP auth flow, consumed by auth.signIn). */
 export interface AuthSessionRow {
@@ -15,8 +16,8 @@ export interface PlatformSessionRow {
   id: string
   platformId: string
   userId: string
-  credentials: unknown
-  metadata: Record<string, unknown>
+  credentials: JsonValue
+  metadata: JsonObject
   active: boolean
   createdAt: Date
 }

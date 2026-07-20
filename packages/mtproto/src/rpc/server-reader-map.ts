@@ -1,5 +1,5 @@
 import type { TlReaderMap } from '@mtcute/tl-runtime'
-import { parseFullTlSchema, parseTlToEntries, generateReaderCodeForTlEntries } from '@mtcute/tl-utils'
+import { parseFullTlSchema, parseTlToEntries, generateReaderCodeForTlEntries, type TlEntry } from '@mtcute/tl-utils'
 import { __tlReaderMap } from '@mtcute/core/utils.js'
 import apiSchemaRaw from '@mtcute/core/tl/api-schema.json' with { type: 'json' }
 import mtpSchemaRaw from '@mtcute/core/tl/mtp-schema.json' with { type: 'json' }
@@ -35,8 +35,10 @@ req_pq#60469778 nonce:int128 = ResPQ;
 export function getServerReaderMap(): TlReaderMap {
   if (_serverReaderMap) return _serverReaderMap
 
-  const apiSchema = parseFullTlSchema(apiSchemaRaw.e ?? apiSchemaRaw)
-  const mtpSchema = parseFullTlSchema(mtpSchemaRaw)
+  // mtcute publishes schemas as generated JSON. The JSON module declaration
+  // cannot express its TL entry shape, so verify it at this boundary.
+  const apiSchema = parseFullTlSchema((apiSchemaRaw.e ?? apiSchemaRaw) as unknown as TlEntry[])
+  const mtpSchema = parseFullTlSchema(mtpSchemaRaw as unknown as TlEntry[])
 
   // Merge mtcute's MTProto entries with the server-only constructors it omits.
   // Keep mtcute's entries authoritative (so field shapes match its generated

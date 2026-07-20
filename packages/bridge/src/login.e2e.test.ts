@@ -211,7 +211,7 @@ async function startApp(options: {
   const fibers = [
     ctx.plugin(Database),
     ctx.plugin(SQLiteDriver, { path: options.databasePath ?? ':memory:' }),
-    ctx.plugin(Server, { port: 0 }),
+    ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
     ctx.plugin(Mtproto, {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,
