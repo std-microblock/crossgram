@@ -412,6 +412,7 @@ describe('bridge login e2e', () => {
       expect(groupHistory.messages[0].groupedId.toString())
         .toBe(groupHistory.messages[1].groupedId.toString())
       const seededDocument = groupHistory.messages[0].media.document
+      const seededPhoto = groupHistory.messages[1].media.photo
       const seededFile = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 64,
         location: {
@@ -420,6 +421,14 @@ describe('bridge login e2e', () => {
         },
       }, 32)
       expect(new TextDecoder().decode(seededFile.bytes)).toBe('static seeded file')
+      const seededImage = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPhotoFileLocation', id: seededPhoto.id, accessHash: seededPhoto.accessHash,
+          fileReference: seededPhoto.fileReference, thumbSize: 'x',
+        },
+      }, 34)
+      expect([...seededImage.bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
 
       const longHistoryFirst = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
@@ -455,7 +464,7 @@ describe('bridge login e2e', () => {
         _: 'messages.sendMessage',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         message: 'Sent through MTProto', randomId: Long.fromNumber(987654321),
-      }, 34)
+      }, 37)
       expect(sentMessage).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
 
       const updatedHistory = await callRpc(resumed, key, resumedSid, {
@@ -463,7 +472,7 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 36)
+      }, 39)
       expect(updatedHistory.messages[0]).toMatchObject({
         _: 'message', id: sentMessage.id, out: true, message: 'Sent through MTProto',
       })
@@ -471,11 +480,11 @@ describe('bridge login e2e', () => {
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(800), filePart: 0,
         bytes: new Uint8Array([137, 80, 78, 71, 9, 8, 7]),
-      }, 38)).toEqual({ _: 'boolTrue' })
+      }, 41)).toEqual({ _: 'boolTrue' })
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(801), filePart: 0,
         bytes: new TextEncoder().encode('static socket file'),
-      }, 40)).toEqual({ _: 'boolTrue' })
+      }, 43)).toEqual({ _: 'boolTrue' })
       const sentAlbum = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMultiMedia', peer: { _: 'inputPeerChat', chatId: group.id },
         multiMedia: [
@@ -495,7 +504,7 @@ describe('bridge login e2e', () => {
             },
           },
         ],
-      }, 42)
+      }, 45)
       const sentAlbumMessages = sentAlbum.updates.map((update: any) => update.message)
       expect(sentAlbumMessages.map((item: any) => item.message)).toEqual(['socket album', ''])
       expect(sentAlbumMessages.map((item: any) => item.media?._)).toEqual([
@@ -507,20 +516,77 @@ describe('bridge login e2e', () => {
         _: 'messages.sendMessage',
         peer: { _: 'inputPeerChat', chatId: mirrorSourceGroup.id },
         message: 'bridge mirror check', randomId: Long.fromNumber(802),
-      }, 44)
+      }, 47)
       expect(sentToMirrorSource).toMatchObject({ _: 'updateShortSentMessage', out: true })
       const mirroredHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerChat', chatId: mirrorTargetGroup.id },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 46)
+      }, 49)
       expect(mirroredHistory.messages).toMatchObject([{
         _: 'message', message: 'bridge mirror check', peerId: { _: 'peerChat', chatId: mirrorTargetGroup.id },
       }])
       expect(mirroredHistory.users).toContainEqual(expect.objectContaining({
         firstName: 'Mirror User',
       }))
+
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'upload.saveBigFilePart', fileId: Long.fromNumber(803), filePart: 0, fileTotalParts: 2,
+        bytes: new TextEncoder().encode('desktop-'),
+      }, 51)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'upload.saveBigFilePart', fileId: Long.fromNumber(803), filePart: 1, fileTotalParts: 2,
+        bytes: new TextEncoder().encode('upload'),
+      }, 53)).toEqual({ _: 'boolTrue' })
+      const stagedMedia = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.uploadMedia', peer: { _: 'inputPeerChat', chatId: group.id },
+        media: {
+          _: 'inputMediaUploadedDocument',
+          file: { _: 'inputFileBig', id: Long.fromNumber(803), parts: 2, name: 'desktop.txt' },
+          mimeType: 'text/plain',
+          attributes: [{ _: 'documentAttributeFilename', fileName: 'desktop.txt' }],
+        },
+      }, 55)
+      expect(stagedMedia).toMatchObject({
+        _: 'messageMediaDocument', document: { _: 'document', mimeType: 'text/plain', size: 14 },
+      })
+      const stagedDocument = stagedMedia.document
+      const stagedPreview = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 8, limit: 6,
+        location: {
+          _: 'inputDocumentFileLocation', id: stagedDocument.id, accessHash: stagedDocument.accessHash,
+          fileReference: stagedDocument.fileReference, thumbSize: '',
+        },
+      }, 57)
+      expect(new TextDecoder().decode(stagedPreview.bytes)).toBe('upload')
+      const stagedSent = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMedia', peer: { _: 'inputPeerChat', chatId: group.id },
+        randomId: Long.fromNumber(803), message: 'desktop two-stage',
+        media: {
+          _: 'inputMediaDocument',
+          id: {
+            _: 'inputDocument', id: stagedDocument.id, accessHash: stagedDocument.accessHash,
+            fileReference: stagedDocument.fileReference,
+          },
+        },
+      }, 59)
+      expect(stagedSent).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewMessage',
+          message: { message: 'desktop two-stage', media: { _: 'messageMediaDocument' } },
+        }],
+      })
+      const finalDocument = stagedSent.updates[0].message.media.document
+      const finalFile = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 64,
+        location: {
+          _: 'inputDocumentFileLocation', id: finalDocument.id, accessHash: finalDocument.accessHash,
+          fileReference: finalDocument.fileReference, thumbSize: '',
+        },
+      }, 61)
+      expect(new TextDecoder().decode(finalFile.bytes)).toBe('desktop-upload')
 
       const desktopStartupBatch: Array<[object, string]> = [
         [{ _: 'help.getPeerColors', hash: 0 }, 'help.peerColors'],
@@ -551,7 +617,7 @@ describe('bridge login e2e', () => {
           _: 'stories.getStoriesArchive', peer: { _: 'inputPeerSelf' }, offsetId: 0, limit: 100,
         }, 'stories.stories'],
       ]
-      let startupSub = 50
+      let startupSub = 70
       for (const [request, expected] of desktopStartupBatch) {
         const response = await callRpc(resumed, key, resumedSid, request, startupSub)
         expect(response._).toBe(expected)
