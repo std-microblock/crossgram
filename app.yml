@@ -14,6 +14,10 @@
 - id: bridge01
   name: '@mtproto-relay/bridge'
   config: {}
+- id: platform-static01
+  name: '@mtproto-relay/platform-static'
+  config:
+    id: static
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:

@@ -1,3 +1,4 @@
+import type { Context } from 'cordis'
 import type {
   IMConversation, IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent,
   IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageContent, IMMessageInput,
@@ -8,6 +9,15 @@ export interface StaticPlatformOptions {
   id?: string
   now?: () => number
   transferChunkSize?: number
+}
+
+export type Config = StaticPlatformOptions
+export const name = 'im-platform-static'
+export const inject = ['imPlatform']
+
+/** Cordis plugin entrypoint. Each plugin instance registers one isolated adapter. */
+export function apply(ctx: Context, config: Config = {}): void {
+  ctx.imPlatform.register(new StaticPlatform(config))
 }
 
 /** Complete in-memory reference adapter used for development and conformance tests. */
@@ -331,4 +341,4 @@ function clone<T>(value: T): T {
   return value === undefined ? value : structuredClone(value)
 }
 
-export default StaticPlatform
+export default apply

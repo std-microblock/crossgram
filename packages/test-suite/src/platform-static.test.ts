@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from 'cordis'
+import { IMPlatformService } from '@mtproto-relay/bridge'
 import type {
   IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMTransferProgress, PlatformSession,
 } from '@mtproto-relay/bridge'
 import { StaticPlatform } from '@mtproto-relay/platform-static'
+import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 
 const session: PlatformSession = {
   platformSessionId: 'static-session', platformId: 'static', userId: 'self', credentials: {}, metadata: {},
@@ -41,6 +44,24 @@ function mediaInput(kind: 'image' | 'file', chunks: number[][], name: string): I
 }
 
 describe('StaticPlatform', () => {
+  it('registers multiple Cordis plugin instances and disposes them independently', async () => {
+    const ctx = new Context()
+    const service = ctx.plugin((serviceCtx) => { new IMPlatformService(serviceCtx) })
+    const first = ctx.plugin(staticPlatformPlugin, { id: 'static-one' })
+    const second = ctx.plugin(staticPlatformPlugin, { id: 'static-two', transferChunkSize: 4 })
+    await Promise.all([service, first, second])
+
+    expect(ctx.imPlatform.ids).toEqual(['static-one', 'static-two'])
+    expect(ctx.imPlatform.require('static-one')).toBeInstanceOf(StaticPlatform)
+    expect(ctx.imPlatform.require('static-two')).toBeInstanceOf(StaticPlatform)
+
+    await first.dispose()
+    expect(ctx.imPlatform.ids).toEqual(['static-two'])
+    await second.dispose()
+    expect(ctx.imPlatform.ids).toEqual([])
+    await service.dispose()
+  })
+
   it('exposes direct, group, channel, and subchannel dialogs through bounded pages', async () => {
     const platform = new StaticPlatform()
     expect(platform.capabilities).toMatchObject({

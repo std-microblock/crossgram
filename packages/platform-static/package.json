@@ -5,6 +5,7 @@
   "type": "module",
   "main": "./src/index.ts",
   "dependencies": {
-    "@mtproto-relay/bridge": "workspace:*"
+    "@mtproto-relay/bridge": "workspace:*",
+    "cordis": "^4.0.0-rc.5"
   }
 }

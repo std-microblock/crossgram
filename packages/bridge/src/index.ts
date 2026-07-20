@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
 import Long from 'long'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
-import type { IMPlatform, JsonValue, PlatformSession } from './platform.js'
+import type { JsonValue, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
@@ -26,8 +26,6 @@ export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
 
 export interface BridgeConfig {
-  /** Registered IM adapters. */
-  platforms?: IMPlatform[]
   dcId?: number
   serverHost?: string
   serverPort?: number
@@ -48,7 +46,7 @@ interface BridgeSessionState {
  * code (stored via minato), which the client enters to log in.
  */
 export function apply(ctx: Context, config: BridgeConfig = {}): void {
-  const platforms = new IMPlatformService(ctx, config.platforms ?? [])
+  const platforms = new IMPlatformService(ctx)
   const registry = platforms.registry
   const dcId = config.dcId ?? 1
   const apiPrefix = config.apiPrefix ?? '/api'

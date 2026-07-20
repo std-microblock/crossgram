@@ -19,7 +19,7 @@ import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import { Mtproto, AbridgedPacketCodec, generateRsaKeyPair } from '@mtproto-relay/mtproto'
 import * as bridge from '@mtproto-relay/bridge'
-import { StaticPlatform } from '@mtproto-relay/platform-static'
+import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
@@ -220,6 +220,7 @@ async function startApp(options: {
   databasePath?: string
   authKeyStorePath?: string
   bridgeConfig?: bridge.BridgeConfig
+  platform?: bridge.IMPlatform
 } = {}) {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
@@ -232,13 +233,22 @@ async function startApp(options: {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,
     }),
-    ctx.plugin(bridge, options.bridgeConfig ?? { platforms: [new StaticPlatform()] }),
+    ctx.plugin(bridge, options.bridgeConfig ?? {}),
+    options.platform
+      ? ctx.plugin(makePlatformPlugin(options.platform))
+      : ctx.plugin(staticPlatformPlugin, { id: 'static' }),
   ]
   await Promise.all(fibers)
   await new Promise((r) => setTimeout(r, 100)) // let fibers settle
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
   const stop = async () => { for (const f of fibers.reverse()) await Promise.resolve((f as any).dispose?.()) }
   return { ctx, port: ctx.mtproto.port, pubKey, rsaKey, stop }
+}
+
+function makePlatformPlugin(platform: bridge.IMPlatform) {
+  const plugin = (ctx: Context) => { ctx.imPlatform.register(platform) }
+  plugin.inject = ['imPlatform']
+  return plugin
 }
 
 describe('bridge login e2e', () => {
@@ -568,9 +578,10 @@ describe('bridge login e2e', () => {
     const uploadPath = await mkdtemp(join(tmpdir(), 'mtproto-bridge-upload-e2e-'))
     const { ctx, port, pubKey, stop } = await startApp({
       bridgeConfig: {
-        platforms: [platform], uploadPath,
+        uploadPath,
         onTransferProgress: (_session, progress) => { transferProgress.push(progress) },
       },
+      platform,
     })
     let client: TestClient | undefined
     try {
