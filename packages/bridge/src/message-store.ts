@@ -1,5 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
-import type { IMConversationRow, IMMessageAliasRow, IMMessageRow } from './models.js'
+import type {
+  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageRow, TlMessagePartRow,
+} from './models.js'
 import {
   messageMedia, messageText,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type JsonValue, type PlatformSession,
@@ -8,6 +10,13 @@ import {
 export interface IngestResult {
   message: IMMessageRow
   created: boolean
+  projection: TlMessagePartRow[]
+}
+
+export interface ProjectedMessage {
+  source: IMMessage
+  parts: TlMessagePartRow[]
+  media: IMMediaRow[]
 }
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
@@ -106,12 +115,17 @@ export class MessageStore {
         locator: item.locator ?? null,
       })), ['messageId', 'ordinal'])
 
-      const storedMedia = await database.get('mtproto_im_media', { messageId: message.id })
+      let storedMedia = await database.select('mtproto_im_media', { messageId: message.id })
+        .orderBy('ordinal').execute()
       for (const stale of storedMedia.filter((item) => item.ordinal >= media.length)) {
         await database.remove('mtproto_im_media', { id: stale.id })
       }
+      storedMedia = storedMedia.filter((item) => item.ordinal < media.length)
+      const projection = await this._ensureProjection(
+        database, session.platformSessionId, conversationRow, message, storedMedia,
+      )
 
-      return { message, created }
+      return { message, created, projection }
     }))
   }
 
@@ -148,6 +162,25 @@ export class MessageStore {
     return Promise.all(rows.map((row) => this._hydrateMessage(row)))
   }
 
+  async readProjectedHistory(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<ProjectedMessage[]> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return []
+    const rows = await this._database.select('mtproto_im_message', { conversationId: conversation.id })
+      .orderBy('timestamp', 'desc').execute()
+    return Promise.all(rows.map(async (row) => ({
+      source: await this._hydrateMessage(row),
+      parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+      media: await this._database.select('mtproto_im_media', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+    })))
+  }
+
   async getConversation(
     platformSessionId: string,
     platformConversationId: string,
@@ -178,12 +211,7 @@ export class MessageStore {
   async allocateIds(scope: string, count: number): Promise<number[]> {
     if (!Number.isSafeInteger(count) || count <= 0) throw new RangeError('count must be a positive integer')
     return this._write(() => this._database.withTransaction(async (database) => {
-        const [counter] = await database.get('mtproto_id_counter', { scope })
-        const first = counter?.nextId ?? 1
-        const nextId = first + count
-        if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
-        await database.upsert('mtproto_id_counter', [{ scope, nextId }])
-        return Array.from({ length: count }, (_, index) => first + index)
+      return this._allocateIds(database, scope, count)
     }))
   }
 
@@ -215,6 +243,50 @@ export class MessageStore {
     })
     if (!row) throw new Error('failed to persist conversation')
     return row
+  }
+
+  private async _ensureProjection(
+    database: Database,
+    platformSessionId: string,
+    conversation: IMConversationRow,
+    message: IMMessageRow,
+    media: IMMediaRow[],
+  ): Promise<TlMessagePartRow[]> {
+    const count = Math.max(1, media.length)
+    const scope = conversation.kind === 'channel'
+      ? `channel:${platformSessionId}:${conversation.id}`
+      : `account:${platformSessionId}`
+    const existing = await database.select('mtproto_tl_message_part', { messageId: message.id })
+      .orderBy('ordinal').execute()
+    let groupedId = existing.find((part) => part.groupedId)?.groupedId ?? null
+    if (count > 1 && !groupedId) {
+      groupedId = String((await this._allocateIds(database, `group:${platformSessionId}`, 1))[0])
+      if (existing.length) await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId })
+    }
+    if (existing.length < count) {
+      const ids = await this._allocateIds(database, scope, count - existing.length)
+      await database.upsert('mtproto_tl_message_part', ids.map((tlMessageId, index) => {
+        const ordinal = existing.length + index
+        return {
+          messageId: message.id,
+          mediaId: media[ordinal]?.id ?? null,
+          scope,
+          tlMessageId,
+          groupedId,
+          ordinal,
+        }
+      }), ['messageId', 'ordinal'])
+    }
+    return database.select('mtproto_tl_message_part', { messageId: message.id }).orderBy('ordinal').execute()
+  }
+
+  private async _allocateIds(database: Database, scope: string, count: number): Promise<number[]> {
+    const [counter] = await database.get('mtproto_id_counter', { scope })
+    const first = counter?.nextId ?? 1
+    const nextId = first + count
+    if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
+    await database.upsert('mtproto_id_counter', [{ scope, nextId }])
+    return Array.from({ length: count }, (_, index) => first + index)
   }
 
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {

@@ -1,9 +1,11 @@
 import type { tl } from '@mtcute/core'
+import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { messageText, type IMDialog, type IMMessage, type IMPlatform, type IMUser, type PlatformSession } from './platform.js'
 import { makeUser } from './synthetic.js'
 import type { MessageStore } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
+import type { IMMediaRow } from './models.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
@@ -13,6 +15,15 @@ type SendMessageRequest = tl.messages.RawSendMessageRequest
 interface MessageRef {
   peerId: string
   platformMessageId: string
+  ordinal: number
+}
+
+interface MaterializedMessage {
+  source: IMMessage
+  tlId: number
+  ordinal: number
+  groupedId?: string
+  media?: IMMediaRow
 }
 
 /**
@@ -30,6 +41,7 @@ export class DialogRpc {
   private readonly _selfId: number
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
+  private readonly _historyCache = new Map<string, MaterializedMessage[]>()
 
   constructor(
     private readonly _platform: IMPlatform,
@@ -95,7 +107,7 @@ export class DialogRpc {
     return {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
-      messages: page.map((item) => this._makeMessage(item.source, item.tlId)),
+      messages: page.map((item) => this._makeMessage(item)),
       topics: [],
       chats: [],
       users: uniqueUsers([peer, this._makeSelfUser()]),
@@ -115,12 +127,12 @@ export class DialogRpc {
         continue
       }
       const history = await this._loadHistory(ref.peerId)
-      const found = history.find((item) => item.source.id === ref.platformMessageId)
+      const found = history.find((item) => item.tlId === requestedId)
       if (!found) {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
         continue
       }
-      messages.push(this._makeMessage(found.source, found.tlId))
+      messages.push(this._makeMessage(found))
       const user = await this._getPeerUser(ref.peerId)
       users.set(user.id, user)
     }
@@ -211,12 +223,14 @@ export class DialogRpc {
       { parts: [{ type: 'text', text: req.message }] },
     )
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
+    let persisted: Awaited<ReturnType<MessageStore['ingest']>> | undefined
     if (this._store) {
       const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
         ?? { id: peerId, kind: 'direct' as const, title: peerId }
-      await this._store.ingest(this._session, conversation, source)
+      persisted = await this._store.ingest(this._session, conversation, source)
     }
-    const id = this._messageId(peerId, source.id)
+    const id = persisted?.projection[0]?.tlMessageId ?? this._messageId(peerId, source.id)
+    this._rememberMessage({ source, tlId: id, ordinal: 0 })
     const pts = ++this._pts
     return {
       _: 'updateShortSentMessage', out: true, id, pts, ptsCount: 1, date: source.timestamp,
@@ -227,8 +241,15 @@ export class DialogRpc {
     const platformPeerId = source.conversation.id
     const peerId = this._peerId(platformPeerId)
     const user = await this._getPeerUser(platformPeerId, source.conversation.title)
-    const topMessage = source.lastMessage ? this._messageId(platformPeerId, source.lastMessage.id) : 0
-    const message = source.lastMessage ? this._makeMessage(source.lastMessage, topMessage) : undefined
+    const projected = source.lastMessage
+      ? this._historyCache.get(platformPeerId)?.filter((item) =>
+          item.source.id === source.lastMessage!.id || item.source.sourceIds?.includes(source.lastMessage!.id))
+      : undefined
+    const top = projected?.[0]
+    const topMessage = top?.tlId ?? (source.lastMessage ? this._messageId(platformPeerId, source.lastMessage.id) : 0)
+    const message = source.lastMessage
+      ? this._makeMessage(top ?? { source: source.lastMessage, tlId: topMessage, ordinal: 0 })
+      : undefined
     const dialog: tl.RawDialog = {
       _: 'dialog',
       peer: { _: 'peerUser', userId: peerId },
@@ -244,18 +265,35 @@ export class DialogRpc {
     return { source, dialog, message, user }
   }
 
-  private async _loadHistory(peerId: string) {
-    const history = this._data
-      ? (await this._data.getHistory(peerId)).messages
-      : (await this._requireHistory(this._platform.getHistory).call(
-          this._platform, this._session, { id: peerId },
-        )).messages
-    for (const source of history.slice().sort((a, b) => a.timestamp - b.timestamp)) {
-      this._messageId(peerId, source.id)
+  private async _loadHistory(peerId: string): Promise<MaterializedMessage[]> {
+    if (this._data && this._store) {
+      await this._data.getHistory(peerId)
+      const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId)
+      const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
+        const item: MaterializedMessage = {
+          source,
+          tlId: part.tlMessageId,
+          ordinal: part.ordinal,
+          groupedId: part.groupedId ?? undefined,
+          media: media.find((entry) => entry.id === part.mediaId),
+        }
+        this._rememberMessage(item)
+        return item
+      })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+      this._historyCache.set(peerId, history)
+      return history
     }
-    return history
-      .map((source) => ({ source, tlId: this._messageId(peerId, source.id) }))
-      .sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+
+    const history = (await this._requireHistory(this._platform.getHistory).call(
+      this._platform, this._session, { id: peerId },
+    )).messages
+    const materialized = history.slice().sort((a, b) => a.timestamp - b.timestamp).map((source) => {
+      const item: MaterializedMessage = { source, tlId: this._messageId(peerId, source.id), ordinal: 0 }
+      this._rememberMessage(item)
+      return item
+    }).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+    this._historyCache.set(peerId, materialized)
+    return materialized
   }
 
   private async _hydrateAllMessages(): Promise<void> {
@@ -282,7 +320,8 @@ export class DialogRpc {
     return this._getPeerUser(peerId)
   }
 
-  private _makeMessage(source: IMMessage, tlId: number): tl.RawMessage {
+  private _makeMessage(item: MaterializedMessage): tl.RawMessage {
+    const { source, tlId } = item
     const peerId = this._peerId(source.conversationId)
     return {
       _: 'message',
@@ -291,8 +330,20 @@ export class DialogRpc {
       fromId: { _: 'peerUser', userId: source.outgoing ? this._selfId : this._peerId(source.senderId) },
       peerId: { _: 'peerUser', userId: peerId },
       date: source.timestamp,
-      message: messageText(source),
+      message: item.ordinal === 0 ? messageText(source) : '',
+      media: item.media ? makeTlMessageMedia(item.media, source.timestamp) : undefined,
+      groupedId: item.groupedId ? Long.fromString(item.groupedId) : undefined,
     } as tl.RawMessage
+  }
+
+  private _rememberMessage(item: MaterializedMessage): void {
+    const key = `${item.source.conversationId}\u0000${item.source.id}\u0000${item.ordinal}`
+    this._messageToTl.set(key, item.tlId)
+    this._tlToMessage.set(item.tlId, {
+      peerId: item.source.conversationId,
+      platformMessageId: item.source.id,
+      ordinal: item.ordinal,
+    })
   }
 
   private async _getPeerUser(peerId: string, fallbackName?: string): Promise<tl.RawUser> {
@@ -341,7 +392,7 @@ export class DialogRpc {
     if (this._nextMessageId > 0x7fffffff) throw new RpcError(500, 'MESSAGE_ID_EXHAUSTED')
     const id = this._nextMessageId++
     this._messageToTl.set(key, id)
-    this._tlToMessage.set(id, { peerId, platformMessageId: messageId })
+    this._tlToMessage.set(id, { peerId, platformMessageId: messageId, ordinal: 0 })
     return id
   }
 
@@ -375,4 +426,30 @@ export function stableId(value: string): number {
 
 function uniqueUsers(users: tl.RawUser[]): tl.RawUser[] {
   return [...new Map(users.map((user) => [user.id, user])).values()]
+}
+
+export function makeTlMessageMedia(media: IMMediaRow, timestamp: number): tl.TypeMessageMedia {
+  const id = Long.fromNumber(media.id)
+  const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
+  if (media.kind === 'image') {
+    return {
+      _: 'messageMediaPhoto',
+      photo: {
+        _: 'photo', id, accessHash: Long.ZERO, fileReference, date: timestamp,
+        sizes: [{
+          _: 'photoSize', type: 'x', w: media.width ?? 1, h: media.height ?? 1,
+          size: Math.min(media.size ?? 0, 0x7fffffff),
+        }],
+        dcId: 1,
+      },
+    }
+  }
+  return {
+    _: 'messageMediaDocument',
+    document: {
+      _: 'document', id, accessHash: Long.ZERO, fileReference, date: timestamp,
+      mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId: 1,
+      attributes: [{ _: 'documentAttributeFilename', fileName: media.name ?? 'file' }],
+    },
+  }
 }

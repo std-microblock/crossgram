@@ -85,6 +85,10 @@ describe('MessageStore', () => {
       content: message.content,
       platformGroupId: message.groupId,
     })
+    expect(first.projection).toMatchObject([
+      { tlMessageId: 1, groupedId: '1', ordinal: 0 },
+      { tlMessageId: 2, groupedId: '1', ordinal: 1 },
+    ])
 
     const [storedConversation] = await ctx.database.get('mtproto_im_conversation', {
       platformSessionId: session.platformSessionId,
@@ -131,6 +135,7 @@ describe('MessageStore', () => {
     expect(repeated.message).toMatchObject({ text: 'updated', timestamp: 101 })
     expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(1)
     expect(await ctx.database.get('mtproto_im_message_alias', {})).toHaveLength(3)
+    expect(repeated.projection).toEqual(first.projection)
   })
 
   it('allocates consecutive signed-int IDs independently per durable scope', async () => {
@@ -139,6 +144,21 @@ describe('MessageStore', () => {
     expect(await store.allocateIds('channel:one', 2)).toEqual([1, 2])
     expect(await store.allocateIds('account:one', 2)).toEqual([4, 5])
     await expect(store.allocateIds('account:one', 0)).rejects.toThrow('positive integer')
+  })
+
+  it('allocates message IDs account-wide but isolates channel ID scopes', async () => {
+    const { store } = await createStore()
+    const direct = { id: 'direct', kind: 'direct' as const, title: 'Direct' }
+    const group = { id: 'group', kind: 'group' as const, title: 'Group' }
+    const channel = { id: 'channel', kind: 'channel' as const, title: 'Channel' }
+    const make = (id: string, conversationId: string): IMMessage => ({
+      id, conversationId, senderId: 'sender', timestamp: 1,
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+    expect((await store.ingest(session, direct, make('direct-1', 'direct'))).projection[0].tlMessageId).toBe(1)
+    expect((await store.ingest(session, group, make('group-1', 'group'))).projection[0].tlMessageId).toBe(2)
+    expect((await store.ingest(session, channel, make('channel-1', 'channel'))).projection[0].tlMessageId).toBe(1)
+    expect((await store.ingest(session, channel, make('channel-2', 'channel'))).projection[0].tlMessageId).toBe(2)
   })
 
   it('serializes concurrent allocations without duplicate IDs', async () => {
