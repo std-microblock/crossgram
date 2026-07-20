@@ -15,6 +15,7 @@ export class UpdateManager {
     private readonly _registry: PlatformRegistry,
     private readonly _store: MessageStore,
     private readonly _sendUpdate: (authKeyId: Uint8Array, update: tl.TypeUpdates) => void,
+    private readonly _dcId = 1,
   ) {}
 
   async publish(
@@ -59,7 +60,7 @@ export class UpdateManager {
       const media = projected.media.find((item) => item.id === part.mediaId)
       const message = makeUpdateMessage(
         session.platformSessionId, event.conversation, projected.source, part.tlMessageId, part.ordinal,
-        part.groupedId ?? undefined, media,
+        part.groupedId ?? undefined, media, this._dcId,
       )
       updates.push({
         _: isEdit
@@ -156,6 +157,7 @@ function makeUpdateMessage(
   ordinal: number,
   groupedId?: string,
   media?: import('./models.js').IMMediaRow,
+  dcId = 1,
 ): tl.RawMessage {
   const peerId = stableId(`peer:${conversation.id}`)
   const peer: tl.TypePeer = conversation.kind === 'group'
@@ -172,7 +174,7 @@ function makeUpdateMessage(
     peerId: peer,
     date: source.timestamp,
     message: ordinal === 0 ? messageText(source) : '',
-    media: media ? makeTlMessageMedia(media, source.timestamp) : undefined,
+    media: media ? makeTlMessageMedia(media, source.timestamp, dcId) : undefined,
     groupedId: groupedId ? Long.fromString(groupedId) : undefined,
   } as tl.RawMessage
 }

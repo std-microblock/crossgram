@@ -27,7 +27,7 @@ afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createHarness() {
+async function createHarness(failSends = 0) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -83,6 +83,10 @@ async function createHarness() {
         outputParts.push({ type: 'media', media })
         mediaIndex++
       }
+      if (failSends > 0) {
+        failSends--
+        throw new Error('simulated platform upload failure')
+      }
       return {
         id: `sent-${++sequence}`, conversationId: target.id, senderId: 'self', outgoing: true,
         timestamp: 1_800_000_000 + sequence, content: { parts: outputParts },
@@ -112,7 +116,7 @@ async function createHarness() {
     await rm(directory, { recursive: true, force: true })
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { rpc, uploads, store, consumed, inputs, progress }
+  return { rpc, platform, uploads, store, consumed, inputs, progress }
 }
 
 function inputFile(id: number, parts: number, name: string): tl.RawInputFile {
@@ -205,6 +209,103 @@ describe('media send streaming', () => {
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
+  it('stages uploadMedia across connections, serves previews, and sends referenced documents', async () => {
+    const { rpc, platform, uploads, store, consumed } = await createHarness()
+    await uploads.savePart(session.platformSessionId, '77', 0, new TextEncoder().encode('large-'))
+    await uploads.savePart(session.platformSessionId, '77', 1, new TextEncoder().encode('document'))
+    const uploaded = await rpc.uploadMedia({
+      _: 'messages.uploadMedia', peer: peer(),
+      media: {
+        _: 'inputMediaUploadedDocument',
+        file: { _: 'inputFileBig', id: Long.fromNumber(77), parts: 2, name: 'large.txt' },
+        mimeType: 'text/plain',
+        attributes: [{ _: 'documentAttributeFilename', fileName: 'large.txt' }],
+      },
+    }) as tl.RawMessageMediaDocument
+    const document = uploaded.document as tl.RawDocument
+    expect(document).toMatchObject({ _: 'document', mimeType: 'text/plain', size: 14 })
+    expect(() => wireRoundTrip(uploaded)).not.toThrow()
+
+    const preview = await rpc.getFile({
+      _: 'upload.getFile', offset: 6, limit: 8,
+      location: {
+        _: 'inputDocumentFileLocation', id: document.id, accessHash: document.accessHash,
+        fileReference: document.fileReference, thumbSize: '',
+      },
+    }) as tl.upload.RawFile
+    expect(new TextDecoder().decode(preview.bytes)).toBe('document')
+
+    const resumed = new DialogRpc(platform, session, store, uploads)
+    const sent = await resumed.sendMedia({
+      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(77), message: 'two-stage',
+      media: {
+        _: 'inputMediaDocument',
+        id: {
+          _: 'inputDocument', id: document.id, accessHash: document.accessHash,
+          fileReference: document.fileReference,
+        },
+      },
+    })
+    expect(sent._).toBe('updates')
+    expect(consumed[0].map((chunk) => new TextDecoder().decode(chunk)).join('')).toBe('large-document')
+    await expect(uploads.open(session.platformSessionId, '77', 2)).rejects.toThrow('part is missing')
+  })
+
+  it('keeps staged parts after a platform failure and retries the same random ID', async () => {
+    const { rpc, uploads, consumed } = await createHarness(1)
+    await uploads.savePart(session.platformSessionId, '88', 0, new TextEncoder().encode('retry-me'))
+    const uploaded = await rpc.uploadMedia({
+      _: 'messages.uploadMedia', peer: peer(),
+      media: {
+        _: 'inputMediaUploadedDocument', file: inputFile(88, 1, 'retry.txt'),
+        mimeType: 'text/plain', attributes: [],
+      },
+    }) as tl.RawMessageMediaDocument
+    const document = uploaded.document as tl.RawDocument
+    const request: tl.messages.RawSendMediaRequest = {
+      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(88), message: '',
+      media: {
+        _: 'inputMediaDocument',
+        id: {
+          _: 'inputDocument', id: document.id, accessHash: document.accessHash,
+          fileReference: document.fileReference,
+        },
+      },
+    }
+
+    await expect(rpc.sendMedia(request)).rejects.toThrow('simulated platform upload failure')
+    expect(new TextDecoder().decode(await collectSource(
+      (await uploads.open(session.platformSessionId, '88', 1)).source,
+    ))).toBe('retry-me')
+    await expect(rpc.sendMedia(request)).resolves.toMatchObject({ _: 'updates' })
+    expect(consumed).toHaveLength(2)
+    await expect(uploads.open(session.platformSessionId, '88', 1)).rejects.toThrow('part is missing')
+  })
+
+  it('stages photos with the configured media DC and sends them by reference', async () => {
+    const { platform, uploads, store, consumed } = await createHarness()
+    const rpc = new DialogRpc(platform, session, store, uploads, undefined, 5)
+    await uploads.savePart(session.platformSessionId, '89', 0, new Uint8Array([137, 80, 78, 71]))
+    const uploaded = await rpc.uploadMedia({
+      _: 'messages.uploadMedia', peer: peer(),
+      media: { _: 'inputMediaUploadedPhoto', file: inputFile(89, 1, 'photo.png') },
+    }) as tl.RawMessageMediaPhoto
+    const photo = uploaded.photo as tl.RawPhoto
+    expect(photo).toMatchObject({ _: 'photo', dcId: 5 })
+
+    await expect(rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(89), message: 'photo',
+      media: {
+        _: 'inputMediaPhoto',
+        id: {
+          _: 'inputPhoto', id: photo.id, accessHash: photo.accessHash,
+          fileReference: photo.fileReference,
+        },
+      },
+    })).resolves.toMatchObject({ _: 'updates' })
+    expect([...consumed[0][0]]).toEqual([137, 80, 78, 71])
+  })
+
   it('rejects missing parts before invoking the platform', async () => {
     const { rpc, uploads, inputs } = await createHarness()
     await uploads.savePart(session.platformSessionId, '9', 0, new Uint8Array([1]))
@@ -215,3 +316,15 @@ describe('media send streaming', () => {
     expect(inputs).toEqual([])
   })
 })
+
+async function collectSource(source: import('./platform.js').IMMediaSource): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = []
+  for await (const chunk of source.stream()) chunks.push(chunk)
+  const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0))
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.length
+  }
+  return bytes
+}

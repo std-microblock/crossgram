@@ -259,3 +259,20 @@ export function sessionFromRow(row: PlatformSessionRow): PlatformSession {
     metadata: row.metadata,
   }
 }
+
+/** Repair IDs written by the short-lived implementation that persisted the full loader tree path. */
+export async function migrateQualifiedPlatformIds(database: Database, platformId: string): Promise<number> {
+  const rows = await database.get('mtproto_platform_session', {})
+  const legacyIds = [...new Set(rows
+    .map((row) => row.platformId)
+    .filter((id) => id !== platformId && id.endsWith(`:${platformId}`)))]
+  let migrated = 0
+  for (const legacyId of legacyIds) {
+    const sessions = await database.get('mtproto_platform_session', { platformId: legacyId })
+    migrated += sessions.length
+    await database.set('mtproto_platform_session', { platformId: legacyId }, { platformId })
+    await database.set('mtproto_auth_session', { platformId: legacyId }, { platformId })
+    await database.set('mtproto_auth_binding', { platformId: legacyId }, { platformId })
+  }
+  return migrated
+}

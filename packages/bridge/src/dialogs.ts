@@ -9,7 +9,7 @@ import { makeUser } from './synthetic.js'
 import type { MessageStore } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
 import type { IMMediaRow } from './models.js'
-import type { UploadedFile, UploadManager } from './upload-manager.js'
+import type { StagedMedia, UploadedFile, UploadManager } from './upload-manager.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
@@ -17,6 +17,7 @@ type GetMessagesRequest = tl.messages.RawGetMessagesRequest
 type SendMessageRequest = tl.messages.RawSendMessageRequest
 type SendMediaRequest = tl.messages.RawSendMediaRequest
 type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
+type UploadMediaRequest = tl.messages.RawUploadMediaRequest
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 
 interface MessageRef {
@@ -31,6 +32,11 @@ interface MaterializedMessage {
   ordinal: number
   groupedId?: string
   media?: IMMediaRow
+}
+
+interface ResolvedMediaUpload {
+  media: IMMediaInput
+  upload: UploadedFile
 }
 
 /**
@@ -58,6 +64,7 @@ export class DialogRpc {
     store?: MessageStore,
     private readonly _uploads?: UploadManager,
     private readonly _onTransferProgress?: (session: PlatformSession, progress: IMTransferProgress) => void | Promise<void>,
+    private readonly _dcId = 1,
   ) {
     this._selfId = this._allocate(`self:${_session.platformSessionId}`, new Map())
     if (store) {
@@ -255,15 +262,11 @@ export class DialogRpc {
 
   async sendMedia(req: SendMediaRequest): Promise<tl.TypeUpdates> {
     return this._sendMediaOnce(req.randomId.toString(), async () => {
-      const resolved = await this._resolveUploadedMedia(req.media)
-      try {
-        const parts: IMMessageInput['parts'] = []
-        if (req.message) parts.push({ type: 'text', text: req.message })
-        parts.push({ type: 'media', media: resolved.media })
-        return await this._sendRichContent(req.peer, { parts }, [resolved.upload])
-      } catch (error) {
-        throw error
-      }
+      const resolved = await this._resolveSendMedia(req.media)
+      const parts: IMMessageInput['parts'] = []
+      if (req.message) parts.push({ type: 'text', text: req.message })
+      parts.push({ type: 'media', media: resolved.media })
+      return this._sendRichContent(req.peer, { parts }, [resolved.upload])
     })
   }
 
@@ -271,7 +274,7 @@ export class DialogRpc {
     const randomId = req.multiMedia.map((item) => item.randomId.toString()).join(':')
     return this._sendMediaOnce(randomId, async () => {
       if (!req.multiMedia.length) throw new RpcError(400, 'MEDIA_EMPTY')
-      const resolved = await Promise.all(req.multiMedia.map((item) => this._resolveUploadedMedia(item.media)))
+      const resolved = await Promise.all(req.multiMedia.map((item) => this._resolveSendMedia(item.media)))
       const parts: IMMessageInput['parts'] = []
       const captions = req.multiMedia.map((item) => item.message).filter(Boolean)
       if (captions.length) parts.push({ type: 'text', text: captions.join('\n') })
@@ -280,18 +283,38 @@ export class DialogRpc {
     })
   }
 
+  async uploadMedia(req: UploadMediaRequest): Promise<tl.TypeMessageMedia> {
+    if (!this._uploads) throw new RpcError(400, 'MEDIA_UPLOAD_UNAVAILABLE')
+    await this._hydratePeers()
+    this._resolvePeer(req.peer)
+    const resolved = await this._resolveUploadedMedia(req.media)
+    const staged: StagedMedia = { ...resolved, timestamp: Math.floor(Date.now() / 1000) }
+    this._uploads.stage(staged)
+    return makeStagedMessageMedia(staged, this._dcId)
+  }
+
   async getFile(req: tl.upload.RawGetFileRequest): Promise<tl.upload.TypeFile> {
-    if (!this._store || !this._platform.downloadMedia) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
-    if (req.offset < 0 || req.limit <= 0) throw new RpcError(400, 'OFFSET_INVALID')
+    if (!this._uploads || !this._store || !this._platform.downloadMedia) {
+      throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
+    }
+    const offset = safeOffset(req.offset)
+    if (offset < 0 || req.limit <= 0) throw new RpcError(400, 'OFFSET_INVALID')
     if (req.location._ !== 'inputDocumentFileLocation' && req.location._ !== 'inputPhotoFileLocation') {
       throw new RpcError(400, 'LOCATION_INVALID')
+    }
+    const staged = this._uploads.getStaged(this._session.platformSessionId, req.location.id.toString())
+    if (staged) {
+      return {
+        _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: staged.timestamp,
+        bytes: await readSourceRange(staged.media.source, offset, req.limit),
+      }
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
     const chunks: Uint8Array[] = []
     let size = 0
     const stream = this._platform.downloadMedia(this._session, stored.media, {
-      offset: req.offset,
+      offset,
       limit: req.limit,
       onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
     })
@@ -303,10 +326,10 @@ export class DialogRpc {
       size += accepted.length
     }
     const bytes = new Uint8Array(size)
-    let offset = 0
+    let position = 0
     for (const chunk of chunks) {
-      bytes.set(chunk, offset)
-      offset += chunk.length
+      bytes.set(chunk, position)
+      position += chunk.length
     }
     return {
       _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp, bytes,
@@ -360,10 +383,7 @@ export class DialogRpc {
     }
   }
 
-  private async _resolveUploadedMedia(media: tl.TypeInputMedia): Promise<{
-    media: IMMediaInput
-    upload: UploadedFile
-  }> {
+  private async _resolveUploadedMedia(media: tl.TypeInputMedia): Promise<ResolvedMediaUpload> {
     if (!this._uploads) throw new RpcError(400, 'MEDIA_UPLOAD_UNAVAILABLE')
     if (media._ !== 'inputMediaUploadedPhoto' && media._ !== 'inputMediaUploadedDocument') {
       throw new RpcError(400, 'MEDIA_INVALID')
@@ -391,6 +411,22 @@ export class DialogRpc {
       },
       upload,
     }
+  }
+
+  private async _resolveSendMedia(media: tl.TypeInputMedia): Promise<ResolvedMediaUpload> {
+    if (media._ === 'inputMediaUploadedPhoto' || media._ === 'inputMediaUploadedDocument') {
+      return this._resolveUploadedMedia(media)
+    }
+    if (!this._uploads) throw new RpcError(400, 'MEDIA_UPLOAD_UNAVAILABLE')
+    if (media._ !== 'inputMediaPhoto' && media._ !== 'inputMediaDocument') {
+      throw new RpcError(400, 'MEDIA_INVALID')
+    }
+    if (media.id._ !== 'inputPhoto' && media.id._ !== 'inputDocument') {
+      throw new RpcError(400, 'MEDIA_INVALID')
+    }
+    const staged = this._uploads.getStaged(this._session.platformSessionId, media.id.id.toString())
+    if (!staged) throw new RpcError(400, 'MEDIA_INVALID')
+    return staged
   }
 
   private async _sendRichContent(
@@ -424,7 +460,7 @@ export class DialogRpc {
     const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
       ?? { id: peerId, kind: 'direct' as const, title: peerId }
     const persisted = await this._store.ingest(this._session, conversation, source)
-    await Promise.all(uploads.map((upload) => upload.cleanup()))
+    await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
 
     const updates: tl.TypeUpdate[] = []
     for (const part of persisted.projection) {
@@ -576,7 +612,7 @@ export class DialogRpc {
       peerId: this._conversationPeer(conversation),
       date: source.timestamp,
       message: item.ordinal === 0 ? messageText(source) : '',
-      media: item.media ? makeTlMessageMedia(item.media, source.timestamp) : undefined,
+      media: item.media ? makeTlMessageMedia(item.media, source.timestamp, this._dcId) : undefined,
       groupedId: item.groupedId ? Long.fromString(item.groupedId) : undefined,
     } as tl.RawMessage
   }
@@ -718,7 +754,7 @@ function inputPeerId(peer: tl.TypeInputPeer): number {
   return 0
 }
 
-export function makeTlMessageMedia(media: IMMediaRow, timestamp: number): tl.TypeMessageMedia {
+export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {
   const id = Long.fromNumber(media.id)
   const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
   if (media.kind === 'image') {
@@ -730,7 +766,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number): tl.Typ
           _: 'photoSize', type: 'x', w: media.width ?? 1, h: media.height ?? 1,
           size: Math.min(media.size ?? 0, 0x7fffffff),
         }],
-        dcId: 1,
+        dcId,
       },
     }
   }
@@ -738,10 +774,78 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number): tl.Typ
     _: 'messageMediaDocument',
     document: {
       _: 'document', id, accessHash: Long.ZERO, fileReference, date: timestamp,
-      mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId: 1,
+      mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId,
       attributes: [{ _: 'documentAttributeFilename', fileName: media.name ?? 'file' }],
     },
   }
+}
+
+function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessageMedia {
+  const id = Long.fromString(staged.upload.fileId)
+  const fileReference = new TextEncoder().encode(`bridge-staged:${staged.upload.fileId}`)
+  if (staged.media.kind === 'image') {
+    return {
+      _: 'messageMediaPhoto',
+      photo: {
+        _: 'photo', id, accessHash: Long.ZERO, fileReference, date: staged.timestamp,
+        sizes: [{
+          _: 'photoSize', type: 'x', w: staged.media.width ?? 1, h: staged.media.height ?? 1,
+          size: Math.min(staged.media.size ?? staged.upload.source.size ?? 0, 0x7fffffff),
+        }],
+        dcId,
+      },
+    }
+  }
+  return {
+    _: 'messageMediaDocument',
+    document: {
+      _: 'document', id, accessHash: Long.ZERO, fileReference, date: staged.timestamp,
+      mimeType: staged.media.mimeType ?? 'application/octet-stream',
+      size: staged.media.size ?? staged.upload.source.size ?? 0,
+      dcId,
+      attributes: [{ _: 'documentAttributeFilename', fileName: staged.media.name ?? 'file' }],
+    },
+  }
+}
+
+function safeOffset(value: unknown): number {
+  const offset = typeof value === 'number'
+    ? value
+    : value && typeof value === 'object' && 'toNumber' in value
+      ? (value as { toNumber(): number }).toNumber()
+      : Number(value)
+  if (!Number.isSafeInteger(offset)) throw new RpcError(400, 'OFFSET_INVALID')
+  return offset
+}
+
+async function readSourceRange(
+  source: import('./platform.js').IMMediaSource,
+  offset: number,
+  limit: number,
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = []
+  let skipped = 0
+  let size = 0
+  for await (const chunk of source.stream()) {
+    if (skipped + chunk.length <= offset) {
+      skipped += chunk.length
+      continue
+    }
+    const start = Math.max(0, offset - skipped)
+    const remaining = limit - size
+    if (remaining <= 0) break
+    const accepted = chunk.subarray(start, start + remaining)
+    chunks.push(accepted)
+    size += accepted.length
+    skipped += chunk.length
+  }
+  const result = new Uint8Array(size)
+  let position = 0
+  for (const chunk of chunks) {
+    result.set(chunk, position)
+    position += chunk.length
+  }
+  return result
 }
 
 function inferImageMime(name: string): string {

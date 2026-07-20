@@ -11,7 +11,8 @@ import { DialogRpc, stableId } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
 import { MessageStore } from './message-store.js'
 import {
-  IMPlatformService, PlatformSubscriptionManager, sessionFromRow, type PlatformRegistry,
+  IMPlatformService, PlatformSubscriptionManager, migrateQualifiedPlatformIds,
+  sessionFromRow, type PlatformRegistry,
 } from './platform-manager.js'
 import { UploadManager } from './upload-manager.js'
 import { UpdateManager } from './update-manager.js'
@@ -57,6 +58,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const updates = new UpdateManager(
     ctx.database, registry, store,
     (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
+    dcId,
   )
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
@@ -68,14 +70,18 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, event) => updates.publish(session, event),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, store, subscriptions, uploads, config.onTransferProgress,
+    ctx, registry, store, subscriptions, uploads, config.onTransferProgress, dcId,
   )
 
   platforms.onChange((event, platformId) => {
     if (event === 'register') {
       ctx.logger('bridge').info('IM platform registered: %s', platformId)
       void ctx.database.prepared()
-        .then(() => subscriptions.startActiveSessions(platformId))
+        .then(async () => {
+          const migrated = await migrateQualifiedPlatformIds(ctx.database, platformId)
+          if (migrated) ctx.logger('bridge').info('migrated %d qualified platform sessions to %s', migrated, platformId)
+          await subscriptions.startActiveSessions(platformId)
+        })
         .catch((error) => ctx.logger('bridge').warn(
           'failed to start platform sessions (%s): %s', platformId, String(error),
         ))
@@ -186,7 +192,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }])
     rpc.setPlatformData({
       session,
-      dialogs: new DialogRpc(platform, session, store, uploads, config.onTransferProgress),
+      dialogs: new DialogRpc(platform, session, store, uploads, config.onTransferProgress, dcId),
     } satisfies BridgeSessionState)
     await subscriptions.ensure(session)
 
@@ -214,6 +220,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.sendMedia(req as tl.messages.RawSendMediaRequest))
   ctx.mtproto.register('messages.sendMultiMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMultiMedia(req as tl.messages.RawSendMultiMediaRequest))
+  ctx.mtproto.register('messages.uploadMedia', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.uploadMedia(req as tl.messages.RawUploadMediaRequest))
   ctx.mtproto.register('upload.saveFilePart', async (rpc, req) => {
     const state = await requireBridgeSession(rpc)
     const input = req as tl.upload.RawSaveFilePartRequest
@@ -228,6 +236,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   })
   ctx.mtproto.register('upload.getFile', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFile(req as tl.upload.RawGetFileRequest))
+  ctx.mtproto.register('upload.getFileHashes', async () => bareVector([]))
 
   // ── Contacts / users ──
   ctx.mtproto.register('contacts.getContacts', async (rpc) =>
@@ -298,6 +307,7 @@ function createSessionResolver(
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
   onTransferProgress?: BridgeConfig['onTransferProgress'],
+  dcId = 1,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
@@ -321,7 +331,7 @@ function createSessionResolver(
         if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
         const session = sessionFromRow(row)
         await subscriptions.ensure(session)
-        return { session, dialogs: new DialogRpc(platform, session, store, uploads, onTransferProgress) }
+        return { session, dialogs: new DialogRpc(platform, session, store, uploads, onTransferProgress, dcId) }
       })()
       loading.set(authKeyId, pending)
       pending.finally(() => loading.delete(authKeyId)).catch(() => {})

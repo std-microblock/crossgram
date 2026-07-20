@@ -4,7 +4,9 @@ import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import { defineModels } from './models.js'
 import { MessageStore } from './message-store.js'
-import { PlatformDataService, PlatformRegistry, PlatformSubscriptionManager } from './platform-manager.js'
+import {
+  migrateQualifiedPlatformIds, PlatformDataService, PlatformRegistry, PlatformSubscriptionManager,
+} from './platform-manager.js'
 import type {
   IMConversation, IMEvent, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities,
   PlatformSession, Unsubscribe,
@@ -238,5 +240,29 @@ describe('PlatformRegistry', () => {
     expect(registry.ids).toEqual(['push', 'second'])
     unregister()
     expect(registry.get('second')).toBeUndefined()
+  })
+
+  it('migrates loader-qualified platform IDs across sessions and auth bindings', async () => {
+    const database = await createDatabase()
+    const legacyId = 'parent-group:static'
+    await database.create('mtproto_platform_session', {
+      id: 'legacy-session', platformId: legacyId, userId: 'self', credentials: {}, metadata: {},
+      active: true, createdAt: new Date(),
+    })
+    await database.create('mtproto_auth_session', {
+      id: 'legacy-auth', virtualPhone: '99900001', loginCode: '123456',
+      platformId: legacyId, platformSessionId: 'legacy-session', used: true,
+    })
+    await database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: legacyId, platformSessionId: 'legacy-session',
+    })
+
+    await expect(migrateQualifiedPlatformIds(database, 'static')).resolves.toBe(1)
+    expect(await database.get('mtproto_platform_session', { id: 'legacy-session' }))
+      .toMatchObject([{ platformId: 'static' }])
+    expect(await database.get('mtproto_auth_session', { id: 'legacy-auth' }))
+      .toMatchObject([{ platformId: 'static' }])
+    expect(await database.get('mtproto_auth_binding', { authKeyId: '0011223344556677' }))
+      .toMatchObject([{ platformId: 'static' }])
   })
 })

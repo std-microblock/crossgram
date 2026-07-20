@@ -372,7 +372,10 @@ export class StaticPlatform implements IMPlatform {
     )))
     const imageId = 'seed:image'
     const fileId = 'seed:file'
-    this._media.set(imageId, new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]))
+    this._media.set(imageId, Uint8Array.from(Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42AAAAAASUVORK5CYII=',
+      'base64',
+    )))
     this._media.set(fileId, new TextEncoder().encode('static seeded file'))
     this._append({
       id: 'group:album', sourceIds: ['group:album:photo', 'group:album:file'],
@@ -385,7 +388,7 @@ export class StaticPlatform implements IMPlatform {
             type: 'media',
             media: {
               id: imageId, kind: 'image', name: 'seed.png', mimeType: 'image/png',
-              size: 8, width: 1, height: 1, locator: { mediaId: imageId },
+              size: this._media.get(imageId)!.length, width: 1, height: 1, locator: { mediaId: imageId },
             },
           },
           {

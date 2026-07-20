@@ -119,7 +119,17 @@ describe('MessageStore', () => {
     const conversation: IMConversation = { id: 'room', kind: 'group', title: 'Room' }
     const initial: IMMessage = {
       id: 'album', sourceIds: ['physical-1', 'physical-2'], conversationId: 'room', senderId: 'alice',
-      timestamp: 100, content: { parts: [{ type: 'text', text: 'initial' }] },
+      timestamp: 100,
+      content: { parts: [
+        { type: 'text', text: 'initial' },
+        {
+          type: 'media',
+          media: {
+            id: 'physical-1', kind: 'image', mimeType: 'image/png', size: 8,
+            locator: { token: 'old' },
+          },
+        },
+      ] },
     }
     const first = await store.ingest(session, conversation, initial)
     const repeated = await store.ingest(session, conversation, {
@@ -127,7 +137,16 @@ describe('MessageStore', () => {
       id: 'physical-2',
       sourceIds: ['album', 'physical-1'],
       timestamp: 101,
-      content: { parts: [{ type: 'text', text: 'updated' }] },
+      content: { parts: [
+        { type: 'text', text: 'updated' },
+        {
+          type: 'media',
+          media: {
+            id: 'physical-1', kind: 'image', mimeType: 'image/png', size: 68,
+            locator: { token: 'current' },
+          },
+        },
+      ] },
     })
 
     expect(repeated.created).toBe(false)
@@ -136,6 +155,9 @@ describe('MessageStore', () => {
     expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(1)
     expect(await ctx.database.get('mtproto_im_message_alias', {})).toHaveLength(3)
     expect(repeated.projection).toEqual(first.projection)
+    expect(await ctx.database.get('mtproto_im_media', { messageId: first.message.id })).toMatchObject([{
+      id: first.projection[0].mediaId, size: 68, locator: { token: 'current' },
+    }])
   })
 
   it('allocates consecutive signed-int IDs independently per durable scope', async () => {
