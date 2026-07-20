@@ -843,6 +843,18 @@ describe('bridge login e2e', () => {
       const [deletedStored] = await ctx.database.get('mtproto_im_message', { id: stored.id })
       expect(deletedStored.deleted).toBe(true)
       expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ pts: 4, seq: 3 })
+      const difference = await callRpc(client, key, sid, {
+        _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+      }, 11)
+      expect(difference).toMatchObject({
+        _: 'updates.difference',
+        newMessages: [{ _: 'message', message: 'arrived by subscribe' }],
+        otherUpdates: [
+          { _: 'updateEditMessage', message: { message: 'edited by subscribe' } },
+          { _: 'updateDeleteMessages', messages: [pushed.updates[0].message.id] },
+        ],
+        state: { pts: 4, seq: 3 },
+      })
 
       const chatId = pushed.chats[0].id
       expect(await callRpc(client, key, sid, {

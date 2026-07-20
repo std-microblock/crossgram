@@ -112,10 +112,15 @@ export class Mtproto extends Service {
   }
 
   /** Send an update only to connections authenticated with the given permanent auth key. */
-  sendUpdateToAuthKey(authKeyId: Uint8Array, update: tl.TypeUpdates): void {
+  sendUpdateToAuthKey(authKeyId: Uint8Array, update: tl.TypeUpdates): number {
+    let delivered = 0
     for (const session of this._sessions) {
-      if (equalBytes(session.authKeyId, authKeyId)) session.sendUpdate(update)
+      if (equalBytes(session.authKeyId, authKeyId)) {
+        session.sendUpdate(update)
+        delivered++
+      }
     }
+    return delivered
   }
 
   async* [Service.init]() {

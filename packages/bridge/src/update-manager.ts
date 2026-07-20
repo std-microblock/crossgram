@@ -1,5 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
+import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
+import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { makeTlMessageMedia, stableId } from './dialogs.js'
 import type { MessageStore } from './message-store.js'
@@ -14,7 +16,7 @@ export class UpdateManager {
     private readonly _database: Database,
     private readonly _registry: PlatformRegistry,
     private readonly _store: MessageStore,
-    private readonly _sendUpdate: (authKeyId: Uint8Array, update: tl.TypeUpdates) => void,
+    private readonly _sendUpdate: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number,
     private readonly _dcId = 1,
   ) {}
 
@@ -97,13 +99,10 @@ export class UpdateManager {
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
-    const bindings = await this._database.get('mtproto_auth_binding', {
-      platformSessionId: session.platformSessionId,
-    })
-    for (const binding of bindings) {
-      this._sendUpdate(hexBytes(binding.authKeyId), payload)
+    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    if (await this._send(session.platformSessionId, payload)) {
+      await this._store.markUpdatePublished(eventKey)
     }
-    await this._store.markUpdatePublished(eventKey)
   }
 
   private async _publishDelete(
@@ -144,13 +143,28 @@ export class UpdateManager {
       date: delivery.date,
       seq: delivery.seq,
     }
-    await this._send(session.platformSessionId, payload)
-    await this._store.markUpdatePublished(eventKey)
+    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    if (await this._send(session.platformSessionId, payload)) {
+      await this._store.markUpdatePublished(eventKey)
+    }
   }
 
-  private async _send(platformSessionId: string, payload: tl.RawUpdates): Promise<void> {
+  private async _send(platformSessionId: string, payload: tl.RawUpdates): Promise<boolean> {
     const bindings = await this._database.get('mtproto_auth_binding', { platformSessionId })
-    for (const binding of bindings) this._sendUpdate(hexBytes(binding.authKeyId), payload)
+    let delivered = 0
+    for (const binding of bindings) delivered += this._sendUpdate(hexBytes(binding.authKeyId), payload)
+    return delivered > 0
+  }
+
+  async retryPending(platformSessionId: string): Promise<number> {
+    let published = 0
+    for (const delivery of await this._store.getPendingUpdateDeliveries(platformSessionId)) {
+      if (!delivery.payload) continue
+      if (!await this._send(platformSessionId, decodeUpdate(delivery.payload))) break
+      await this._store.markUpdatePublished(delivery.eventKey)
+      published++
+    }
+    return published
   }
 
   async getState(platformSessionId: string): Promise<tl.updates.RawState> {
@@ -160,6 +174,64 @@ export class UpdateManager {
       date: state.date, seq: state.seq, unreadCount: 0,
     }
   }
+
+  async getDifference(
+    platformSessionId: string,
+    request: tl.updates.RawGetDifferenceRequest,
+  ): Promise<tl.updates.TypeDifference> {
+    const state = await this.getState(platformSessionId)
+    const deliveries = await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts)
+    if (!deliveries.length) {
+      return request.pts < state.pts
+        ? { _: 'updates.differenceTooLong', pts: state.pts }
+        : { _: 'updates.differenceEmpty', date: state.date, seq: state.seq }
+    }
+    if (deliveries.some((delivery) => !delivery.payload)) {
+      return { _: 'updates.differenceTooLong', pts: state.pts }
+    }
+    const requestedLimit = request.ptsLimit ?? request.ptsTotalLimit ?? 100
+    const page = deliveries.slice(0, Math.max(1, Math.min(requestedLimit, 100)))
+    const newMessages: tl.TypeMessage[] = []
+    const otherUpdates: tl.TypeUpdate[] = []
+    const chats = new Map<string, tl.TypeChat>()
+    const users = new Map<string, tl.TypeUser>()
+    for (const delivery of page) {
+      const payload = decodeUpdate(delivery.payload)
+      for (const update of payload.updates) {
+        if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
+          newMessages.push(update.message)
+        } else {
+          otherUpdates.push(update)
+        }
+      }
+      for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
+      for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
+    }
+    for (const delivery of page) await this._store.markUpdatePublished(delivery.eventKey)
+    const last = page.at(-1)!
+    const difference = {
+      newMessages, newEncryptedMessages: [], otherUpdates,
+      chats: [...chats.values()], users: [...users.values()],
+    }
+    if (page.length < deliveries.length) {
+      return {
+        _: 'updates.differenceSlice', ...difference,
+        intermediateState: {
+          _: 'updates.state', pts: last.pts, qts: state.qts,
+          date: last.date, seq: last.seq, unreadCount: 0,
+        },
+      }
+    }
+    return { _: 'updates.difference', ...difference, state }
+  }
+}
+
+function encodeUpdate(update: tl.RawUpdates): string {
+  return Buffer.from(TlBinaryWriter.serializeObject(__tlWriterMap, update)).toString('base64')
+}
+
+function decodeUpdate(payload: string): tl.RawUpdates {
+  return new TlBinaryReader(__tlReaderMap, Buffer.from(payload, 'base64')).object() as tl.RawUpdates
 }
 
 function makeUpdateMessage(

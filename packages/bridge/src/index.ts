@@ -265,13 +265,17 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getReplies(req as tl.messages.RawGetRepliesRequest))
 
   // ── Updates ──
-  ctx.mtproto.register('updates.getState', async (rpc) =>
-    updates.getState((await requireBridgeSession(rpc)).session.platformSessionId))
-
-  ctx.mtproto.register('updates.getDifference', async (rpc) => {
-    const state = await updates.getState((await requireBridgeSession(rpc)).session.platformSessionId)
-    return { _: 'updates.differenceEmpty', date: state.date, seq: state.seq } as unknown as tl.TlObject
+  ctx.mtproto.register('updates.getState', async (rpc) => {
+    const platformSessionId = (await requireBridgeSession(rpc)).session.platformSessionId
+    await updates.retryPending(platformSessionId)
+    return updates.getState(platformSessionId)
   })
+
+  ctx.mtproto.register('updates.getDifference', async (rpc, req) =>
+    updates.getDifference(
+      (await requireBridgeSession(rpc)).session.platformSessionId,
+      req as tl.updates.RawGetDifferenceRequest,
+    ))
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
   ctx.mtproto.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))

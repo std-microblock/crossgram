@@ -125,6 +125,7 @@ export interface UpdateDeliveryRow {
   seq: number
   date: number
   published: boolean
+  payload: string
 }
 
 declare module '@cordisjs/plugin-database' {
@@ -232,7 +233,7 @@ export function defineModels(ctx: Context): void {
 
   ctx.model.extend('mtproto_update_delivery', {
     messageId: 'unsigned', eventKey: 'text', platformSessionId: 'string', pts: 'unsigned', ptsCount: 'unsigned',
-    seq: 'unsigned', date: 'unsigned', published: 'boolean',
+    seq: 'unsigned', date: 'unsigned', published: 'boolean', payload: 'text',
   }, {
     primary: 'messageId', autoInc: true,
     unique: ['eventKey'], indexes: ['platformSessionId'],

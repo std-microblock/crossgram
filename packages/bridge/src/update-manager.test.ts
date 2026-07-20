@@ -251,4 +251,64 @@ describe('UpdateManager', () => {
     expect(retried).toMatchObject([{ _: 'updates', seq: 1, updates: [{ pts: 2 }] }])
     expect(await retrying.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 1 })
   })
+
+  it('keeps offline updates pending and replays them when a bound connection returns', async () => {
+    const { ctx, store } = await createHarness()
+    const registry = new PlatformRegistry([[session.platformId, platform]])
+    const sent: tl.TypeUpdates[] = []
+    let online = false
+    const manager = new UpdateManager(ctx.database, registry, store, (_key, update) => {
+      if (!online) return 0
+      sent.push(update)
+      return 1
+    })
+    const conversation: IMConversation = { id: 'offline', kind: 'group', title: 'Offline' }
+    const message: IMMessage = {
+      id: 'offline-message', conversationId: conversation.id, senderId: 'alice', timestamp: 40,
+      content: { parts: [{ type: 'text', text: 'persist before push' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    expect(sent).toHaveLength(0)
+    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toMatchObject([{
+      published: false, pts: 2, payload: expect.any(String),
+    }])
+    online = true
+    await expect(manager.retryPending(session.platformSessionId)).resolves.toBe(1)
+    expect(sent).toMatchObject([{
+      _: 'updates', seq: 1,
+      updates: [{ _: 'updateNewMessage', pts: 2, message: { message: 'persist before push' } }],
+    }])
+    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
+  })
+
+  it('recovers persisted messages and mutations through updates.getDifference', async () => {
+    const { ctx, store } = await createHarness()
+    const registry = new PlatformRegistry([[session.platformId, platform]])
+    const manager = new UpdateManager(ctx.database, registry, store, () => 0)
+    const conversation: IMConversation = { id: 'difference', kind: 'direct', title: 'Difference' }
+    const original: IMMessage = {
+      id: 'difference-message', conversationId: conversation.id, senderId: 'alice', timestamp: 50,
+      content: { parts: [{ type: 'text', text: 'original' }] },
+    }
+    const created = await store.ingest(session, conversation, original)
+    await manager.publish(session, { event: { type: 'message', conversation, message: original }, result: created })
+    const edited = { ...original, content: { parts: [{ type: 'text' as const, text: 'edited' }] } }
+    const changed = await store.ingest(session, conversation, edited)
+    await manager.publish(session, {
+      event: { type: 'message-edit', eventId: 'difference-edit', conversation, message: edited }, result: changed,
+    })
+
+    const difference = await manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })
+    expect(difference).toMatchObject({
+      _: 'updates.difference',
+      newMessages: [{ _: 'message', message: 'original' }],
+      otherUpdates: [{ _: 'updateEditMessage', message: { message: 'edited' } }],
+      state: { pts: 3, seq: 2 },
+    })
+    expect(() => roundTrip(difference)).not.toThrow()
+  })
 })

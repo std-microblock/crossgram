@@ -389,6 +389,7 @@ export class MessageStore {
       await database.upsert('mtproto_update_state', [state])
       return database.create('mtproto_update_delivery', {
         eventKey, platformSessionId, pts: state.pts, ptsCount, seq: state.seq, date, published: false,
+        payload: '',
       })
     }))
   }
@@ -402,6 +403,25 @@ export class MessageStore {
     await this._write(async () => {
       await this._database.set('mtproto_update_delivery', { eventKey }, { published: true })
     })
+  }
+
+  async setUpdatePayload(eventKey: string, payload: string): Promise<void> {
+    await this._write(async () => {
+      await this._database.set('mtproto_update_delivery', { eventKey }, { payload })
+    })
+  }
+
+  async getPendingUpdateDeliveries(platformSessionId: string) {
+    const rows = await this._database.get('mtproto_update_delivery', {
+      platformSessionId, published: false,
+    })
+    return rows.sort((left, right) => left.pts - right.pts || left.messageId - right.messageId)
+  }
+
+  async getUpdateDeliveriesAfter(platformSessionId: string, pts: number) {
+    const rows = await this._database.get('mtproto_update_delivery', { platformSessionId })
+    return rows.filter((row) => row.pts > pts)
+      .sort((left, right) => left.pts - right.pts || left.messageId - right.messageId)
   }
 
   async getConversation(

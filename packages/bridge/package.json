@@ -11,13 +11,13 @@
   },
   "dependencies": {
     "@mtcute/core": "^0.30.3",
+    "@mtcute/tl-runtime": "^0.30.3",
     "@mtproto-relay/mtproto": "workspace:*",
     "long": "^5.3.0"
   },
   "devDependencies": {
     "@fuman/io": "^0.0.20",
     "@fuman/utils": "^0.0.20",
-    "@mtcute/node": "^0.30.3",
-    "@mtcute/tl-runtime": "^0.30.3"
+    "@mtcute/node": "^0.30.3"
   }
 }
