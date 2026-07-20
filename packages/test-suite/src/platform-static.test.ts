@@ -101,7 +101,7 @@ describe('StaticPlatform', () => {
   })
 
   it('runs Group A new, edit, and delete events in order and mutates history', async () => {
-    const platform = new StaticPlatform({ now: () => 1_900_000_000 })
+    const platform = new StaticPlatform({ now: () => 1_900_000_000, instanceId: 'test-run' })
     const events: import('@mtproto-relay/bridge').IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     await platform.tick(session)
@@ -112,18 +112,38 @@ describe('StaticPlatform', () => {
       message: { senderId: 'alice', content: { parts: [{ text: 'Group A live message 1' }] } },
     })
     expect(events[1]).toMatchObject({
-      type: 'message-edit', eventId: 'group-a:edit:1',
+      type: 'message-edit', eventId: 'group-a:edit:test-run:1',
       message: { id: 'group-a:seed:3', content: { parts: [{ text: 'Group A edited message 1' }] } },
     })
     expect(events[2]).toMatchObject({
-      type: 'message-delete', eventId: 'group-a:delete:1', messageIds: ['group-a:seed:1'],
+      type: 'message-delete', eventId: 'group-a:delete:test-run:1', messageIds: ['group-a:seed:1'],
     })
     const history = await platform.getHistory(session, { id: 'group-a' }, { limit: 10 })
     expect(history.messages.map((message) => message.id)).toEqual([
-      expect.stringContaining('group-a:live:1'), 'group-a:seed:3', 'group-a:seed:2',
+      expect.stringContaining('group-a:live:test-run:1'), 'group-a:seed:3', 'group-a:seed:2',
     ])
     expect(history.messages[1].content.parts).toEqual([{ type: 'text', text: 'Group A edited message 1' }])
     await unsubscribe()
+  })
+
+  it('names live and sent events independently across reconstructed platform instances', async () => {
+    const first = new StaticPlatform({ now: () => 1_900_000_000, instanceId: 'before-hmr' })
+    const second = new StaticPlatform({ now: () => 1_900_000_000, instanceId: 'after-hmr' })
+    const firstEvents: import('@mtproto-relay/bridge').IMEvent[] = []
+    const secondEvents: import('@mtproto-relay/bridge').IMEvent[] = []
+    const unsubscribeFirst = await first.subscribe(session, (event) => { firstEvents.push(event) })
+    const unsubscribeSecond = await second.subscribe(session, (event) => { secondEvents.push(event) })
+    await first.tick(session)
+    await second.tick(session)
+    const firstSent = await first.sendMessage(session, { id: 'group-b' }, { parts: [{ type: 'text', text: 'one' }] })
+    const secondSent = await second.sendMessage(session, { id: 'group-b' }, { parts: [{ type: 'text', text: 'two' }] })
+
+    expect((firstEvents[0] as Extract<typeof firstEvents[number], { type: 'message' }>).message.id)
+      .not.toBe((secondEvents[0] as Extract<typeof secondEvents[number], { type: 'message' }>).message.id)
+    expect((firstEvents[1] as Extract<typeof firstEvents[number], { type: 'message-edit' }>).eventId)
+      .not.toBe((secondEvents[1] as Extract<typeof secondEvents[number], { type: 'message-edit' }>).eventId)
+    expect(firstSent.id).not.toBe(secondSent.id)
+    await Promise.all([unsubscribeFirst(), unsubscribeSecond()])
   })
 
   it('ticks Group A every 1000ms while subscribed and stops after unsubscribe', async () => {

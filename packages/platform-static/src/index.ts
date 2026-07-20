@@ -1,4 +1,5 @@
 import type { Context } from 'cordis'
+import { randomUUID } from 'node:crypto'
 import type {
   IMConversation, IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent,
   IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageContent, IMMessageInput,
@@ -8,6 +9,7 @@ import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 
 export interface StaticPlatformOptions {
   now?: () => number
+  instanceId?: string
   transferChunkSize?: number
   eventIntervalMs?: number
   historySize?: number
@@ -50,6 +52,7 @@ export class StaticPlatform implements IMPlatform {
   private readonly _transferChunkSize: number
   private readonly _eventIntervalMs: number
   private readonly _historySize: number
+  private readonly _instanceId: string
   private readonly _users = new Map<string, IMUser>()
   private readonly _conversations = new Map<string, IMConversation>()
   private readonly _messages = new Map<string, IMMessage[]>()
@@ -65,6 +68,7 @@ export class StaticPlatform implements IMPlatform {
     this._transferChunkSize = options.transferChunkSize ?? 64 * 1024
     this._eventIntervalMs = options.eventIntervalMs ?? 0
     this._historySize = Math.max(0, Math.trunc(options.historySize ?? 10_000))
+    this._instanceId = options.instanceId ?? randomUUID()
     this._seed()
   }
 
@@ -236,7 +240,7 @@ export class StaticPlatform implements IMPlatform {
     const sequence = ++this._demoSequence
     const timestamp = this._now()
     const created = textMessage(
-      `group-a:live:${sequence}:${'n'.repeat(128)}`,
+      `group-a:live:${this._instanceId}:${sequence}:${'n'.repeat(128)}`,
       conversation.id,
       sequence % 2 ? 'alice' : 'bob',
       `Group A live message ${sequence}`,
@@ -254,7 +258,7 @@ export class StaticPlatform implements IMPlatform {
       }
       this._append(edited)
       await this._dispatch(session, {
-        type: 'message-edit', eventId: `group-a:edit:${sequence}`,
+        type: 'message-edit', eventId: `group-a:edit:${this._instanceId}:${sequence}`,
         conversation: clone(conversation), message: clone(edited),
       })
     }
@@ -264,7 +268,7 @@ export class StaticPlatform implements IMPlatform {
       this._messages.set(conversation.id, (this._messages.get(conversation.id) ?? [])
         .filter((message) => message.id !== deleteTarget.id))
       await this._dispatch(session, {
-        type: 'message-delete', eventId: `group-a:delete:${sequence}`,
+        type: 'message-delete', eventId: `group-a:delete:${this._instanceId}:${sequence}`,
         conversation: clone(conversation), messageIds: [deleteTarget.id], timestamp,
       })
     }
@@ -318,7 +322,7 @@ export class StaticPlatform implements IMPlatform {
   }
 
   private _messageId(conversationId: string): string {
-    return `static:${conversationId}:${++this._sequence}:${'x'.repeat(256)}`
+    return `static:${this._instanceId}:${conversationId}:${++this._sequence}:${'x'.repeat(256)}`
   }
 
   private _seed(): void {
