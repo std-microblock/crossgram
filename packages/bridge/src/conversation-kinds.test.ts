@@ -35,7 +35,6 @@ function source(conversation: IMConversation): IMMessage {
 
 const sentTargets: string[] = []
 const platform: IMPlatform = {
-  id: 'kinds',
   capabilities: {
     history: true,
     send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },

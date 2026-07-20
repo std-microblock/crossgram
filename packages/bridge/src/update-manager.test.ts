@@ -17,7 +17,6 @@ const session: PlatformSession = {
 }
 
 const platform: IMPlatform = {
-  id: 'updates-platform',
   capabilities: {
     history: false,
     send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
@@ -42,15 +41,15 @@ async function createHarness() {
   defineModels(ctx)
   await ctx.database.prepared()
   await ctx.database.create('mtproto_auth_binding', {
-    authKeyId: '0011223344556677', platformId: platform.id, platformSessionId: session.platformSessionId,
+    authKeyId: '0011223344556677', platformId: session.platformId, platformSessionId: session.platformSessionId,
   })
   await ctx.database.create('mtproto_auth_binding', {
-    authKeyId: '8899aabbccddeeff', platformId: platform.id, platformSessionId: 'other-session',
+    authKeyId: '8899aabbccddeeff', platformId: session.platformId, platformSessionId: 'other-session',
   })
   const sent: Array<{ authKeyId: Uint8Array, update: tl.TypeUpdates }> = []
   const store = new MessageStore(ctx.database)
   const manager = new UpdateManager(
-    ctx.database, new PlatformRegistry([platform]), store,
+    ctx.database, new PlatformRegistry([[session.platformId, platform]]), store,
     (authKeyId, update) => sent.push({ authKeyId, update }),
   )
   disposals.push(async () => {
@@ -119,7 +118,7 @@ describe('UpdateManager', () => {
 
   it('reuses the reserved pts and retries delivery after a send failure', async () => {
     const { ctx, store } = await createHarness()
-    const registry = new PlatformRegistry([platform])
+    const registry = new PlatformRegistry([[session.platformId, platform]])
     const conversation: IMConversation = { id: 'retry', kind: 'direct', title: 'Retry' }
     const message: IMMessage = {
       id: 'retry-message', conversationId: conversation.id, senderId: 'alice', timestamp: 20,

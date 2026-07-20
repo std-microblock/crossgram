@@ -40,7 +40,6 @@ async function createDatabase() {
 }
 
 class PushPlatform implements IMPlatform {
-  constructor(readonly id = 'push') {}
   readonly capabilities: PlatformCapabilities = {
     ...capabilities,
     send: { ...capabilities.send },
@@ -86,7 +85,7 @@ describe('PlatformSubscriptionManager', () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     const store = new MessageStore(database)
-    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([platform]), store)
+    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([['push', platform]]), store)
     const conversation: IMConversation = { id: 'room', kind: 'group', title: 'Push room' }
 
     await Promise.all([manager.ensure(session), manager.ensure(session), manager.ensure(session)])
@@ -96,7 +95,7 @@ describe('PlatformSubscriptionManager', () => {
     expect(await store.readHistory(session.platformSessionId, conversation.id)).toMatchObject([
       { id: 'event-1', conversationId: 'room', content: { parts: [{ type: 'text', text: 'message-event-1' }] } },
     ])
-    await manager.stopPlatform(platform.id)
+    await manager.stopPlatform(session.platformId)
     expect(platform.unsubscribeCalls).toBe(1)
     await manager.ensure(session)
     expect(platform.subscribeCalls).toBe(2)
@@ -108,7 +107,7 @@ describe('PlatformSubscriptionManager', () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     const store = new MessageStore(database)
-    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([platform]), store)
+    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([['push', platform]]), store)
     const conversation: IMConversation = { id: 'channel', kind: 'channel', title: 'Channel' }
     await manager.ensure(session)
 
@@ -126,15 +125,15 @@ describe('PlatformSubscriptionManager', () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     await database.create('mtproto_platform_session', {
-      id: session.platformSessionId, platformId: platform.id, userId: 'self', credentials: {}, metadata: {},
+      id: session.platformSessionId, platformId: session.platformId, userId: 'self', credentials: {}, metadata: {},
       active: true, createdAt: new Date(),
     })
     await database.create('mtproto_platform_session', {
-      id: 'inactive', platformId: platform.id, userId: 'self', credentials: {}, metadata: {},
+      id: 'inactive', platformId: session.platformId, userId: 'self', credentials: {}, metadata: {},
       active: false, createdAt: new Date(),
     })
     const manager = new PlatformSubscriptionManager(
-      database, new PlatformRegistry([platform]), new MessageStore(database),
+      database, new PlatformRegistry([['push', platform]]), new MessageStore(database),
     )
     await manager.startActiveSessions()
     expect(platform.subscribeCalls).toBe(1)
@@ -206,13 +205,15 @@ describe('PlatformDataService', () => {
 describe('PlatformRegistry', () => {
   it('rejects duplicate IDs and resolves independent adapters', () => {
     const first = new PushPlatform()
-    expect(() => new PlatformRegistry([first, new PushPlatform()])).toThrow('duplicate IM platform ID')
-    const registry = new PlatformRegistry([first])
+    expect(() => new PlatformRegistry([
+      ['push', first], ['push', new PushPlatform()],
+    ])).toThrow('duplicate IM platform ID')
+    const registry = new PlatformRegistry([['push', first]])
     expect(registry.require('push')).toBe(first)
     expect(() => registry.require('missing')).toThrow('not registered')
 
-    const second = new PushPlatform('second')
-    const unregister = registry.register(second)
+    const second = new PushPlatform()
+    const unregister = registry.register('second', second)
     expect(registry.ids).toEqual(['push', 'second'])
     unregister()
     expect(registry.get('second')).toBeUndefined()

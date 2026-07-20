@@ -9,11 +9,11 @@ import type {
 export class PlatformRegistry {
   private readonly _platforms = new Map<string, IMPlatform>()
 
-  constructor(platforms: readonly IMPlatform[]) {
-    for (const platform of platforms) this.register(platform)
+  constructor(platforms: readonly (readonly [string, IMPlatform])[] = []) {
+    for (const [registrationId, platform] of platforms) this.register(registrationId, platform)
   }
 
-  register(platform: IMPlatform, registrationId = platform.id): Unsubscribe {
+  register(registrationId: string, platform: IMPlatform): Unsubscribe {
     if (this._platforms.has(registrationId)) throw new Error(`duplicate IM platform ID: ${registrationId}`)
     this._platforms.set(registrationId, platform)
     return () => {
@@ -56,9 +56,9 @@ export class IMPlatformService extends Service {
   readonly registry: PlatformRegistry
   private readonly _listeners = new Set<PlatformRegistryListener>()
 
-  constructor(ctx: Context, initialPlatforms: readonly IMPlatform[] = []) {
+  constructor(ctx: Context) {
     super(ctx, 'imPlatform')
-    this.registry = new PlatformRegistry(initialPlatforms)
+    this.registry = new PlatformRegistry()
   }
 
   get(id: string): IMPlatform | undefined {
@@ -74,9 +74,9 @@ export class IMPlatformService extends Service {
   }
 
   /** Register an adapter for the lifetime of the calling Cordis plugin fiber. */
-  register(platform: IMPlatform, registrationId = resolvePlatformPluginId(this.ctx, platform.id)): Unsubscribe {
+  register(platform: IMPlatform, registrationId = resolvePlatformPluginId(this.ctx)): Unsubscribe {
     return this.ctx.effect(() => {
-      const unregister = this.registry.register(platform, registrationId)
+      const unregister = this.registry.register(registrationId, platform)
       this._emit('register', registrationId, platform)
       return () => {
         unregister()

@@ -173,7 +173,6 @@ export type IMEvent =
 export type Unsubscribe = () => void | Promise<void>
 
 export interface IMPlatform {
-  readonly id: string
   readonly capabilities: PlatformCapabilities
 
   subscribe(session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe>

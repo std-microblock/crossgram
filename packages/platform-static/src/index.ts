@@ -7,7 +7,6 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 
 export interface StaticPlatformOptions {
-  id?: string
   now?: () => number
   transferChunkSize?: number
 }
@@ -21,12 +20,11 @@ export const inject = ['imPlatform']
 /** Cordis plugin entrypoint. Each plugin instance registers one isolated adapter. */
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'static')
-  ctx.imPlatform.register(new StaticPlatform({ ...config, id }), id)
+  ctx.imPlatform.register(new StaticPlatform(config), id)
 }
 
 /** Complete in-memory reference adapter used for development and conformance tests. */
 export class StaticPlatform implements IMPlatform {
-  readonly id: string
   readonly capabilities: PlatformCapabilities = {
     history: true,
     send: {
@@ -50,7 +48,6 @@ export class StaticPlatform implements IMPlatform {
   private _sequence = 1_000
 
   constructor(options: StaticPlatformOptions = {}) {
-    this.id = options.id ?? 'static'
     this._now = options.now ?? (() => Math.floor(Date.now() / 1000))
     this._transferChunkSize = options.transferChunkSize ?? 64 * 1024
     this._seed()

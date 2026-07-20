@@ -45,7 +45,6 @@ const album: IMMessage = {
 }
 
 const platform: IMPlatform = {
-  id: 'media',
   capabilities: {
     history: true,
     send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },

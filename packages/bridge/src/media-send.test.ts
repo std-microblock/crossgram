@@ -41,7 +41,6 @@ async function createHarness() {
   const inputs: IMMessageInput[] = []
   let sequence = 0
   const platform: IMPlatform = {
-    id: 'streaming',
     capabilities: {
       history: true,
       send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },

@@ -63,8 +63,7 @@ describe('StaticPlatform', () => {
     expect(ctx.imPlatform.ids).toEqual(['static-one', 'static-two'])
     expect(ctx.imPlatform.require('static-one')).toBeInstanceOf(StaticPlatform)
     expect(ctx.imPlatform.require('static-two')).toBeInstanceOf(StaticPlatform)
-    expect(ctx.imPlatform.require('static-one').id).toBe('static-one')
-    expect(ctx.imPlatform.require('static-two').id).toBe('static-two')
+    expect(ctx.imPlatform.require('static-one')).not.toBe(ctx.imPlatform.require('static-two'))
 
     await first.dispose()
     expect(ctx.imPlatform.ids).toEqual(['static-two'])

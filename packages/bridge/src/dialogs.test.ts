@@ -18,7 +18,6 @@ const session: PlatformSession = {
 }
 
 class DialogTestPlatform implements IMPlatform {
-  readonly id = 'dialog-test'
   readonly capabilities = {
     history: true,
     send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
@@ -262,7 +261,6 @@ describe('DialogRpc', () => {
 
     const disabled: IMPlatform = {
       ...platform,
-      id: 'disabled',
       capabilities: { ...platform.capabilities, send: { ...platform.capabilities.send, text: false } },
       subscribe: platform.subscribe.bind(platform),
       sendMessage: platform.sendMessage.bind(platform),
@@ -281,7 +279,6 @@ describe('DialogRpc', () => {
     } satisfies Partial<RpcError>)
 
     const platform: IMPlatform = {
-      id: 'push-only',
       capabilities: {
         history: false,
         send: { text: true, images: false, files: false, mixed: false, maxTextLength: 100, maxMedia: 0 },

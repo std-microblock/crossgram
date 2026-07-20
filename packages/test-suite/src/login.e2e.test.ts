@@ -220,7 +220,7 @@ async function startApp(options: {
   databasePath?: string
   authKeyStorePath?: string
   bridgeConfig?: bridge.BridgeConfig
-  platform?: bridge.IMPlatform
+  platform?: { id: string, adapter: bridge.IMPlatform }
 } = {}) {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
@@ -235,7 +235,7 @@ async function startApp(options: {
     }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
     options.platform
-      ? ctx.plugin(makePlatformPlugin(options.platform))
+      ? ctx.plugin(makePlatformPlugin(options.platform.id, options.platform.adapter))
       : ctx.plugin(staticPlatformPlugin),
   ]
   await Promise.all(fibers)
@@ -245,8 +245,8 @@ async function startApp(options: {
   return { ctx, port: ctx.mtproto.port, pubKey, rsaKey, stop }
 }
 
-function makePlatformPlugin(platform: bridge.IMPlatform) {
-  const plugin = (ctx: Context) => { ctx.imPlatform.register(platform) }
+function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
+  const plugin = (ctx: Context) => { ctx.imPlatform.register(platform, id) }
   plugin.inject = ['imPlatform']
   return plugin
 }
@@ -519,8 +519,8 @@ describe('bridge login e2e', () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let remoteBytes = new Uint8Array()
     const transferProgress: bridge.IMTransferProgress[] = []
+    const platformId = 'push-e2e'
     const platform: bridge.IMPlatform = {
-      id: 'push-e2e',
       capabilities: {
         history: false,
         send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
@@ -581,17 +581,17 @@ describe('bridge login e2e', () => {
         uploadPath,
         onTransferProgress: (_session, progress) => { transferProgress.push(progress) },
       },
-      platform,
+      platform: { id: platformId, adapter: platform },
     })
     let client: TestClient | undefined
     try {
       await ctx.database.create('mtproto_platform_session', {
-        id: 'push-ps', platformId: platform.id, userId: 'self', credentials: {},
+        id: 'push-ps', platformId, userId: 'self', credentials: {},
         metadata: { firstName: 'Push User' }, active: true, createdAt: new Date(),
       })
       await ctx.database.create('mtproto_auth_session', {
         id: 'push-auth', virtualPhone: '99900777', loginCode: '777777',
-        platformId: platform.id, platformSessionId: 'push-ps', used: false,
+        platformId, platformSessionId: 'push-ps', used: false,
       })
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
