@@ -22,6 +22,15 @@ const BOOL_FALSE_ID = 0xBC799737
 // Bare Vector<X> prefix (https://core.telegram.org/type/Vector%20X)
 const VECTOR_ID = 0x1CB5C415
 
+class ResumeStoredAuthKey extends Error {
+  constructor(
+    readonly authKey: Uint8Array,
+    readonly encryptedFrames: Uint8Array[],
+  ) {
+    super('resume stored auth key')
+  }
+}
+
 /** Serialize a Long to 8 little-endian bytes (matches an 8-byte auth key id). */
 function longToBytesLE(v: Long): Uint8Array {
   const b = new Uint8Array(8)
@@ -195,57 +204,97 @@ export class ServerSession {
   private async _runHandshake(data: Uint8Array, isTemp: boolean): Promise<void> {
     this._log.verbose('%s handshake starting (%d bytes)', isTemp ? 'temp-key' : 'perm-key', data.length)
 
-    try {
-      const unencryptedQueue: Uint8Array[] = [data]
-      let waitingForMessage: ((data: Uint8Array) => void) | null = null
+    const normalHandler = this._msgHandler
+    const unencryptedQueue: Uint8Array[] = [data]
+    const encryptedFrames: Uint8Array[] = []
+    let handshakeError: Error | null = null
+    let resumeLookup: Promise<void> | null = null
+    let waitingForMessage: {
+      resolve: (data: Uint8Array) => void
+      reject: (error: Error) => void
+    } | null = null
 
-      // Replace handler to capture subsequent unencrypted messages during handshake
-      if (this._msgHandler) {
-        this._connection.onMessage.remove(this._msgHandler)
+    const interruptHandshake = (error: Error) => {
+      handshakeError = error
+      if (waitingForMessage) {
+        const waiter = waitingForMessage
+        waitingForMessage = null
+        waiter.reject(error)
       }
-      const tempHandler = (msg: Uint8Array) => {
-        // A single intermediate frame may contain multiple unencrypted messages.
-        // Each unencrypted message: auth_key_id(8)=0 + msg_id(8) + length(4) + body.
-        // Split the frame into individual messages.
-        let offset = 0
-        while (offset + 20 <= msg.length) {
-          // During the handshake every message must be plaintext (auth_key_id == 0).
-          // A non-zero auth_key_id here means the client is sending encrypted
-          // traffic with an auth key this (stateless / restarted) server doesn't
-          // know — e.g. a key it cached from a previous server instance. Drop the
-          // frame rather than misreading it as a handshake message and stalling.
-          let zeroKeyId = true
-          for (let i = 0; i < 8; i++) {
-            if (msg[offset + i] !== 0) { zeroKeyId = false; break }
-          }
-          if (!zeroKeyId) {
-            this._log.warn('dropping encrypted frame during handshake (client using an unknown/stale auth key id %h)', msg.subarray(offset, offset + 8))
-            break
-          }
+    }
 
-          const dv = new DataView(msg.buffer, msg.byteOffset + offset)
-          const length = dv.getUint32(16, true) // length at offset 16 (after 8+8)
-          const msgEnd = 20 + length
-          if (offset + msgEnd > msg.length) break
-          const single = msg.subarray(offset, offset + msgEnd)
-          if (waitingForMessage) {
-            const resolve = waitingForMessage
-            waitingForMessage = null
-            resolve(single)
-          } else {
-            unencryptedQueue.push(single)
-          }
-          offset += msgEnd
+    const tempHandler = (msg: Uint8Array) => {
+      // Telegram Desktop probes a media connection with req_pq, then reuses its
+      // cached permanent key on that same socket. Pause the unfinished probe
+      // handshake and resume only after the key store confirms the key id.
+      const keyId = msg.subarray(0, 8)
+      const encrypted = !keyId.every(b => b === 0)
+      if (encrypted && !isTemp) {
+        encryptedFrames.push(msg)
+        if (!resumeLookup) {
+          const storedKeyId = new Uint8Array(keyId)
+          resumeLookup = Promise.resolve()
+            .then(() => this._keyStore?.get(storedKeyId))
+            .then((stored) => {
+              if (!stored) {
+                throw new Error(`client presented unknown cached auth key id ${Buffer.from(storedKeyId).toString('hex')}`)
+              }
+              interruptHandshake(new ResumeStoredAuthKey(stored, encryptedFrames))
+            })
+            .catch((err) => {
+              const error = err instanceof Error ? err : new Error(String(err))
+              interruptHandshake(error)
+            })
         }
+        return
+      }
+
+      // A single intermediate frame may contain multiple unencrypted messages.
+      // Each unencrypted message: auth_key_id(8)=0 + msg_id(8) + length(4) + body.
+      let offset = 0
+      while (offset + 20 <= msg.length) {
+        // Encrypted traffic during a PFS handshake cannot replace its already
+        // established permanent key, so retain the previous strict behavior.
+        let zeroKeyId = true
+        for (let i = 0; i < 8; i++) {
+          if (msg[offset + i] !== 0) { zeroKeyId = false; break }
+        }
+        if (!zeroKeyId) {
+          this._log.warn('dropping encrypted frame during temp-key handshake (auth key id %h)', msg.subarray(offset, offset + 8))
+          break
+        }
+
+        const dv = new DataView(msg.buffer, msg.byteOffset + offset)
+        const length = dv.getUint32(16, true)
+        const msgEnd = 20 + length
+        if (offset + msgEnd > msg.length) break
+        const single = msg.subarray(offset, offset + msgEnd)
+        if (waitingForMessage) {
+          const waiter = waitingForMessage
+          waitingForMessage = null
+          waiter.resolve(single)
+        } else {
+          unencryptedQueue.push(single)
+        }
+        offset += msgEnd
+      }
+    }
+
+    let resumed: ResumeStoredAuthKey | null = null
+    try {
+      // Replace handler to capture subsequent unencrypted messages during handshake
+      if (normalHandler) {
+        this._connection.onMessage.remove(normalHandler)
       }
       this._connection.onMessage.add(tempHandler)
 
       const recvPlain = async (): Promise<Uint8Array> => {
+        if (handshakeError) throw handshakeError
         if (unencryptedQueue.length > 0) {
           return unencryptedQueue.shift()!
         }
-        return new Promise((resolve) => {
-          waitingForMessage = resolve
+        return new Promise((resolve, reject) => {
+          waitingForMessage = { resolve, reject }
         })
       }
 
@@ -293,16 +342,6 @@ export class ServerSession {
         }
       }
 
-      // Restore normal handler
-      this._connection.onMessage.remove(tempHandler)
-      const normalHandler = (msg: Uint8Array) => {
-        this._onRawData(msg).catch((err) => {
-          this._log.error('unhandled error: %s', err)
-        })
-      }
-      this._msgHandler = normalHandler
-      this._connection.onMessage.add(normalHandler)
-
       // Generate initial future salts once, before the first encrypted message.
       if (!isTemp) {
         this._generateFutureSalts()
@@ -312,8 +351,28 @@ export class ServerSession {
       // is received, because we need the client's session ID (captured from
       // the first message) to encrypt it correctly.
     } catch (err) {
-      this._log.error('%s handshake failed: %s', isTemp ? 'temp-key' : 'perm-key', err instanceof Error ? err.stack : err)
-      this._connection.close()
+      if (err instanceof ResumeStoredAuthKey) {
+        resumed = err
+      } else {
+        this._log.error('%s handshake failed: %s', isTemp ? 'temp-key' : 'perm-key', err instanceof Error ? err.stack : err)
+        this._connection.close()
+      }
+    } finally {
+      this._connection.onMessage.remove(tempHandler)
+      if (normalHandler) {
+        this._msgHandler = normalHandler
+        this._connection.onMessage.add(normalHandler)
+      }
+    }
+
+    if (resumed) {
+      this._permAuthKey.setup(resumed.authKey)
+      this._generateFutureSalts()
+      this._authorized = true
+      this._log.info('resumed session from stored auth key after plaintext transport probe, id = %h', this._permAuthKey.id)
+      for (const frame of resumed.encryptedFrames) {
+        await this._onRawData(frame)
+      }
     }
   }
 

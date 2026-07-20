@@ -15,7 +15,7 @@ import {
   addPublicKey,
 } from '@mtcute/core/utils.js'
 import { NodePlatform } from '@mtcute/node'
-import { ObfuscatedPacketCodec } from '@mtcute/core'
+import { ObfuscatedPacketCodec, type tl } from '@mtcute/core'
 import Long from 'long'
 import { Context } from 'cordis'
 import { Mtproto } from '../service.js'
@@ -123,6 +123,20 @@ async function sendPlain(client: TestClient, obj: { _: string, [k: string]: unkn
   w.long(makeMsgId(sub))
   w.uint(len)
   w.object(obj)
+  await client.send(w.result())
+}
+
+/** Telegram Desktop's TCP endpoint probe uses the legacy req_pq constructor. */
+async function sendLegacyReqPq(client: TestClient, nonce: Uint8Array, sub: number): Promise<void> {
+  const body = TlBinaryWriter.manual(20)
+  body.uint(0x60469778)
+  body.raw(nonce)
+
+  const w = TlBinaryWriter.manual(40)
+  w.long(Long.ZERO)
+  w.long(makeMsgId(sub))
+  w.uint(20)
+  w.raw(body.result())
   await client.send(w.result())
 }
 
@@ -234,7 +248,13 @@ function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap 
   return reader
 }
 
-async function startServer(): Promise<{ port: number, pubKey: any, stop: () => Promise<void> }> {
+async function startServer(): Promise<{
+  port: number
+  pubKey: any
+  uploadedParts: Uint8Array[]
+  downloadBytes: Uint8Array
+  stop: () => Promise<void>
+}> {
   const rsaKey = generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
 
@@ -306,8 +326,19 @@ async function startServer(): Promise<{ port: number, pubKey: any, stop: () => P
     }
   })
 
+  const uploadedParts: Uint8Array[] = []
+  ctx.mtproto.register('upload.saveFilePart', async (_rpc, req) => {
+    const input = req as tl.upload.RawSaveFilePartRequest
+    uploadedParts.push(new Uint8Array(input.bytes))
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  })
+  const downloadBytes = new TextEncoder().encode('media connection download')
+  ctx.mtproto.register('upload.getFile', async () => ({
+    _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: nowSec(), bytes: downloadBytes,
+  }))
+
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
-  return { port: ctx.mtproto.port, pubKey, stop: () => Promise.resolve(fiber.dispose()) }
+  return { port: ctx.mtproto.port, pubKey, uploadedParts, downloadBytes, stop: () => Promise.resolve(fiber.dispose()) }
 }
 
 describe('e2e: obfuscated transport + PFS + RPC', () => {
@@ -474,7 +505,69 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       await stop()
     }
   })
+
+  it('resumes cached auth after a req_pq transport probe and accepts a file part', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, uploadedParts, downloadBytes, stop } = await startServer()
+    try {
+      // Establish and persist the permanent key on a regular API connection.
+      const api = await TestClient.connect(port)
+      const perm = await doClientHandshake(api, pubKey, false)
+      const apiSession = new Long(0x33333333, 0x33333333)
+      const configReq = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' })
+      await api.send(clientEncrypt(perm, configReq, perm.salt, apiSession, 4))
+      await readRpcResult(api, perm)
+      api.close()
+
+      // Desktop media sockets probe TCP with legacy req_pq before sending an
+      // encrypted ping using the cached permanent key on the same connection.
+      const media = await TestClient.connect(port)
+      await sendLegacyReqPq(media, crypto.randomBytes(16), 8)
+      expect((await readPlainObj(media))._).toBe('mt_resPQ')
+
+      const mediaSession = new Long(0x44444444, 0x44444444)
+      const pingId = new Long(0x55667788, 0x11223344)
+      const ping = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'mt_ping', pingId } as unknown as { _: string })
+      await media.send(clientEncrypt(perm, ping, perm.salt, mediaSession, 12))
+      const pong = await readEncryptedObject(media, perm, 'mt_pong')
+      expect(pong.pingId.eq(pingId)).toBe(true)
+
+      const bytes = new Uint8Array([0, 1, 2, 3, 0xfe, 0xff])
+      const savePart = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(9001), filePart: 0, bytes,
+      } as { _: string })
+      await media.send(clientEncrypt(perm, savePart, perm.salt, mediaSession, 16))
+      expect(await readRpcResult(media, perm)).toEqual({ _: 'boolTrue' })
+      expect(uploadedParts).toEqual([bytes])
+
+      const getFile = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'upload.getFile', offset: Long.ZERO, limit: 1024,
+        location: {
+          _: 'inputDocumentFileLocation', id: Long.fromNumber(42), accessHash: Long.ZERO,
+          fileReference: new Uint8Array(), thumbSize: '',
+        },
+      } as { _: string })
+      await media.send(clientEncrypt(perm, getFile, perm.salt, mediaSession, 20))
+      const downloaded = await readRpcResult(media, perm) as tl.upload.RawFile
+      expect(downloaded._).toBe('upload.file')
+      expect(downloaded.bytes).toEqual(downloadBytes)
+      media.close()
+    } finally {
+      await stop()
+    }
+  })
 })
+
+async function readEncryptedObject(client: TestClient, key: ClientKey, type: string): Promise<any> {
+  for (let i = 0; i < 10; i++) {
+    const reader = clientDecrypt(key, await client.read())
+    try {
+      const obj = reader.object() as { _: string }
+      if (obj._ === type) return obj
+    } catch { /* Ignore service messages not represented by the test reader. */ }
+  }
+  throw new Error(`no ${type} received`)
+}
 
 /** Read encrypted frames until an rpc_result is found; return the inner result object. */
 async function readRpcResult(client: TestClient, key: ClientKey, readerMap: TlReaderMap = __tlReaderMap): Promise<any> {
