@@ -117,6 +117,7 @@ export interface UpdateStateRow {
 }
 
 export interface UpdateDeliveryRow {
+  messageId: number
   eventKey: string
   platformSessionId: string
   pts: number
@@ -230,7 +231,10 @@ export function defineModels(ctx: Context): void {
   }, { primary: 'platformSessionId' })
 
   ctx.model.extend('mtproto_update_delivery', {
-    eventKey: 'text', platformSessionId: 'string', pts: 'unsigned', ptsCount: 'unsigned',
+    messageId: 'unsigned', eventKey: 'text', platformSessionId: 'string', pts: 'unsigned', ptsCount: 'unsigned',
     seq: 'unsigned', date: 'unsigned', published: 'boolean',
-  }, { primary: 'eventKey', indexes: ['platformSessionId'] })
+  }, {
+    primary: 'messageId', autoInc: true,
+    unique: ['eventKey'], indexes: ['platformSessionId'],
+  })
 }

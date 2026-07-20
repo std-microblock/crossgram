@@ -606,14 +606,14 @@ export class ServerSession {
 
     try {
       const result = await this._dispatcher.dispatch(ctx, unwrapped.request)
-      this._sendRpcResult(msgId, result)
+      this._sendRpcResult(msgId, result, unwrapped.request._)
     } catch (err) {
-      this._log.error('RPC dispatch error for %s: %s', request._, err instanceof Error ? err.stack : err)
+      this._log.error('RPC dispatch error for %s: %s', unwrapped.request._, err instanceof Error ? err.stack : err)
       this._sendRpcResult(msgId, {
         _: 'mt_rpc_error',
         errorCode: 500,
         errorMessage: 'INTERNAL',
-      } as mtp.RawMt_rpc_error)
+      } as mtp.RawMt_rpc_error, unwrapped.request._)
     }
   }
 
@@ -643,7 +643,7 @@ export class ServerSession {
     this._log.debug('sent new_session_created')
   }
 
-  private _sendRpcResult(reqMsgId: Long, result: RpcResult): void {
+  private _sendRpcResult(reqMsgId: Long, result: RpcResult, method?: string): void {
     const kind = (result as { _: string })._
 
     let resultBytes: Uint8Array
@@ -668,8 +668,8 @@ export class ServerSession {
     if (kind === 'mt_rpc_error') {
       const error = result as mtp.RawMt_rpc_error
       this._log.warn(
-        '>>> rpc_error for %s: %d %s',
-        reqMsgId.toString(16), error.errorCode, error.errorMessage,
+        '>>> rpc_error for %s (%s): %d %s',
+        reqMsgId.toString(16), method ?? 'unknown', error.errorCode, error.errorMessage,
       )
     } else {
       this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), kind)

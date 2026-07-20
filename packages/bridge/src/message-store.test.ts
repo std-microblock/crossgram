@@ -209,6 +209,18 @@ describe('MessageStore', () => {
     expect(ids).toEqual(Array.from({ length: 24 }, (_, index) => index + 1))
   })
 
+  it('allocates independent outbox rows while deduplicating by event key', async () => {
+    const { ctx, store } = await createStore()
+    const first = await store.prepareUpdateDelivery('event:first', session.platformSessionId, 1, 100)
+    const second = await store.prepareUpdateDelivery('event:second', session.platformSessionId, 2, 101)
+    const repeated = await store.prepareUpdateDelivery('event:first', session.platformSessionId, 1, 100)
+
+    expect(first).toMatchObject({ messageId: 1, eventKey: 'event:first', pts: 2, seq: 1 })
+    expect(second).toMatchObject({ messageId: 2, eventKey: 'event:second', pts: 4, seq: 2 })
+    expect(repeated).toEqual(first)
+    expect(await ctx.database.get('mtproto_update_delivery', {})).toHaveLength(2)
+  })
+
   it('rejects mismatched conversation payloads without writing partial rows', async () => {
     const { ctx, store } = await createStore()
     await expect(store.ingest(session, { id: 'one', kind: 'direct', title: 'One' }, {
