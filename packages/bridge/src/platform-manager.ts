@@ -45,7 +45,9 @@ export type PlatformRegistryListener = (
 
 /** Resolve the stable Cordis config-entry ID, with a fallback for direct `ctx.plugin()` usage. */
 export function resolvePlatformPluginId(ctx: Context, fallback?: string): string {
-  const entryId = (ctx.fiber as typeof ctx.fiber & { entry?: { id?: unknown } }).entry?.id
+  const entryId = (ctx.fiber as typeof ctx.fiber & {
+    entry?: { options?: { id?: unknown } }
+  }).entry?.options?.id
   if (typeof entryId === 'string' && entryId) return entryId
   if (fallback) return fallback
   throw new Error('IM platform must be loaded from a named Cordis config entry')
