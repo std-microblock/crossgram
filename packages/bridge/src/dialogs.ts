@@ -419,11 +419,13 @@ export class DialogRpc {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
     const includeSelf = req.filter._ === 'channelParticipantsRecent'
+      || req.filter._ === 'channelParticipantsAdmins'
+    const participant: tl.TypeChannelParticipant = req.filter._ === 'channelParticipantsAdmins'
+      ? { _: 'channelParticipantCreator', userId: this._selfId, adminRights: makeAdminRights() }
+      : { _: 'channelParticipantSelf', userId: this._selfId, inviterId: this._selfId, date: 0 }
     return {
       _: 'channels.channelParticipants', count: includeSelf ? 1 : 0,
-      participants: includeSelf ? [{
-        _: 'channelParticipantSelf', userId: this._selfId, inviterId: this._selfId, date: 0,
-      }] : [],
+      participants: includeSelf ? [participant] : [],
       chats: [this._makeChat(conversation)], users: includeSelf ? [this._makeSelfUser()] : [],
     }
   }
@@ -901,13 +903,13 @@ export class DialogRpc {
     const id = this._peerId(conversation.id)
     if (conversation.kind === 'group') {
       return {
-        _: 'chat', id, title: conversation.title, photo: { _: 'chatPhotoEmpty' },
+        _: 'chat', creator: true, id, title: conversation.title, photo: { _: 'chatPhotoEmpty' },
         participantsCount: Number(conversation.metadata?.participantsCount ?? 0), date: 0, version: 1,
       }
     }
     const broadcast = conversation.metadata?.broadcast === true
     return {
-      _: 'channel', id, accessHash: Long.ZERO, title: conversation.title,
+      _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
       forum: !broadcast && this._subchannels(conversation.id).length > 0 || undefined,
       photo: { _: 'chatPhotoEmpty' }, date: 0,
@@ -1002,6 +1004,14 @@ export class DialogRpc {
   private _requireHistory<T extends Function>(method: T | undefined): T {
     if (!this._platform.capabilities.history || !method) throw new RpcError(400, 'HISTORY_UNAVAILABLE')
     return method
+  }
+}
+
+function makeAdminRights(): tl.RawChatAdminRights {
+  return {
+    _: 'chatAdminRights', changeInfo: true, postMessages: true, editMessages: true,
+    deleteMessages: true, banUsers: true, inviteUsers: true, pinMessages: true,
+    addAdmins: true, manageCall: true, manageTopics: true, other: true,
   }
 }
 

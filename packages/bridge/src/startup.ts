@@ -47,6 +47,9 @@ export const startupRpcHandlers: Readonly<Record<string, StartupHandler>> = {
   'messages.getAllStickers': () => ({
     _: 'messages.allStickers', hash: Long.ZERO, sets: [],
   } as unknown as tl.TlObject),
+  'messages.getEmojiStickers': () => ({
+    _: 'messages.allStickers', hash: Long.ZERO, sets: [],
+  } as unknown as tl.TlObject),
   'messages.getRecentStickers': () => ({
     _: 'messages.recentStickers', hash: Long.ZERO, packs: [], stickers: [], dates: [],
   } as unknown as tl.TlObject),
@@ -55,6 +58,12 @@ export const startupRpcHandlers: Readonly<Record<string, StartupHandler>> = {
   } as unknown as tl.TlObject),
   'messages.getFeaturedStickers': () => ({
     _: 'messages.featuredStickers', hash: Long.ZERO, count: 0, sets: [], unread: [],
+  } as unknown as tl.TlObject),
+  'messages.getFeaturedEmojiStickers': () => ({
+    _: 'messages.featuredStickers', hash: Long.ZERO, count: 0, sets: [], unread: [],
+  } as unknown as tl.TlObject),
+  'messages.getSavedGifs': () => ({
+    _: 'messages.savedGifs', hash: Long.ZERO, gifs: [],
   } as unknown as tl.TlObject),
   'help.getPremiumPromo': () => ({
     _: 'help.premiumPromo', statusText: '', statusEntities: [],

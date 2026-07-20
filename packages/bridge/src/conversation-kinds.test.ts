@@ -175,6 +175,10 @@ describe('conversation kinds', () => {
       _: 'channels.getParticipants', channel, filter: { _: 'channelParticipantsRecent' },
       offset: 0, limit: 200, hash: Long.ZERO,
     })
+    const admins = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel, filter: { _: 'channelParticipantsAdmins' },
+      offset: 0, limit: 200, hash: Long.ZERO,
+    })
     const sendAs = await rpc.getSendAs({
       _: 'channels.getSendAs', peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ZERO },
     })
@@ -188,8 +192,12 @@ describe('conversation kinds', () => {
       _: 'channels.channelParticipant', participant: { _: 'channelParticipantSelf' },
     })
     expect(participants).toMatchObject({ _: 'channels.channelParticipants', count: 1 })
+    expect(admins).toMatchObject({
+      _: 'channels.channelParticipants', count: 1,
+      participants: [{ _: 'channelParticipantCreator', adminRights: { manageTopics: true } }],
+    })
     expect(sendAs).toMatchObject({ _: 'channels.sendAsPeers', peers: [{ peer: { _: 'peerUser' } }] })
-    for (const result of [groupSettings, fullGroup, fullChannel, self, participants, sendAs]) {
+    for (const result of [groupSettings, fullGroup, fullChannel, self, participants, admins, sendAs]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
   })

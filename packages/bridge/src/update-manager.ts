@@ -272,13 +272,13 @@ function makeUpdateChat(conversation: IMConversation, forum = false): tl.TypeCha
   const id = stableId(`peer:${conversation.id}`)
   if (conversation.kind === 'group') {
     return {
-      _: 'chat', id, title: conversation.title, photo: { _: 'chatPhotoEmpty' },
+      _: 'chat', creator: true, id, title: conversation.title, photo: { _: 'chatPhotoEmpty' },
       participantsCount: Number(conversation.metadata?.participantsCount ?? 0), date: 0, version: 1,
     }
   }
   const broadcast = conversation.metadata?.broadcast === true
   return {
-    _: 'channel', id, accessHash: Long.ZERO, title: conversation.title,
+    _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
     broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
     forum: forum || undefined,
     photo: { _: 'chatPhotoEmpty' }, date: 0,
