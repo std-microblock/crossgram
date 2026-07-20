@@ -6,7 +6,7 @@ import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/
 import { createAesIgeForMessageOld } from '@mtcute/core/utils.js'
 import Long from 'long'
 import { ServerAuthKey } from './server-auth-key.js'
-import type { AuthKeyStore } from './auth-key-store.js'
+import type { AuthKeyStore, StoredAuthKey } from './auth-key-store.js'
 import type { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
 import { doServerAuthorization } from './server-authorization.js'
@@ -24,10 +24,16 @@ const VECTOR_ID = 0x1CB5C415
 
 class ResumeStoredAuthKey extends Error {
   constructor(
-    readonly authKey: Uint8Array,
+    readonly record: StoredAuthKey,
     readonly encryptedFrames: Uint8Array[],
   ) {
     super('resume stored auth key')
+  }
+}
+
+class UnknownStoredAuthKey extends Error {
+  constructor(readonly keyId: Uint8Array) {
+    super('unknown or expired auth key')
   }
 }
 
@@ -67,6 +73,7 @@ export class ServerSession {
    * the client uses it for all encrypted traffic. Null until negotiated.
    */
   private _tempAuthKey: ServerAuthKey | null = null
+  private _tempAuthKeyExpiresAt: number | null = null
   private _msgIdGen: ServerMessageIdGenerator
   private _sessionId: Long = Long.ZERO
   private _sessionIdSet = false
@@ -136,22 +143,16 @@ export class ServerSession {
 
   private async _onRawData(data: Uint8Array): Promise<void> {
     if (!this._authorized) {
-      // A returning client may present a cached permanent auth key (encrypted
-      // frame, non-zero auth_key_id) instead of handshaking. If we have that key
-      // persisted, adopt it and skip the handshake.
+      // Returning API and media connections may present either a permanent key
+      // or a temporary PFS key before any plaintext handshake.
       const firstKeyId = data.subarray(0, 8)
-      if (!firstKeyId.every(b => b === 0) && this._keyStore) {
-        const stored = await this._keyStore.get(firstKeyId)
-        if (stored) {
-          this._permAuthKey.setup(stored)
-          this._generateFutureSalts()
-          this._authorized = true
-          this._log.info('resumed session from stored auth key id = %h', this._permAuthKey.id)
+      if (!firstKeyId.every(b => b === 0)) {
+        const stored = await this._keyStore?.get(firstKeyId)
+        if (stored && await this._adoptStoredAuthKey(stored)) {
           await this._onRawData(data) // re-process this frame, now authorized
           return
         }
-        this._log.warn('client presented unknown cached auth key id %h; closing so it re-authorizes', firstKeyId)
-        this._connection.close()
+        this._sendAuthKeyNotFound(firstKeyId)
         return
       }
       await this._runHandshake(data, false)
@@ -198,8 +199,8 @@ export class ServerSession {
    * Run one DH handshake to completion over unencrypted messages.
    *
    * @param data    The first unencrypted frame that triggered the handshake.
-   * @param isTemp  false = permanent auth key (first handshake); true = PFS
-   *                temporary auth key (second handshake on the same connection).
+   * @param isTemp  Whether this is a second handshake on an authorized socket.
+   *                The key kind itself comes from p_q_inner_data(_temp)_dc.
    */
   private async _runHandshake(data: Uint8Array, isTemp: boolean): Promise<void> {
     this._log.verbose('%s handshake starting (%d bytes)', isTemp ? 'temp-key' : 'perm-key', data.length)
@@ -225,7 +226,7 @@ export class ServerSession {
 
     const tempHandler = (msg: Uint8Array) => {
       // Telegram Desktop probes a media connection with req_pq, then reuses its
-      // cached permanent key on that same socket. Pause the unfinished probe
+      // cached permanent or temporary key on that same socket. Pause the probe
       // handshake and resume only after the key store confirms the key id.
       const keyId = msg.subarray(0, 8)
       const encrypted = !keyId.every(b => b === 0)
@@ -237,7 +238,7 @@ export class ServerSession {
             .then(() => this._keyStore?.get(storedKeyId))
             .then((stored) => {
               if (!stored) {
-                throw new Error(`client presented unknown cached auth key id ${Buffer.from(storedKeyId).toString('hex')}`)
+                throw new UnknownStoredAuthKey(storedKeyId)
               }
               interruptHandshake(new ResumeStoredAuthKey(stored, encryptedFrames))
             })
@@ -322,12 +323,19 @@ export class ServerSession {
 
       this._msgIdGen.updateTimeOffset(result.timeOffset)
 
-      if (isTemp) {
-        // The temp key lives alongside the perm key; the client binds them via
-        // auth.bindTempAuthKey (which arrives encrypted with the temp key) and
-        // then uses the temp key for all subsequent traffic.
+      if (isTemp && !result.temporary) {
+        throw new Error('client requested a permanent key during a PFS handshake')
+      }
+
+      if (result.temporary) {
+        // Desktop shares the PFS key across its API, upload, and download TCP
+        // connections. A fresh media socket may create this key directly; its
+        // permanent identity is loaded later from auth.bindTempAuthKey.
         this._tempAuthKey = new ServerAuthKey(this._crypto, this._log, this._readerMap)
         this._tempAuthKey.setup(result.authKey)
+        this._tempAuthKeyExpiresAt = result.expiresAt ?? null
+        this._serverSalt = result.serverSalt
+        this._authorized = true
         this._log.info('temp-key (PFS) handshake complete, temp auth key id = %h', this._tempAuthKey.id)
       } else {
         this._permAuthKey.setup(result.authKey)
@@ -336,14 +344,14 @@ export class ServerSession {
         this._log.info('handshake complete, auth key id = %h', this._permAuthKey.id)
         // Persist the perm key so a returning client can resume without re-handshaking.
         try {
-          await this._keyStore?.save(this._permAuthKey.id, result.authKey)
+          await this._keyStore?.save(this._permAuthKey.id, { key: result.authKey })
         } catch (err) {
           this._log.warn('failed to persist auth key: %s', err instanceof Error ? err.message : err)
         }
       }
 
       // Generate initial future salts once, before the first encrypted message.
-      if (!isTemp) {
+      if (this._futureSalts.length === 0) {
         this._generateFutureSalts()
       }
 
@@ -353,6 +361,8 @@ export class ServerSession {
     } catch (err) {
       if (err instanceof ResumeStoredAuthKey) {
         resumed = err
+      } else if (err instanceof UnknownStoredAuthKey) {
+        this._sendAuthKeyNotFound(err.keyId)
       } else {
         this._log.error('%s handshake failed: %s', isTemp ? 'temp-key' : 'perm-key', err instanceof Error ? err.stack : err)
         this._connection.close()
@@ -366,14 +376,43 @@ export class ServerSession {
     }
 
     if (resumed) {
-      this._permAuthKey.setup(resumed.authKey)
-      this._generateFutureSalts()
-      this._authorized = true
-      this._log.info('resumed session from stored auth key after plaintext transport probe, id = %h', this._permAuthKey.id)
+      if (!await this._adoptStoredAuthKey(resumed.record)) {
+        this._sendAuthKeyNotFound(resumed.encryptedFrames[0].subarray(0, 8))
+        return
+      }
       for (const frame of resumed.encryptedFrames) {
         await this._onRawData(frame)
       }
     }
+  }
+
+  private async _adoptStoredAuthKey(record: StoredAuthKey): Promise<boolean> {
+    if (record.permanentKeyId) {
+      const permanent = await this._keyStore?.get(record.permanentKeyId)
+      if (!permanent || permanent.permanentKeyId) return false
+      this._permAuthKey.setup(permanent.key)
+      this._tempAuthKey = new ServerAuthKey(this._crypto, this._log, this._readerMap)
+      this._tempAuthKey.setup(record.key)
+      this._tempAuthKeyExpiresAt = record.expiresAt ?? null
+      this._log.info(
+        'resumed temporary auth key %h for permanent key %h',
+        this._tempAuthKey.id,
+        this._permAuthKey.id,
+      )
+    } else {
+      this._permAuthKey.setup(record.key)
+      this._log.info('resumed permanent auth key %h', this._permAuthKey.id)
+    }
+    this._generateFutureSalts()
+    this._authorized = true
+    return true
+  }
+
+  private _sendAuthKeyNotFound(keyId: Uint8Array): void {
+    this._log.warn('client presented unknown or expired auth key id %h; sending -404', keyId)
+    const error = new Uint8Array(4)
+    new DataView(error.buffer).setInt32(0, -404, true)
+    this._connection.sendAndClose(error)
   }
 
   private async _handleDecryptedMessage(msgId: Long, seqNo: number, reader: TlBinaryReader): Promise<void> {
@@ -439,7 +478,7 @@ export class ServerSession {
         break
 
       case 'auth.bindTempAuthKey':
-        this._handleBindTempAuthKey(msgId, obj as unknown as tl.auth.RawBindTempAuthKeyRequest)
+        await this._handleBindTempAuthKey(msgId, obj as unknown as tl.auth.RawBindTempAuthKeyRequest)
         break
 
       default:
@@ -565,9 +604,26 @@ export class ServerSession {
    * is a `bind_auth_key_inner` sealed with the *permanent* key using the old
    * MTProto message encryption. We decrypt and verify it, then reply boolTrue.
    */
-  private _handleBindTempAuthKey(msgId: Long, req: tl.auth.RawBindTempAuthKeyRequest): void {
+  private async _handleBindTempAuthKey(msgId: Long, req: tl.auth.RawBindTempAuthKeyRequest): Promise<void> {
+    if (!this._permAuthKey.ready) {
+      const permanentId = longToBytesLE(req.permAuthKeyId)
+      const permanent = await this._keyStore?.get(permanentId)
+      if (permanent && !permanent.permanentKeyId) {
+        this._permAuthKey.setup(permanent.key)
+        this._log.info('loaded permanent key %h for direct temp-key binding', this._permAuthKey.id)
+      }
+    }
     const ok = this._verifyBindInner(req)
     if (ok) {
+      try {
+        await this._keyStore?.save(this._tempAuthKey!.id, {
+          key: this._tempAuthKey!.key,
+          permanentKeyId: new Uint8Array(this._permAuthKey.id),
+          expiresAt: req.expiresAt,
+        })
+      } catch (err) {
+        this._log.warn('failed to persist bound temp auth key: %s', err instanceof Error ? err.message : err)
+      }
       this._log.info('temp key bound to perm key (temp id = %h)', this._tempAuthKey?.id)
     } else {
       this._log.warn('bindTempAuthKey verification failed, replying boolTrue anyway')
@@ -632,8 +688,17 @@ export class ServerSession {
       const tempIdOk = typed.equal(longToBytesLE(bind.tempAuthKeyId), this._tempAuthKey.id)
       const permIdOk = typed.equal(longToBytesLE(bind.permAuthKeyId), this._permAuthKey.id)
       const nonceOk = bind.nonce.eq(req.nonce)
-      if (!tempIdOk || !permIdOk || !nonceOk) {
-        this._log.warn('bindTempAuthKey: field mismatch (temp=%s perm=%s nonce=%s)', tempIdOk, permIdOk, nonceOk)
+      const expiryOk = bind.expiresAt === req.expiresAt
+        && req.expiresAt > Math.floor(Date.now() / 1000)
+        && (this._tempAuthKeyExpiresAt === null || req.expiresAt <= this._tempAuthKeyExpiresAt + 5)
+      if (!tempIdOk || !permIdOk || !nonceOk || !expiryOk) {
+        this._log.warn(
+          'bindTempAuthKey: field mismatch (temp=%s perm=%s nonce=%s expiry=%s)',
+          tempIdOk,
+          permIdOk,
+          nonceOk,
+          expiryOk,
+        )
         return false
       }
       return true

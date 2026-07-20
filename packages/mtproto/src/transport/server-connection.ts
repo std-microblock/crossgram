@@ -33,6 +33,7 @@ export class ServerConnection {
   readonly onReady = new Emitter<void>()
 
   private _closed = false
+  private _closeEmitted = false
   private _recvBuffer = Bytes.alloc(65536)
   /** Codec is `null` until the transport is detected from the first bytes. */
   private _codec: IPacketCodec | null = null
@@ -47,8 +48,9 @@ export class ServerConnection {
       this._log.warn('socket error: %s', err.message)
     })
     _socket.on('close', () => {
-      if (!this._closed) {
-        this._closed = true
+      this._closed = true
+      if (!this._closeEmitted) {
+        this._closeEmitted = true
         this.onClose.emit()
       }
     })
@@ -70,20 +72,37 @@ export class ServerConnection {
    * The packet is encoded by the (detected) codec before writing to the socket.
    */
   send(data: Uint8Array): void {
+    this._send(data, false)
+  }
+
+  /** Send one final framed packet and close after the socket flushes it. */
+  sendAndClose(data: Uint8Array): void {
+    this._send(data, true)
+  }
+
+  private _send(data: Uint8Array, closeAfterWrite: boolean): void {
     if (this._closed) return
     if (!this._codec) {
       this._log.warn('send() called before transport was detected; dropping %d bytes', data.length)
+      if (closeAfterWrite) this.close()
       return
     }
 
     const writable = Bytes.alloc(data.length + 16)
     const result = this._codec.encode(data, writable)
+    const write = () => {
+      const encoded = writable.result()
+      if (closeAfterWrite) {
+        this._closed = true
+        this._socket.end(encoded)
+      } else {
+        this._socket.write(encoded)
+      }
+    }
     if (result instanceof Promise) {
-      result.then(() => {
-        this._socket.write(writable.result())
-      })
+      result.then(write)
     } else {
-      this._socket.write(writable.result())
+      write()
     }
   }
 

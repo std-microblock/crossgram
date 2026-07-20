@@ -232,6 +232,41 @@ function clientEncrypt(key: ClientKey, body: Uint8Array, salt: Long, sessionId: 
   return u8.concat3(key.authKeyId, messageKey, ige.encrypt(buf))
 }
 
+async function bindTempAuthKey(
+  client: TestClient,
+  perm: ClientKey,
+  temp: ClientKey,
+  sessionId: Long,
+): Promise<void> {
+  const bindInner = {
+    _: 'mt_bind_auth_key_inner',
+    nonce: Long.fromBytesLE(Array.from(crypto.randomBytes(8))),
+    tempAuthKeyId: Long.fromBytesLE(Array.from(temp.authKeyId)),
+    permAuthKeyId: Long.fromBytesLE(Array.from(perm.authKeyId)),
+    tempSessionId: sessionId,
+    expiresAt: nowSec() + 3600,
+  }
+  const bw = TlBinaryWriter.alloc(__tlWriterMap, 80)
+  bw.raw(crypto.randomBytes(16))
+  bw.long(makeMsgId(4))
+  bw.int(0)
+  bw.int(40)
+  bw.object(bindInner)
+  const msgNoPad = bw.result()
+  bw.raw(crypto.randomBytes(8))
+  const msgKey = crypto.sha1(msgNoPad).subarray(4, 20)
+  const encInner = createAesIgeForMessageOld(crypto, perm.authKey, msgKey, true).encrypt(bw.result())
+  const bindReq = TlBinaryWriter.serializeObject(__tlWriterMap, {
+    _: 'auth.bindTempAuthKey',
+    permAuthKeyId: bindInner.permAuthKeyId,
+    nonce: bindInner.nonce,
+    expiresAt: bindInner.expiresAt,
+    encryptedMessage: u8.concat3(perm.authKeyId, msgKey, encInner),
+  } as unknown as { _: string })
+  await client.send(clientEncrypt(temp, bindReq, temp.salt, sessionId, 4))
+  expect(await readRpcResult(client, temp)).toEqual({ _: 'boolTrue' })
+}
+
 /** Decrypt a server→client message, returning the inner object reader positioned at the body. */
 function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap = __tlReaderMap): TlBinaryReader {
   expect(typed.equal(data.subarray(0, 8), key.authKeyId)).toBe(true)
@@ -252,6 +287,7 @@ async function startServer(): Promise<{
   port: number
   pubKey: any
   uploadedParts: Uint8Array[]
+  transferAuthKeyIds: Uint8Array[]
   downloadBytes: Uint8Array
   stop: () => Promise<void>
 }> {
@@ -327,18 +363,24 @@ async function startServer(): Promise<{
   })
 
   const uploadedParts: Uint8Array[] = []
-  ctx.mtproto.register('upload.saveFilePart', async (_rpc, req) => {
+  const transferAuthKeyIds: Uint8Array[] = []
+  ctx.mtproto.register('upload.saveFilePart', async (rpc, req) => {
     const input = req as tl.upload.RawSaveFilePartRequest
     uploadedParts.push(new Uint8Array(input.bytes))
+    transferAuthKeyIds.push(new Uint8Array(rpc.authKeyId!))
     return { _: 'boolTrue' } as unknown as tl.TlObject
   })
   const downloadBytes = new TextEncoder().encode('media connection download')
-  ctx.mtproto.register('upload.getFile', async () => ({
-    _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: nowSec(), bytes: downloadBytes,
-  }))
+  ctx.mtproto.register('upload.getFile', async (rpc) => {
+    transferAuthKeyIds.push(new Uint8Array(rpc.authKeyId!))
+    return { _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: nowSec(), bytes: downloadBytes }
+  })
 
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
-  return { port: ctx.mtproto.port, pubKey, uploadedParts, downloadBytes, stop: () => Promise.resolve(fiber.dispose()) }
+  return {
+    port: ctx.mtproto.port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes,
+    stop: () => Promise.resolve(fiber.dispose()),
+  }
 }
 
 describe('e2e: obfuscated transport + PFS + RPC', () => {
@@ -389,39 +431,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const sdv = typed.toDataView(sessionId)
       const sessionLong = new Long(sdv.getInt32(0, true), sdv.getInt32(4, true))
 
-      // Build auth.bindTempAuthKey exactly as mtcute/tdesktop do.
-      const bindInner = {
-        _: 'mt_bind_auth_key_inner',
-        nonce: Long.fromBytesLE(Array.from(crypto.randomBytes(8))),
-        tempAuthKeyId: Long.fromBytesLE(Array.from(temp.authKeyId)),
-        permAuthKeyId: Long.fromBytesLE(Array.from(perm.authKeyId)),
-        tempSessionId: sessionLong,
-        expiresAt: nowSec() + 3600,
-      }
-      const bw = TlBinaryWriter.alloc(__tlWriterMap, 80)
-      bw.raw(crypto.randomBytes(16))
-      const bindMsgId = makeMsgId(4)
-      bw.long(bindMsgId)
-      bw.int(0)
-      bw.int(40)
-      bw.object(bindInner)
-      const msgNoPad = bw.result()
-      bw.raw(crypto.randomBytes(8))
-      const msgWithPad = bw.result()
-      const msgKey = crypto.sha1(msgNoPad).subarray(4, 20)
-      const encInner = createAesIgeForMessageOld(crypto, perm.authKey, msgKey, true).encrypt(msgWithPad)
-      const encryptedMessage = u8.concat3(perm.authKeyId, msgKey, encInner)
-
-      const bindReq = TlBinaryWriter.serializeObject(__tlWriterMap, {
-        _: 'auth.bindTempAuthKey',
-        permAuthKeyId: bindInner.permAuthKeyId,
-        nonce: bindInner.nonce,
-        expiresAt: bindInner.expiresAt,
-        encryptedMessage,
-      } as unknown as { _: string })
-      await client.send(clientEncrypt(temp, bindReq, temp.salt, sessionLong, 4))
-      const bindResult = await readRpcResult(client, temp)
-      expect(bindResult._).toBe('boolTrue')
+      await bindTempAuthKey(client, perm, temp, sessionLong)
 
       // Now a real RPC over the temp key.
       const req = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' })
@@ -506,11 +516,11 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
-  it('resumes cached auth after a req_pq transport probe and accepts a file part', async () => {
+  it('resumes a bound PFS key after a req_pq probe for upload and download', async () => {
     await crypto.initialize?.()
-    const { port, pubKey, uploadedParts, downloadBytes, stop } = await startServer()
+    const { port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes, stop } = await startServer()
     try {
-      // Establish and persist the permanent key on a regular API connection.
+      // Establish the account's permanent key on the main API connection.
       const api = await TestClient.connect(port)
       const perm = await doClientHandshake(api, pubKey, false)
       const apiSession = new Long(0x33333333, 0x33333333)
@@ -519,8 +529,18 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       await readRpcResult(api, perm)
       api.close()
 
+      // Desktop's config-enumeration connection creates p_q_inner_data_temp_dc
+      // directly, then binds that key to the permanent key from another socket.
+      const config = await TestClient.connect(port)
+      const temp = await doClientHandshake(config, pubKey, true)
+      const configSession = new Long(0x35353535, 0x35353535)
+      await bindTempAuthKey(config, perm, temp, configSession)
+      await config.send(clientEncrypt(temp, configReq, temp.salt, configSession, 8))
+      await readRpcResult(config, temp)
+      config.close()
+
       // Desktop media sockets probe TCP with legacy req_pq before sending an
-      // encrypted ping using the cached permanent key on the same connection.
+      // encrypted ping using the bound PFS key on the same connection.
       const media = await TestClient.connect(port)
       await sendLegacyReqPq(media, crypto.randomBytes(16), 8)
       expect((await readPlainObj(media))._).toBe('mt_resPQ')
@@ -528,16 +548,16 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const mediaSession = new Long(0x44444444, 0x44444444)
       const pingId = new Long(0x55667788, 0x11223344)
       const ping = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'mt_ping', pingId } as unknown as { _: string })
-      await media.send(clientEncrypt(perm, ping, perm.salt, mediaSession, 12))
-      const pong = await readEncryptedObject(media, perm, 'mt_pong')
+      await media.send(clientEncrypt(temp, ping, temp.salt, mediaSession, 12))
+      const pong = await readEncryptedObject(media, temp, 'mt_pong')
       expect(pong.pingId.eq(pingId)).toBe(true)
 
       const bytes = new Uint8Array([0, 1, 2, 3, 0xfe, 0xff])
       const savePart = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(9001), filePart: 0, bytes,
       } as { _: string })
-      await media.send(clientEncrypt(perm, savePart, perm.salt, mediaSession, 16))
-      expect(await readRpcResult(media, perm)).toEqual({ _: 'boolTrue' })
+      await media.send(clientEncrypt(temp, savePart, temp.salt, mediaSession, 16))
+      expect(await readRpcResult(media, temp)).toEqual({ _: 'boolTrue' })
       expect(uploadedParts).toEqual([bytes])
 
       const getFile = TlBinaryWriter.serializeObject(__tlWriterMap, {
@@ -547,11 +567,41 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
           fileReference: new Uint8Array(), thumbSize: '',
         },
       } as { _: string })
-      await media.send(clientEncrypt(perm, getFile, perm.salt, mediaSession, 20))
-      const downloaded = await readRpcResult(media, perm) as tl.upload.RawFile
+      await media.send(clientEncrypt(temp, getFile, temp.salt, mediaSession, 20))
+      const downloaded = await readRpcResult(media, temp) as tl.upload.RawFile
       expect(downloaded._).toBe('upload.file')
       expect(downloaded.bytes).toEqual(downloadBytes)
+      expect(transferAuthKeyIds).toHaveLength(2)
+      expect(transferAuthKeyIds.every(id => typed.equal(id, perm.authKeyId))).toBe(true)
       media.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('returns -404 after a probe when the cached key is unknown', async () => {
+    await crypto.initialize?.()
+    const { port, stop } = await startServer()
+    try {
+      const client = await TestClient.connect(port)
+      await sendLegacyReqPq(client, crypto.randomBytes(16), 4)
+      expect((await readPlainObj(client))._).toBe('mt_resPQ')
+
+      const authKey = crypto.randomBytes(256)
+      const stale: ClientKey = {
+        authKey,
+        authKeyId: crypto.sha1(authKey).subarray(-8),
+        salt: Long.ZERO,
+      }
+      const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_ping', pingId: Long.fromNumber(404),
+      } as unknown as { _: string })
+      await client.send(clientEncrypt(stale, ping, Long.ZERO, Long.ONE, 8))
+
+      const error = await client.read()
+      expect(error).toHaveLength(4)
+      expect(new DataView(error.buffer, error.byteOffset, 4).getInt32(0, true)).toBe(-404)
+      client.close()
     } finally {
       await stop()
     }

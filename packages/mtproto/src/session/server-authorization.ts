@@ -30,6 +30,10 @@ export interface AuthorizationResult {
   serverSalt: Long
   /** Time offset between server and client clocks */
   timeOffset: number
+  /** Whether the client requested a temporary PFS key in p_q_inner_data_temp_dc. */
+  temporary: boolean
+  /** Expiration requested for a temporary PFS key, as a Unix timestamp. */
+  expiresAt?: number
 }
 
 /**
@@ -132,6 +136,7 @@ export async function doServerAuthorization(
   }
 
   const pqInner = pqInnerData as mtp.RawMt_p_q_inner_data_dc | mtp.RawMt_p_q_inner_data_temp_dc
+  const temporary = pqInner._ === 'mt_p_q_inner_data_temp_dc'
 
   if (!typed.equal(pqInner.nonce, clientNonce)) {
     throw new Error('Step 2: invalid nonce in inner data')
@@ -149,6 +154,9 @@ export async function doServerAuthorization(
   const gABytes = bigint.toBytes(gA, 256)
 
   const serverTime = Math.floor(Date.now() / 1000)
+  const expiresAt = temporary
+    ? serverTime + pqInner.expiresIn
+    : undefined
 
   const serverDhInner: mtp.RawMt_server_DH_inner_data = {
     _: 'mt_server_DH_inner_data',
@@ -254,7 +262,7 @@ export async function doServerAuthorization(
 
   authLog.info('server authorization successful')
 
-  return { authKey, serverSalt, timeOffset }
+  return { authKey, serverSalt, timeOffset, temporary, expiresAt }
 }
 
 // ── RSA decryption helpers ──

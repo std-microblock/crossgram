@@ -1,23 +1,21 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-/**
- * Persistent store for established permanent auth keys.
- *
- * MTProto clients (especially Telegram Desktop) cache their permanent auth key
- * and reuse it on reconnect by sending encrypted traffic with the cached
- * `auth_key_id` — without redoing the DH handshake. A stateless server that
- * forgets keys on restart therefore leaves such clients stuck. Persisting keys
- * lets the server recognize a returning client and skip the handshake.
- *
- * Only the 256-byte auth key is stored; the server salt is renegotiated per
- * connection (clients adapt via `bad_server_salt`).
- */
+export interface StoredAuthKey {
+  /** The 256-byte MTProto auth key. */
+  key: Uint8Array
+  /** Present for a temporary PFS key and points at its permanent identity. */
+  permanentKeyId?: Uint8Array
+  /** Unix timestamp after which a temporary key must be rejected. */
+  expiresAt?: number
+}
+
+/** Persistent store for permanent keys and their bound temporary PFS keys. */
 export interface AuthKeyStore {
   /** Look up an auth key by its 8-byte id. */
-  get(id: Uint8Array): Promise<Uint8Array | undefined> | Uint8Array | undefined
-  /** Persist an auth key under its 8-byte id. */
-  save(id: Uint8Array, key: Uint8Array): Promise<void> | void
+  get(id: Uint8Array): Promise<StoredAuthKey | undefined> | StoredAuthKey | undefined
+  /** Persist a permanent key or temporary key association under its 8-byte id. */
+  save(id: Uint8Array, record: StoredAuthKey): Promise<void> | void
 }
 
 function toHex(u: Uint8Array): string {
@@ -34,15 +32,26 @@ function fromHex(s: string): Uint8Array {
 
 /** In-memory store — survives across connections within one process, not restarts. */
 export class MemoryAuthKeyStore implements AuthKeyStore {
-  private _keys = new Map<string, Uint8Array>()
+  private _keys = new Map<string, StoredAuthKey>()
 
-  get(id: Uint8Array): Uint8Array | undefined {
-    return this._keys.get(toHex(id))
+  get(id: Uint8Array): StoredAuthKey | undefined {
+    const record = this._keys.get(toHex(id))
+    if (record?.expiresAt !== undefined && record.expiresAt <= Date.now() / 1000) {
+      this._keys.delete(toHex(id))
+      return undefined
+    }
+    return record
   }
 
-  save(id: Uint8Array, key: Uint8Array): void {
-    this._keys.set(toHex(id), key)
+  save(id: Uint8Array, record: StoredAuthKey): void {
+    this._keys.set(toHex(id), record)
   }
+}
+
+interface SerializedAuthKey {
+  key: string
+  permanentKeyId?: string
+  expiresAt?: number
 }
 
 /**
@@ -50,27 +59,47 @@ export class MemoryAuthKeyStore implements AuthKeyStore {
  * memory and flushed to disk on each save (auth keys are established rarely).
  */
 export class FileAuthKeyStore implements AuthKeyStore {
-  private _keys = new Map<string, string>()
+  private _keys = new Map<string, SerializedAuthKey>()
 
   constructor(private readonly _path: string) {
     if (existsSync(_path)) {
       try {
-        const raw = JSON.parse(readFileSync(_path, 'utf-8')) as Record<string, string>
-        for (const [id, key] of Object.entries(raw)) this._keys.set(id, key)
+        const raw = JSON.parse(readFileSync(_path, 'utf-8')) as Record<string, string | SerializedAuthKey>
+        for (const [id, value] of Object.entries(raw)) {
+          // Files written before temporary-key support stored the key as a bare
+          // hex string. Treat those entries as permanent keys during migration.
+          this._keys.set(id, typeof value === 'string' ? { key: value } : value)
+        }
       } catch {
         // corrupt/empty file — start fresh
       }
     }
   }
 
-  get(id: Uint8Array): Uint8Array | undefined {
-    const hex = this._keys.get(toHex(id))
-    return hex ? fromHex(hex) : undefined
+  get(id: Uint8Array): StoredAuthKey | undefined {
+    const idHex = toHex(id)
+    const value = this._keys.get(idHex)
+    if (!value) return undefined
+    if (value.expiresAt !== undefined && value.expiresAt <= Date.now() / 1000) {
+      this._keys.delete(idHex)
+      return undefined
+    }
+    return {
+      key: fromHex(value.key),
+      permanentKeyId: value.permanentKeyId ? fromHex(value.permanentKeyId) : undefined,
+      expiresAt: value.expiresAt,
+    }
   }
 
-  save(id: Uint8Array, key: Uint8Array): void {
-    this._keys.set(toHex(id), toHex(key))
+  save(id: Uint8Array, record: StoredAuthKey): void {
+    this._keys.set(toHex(id), {
+      key: toHex(record.key),
+      permanentKeyId: record.permanentKeyId ? toHex(record.permanentKeyId) : undefined,
+      expiresAt: record.expiresAt,
+    })
     mkdirSync(dirname(this._path), { recursive: true })
-    writeFileSync(this._path, JSON.stringify(Object.fromEntries(this._keys)))
+    const temporaryPath = `${this._path}.tmp`
+    writeFileSync(temporaryPath, JSON.stringify(Object.fromEntries(this._keys)))
+    renameSync(temporaryPath, this._path)
   }
 }

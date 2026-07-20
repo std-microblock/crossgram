@@ -16,7 +16,7 @@ export { RpcError, RpcErrors, toRpcError, isRpcError } from './rpc/errors.js'
 
 export { ServerConnection } from './transport/server-connection.js'
 export { AbridgedPacketCodec, ServerObfuscatedCodec, createServerObfuscation } from './transport/server-obfuscation.js'
-export { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './session/auth-key-store.js'
+export { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore, type StoredAuthKey } from './session/auth-key-store.js'
 export { ServerSession } from './session/server-session.js'
 export { ServerAuthKey } from './session/server-auth-key.js'
 export { ServerMessageIdGenerator } from './session/message-id.js'
