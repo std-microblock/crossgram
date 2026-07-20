@@ -71,18 +71,18 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx, registry, store, subscriptions, uploads, config.onTransferProgress,
   )
 
-  platforms.onChange((event, platform) => {
+  platforms.onChange((event, platformId) => {
     if (event === 'register') {
-      ctx.logger('bridge').info('IM platform registered: %s', platform.id)
+      ctx.logger('bridge').info('IM platform registered: %s', platformId)
       void ctx.database.prepared()
-        .then(() => subscriptions.startActiveSessions(platform.id))
+        .then(() => subscriptions.startActiveSessions(platformId))
         .catch((error) => ctx.logger('bridge').warn(
-          'failed to start platform sessions (%s): %s', platform.id, String(error),
+          'failed to start platform sessions (%s): %s', platformId, String(error),
         ))
     } else {
-      ctx.logger('bridge').info('IM platform unregistered: %s', platform.id)
-      void subscriptions.stopPlatform(platform.id).catch((error) => ctx.logger('bridge').warn(
-        'failed to stop platform sessions (%s): %s', platform.id, String(error),
+      ctx.logger('bridge').info('IM platform unregistered: %s', platformId)
+      void subscriptions.stopPlatform(platformId).catch((error) => ctx.logger('bridge').warn(
+        'failed to stop platform sessions (%s): %s', platformId, String(error),
       ))
     }
   })

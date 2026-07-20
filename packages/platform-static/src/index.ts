@@ -4,6 +4,7 @@ import type {
   IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageContent, IMMessageInput,
   IMPageQuery, IMPlatform, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
+import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 
 export interface StaticPlatformOptions {
   id?: string
@@ -11,13 +12,16 @@ export interface StaticPlatformOptions {
   transferChunkSize?: number
 }
 
-export type Config = StaticPlatformOptions
+export interface Config {
+  transferChunkSize?: number
+}
 export const name = 'im-platform-static'
 export const inject = ['imPlatform']
 
 /** Cordis plugin entrypoint. Each plugin instance registers one isolated adapter. */
 export function apply(ctx: Context, config: Config = {}): void {
-  ctx.imPlatform.register(new StaticPlatform(config))
+  const id = resolvePlatformPluginId(ctx, 'static')
+  ctx.imPlatform.register(new StaticPlatform({ ...config, id }), id)
 }
 
 /** Complete in-memory reference adapter used for development and conformance tests. */
@@ -340,5 +344,3 @@ function textMessage(
 function clone<T>(value: T): T {
   return value === undefined ? value : structuredClone(value)
 }
-
-export default apply

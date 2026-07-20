@@ -43,17 +43,28 @@ function mediaInput(kind: 'image' | 'file', chunks: number[][], name: string): I
   }
 }
 
+function loadedStaticPlugin(id: string, config: staticPlatformPlugin.Config = {}) {
+  const plugin = (ctx: Context) => {
+    ;(ctx.fiber as typeof ctx.fiber & { entry?: { id: string } }).entry = { id }
+    staticPlatformPlugin.apply(ctx, config)
+  }
+  plugin.inject = ['imPlatform']
+  return plugin
+}
+
 describe('StaticPlatform', () => {
   it('registers multiple Cordis plugin instances and disposes them independently', async () => {
     const ctx = new Context()
     const service = ctx.plugin((serviceCtx) => { new IMPlatformService(serviceCtx) })
-    const first = ctx.plugin(staticPlatformPlugin, { id: 'static-one' })
-    const second = ctx.plugin(staticPlatformPlugin, { id: 'static-two', transferChunkSize: 4 })
+    const first = ctx.plugin(loadedStaticPlugin('static-one'))
+    const second = ctx.plugin(loadedStaticPlugin('static-two', { transferChunkSize: 4 }))
     await Promise.all([service, first, second])
 
     expect(ctx.imPlatform.ids).toEqual(['static-one', 'static-two'])
     expect(ctx.imPlatform.require('static-one')).toBeInstanceOf(StaticPlatform)
     expect(ctx.imPlatform.require('static-two')).toBeInstanceOf(StaticPlatform)
+    expect(ctx.imPlatform.require('static-one').id).toBe('static-one')
+    expect(ctx.imPlatform.require('static-two').id).toBe('static-two')
 
     await first.dispose()
     expect(ctx.imPlatform.ids).toEqual(['static-two'])

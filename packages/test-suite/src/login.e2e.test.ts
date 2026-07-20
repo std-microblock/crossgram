@@ -236,7 +236,7 @@ async function startApp(options: {
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
     options.platform
       ? ctx.plugin(makePlatformPlugin(options.platform))
-      : ctx.plugin(staticPlatformPlugin, { id: 'static' }),
+      : ctx.plugin(staticPlatformPlugin),
   ]
   await Promise.all(fibers)
   await new Promise((r) => setTimeout(r, 100)) // let fibers settle

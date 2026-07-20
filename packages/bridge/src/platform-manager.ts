@@ -13,11 +13,11 @@ export class PlatformRegistry {
     for (const platform of platforms) this.register(platform)
   }
 
-  register(platform: IMPlatform): Unsubscribe {
-    if (this._platforms.has(platform.id)) throw new Error(`duplicate IM platform ID: ${platform.id}`)
-    this._platforms.set(platform.id, platform)
+  register(platform: IMPlatform, registrationId = platform.id): Unsubscribe {
+    if (this._platforms.has(registrationId)) throw new Error(`duplicate IM platform ID: ${registrationId}`)
+    this._platforms.set(registrationId, platform)
     return () => {
-      if (this._platforms.get(platform.id) === platform) this._platforms.delete(platform.id)
+      if (this._platforms.get(registrationId) === platform) this._platforms.delete(registrationId)
     }
   }
 
@@ -37,7 +37,19 @@ export class PlatformRegistry {
 }
 
 export type PlatformRegistryEvent = 'register' | 'unregister'
-export type PlatformRegistryListener = (event: PlatformRegistryEvent, platform: IMPlatform) => void
+export type PlatformRegistryListener = (
+  event: PlatformRegistryEvent,
+  registrationId: string,
+  platform: IMPlatform,
+) => void
+
+/** Resolve the stable Cordis config-entry ID, with a fallback for direct `ctx.plugin()` usage. */
+export function resolvePlatformPluginId(ctx: Context, fallback?: string): string {
+  const entryId = (ctx.fiber as typeof ctx.fiber & { entry?: { id?: unknown } }).entry?.id
+  if (typeof entryId === 'string' && entryId) return entryId
+  if (fallback) return fallback
+  throw new Error('IM platform must be loaded from a named Cordis config entry')
+}
 
 /** Cordis-owned adapter registry exposed as `ctx.imPlatform`. */
 export class IMPlatformService extends Service {
@@ -62,15 +74,15 @@ export class IMPlatformService extends Service {
   }
 
   /** Register an adapter for the lifetime of the calling Cordis plugin fiber. */
-  register(platform: IMPlatform): Unsubscribe {
+  register(platform: IMPlatform, registrationId = resolvePlatformPluginId(this.ctx, platform.id)): Unsubscribe {
     return this.ctx.effect(() => {
-      const unregister = this.registry.register(platform)
-      this._emit('register', platform)
+      const unregister = this.registry.register(platform, registrationId)
+      this._emit('register', registrationId, platform)
       return () => {
         unregister()
-        this._emit('unregister', platform)
+        this._emit('unregister', registrationId, platform)
       }
-    }, `imPlatform.register(${platform.id})`)
+    }, `imPlatform.register(${registrationId})`)
   }
 
   onChange(listener: PlatformRegistryListener): Unsubscribe {
@@ -80,8 +92,8 @@ export class IMPlatformService extends Service {
     }, 'imPlatform.onChange')
   }
 
-  private _emit(event: PlatformRegistryEvent, platform: IMPlatform): void {
-    for (const listener of this._listeners) listener(event, platform)
+  private _emit(event: PlatformRegistryEvent, registrationId: string, platform: IMPlatform): void {
+    for (const listener of this._listeners) listener(event, registrationId, platform)
   }
 }
 
