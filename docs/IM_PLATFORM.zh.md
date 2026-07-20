@@ -12,6 +12,14 @@ ctx.plugin(bridge, {
 })
 ```
 
+bridge 不注册默认 adapter。开发或测试时也必须显式传入平台实例，避免生产配置缺失时静默连接到 demo 数据。仓库中的完整参考实现是 `@mtproto-relay/platform-static`：
+
+```ts
+import { StaticPlatform } from '@mtproto-relay/platform-static'
+
+ctx.plugin(bridge, { platforms: [new StaticPlatform()] })
+```
+
 每个 `PlatformSession.platformId` 决定实际 adapter。bridge 启动时会为数据库中所有 active session 调用一次 `subscribe()`；同一 session 的多个 MTProto 连接不会重复订阅。插件停止时会等待 `Unsubscribe`。
 
 `subscribe()` handler 返回的 Promise 有背压语义。adapter 应等待它结束再确认/提交自己的消费游标，否则进程在入库前退出可能丢消息。
@@ -138,4 +146,20 @@ adapter 必须准确声明 `send.text/images/files/mixed/maxTextLength/maxMedia`
 8. history 与 subscribe 同时返回同一消息时只保留一条。
 9. 服务重启后相同外部 ID 对应相同 Telegram message/group ID。
 
-仓库测试可作为参考：`message-store.test.ts`、`platform-manager.test.ts`、`media-projection.test.ts`、`media-send.test.ts`、`conversation-kinds.test.ts` 和 `login.e2e.test.ts`。
+bridge 内部行为测试位于 `packages/bridge/src`，包括 `message-store.test.ts`、`platform-manager.test.ts`、`media-projection.test.ts`、`media-send.test.ts` 和 `conversation-kinds.test.ts`。
+
+跨包契约测试独立位于 `@mtproto-relay/test-suite`，依赖方向固定为：
+
+```text
+test-suite -> platform-static -> bridge -> mtproto
+           -> bridge -----------^
+```
+
+- `platform-static.test.ts` 直接验证分页、四类 conversation、混合媒体、逐 chunk 进度、range 下载、subscribe 背压、去重、超长 opaque ID、取消和错误行为。
+- `login.e2e.test.ts` 通过真实 MTProto socket 验证登录/重连/重启、IMMessage 入库、群相册 TL 投影、文件上传下载、channel/subchannel 持久化和 push-only 平台。
+
+运行 adapter 契约与跨包 e2e：
+
+```bash
+pnpm --filter @mtproto-relay/test-suite exec vitest run
+```
