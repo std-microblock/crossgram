@@ -19,6 +19,18 @@ export interface ProjectedMessage {
   media: IMMediaRow[]
 }
 
+export interface IngestOptions {
+  allocation?: 'live' | 'history'
+}
+
+export interface StoredHistoryQuery {
+  limit: number
+  beforeTimestamp?: number
+  maxTimestamp?: number
+}
+
+const MESSAGE_ID_MIDPOINT = 0x40000000
+
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
   private _writeTail = Promise.resolve()
@@ -29,6 +41,7 @@ export class MessageStore {
     session: PlatformSession,
     conversation: IMConversation,
     source: IMMessage,
+    options: IngestOptions = {},
   ): Promise<IngestResult> {
     if (source.conversationId !== conversation.id) {
       throw new Error('message conversation does not match ingestion target')
@@ -123,6 +136,7 @@ export class MessageStore {
       storedMedia = storedMedia.filter((item) => item.ordinal < media.length)
       const projection = await this._ensureProjection(
         database, session.platformSessionId, conversationRow, message, storedMedia,
+        options.allocation ?? 'live',
       )
 
       return { message, created, projection }
@@ -138,9 +152,22 @@ export class MessageStore {
       this._upsertConversation(database, session, conversation, unreadCount, new Date())))
   }
 
-  async listDialogs(platformSessionId: string): Promise<IMDialog[]> {
-    const conversations = await this._database.select('mtproto_im_conversation', { platformSessionId })
-      .orderBy('updatedAt', 'desc').execute()
+  async listDialogs(
+    platformSessionId: string,
+    query: { limit?: number, afterConversationId?: string } = {},
+  ): Promise<IMDialog[]> {
+    const limit = clampDatabaseLimit(query.limit ?? 100)
+    const [anchor] = query.afterConversationId
+      ? await this._database.get('mtproto_im_conversation', {
+          platformSessionId, platformConversationId: query.afterConversationId,
+        })
+      : []
+    let conversations = await this._database.select('mtproto_im_conversation', {
+      platformSessionId,
+      ...(anchor ? { updatedAt: { $lte: anchor.updatedAt } } : {}),
+    }).orderBy('updatedAt', 'desc').limit(limit + (anchor ? 1 : 0)).execute()
+    if (anchor) conversations = conversations.filter((item) => item.id !== anchor.id)
+    conversations = conversations.slice(0, limit)
     return Promise.all(conversations.map(async (conversation) => {
       const [latest] = await this._database.select('mtproto_im_message', { conversationId: conversation.id })
         .orderBy('timestamp', 'desc').limit(1).execute()
@@ -152,26 +179,37 @@ export class MessageStore {
     }))
   }
 
-  async readHistory(platformSessionId: string, platformConversationId: string): Promise<IMMessage[]> {
+  async readHistory(
+    platformSessionId: string,
+    platformConversationId: string,
+    query: StoredHistoryQuery = { limit: 100 },
+  ): Promise<IMMessage[]> {
     const [conversation] = await this._database.get('mtproto_im_conversation', {
       platformSessionId, platformConversationId,
     })
     if (!conversation) return []
-    const rows = await this._database.select('mtproto_im_message', { conversationId: conversation.id })
-      .orderBy('timestamp', 'desc').execute()
+    const rows = await this._database.select('mtproto_im_message', {
+      conversationId: conversation.id,
+      ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
+      ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
+    }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
     return Promise.all(rows.map((row) => this._hydrateMessage(row)))
   }
 
   async readProjectedHistory(
     platformSessionId: string,
     platformConversationId: string,
+    query: StoredHistoryQuery = { limit: 100 },
   ): Promise<ProjectedMessage[]> {
     const [conversation] = await this._database.get('mtproto_im_conversation', {
       platformSessionId, platformConversationId,
     })
     if (!conversation) return []
-    const rows = await this._database.select('mtproto_im_message', { conversationId: conversation.id })
-      .orderBy('timestamp', 'desc').execute()
+    const rows = await this._database.select('mtproto_im_message', {
+      conversationId: conversation.id,
+      ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
+      ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
+    }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
     return Promise.all(rows.map(async (row) => ({
       source: await this._hydrateMessage(row),
       parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
@@ -179,6 +217,36 @@ export class MessageStore {
       media: await this._database.select('mtproto_im_media', { messageId: row.id })
         .orderBy('ordinal').execute(),
     })))
+  }
+
+  async findProjectedByTlId(
+    platformSessionId: string,
+    tlMessageId: number,
+    platformConversationId?: string,
+  ): Promise<ProjectedMessage | undefined> {
+    let conversationId: number | undefined
+    if (platformConversationId) {
+      const [conversation] = await this._database.get('mtproto_im_conversation', {
+        platformSessionId, platformConversationId,
+      })
+      if (!conversation) return
+      conversationId = conversation.id
+    }
+    const [part] = await this._database.get('mtproto_tl_message_part', {
+      platformSessionId,
+      tlMessageId,
+      ...(conversationId === undefined ? {} : { conversationId }),
+    })
+    if (!part) return
+    const [row] = await this._database.get('mtproto_im_message', { id: part.messageId })
+    if (!row) return
+    return {
+      source: await this._hydrateMessage(row),
+      parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+      media: await this._database.select('mtproto_im_media', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+    }
   }
 
   async getConversation(
@@ -251,6 +319,7 @@ export class MessageStore {
     conversation: IMConversationRow,
     message: IMMessageRow,
     media: IMMediaRow[],
+    allocation: 'live' | 'history',
   ): Promise<TlMessagePartRow[]> {
     const count = Math.max(1, media.length)
     const scope = conversation.kind === 'channel'
@@ -264,10 +333,12 @@ export class MessageStore {
       if (existing.length) await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId })
     }
     if (existing.length < count) {
-      const ids = await this._allocateIds(database, scope, count - existing.length)
+      const ids = await this._allocateMessageIds(database, scope, count - existing.length, allocation)
       await database.upsert('mtproto_tl_message_part', ids.map((tlMessageId, index) => {
         const ordinal = existing.length + index
         return {
+          platformSessionId,
+          conversationId: conversation.id,
           messageId: message.id,
           mediaId: media[ordinal]?.id ?? null,
           scope,
@@ -286,6 +357,28 @@ export class MessageStore {
     const nextId = first + count
     if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
     await database.upsert('mtproto_id_counter', [{ scope, nextId }])
+    return Array.from({ length: count }, (_, index) => first + index)
+  }
+
+  private async _allocateMessageIds(
+    database: Database,
+    scope: string,
+    count: number,
+    allocation: 'live' | 'history',
+  ): Promise<number[]> {
+    const counterScope = `${allocation}:${scope}`
+    const [counter] = await database.get('mtproto_id_counter', { scope: counterScope })
+    if (allocation === 'live') {
+      const first = counter?.nextId ?? MESSAGE_ID_MIDPOINT
+      const nextId = first + count
+      if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
+      await database.upsert('mtproto_id_counter', [{ scope: counterScope, nextId }])
+      return Array.from({ length: count }, (_, index) => first + index)
+    }
+    const end = counter?.nextId ?? MESSAGE_ID_MIDPOINT
+    const first = end - count
+    if (first <= 0) throw new RangeError(`message ID scope exhausted: ${scope}`)
+    await database.upsert('mtproto_id_counter', [{ scope: counterScope, nextId: first }])
     return Array.from({ length: count }, (_, index) => first + index)
   }
 
@@ -333,4 +426,8 @@ function toConversation(row: IMConversationRow): IMConversation {
     spaceId: row.spacePlatformId ?? undefined,
     metadata: row.metadata,
   }
+}
+
+function clampDatabaseLimit(limit: number): number {
+  return Math.max(1, Math.min(Math.trunc(limit), 500))
 }

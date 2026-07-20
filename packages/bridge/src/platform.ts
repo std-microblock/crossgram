@@ -122,6 +122,20 @@ export interface IMDialog {
 export interface IMPageQuery {
   cursor?: string
   limit?: number
+  /** Stable platform entity ID after which the next page starts. */
+  afterId?: string
+}
+
+export interface IMHistoryAnchor {
+  id: string
+  timestamp: number
+}
+
+export interface IMHistoryQuery extends IMPageQuery {
+  /** Fetch messages strictly older than this platform message. */
+  before?: IMHistoryAnchor
+  /** Fetch messages strictly newer than this platform message. */
+  after?: IMHistoryAnchor
 }
 
 export interface IMDialogPage {
@@ -170,7 +184,7 @@ export interface IMPlatform {
   getHistory?(
     session: PlatformSession,
     conversation: IMConversationRef,
-    query?: IMPageQuery,
+    query?: IMHistoryQuery,
   ): Promise<IMHistoryPage>
   getUser?(session: PlatformSession, userId: string): Promise<IMUser | null>
   downloadMedia?(

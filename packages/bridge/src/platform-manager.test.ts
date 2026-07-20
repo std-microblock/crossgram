@@ -139,7 +139,7 @@ describe('PlatformSubscriptionManager', () => {
 })
 
 describe('PlatformDataService', () => {
-  it('fetches every history page first, then serves the canonical database view', async () => {
+  it('fetches one requested history window at a time and persists both windows', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
@@ -156,17 +156,19 @@ describe('PlatformDataService', () => {
     }
     platform.getHistory = async (_session, _conversation, query) => {
       historyCalls++
-      if (!query?.cursor) return { messages: [incoming('2', conversation.id)], nextCursor: 'history-2' }
+      if (!query?.before) return { messages: [incoming('2', conversation.id)], nextCursor: 'history-2' }
       return { messages: [incoming('1', conversation.id)] }
     }
     const data = new PlatformDataService(platform, session, new MessageStore(database))
 
     const dialogs = await data.getDialogs()
-    expect(dialogCalls).toBe(2)
+    expect(dialogCalls).toBe(1)
     expect(dialogs).toMatchObject([{ conversation: { id: 'history-room' }, unreadCount: 4 }])
     const history = await data.getHistory(conversation.id)
+    expect(historyCalls).toBe(1)
+    expect(history.messages.map((message) => message.id)).toEqual(['2'])
+    await data.getHistory(conversation.id, { limit: 1, before: { id: '2', timestamp: 2 } })
     expect(historyCalls).toBe(2)
-    expect(history.messages.map((message) => message.id)).toEqual(['2', '1'])
     expect(await database.get('mtproto_im_message', {})).toHaveLength(2)
   })
 
@@ -182,13 +184,18 @@ describe('PlatformDataService', () => {
     expect((await data.getHistory(conversation.id)).messages.map((message) => message.id)).toEqual(['9'])
   })
 
-  it('rejects repeated pagination cursors instead of looping forever', async () => {
+  it('does not chase an upstream nextCursor during a single bridge read', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
-    platform.getDialogs = async () => ({ dialogs: [], nextCursor: 'same' })
+    let calls = 0
+    platform.getDialogs = async () => {
+      calls++
+      return { dialogs: [], nextCursor: 'next' }
+    }
     const data = new PlatformDataService(platform, session, new MessageStore(database))
-    await expect(data.getDialogs()).rejects.toThrow('repeated pagination cursor')
+    await expect(data.getDialogs()).resolves.toEqual([])
+    expect(calls).toBe(1)
   })
 })
 

@@ -98,7 +98,7 @@ describe('rich-media projection', () => {
     const messages = result.messages as tl.RawMessage[]
 
     expect(messages).toHaveLength(2)
-    expect(messages.map((message) => message.id)).toEqual([2, 1])
+    expect(messages.map((message) => message.id)).toEqual([0x40000001, 0x40000000])
     expect(messages[0].groupedId?.toString()).toBe(messages[1].groupedId?.toString())
     expect(messages.map((message) => message.message)).toEqual(['', 'album caption'])
     expect(messages.map((message) => message.media?._)).toEqual([
@@ -124,5 +124,39 @@ describe('rich-media projection', () => {
       media: message.media?._,
     }))
     expect(pick(second)).toEqual(pick(first))
+  })
+
+  it('requests and materializes bounded history windows instead of loading the full conversation', async () => {
+    const store = await createStore()
+    const messages = Array.from({ length: 1_000 }, (_, index): IMMessage => ({
+      id: String(1_000 - index),
+      conversationId: conversation.id,
+      senderId: 'alice',
+      timestamp: 1_000 - index,
+      content: { parts: [{ type: 'text', text: String(1_000 - index) }] },
+    }))
+    const queries: Array<{ limit?: number, before?: { id: string } }> = []
+    const pagedPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: [{ conversation, unreadCount: 0, lastMessage: messages[0] }] }
+      },
+      async getHistory(_session, _conversation, query) {
+        queries.push({ limit: query?.limit, before: query?.before })
+        const start = query?.before ? messages.findIndex((message) => message.id === query.before!.id) + 1 : 0
+        return { messages: messages.slice(start, start + (query?.limit ?? 100)) }
+      },
+    }
+    const rpc = new DialogRpc(pagedPlatform, session, store)
+    const first = await rpc.getHistory({ ...historyRequest(), limit: 2 }) as tl.messages.RawMessages
+    expect(queries).toMatchObject([{ limit: 3, before: undefined }])
+    expect(first.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual(['1000', '999'])
+
+    const offsetId = (first.messages[1] as tl.RawMessage).id
+    const second = await rpc.getHistory({ ...historyRequest(), offsetId, limit: 2 }) as tl.messages.RawMessages
+    expect(queries[1]).toMatchObject({ limit: 3, before: { id: '999' } })
+    expect(second.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual(['998', '997'])
+    expect((await store.readHistory(session.platformSessionId, conversation.id, { limit: 100 })).length)
+      .toBeLessThanOrEqual(6)
   })
 })

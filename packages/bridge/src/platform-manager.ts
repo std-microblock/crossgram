@@ -2,7 +2,7 @@ import type { Database } from '@cordisjs/plugin-database'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore } from './message-store.js'
 import type {
-  IMConversation, IMDialog, IMEvent, IMHistoryPage, IMPlatform, PlatformSession, Unsubscribe,
+  IMConversation, IMDialog, IMEvent, IMHistoryPage, IMHistoryQuery, IMPlatform, PlatformSession, Unsubscribe,
 } from './platform.js'
 
 export class PlatformRegistry {
@@ -112,20 +112,18 @@ export class PlatformDataService {
     private readonly _store: MessageStore,
   ) {}
 
-  async getDialogs(): Promise<IMDialog[]> {
+  async getDialogs(query: { limit?: number, afterId?: string } = {}): Promise<IMDialog[]> {
     if (this._platform.capabilities.history && this._platform.getDialogs) {
-      let cursor: string | undefined
-      const seen = new Set<string>()
-      do {
-        const page = await this._platform.getDialogs(this._session, { cursor, limit: 100 })
-        await this._ingestDialogs(page.dialogs)
-        cursor = nextCursor(page.nextCursor, seen)
-      } while (cursor)
+      const page = await this._platform.getDialogs(this._session, query)
+      await this._ingestDialogs(page.dialogs)
     }
-    return this._store.listDialogs(this._session.platformSessionId)
+    return this._store.listDialogs(this._session.platformSessionId, {
+      limit: query.limit,
+      afterConversationId: query.afterId,
+    })
   }
 
-  async getHistory(conversationId: string): Promise<IMHistoryPage> {
+  async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {
     let conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
     if (!conversation) {
       await this.getDialogs()
@@ -134,15 +132,16 @@ export class PlatformDataService {
     conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
 
     if (this._platform.capabilities.history && this._platform.getHistory) {
-      let cursor: string | undefined
-      const seen = new Set<string>()
-      do {
-        const page = await this._platform.getHistory(this._session, { id: conversationId }, { cursor, limit: 100 })
-        for (const message of page.messages) await this._store.ingest(this._session, conversation, message)
-        cursor = nextCursor(page.nextCursor, seen)
-      } while (cursor)
+      const page = await this._platform.getHistory(this._session, { id: conversationId }, query)
+      for (const message of page.messages.slice().sort((left, right) => right.timestamp - left.timestamp)) {
+        await this._store.ingest(this._session, conversation, message, { allocation: 'history' })
+      }
     }
-    return { messages: await this._store.readHistory(this._session.platformSessionId, conversationId) }
+    return {
+      messages: await this._store.readHistory(
+        this._session.platformSessionId, conversationId, { limit: query.limit ?? 100 },
+      ),
+    }
   }
 
   private async _ingestDialogs(dialogs: readonly IMDialog[]): Promise<void> {
@@ -151,13 +150,6 @@ export class PlatformDataService {
       if (dialog.lastMessage) await this._store.ingest(this._session, dialog.conversation, dialog.lastMessage)
     }
   }
-}
-
-function nextCursor(cursor: string | undefined, seen: Set<string>): string | undefined {
-  if (!cursor) return
-  if (seen.has(cursor)) throw new Error(`platform returned a repeated pagination cursor: ${cursor}`)
-  seen.add(cursor)
-  return cursor
 }
 
 export function sessionFromRow(row: PlatformSessionRow): PlatformSession {

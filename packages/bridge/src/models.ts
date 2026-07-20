@@ -92,6 +92,8 @@ export interface IMMediaRow {
 
 export interface TlMessagePartRow {
   id: number
+  platformSessionId: string
+  conversationId: number
   messageId: number
   mediaId: number | null
   scope: string
@@ -198,12 +200,13 @@ export function defineModels(ctx: Context): void {
   })
 
   ctx.model.extend('mtproto_tl_message_part', {
-    id: 'unsigned', messageId: 'unsigned', mediaId: { type: 'unsigned', nullable: true }, scope: 'string',
+    id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
+    messageId: 'unsigned', mediaId: { type: 'unsigned', nullable: true }, scope: 'string',
     tlMessageId: 'unsigned', groupedId: { type: 'string', nullable: true }, ordinal: 'unsigned',
   }, {
     primary: 'id', autoInc: true,
     unique: [['scope', 'tlMessageId'], ['messageId', 'ordinal']],
-    indexes: ['messageId'],
+    indexes: ['messageId', ['platformSessionId', 'conversationId', 'tlMessageId']],
   })
 
   ctx.model.extend('mtproto_id_counter', {

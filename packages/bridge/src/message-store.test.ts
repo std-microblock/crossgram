@@ -86,8 +86,8 @@ describe('MessageStore', () => {
       platformGroupId: message.groupId,
     })
     expect(first.projection).toMatchObject([
-      { tlMessageId: 1, groupedId: '1', ordinal: 0 },
-      { tlMessageId: 2, groupedId: '1', ordinal: 1 },
+      { tlMessageId: 0x40000000, groupedId: '1', ordinal: 0 },
+      { tlMessageId: 0x40000001, groupedId: '1', ordinal: 1 },
     ])
 
     const [storedConversation] = await ctx.database.get('mtproto_im_conversation', {
@@ -155,10 +155,29 @@ describe('MessageStore', () => {
       id, conversationId, senderId: 'sender', timestamp: 1,
       content: { parts: [{ type: 'text', text: id }] },
     })
-    expect((await store.ingest(session, direct, make('direct-1', 'direct'))).projection[0].tlMessageId).toBe(1)
-    expect((await store.ingest(session, group, make('group-1', 'group'))).projection[0].tlMessageId).toBe(2)
-    expect((await store.ingest(session, channel, make('channel-1', 'channel'))).projection[0].tlMessageId).toBe(1)
-    expect((await store.ingest(session, channel, make('channel-2', 'channel'))).projection[0].tlMessageId).toBe(2)
+    expect((await store.ingest(session, direct, make('direct-1', 'direct'))).projection[0].tlMessageId).toBe(0x40000000)
+    expect((await store.ingest(session, group, make('group-1', 'group'))).projection[0].tlMessageId).toBe(0x40000001)
+    expect((await store.ingest(session, channel, make('channel-1', 'channel'))).projection[0].tlMessageId).toBe(0x40000000)
+    expect((await store.ingest(session, channel, make('channel-2', 'channel'))).projection[0].tlMessageId).toBe(0x40000001)
+  })
+
+  it('allocates backward history IDs and returns bounded database pages', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'paged', kind: 'direct' as const, title: 'Paged' }
+    const make = (id: string, timestamp: number): IMMessage => ({
+      id, conversationId: conversation.id, senderId: 'sender', timestamp,
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+    const live = await store.ingest(session, conversation, make('latest', 100))
+    const older = await store.ingest(session, conversation, make('older', 90), { allocation: 'history' })
+    const oldest = await store.ingest(session, conversation, make('oldest', 80), { allocation: 'history' })
+    expect([live, older, oldest].map((item) => item.projection[0].tlMessageId))
+      .toEqual([0x40000000, 0x3fffffff, 0x3ffffffe])
+    expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, { limit: 2 }))
+      .map((item) => item.source.id)).toEqual(['latest', 'older'])
+    expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, {
+      limit: 2, beforeTimestamp: 90,
+    })).map((item) => item.source.id)).toEqual(['oldest'])
   })
 
   it('serializes concurrent allocations without duplicate IDs', async () => {

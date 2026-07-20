@@ -11,6 +11,7 @@ type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
 type GetMessagesRequest = tl.messages.RawGetMessagesRequest
 type SendMessageRequest = tl.messages.RawSendMessageRequest
+type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 
 interface MessageRef {
   peerId: string
@@ -56,7 +57,13 @@ export class DialogRpc {
   }
 
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
-    const all = (await this._loadDialogs())
+    const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerUser'
+      ? this._tlToPeer.get(req.offsetPeer.userId)
+      : undefined
+    const all = (await this._loadDialogs({
+      limit: clampLimit(req.limit) + 1,
+      afterId: requestedOffsetPeer,
+    }))
       .slice()
       .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0))
 
@@ -93,7 +100,7 @@ export class DialogRpc {
   async getHistory(req: GetHistoryRequest): Promise<tl.messages.TypeMessages> {
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
-    const all = await this._loadHistory(peerId)
+    const all = await this._loadHistory(peerId, req)
     const filtered = all.filter((item) => {
       if (req.offsetId > 0 && item.tlId >= req.offsetId) return false
       if (req.offsetDate > 0 && item.source.timestamp >= req.offsetDate) return false
@@ -121,12 +128,38 @@ export class DialogRpc {
 
     for (const input of req.id) {
       const requestedId = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
-      const ref = this._tlToMessage.get(requestedId)
+      let ref = this._tlToMessage.get(requestedId)
+      if (!ref && this._store) {
+        const projected = await this._store.findProjectedByTlId(this._session.platformSessionId, requestedId)
+        if (projected) {
+          for (const part of projected.parts) {
+            this._rememberMessage({
+              source: projected.source,
+              tlId: part.tlMessageId,
+              ordinal: part.ordinal,
+              groupedId: part.groupedId ?? undefined,
+              media: projected.media.find((entry) => entry.id === part.mediaId),
+            })
+          }
+          ref = this._tlToMessage.get(requestedId)
+        }
+      }
       if (!ref) {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
         continue
       }
-      const history = await this._loadHistory(ref.peerId)
+      const projected = this._store
+        ? await this._store.findProjectedByTlId(this._session.platformSessionId, requestedId, ref.peerId)
+        : undefined
+      const history = projected
+        ? projected.parts.map((part): MaterializedMessage => ({
+            source: projected.source,
+            tlId: part.tlMessageId,
+            ordinal: part.ordinal,
+            groupedId: part.groupedId ?? undefined,
+            media: projected.media.find((entry) => entry.id === part.mediaId),
+          }))
+        : await this._loadHistory(ref.peerId, { limit: 1 })
       const found = history.find((item) => item.tlId === requestedId)
       if (!found) {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
@@ -155,7 +188,7 @@ export class DialogRpc {
   }
 
   async getContacts(): Promise<tl.contacts.RawContacts> {
-    const dialogs = (await this._loadDialogs()).sort((left, right) =>
+    const dialogs = (await this._loadDialogs({ limit: 500 })).sort((left, right) =>
       left.conversation.title.localeCompare(right.conversation.title))
     const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
     return {
@@ -265,10 +298,25 @@ export class DialogRpc {
     return { source, dialog, message, user }
   }
 
-  private async _loadHistory(peerId: string): Promise<MaterializedMessage[]> {
+  private async _loadHistory(peerId: string, request: HistoryWindow = { limit: 1 }): Promise<MaterializedMessage[]> {
     if (this._data && this._store) {
-      await this._data.getHistory(peerId)
-      const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId)
+      const anchorId = request.offsetId || request.maxId || undefined
+      const anchor = anchorId
+        ? await this._store.findProjectedByTlId(this._session.platformSessionId, anchorId, peerId)
+        : undefined
+      const fetchLimit = Math.max(1, Math.min(
+        (request.limit ?? 1) + Math.max(0, request.addOffset ?? 0) + 1,
+        200,
+      ))
+      await this._data.getHistory(peerId, {
+        limit: fetchLimit,
+        before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
+      })
+      const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
+        limit: fetchLimit,
+        beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
+        maxTimestamp: anchor?.source.timestamp,
+      })
       const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
         const item: MaterializedMessage = {
           source,
@@ -285,7 +333,7 @@ export class DialogRpc {
     }
 
     const history = (await this._requireHistory(this._platform.getHistory).call(
-      this._platform, this._session, { id: peerId },
+      this._platform, this._session, { id: peerId }, { limit: request.limit },
     )).messages
     const materialized = history.slice().sort((a, b) => a.timestamp - b.timestamp).map((source) => {
       const item: MaterializedMessage = { source, tlId: this._messageId(peerId, source.id), ordinal: 0 }
@@ -306,10 +354,10 @@ export class DialogRpc {
     for (const dialog of dialogs) this._peerId(dialog.conversation.id)
   }
 
-  private async _loadDialogs(): Promise<IMDialog[]> {
-    if (this._data) return this._data.getDialogs()
+  private async _loadDialogs(query: { limit?: number, afterId?: string } = { limit: 100 }): Promise<IMDialog[]> {
+    if (this._data) return this._data.getDialogs(query)
     const getDialogs = this._requireHistory(this._platform.getDialogs)
-    return (await getDialogs.call(this._platform, this._session)).dialogs
+    return (await getDialogs.call(this._platform, this._session, query)).dialogs
   }
 
   private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {
