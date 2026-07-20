@@ -265,11 +265,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getReplies(req as tl.messages.RawGetRepliesRequest))
 
   // ── Updates ──
-  ctx.mtproto.register('updates.getState', async (rpc) => {
-    const platformSessionId = (await requireBridgeSession(rpc)).session.platformSessionId
-    await updates.retryPending(platformSessionId)
-    return updates.getState(platformSessionId)
-  })
+  ctx.mtproto.register('updates.getState', async (rpc) =>
+    updates.getState((await requireBridgeSession(rpc)).session.platformSessionId))
 
   ctx.mtproto.register('updates.getDifference', async (rpc, req) =>
     updates.getDifference(
