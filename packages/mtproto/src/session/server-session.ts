@@ -119,6 +119,10 @@ export class ServerSession {
     this._sendEncryptedMessage(serialized, true)
   }
 
+  get authKeyId(): Uint8Array | null {
+    return this._permAuthKey.ready ? this._permAuthKey.id : null
+  }
+
   // ── Internal: data handling ──
 
   private async _onRawData(data: Uint8Array): Promise<void> {

@@ -111,6 +111,13 @@ export class Mtproto extends Service {
     for (const session of this._sessions) session.sendUpdate(update)
   }
 
+  /** Send an update only to connections authenticated with the given permanent auth key. */
+  sendUpdateToAuthKey(authKeyId: Uint8Array, update: tl.TypeUpdates): void {
+    for (const session of this._sessions) {
+      if (equalBytes(session.authKeyId, authKeyId)) session.sendUpdate(update)
+    }
+  }
+
   async* [Service.init]() {
     await this._crypto.initialize?.()
 
@@ -159,6 +166,14 @@ export class Mtproto extends Service {
     session.start()
     connection.start()
   }
+}
+
+function equalBytes(left: Uint8Array | null, right: Uint8Array): boolean {
+  if (!left || left.length !== right.length) return false
+  for (let index = 0; index < left.length; index++) {
+    if (left[index] !== right[index]) return false
+  }
+  return true
 }
 
 export default Mtproto

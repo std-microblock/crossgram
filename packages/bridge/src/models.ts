@@ -115,6 +115,16 @@ export interface UpdateStateRow {
   date: number
 }
 
+export interface UpdateDeliveryRow {
+  messageId: number
+  platformSessionId: string
+  pts: number
+  ptsCount: number
+  seq: number
+  date: number
+  published: boolean
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
@@ -128,6 +138,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_tl_message_part: TlMessagePartRow
     mtproto_id_counter: IdCounterRow
     mtproto_update_state: UpdateStateRow
+    mtproto_update_delivery: UpdateDeliveryRow
   }
 }
 
@@ -216,4 +227,9 @@ export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_update_state', {
     platformSessionId: 'string', pts: 'unsigned', qts: 'unsigned', seq: 'unsigned', date: 'unsigned',
   }, { primary: 'platformSessionId' })
+
+  ctx.model.extend('mtproto_update_delivery', {
+    messageId: 'unsigned', platformSessionId: 'string', pts: 'unsigned', ptsCount: 'unsigned',
+    seq: 'unsigned', date: 'unsigned', published: 'boolean',
+  }, { primary: 'messageId', indexes: ['platformSessionId'] })
 }

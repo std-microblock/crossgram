@@ -1,6 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { PlatformSessionRow } from './models.js'
-import { MessageStore } from './message-store.js'
+import { MessageStore, type IngestResult } from './message-store.js'
 import type {
   IMConversation, IMDialog, IMEvent, IMHistoryPage, IMHistoryQuery, IMPlatform, PlatformSession, Unsubscribe,
 } from './platform.js'
@@ -40,6 +40,11 @@ export class PlatformSubscriptionManager {
     private readonly _registry: PlatformRegistry,
     private readonly _store: MessageStore,
     private readonly _onError: (error: unknown, session?: PlatformSession) => void = () => {},
+    private readonly _onMessage?: (
+      session: PlatformSession,
+      event: Extract<IMEvent, { type: 'message' }>,
+      result: IngestResult,
+    ) => void | Promise<void>,
   ) {}
 
   async startActiveSessions(): Promise<void> {
@@ -99,7 +104,8 @@ export class PlatformSubscriptionManager {
     if (event.type === 'conversation') {
       await this._store.upsertConversation(session, event.conversation)
     } else if (event.type === 'message') {
-      await this._store.ingest(session, event.conversation, event.message)
+      const result = await this._store.ingest(session, event.conversation, event.message)
+      await this._onMessage?.(session, event, result)
     }
   }
 }

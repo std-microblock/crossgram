@@ -276,6 +276,53 @@ export class MessageStore {
     }
   }
 
+  async getUpdateState(platformSessionId: string) {
+    const [state] = await this._database.get('mtproto_update_state', { platformSessionId })
+    return state ?? {
+      platformSessionId, pts: 1, qts: 0, seq: 0, date: Math.floor(Date.now() / 1000),
+    }
+  }
+
+  async advanceUpdateState(platformSessionId: string, ptsCount: number, date: number) {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const [current] = await database.get('mtproto_update_state', { platformSessionId })
+      const state = {
+        platformSessionId,
+        pts: (current?.pts ?? 1) + ptsCount,
+        qts: current?.qts ?? 0,
+        seq: (current?.seq ?? 0) + 1,
+        date,
+      }
+      await database.upsert('mtproto_update_state', [state])
+      return state
+    }))
+  }
+
+  async prepareUpdateDelivery(messageId: number, platformSessionId: string, ptsCount: number, date: number) {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const [existing] = await database.get('mtproto_update_delivery', { messageId })
+      if (existing) return existing
+      const [current] = await database.get('mtproto_update_state', { platformSessionId })
+      const state = {
+        platformSessionId,
+        pts: (current?.pts ?? 1) + ptsCount,
+        qts: current?.qts ?? 0,
+        seq: (current?.seq ?? 0) + 1,
+        date,
+      }
+      await database.upsert('mtproto_update_state', [state])
+      return database.create('mtproto_update_delivery', {
+        messageId, platformSessionId, pts: state.pts, ptsCount, seq: state.seq, date, published: false,
+      })
+    }))
+  }
+
+  async markUpdatePublished(messageId: number): Promise<void> {
+    await this._write(async () => {
+      await this._database.set('mtproto_update_delivery', { messageId }, { published: true })
+    })
+  }
+
   async getConversation(
     platformSessionId: string,
     platformConversationId: string,

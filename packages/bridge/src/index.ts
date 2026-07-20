@@ -12,11 +12,13 @@ import { startupRpcHandlers } from './startup.js'
 import { MessageStore } from './message-store.js'
 import { PlatformRegistry, PlatformSubscriptionManager, sessionFromRow } from './platform-manager.js'
 import { UploadManager } from './upload-manager.js'
+import { UpdateManager } from './update-manager.js'
 
 export * from './platform.js'
 export * from './message-store.js'
 export * from './platform-manager.js'
 export * from './upload-manager.js'
+export * from './update-manager.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
@@ -51,6 +53,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   defineModels(ctx)
   const store = new MessageStore(ctx.database)
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
+  const updates = new UpdateManager(
+    ctx.database, registry, store,
+    (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
+  )
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
     registry,
@@ -58,6 +64,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (error, session) => ctx.logger('bridge').warn(
       'platform subscription failed (%s): %s', session?.platformId ?? 'unknown', String(error),
     ),
+    (session, event, result) => updates.publish(session, event, result),
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, store, subscriptions, uploads, config.onTransferProgress,
@@ -214,14 +221,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getFullUser(req as tl.users.RawGetFullUserRequest))
 
   // ── Updates ──
-  ctx.mtproto.register('updates.getState', async () => ({
-    _: 'updates.state',
-    pts: 1, qts: 0, date: Math.floor(Date.now() / 1000), seq: 0, unreadCount: 0,
-  } as unknown as tl.TlObject))
+  ctx.mtproto.register('updates.getState', async (rpc) =>
+    updates.getState((await requireBridgeSession(rpc)).session.platformSessionId))
 
-  ctx.mtproto.register('updates.getDifference', async () => ({
-    _: 'updates.differenceEmpty', date: Math.floor(Date.now() / 1000), seq: 0,
-  } as unknown as tl.TlObject))
+  ctx.mtproto.register('updates.getDifference', async (rpc) => {
+    const state = await updates.getState((await requireBridgeSession(rpc)).session.platformSessionId)
+    return { _: 'updates.differenceEmpty', date: state.date, seq: state.seq } as unknown as tl.TlObject
+  })
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
   ctx.mtproto.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))

@@ -200,10 +200,25 @@ async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj:
   throw new Error('no rpc_result')
 }
 
+async function readPush(client: TestClient, key: ClientKey): Promise<any> {
+  for (let index = 0; index < 12; index++) {
+    const reader = clientDecrypt(key, await client.read())
+    const saved = reader.pos
+    if (reader.uint() === 0xf35c6d01) continue
+    reader.pos = saved
+    try {
+      const object = reader.object() as any
+      if (object._ === 'updates' || object._ === 'updateShort') return object
+    } catch { /* service message */ }
+  }
+  throw new Error('no pushed update')
+}
+
 async function startApp(options: {
   rsaKey?: ReturnType<typeof generateRsaKeyPair>
   databasePath?: string
   authKeyStorePath?: string
+  bridgeConfig?: bridge.BridgeConfig
 } = {}) {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
@@ -216,7 +231,7 @@ async function startApp(options: {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,
     }),
-    ctx.plugin(bridge, {}),
+    ctx.plugin(bridge, options.bridgeConfig ?? {}),
   ]
   await Promise.all(fibers)
   await new Promise((r) => setTimeout(r, 100)) // let fibers settle
@@ -411,6 +426,160 @@ describe('bridge login e2e', () => {
       resumed.close()
     } finally {
       await stop()
+    }
+  }, 15000)
+
+  it('persists a push-only platform event and delivers it only after commit', async () => {
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    let remoteBytes = new Uint8Array()
+    const transferProgress: bridge.IMTransferProgress[] = []
+    const platform: bridge.IMPlatform = {
+      id: 'push-e2e',
+      capabilities: {
+        history: false,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
+      async sendMessage(_session, target, content, options) {
+        const output: bridge.IMMessagePart[] = []
+        for (const part of content.parts) {
+          if (part.type === 'text') {
+            output.push(part)
+            continue
+          }
+          const chunks: Uint8Array[] = []
+          let size = 0
+          for await (const chunk of part.media.source.stream({ signal: options?.signal })) {
+            chunks.push(chunk)
+            size += chunk.length
+            await options?.onProgress?.({
+              phase: 'upload', mediaIndex: 0, transferredBytes: size, totalBytes: part.media.source.size,
+            })
+          }
+          remoteBytes = new Uint8Array(size)
+          let offset = 0
+          for (const chunk of chunks) {
+            remoteBytes.set(chunk, offset)
+            offset += chunk.length
+          }
+          output.push({
+            type: 'media',
+            media: {
+              id: 'remote-file', kind: part.media.kind, name: part.media.name,
+              mimeType: part.media.mimeType, size, locator: { id: 'remote-file' },
+            },
+          })
+        }
+        return {
+          id: 'sent-media', conversationId: target.id, senderId: 'self', outgoing: true,
+          timestamp: 1_800_000_101, content: { parts: output },
+        }
+      },
+      async *downloadMedia(_session, _media, options) {
+        const offset = options?.offset ?? 0
+        const bytes = remoteBytes.subarray(offset, offset + (options?.limit ?? remoteBytes.length))
+        await options?.onProgress?.({
+          phase: 'download', mediaIndex: 0, transferredBytes: bytes.length, totalBytes: bytes.length,
+        })
+        yield bytes
+      },
+      async getUser(_session, id) { return { id, firstName: id === 'sender' ? 'Sender' : id } },
+    }
+    const uploadPath = await mkdtemp(join(tmpdir(), 'mtproto-bridge-upload-e2e-'))
+    const { ctx, port, pubKey, stop } = await startApp({
+      bridgeConfig: {
+        platforms: [platform], uploadPath,
+        onTransferProgress: (_session, progress) => { transferProgress.push(progress) },
+      },
+    })
+    let client: TestClient | undefined
+    try {
+      await ctx.database.create('mtproto_platform_session', {
+        id: 'push-ps', platformId: platform.id, userId: 'self', credentials: {},
+        metadata: { firstName: 'Push User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'push-auth', virtualPhone: '99900777', loginCode: '777777',
+        platformId: platform.id, platformSessionId: 'push-ps', used: false,
+      })
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x56789abc, 0x5abc, false)
+      const code = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: '+99900777', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 4)
+      const authorization = await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: '99900777', phoneCodeHash: code.phoneCodeHash, phoneCode: '777777',
+      }, 6)
+      expect(authorization._).toBe('auth.authorization')
+      expect(handler).toBeTypeOf('function')
+      expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 8)).toMatchObject({ pts: 1, seq: 0 })
+
+      const conversation: bridge.IMConversation = { id: 'push-group', kind: 'group', title: 'Push Group' }
+      const message: bridge.IMMessage = {
+        id: `opaque:${'x'.repeat(8_192)}`, conversationId: conversation.id, senderId: 'sender',
+        timestamp: 1_800_000_100, content: { parts: [{ type: 'text', text: 'arrived by subscribe' }] },
+      }
+      await handler!({ type: 'message', conversation, message })
+
+      const pushed = await readPush(client, key)
+      expect(pushed).toMatchObject({
+        _: 'updates', seq: 1,
+        updates: [{
+          _: 'updateNewMessage', pts: 2, ptsCount: 1,
+          message: { peerId: { _: 'peerChat' }, message: 'arrived by subscribe' },
+        }],
+        chats: [{ _: 'chat', title: 'Push Group' }],
+      })
+      const [stored] = await ctx.database.get('mtproto_im_message', {})
+      expect(stored).toMatchObject({ primaryPlatformMessageId: message.id, text: 'arrived by subscribe' })
+      expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ pts: 2, seq: 1 })
+
+      const chatId = pushed.chats[0].id
+      expect(await callRpc(client, key, sid, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(700), filePart: 0,
+        bytes: new TextEncoder().encode('stream-'),
+      }, 12)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(client, key, sid, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(700), filePart: 1,
+        bytes: new TextEncoder().encode('through'),
+      }, 14)).toEqual({ _: 'boolTrue' })
+      const sentMedia = await callRpc(client, key, sid, {
+        _: 'messages.sendMedia', peer: { _: 'inputPeerChat', chatId }, randomId: Long.fromNumber(700),
+        message: 'file caption',
+        media: {
+          _: 'inputMediaUploadedDocument',
+          file: { _: 'inputFile', id: Long.fromNumber(700), parts: 2, name: 'stream.txt', md5Checksum: '' },
+          mimeType: 'text/plain', attributes: [{ _: 'documentAttributeFilename', fileName: 'stream.txt' }],
+        },
+      }, 16)
+      expect(sentMedia).toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateNewMessage', message: { message: 'file caption', media: { _: 'messageMediaDocument' } } }],
+      })
+      expect(new TextDecoder().decode(remoteBytes)).toBe('stream-through')
+      const sentDocument = sentMedia.updates[0].message.media.document
+      const downloaded = await callRpc(client, key, sid, {
+        _: 'upload.getFile', offset: 7, limit: 7,
+        location: {
+          _: 'inputDocumentFileLocation', id: sentDocument.id, accessHash: sentDocument.accessHash,
+          fileReference: sentDocument.fileReference, thumbSize: '',
+        },
+      }, 18)
+      expect(new TextDecoder().decode(downloaded.bytes)).toBe('through')
+      expect(transferProgress).toMatchObject([
+        { phase: 'upload', transferredBytes: 7, totalBytes: 14 },
+        { phase: 'upload', transferredBytes: 14, totalBytes: 14 },
+        { phase: 'download', transferredBytes: 7, totalBytes: 7 },
+      ])
+    } finally {
+      client?.close()
+      await stop()
+      await rm(uploadPath, { recursive: true, force: true })
     }
   }, 15000)
 
