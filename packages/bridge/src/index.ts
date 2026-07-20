@@ -320,6 +320,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx.mtproto.register(method, async () => handler())
   }
 
+  ctx.mtproto.broadcastUpdate({
+    _: 'updateShort', update: { _: 'updateConfig' }, date: Math.floor(Date.now() / 1000),
+  })
   ctx.logger('bridge').info('bridge backend registered (platforms: %s)', registry.ids.join(', '))
 }
 

@@ -313,6 +313,11 @@ describe('bridge login e2e', () => {
       expect(filters._).toBe('messages.dialogFilters')
       const countries = await callRpc(resumed, key, resumedSid, { _: 'help.getCountriesList', langCode: 'en', hash: 0 }, 14)
       expect(countries._).toBe('help.countriesList')
+      const config = await callRpc(resumed, key, resumedSid, { _: 'help.getConfig' }, 15)
+      expect(config).toMatchObject({
+        _: 'config', thisDc: 1,
+        dcOptions: [{ id: 1, ipAddress: '127.0.0.1', tcpoOnly: true }],
+      })
       dbg('post-login sync ok:', state._, status._, filters._, countries._)
 
       const contacts = await callRpc(resumed, key, resumedSid, {

@@ -9,7 +9,7 @@ export function makeConfig(dcId: number, host = '127.0.0.1', port = 4430): tl.Tl
     revokePmInbox: false, blockedMode: false, forceTryIpv6: false, date: now, expires: now + 3600,
     testMode: false, thisDc: dcId,
     dcOptions: [{
-      _: 'dcOption', flags: 0, ipv6: false, mediaOnly: false, tcpoOnly: false, cdn: false, static: true,
+      _: 'dcOption', flags: 0, ipv6: false, mediaOnly: false, tcpoOnly: true, cdn: false, static: true,
       id: dcId, ipAddress: host, port,
     }],
     dcTxtDomainName: '', chatSizeMax: 200, megagroupSizeMax: 200000, forwardedCountMax: 100,
