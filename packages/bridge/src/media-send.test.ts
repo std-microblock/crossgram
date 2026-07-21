@@ -135,6 +135,10 @@ function wireRoundTrip<T>(object: T): T {
 describe('media send streaming', () => {
   it('streams file parts into the adapter, reports progressive bytes, persists, and cleans up', async () => {
     const { rpc, uploads, store, consumed, progress } = await createHarness()
+    const priorPush = await store.prepareUpdateDelivery(
+      'prior-push', session.platformSessionId, 1, 1_799_999_999,
+    )
+    expect(priorPush).toMatchObject({ pts: 2, seq: 1 })
     await uploads.savePart(session.platformSessionId, '42', 0, new TextEncoder().encode('first-'))
     await uploads.savePart(session.platformSessionId, '42', 1, new TextEncoder().encode('second'))
     const request: tl.messages.RawSendMediaRequest = {
@@ -161,6 +165,8 @@ describe('media send streaming', () => {
       _: 'updateMessageID', id: expect.any(Number), randomId: Long.fromNumber(42),
     })
     const update = (result as tl.RawUpdates).updates[1] as tl.RawUpdateNewMessage
+    expect(update).toMatchObject({ pts: 3, ptsCount: 1 })
+    expect(await store.getUpdateState(session.platformSessionId)).toMatchObject({ pts: 3, seq: 1 })
     const media = (update.message as tl.RawMessage).media as tl.RawMessageMediaDocument
     const document = media.document as tl.RawDocument
     expect(document.accessHash).not.toEqual(Long.ZERO)

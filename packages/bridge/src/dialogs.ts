@@ -564,7 +564,7 @@ export class DialogRpc {
     }
     const id = persisted?.projection[0]?.tlMessageId ?? this._messageId(peerId, source.id)
     this._rememberMessage({ source, tlId: id, ordinal: 0 })
-    const pts = ++this._pts
+    const pts = await this._reservePts(1, source.timestamp)
     return {
       _: 'updateShortSentMessage', out: true, id, pts, ptsCount: 1, date: source.timestamp,
     }
@@ -665,6 +665,8 @@ export class DialogRpc {
     await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
 
     const updates: tl.TypeUpdate[] = []
+    let pts = await this._reservePts(persisted.projection.length, source.timestamp)
+      - persisted.projection.length
     for (const [index, part] of persisted.projection.entries()) {
       const projected = await this._store.findProjectedByTlId(
         this._session.platformSessionId, part.tlMessageId, peerId,
@@ -683,7 +685,7 @@ export class DialogRpc {
         updates.push({ _: 'updateMessageID', id: part.tlMessageId, randomId })
       }
       updates.push({
-        _: 'updateNewMessage', message: this._makeMessage(item), pts: ++this._pts, ptsCount: 1,
+        _: 'updateNewMessage', message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
       } as tl.RawUpdateNewMessage)
     }
     const target = this._conversation(peerId)
@@ -695,6 +697,14 @@ export class DialogRpc {
       chats: target.kind === 'direct' ? [] : [this._makeChat(target)],
       date: source.timestamp, seq: 0,
     }
+  }
+
+  private async _reservePts(count: number, date: number): Promise<number> {
+    if (this._store) {
+      return (await this._store.advancePts(this._session.platformSessionId, count, date)).pts
+    }
+    this._pts += count
+    return this._pts
   }
 
   private async _materializeDialog(source: IMDialog) {

@@ -363,6 +363,25 @@ export class MessageStore {
     }
   }
 
+  /** Reserve account pts for an RPC response without advancing the push-update seq. */
+  async advancePts(platformSessionId: string, ptsCount: number, date: number) {
+    if (!Number.isSafeInteger(ptsCount) || ptsCount <= 0) {
+      throw new RangeError('pts count must be a positive integer')
+    }
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const [current] = await database.get('mtproto_update_state', { platformSessionId })
+      const state = {
+        platformSessionId,
+        pts: (current?.pts ?? 1) + ptsCount,
+        qts: current?.qts ?? 0,
+        seq: current?.seq ?? 0,
+        date,
+      }
+      await database.upsert('mtproto_update_state', [state])
+      return state
+    }))
+  }
+
   async advanceUpdateState(platformSessionId: string, ptsCount: number, date: number) {
     return this._write(() => this._database.withTransaction(async (database) => {
       const [current] = await database.get('mtproto_update_state', { platformSessionId })

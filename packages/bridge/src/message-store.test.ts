@@ -37,6 +37,17 @@ async function createStore() {
 }
 
 describe('MessageStore', () => {
+  it('reserves RPC pts without advancing the push sequence', async () => {
+    const { store } = await createStore()
+    await store.prepareUpdateDelivery('push-1', session.platformSessionId, 2, 1_800_000_000)
+
+    await expect(store.advancePts(session.platformSessionId, 3, 1_800_000_001)).resolves.toMatchObject({
+      pts: 6, seq: 1, date: 1_800_000_001,
+    })
+    await expect(store.advancePts(session.platformSessionId, 0, 1_800_000_002))
+      .rejects.toThrow('positive integer')
+  })
+
   it('persists arbitrarily long platform IDs, aliases, ordered content, and media metadata', async () => {
     const { ctx, store } = await createStore()
     const conversationId = `conversation:${'c'.repeat(32_768)}`
