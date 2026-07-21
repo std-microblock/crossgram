@@ -1583,16 +1583,16 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@mtproto-relay/cordis-plugin-bridge@workspace:*, @mtproto-relay/cordis-plugin-bridge@workspace:packages/bridge":
+"@mtproto-relay/bridge@workspace:*, @mtproto-relay/bridge@workspace:packages/bridge":
   version: 0.0.0-use.local
-  resolution: "@mtproto-relay/cordis-plugin-bridge@workspace:packages/bridge"
+  resolution: "@mtproto-relay/bridge@workspace:packages/bridge"
   dependencies:
     "@fuman/io": "npm:^0.0.20"
     "@fuman/utils": "npm:^0.0.20"
     "@mtcute/core": "npm:^0.30.3"
     "@mtcute/node": "npm:^0.30.3"
     "@mtcute/tl-runtime": "npm:^0.30.3"
-    "@mtproto-relay/cordis-plugin-mtproto": "workspace:*"
+    "@mtproto-relay/mtproto": "workspace:*"
     long: "npm:^5.3.0"
   peerDependencies:
     "@cordisjs/plugin-database": ^4.0.0
@@ -1601,9 +1601,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@mtproto-relay/cordis-plugin-mtproto@workspace:*, @mtproto-relay/cordis-plugin-mtproto@workspace:packages/mtproto":
+"@mtproto-relay/mtproto@workspace:*, @mtproto-relay/mtproto@workspace:packages/mtproto":
   version: 0.0.0-use.local
-  resolution: "@mtproto-relay/cordis-plugin-mtproto@workspace:packages/mtproto"
+  resolution: "@mtproto-relay/mtproto@workspace:packages/mtproto"
   dependencies:
     "@fuman/io": "npm:^0.0.20"
     "@fuman/utils": "npm:^0.0.20"
@@ -1617,11 +1617,11 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@mtproto-relay/cordis-plugin-platform-static@workspace:*, @mtproto-relay/cordis-plugin-platform-static@workspace:packages/platform-static":
+"@mtproto-relay/platform-static@workspace:*, @mtproto-relay/platform-static@workspace:packages/platform-static":
   version: 0.0.0-use.local
-  resolution: "@mtproto-relay/cordis-plugin-platform-static@workspace:packages/platform-static"
+  resolution: "@mtproto-relay/platform-static@workspace:packages/platform-static"
   dependencies:
-    "@mtproto-relay/cordis-plugin-bridge": "workspace:*"
+    "@mtproto-relay/bridge": "workspace:*"
   peerDependencies:
     cordis: ^4.0.0-rc.5
   languageName: unknown
@@ -1639,9 +1639,9 @@ __metadata:
     "@mtcute/core": "npm:^0.30.3"
     "@mtcute/node": "npm:^0.30.3"
     "@mtcute/tl-runtime": "npm:^0.30.3"
-    "@mtproto-relay/cordis-plugin-bridge": "workspace:*"
-    "@mtproto-relay/cordis-plugin-mtproto": "workspace:*"
-    "@mtproto-relay/cordis-plugin-platform-static": "workspace:*"
+    "@mtproto-relay/bridge": "workspace:*"
+    "@mtproto-relay/mtproto": "workspace:*"
+    "@mtproto-relay/platform-static": "workspace:*"
     cordis: "npm:^4.0.0-rc.5"
     long: "npm:^5.3.0"
   languageName: unknown

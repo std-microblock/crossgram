@@ -1,9 +1,10 @@
 {
-  "name": "@mtproto-relay/cordis-plugin-mtproto",
+  "name": "@mtproto-relay/mtproto",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "cordis": {},
   "peerDependencies": {
     "cordis": "^4.0.0-rc.5"
   },

@@ -17,9 +17,9 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
-import { Mtproto, AbridgedPacketCodec, generateRsaKeyPair } from '@mtproto-relay/cordis-plugin-mtproto'
-import * as bridge from '@mtproto-relay/cordis-plugin-bridge'
-import * as staticPlatformPlugin from '@mtproto-relay/cordis-plugin-platform-static'
+import { Mtproto, AbridgedPacketCodec, generateRsaKeyPair } from '@mtproto-relay/mtproto'
+import * as bridge from '@mtproto-relay/bridge'
+import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 

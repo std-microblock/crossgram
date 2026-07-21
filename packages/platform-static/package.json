@@ -1,16 +1,14 @@
 {
-  "name": "@mtproto-relay/cordis-plugin-platform-static",
+  "name": "@mtproto-relay/platform-static",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
-  "cordis": {
-    "description": "static"
-  },
+  "cordis": {},
   "peerDependencies": {
     "cordis": "^4.0.0-rc.5"
   },
   "dependencies": {
-    "@mtproto-relay/cordis-plugin-bridge": "workspace:*"
+    "@mtproto-relay/bridge": "workspace:*"
   }
 }
