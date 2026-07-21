@@ -1,6 +1,6 @@
 import type { tl } from '@mtcute/core'
 import Long from 'long'
-import { RpcError } from '@mtproto-relay/mtproto'
+import { RpcError } from '@mtproto-relay/cordis-plugin-mtproto'
 import {
   messageText, type IMDialog, type IMMediaInput, type IMMessage, type IMMessageInput,
   type IMPlatform, type IMTransferProgress, type IMUser, type PlatformSession,

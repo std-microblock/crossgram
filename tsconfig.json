@@ -2,7 +2,7 @@
   "extends": "./tsconfig.base",
   "compilerOptions": {
     "paths": {
-      "@mtproto-relay/*": ["./packages/*/src"],
+      "@mtproto-relay/cordis-plugin-*": ["./packages/*/src"],
       // cordis
       "@cordisjs/plugin-database-*": ["./external/database/packages/*/src"],
       "@cordisjs/plugin-*": [
