@@ -11,6 +11,7 @@ function makeContext(): ServerRpcContext {
     authKeyId: null,
     sessionId: Long.ZERO,
     isAuthorized: true,
+    routeId: null,
     sendUpdate() {},
     getPlatformData: <T>() => null as T,
     setPlatformData() {},

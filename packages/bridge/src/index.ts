@@ -33,6 +33,8 @@ export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
 
 export interface BridgeConfig {
+  /** Account route exposed to the MTProto service (default: bridge:default). */
+  routeId?: string
   dcId?: number
   serverHost?: string
   serverPort?: number
@@ -59,6 +61,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const platforms = new IMPlatformService(ctx)
   const stickerProviders = new IMStickerService(ctx)
   const registry = platforms.registry
+  const routeId = config.routeId ?? 'bridge:default'
+  const rpc = ctx.mtproto.route(routeId)
   const dcId = config.dcId ?? 1
   const apiPrefix = config.apiPrefix ?? '/api'
 
@@ -83,6 +87,22 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx, registry, stickerProviders.registry,
     store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
   )
+
+  ctx.mtproto.resolveRoute(async (requestContext, request) => {
+    if (requestContext.authKeyId) {
+      const [binding] = await ctx.database.get('mtproto_route_binding', {
+        authKeyId: authKeyHex(requestContext.authKeyId),
+      })
+      if (binding) return binding.routeId
+    }
+    if (request._ !== 'auth.sendCode' && request._ !== 'auth.signIn') return
+    const phoneNumber = (request as unknown as { phoneNumber?: string }).phoneNumber
+    if (!phoneNumber) return
+    const [auth] = await ctx.database.get('mtproto_auth_session', {
+      virtualPhone: normPhone(phoneNumber),
+    })
+    return auth ? routeId : undefined
+  })
 
   platforms.onChange((event, platformId) => {
     if (event === 'register') {
@@ -169,7 +189,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   } as unknown as tl.TlObject))
 
   // ── Auth ──
-  ctx.mtproto.register('auth.sendCode', async (_rpc, req) => {
+  rpc.register('auth.sendCode', async (_rpc, req) => {
     const phone = normPhone((req as unknown as { phoneNumber: string }).phoneNumber)
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
@@ -182,7 +202,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     } as unknown as tl.TlObject
   })
 
-  ctx.mtproto.register('auth.signIn', async (rpc, req) => {
+  rpc.register('auth.signIn', async (rpc, req) => {
     const { phoneNumber, phoneCode } = req as unknown as { phoneNumber: string, phoneCode: string }
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: normPhone(phoneNumber) })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
@@ -201,6 +221,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platformId: ps.platformId,
       platformSessionId: ps.id,
     }])
+    await ctx.database.upsert('mtproto_route_binding', [{
+      authKeyId: authKeyHex(rpc.authKeyId),
+      routeId,
+      createdAt: new Date(),
+    }])
+    ctx.mtproto.bindRoute(rpc.authKeyId, routeId)
     const state: BridgeSessionState = {
       generation, session,
       stickers: new StickerRpc(ctx.database, stickerProviders.registry, platform, session, dcId),
@@ -224,165 +250,165 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   })
 
   // ── Messages ──
-  ctx.mtproto.register('messages.getDialogs', async (rpc, req) =>
+  rpc.register('messages.getDialogs', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getDialogs(req as tl.messages.RawGetDialogsRequest))
-  ctx.mtproto.register('messages.getHistory', async (rpc, req) =>
+  rpc.register('messages.getHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
-  ctx.mtproto.register('messages.getMessages', async (rpc, req) =>
+  rpc.register('messages.getMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
-  ctx.mtproto.register('messages.search', async (rpc, req) =>
+  rpc.register('messages.search', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
-  ctx.mtproto.register('messages.readHistory', async (rpc, req) =>
+  rpc.register('messages.readHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.readHistory(req as tl.messages.RawReadHistoryRequest))
-  ctx.mtproto.register('messages.getScheduledHistory', async (rpc, req) =>
+  rpc.register('messages.getScheduledHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getScheduledHistory(req as tl.messages.RawGetScheduledHistoryRequest))
-  ctx.mtproto.register('messages.getPinnedDialogs', async (rpc) =>
+  rpc.register('messages.getPinnedDialogs', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getPinnedDialogs())
-  ctx.mtproto.register('messages.sendMessage', async (rpc, req) =>
+  rpc.register('messages.sendMessage', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMessage(req as tl.messages.RawSendMessageRequest))
-  ctx.mtproto.register('messages.sendMedia', async (rpc, req) =>
+  rpc.register('messages.sendMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMedia(req as tl.messages.RawSendMediaRequest))
-  ctx.mtproto.register('messages.sendMultiMedia', async (rpc, req) =>
+  rpc.register('messages.sendMultiMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMultiMedia(req as tl.messages.RawSendMultiMediaRequest))
-  ctx.mtproto.register('messages.setTyping', async (rpc) => {
+  rpc.register('messages.setTyping', async (rpc) => {
     await requireBridgeSession(rpc)
     return { _: 'boolTrue' } as unknown as tl.TlObject
   })
-  ctx.mtproto.register('messages.uploadMedia', async (rpc, req) =>
+  rpc.register('messages.uploadMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.uploadMedia(req as tl.messages.RawUploadMediaRequest))
-  ctx.mtproto.register('upload.saveFilePart', async (rpc, req) => {
+  rpc.register('upload.saveFilePart', async (rpc, req) => {
     const state = await requireBridgeSession(rpc)
     const input = req as tl.upload.RawSaveFilePartRequest
     await uploads.savePart(state.session.platformSessionId, input.fileId.toString(), input.filePart, input.bytes)
     return { _: 'boolTrue' } as unknown as tl.TlObject
   })
-  ctx.mtproto.register('upload.saveBigFilePart', async (rpc, req) => {
+  rpc.register('upload.saveBigFilePart', async (rpc, req) => {
     const state = await requireBridgeSession(rpc)
     const input = req as tl.upload.RawSaveBigFilePartRequest
     await uploads.savePart(state.session.platformSessionId, input.fileId.toString(), input.filePart, input.bytes)
     return { _: 'boolTrue' } as unknown as tl.TlObject
   })
-  ctx.mtproto.register('upload.getFile', async (rpc, req) =>
+  rpc.register('upload.getFile', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFile(req as tl.upload.RawGetFileRequest))
-  ctx.mtproto.register('upload.getFileHashes', async () => bareVector([]))
+  rpc.register('upload.getFileHashes', async () => bareVector([]))
 
-  ctx.mtproto.register('messages.getAllStickers', async (rpc, req) =>
+  rpc.register('messages.getAllStickers', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.getAllStickers(req as tl.messages.RawGetAllStickersRequest))
-  ctx.mtproto.register('messages.getStickerSet', async (rpc, req) => {
+  rpc.register('messages.getStickerSet', async (rpc, req) => {
     const state = await requireBridgeSession(rpc)
     return await state.dialogs.getReactionStickerSet(req as tl.messages.RawGetStickerSetRequest)
       ?? state.stickers.getStickerSet(req as tl.messages.RawGetStickerSetRequest)
   })
-  ctx.mtproto.register('messages.getStickers', async (rpc, req) =>
+  rpc.register('messages.getStickers', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.getStickers(req as tl.messages.RawGetStickersRequest))
-  ctx.mtproto.register('messages.getRecentStickers', async (rpc, req) =>
+  rpc.register('messages.getRecentStickers', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.getRecentStickers(req as tl.messages.RawGetRecentStickersRequest))
-  ctx.mtproto.register('messages.saveRecentSticker', async (rpc, req) =>
+  rpc.register('messages.saveRecentSticker', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.saveRecentSticker(req as tl.messages.RawSaveRecentStickerRequest))
-  ctx.mtproto.register('messages.clearRecentStickers', async (rpc, req) =>
+  rpc.register('messages.clearRecentStickers', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.clearRecentStickers(req as tl.messages.RawClearRecentStickersRequest))
-  ctx.mtproto.register('messages.getFavedStickers', async (rpc, req) =>
+  rpc.register('messages.getFavedStickers', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.getFavedStickers(req as tl.messages.RawGetFavedStickersRequest))
-  ctx.mtproto.register('messages.faveSticker', async (rpc, req) =>
+  rpc.register('messages.faveSticker', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.faveSticker(req as tl.messages.RawFaveStickerRequest))
-  ctx.mtproto.register('messages.installStickerSet', async (rpc, req) =>
+  rpc.register('messages.installStickerSet', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.installStickerSet(req as tl.messages.RawInstallStickerSetRequest))
-  ctx.mtproto.register('messages.uninstallStickerSet', async (rpc, req) =>
+  rpc.register('messages.uninstallStickerSet', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.uninstallStickerSet(
       req as tl.messages.RawUninstallStickerSetRequest,
     ))
-  ctx.mtproto.register('messages.reorderStickerSets', async (rpc, req) =>
+  rpc.register('messages.reorderStickerSets', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.reorderStickerSets(
       req as tl.messages.RawReorderStickerSetsRequest,
     ))
-  ctx.mtproto.register('messages.toggleStickerSets', async (rpc, req) =>
+  rpc.register('messages.toggleStickerSets', async (rpc, req) =>
     (await requireBridgeSession(rpc)).stickers.toggleStickerSets(req as tl.messages.RawToggleStickerSetsRequest))
-  ctx.mtproto.register('messages.getAvailableReactions', async (rpc) =>
+  rpc.register('messages.getAvailableReactions', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getAvailableReactions())
-  ctx.mtproto.register('messages.getTopReactions', async (rpc, req) =>
+  rpc.register('messages.getTopReactions', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getTopReactions(
       (req as tl.messages.RawGetTopReactionsRequest).limit,
     ))
-  ctx.mtproto.register('messages.getRecentReactions', async (rpc, req) =>
+  rpc.register('messages.getRecentReactions', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getTopReactions(
       (req as tl.messages.RawGetRecentReactionsRequest).limit,
     ))
-  ctx.mtproto.register('messages.getDefaultTagReactions', async (rpc) =>
+  rpc.register('messages.getDefaultTagReactions', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getTopReactions(100))
-  ctx.mtproto.register('messages.clearRecentReactions', async (rpc) => {
+  rpc.register('messages.clearRecentReactions', async (rpc) => {
     await requireBridgeSession(rpc)
     return { _: 'boolTrue' } as unknown as tl.TlObject
   })
-  ctx.mtproto.register('messages.getEmojiStickers', async (rpc) =>
+  rpc.register('messages.getEmojiStickers', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getEmojiStickers())
-  ctx.mtproto.register('messages.getCustomEmojiDocuments', async (rpc, req) =>
+  rpc.register('messages.getCustomEmojiDocuments', async (rpc, req) =>
     bareVector(await (await requireBridgeSession(rpc)).dialogs.getCustomEmojiDocuments(
       req as tl.messages.RawGetCustomEmojiDocumentsRequest,
     )))
-  ctx.mtproto.register('messages.sendReaction', async (rpc, req) =>
+  rpc.register('messages.sendReaction', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendReaction(req as tl.messages.RawSendReactionRequest))
-  ctx.mtproto.register('messages.getMessagesReactions', async (rpc, req) =>
+  rpc.register('messages.getMessagesReactions', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessagesReactions(req as tl.messages.RawGetMessagesReactionsRequest))
-  ctx.mtproto.register('messages.getMessageReactionsList', async (rpc, req) =>
+  rpc.register('messages.getMessageReactionsList', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessageReactionsList(
       req as tl.messages.RawGetMessageReactionsListRequest,
     ))
 
   // ── Contacts / users ──
-  ctx.mtproto.register('contacts.getContacts', async (rpc) =>
+  rpc.register('contacts.getContacts', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getContacts())
-  ctx.mtproto.register('users.getUsers', async (rpc, req) =>
+  rpc.register('users.getUsers', async (rpc, req) =>
     bareVector(await (await requireBridgeSession(rpc)).dialogs.getUsers(req as tl.users.RawGetUsersRequest)))
-  ctx.mtproto.register('users.getFullUser', async (rpc, req) =>
+  rpc.register('users.getFullUser', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullUser(req as tl.users.RawGetFullUserRequest))
-  ctx.mtproto.register('messages.getPeerSettings', async (rpc, req) =>
+  rpc.register('messages.getPeerSettings', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getPeerSettings(req as tl.messages.RawGetPeerSettingsRequest))
-  ctx.mtproto.register('messages.getFullChat', async (rpc, req) =>
+  rpc.register('messages.getFullChat', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullChat(req as tl.messages.RawGetFullChatRequest))
-  ctx.mtproto.register('channels.getFullChannel', async (rpc, req) =>
+  rpc.register('channels.getFullChannel', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullChannel(req as tl.channels.RawGetFullChannelRequest))
-  ctx.mtproto.register('channels.getParticipant', async (rpc, req) =>
+  rpc.register('channels.getParticipant', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipant(req as tl.channels.RawGetParticipantRequest))
-  ctx.mtproto.register('channels.getParticipants', async (rpc, req) =>
+  rpc.register('channels.getParticipants', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipants(req as tl.channels.RawGetParticipantsRequest))
-  ctx.mtproto.register('channels.getSendAs', async (rpc, req) =>
+  rpc.register('channels.getSendAs', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getSendAs(req as tl.channels.RawGetSendAsRequest))
-  ctx.mtproto.register('messages.getForumTopics', async (rpc, req) =>
+  rpc.register('messages.getForumTopics', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsRequest))
-  ctx.mtproto.register('messages.getForumTopicsByID', async (rpc, req) =>
+  rpc.register('messages.getForumTopicsByID', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsByIDRequest))
-  ctx.mtproto.register('messages.getReplies', async (rpc, req) =>
+  rpc.register('messages.getReplies', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getReplies(req as tl.messages.RawGetRepliesRequest))
-  ctx.mtproto.register('channels.toggleViewForumAsMessages', async () => ({
+  rpc.register('channels.toggleViewForumAsMessages', async () => ({
     _: 'updates', updates: [], users: [], chats: [], date: Math.floor(Date.now() / 1000), seq: 0,
   } as tl.RawUpdates))
 
   // ── Updates ──
-  ctx.mtproto.register('updates.getState', async (rpc) =>
+  rpc.register('updates.getState', async (rpc) =>
     updates.getState((await requireBridgeSession(rpc)).session.platformSessionId))
 
-  ctx.mtproto.register('updates.getDifference', async (rpc, req) =>
+  rpc.register('updates.getDifference', async (rpc, req) =>
     updates.getDifference(
       (await requireBridgeSession(rpc)).session.platformSessionId,
       req as tl.updates.RawGetDifferenceRequest,
     ))
-  ctx.mtproto.register('updates.getChannelDifference', async (rpc) => {
+  rpc.register('updates.getChannelDifference', async (rpc) => {
     const state = await updates.getState((await requireBridgeSession(rpc)).session.platformSessionId)
     return { _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts } as tl.updates.RawChannelDifferenceEmpty
   })
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
-  ctx.mtproto.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))
-  ctx.mtproto.register('account.getNotifySettings', async () => ({
+  rpc.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))
+  rpc.register('account.getNotifySettings', async () => ({
     _: 'peerNotifySettings',
   } as unknown as tl.TlObject))
-  ctx.mtproto.register('help.getCountriesList', async () => ({
+  rpc.register('help.getCountriesList', async () => ({
     _: 'help.countriesList', countries: [], hash: 0,
   } as unknown as tl.TlObject))
-  ctx.mtproto.register('messages.getDialogFilters', async () => ({
+  rpc.register('messages.getDialogFilters', async () => ({
     _: 'messages.dialogFilters', flags: 0, filters: [],
   } as unknown as tl.TlObject))
-  ctx.mtproto.register('auth.resendCode', async (_rpc, req) => {
+  rpc.register('auth.resendCode', async (_rpc, req) => {
     const phone = normPhone((req as unknown as { phoneNumber: string }).phoneNumber)
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
@@ -392,6 +418,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       phoneCodeHash: `hash_${auth.id}`,
     } as unknown as tl.TlObject
   })
+  // Telegram Desktop probes QR login before the user has selected a phone
+  // account, so this one response remains shared until a route is bound.
   ctx.mtproto.register('auth.exportLoginToken', async () => ({
     _: 'auth.loginToken',
     expires: Math.floor(Date.now() / 1000) + 60,
@@ -399,7 +427,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   } as unknown as tl.TlObject))
 
   for (const [method, handler] of Object.entries(startupRpcHandlers)) {
-    ctx.mtproto.register(method, async () => handler())
+    rpc.register(method, async () => handler())
   }
 
   ctx.mtproto.broadcastUpdate({

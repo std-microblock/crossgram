@@ -18,6 +18,8 @@ export interface ServerRpcContext {
   sessionId: Long
   /** Whether the DH handshake has completed. */
   isAuthorized: boolean
+  /** Backend route selected for this account, or null before routing. */
+  routeId: string | null
   /** Push a server-initiated update to this client. */
   sendUpdate: (update: tl.TypeUpdates) => void
   /** Read backend-specific data shared by all connections using this auth key. */

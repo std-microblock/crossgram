@@ -6,6 +6,7 @@
   "main": "./src/index.ts",
   "cordis": {},
   "peerDependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
     "cordis": "^4.0.0-rc.5"
   },
   "dependencies": {

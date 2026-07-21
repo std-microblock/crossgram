@@ -222,6 +222,7 @@ async function startApp(options: {
   databasePath?: string
   authKeyStorePath?: string
   bridgeConfig?: bridge.BridgeConfig
+  relayConfig?: relay.RelayConfig
   platform?: { id: string, adapter: bridge.IMPlatform }
 } = {}) {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
@@ -236,6 +237,7 @@ async function startApp(options: {
       authKeyStorePath: options.authKeyStorePath,
     }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
+    ...(options.relayConfig ? [ctx.plugin(relay, options.relayConfig)] : []),
     options.platform
       ? ctx.plugin(makePlatformPlugin(options.platform.id, options.platform.adapter))
       : ctx.plugin(staticPlatformPlugin, { eventIntervalMs: 0, historySize: 10_000 }),
@@ -1558,6 +1560,8 @@ describe('relay e2e', () => {
       destroyed: boolean
     }> = []
     const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
       ctx.plugin(Mtproto, { port: 0, host: '127.0.0.1', rsaKey, log }),
       ctx.plugin(relay, {
         apiId: 1,
@@ -1609,4 +1613,132 @@ describe('relay e2e', () => {
     }
     expect(upstreams[0].destroyed).toBe(true)
   })
+
+  it('routes bridge and relay accounts independently and restores both routes after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mtproto-routes-e2e-'))
+    const databasePath = pathToFileURL(join(directory, 'routes.db')).href
+    const authKeyStorePath = join(directory, 'auth-keys.json')
+    const rsaKey = generateRsaKeyPair()
+    const upstreamCalls: string[] = []
+    const relayConfig: relay.RelayConfig = {
+      apiId: 1,
+      apiHash: 'test',
+      clientFactory: () => ({
+        onServerUpdate: new Emitter<tl.TypeUpdates>(),
+        async call(request) {
+          upstreamCalls.push(request._)
+          if (request._ === 'auth.sendCode') {
+            return {
+              _: 'auth.sentCode', type: { _: 'auth.sentCodeTypeApp', length: 5 },
+              phoneCodeHash: 'official-hash',
+            }
+          }
+          if (request._ === 'auth.signIn') {
+            return {
+              _: 'auth.authorization',
+              user: {
+                _: 'user', id: 777, self: true, accessHash: Long.ZERO,
+                firstName: 'Official Relay', phone: '15550001111',
+              },
+            }
+          }
+          if (request._ === 'contacts.getContacts') {
+            return {
+              _: 'contacts.contacts', contacts: [], savedCount: 0,
+              users: [{
+                _: 'user', id: 777, self: true, accessHash: Long.ZERO,
+                firstName: 'Official Relay', phone: '15550001111',
+              }],
+            }
+          }
+          throw Object.assign(new Error('METHOD_INVALID'), { code: 400, text: 'METHOD_INVALID' })
+        },
+        async notifyLoggedIn() {
+          return {
+            _: 'user', id: 777, self: true, accessHash: Long.ZERO,
+            firstName: 'Official Relay', phone: '15550001111',
+          } as tl.RawUser
+        },
+        async destroy() {},
+      }),
+    }
+    let first: Awaited<ReturnType<typeof startApp>> | undefined
+    let second: Awaited<ReturnType<typeof startApp>> | undefined
+    let bridgeClient: TestClient | undefined
+    let relayClient: TestClient | undefined
+
+    try {
+      first = await startApp({ rsaKey, databasePath, authKeyStorePath, relayConfig })
+      await first.ctx.database.create('mtproto_platform_session', {
+        id: 'route-bridge-ps', platformId: 'static', userId: 'bridge-user',
+        credentials: { token: 'bridge' }, metadata: { firstName: 'Bridge Route' },
+        active: true, createdAt: new Date(),
+      })
+      await first.ctx.database.create('mtproto_auth_session', {
+        id: 'route-bridge-auth', virtualPhone: '99900888', loginCode: '888888',
+        platformId: 'static', platformSessionId: 'route-bridge-ps', used: false,
+      })
+
+      bridgeClient = await TestClient.connect(first.port)
+      const bridgeKey = await doClientHandshake(bridgeClient, first.pubKey)
+      const bridgeSid = new Long(0x11111111, 0x11aa, false)
+      expect(await callRpc(bridgeClient, bridgeKey, bridgeSid, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 2)).toMatchObject({ _: 'auth.loginToken' })
+      const bridgeCode = await callRpc(bridgeClient, bridgeKey, bridgeSid, {
+        _: 'auth.sendCode', phoneNumber: '+99900888', apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 4)
+      expect(await callRpc(bridgeClient, bridgeKey, bridgeSid, {
+        _: 'auth.signIn', phoneNumber: '99900888',
+        phoneCodeHash: bridgeCode.phoneCodeHash, phoneCode: '888888',
+      }, 6)).toMatchObject({ _: 'auth.authorization', user: { firstName: 'Bridge Route' } })
+
+      relayClient = await TestClient.connect(first.port)
+      const relayKey = await doClientHandshake(relayClient, first.pubKey)
+      const relaySid = new Long(0x22222222, 0x22aa, false)
+      const relayCode = await callRpc(relayClient, relayKey, relaySid, {
+        _: 'auth.sendCode', phoneNumber: '+15550001111', apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 4)
+      expect(relayCode).toMatchObject({ _: 'auth.sentCode', phoneCodeHash: 'official-hash' })
+      expect(await callRpc(relayClient, relayKey, relaySid, {
+        _: 'auth.signIn', phoneNumber: '15550001111',
+        phoneCodeHash: relayCode.phoneCodeHash, phoneCode: '12345',
+      }, 6)).toMatchObject({ _: 'auth.authorization', user: { firstName: 'Official Relay' } })
+
+      const routeRows = await first.ctx.database.get('mtproto_route_binding', {})
+      expect(new Map(routeRows.map(row => [row.authKeyId, row.routeId]))).toEqual(new Map([
+        [Buffer.from(bridgeKey.authKeyId).toString('hex'), 'bridge:default'],
+        [Buffer.from(relayKey.authKeyId).toString('hex'), 'relay:official'],
+      ]))
+
+      bridgeClient.close()
+      relayClient.close()
+      bridgeClient = relayClient = undefined
+      await first.stop()
+      first = undefined
+
+      second = await startApp({ rsaKey, databasePath, authKeyStorePath, relayConfig })
+      bridgeClient = await TestClient.connect(second.port)
+      relayClient = await TestClient.connect(second.port)
+      const bridgeContacts = await callRpc(
+        bridgeClient, bridgeKey, new Long(0x33333333, 0x33aa, false),
+        { _: 'contacts.getContacts', hash: Long.ZERO }, 8,
+      )
+      const relayContacts = await callRpc(
+        relayClient, relayKey, new Long(0x44444444, 0x44aa, false),
+        { _: 'contacts.getContacts', hash: Long.ZERO }, 8,
+      )
+      expect(bridgeContacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
+      expect(relayContacts.users.map((user: any) => user.firstName)).toEqual(['Official Relay'])
+      expect(upstreamCalls.filter(method => method === 'contacts.getContacts')).toHaveLength(1)
+    } finally {
+      bridgeClient?.close()
+      relayClient?.close()
+      await second?.stop()
+      await first?.stop()
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 15000)
 })
