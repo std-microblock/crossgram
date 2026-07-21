@@ -82,7 +82,7 @@ describe('StaticPlatform', () => {
     try {
       await Promise.all([service, plugin])
       const events: import('@mtproto-relay/bridge').IMEvent[] = []
-      const unsubscribe = await ctx.imPlatform.require('static-default').subscribe(session, (event) => events.push(event))
+      const unsubscribe = await ctx.imPlatform.require('static-default').subscribe(session, (event) => { events.push(event) })
       await vi.advanceTimersByTimeAsync(10_000)
       expect(events).toEqual([])
       await unsubscribe()
@@ -287,6 +287,15 @@ describe('StaticPlatform', () => {
       { phase: 'download', mediaIndex: 0, transferredBytes: 4, totalBytes: 6 },
       { phase: 'download', mediaIndex: 0, transferredBytes: 6, totalBytes: 6 },
     ])
+
+    const image = album.content.parts.find((part) => part.type === 'media' && part.media.kind === 'image')
+    if (!image || image.type !== 'media') throw new Error('seeded image missing')
+    expect(image.media).toMatchObject({
+      name: 'seed.png', mimeType: 'image/png', size: 3_266_938, width: 1240, height: 1754,
+    })
+    const imageBytes = await collect(platform.downloadMedia(session, image.media))
+    expect(imageBytes).toHaveLength(3_266_938)
+    expect(imageBytes.subarray(0, 8)).toEqual(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]))
   })
 
   it('waits for subscribe handlers, stores incoming group messages, deduplicates, and unsubscribes', async () => {

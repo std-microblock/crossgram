@@ -1,5 +1,6 @@
 import type { Context } from 'cordis'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import type {
   IMConversation, IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent,
   IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageContent, IMMessageInput,
@@ -22,6 +23,8 @@ export interface Config {
 }
 export const name = 'im-platform-static'
 export const inject = ['imPlatform']
+
+const seededImage = new Uint8Array(readFileSync(new URL('./test-image.png', import.meta.url)))
 
 /** Cordis plugin entrypoint. Each plugin instance registers one isolated adapter. */
 export function apply(ctx: Context, config: Config = {}): void {
@@ -378,10 +381,7 @@ export class StaticPlatform implements IMPlatform {
     )))
     const imageId = 'seed:image'
     const fileId = 'seed:file'
-    this._media.set(imageId, Uint8Array.from(Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42AAAAAASUVORK5CYII=',
-      'base64',
-    )))
+    this._media.set(imageId, seededImage)
     this._media.set(fileId, new TextEncoder().encode('static seeded file'))
     this._append({
       id: 'group:album', sourceIds: ['group:album:photo', 'group:album:file'],
@@ -394,7 +394,7 @@ export class StaticPlatform implements IMPlatform {
             type: 'media',
             media: {
               id: imageId, kind: 'image', name: 'seed.png', mimeType: 'image/png',
-              size: this._media.get(imageId)!.length, width: 1, height: 1, locator: { mediaId: imageId },
+              size: seededImage.length, width: 1240, height: 1754, locator: { mediaId: imageId },
             },
           },
           {
