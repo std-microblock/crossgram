@@ -148,7 +148,12 @@ async function readPlainObj(client: TestClient): Promise<any> {
 interface ClientKey { authKey: Uint8Array, authKeyId: Uint8Array, salt: Long }
 
 /** Run a full client DH handshake (perm or temp) and return the resulting key. */
-async function doClientHandshake(client: TestClient, pubKey: any, temp: boolean): Promise<ClientKey> {
+async function doClientHandshake(
+  client: TestClient,
+  pubKey: any,
+  temp: boolean,
+  tempExpiresIn = 3600,
+): Promise<ClientKey> {
   const nonce = crypto.randomBytes(16)
   await sendPlain(client, { _: 'mt_req_pq_multi', nonce }, 4)
 
@@ -159,7 +164,10 @@ async function doClientHandshake(client: TestClient, pubKey: any, temp: boolean)
 
   const newNonce = crypto.randomBytes(32)
   const pqInner = temp
-    ? { _: 'mt_p_q_inner_data_temp_dc', pq: resPq.pq, p, q, nonce, newNonce, serverNonce, dc: 1, expiresIn: 3600 }
+    ? {
+      _: 'mt_p_q_inner_data_temp_dc', pq: resPq.pq, p, q, nonce, newNonce, serverNonce,
+      dc: 1, expiresIn: tempExpiresIn,
+    }
     : { _: 'mt_p_q_inner_data_dc', pq: resPq.pq, p, q, nonce, newNonce, serverNonce, dc: 1 }
   const encryptedData = rsaPad(TlBinaryWriter.serializeObject(__tlWriterMap, pqInner), pubKey)
 
@@ -237,6 +245,7 @@ async function bindTempAuthKey(
   perm: ClientKey,
   temp: ClientKey,
   sessionId: Long,
+  expiresIn = 3600,
 ): Promise<void> {
   const bindInner = {
     _: 'mt_bind_auth_key_inner',
@@ -244,7 +253,7 @@ async function bindTempAuthKey(
     tempAuthKeyId: Long.fromBytesLE(Array.from(temp.authKeyId)),
     permAuthKeyId: Long.fromBytesLE(Array.from(perm.authKeyId)),
     tempSessionId: sessionId,
-    expiresAt: nowSec() + 3600,
+    expiresAt: nowSec() + expiresIn,
   }
   const bw = TlBinaryWriter.alloc(__tlWriterMap, 80)
   bw.raw(crypto.randomBytes(16))
@@ -576,6 +585,40 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       expect(downloaded.bytes).toEqual(downloadBytes)
       expect(transferAuthKeyIds).toHaveLength(2)
       expect(transferAuthKeyIds.every(id => typed.equal(id, perm.authKeyId))).toBe(true)
+      media.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('persists a temp key when desktop bind lifetime differs from handshake lifetime', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, uploadedParts, transferAuthKeyIds, stop } = await startServer()
+    try {
+      const api = await TestClient.connect(port)
+      const perm = await doClientHandshake(api, pubKey, false)
+      api.close()
+
+      const config = await TestClient.connect(port)
+      // Desktop may request a short PFS handshake but bind that key for the
+      // account's standard one-day transfer lifetime.
+      const temp = await doClientHandshake(config, pubKey, true, 3600)
+      const sessionId = new Long(0x45454545, 0x45454545)
+      await bindTempAuthKey(config, perm, temp, sessionId, 24 * 3600)
+      config.close()
+
+      const media = await TestClient.connect(port)
+      await sendLegacyReqPq(media, crypto.randomBytes(16), 8)
+      expect((await readPlainObj(media))._).toBe('mt_resPQ')
+      const savePart = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(9002), filePart: 0,
+        bytes: new Uint8Array([9, 8, 7]),
+      } as { _: string })
+      await media.send(clientEncrypt(temp, savePart, temp.salt, sessionId, 12))
+      expect(await readRpcResult(media, temp)).toEqual({ _: 'boolTrue' })
+      expect(uploadedParts).toEqual([new Uint8Array([9, 8, 7])])
+      expect(transferAuthKeyIds).toHaveLength(1)
+      expect(typed.equal(transferAuthKeyIds[0], perm.authKeyId)).toBe(true)
       media.close()
     } finally {
       await stop()

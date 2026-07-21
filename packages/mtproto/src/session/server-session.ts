@@ -690,7 +690,6 @@ export class ServerSession {
       const nonceOk = bind.nonce.eq(req.nonce)
       const expiryOk = bind.expiresAt === req.expiresAt
         && req.expiresAt > Math.floor(Date.now() / 1000)
-        && (this._tempAuthKeyExpiresAt === null || req.expiresAt <= this._tempAuthKeyExpiresAt + 5)
       if (!tempIdOk || !permIdOk || !nonceOk || !expiryOk) {
         this._log.warn(
           'bindTempAuthKey: field mismatch (temp=%s perm=%s nonce=%s expiry=%s)',
