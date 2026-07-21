@@ -460,7 +460,7 @@ export class DialogRpc {
       const parts: IMMessageInput['parts'] = []
       if (req.message) parts.push({ type: 'text', text: req.message })
       parts.push({ type: 'media', media: resolved.media })
-      return this._sendRichContent(req.peer, { parts }, [resolved.upload], req.replyTo)
+      return this._sendRichContent(req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo)
     })
   }
 
@@ -473,7 +473,13 @@ export class DialogRpc {
       const captions = req.multiMedia.map((item) => item.message).filter(Boolean)
       if (captions.length) parts.push({ type: 'text', text: captions.join('\n') })
       for (const item of resolved) parts.push({ type: 'media', media: item.media })
-      return this._sendRichContent(req.peer, { parts }, resolved.map((item) => item.upload), req.replyTo)
+      return this._sendRichContent(
+        req.peer,
+        { parts },
+        resolved.map((item) => item.upload),
+        req.multiMedia.map((item) => item.randomId),
+        req.replyTo,
+      )
     })
   }
 
@@ -627,6 +633,7 @@ export class DialogRpc {
     inputPeer: tl.TypeInputPeer,
     content: IMMessageInput,
     uploads: UploadedFile[],
+    randomIds: Long[],
     replyTo?: tl.TypeInputReplyTo,
   ): Promise<tl.TypeUpdates> {
     const media = content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
@@ -658,7 +665,7 @@ export class DialogRpc {
     await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
 
     const updates: tl.TypeUpdate[] = []
-    for (const part of persisted.projection) {
+    for (const [index, part] of persisted.projection.entries()) {
       const projected = await this._store.findProjectedByTlId(
         this._session.platformSessionId, part.tlMessageId, peerId,
       )
@@ -671,6 +678,10 @@ export class DialogRpc {
         media: projected.media.find((entry) => entry.id === part.mediaId),
       }
       this._rememberMessage(item)
+      const randomId = randomIds[index]
+      if (randomId) {
+        updates.push({ _: 'updateMessageID', id: part.tlMessageId, randomId })
+      }
       updates.push({
         _: 'updateNewMessage', message: this._makeMessage(item), pts: ++this._pts, ptsCount: 1,
       } as tl.RawUpdateNewMessage)

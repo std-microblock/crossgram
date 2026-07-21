@@ -157,7 +157,10 @@ describe('media send streaming', () => {
     await expect(uploads.open(session.platformSessionId, '42', 2)).rejects.toThrow('part is missing')
     expect(() => wireRoundTrip(result)).not.toThrow()
 
-    const update = (result as tl.RawUpdates).updates[0] as tl.RawUpdateNewMessage
+    expect((result as tl.RawUpdates).updates[0]).toEqual({
+      _: 'updateMessageID', id: expect.any(Number), randomId: Long.fromNumber(42),
+    })
+    const update = (result as tl.RawUpdates).updates[1] as tl.RawUpdateNewMessage
     const media = (update.message as tl.RawMessage).media as tl.RawMessageMediaDocument
     const document = media.document as tl.RawDocument
     expect(document.accessHash).not.toEqual(Long.ZERO)
@@ -206,7 +209,14 @@ describe('media send streaming', () => {
       { mediaIndex: 1, transferredBytes: 3 },
     ])
     expect(result._).toBe('updates')
-    expect((result as tl.RawUpdates).updates).toHaveLength(2)
+    expect((result as tl.RawUpdates).updates.map((update) => update._)).toEqual([
+      'updateMessageID', 'updateNewMessage', 'updateMessageID', 'updateNewMessage',
+    ])
+    expect((result as tl.RawUpdates).updates.filter((update) => update._ === 'updateMessageID'))
+      .toMatchObject([
+        { randomId: Long.ONE },
+        { randomId: Long.fromNumber(2) },
+      ])
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
@@ -303,7 +313,13 @@ describe('media send streaming', () => {
           fileReference: photo.fileReference,
         },
       },
-    })).resolves.toMatchObject({ _: 'updates' })
+    })).resolves.toMatchObject({
+      _: 'updates',
+      updates: [
+        { _: 'updateMessageID', randomId: Long.fromNumber(89) },
+        { _: 'updateNewMessage', message: { media: { _: 'messageMediaPhoto' } } },
+      ],
+    })
     expect([...consumed[0][0]]).toEqual([137, 80, 78, 71])
   })
 

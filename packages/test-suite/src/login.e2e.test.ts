@@ -513,7 +513,13 @@ describe('bridge login e2e', () => {
           },
         ],
       }, 45)
-      const sentAlbumMessages = sentAlbum.updates.map((update: any) => update.message)
+      expect(sentAlbum.updates.filter((update: any) => update._ === 'updateMessageID')).toMatchObject([
+        { randomId: Long.fromNumber(800) },
+        { randomId: Long.fromNumber(801) },
+      ])
+      const sentAlbumMessages = sentAlbum.updates
+        .filter((update: any) => update._ === 'updateNewMessage')
+        .map((update: any) => update.message)
       expect(sentAlbumMessages.map((item: any) => item.message)).toEqual(['socket album', ''])
       expect(sentAlbumMessages.map((item: any) => item.media?._)).toEqual([
         'messageMediaPhoto', 'messageMediaDocument',
@@ -582,12 +588,15 @@ describe('bridge login e2e', () => {
       }, 59)
       expect(stagedSent).toMatchObject({
         _: 'updates',
-        updates: [{
-          _: 'updateNewMessage',
-          message: { message: 'desktop two-stage', media: { _: 'messageMediaDocument' } },
-        }],
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(803) },
+          {
+            _: 'updateNewMessage',
+            message: { message: 'desktop two-stage', media: { _: 'messageMediaDocument' } },
+          },
+        ],
       })
-      const finalDocument = stagedSent.updates[0].message.media.document
+      const finalDocument = stagedSent.updates[1].message.media.document
       expect(finalDocument.accessHash).not.toEqual(Long.ZERO)
       const finalFile = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 64,
@@ -924,10 +933,13 @@ describe('bridge login e2e', () => {
       }, 16)
       expect(sentMedia).toMatchObject({
         _: 'updates',
-        updates: [{ _: 'updateNewMessage', message: { message: 'file caption', media: { _: 'messageMediaDocument' } } }],
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(700) },
+          { _: 'updateNewMessage', message: { message: 'file caption', media: { _: 'messageMediaDocument' } } },
+        ],
       })
       expect(new TextDecoder().decode(remoteBytes)).toBe('stream-through')
-      const sentDocument = sentMedia.updates[0].message.media.document
+      const sentDocument = sentMedia.updates[1].message.media.document
       const downloaded = await callRpc(client, key, sid, {
         _: 'upload.getFile', offset: 7, limit: 7,
         location: {
