@@ -4,9 +4,9 @@
  * patch-tdesktop.cjs — redirect a Telegram Desktop fork to a custom MTProto server.
  *
  * Patches three things in the binary, in-place:
- *   1. RSA public key   — client trusts your server during DH handshake
- *   2. DC IPv4 strings  — all production DC addresses → --host
- *   3. DC port values   — BuiltInDc struct port fields → --port
+ *   1. RSA public keys  — trust the relay and reject Telegram Special Config
+ *   2. DC address strings — all built-in IPv4 and IPv6 addresses → --host
+ *   3. DC port values   — every production/test BuiltInDc port → --port
  *
  * Supports: Telegram Desktop, AyuGram, MaterialGram, and any TDLib-based fork.
  * Platforms: macOS (.app bundle or raw binary), Linux (ELF), Windows (PE/exe).
@@ -217,129 +217,200 @@ function findDcStructs(buf, expectedDcIds, oldPort) {
   return results;
 }
 
+const BUILT_IN_IPS = [
+  // Production IPv4.
+  '149.154.175.50', '149.154.167.51', '95.161.76.100',
+  '149.154.175.100', '149.154.167.91', '149.154.171.5',
+  // Production IPv6. Leaving these intact lets an IPv6-capable client bypass
+  // the patched IPv4 entries and connect directly to Telegram.
+  '2001:0b28:f23d:f001:0000:0000:0000:000a',
+  '2001:067c:04e8:f002:0000:0000:0000:000a',
+  '2001:0b28:f23d:f003:0000:0000:0000:000a',
+  '2001:067c:04e8:f004:0000:0000:0000:000a',
+  '2001:0b28:f23f:f005:0000:0000:0000:000a',
+  // Test IPv4 and IPv6.
+  '149.154.175.10', '149.154.167.40', '149.154.175.117',
+  '2001:0b28:f23d:f001:0000:0000:0000:000e',
+  '2001:067c:04e8:f002:0000:0000:0000:000e',
+  '2001:0b28:f23d:f003:0000:0000:0000:000e',
+];
+
+// Match exact Telegram keys rather than every RSA-2048 PEM in a fork. The
+// Special Config key decrypts cloud-fetched help.configSimple payloads; replacing
+// it prevents those payloads from injecting fresh official DC addresses.
+const ROUTING_RSA_KEYS = [
+  { label: 'special config', prefix: 'MIIBCgKCAQEAyr+18Rex2ohtVy8sroGPBwXD3DOo' },
+  { label: 'test MTProto', prefix: 'MIIBCgKCAQEAyMEdY1aR+sCR3ZSJrtztKTKqigvO' },
+  { label: 'production MTProto', prefix: 'MIIBCgKCAQEA6LszBcC1LGzyr992NzE0ieY+BSaO' },
+];
+
+// Longest sequences go first. Patching them before [1,2,3] prevents the test
+// pattern from also matching the prefix of the production IPv6 array.
+const DC_STRUCT_LAYOUTS = [
+  { label: 'production IPv4', dcIds: [1, 2, 2, 3, 4, 5] },
+  { label: 'production IPv6', dcIds: [1, 2, 3, 4, 5] },
+  { label: 'test IPv4/IPv6', dcIds: [1, 2, 3] },
+];
+const OLD_PORT = 443;
+
+function keyKind(base64) {
+  return ROUTING_RSA_KEYS.find(({ prefix }) => base64.startsWith(prefix));
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-const PRODUCTION_IPS    = ['149.154.175.50','149.154.167.51','95.161.76.100','149.154.175.100','149.154.167.91','149.154.171.5'];
-const PRODUCTION_DC_IDS = [1, 2, 2, 3, 4, 5];
-const OLD_PORT          = 443;
-// First 40 base64 chars of the current Telegram production RSA-2048 key
-const KNOWN_PROD_KEY_PREFIX = 'MIIBCgKCAQEA6LszBcC1LGzyr992NzE0ieY+BSaO';
+function main(argv = process.argv.slice(2)) {
+  const opts = parseArgs(argv);
 
-const opts = parseArgs(process.argv.slice(2));
+  const { appRoot, binaryPath } = resolveBinary(opts.binary);
+  console.log(`Binary: ${binaryPath}`);
 
-const { appRoot, binaryPath } = resolveBinary(opts.binary);
-console.log(`Binary: ${binaryPath}`);
+  const keyFile = opts.key || findKeyFile(__dirname);
+  if (!keyFile) die('RSA public key not found. Pass --key <file> or place it at data/rsa-key.json.pem');
+  console.log(`RSA key: ${keyFile}`);
 
-const keyFile = opts.key || findKeyFile(__dirname);
-if (!keyFile) die('RSA public key not found. Pass --key <file> or place it at data/rsa-key.json.pem');
-console.log(`RSA key: ${keyFile}`);
+  const newPem    = fs.readFileSync(keyFile, 'utf8').trim();
+  const newBase64 = newPem.split('\n').filter(l => !l.startsWith('-----')).join('');
+  if (newBase64.length !== 360)
+    die(`Key at ${keyFile} has ${newBase64.length} base64 chars; expected 360 (RSA-2048 PKCS#1)`);
 
-const newPem    = fs.readFileSync(keyFile, 'utf8').trim();
-const newBase64 = newPem.split('\n').filter(l => !l.startsWith('-----')).join('');
-if (newBase64.length !== 360)
-  die(`Key at ${keyFile} has ${newBase64.length} base64 chars; expected 360 (RSA-2048 PKCS#1)`);
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(opts.host)) die(`--host must be an IPv4 address, got: ${opts.host}`);
+  if (Buffer.byteLength(opts.host + '\0') > 14)    die(`--host "${opts.host}" too long (max 13 chars + null)`);
+  if (isNaN(opts.port) || opts.port < 1 || opts.port > 65535) die(`--port must be 1–65535`);
 
-if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(opts.host)) die(`--host must be an IPv4 address, got: ${opts.host}`);
-if (Buffer.byteLength(opts.host + '\0') > 14)    die(`--host "${opts.host}" too long (max 13 chars + null)`);
-if (isNaN(opts.port) || opts.port < 1 || opts.port > 65535) die(`--port must be 1–65535`);
+  console.log(`Redirecting to: ${opts.host}:${opts.port}`);
+  if (opts.dryRun) console.log('(dry-run — no files will be modified)');
 
-console.log(`Redirecting to: ${opts.host}:${opts.port}`);
-if (opts.dryRun) console.log('(dry-run — no files will be modified)');
+  const buf = Buffer.from(fs.readFileSync(binaryPath));
+  let totalPatches = 0;
 
-const buf = Buffer.from(fs.readFileSync(binaryPath));
-let totalPatches = 0;
+  // ── 1. RSA key ───────────────────────────────────────────────────────────────
 
-// ── 1. RSA key ───────────────────────────────────────────────────────────────
-
-console.log('\n=== 1. RSA key ===');
-const rsaKeys = findRsaKeys(buf);
-console.log(`  Found ${rsaKeys.length} RSA PEM block(s) total`);
-let rsaCount = 0;
-for (const k of rsaKeys) {
-  const isTarget = k.base64.startsWith(KNOWN_PROD_KEY_PREFIX);
-  console.log(`  0x${k.offset.toString(16).padStart(9, '0')}: ${k.base64.length}-char b64 — ${isTarget ? 'PROD' : `skip (${k.base64.slice(0, 20)}...)`}`);
-  if (!isTarget) continue;
-  if (k.base64.length !== newBase64.length)
-    die(`Key length mismatch: original ${k.base64.length} vs new ${newBase64.length} chars`);
-  const replacement = Buffer.from(reformatPem(newBase64, k.lineLengths), 'ascii');
-  if (replacement.length !== k.length)
-    die(`PEM byte size mismatch: ${k.length} vs ${replacement.length}`);
-  if (!opts.dryRun) replacement.copy(buf, k.offset);
-  rsaCount++;
-  totalPatches++;
-}
-console.log(`  Patched: ${rsaCount}`);
-
-// ── 2. DC IPv4 strings ───────────────────────────────────────────────────────
-
-console.log('\n=== 2. DC IPv4 strings ===');
-const ipHits = findIpStrings(buf, PRODUCTION_IPS);
-let ipCount = 0;
-for (const h of ipHits) {
-  const newBytes = Buffer.alloc(h.length, 0);
-  Buffer.from(opts.host + '\0', 'ascii').copy(newBytes);
-  console.log(`  0x${h.offset.toString(16).padStart(9, '0')}: "${h.original}" → "${opts.host}"`);
-  if (!opts.dryRun) newBytes.copy(buf, h.offset);
-  ipCount++;
-  totalPatches++;
-}
-console.log(`  Patched: ${ipCount}`);
-
-// ── 3. DC port in struct ─────────────────────────────────────────────────────
-
-console.log(`\n=== 3. DC port (${OLD_PORT} → ${opts.port}) ===`);
-const structs = findDcStructs(buf, PRODUCTION_DC_IDS, OLD_PORT);
-let portCount = 0;
-for (const s of structs) {
-  console.log(`  Struct @ 0x${s.offset.toString(16).padStart(9, '0')}: ${s.entries.map(e => `dc${e.dcId}`).join(',')}`);
-  for (const e of s.entries) {
-    if (!opts.dryRun) buf.writeInt32LE(opts.port, e.entryOffset + 16);
-    portCount++;
+  console.log('\n=== 1. RSA keys ===');
+  const rsaKeys = findRsaKeys(buf);
+  console.log(`  Found ${rsaKeys.length} RSA PEM block(s) total`);
+  let rsaCount = 0;
+  for (const k of rsaKeys) {
+    const kind = keyKind(k.base64);
+    const alreadyPatched = k.base64 === newBase64;
+    const description = kind?.label ?? (alreadyPatched ? 'relay key (already patched)' : `skip (${k.base64.slice(0, 20)}...)`);
+    console.log(`  0x${k.offset.toString(16).padStart(9, '0')}: ${k.base64.length}-char b64 — ${description}`);
+    if (!kind) continue;
+    if (k.base64.length !== newBase64.length)
+      die(`Key length mismatch: original ${k.base64.length} vs new ${newBase64.length} chars`);
+    const replacement = Buffer.from(reformatPem(newBase64, k.lineLengths), 'ascii');
+    if (replacement.length !== k.length)
+      die(`PEM byte size mismatch: ${k.length} vs ${replacement.length}`);
+    replacement.copy(buf, k.offset);
+    rsaCount++;
     totalPatches++;
   }
-}
-console.log(`  Patched: ${portCount} port field(s) across ${structs.length} struct array(s)`);
+  console.log(`  Patched: ${rsaCount}`);
 
-// ── Write + sign ─────────────────────────────────────────────────────────────
+  // ── 2. DC address strings ────────────────────────────────────────────────────
 
-if (opts.dryRun) {
-  console.log(`\n(dry-run) Would patch ${totalPatches} location(s). No files written.`);
-  process.exit(0);
-}
-
-if (totalPatches === 0) {
-  console.log('\nNothing to patch — binary may already be up to date.');
-  process.exit(0);
-}
-
-if (opts.backup) {
-  const backupPath = binaryPath + '.original';
-  if (!fs.existsSync(backupPath)) {
-    fs.copyFileSync(binaryPath, backupPath);
-    console.log(`\nBackup: ${backupPath}`);
-  } else {
-    console.log(`\nBackup already exists, skipping: ${backupPath}`);
+  console.log('\n=== 2. DC address strings ===');
+  const ipHits = findIpStrings(buf, BUILT_IN_IPS);
+  let ipCount = 0;
+  for (const h of ipHits) {
+    const newBytes = Buffer.alloc(h.length, 0);
+    Buffer.from(opts.host + '\0', 'ascii').copy(newBytes);
+    console.log(`  0x${h.offset.toString(16).padStart(9, '0')}: "${h.original}" → "${opts.host}"`);
+    newBytes.copy(buf, h.offset);
+    ipCount++;
+    totalPatches++;
   }
-}
+  console.log(`  Patched: ${ipCount}`);
 
-fs.writeFileSync(binaryPath, buf);
-console.log('Binary written.');
+  // ── 3. DC port in struct ─────────────────────────────────────────────────────
 
-if (opts.resign && os.platform() === 'darwin') {
-  console.log('Re-signing with ad-hoc signature...');
-  try {
-    execSync(`codesign --force --deep --sign - ${JSON.stringify(appRoot)}`, { stdio: 'inherit' });
-    console.log('Signed OK.');
-  } catch {
-    console.error('codesign failed. Try running with sudo, or pass --no-resign and sign manually.');
-    process.exit(1);
+  console.log(`\n=== 3. DC port (${OLD_PORT} → ${opts.port}) ===`);
+  let portCount = 0;
+  let structCount = 0;
+  for (const layout of DC_STRUCT_LAYOUTS) {
+    const structs = findDcStructs(buf, layout.dcIds, OLD_PORT);
+    for (const s of structs) {
+      console.log(`  ${layout.label} @ 0x${s.offset.toString(16).padStart(9, '0')}: ${s.entries.map(e => `dc${e.dcId}`).join(',')}`);
+      for (const e of s.entries) {
+        buf.writeInt32LE(opts.port, e.entryOffset + 16);
+        portCount++;
+        totalPatches++;
+      }
+      structCount++;
+    }
   }
-  try { execSync(`xattr -dr com.apple.quarantine ${JSON.stringify(appRoot)}`, { stdio: 'pipe' }); } catch {}
-} else if (opts.resign && os.platform() !== 'darwin') {
-  console.log('(--resign ignored on non-macOS)');
+  console.log(`  Patched: ${portCount} port field(s) across ${structCount} struct array(s)`);
+
+  // Verify the in-memory result even during --dry-run. A successful run must not
+  // leave any known static or cloud-config route back to Telegram.
+  const remainingRoutingKeys = findRsaKeys(buf).filter(k => keyKind(k.base64));
+  const remainingIps = findIpStrings(buf, BUILT_IN_IPS);
+  const remainingPortStructs = DC_STRUCT_LAYOUTS.flatMap(layout => findDcStructs(buf, layout.dcIds, OLD_PORT));
+  const relayKeyCount = findRsaKeys(buf).filter(k => k.base64 === newBase64).length;
+  if (remainingRoutingKeys.length || remainingIps.length || remainingPortStructs.length) {
+    die(`Verification failed: ${remainingRoutingKeys.length} routing key(s), ${remainingIps.length} address(es), and ${remainingPortStructs.length} port array(s) remain`);
+  }
+  if (relayKeyCount === 0) {
+    die('No Telegram routing RSA key was found; unsupported or already modified binary');
+  }
+  console.log(`  Verified: no known Telegram route remains (${relayKeyCount} relay key block(s))`);
+
+  // ── Write + sign ─────────────────────────────────────────────────────────────
+
+  if (opts.dryRun) {
+    console.log(`\n(dry-run) Would patch ${totalPatches} location(s). No files written.`);
+    process.exit(0);
+  }
+
+  if (totalPatches === 0) {
+    console.log('\nNothing to patch — binary may already be up to date.');
+    process.exit(0);
+  }
+
+  if (opts.backup) {
+    const backupPath = binaryPath + '.original';
+    if (!fs.existsSync(backupPath)) {
+      fs.copyFileSync(binaryPath, backupPath);
+      console.log(`\nBackup: ${backupPath}`);
+    } else {
+      console.log(`\nBackup already exists, skipping: ${backupPath}`);
+    }
+  }
+
+  fs.writeFileSync(binaryPath, buf);
+  console.log('Binary written.');
+
+  if (opts.resign && os.platform() === 'darwin') {
+    console.log('Re-signing with ad-hoc signature...');
+    try {
+      execSync(`codesign --force --deep --sign - ${JSON.stringify(appRoot)}`, { stdio: 'inherit' });
+      console.log('Signed OK.');
+    } catch {
+      console.error('codesign failed. Try running with sudo, or pass --no-resign and sign manually.');
+      process.exit(1);
+    }
+    try { execSync(`xattr -dr com.apple.quarantine ${JSON.stringify(appRoot)}`, { stdio: 'pipe' }); } catch {}
+  } else if (opts.resign && os.platform() !== 'darwin') {
+    console.log('(--resign ignored on non-macOS)');
+  }
+
+  console.log(`\n=== Done ===`);
+  console.log(`  RSA keys : ${rsaCount}`);
+  console.log(`  IPs      : ${ipCount}`);
+  console.log(`  Ports    : ${portCount}`);
 }
 
-console.log(`\n=== Done ===`);
-console.log(`  RSA keys : ${rsaCount}`);
-console.log(`  IPs      : ${ipCount}`);
-console.log(`  Ports    : ${portCount}`);
+if (require.main === module) main();
+
+module.exports = {
+  BUILT_IN_IPS,
+  DC_STRUCT_LAYOUTS,
+  OLD_PORT,
+  ROUTING_RSA_KEYS,
+  findDcStructs,
+  findIpStrings,
+  findRsaKeys,
+  keyKind,
+  main,
+  reformatPem,
+};
