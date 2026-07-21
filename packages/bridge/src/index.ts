@@ -16,12 +16,18 @@ import {
 } from './platform-manager.js'
 import { UploadManager } from './upload-manager.js'
 import { UpdateManager } from './update-manager.js'
+import { IMStickerService } from './sticker-provider.js'
+import { StickerRpc } from './sticker-rpc.js'
+import { ReactionRpc } from './reaction-rpc.js'
 
 export * from './platform.js'
 export * from './message-store.js'
 export * from './platform-manager.js'
 export * from './upload-manager.js'
 export * from './update-manager.js'
+export * from './sticker-provider.js'
+export * from './sticker-rpc.js'
+export * from './reaction-rpc.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
@@ -40,6 +46,7 @@ interface BridgeSessionState {
   generation: object
   session: PlatformSession
   dialogs: DialogRpc
+  stickers: StickerRpc
 }
 
 /**
@@ -50,6 +57,7 @@ interface BridgeSessionState {
 export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const generation = {}
   const platforms = new IMPlatformService(ctx)
+  const stickerProviders = new IMStickerService(ctx)
   const registry = platforms.registry
   const dcId = config.dcId ?? 1
   const apiPrefix = config.apiPrefix ?? '/api'
@@ -72,7 +80,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, event) => updates.publish(session, event),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
+    ctx, registry, stickerProviders.registry,
+    store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
   )
 
   platforms.onChange((event, platformId) => {
@@ -192,15 +201,22 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platformId: ps.platformId,
       platformSessionId: ps.id,
     }])
-    rpc.setPlatformData({
+    const state: BridgeSessionState = {
       generation, session,
-      dialogs: new DialogRpc(platform, session, store, uploads, config.onTransferProgress, dcId),
-    } satisfies BridgeSessionState)
+      stickers: new StickerRpc(ctx.database, stickerProviders.registry, platform, session, dcId),
+      dialogs: undefined as never,
+    }
+    state.dialogs = new DialogRpc(
+      platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
+      new ReactionRpc(platform, session, dcId),
+    )
+    rpc.setPlatformData(state)
     await subscriptions.ensure(session)
 
     const user = makeUser({
       id: stableId(`self:${ps.id}`),
       self: true,
+      premium: true,
       firstName: (ps.metadata.firstName as string) ?? 'Bridge',
       phone: phoneNumber,
     })
@@ -249,6 +265,68 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   ctx.mtproto.register('upload.getFile', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFile(req as tl.upload.RawGetFileRequest))
   ctx.mtproto.register('upload.getFileHashes', async () => bareVector([]))
+
+  ctx.mtproto.register('messages.getAllStickers', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.getAllStickers(req as tl.messages.RawGetAllStickersRequest))
+  ctx.mtproto.register('messages.getStickerSet', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return await state.dialogs.getReactionStickerSet(req as tl.messages.RawGetStickerSetRequest)
+      ?? state.stickers.getStickerSet(req as tl.messages.RawGetStickerSetRequest)
+  })
+  ctx.mtproto.register('messages.getStickers', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.getStickers(req as tl.messages.RawGetStickersRequest))
+  ctx.mtproto.register('messages.getRecentStickers', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.getRecentStickers(req as tl.messages.RawGetRecentStickersRequest))
+  ctx.mtproto.register('messages.saveRecentSticker', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.saveRecentSticker(req as tl.messages.RawSaveRecentStickerRequest))
+  ctx.mtproto.register('messages.clearRecentStickers', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.clearRecentStickers(req as tl.messages.RawClearRecentStickersRequest))
+  ctx.mtproto.register('messages.getFavedStickers', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.getFavedStickers(req as tl.messages.RawGetFavedStickersRequest))
+  ctx.mtproto.register('messages.faveSticker', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.faveSticker(req as tl.messages.RawFaveStickerRequest))
+  ctx.mtproto.register('messages.installStickerSet', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.installStickerSet(req as tl.messages.RawInstallStickerSetRequest))
+  ctx.mtproto.register('messages.uninstallStickerSet', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.uninstallStickerSet(
+      req as tl.messages.RawUninstallStickerSetRequest,
+    ))
+  ctx.mtproto.register('messages.reorderStickerSets', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.reorderStickerSets(
+      req as tl.messages.RawReorderStickerSetsRequest,
+    ))
+  ctx.mtproto.register('messages.toggleStickerSets', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).stickers.toggleStickerSets(req as tl.messages.RawToggleStickerSetsRequest))
+  ctx.mtproto.register('messages.getAvailableReactions', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getAvailableReactions())
+  ctx.mtproto.register('messages.getTopReactions', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getTopReactions(
+      (req as tl.messages.RawGetTopReactionsRequest).limit,
+    ))
+  ctx.mtproto.register('messages.getRecentReactions', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getTopReactions(
+      (req as tl.messages.RawGetRecentReactionsRequest).limit,
+    ))
+  ctx.mtproto.register('messages.getDefaultTagReactions', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getTopReactions(100))
+  ctx.mtproto.register('messages.clearRecentReactions', async (rpc) => {
+    await requireBridgeSession(rpc)
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  })
+  ctx.mtproto.register('messages.getEmojiStickers', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getEmojiStickers())
+  ctx.mtproto.register('messages.getCustomEmojiDocuments', async (rpc, req) =>
+    bareVector(await (await requireBridgeSession(rpc)).dialogs.getCustomEmojiDocuments(
+      req as tl.messages.RawGetCustomEmojiDocumentsRequest,
+    )))
+  ctx.mtproto.register('messages.sendReaction', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.sendReaction(req as tl.messages.RawSendReactionRequest))
+  ctx.mtproto.register('messages.getMessagesReactions', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getMessagesReactions(req as tl.messages.RawGetMessagesReactionsRequest))
+  ctx.mtproto.register('messages.getMessageReactionsList', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getMessageReactionsList(
+      req as tl.messages.RawGetMessageReactionsListRequest,
+    ))
 
   // ── Contacts / users ──
   ctx.mtproto.register('contacts.getContacts', async (rpc) =>
@@ -344,6 +422,7 @@ function normPhone(p: string): string {
 function createSessionResolver(
   ctx: Context,
   registry: PlatformRegistry,
+  stickerProviders: import('./sticker-provider.js').StickerProviderRegistry,
   store: MessageStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
@@ -373,10 +452,16 @@ function createSessionResolver(
         if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
         const session = sessionFromRow(row)
         await subscriptions.ensure(session)
-        return {
+        const state: BridgeSessionState = {
           generation, session,
-          dialogs: new DialogRpc(platform, session, store, uploads, onTransferProgress, dcId),
+          stickers: new StickerRpc(ctx.database, stickerProviders, platform, session, dcId),
+          dialogs: undefined as never,
         }
+        state.dialogs = new DialogRpc(
+          platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
+          new ReactionRpc(platform, session, dcId),
+        )
+        return state
       })()
       loading.set(authKeyId, pending)
       pending.finally(() => loading.delete(authKeyId)).catch(() => {})

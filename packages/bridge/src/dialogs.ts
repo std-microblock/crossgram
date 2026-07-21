@@ -10,6 +10,8 @@ import type { MessageStore } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
 import type { IMMediaRow } from './models.js'
 import type { StagedMedia, UploadedFile, UploadManager } from './upload-manager.js'
+import type { StickerRpc } from './sticker-rpc.js'
+import type { ReactionRpc } from './reaction-rpc.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
@@ -37,6 +39,12 @@ interface MaterializedMessage {
 interface ResolvedMediaUpload {
   media: IMMediaInput
   upload: UploadedFile
+}
+
+interface ResolvedStickerInput {
+  sticker: import('./sticker-provider.js').IMStickerSendPlan
+  providerId: string
+  stickerId: string
 }
 
 /**
@@ -67,6 +75,8 @@ export class DialogRpc {
     private readonly _uploads?: UploadManager,
     private readonly _onTransferProgress?: (session: PlatformSession, progress: IMTransferProgress) => void | Promise<void>,
     private readonly _dcId = 1,
+    private readonly _stickers?: StickerRpc,
+    private readonly _reactions?: ReactionRpc,
   ) {
     this._selfId = this._allocate(`self:${_session.platformSessionId}`, new Map())
     if (store) {
@@ -309,23 +319,39 @@ export class DialogRpc {
     const peerId = this._tlToPeer.get(req.chatId)
     const conversation = peerId ? this._conversation(peerId) : undefined
     if (!conversation || conversation.kind !== 'group') throw new RpcError(400, 'CHAT_ID_INVALID')
+    const participantIds = Array.isArray(conversation.metadata?.participantIds)
+      ? conversation.metadata.participantIds.filter((id): id is string => typeof id === 'string')
+      : []
+    const participantUsers = await Promise.all(participantIds.map((id) => this._getPeerUser(id)))
+    const reactionContext = await this._platform.getAvailableReactions?.(
+      this._session, { conversationId: conversation.id },
+    )
     return {
       _: 'messages.chatFull',
       fullChat: {
         _: 'chatFull', id: req.chatId, about: '',
         participants: {
           _: 'chatParticipants', chatId: req.chatId,
-          participants: [{ _: 'chatParticipantCreator', userId: this._selfId }], version: 1,
+          participants: [
+            { _: 'chatParticipantCreator', userId: this._selfId },
+            ...participantUsers.map((user): tl.RawChatParticipant => ({
+              _: 'chatParticipant', userId: user.id, inviterId: this._selfId, date: 0,
+            })),
+          ], version: 1,
         },
         notifySettings: { _: 'peerNotifySettings' },
+        availableReactions: this._reactions?.chatReactions(conversation.id, reactionContext),
       },
-      chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
+      chats: [this._makeChat(conversation)], users: uniqueUsers([this._makeSelfUser(), ...participantUsers]),
     }
   }
 
   async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
+    const reactionContext = await this._platform.getAvailableReactions?.(
+      this._session, { conversationId: conversation.id },
+    )
     return {
       _: 'messages.chatFull',
       fullChat: {
@@ -335,6 +361,7 @@ export class DialogRpc {
         readInboxMaxId: 0, readOutboxMaxId: 0, unreadCount: 0,
         chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
         notifySettings: { _: 'peerNotifySettings' }, botInfo: [], pts: this._pts,
+        availableReactions: this._reactions?.chatReactions(conversation.id, reactionContext),
       },
       chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
     }
@@ -459,6 +486,12 @@ export class DialogRpc {
       const resolved = await this._resolveSendMedia(req.media)
       const parts: IMMessageInput['parts'] = []
       if (req.message) parts.push({ type: 'text', text: req.message })
+      if ('sticker' in resolved) {
+        parts.push({ type: 'sticker', sticker: resolved.sticker })
+        const updates = await this._sendRichContent(req.peer, { parts }, [], [req.randomId], req.replyTo)
+        await this._stickers?.markUsedByRef(resolved.providerId, resolved.stickerId)
+        return updates
+      }
       parts.push({ type: 'media', media: resolved.media })
       return this._sendRichContent(req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo)
     })
@@ -469,14 +502,16 @@ export class DialogRpc {
     return this._sendMediaOnce(randomId, async () => {
       if (!req.multiMedia.length) throw new RpcError(400, 'MEDIA_EMPTY')
       const resolved = await Promise.all(req.multiMedia.map((item) => this._resolveSendMedia(item.media)))
+      if (resolved.some((item) => 'sticker' in item)) throw new RpcError(400, 'MEDIA_INVALID')
+      const mediaResolved = resolved as ResolvedMediaUpload[]
       const parts: IMMessageInput['parts'] = []
       const captions = req.multiMedia.map((item) => item.message).filter(Boolean)
       if (captions.length) parts.push({ type: 'text', text: captions.join('\n') })
-      for (const item of resolved) parts.push({ type: 'media', media: item.media })
+      for (const item of mediaResolved) parts.push({ type: 'media', media: item.media })
       return this._sendRichContent(
         req.peer,
         { parts },
-        resolved.map((item) => item.upload),
+        mediaResolved.map((item) => item.upload),
         req.multiMedia.map((item) => item.randomId),
         req.replyTo,
       )
@@ -494,13 +529,37 @@ export class DialogRpc {
   }
 
   async getFile(req: tl.upload.RawGetFileRequest): Promise<tl.upload.TypeFile> {
-    if (!this._uploads || !this._store || !this._platform.downloadMedia) {
-      throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
-    }
     const offset = safeOffset(req.offset)
     if (offset < 0 || req.limit <= 0) throw new RpcError(400, 'OFFSET_INVALID')
+    if (req.location._ === 'inputStickerSetThumb') {
+      const bytes = await this._stickers?.getSetThumb(req.location.stickerset, offset, req.limit)
+      if (!bytes) throw new RpcError(400, 'LOCATION_INVALID')
+      return {
+        _: 'upload.file', type: { _: 'storage.fileWebp' },
+        mtime: Math.floor(Date.now() / 1000), bytes,
+      }
+    }
     if (req.location._ !== 'inputDocumentFileLocation' && req.location._ !== 'inputPhotoFileLocation') {
       throw new RpcError(400, 'LOCATION_INVALID')
+    }
+    if (req.location._ === 'inputDocumentFileLocation') {
+      const reaction = await this._reactions?.getFile(req.location.id.toNumber(), offset, req.limit)
+      if (reaction) {
+        return {
+          _: 'upload.file', type: { _: 'storage.fileWebp' },
+          mtime: Math.floor(Date.now() / 1000), bytes: reaction,
+        }
+      }
+      const sticker = await this._stickers?.getFile(req.location.id.toNumber(), offset, req.limit)
+      if (sticker) {
+        return {
+          _: 'upload.file', type: { _: 'storage.fileUnknown' },
+          mtime: Math.floor(Date.now() / 1000), bytes: sticker,
+        }
+      }
+    }
+    if (!this._uploads || !this._store || !this._platform.downloadMedia) {
+      throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
     }
     const staged = this._uploads.getStaged(this._session.platformSessionId, req.location.id.toString())
     if (staged) {
@@ -533,6 +592,126 @@ export class DialogRpc {
     }
     return {
       _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp, bytes,
+    }
+  }
+
+  async getAvailableReactions(): Promise<tl.messages.RawAvailableReactions> {
+    return this._reactions?.availableCatalog()
+      ?? { _: 'messages.availableReactions', hash: 0, reactions: [] }
+  }
+
+  getTopReactions(limit: number): tl.messages.RawReactions {
+    return this._reactions?.topReactions(limit)
+      ?? { _: 'messages.reactions', hash: Long.ZERO, reactions: [] }
+  }
+
+  async getEmojiStickers(): Promise<tl.messages.RawAllStickers> {
+    return this._reactions?.getEmojiStickers()
+      ?? { _: 'messages.allStickers', hash: Long.ZERO, sets: [] }
+  }
+
+  async getReactionStickerSet(
+    req: tl.messages.RawGetStickerSetRequest,
+  ): Promise<tl.messages.TypeStickerSet | undefined> {
+    return this._reactions?.getStickerSet(req)
+  }
+
+  getCustomEmojiDocuments(req: tl.messages.RawGetCustomEmojiDocumentsRequest) {
+    return this._reactions?.getCustomEmojiDocuments(req.documentId) ?? []
+  }
+
+  async sendReaction(req: tl.messages.RawSendReactionRequest): Promise<tl.TypeUpdates> {
+    if (!this._platform.capabilities.reactions?.write || !this._platform.setMessageReactions) {
+      throw new RpcError(400, 'REACTION_INVALID')
+    }
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    const projected = await this._store?.findProjectedByTlId(
+      this._session.platformSessionId, req.msgId, peerId,
+    )
+    if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+    const target = {
+      conversationId: peerId,
+      messageId: projected.source.id,
+      targetId: projected.source.sourceIds?.[0] ?? projected.source.id,
+    }
+    const context = await this._platform.getAvailableReactions?.(this._session, target)
+      ?? projected.source.reactionContext
+      ?? { available: [], reactions: [], maxSelected: 0 }
+    const selected = (req.reaction ?? []).map((reaction) =>
+      this._reactions!.resolveInput(peerId, reaction, context))
+    if (selected.length > context.maxSelected) throw new RpcError(400, 'REACTIONS_TOO_MANY')
+    const updated = await this._platform.setMessageReactions(
+      this._session, target, selected.map((item) => item.key),
+    )
+    const conversation = this._conversation(peerId)
+    const result = await this._store!.setReactions(this._session, conversation, target, updated)
+    const pts = await this._reservePts(1, Math.floor(Date.now() / 1000))
+    const update: tl.RawUpdateMessageReactions = {
+      _: 'updateMessageReactions',
+      peer: this._conversationPeer(conversation),
+      msgId: req.msgId,
+      reactions: this._reactions!.messageReactions(peerId, result.message),
+    }
+    return {
+      _: 'updates', updates: [update],
+      users: [this._makeSelfUser()],
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      date: Math.floor(Date.now() / 1000), seq: 0,
+    }
+  }
+
+  async getMessagesReactions(req: tl.messages.RawGetMessagesReactionsRequest): Promise<tl.TypeUpdates> {
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    const conversation = this._conversation(peerId)
+    const updates: tl.TypeUpdate[] = []
+    for (const id of req.id) {
+      const projected = await this._store?.findProjectedByTlId(this._session.platformSessionId, id, peerId)
+      if (!projected) continue
+      updates.push({
+        _: 'updateMessageReactions', peer: this._conversationPeer(conversation),
+        msgId: id, reactions: this._reactions!.messageReactions(peerId, projected.source),
+      } as tl.RawUpdateMessageReactions)
+    }
+    return {
+      _: 'updates', updates, users: [this._makeSelfUser()],
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      date: Math.floor(Date.now() / 1000), seq: 0,
+    }
+  }
+
+  async getMessageReactionsList(
+    req: tl.messages.RawGetMessageReactionsListRequest,
+  ): Promise<tl.messages.RawMessageReactionsList> {
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    const projected = await this._store?.findProjectedByTlId(this._session.platformSessionId, req.id, peerId)
+    if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+    const context = projected.source.reactionContext
+    const filter = req.reaction && context
+      ? this._reactions!.resolveInput(peerId, req.reaction, context).key
+      : undefined
+    const definitions = new Map((context?.available ?? []).map((item) => [item.key, item]))
+    const actors = (context?.reactions ?? []).flatMap((summary) =>
+      summary.key === filter || filter === undefined
+        ? (summary.recentActors ?? []).map((actor) => ({ summary, actor }))
+        : [])
+      .slice(0, Math.max(0, req.limit))
+    const users = await Promise.all([...new Set(actors.map(({ actor }) => actor.userId))]
+      .map((id) => this._getPeerUser(id)))
+    return {
+      _: 'messages.messageReactionsList',
+      count: actors.length,
+      reactions: actors.map(({ summary, actor }) => ({
+        _: 'messagePeerReaction',
+        peerId: { _: 'peerUser', userId: this._peerId(actor.userId) },
+        date: actor.timestamp ?? projected.source.timestamp,
+        reaction: this._reactions!.toTlReaction(peerId, definitions.get(summary.key)!),
+        my: actor.userId === this._session.userId || undefined,
+      })),
+      chats: [],
+      users: uniqueUsers([...users, this._makeSelfUser()]),
     }
   }
 
@@ -613,7 +792,7 @@ export class DialogRpc {
     }
   }
 
-  private async _resolveSendMedia(media: tl.TypeInputMedia): Promise<ResolvedMediaUpload> {
+  private async _resolveSendMedia(media: tl.TypeInputMedia): Promise<ResolvedMediaUpload | ResolvedStickerInput> {
     if (media._ === 'inputMediaUploadedPhoto' || media._ === 'inputMediaUploadedDocument') {
       return this._resolveUploadedMedia(media)
     }
@@ -623,6 +802,16 @@ export class DialogRpc {
     }
     if (media.id._ !== 'inputPhoto' && media.id._ !== 'inputDocument') {
       throw new RpcError(400, 'MEDIA_INVALID')
+    }
+    if (media._ === 'inputMediaDocument' && media.id._ === 'inputDocument') {
+      const sticker = await this._stickers?.resolveSend(media.id)
+      if (sticker) {
+        return {
+          sticker: sticker.plan,
+          providerId: sticker.providerId,
+          stickerId: sticker.stickerId,
+        }
+      }
     }
     const staged = this._uploads.getStaged(this._session.platformSessionId, media.id.id.toString())
     if (!staged) throw new RpcError(400, 'MEDIA_INVALID')
@@ -637,6 +826,7 @@ export class DialogRpc {
     replyTo?: tl.TypeInputReplyTo,
   ): Promise<tl.TypeUpdates> {
     const media = content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
+    const stickers = content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
     if (media.length > this._platform.capabilities.send.maxMedia) throw new RpcError(400, 'MEDIA_TOO_MANY')
     if (media.some((item) => item.kind === 'image') && !this._platform.capabilities.send.images) {
@@ -647,6 +837,13 @@ export class DialogRpc {
     }
     if (text && media.length && !this._platform.capabilities.send.mixed) {
       throw new RpcError(400, 'MIXED_SEND_UNAVAILABLE')
+    }
+    if (stickers.length > 1) throw new RpcError(400, 'STICKERS_TOO_MUCH')
+    if (stickers.some((item) => item.type === 'native') && !this._platform.capabilities.stickers?.native) {
+      throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
+    }
+    if (stickers.some((item) => item.type === 'upload') && !this._platform.capabilities.stickers?.upload) {
+      throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
     }
     if (Array.from(text).length > this._platform.capabilities.send.maxTextLength) {
       throw new RpcError(400, 'MESSAGE_TOO_LONG')
@@ -831,8 +1028,17 @@ export class DialogRpc {
       replyTo: this._topicReplyHeader(conversation, tlId),
       date: source.timestamp,
       message: item.ordinal === 0 ? messageText(source) : '',
-      media: item.media ? makeTlMessageMedia(item.media, source.timestamp, this._dcId) : undefined,
+      media: item.media
+        ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
+        : source.content.parts.find((part) => part.type === 'sticker')
+          ? this._stickers?.makeMessageMedia(
+              source.content.parts.find((part) => part.type === 'sticker')!.sticker,
+            )
+          : undefined,
       groupedId: item.groupedId ? Long.fromString(item.groupedId) : undefined,
+      reactions: source.reactionContext?.reactions.length
+        ? this._reactions?.messageReactions(source.conversationId, source)
+        : undefined,
     } as tl.RawMessage
   }
 
@@ -871,6 +1077,7 @@ export class DialogRpc {
     return makeUser({
       id: this._selfId,
       self: true,
+      premium: true,
       firstName: String(this._session.metadata.firstName ?? 'Bridge'),
       lastName: this._session.metadata.lastName as string | undefined,
       username: this._session.metadata.username as string | undefined,

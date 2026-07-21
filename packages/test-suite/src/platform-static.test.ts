@@ -3,7 +3,7 @@ import { Context } from 'cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { IMPlatformService } from '@mtproto-relay/bridge'
+import { IMPlatformService, IMStickerService } from '@mtproto-relay/bridge'
 import type {
   IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMTransferProgress, PlatformSession,
 } from '@mtproto-relay/bridge'
@@ -53,14 +53,17 @@ function loadedStaticPlugin(id: string, config: staticPlatformPlugin.Config = {}
     }).entry = { id: `parent:${id}`, options: { id } }
     staticPlatformPlugin.apply(ctx, config)
   }
-  plugin.inject = ['imPlatform']
+  plugin.inject = ['imPlatform', 'imSticker']
   return plugin
 }
 
 describe('StaticPlatform', () => {
   it('registers multiple Cordis plugin instances and disposes them independently', async () => {
     const ctx = new Context()
-    const service = ctx.plugin((serviceCtx) => { new IMPlatformService(serviceCtx) })
+    const service = ctx.plugin((serviceCtx) => {
+      new IMPlatformService(serviceCtx)
+      new IMStickerService(serviceCtx)
+    })
     const first = ctx.plugin(loadedStaticPlugin('static-one'))
     const second = ctx.plugin(loadedStaticPlugin('static-two', { transferChunkSize: 4 }))
     await Promise.all([service, first, second])
@@ -69,18 +72,26 @@ describe('StaticPlatform', () => {
     expect(ctx.imPlatform.require('static-one')).toBeInstanceOf(StaticPlatform)
     expect(ctx.imPlatform.require('static-two')).toBeInstanceOf(StaticPlatform)
     expect(ctx.imPlatform.require('static-one')).not.toBe(ctx.imPlatform.require('static-two'))
+    expect(ctx.imSticker.ids).toEqual([
+      'static-one:native', 'static-one:plugin', 'static-two:native', 'static-two:plugin',
+    ])
 
     await first.dispose()
     expect(ctx.imPlatform.ids).toEqual(['static-two'])
+    expect(ctx.imSticker.ids).toEqual(['static-two:native', 'static-two:plugin'])
     await second.dispose()
     expect(ctx.imPlatform.ids).toEqual([])
+    expect(ctx.imSticker.ids).toEqual([])
     await service.dispose()
   })
 
   it('does not generate durable demo traffic unless an interval is configured', async () => {
     vi.useFakeTimers()
     const ctx = new Context()
-    const service = ctx.plugin((serviceCtx) => { new IMPlatformService(serviceCtx) })
+    const service = ctx.plugin((serviceCtx) => {
+      new IMPlatformService(serviceCtx)
+      new IMStickerService(serviceCtx)
+    })
     const plugin = ctx.plugin(loadedStaticPlugin('static-default'))
     try {
       await Promise.all([service, plugin])
@@ -93,6 +104,40 @@ describe('StaticPlatform', () => {
       await plugin.dispose()
       await service.dispose()
       vi.useRealTimers()
+    }
+  })
+
+  it('registers native and plugin sticker packs without advertising TGS support', async () => {
+    const ctx = new Context()
+    const service = ctx.plugin((serviceCtx) => {
+      new IMPlatformService(serviceCtx)
+      new IMStickerService(serviceCtx)
+    })
+    const plugin = ctx.plugin(loadedStaticPlugin('static-catalog'))
+    try {
+      await Promise.all([service, plugin])
+      const platform = ctx.imPlatform.require('static-catalog')
+      expect(platform.capabilities.stickers).toEqual({
+        native: true, upload: true, formats: ['static', 'video'],
+      })
+      const context = { session, platformKind: 'static' }
+      const native = await ctx.imSticker.require('static-catalog:native').listPacks(context)
+      const provided = await ctx.imSticker.require('static-catalog:plugin').listPacks(context)
+      expect(native.packs).toMatchObject([{ title: 'Static Native Stickers', count: 2 }])
+      expect(provided.packs).toMatchObject([{ title: 'Static Plugin Stickers', count: 2 }])
+      const pack = await ctx.imSticker.require('static-catalog:plugin')
+        .getPack(context, provided.packs[0].packId)
+      expect(pack?.stickers.map((sticker) => sticker.format)).toEqual(['static', 'video'])
+      const saved = await ctx.imSticker.require('static-catalog:plugin').listSavedStickers!(context)
+      expect(saved.stickers).toMatchObject([{
+        stickerId: 'loose-saved',
+        packId: undefined,
+        title: 'Platform Saved Loose Sticker',
+        format: 'static',
+      }])
+    } finally {
+      await plugin.dispose()
+      await service.dispose()
     }
   })
 
@@ -111,10 +156,10 @@ describe('StaticPlatform', () => {
       all.push(...page.dialogs)
       cursor = page.nextCursor
     } while (cursor)
-    expect(all).toHaveLength(9)
+    expect(all).toHaveLength(10)
     expect(all.map((dialog) => dialog.conversation.id)).toEqual([
       'group-a', 'qq-group', 'group-c', 'group-b', 'discord-support',
-      'discord-general', 'bob', 'alice', 'group-d',
+      'discord-general', 'bob', 'alice', 'reaction-sticker-lab', 'group-d',
     ])
     const after = await platform.getDialogs(session, { afterId: 'group-c', limit: 2 })
     expect(after.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['group-b', 'discord-support'])
@@ -146,6 +191,60 @@ describe('StaticPlatform', () => {
     ])
     expect(history.messages[1].content.parts).toEqual([{ type: 'text', text: 'Group A edited message 1' }])
     await unsubscribe()
+  })
+
+  it('sets reactions authoritatively and emits reaction snapshots with backpressure', async () => {
+    const platform = new StaticPlatform({ now: () => 1_900_000_050 })
+    const conversation: IMConversation = { id: 'qq-group', kind: 'group', title: 'Static QQ Group' }
+    const events: import('@mtproto-relay/bridge').IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      await Promise.resolve()
+      events.push(event)
+    })
+    const reactions = await platform.setMessageReactions(session, {
+      conversationId: 'qq-group', messageId: 'group:2', targetId: 'group:2',
+    }, ['like', 'heart'])
+    expect(reactions).toMatchObject({
+      available: [
+        { key: 'like', presentation: { type: 'emoji', emoticon: '👍' } },
+        { key: 'heart', presentation: { type: 'emoji', emoticon: '❤️' } },
+        { key: 'laugh', presentation: { type: 'emoji', emoticon: '😂' } },
+      ],
+      reactions: [
+        { key: 'like', count: 3, selected: true },
+        { key: 'heart', count: 1, selected: true },
+      ],
+    })
+    const context = {
+      ...reactions,
+      reactions: [{
+        key: 'heart', count: 5,
+        recentActors: [{ userId: 'alice', timestamp: 1_900_000_050 }],
+      }],
+    }
+    await platform.emitReactions(session, conversation, 'group:2', context, 'reaction-event-1')
+    expect(events).toMatchObject([{
+      type: 'message-reactions', eventId: 'reaction-event-1',
+      target: { messageId: 'group:2', targetId: 'group:2' },
+      context: { reactions: [{ key: 'heart', count: 5 }] },
+    }])
+    await unsubscribe()
+  })
+
+  it('exposes different reaction catalogs per chat and per message', async () => {
+    const platform = new StaticPlatform()
+    const group = await platform.getAvailableReactions(session, { conversationId: 'qq-group' })
+    const lab = await platform.getAvailableReactions(session, { conversationId: 'reaction-sticker-lab' })
+    const limited = await platform.getAvailableReactions(session, {
+      conversationId: 'reaction-sticker-lab',
+      messageId: 'lab:reaction:limited',
+      targetId: 'lab:reaction:limited',
+    })
+    expect(group.available.map((item) => item.key)).toEqual(['like', 'heart', 'laugh'])
+    expect(lab.available).toHaveLength(11)
+    expect(lab.available.filter((item) => item.presentation.type === 'custom')).toHaveLength(2)
+    expect(limited.available.map((item) => item.key)).toEqual(['heart', 'clap'])
+    expect(limited.maxSelected).toBe(2)
   })
 
   it('names live and sent events independently across reconstructed platform instances', async () => {

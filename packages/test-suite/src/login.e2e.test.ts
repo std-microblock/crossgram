@@ -353,21 +353,22 @@ describe('bridge login e2e', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 22)
       expect(dialogs._).toBe('messages.dialogs')
-      expect(dialogs.dialogs).toHaveLength(8)
+      expect(dialogs.dialogs).toHaveLength(9)
       expect(dialogs.dialogs.map((dialog: any) => dialog.peer._)).toEqual([
         'peerChat', 'peerChat', 'peerChat', 'peerChat',
-        'peerChannel', 'peerUser', 'peerUser', 'peerChat',
+        'peerChannel', 'peerUser', 'peerUser', 'peerChat', 'peerChat',
       ])
       expect(new Set(dialogs.users.map((user: any) => user.firstName)))
         .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
       expect(dialogs.chats.map((chat: any) => chat.title)).toEqual([
         'Group A - Live Mutations', 'Static QQ Group', 'Group C - Mirror Target',
-        'Group B - Mirror Source', 'general', 'Group D - Long History',
+        'Group B - Mirror Source', 'general', 'Reaction & Sticker Lab', 'Group D - Long History',
       ])
       const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
       const mirrorSourceGroup = dialogs.chats.find((chat: any) => chat.title === 'Group B - Mirror Source')
       const mirrorTargetGroup = dialogs.chats.find((chat: any) => chat.title === 'Group C - Mirror Target')
       const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')
+      const reactionStickerLab = dialogs.chats.find((chat: any) => chat.title === 'Reaction & Sticker Lab')
       const generalChannel = dialogs.chats.find((chat: any) => chat.title === 'general')
       expect(generalChannel).toMatchObject({ _: 'channel', megagroup: true, forum: true })
       const [supportConversation] = await ctx.database.get('mtproto_im_conversation', {
@@ -419,6 +420,17 @@ describe('bridge login e2e', () => {
         'messageMediaDocument', 'messageMediaPhoto',
       ])
       expect(groupHistory.messages.map((item: any) => item.groupedId)).toEqual([undefined, undefined])
+      const reactionHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChat', chatId: group.id },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 10,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 31)
+      const reactionMessage = reactionHistory.messages.find((item: any) => item.message === 'Group history works')
+      expect(reactionMessage.reactions).toMatchObject({
+        _: 'messageReactions',
+        results: [{ reaction: { _: 'reactionEmoji', emoticon: '👍' }, count: 2 }],
+      })
       const seededDocument = groupHistory.messages[0].media.document
       const seededPhoto = groupHistory.messages[1].media.photo
       const seededFile = await callRpc(resumed, key, resumedSid, {
@@ -763,6 +775,448 @@ describe('bridge login e2e', () => {
         expect(response._).toBe(expected)
         startupSub += 2
       }
+
+      // Sticker providers are aggregated by bridge: static exposes one native
+      // provider and one standalone/plugin provider in the same account.
+      const allStickers = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getAllStickers', hash: Long.ZERO,
+      }, 170)
+      expect(allStickers).toMatchObject({
+        _: 'messages.allStickers',
+        sets: expect.arrayContaining([
+          expect.objectContaining({ title: 'Static Native Stickers', count: 2 }),
+          expect.objectContaining({ title: 'Static Plugin Stickers', count: 2 }),
+        ]),
+      })
+      const nativeSet = allStickers.sets.find((set: any) => set.title === 'Static Native Stickers')
+      const pluginSet = allStickers.sets.find((set: any) => set.title === 'Static Plugin Stickers')
+      expect(nativeSet).toBeTruthy()
+      expect(pluginSet).toBeTruthy()
+
+      const nativePack = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: nativeSet.id, accessHash: nativeSet.accessHash },
+        hash: 0,
+      }, 172)
+      const pluginPack = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: pluginSet.id, accessHash: pluginSet.accessHash },
+        hash: 0,
+      }, 174)
+      expect(nativePack).toMatchObject({
+        _: 'messages.stickerSet',
+        set: { title: 'Static Native Stickers' },
+        documents: [
+          expect.objectContaining({
+            _: 'document', date: 1_700_000_000, mimeType: 'image/webp',
+            attributes: expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeSticker' })]),
+          }),
+          expect.anything(),
+        ],
+      })
+      expect(pluginPack).toMatchObject({
+        _: 'messages.stickerSet',
+        set: {
+          title: 'Static Plugin Stickers', installedDate: undefined,
+          thumbs: [expect.objectContaining({ _: 'photoSize' })],
+          thumbDcId: 1,
+          thumbVersion: 3,
+          thumbDocumentId: expect.any(Long),
+        },
+        documents: expect.arrayContaining([expect.objectContaining({ _: 'document', mimeType: 'image/webp' })]),
+      })
+      const packThumb = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024 * 1024,
+        location: {
+          _: 'inputStickerSetThumb',
+          stickerset: { _: 'inputStickerSetID', id: pluginSet.id, accessHash: pluginSet.accessHash },
+          thumbVersion: pluginPack.set.thumbVersion,
+        },
+      }, 175)
+      expect([...packThumb.bytes.subarray(0, 4)]).toEqual([0x52, 0x49, 0x46, 0x46])
+      const availableReactions = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getAvailableReactions', hash: 0,
+      }, 176)
+      expect(availableReactions).toMatchObject({
+        _: 'messages.availableReactions',
+        reactions: expect.arrayContaining([
+          expect.objectContaining({
+            reaction: '👍', title: 'Like',
+            staticIcon: expect.objectContaining({ mimeType: 'image/webp' }),
+            appearAnimation: expect.objectContaining({ mimeType: 'image/webp' }),
+          }),
+          expect.objectContaining({ reaction: '❤️', title: 'Love' }),
+          expect.objectContaining({ reaction: '😂', title: 'Laugh' }),
+          expect.objectContaining({ reaction: '😢', title: 'Sad' }),
+          expect.objectContaining({ reaction: '🔥', title: 'Fire' }),
+          expect.objectContaining({ reaction: '🎉', title: 'Party' }),
+          expect.objectContaining({ reaction: '👏', title: 'Clap' }),
+          expect.objectContaining({ reaction: '🤔', title: 'Thinking' }),
+          expect.objectContaining({ reaction: '🤯', title: 'Mind Blown' }),
+        ]),
+      })
+      const topReactions = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getTopReactions', limit: 100, hash: Long.ZERO,
+      }, 177)
+      expect(topReactions).toMatchObject({
+        _: 'messages.reactions',
+        reactions: [
+          { _: 'reactionEmoji', emoticon: '👍' },
+          { _: 'reactionEmoji', emoticon: '❤️' },
+          { _: 'reactionEmoji', emoticon: '😂' },
+          { _: 'reactionEmoji', emoticon: '😢' },
+          { _: 'reactionEmoji', emoticon: '🔥' },
+          { _: 'reactionEmoji', emoticon: '🎉' },
+          { _: 'reactionEmoji', emoticon: '👏' },
+          { _: 'reactionEmoji', emoticon: '🤔' },
+          { _: 'reactionEmoji', emoticon: '🤯' },
+        ],
+      })
+      await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getFullChat', chatId: reactionStickerLab.id,
+      }, 178)
+      const emojiStickerSets = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getEmojiStickers', hash: Long.ZERO,
+      }, 179)
+      expect(emojiStickerSets).toMatchObject({
+        _: 'messages.allStickers',
+        sets: [expect.objectContaining({ emojis: true, title: 'Platform Reactions', count: 2 })],
+      })
+      const customReactionPack = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getStickerSet',
+        stickerset: {
+          _: 'inputStickerSetID',
+          id: emojiStickerSets.sets[0].id,
+          accessHash: emojiStickerSets.sets[0].accessHash,
+        },
+        hash: 0,
+      }, 180)
+      expect(customReactionPack).toMatchObject({
+        _: 'messages.stickerSet',
+        documents: expect.arrayContaining([
+          expect.objectContaining({
+            date: 1_700_000_000, mimeType: 'image/webp',
+            attributes: expect.arrayContaining([
+              expect.objectContaining({ _: 'documentAttributeCustomEmoji', alt: 'lab-static' }),
+            ]),
+          }),
+          expect.objectContaining({
+            date: 1_700_000_000, mimeType: 'video/webm',
+            attributes: expect.arrayContaining([
+              expect.objectContaining({ _: 'documentAttributeCustomEmoji', alt: 'lab-video' }),
+            ]),
+          }),
+        ]),
+      })
+
+      const emojiStickers = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getStickers', emoticon: '🙂', hash: Long.ZERO,
+      }, 182)
+      expect(emojiStickers).toMatchObject({ _: 'messages.stickers', stickers: { length: 1 } })
+
+      const pluginDocument = pluginPack.documents[0]
+      const customReactionDocument = customReactionPack.documents[0]
+      const initialFavorites = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getFavedStickers', hash: Long.ZERO,
+      }, 187)
+      const looseStickerDocument = initialFavorites.stickers.find((document: any) =>
+        document.attributes.some((attribute: any) =>
+          attribute._ === 'documentAttributeSticker'
+          && attribute.stickerset._ === 'inputStickerSetEmpty'))
+      expect(looseStickerDocument).toMatchObject({
+        _: 'document',
+        mimeType: 'image/webp',
+        attributes: expect.arrayContaining([
+          expect.objectContaining({
+            _: 'documentAttributeSticker',
+            stickerset: { _: 'inputStickerSetEmpty' },
+          }),
+        ]),
+      })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getCustomEmojiDocuments',
+        documentId: [customReactionDocument.id],
+      }, 184)).toMatchObject([
+        expect.objectContaining({ id: customReactionDocument.id }),
+      ])
+      const customReactionBytes = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024 * 1024,
+        location: {
+          _: 'inputDocumentFileLocation',
+          id: customReactionDocument.id,
+          accessHash: customReactionDocument.accessHash,
+          fileReference: customReactionDocument.fileReference,
+          thumbSize: '',
+        },
+      }, 185)
+      expect(customReactionBytes.bytes.length).toBeGreaterThan(100)
+      const stickerBytes = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024 * 1024,
+        location: {
+          _: 'inputDocumentFileLocation',
+          id: pluginDocument.id,
+          accessHash: pluginDocument.accessHash,
+          fileReference: pluginDocument.fileReference,
+          thumbSize: '',
+        },
+      }, 186)
+      expect(stickerBytes).toMatchObject({ _: 'upload.file' })
+      expect(stickerBytes.bytes.length).toBeGreaterThan(100)
+
+      const reacted = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendReaction',
+        peer: { _: 'inputPeerChat', chatId: group.id },
+        msgId: reactionMessage.id,
+        reaction: [
+          { _: 'reactionEmoji', emoticon: '👍' },
+        ],
+      }, 188)
+      expect(reacted).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateMessageReactions',
+          msgId: reactionMessage.id,
+          reactions: {
+            results: expect.arrayContaining([
+              expect.objectContaining({ reaction: { _: 'reactionEmoji', emoticon: '👍' }, count: 3 }),
+            ]),
+          },
+        }],
+      })
+      const reactionList = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getMessageReactionsList',
+        peer: { _: 'inputPeerChat', chatId: group.id },
+        id: reactionMessage.id,
+        offset: '', limit: 100,
+      }, 190)
+      expect(reactionList).toMatchObject({
+        _: 'messages.messageReactionsList',
+        reactions: expect.arrayContaining([
+          expect.objectContaining({ my: true, reaction: { _: 'reactionEmoji', emoticon: '👍' } }),
+        ]),
+      })
+      const staticAdapter = ctx.imPlatform.require('static') as staticPlatformPlugin.StaticPlatform
+      const pushedContext = await staticAdapter.getAvailableReactions(
+        {
+          platformSessionId: 'ps1', platformId: 'static', userId: 'alice',
+          credentials: { t: 'x' }, metadata: { firstName: 'Alice' },
+        },
+        { conversationId: 'qq-group', messageId: 'group:2', targetId: 'group:2' },
+      )
+      await staticAdapter.emitReactions(
+        {
+          platformSessionId: 'ps1', platformId: 'static', userId: 'alice',
+          credentials: { t: 'x' }, metadata: { firstName: 'Alice' },
+        },
+        { id: 'qq-group', kind: 'group', title: 'Static QQ Group' },
+        'group:2',
+        {
+          ...pushedContext,
+          reactions: [{
+            key: 'heart', count: 4,
+            recentActors: [{ userId: 'bob', timestamp: 1_700_000_500 }],
+          }],
+        },
+        'static-reaction-event-1',
+      )
+      const pushedReaction = await readPush(resumed, key)
+      expect(pushedReaction).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateMessageReactions',
+          msgId: reactionMessage.id,
+          reactions: {
+            results: [{
+              reaction: { _: 'reactionEmoji', emoticon: '❤️' },
+              count: 4,
+            }],
+          },
+        }],
+      })
+
+      const inputSticker = (document: any) => ({
+        _: 'inputMediaDocument',
+        id: {
+          _: 'inputDocument', id: document.id,
+          accessHash: document.accessHash, fileReference: document.fileReference,
+        },
+      })
+      const sentNativeSticker = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMedia',
+        peer: { _: 'inputPeerChat', chatId: group.id },
+        media: inputSticker(nativePack.documents[0]),
+        message: '',
+        randomId: Long.fromNumber(901),
+      }, 192)
+      expect(sentNativeSticker._).toBe('updates')
+      const nativeStickerUpdate = sentNativeSticker.updates.find((update: any) => update._ === 'updateNewMessage')
+      expect(nativeStickerUpdate.message.media._).toBe('messageMediaDocument')
+      expect(nativeStickerUpdate.message.media.document.attributes)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeSticker' })]))
+      const sentPluginSticker = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMedia',
+        peer: { _: 'inputPeerChat', chatId: group.id },
+        media: inputSticker(pluginDocument),
+        message: '',
+        randomId: Long.fromNumber(902),
+      }, 194)
+      expect(sentPluginSticker._).toBe('updates')
+      expect(sentPluginSticker.updates.find((update: any) => update._ === 'updateNewMessage'))
+        .toMatchObject({ message: { media: { _: 'messageMediaDocument' } } })
+      const sentLooseSticker = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMedia',
+        peer: { _: 'inputPeerChat', chatId: group.id },
+        media: inputSticker(looseStickerDocument),
+        message: '',
+        randomId: Long.fromNumber(903),
+      }, 195)
+      expect(sentLooseSticker.updates.find((update: any) => update._ === 'updateNewMessage'))
+        .toMatchObject({
+          message: {
+            media: {
+              document: {
+                attributes: expect.arrayContaining([
+                  expect.objectContaining({ stickerset: { _: 'inputStickerSetEmpty' } }),
+                ]),
+              },
+            },
+          },
+        })
+
+      const recentStickers = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO,
+      }, 196)
+      expect(recentStickers).toMatchObject({
+        _: 'messages.recentStickers',
+        stickers: expect.arrayContaining([
+          expect.objectContaining({ id: nativePack.documents[0].id }),
+          expect.objectContaining({ id: pluginDocument.id }),
+          expect.objectContaining({ id: looseStickerDocument.id }),
+        ]),
+      })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.faveSticker',
+        id: {
+          _: 'inputDocument', id: pluginDocument.id,
+          accessHash: pluginDocument.accessHash, fileReference: pluginDocument.fileReference,
+        },
+        unfave: false,
+      }, 198)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getFavedStickers', hash: Long.ZERO,
+      }, 200)).toMatchObject({
+        _: 'messages.favedStickers',
+        stickers: expect.arrayContaining([
+          expect.objectContaining({ id: pluginDocument.id }),
+          expect.objectContaining({ id: looseStickerDocument.id }),
+        ]),
+      })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.clearRecentStickers', attached: false,
+      }, 202)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO,
+      }, 204)).toMatchObject({ _: 'messages.recentStickers', stickers: [] })
+
+      const labFull = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getFullChat', chatId: reactionStickerLab.id,
+      }, 206)
+      expect(labFull).toMatchObject({
+        _: 'messages.chatFull',
+        fullChat: {
+          availableReactions: {
+            _: 'chatReactionsSome',
+            reactions: { length: 11 },
+          },
+        },
+      })
+      const qqFull = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getFullChat', chatId: group.id,
+      }, 207)
+      expect(qqFull.fullChat.availableReactions).toMatchObject({
+        _: 'chatReactionsSome',
+        reactions: [
+          { _: 'reactionEmoji', emoticon: '👍' },
+          { _: 'reactionEmoji', emoticon: '❤️' },
+          { _: 'reactionEmoji', emoticon: '😂' },
+        ],
+      })
+      const labHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChat', chatId: reactionStickerLab.id },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 10,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 208)
+      expect(labHistory.messages.map((item: any) => item.message)).toEqual([
+        'This message only allows ❤️ and 👏',
+        'Custom reactions: static / video',
+        'Standard reactions: 👍 ❤️ 😂 😢 🔥 🎉 👏 🤔 🤯',
+        '', '', '',
+      ])
+      expect(labHistory.messages[0].reactions).toBeUndefined()
+      expect(labHistory.messages[1].reactions.results).toHaveLength(2)
+      expect(labHistory.messages[2].reactions.results).toHaveLength(9)
+      const customLabReaction = labHistory.messages[1].reactions.results
+        .find((item: any) => item.reaction._ === 'reactionCustomEmoji').reaction
+      const customReacted = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendReaction',
+        peer: { _: 'inputPeerChat', chatId: reactionStickerLab.id },
+        msgId: labHistory.messages[1].id,
+        reaction: [customLabReaction],
+      }, 209)
+      expect(customReacted).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateMessageReactions',
+          msgId: labHistory.messages[1].id,
+          reactions: {
+            results: expect.arrayContaining([
+              expect.objectContaining({ reaction: customLabReaction, chosenOrder: 0 }),
+            ]),
+          },
+        }],
+      })
+      const labStickerDocuments = labHistory.messages.slice(3).map((item: any) => item.media.document)
+      expect(labStickerDocuments.map((document: any) => document.mimeType)).toEqual([
+        'video/webm', 'image/webp', 'image/webp',
+      ])
+      expect(labStickerDocuments[0].attributes)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeVideo' })]))
+      expect(labStickerDocuments[1].attributes)
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ stickerset: { _: 'inputStickerSetEmpty' } }),
+        ]))
+      const labAssetHeaders: number[][] = []
+      for (const [index, document] of labStickerDocuments.entries()) {
+        const file = await callRpc(resumed, key, resumedSid, {
+          _: 'upload.getFile', offset: 0, limit: 16,
+          location: {
+            _: 'inputDocumentFileLocation', id: document.id, accessHash: document.accessHash,
+            fileReference: document.fileReference, thumbSize: '',
+          },
+        }, 210 + index)
+        labAssetHeaders.push([...file.bytes.subarray(0, 4)])
+      }
+      expect(labAssetHeaders).toEqual([
+        [0x1a, 0x45, 0xdf, 0xa3],
+        [0x52, 0x49, 0x46, 0x46],
+        [0x52, 0x49, 0x46, 0x46],
+      ])
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.installStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: pluginSet.id, accessHash: pluginSet.accessHash },
+        archived: false,
+      }, 214)).toEqual({ _: 'messages.stickerSetInstallResultSuccess' })
+      const installedPluginPack = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: pluginSet.id, accessHash: pluginSet.accessHash },
+        hash: 0,
+      }, 216)
+      expect(installedPluginPack.set.installedDate).toBeGreaterThan(0)
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.reorderStickerSets',
+        order: [pluginSet.id],
+      }, 218)).toEqual({ _: 'boolTrue' })
       dbg('bridge contacts/dialogs/history/send ok')
 
       resumed.close()
@@ -1008,6 +1462,36 @@ describe('bridge login e2e', () => {
         phoneCodeHash: sentCode.phoneCodeHash, phoneCode: '654321',
       }, 6)
       expect(authorization._).toBe('auth.authorization')
+      const stickerSets = await callRpc(client, key, sid, {
+        _: 'messages.getAllStickers', hash: Long.ZERO,
+      }, 7)
+      const persistedSet = stickerSets.sets.find((set: any) => set.title === 'Static Plugin Stickers')
+      const persistedPack = await callRpc(client, key, sid, {
+        _: 'messages.getStickerSet',
+        stickerset: {
+          _: 'inputStickerSetID', id: persistedSet.id, accessHash: persistedSet.accessHash,
+        },
+        hash: 0,
+      }, 9)
+      const persistedDocument = persistedPack.documents[0]
+      const persistedInputDocument = {
+        _: 'inputDocument', id: persistedDocument.id,
+        accessHash: persistedDocument.accessHash, fileReference: persistedDocument.fileReference,
+      }
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.saveRecentSticker', attached: false,
+        id: persistedInputDocument, unsave: false,
+      }, 11)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.faveSticker', id: persistedInputDocument, unfave: false,
+      }, 13)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.installStickerSet',
+        stickerset: {
+          _: 'inputStickerSetID', id: persistedSet.id, accessHash: persistedSet.accessHash,
+        },
+        archived: false,
+      }, 15)).toEqual({ _: 'messages.stickerSetInstallResultSuccess' })
       client.close()
       client = undefined
       await first.stop()
@@ -1023,6 +1507,35 @@ describe('bridge login e2e', () => {
       expect(dialogs._).toBe('messages.dialogs')
       expect(new Set(dialogs.users.map((user: any) => user.firstName)))
         .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
+      expect(await callRpc(client, key, resumedSid, {
+        _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO,
+      }, 10)).toMatchObject({
+        _: 'messages.recentStickers',
+        stickers: [expect.objectContaining({ id: persistedDocument.id })],
+      })
+      expect(await callRpc(client, key, resumedSid, {
+        _: 'messages.getFavedStickers', hash: Long.ZERO,
+      }, 12)).toMatchObject({
+        _: 'messages.favedStickers',
+        stickers: expect.arrayContaining([
+          expect.objectContaining({ id: persistedDocument.id }),
+          expect.objectContaining({
+            attributes: expect.arrayContaining([
+              expect.objectContaining({ stickerset: { _: 'inputStickerSetEmpty' } }),
+            ]),
+          }),
+        ]),
+      })
+      expect(await callRpc(client, key, resumedSid, {
+        _: 'messages.getStickerSet',
+        stickerset: {
+          _: 'inputStickerSetID', id: persistedSet.id, accessHash: persistedSet.accessHash,
+        },
+        hash: 0,
+      }, 14)).toMatchObject({
+        _: 'messages.stickerSet',
+        set: { installedDate: expect.any(Number) },
+      })
     } finally {
       client?.close()
       await second?.stop()

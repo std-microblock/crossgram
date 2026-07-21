@@ -184,7 +184,121 @@ adapter 必须准确声明 `send.text/images/files/mixed/maxTextLength/maxMedia`
 
 以下情况不得返回伪成功：缺上传 part、已取消、平台未确认 message ID、媒体读取不完整、history cursor 无效或 session 已失效。
 
-## 9. 最小 conformance 清单
+## 9. Sticker Provider
+
+Sticker catalog 不属于 `IMPlatform`。bridge 通过 `ctx.imSticker` 聚合平台原生 Provider 和独立贴纸插件：
+
+```ts
+ctx.imSticker.register(provider, 'qq-main:native')
+ctx.imSticker.register(companyStickerProvider, 'company-stickers')
+```
+
+全局 sticker identity 为 `(providerId, stickerId)`，pack identity 为 `(providerId, packId)`。Provider 负责：
+
+- `listPacks()` / `getPack()` / `getSticker()` / `search()`。
+- 通过 `openAsset()` 提供 Telegram 预览、下载和跨平台上传所需的流。
+- 可选通过 `prepareSend()` 返回平台 native reference；没有 native 表达时 bridge 使用 asset upload。
+
+平台插件可以共享同一个底层 client，同时注册 `IMPlatform` 和平台原生 `IMStickerProvider`。独立贴纸包只注册 Provider，不需要依赖任何具体 IM API。
+
+`messages.getRecentStickers`、`saveRecentSticker`、`getFavedStickers`、`faveSticker` 和 clear 操作全部由 bridge 数据库统一管理。发送经平台确认并完成入库后才进入 recent；Provider 临时卸载不会删除 favorite/recent 记录。
+
+平台本身已有的用户收藏可由 Provider 的 `listSavedStickers()` 暴露。此列表允许返回不属于任何 pack 的 sticker：
+
+```ts
+{
+  providerId: 'qq-main:native',
+  stickerId: 'user-saved-123',
+  packId: undefined,
+  format: 'static',
+  mimeType: 'image/webp',
+}
+```
+
+bridge 会将这种 loose sticker 投影为：
+
+```ts
+{
+  _: 'documentAttributeSticker',
+  stickerset: { _: 'inputStickerSetEmpty' },
+}
+```
+
+它会出现在统一 `messages.getFavedStickers` 中，仍然可以下载、发送、进入 recent，并可由 bridge 再次收藏；但不会伪造 sticker set，也不会出现在 `getAllStickers`。本地收藏和 Provider 收藏按 `(providerId, stickerId)` 去重。
+
+Sticker set 的安装状态同样属于 bridge 用户状态。`installStickerSet`、`uninstallStickerSet`、`toggleStickerSets` 和 `reorderStickerSets` 写入 bridge 数据库；安装后的 set 通过 `StickerSet.installedDate` 返回，服务重启后保持。
+
+`IMMessagePart` 和 `IMMessageInputPart` 支持 `type: 'sticker'`。发送计划分为：
+
+```ts
+type IMStickerSendPlan =
+  | { type: 'native', providerId: string, stickerId: string, reference: JsonValue }
+  | { type: 'upload', providerId: string, stickerId: string, format: 'static' | 'animated' | 'video', source: IMMediaSource, ... }
+```
+
+adapter 只负责执行最终 native/upload 输入，不实现 Telegram sticker set、收藏或最近使用逻辑。
+
+## 10. Reaction
+
+Reaction 是消息 mutation，不属于 message text/media，也不能通过 `message-edit` 模拟。平台使用 opaque native key：
+
+```ts
+interface IMReactionSummary {
+  key: string
+  count: number
+  selected?: boolean
+  recentActors?: Array<{ userId: string, timestamp?: number }>
+}
+```
+
+发送使用最终状态语义：
+
+```ts
+setMessageReactions(session, target, reactionKeys)
+```
+
+Reaction 定义由平台按 chat 或具体消息动态返回：
+
+```ts
+interface IMReactionDefinition {
+  key: string
+  title?: string
+  presentation:
+    | { type: 'emoji', emoticon: string }
+    | { type: 'custom', alt: string, resource: IMReactionResource }
+}
+
+interface IMReactionContext {
+  available: IMReactionDefinition[]
+  reactions: IMReactionSummary[]
+  maxSelected: number
+}
+```
+
+- `presentation.type === 'emoji'` 只提供平台 native key 到 Telegram 标准 emoji 的映射。标准 reaction 的图标和动画由 bridge 的 Telegram reaction catalog 提供，adapter 不提供资源。
+- `presentation.type === 'custom'` 用于 Discord guild emoji 等 chat/message scoped reaction。资源由 `downloadReactionResource()` 下载，不经过 Sticker Provider。
+- `getAvailableReactions(session, { conversationId })` 返回 chat 默认能力。
+- 传入 `messageId/targetId` 时返回具体消息能力，允许同一 chat 中不同消息有不同 reaction allow-list。
+- `getMessageReactions()` 返回消息当前 count；history 返回的 `IMMessage.reactionContext` 使用相同结构。
+
+这样 Telegram `messages.sendReaction` 的 vector 可以直接映射到平台，不需要 bridge 猜测 add/remove 操作。平台推送使用完整 context：
+
+```ts
+{
+  type: 'message-reactions',
+  eventId,
+  conversation,
+  target,
+  context,
+  timestamp,
+}
+```
+
+bridge 将 context 独立入库，通过持久化 delivery/outbox 发布 `updateMessageReactions`。Custom resource 的 synthetic Document ID 包含 session、conversation、native key 和 resource version，避免跨 guild 泄漏或资源更新后命中旧缓存。
+
+`messages.getAvailableReactions` 是 bridge 账号级 Telegram 标准 reaction catalog；`ChatFull.availableReactions` 才是平台针对当前 chat 返回的允许集合。
+
+## 11. 最小 conformance 清单
 
 每个平台实现至少覆盖：
 
@@ -200,6 +314,8 @@ adapter 必须准确声明 `send.text/images/files/mixed/maxTextLength/maxMedia`
 10. edit 保持 message/TL ID，delete 从 history 隐藏且重复 mutation 不重复推进 pts。
 11. 至少 1000 条并发 subscribe 事件不丢 message、alias 或 TL projection。
 12. 万级历史只返回请求窗口，深分页不在单次 RPC 中全量入库。
+13. 平台 native sticker 与独立 Provider sticker 同时出现在 catalog，均可下载、发送并进入统一 recent/favorite。
+14. Unicode/custom-emoji reaction 均可从 reaction pack 映射、发送、写入历史并通过 push update 发布。
 
 bridge 内部行为测试位于 `packages/bridge/src`，包括 `message-store.test.ts`、`platform-manager.test.ts`、`media-projection.test.ts`、`media-send.test.ts` 和 `conversation-kinds.test.ts`。
 
