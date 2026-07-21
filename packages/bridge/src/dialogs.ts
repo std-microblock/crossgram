@@ -12,6 +12,7 @@ import type { IMMediaRow } from './models.js'
 import type { StagedMedia, UploadedFile, UploadManager } from './upload-manager.js'
 import type { StickerRpc } from './sticker-rpc.js'
 import type { ReactionRpc } from './reaction-rpc.js'
+import type { TelegramResources } from '@mtproto-relay/telegram-resources'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
@@ -77,6 +78,7 @@ export class DialogRpc {
     private readonly _dcId = 1,
     private readonly _stickers?: StickerRpc,
     private readonly _reactions?: ReactionRpc,
+    private readonly _resources?: TelegramResources,
   ) {
     this._selfId = this._allocate(`self:${_session.platformSessionId}`, new Map())
     if (store) {
@@ -543,6 +545,17 @@ export class DialogRpc {
       throw new RpcError(400, 'LOCATION_INVALID')
     }
     if (req.location._ === 'inputDocumentFileLocation') {
+      // 官方资源优先：按真实 doc id 从本地 TGS 仓库回源
+      const official = this._resources?.getFile(req.location.id)
+      if (official) {
+        const isTgs = official.mimeType === 'application/x-tgsticker'
+        return {
+          _: 'upload.file',
+          type: { _: isTgs ? 'storage.fileUnknown' : 'storage.fileWebp' },
+          mtime: Math.floor(Date.now() / 1000),
+          bytes: official.bytes.subarray(offset, offset + req.limit),
+        }
+      }
       const reaction = await this._reactions?.getFile(req.location.id.toNumber(), offset, req.limit)
       if (reaction) {
         return {
@@ -596,23 +609,28 @@ export class DialogRpc {
   }
 
   async getAvailableReactions(): Promise<tl.messages.RawAvailableReactions> {
-    return this._reactions?.availableCatalog()
-      ?? { _: 'messages.availableReactions', hash: 0, reactions: [] }
+    return this._resources.availableReactions()
   }
 
-  getTopReactions(limit: number): tl.messages.RawReactions {
-    return this._reactions?.topReactions(limit)
-      ?? { _: 'messages.reactions', hash: Long.ZERO, reactions: [] }
+  getAvailableEffects(): tl.messages.RawAvailableEffects {
+    return this._resources.availableEffects()
+  }
+
+  getTopReactions(_limit: number): tl.messages.RawReactions {
+    return { _: 'messages.reactions', hash: Long.ZERO, reactions: [] }
   }
 
   async getEmojiStickers(): Promise<tl.messages.RawAllStickers> {
-    return this._reactions?.getEmojiStickers()
-      ?? { _: 'messages.allStickers', hash: Long.ZERO, sets: [] }
+    return { _: 'messages.allStickers', hash: Long.ZERO, sets: [] }
   }
 
   async getReactionStickerSet(
     req: tl.messages.RawGetStickerSetRequest,
   ): Promise<tl.messages.TypeStickerSet | undefined> {
+    const ss = req.stickerset
+    if (ss._ === 'inputStickerSetAnimatedEmoji') return this._resources.stickerSet('emoji')
+    if (ss._ === 'inputStickerSetAnimatedEmojiAnimations') return this._resources.stickerSet('emoji_animations')
+    if (ss._ === 'inputStickerSetEmojiGenericAnimations') return this._resources.stickerSet('emoji_generic')
     return this._reactions?.getStickerSet(req)
   }
 

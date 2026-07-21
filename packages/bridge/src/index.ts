@@ -19,6 +19,13 @@ import { UpdateManager } from './update-manager.js'
 import { IMStickerService } from './sticker-provider.js'
 import { StickerRpc } from './sticker-rpc.js'
 import { ReactionRpc } from './reaction-rpc.js'
+import { createTelegramResources } from '@mtproto-relay/telegram-resources'
+
+const telegramResources = createTelegramResources()
+if (!telegramResources) throw new Error(
+  'Telegram official TGS assets not found. '
+  + 'Run `tgs-assets fetch` in the telegram-reactions-tgs repo to generate them.',
+)
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -234,7 +241,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     state.dialogs = new DialogRpc(
       platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
-      new ReactionRpc(platform, session, dcId),
+      new ReactionRpc(platform, session, dcId, telegramResources),
+      telegramResources,
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -325,6 +333,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).stickers.toggleStickerSets(req as tl.messages.RawToggleStickerSetsRequest))
   rpc.register('messages.getAvailableReactions', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getAvailableReactions())
+  rpc.register('messages.getAvailableEffects', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getAvailableEffects())
   rpc.register('messages.getTopReactions', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getTopReactions(
       (req as tl.messages.RawGetTopReactionsRequest).limit,
@@ -487,7 +497,8 @@ function createSessionResolver(
         }
         state.dialogs = new DialogRpc(
           platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
-          new ReactionRpc(platform, session, dcId),
+          new ReactionRpc(platform, session, dcId, telegramResources),
+          telegramResources,
         )
         return state
       })()
