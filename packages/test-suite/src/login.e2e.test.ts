@@ -596,6 +596,11 @@ describe('bridge login e2e', () => {
       }, 61)
       expect(new TextDecoder().decode(finalFile.bytes)).toBe('desktop-upload')
 
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.setTyping', peer: { _: 'inputPeerChat', chatId: group.id },
+        action: { _: 'sendMessageUploadDocumentAction', progress: 0 },
+      }, 62)).toEqual({ _: 'boolTrue' })
+
       const peerSettings = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getPeerSettings',
         peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },

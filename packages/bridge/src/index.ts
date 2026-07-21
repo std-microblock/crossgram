@@ -228,6 +228,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.sendMedia(req as tl.messages.RawSendMediaRequest))
   ctx.mtproto.register('messages.sendMultiMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMultiMedia(req as tl.messages.RawSendMultiMediaRequest))
+  ctx.mtproto.register('messages.setTyping', async (rpc) => {
+    await requireBridgeSession(rpc)
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  })
   ctx.mtproto.register('messages.uploadMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.uploadMedia(req as tl.messages.RawUploadMediaRequest))
   ctx.mtproto.register('upload.saveFilePart', async (rpc, req) => {
