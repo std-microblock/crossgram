@@ -1,5 +1,7 @@
 import type { Context } from 'cordis'
-import type { IMConversationKind, IMMediaKind, JsonObject, JsonValue } from './platform.js'
+import type {
+  IMConversationKind, IMMediaKind, IMReactionActor, IMReactionDefinition, JsonObject, JsonValue,
+} from './platform.js'
 
 export interface AuthSessionRow {
   id: string
@@ -128,6 +130,45 @@ export interface UpdateDeliveryRow {
   payload: string
 }
 
+export interface StickerRecentRow {
+  id: number
+  platformSessionId: string
+  providerId: string
+  providerStickerId: string
+  attached: boolean
+  useCount: number
+  lastUsedAt: Date
+}
+
+export interface StickerFavoriteRow {
+  id: number
+  platformSessionId: string
+  providerId: string
+  providerStickerId: string
+  createdAt: Date
+}
+
+export interface IMMessageReactionRow {
+  id: number
+  messageId: number
+  nativeReactionKey: string
+  count: number
+  selected: boolean
+  recentActors: IMReactionActor[]
+  definition: IMReactionDefinition
+  updatedAt: Date
+}
+
+export interface StickerSetInstallRow {
+  id: number
+  platformSessionId: string
+  providerId: string
+  providerPackId: string
+  installedAt: Date
+  sortOrder: number
+  archived: boolean
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
@@ -142,6 +183,10 @@ declare module '@cordisjs/plugin-database' {
     mtproto_id_counter: IdCounterRow
     mtproto_update_state: UpdateStateRow
     mtproto_update_delivery: UpdateDeliveryRow
+    mtproto_sticker_recent: StickerRecentRow
+    mtproto_sticker_favorite: StickerFavoriteRow
+    mtproto_im_message_reaction: IMMessageReactionRow
+    mtproto_sticker_set_install: StickerSetInstallRow
   }
 }
 
@@ -241,5 +286,41 @@ export function defineModels(ctx: Context): void {
       ['platformSessionId', 'published', 'pts'],
       ['platformSessionId', 'pts'],
     ],
+  })
+
+  ctx.model.extend('mtproto_sticker_recent', {
+    id: 'unsigned', platformSessionId: 'string', providerId: 'string', providerStickerId: 'text',
+    attached: 'boolean', useCount: 'unsigned', lastUsedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'providerId', 'providerStickerId', 'attached']],
+    indexes: [['platformSessionId', 'attached', 'lastUsedAt']],
+  })
+
+  ctx.model.extend('mtproto_sticker_favorite', {
+    id: 'unsigned', platformSessionId: 'string', providerId: 'string', providerStickerId: 'text',
+    createdAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'providerId', 'providerStickerId']],
+    indexes: [['platformSessionId', 'createdAt']],
+  })
+
+  ctx.model.extend('mtproto_im_message_reaction', {
+    id: 'unsigned', messageId: 'unsigned', nativeReactionKey: 'text', count: 'unsigned',
+    selected: 'boolean', recentActors: 'json', definition: 'json', updatedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['messageId', 'nativeReactionKey']],
+    indexes: ['messageId'],
+  })
+
+  ctx.model.extend('mtproto_sticker_set_install', {
+    id: 'unsigned', platformSessionId: 'string', providerId: 'string', providerPackId: 'text',
+    installedAt: 'timestamp', sortOrder: 'integer', archived: 'boolean',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'providerId', 'providerPackId']],
+    indexes: [['platformSessionId', 'archived', 'sortOrder']],
   })
 }

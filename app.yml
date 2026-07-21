@@ -16,6 +16,8 @@
   config: {}
 - id: static
   name: '@mtproto-relay/platform-static'
+  config:
+    eventIntervalMs: 1000
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:

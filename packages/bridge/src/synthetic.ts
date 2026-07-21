@@ -47,11 +47,13 @@ export function makeUser(opts: {
   lastName?: string | null
   username?: string | null
   phone?: string | null
+  premium?: boolean
 }): tl.RawUser {
   return {
     _: 'user',
     flags: 0,
     self: opts.self,
+    premium: opts.premium,
     contact: opts.contact,
     mutualContact: opts.mutualContact,
     id: opts.id,

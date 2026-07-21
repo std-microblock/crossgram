@@ -31,10 +31,54 @@ export class UpdateManager {
       )
       return
     }
+    if (committed.event.type === 'message-reactions') {
+      await this._publishReactions(
+        session,
+        committed as Extract<CommittedPlatformEvent, { event: { type: 'message-reactions' } }>,
+      )
+      return
+    }
     await this._publishMessage(
       session,
       committed as Exclude<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
     )
+  }
+
+  private async _publishReactions(
+    session: PlatformSession,
+    committed: Extract<CommittedPlatformEvent, { event: { type: 'message-reactions' } }>,
+  ): Promise<void> {
+    const { event, result } = committed
+    const eventKey = `${session.platformSessionId}:reaction:${event.eventId}`
+    let delivery = await this._store.getUpdateDelivery(eventKey)
+    if (!delivery && !result.changed) return
+    delivery ??= await this._store.prepareUpdateDelivery(
+      eventKey, session.platformSessionId, Math.max(1, result.tlMessageIds.length), event.timestamp,
+    )
+    if (delivery.published) return
+    const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
+      ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
+        ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
+      : event.conversation
+    const reactions = makeMessageReactions(result.message, session.platformSessionId)
+    let pts = delivery.pts - delivery.ptsCount
+    const updates = result.tlMessageIds.map((msgId): tl.RawUpdateMessageReactions => ({
+      _: 'updateMessageReactions',
+      peer: conversationPeer(displayConversation),
+      msgId,
+      reactions,
+    }))
+    // updateMessageReactions itself does not carry pts; account pts is retained
+    // in the durable delivery state for difference/retry ordering.
+    pts += updates.length
+    void pts
+    const payload: tl.RawUpdates = {
+      _: 'updates', updates, users: [],
+      chats: displayConversation.kind === 'direct' ? [] : [makeUpdateChat(displayConversation)],
+      date: delivery.date, seq: delivery.seq,
+    }
+    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    if (await this._send(session.platformSessionId, payload)) await this._store.markUpdatePublished(eventKey)
   }
 
   private async _publishMessage(
@@ -85,7 +129,10 @@ export class UpdateManager {
     const platform = this._registry.require(session.platformId)
     const sender = await platform.getUser?.(session, event.message.senderId)
     const users = [
-      makeUser({ id: stableId(`self:${session.platformSessionId}`), self: true, firstName: String(session.metadata.firstName ?? 'Bridge') }),
+      makeUser({
+        id: stableId(`self:${session.platformSessionId}`), self: true, premium: true,
+        firstName: String(session.metadata.firstName ?? 'Bridge'),
+      }),
       makeUser({
         id: stableId(`peer:${event.message.senderId}`),
         firstName: sender?.firstName ?? event.message.senderId,
@@ -269,6 +316,9 @@ function makeUpdateMessage(
     message: ordinal === 0 ? messageText(source) : '',
     media: media ? makeTlMessageMedia(media, source.timestamp, dcId) : undefined,
     groupedId: groupedId ? Long.fromString(groupedId) : undefined,
+    reactions: source.reactionContext?.reactions.length
+      ? makeMessageReactions(source, platformSessionId)
+      : undefined,
   } as tl.RawMessage
 }
 
@@ -297,4 +347,37 @@ function hexBytes(value: string): Uint8Array {
     bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16)
   }
   return bytes
+}
+
+function conversationPeer(conversation: IMConversation): tl.TypePeer {
+  const id = stableId(`peer:${conversation.id}`)
+  return conversation.kind === 'group'
+    ? { _: 'peerChat', chatId: id }
+    : conversation.kind === 'channel'
+      ? { _: 'peerChannel', channelId: id }
+      : { _: 'peerUser', userId: id }
+}
+
+function makeMessageReactions(
+  message: IMMessage,
+  platformSessionId: string,
+): tl.RawMessageReactions {
+  const definitions = new Map((message.reactionContext?.available ?? []).map((item) => [item.key, item]))
+  return {
+    _: 'messageReactions',
+    results: (message.reactionContext?.reactions ?? []).flatMap((summary) => {
+      const definition = definitions.get(summary.key)
+      if (!definition) return []
+      const reaction: tl.TypeReaction = definition.presentation.type === 'emoji'
+        ? { _: 'reactionEmoji', emoticon: definition.presentation.emoticon }
+        : { _: 'reactionCustomEmoji', documentId: Long.fromNumber(stableId([
+            'reaction-resource', 1, platformSessionId, message.conversationId,
+            definition.key, definition.presentation.resource.version,
+          ].join(':'))) }
+      return [{
+        _: 'reactionCount', reaction, count: summary.count,
+        chosenOrder: summary.selected ? 0 : undefined,
+      } as tl.RawReactionCount]
+    }),
+  }
 }

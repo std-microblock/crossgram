@@ -23,6 +23,18 @@ export interface PlatformCapabilities {
     channels: boolean
     subchannels: boolean
   }
+  stickers?: {
+    native: boolean
+    upload: boolean
+    formats: Array<'static' | 'animated' | 'video'>
+  }
+  reactions?: {
+    read: boolean
+    write: boolean
+    events: boolean
+    actorList: boolean
+    maxSelected: number
+  }
 }
 
 /** An authenticated platform session (created by the HTTP auth flow). */
@@ -84,10 +96,12 @@ export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
 export type IMMessagePart =
   | { type: 'text', text: string }
   | { type: 'media', media: IMMedia }
+  | { type: 'sticker', sticker: import('./sticker-provider.js').IMSticker }
 
 export type IMMessageInputPart =
   | { type: 'text', text: string }
   | { type: 'media', media: IMMediaInput }
+  | { type: 'sticker', sticker: import('./sticker-provider.js').IMStickerSendPlan }
 
 export interface IMMessageContent {
   parts: IMMessagePart[]
@@ -111,6 +125,55 @@ export interface IMMessage {
   /** Opaque platform grouping key, retained for album reconciliation. */
   groupId?: string
   metadata?: JsonObject
+  reactionContext?: IMReactionContext
+}
+
+export interface IMReactionActor {
+  userId: string
+  timestamp?: number
+}
+
+export interface IMReactionSummary {
+  key: string
+  count: number
+  selected?: boolean
+  recentActors?: IMReactionActor[]
+}
+
+export interface IMReactionResource {
+  version: number
+  format: 'static' | 'video'
+  mimeType: 'image/webp' | 'video/webm'
+  width: number
+  height: number
+  size?: number
+  locator?: JsonValue
+}
+
+export interface IMReactionDefinition {
+  key: string
+  title?: string
+  presentation:
+    | { type: 'emoji', emoticon: string }
+    | { type: 'custom', alt: string, resource: IMReactionResource }
+}
+
+export interface IMReactionContext {
+  available: IMReactionDefinition[]
+  reactions: IMReactionSummary[]
+  maxSelected: number
+}
+
+export interface IMMessageTarget {
+  conversationId: string
+  messageId: string
+  targetId: string
+}
+
+export interface IMReactionTarget {
+  conversationId: string
+  messageId?: string
+  targetId?: string
 }
 
 export interface IMDialog {
@@ -177,10 +240,19 @@ export type IMEvent =
     }
   | { type: 'conversation', conversation: IMConversation }
   | { type: 'read', conversationId: string, upToMessageId: string }
+  | {
+      type: 'message-reactions'
+      eventId: string
+      conversation: IMConversation
+      target: IMMessageTarget
+      context: IMReactionContext
+      timestamp: number
+    }
 
 export type Unsubscribe = () => void | Promise<void>
 
 export interface IMPlatform {
+  readonly platformKind?: string
   readonly capabilities: PlatformCapabilities
 
   subscribe(session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe>
@@ -204,6 +276,24 @@ export interface IMPlatform {
     media: IMMedia,
     options?: IMDownloadOptions,
   ): AsyncIterable<Uint8Array>
+  setMessageReactions?(
+    session: PlatformSession,
+    target: IMMessageTarget,
+    reactionKeys: readonly string[],
+  ): Promise<IMReactionContext>
+  getAvailableReactions?(
+    session: PlatformSession,
+    target: IMReactionTarget,
+  ): Promise<IMReactionContext>
+  getMessageReactions?(
+    session: PlatformSession,
+    target: IMMessageTarget,
+  ): Promise<IMReactionContext>
+  downloadReactionResource?(
+    session: PlatformSession,
+    resource: IMReactionResource,
+    options?: IMDownloadOptions,
+  ): AsyncIterable<Uint8Array>
 }
 
 export function messageText(message: IMMessage): string {
@@ -212,4 +302,8 @@ export function messageText(message: IMMessage): string {
 
 export function messageMedia(message: IMMessage): IMMedia[] {
   return message.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
+}
+
+export function messageStickers(message: IMMessage): import('./sticker-provider.js').IMSticker[] {
+  return message.content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
 }

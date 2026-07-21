@@ -4,7 +4,8 @@ import type {
 } from './models.js'
 import {
   messageMedia, messageText,
-  type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type JsonValue, type PlatformSession,
+  type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
+  type IMReactionContext, type JsonValue, type PlatformSession,
 } from './platform.js'
 
 export interface IngestResult {
@@ -17,6 +18,12 @@ export interface IngestResult {
 export interface DeleteResult {
   changed: boolean
   messageIds: number[]
+  tlMessageIds: number[]
+}
+
+export interface ReactionResult {
+  changed: boolean
+  message: IMMessage
   tlMessageIds: number[]
 }
 
@@ -164,6 +171,7 @@ export class MessageStore {
         database, session.platformSessionId, conversationRow, message, storedMedia,
         options.allocation ?? 'live',
       )
+      await this._replaceReactions(database, message.id, source.reactionContext, now)
 
       return { message, created, changed, projection }
     }))
@@ -203,6 +211,37 @@ export class MessageStore {
         changed: deletedMessageIds.length > 0,
         messageIds: deletedMessageIds,
         tlMessageIds,
+      }
+    }))
+  }
+
+  async setReactions(
+    session: PlatformSession,
+    conversation: IMConversation,
+    target: IMMessageTarget,
+    context: IMReactionContext,
+  ): Promise<ReactionResult> {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const conversationRow = await this._upsertConversation(database, session, conversation, undefined, new Date())
+      const [alias] = await database.get('mtproto_im_message_alias', {
+        platformSessionId: session.platformSessionId,
+        conversationId: conversationRow.id,
+        platformMessageId: target.targetId,
+      })
+      if (!alias) throw new Error(`reaction target is not stored: ${target.targetId}`)
+      const [row] = await database.get('mtproto_im_message', { id: alias.messageId })
+      if (!row || row.deleted) throw new Error(`reaction target message is unavailable: ${target.targetId}`)
+      const before = await database.select('mtproto_im_message_reaction', { messageId: row.id })
+        .orderBy('nativeReactionKey').execute()
+      await this._replaceReactions(database, row.id, context, new Date())
+      const after = await database.select('mtproto_im_message_reaction', { messageId: row.id })
+        .orderBy('nativeReactionKey').execute()
+      const parts = await database.select('mtproto_tl_message_part', { messageId: row.id })
+        .orderBy('ordinal').execute()
+      return {
+        changed: JSON.stringify(before.map(reactionComparable)) !== JSON.stringify(after.map(reactionComparable)),
+        message: await this._hydrateMessage(row),
+        tlMessageIds: parts.map((part) => part.tlMessageId),
       }
     }))
   }
@@ -589,6 +628,8 @@ export class MessageStore {
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
     const aliases = await this._database.select('mtproto_im_message_alias', { messageId: row.id })
       .orderBy('ordinal').execute()
+    const reactions = await this._database.select('mtproto_im_message_reaction', { messageId: row.id })
+      .orderBy('id').execute()
     return {
       id: row.primaryPlatformMessageId,
       sourceIds: aliases.map((alias) => alias.platformMessageId),
@@ -599,7 +640,45 @@ export class MessageStore {
       outgoing: row.outgoing,
       groupId: row.platformGroupId ?? undefined,
       metadata: row.metadata,
+      reactionContext: reactions.length ? {
+        available: reactions.map((reaction) => reaction.definition),
+        reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
+          key: reaction.nativeReactionKey, count: reaction.count,
+          selected: reaction.selected, recentActors: reaction.recentActors,
+        })),
+        maxSelected: Number(row.metadata.reactionMaxSelected ?? 1),
+      } : undefined,
     }
+  }
+
+  private async _replaceReactions(
+    database: Database,
+    messageId: number,
+    context: IMReactionContext | undefined,
+    now: Date,
+  ): Promise<void> {
+    if (context === undefined) return
+    const [message] = await database.get('mtproto_im_message', { id: messageId })
+    if (message) {
+      await database.set('mtproto_im_message', { id: messageId }, {
+        metadata: { ...message.metadata, reactionMaxSelected: context.maxSelected },
+      })
+    }
+    const definitions = new Map(context.available.map((definition) => [definition.key, definition]))
+    const summaries = new Map(context.reactions.map((reaction) => [reaction.key, reaction]))
+    const keys = new Set(definitions.keys())
+    const existing = await database.get('mtproto_im_message_reaction', { messageId })
+    for (const stale of existing.filter((reaction) => !keys.has(reaction.nativeReactionKey))) {
+      await database.remove('mtproto_im_message_reaction', { id: stale.id })
+    }
+    await database.upsert('mtproto_im_message_reaction', [...definitions].map(([key, definition]) => {
+      const reaction = summaries.get(key)
+      return {
+      messageId, nativeReactionKey: key, count: reaction?.count ?? 0,
+      selected: reaction?.selected ?? false, recentActors: reaction?.recentActors ?? [],
+      definition, updatedAt: now,
+    }
+    }), ['messageId', 'nativeReactionKey'])
   }
 
   private async _conversationId(id: number): Promise<string> {
@@ -650,4 +729,14 @@ function toConversation(row: IMConversationRow): IMConversation {
 
 function clampDatabaseLimit(limit: number): number {
   return Math.max(1, Math.min(Math.trunc(limit), 500))
+}
+
+function reactionComparable(reaction: import('./models.js').IMMessageReactionRow) {
+  return {
+    key: reaction.nativeReactionKey,
+    count: reaction.count,
+    selected: reaction.selected,
+    recentActors: reaction.recentActors,
+    definition: reaction.definition,
+  }
 }

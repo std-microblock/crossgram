@@ -1,7 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
-import { MessageStore, type DeleteResult, type IngestResult } from './message-store.js'
+import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult } from './message-store.js'
 import type {
   IMConversation, IMDialog, IMEvent, IMHistoryPage, IMHistoryQuery, IMPlatform, PlatformSession, Unsubscribe,
 } from './platform.js'
@@ -194,6 +194,9 @@ export class PlatformSubscriptionManager {
     } else if (event.type === 'message-delete') {
       const result = await this._store.deleteMessages(session, event.conversation, event.messageIds)
       await this._onEvent?.(session, { event, result })
+    } else if (event.type === 'message-reactions') {
+      const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
+      await this._onEvent?.(session, { event, result })
     }
   }
 }
@@ -202,6 +205,7 @@ export type CommittedPlatformEvent =
   | { event: Extract<IMEvent, { type: 'message' }>, result: IngestResult }
   | { event: Extract<IMEvent, { type: 'message-edit' }>, result: IngestResult }
   | { event: Extract<IMEvent, { type: 'message-delete' }>, result: DeleteResult }
+  | { event: Extract<IMEvent, { type: 'message-reactions' }>, result: ReactionResult }
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
