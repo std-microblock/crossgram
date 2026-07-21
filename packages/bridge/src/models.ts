@@ -28,6 +28,12 @@ export interface AuthBindingRow {
   platformSessionId: string
 }
 
+export interface RouteBindingRow {
+  authKeyId: string
+  routeId: string
+  createdAt: Date
+}
+
 export interface IMConversationRow {
   id: number
   platformSessionId: string
@@ -174,6 +180,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_auth_session: AuthSessionRow
     mtproto_platform_session: PlatformSessionRow
     mtproto_auth_binding: AuthBindingRow
+    mtproto_route_binding: RouteBindingRow
     mtproto_im_conversation: IMConversationRow
     mtproto_im_user: IMUserRow
     mtproto_im_message: IMMessageRow
@@ -204,6 +211,10 @@ export function defineModels(ctx: Context): void {
 
   ctx.model.extend('mtproto_auth_binding', {
     authKeyId: 'string', platformId: 'string', platformSessionId: 'string',
+  }, { primary: 'authKeyId' })
+
+  ctx.model.extend('mtproto_route_binding', {
+    authKeyId: 'string', routeId: 'string', createdAt: 'timestamp',
   }, { primary: 'authKeyId' })
 
   ctx.model.extend('mtproto_im_conversation', {

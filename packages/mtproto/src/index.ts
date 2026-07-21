@@ -1,8 +1,8 @@
 export { Mtproto, default } from './service.js'
-export type { MtprotoConfig } from './service.js'
+export type { MtprotoConfig, RouteRegistrar, RouteResolver } from './service.js'
 
 export { RpcDispatcher, bareVector, isBareVector, unwrapRpcRequest } from './rpc/dispatcher.js'
-export type { RpcHandler, RpcResult, BareVector, UnwrappedRpcRequest } from './rpc/dispatcher.js'
+export type { RpcDispatch, RpcHandler, RpcResult, BareVector, UnwrappedRpcRequest } from './rpc/dispatcher.js'
 export type { ServerRpcContext } from './rpc/context.js'
 export {
   CURRENT_API_LAYER,

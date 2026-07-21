@@ -65,6 +65,10 @@ export function unwrapRpcRequest(request: tl.RpcMethod): UnwrappedRpcRequest {
  */
 export type RpcHandler = (ctx: ServerRpcContext, request: tl.RpcMethod) => Promise<RpcResult>
 
+export interface RpcDispatch {
+  dispatch(ctx: ServerRpcContext, request: tl.RpcMethod): Promise<RpcResult>
+}
+
 /**
  * Dispatches incoming RPC calls to registered handlers by method name.
  *
@@ -134,6 +138,11 @@ export class RpcDispatcher {
   /** Check if a method has a registered handler */
   has(method: string): boolean {
     return this._handlers.has(method) || !!this._fallback
+  }
+
+  /** Check for a method-specific handler without considering fallback. */
+  hasDirect(method: string): boolean {
+    return this._handlers.has(method)
   }
 }
 

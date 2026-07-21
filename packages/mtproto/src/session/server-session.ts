@@ -12,7 +12,7 @@ import { ServerMessageIdGenerator } from './message-id.js'
 import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector, unwrapRpcRequest } from '../rpc/dispatcher.js'
-import type { RpcDispatcher, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
+import type { RpcDispatch, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
 import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
 
 // TL constructor IDs for MTProto service messages
@@ -93,7 +93,7 @@ export class ServerSession {
     private readonly _log: Logger,
     private readonly _rsaPrivateKeyPem: string,
     private readonly _rsaKeyFingerprint: Long,
-    private readonly _dispatcher: RpcDispatcher,
+    private readonly _dispatcher: RpcDispatch,
     private readonly _authKeyData: AuthKeyDataStore,
     private readonly _keyStore?: AuthKeyStore,
   ) {
@@ -722,6 +722,7 @@ export class ServerSession {
       authKeyId: this._permAuthKey.ready ? this._permAuthKey.id : null,
       sessionId: this._sessionId,
       isAuthorized: this._authorized,
+      routeId: null,
       sendUpdate: (update) => this.sendUpdate(update),
       getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
       setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),

@@ -6,7 +6,19 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export const name = 'mtproto-relay'
-export const inject = ['mtproto']
+export const inject = ['mtproto', 'database', 'model']
+
+interface RouteBindingRow {
+  authKeyId: string
+  routeId: string
+  createdAt: Date
+}
+
+declare module '@cordisjs/plugin-database' {
+  interface Tables {
+    mtproto_route_binding: RouteBindingRow
+  }
+}
 
 export interface RelayClient {
   readonly onServerUpdate: {
@@ -35,6 +47,8 @@ export interface RelayConfig {
   storagePath?: string
   /** Disable mtcute's difference loop; raw server updates are still forwarded. */
   disableUpdates?: boolean
+  /** Account route exposed to the MTProto service (default: relay:official). */
+  routeId?: string
   /** Injectable for tests and custom upstream transports. */
   clientFactory?: RelayClientFactory
 }
@@ -58,6 +72,28 @@ export function apply(ctx: Context, config: RelayConfig): void {
 
   const clients = new Map<string, Promise<RelayEntry>>()
   const factory = config.clientFactory ?? createDefaultClient
+  const routeId = config.routeId ?? 'relay:official'
+  const rpc = ctx.mtproto.route(routeId)
+
+  ctx.model.extend('mtproto_route_binding', {
+    authKeyId: 'string', routeId: 'string', createdAt: 'timestamp',
+  }, { primary: 'authKeyId' })
+
+  ctx.mtproto.resolveRoute(async (requestContext, request) => {
+    if (!requestContext.authKeyId) return
+    const authKeyHex = Buffer.from(requestContext.authKeyId).toString('hex')
+    const [binding] = await ctx.database.get('mtproto_route_binding', { authKeyId: authKeyHex })
+    if (binding) return binding.routeId
+    if (request._ !== 'auth.sendCode') return
+    const phone = String((request as unknown as { phoneNumber?: string }).phoneNumber ?? '')
+      .replace(/\D/g, '')
+    // 999... is reserved by bridge's virtual-phone login flow.
+    if (!phone || phone.startsWith('999')) return
+    await ctx.database.upsert('mtproto_route_binding', [{
+      authKeyId: authKeyHex, routeId, createdAt: new Date(),
+    }])
+    return routeId
+  })
 
   async function requireClient(authKeyId: Uint8Array | null): Promise<RelayEntry> {
     if (!authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
@@ -79,8 +115,8 @@ export function apply(ctx: Context, config: RelayConfig): void {
     return pending
   }
 
-  ctx.mtproto.fallback(async (rpc, request) => {
-    const { client } = await requireClient(rpc.authKeyId)
+  rpc.fallback(async (requestContext, request) => {
+    const { client } = await requireClient(requestContext.authKeyId)
     try {
       const result = await client.call(request)
       if (request._ === 'auth.signIn' || request._ === 'auth.signUp'
