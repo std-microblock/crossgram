@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { bigint, typed, u8 } from '@fuman/utils'
+import { bigint, Emitter, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
+import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import { LogManager, generateKeyAndIvFromNonce, createAesIgeForMessage, findKeyByFingerprints, addPublicKey } from '@mtcute/core/utils.js'
@@ -19,6 +20,7 @@ import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import { Mtproto, AbridgedPacketCodec, generateRsaKeyPair } from '@mtproto-relay/mtproto'
 import * as bridge from '@mtproto-relay/bridge'
+import * as relay from '@mtproto-relay/relay'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
@@ -1543,4 +1545,68 @@ describe('bridge login e2e', () => {
       await rm(directory, { recursive: true, force: true })
     }
   }, 15000)
+})
+
+describe('relay e2e', () => {
+  it('forwards raw RPCs and upstream updates over the downstream socket', async () => {
+    const rsaKey = generateRsaKeyPair()
+    addPublicKey(crypto, rsaKey.publicKeyPem, false)
+    const ctx = new Context()
+    const calls: tl.RpcMethod[] = []
+    const upstreams: Array<{
+      onServerUpdate: Emitter<tl.TypeUpdates>
+      destroyed: boolean
+    }> = []
+    const fibers = [
+      ctx.plugin(Mtproto, { port: 0, host: '127.0.0.1', rsaKey, log }),
+      ctx.plugin(relay, {
+        apiId: 1,
+        apiHash: 'test',
+        clientFactory: () => {
+          const state = {
+            onServerUpdate: new Emitter<tl.TypeUpdates>(),
+            destroyed: false,
+          }
+          upstreams.push(state)
+          return {
+            onServerUpdate: state.onServerUpdate,
+            async call(request) {
+              calls.push(request)
+              return { _: 'nearestDc', country: 'NL', thisDc: 2, nearestDc: 2 }
+            },
+            async destroy() { state.destroyed = true },
+          }
+        },
+      }),
+    ]
+    await Promise.all(fibers)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
+    const client = await TestClient.connect(ctx.mtproto.port)
+    const key = await doClientHandshake(client, pubKey)
+    const sid = new Long(0x34567890, 0x3abc, false)
+    try {
+      const result = await callRpc(client, key, sid, { _: 'help.getNearestDc' }, 4)
+      expect(result).toEqual({ _: 'nearestDc', country: 'NL', thisDc: 2, nearestDc: 2 })
+      expect(calls).toMatchObject([{ _: 'help.getNearestDc' }])
+      expect(upstreams).toHaveLength(1)
+
+      upstreams[0].onServerUpdate.emit({
+        _: 'updateShort',
+        update: {
+          _: 'updateUserStatus', userId: 1,
+          status: { _: 'userStatusOnline', expires: nowSec() + 60 },
+        },
+        date: nowSec(),
+      } as tl.TypeUpdates)
+      expect(await readPush(client, key)).toMatchObject({
+        _: 'updateShort',
+        update: { _: 'updateUserStatus', userId: 1 },
+      })
+    } finally {
+      client.close()
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    }
+    expect(upstreams[0].destroyed).toBe(true)
+  })
 })
