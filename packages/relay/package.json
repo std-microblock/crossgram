@@ -1,0 +1,17 @@
+{
+  "name": "@mtproto-relay/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {},
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@fuman/utils": "^0.0.20",
+    "@mtcute/core": "^0.30.3",
+    "@mtcute/node": "^0.30.3",
+    "@mtproto-relay/mtproto": "workspace:*"
+  }
+}
