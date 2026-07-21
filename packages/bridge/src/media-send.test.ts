@@ -160,6 +160,7 @@ describe('media send streaming', () => {
     const update = (result as tl.RawUpdates).updates[0] as tl.RawUpdateNewMessage
     const media = (update.message as tl.RawMessage).media as tl.RawMessageMediaDocument
     const document = media.document as tl.RawDocument
+    expect(document.accessHash).not.toEqual(Long.ZERO)
     const downloaded = await rpc.getFile({
       _: 'upload.getFile', offset: 6, limit: 6,
       location: {

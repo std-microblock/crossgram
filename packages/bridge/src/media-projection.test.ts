@@ -104,11 +104,11 @@ describe('rich-media projection', () => {
       'messageMediaDocument', 'messageMediaPhoto',
     ])
     expect((messages[0].media as tl.RawMessageMediaDocument).document).toMatchObject({
-      _: 'document', mimeType: 'application/pdf', size: 5678,
+      _: 'document', accessHash: Long.fromNumber(2), mimeType: 'application/pdf', size: 5678,
       attributes: [{ _: 'documentAttributeFilename', fileName: 'report.pdf' }],
     })
     expect((messages[1].media as tl.RawMessageMediaPhoto).photo).toMatchObject({
-      _: 'photo', sizes: [{ _: 'photoSize', w: 800, h: 600, size: 1234 }],
+      _: 'photo', accessHash: Long.fromNumber(1), sizes: [{ _: 'photoSize', w: 800, h: 600, size: 1234 }],
     })
     expect(() => wireRoundTrip(result)).not.toThrow()
   })

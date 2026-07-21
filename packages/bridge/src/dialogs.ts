@@ -1055,12 +1055,17 @@ function inputPeerId(peer: tl.TypeInputPeer): number {
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {
   const id = Long.fromNumber(media.id)
+  // Real Telegram media always carries a non-zero access hash. The bridge
+  // resolves downloads from its durable media row, so this synthetic hash is
+  // only for clients (notably Desktop) that disable the download action when
+  // access_hash is zero.
+  const accessHash = Long.fromNumber(media.id)
   const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
   if (media.kind === 'image') {
     return {
       _: 'messageMediaPhoto',
       photo: {
-        _: 'photo', id, accessHash: Long.ZERO, fileReference, date: timestamp,
+        _: 'photo', id, accessHash, fileReference, date: timestamp,
         sizes: [{
           _: 'photoSize', type: 'x', w: media.width ?? 1, h: media.height ?? 1,
           size: Math.min(media.size ?? 0, 0x7fffffff),
@@ -1072,7 +1077,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   return {
     _: 'messageMediaDocument',
     document: {
-      _: 'document', id, accessHash: Long.ZERO, fileReference, date: timestamp,
+      _: 'document', id, accessHash, fileReference, date: timestamp,
       mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId,
       attributes: [{ _: 'documentAttributeFilename', fileName: media.name ?? 'file' }],
     },
@@ -1081,12 +1086,13 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
 
 function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessageMedia {
   const id = Long.fromString(staged.upload.fileId)
+  const accessHash = id
   const fileReference = new TextEncoder().encode(`bridge-staged:${staged.upload.fileId}`)
   if (staged.media.kind === 'image') {
     return {
       _: 'messageMediaPhoto',
       photo: {
-        _: 'photo', id, accessHash: Long.ZERO, fileReference, date: staged.timestamp,
+        _: 'photo', id, accessHash, fileReference, date: staged.timestamp,
         sizes: [{
           _: 'photoSize', type: 'x', w: staged.media.width ?? 1, h: staged.media.height ?? 1,
           size: Math.min(staged.media.size ?? staged.upload.source.size ?? 0, 0x7fffffff),
@@ -1098,7 +1104,7 @@ function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessa
   return {
     _: 'messageMediaDocument',
     document: {
-      _: 'document', id, accessHash: Long.ZERO, fileReference, date: staged.timestamp,
+      _: 'document', id, accessHash, fileReference, date: staged.timestamp,
       mimeType: staged.media.mimeType ?? 'application/octet-stream',
       size: staged.media.size ?? staged.upload.source.size ?? 0,
       dcId,

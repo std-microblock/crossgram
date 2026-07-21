@@ -560,6 +560,7 @@ describe('bridge login e2e', () => {
         _: 'messageMediaDocument', document: { _: 'document', mimeType: 'text/plain', size: 14 },
       })
       const stagedDocument = stagedMedia.document
+      expect(stagedDocument.accessHash).not.toEqual(Long.ZERO)
       const stagedPreview = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 8, limit: 6,
         location: {
@@ -587,6 +588,7 @@ describe('bridge login e2e', () => {
         }],
       })
       const finalDocument = stagedSent.updates[0].message.media.document
+      expect(finalDocument.accessHash).not.toEqual(Long.ZERO)
       const finalFile = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 64,
         location: {
