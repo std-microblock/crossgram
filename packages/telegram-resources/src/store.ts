@@ -83,7 +83,7 @@ export class TelegramResources {
   private readonly _idToFile = new Map<string, string>()
   private readonly _idToMeta = new Map<string, DocMeta>()
 
-  constructor(assetsBase: URL = new URL('./assets/', import.meta.url)) {
+  constructor(assetsBase: URL = new URL('../assets/', import.meta.url)) {
     this._assetsBase = assetsBase
     const raw = readFileSync(new URL('index.json', assetsBase), 'utf-8')
     this._index = JSON.parse(raw) as IndexFile
@@ -97,8 +97,7 @@ export class TelegramResources {
     }
   }
 
-  private _toDoc(meta?: DocMeta): tl.RawDocument | undefined {
-    if (!meta) return undefined
+  private _toDoc(meta: DocMeta): tl.RawDocument {
     return {
       _: 'document',
       id: Long.fromString(meta.id),
@@ -178,9 +177,9 @@ export class TelegramResources {
           flags: (hasStatic ? 1 : 0) | (hasAnim ? 2 : 0) | (e.premium_required ? 4 : 0),
           id: Long.fromString(e.id),
           emoticon: e.emoticon,
-          staticIconId: e.assets.static_icon ? Long.fromString(e.assets.static_icon.doc.id) : undefined,
-          effectStickerId: e.assets.effect_sticker ? Long.fromString(e.assets.effect_sticker.doc.id) : undefined,
-          effectAnimationId: e.assets.effect_animation ? Long.fromString(e.assets.effect_animation.doc.id) : undefined,
+          staticIconId: Long.fromString(e.assets.static_icon.doc.id),
+          effectStickerId: Long.fromString(e.assets.effect_sticker.doc.id),
+          effectAnimationId: Long.fromString(e.assets.effect_animation.doc.id),
         }
       }),
       documents,
@@ -221,9 +220,5 @@ export class TelegramResources {
 export function createTelegramResources(
   assetsBase?: URL,
 ): TelegramResources | undefined {
-  try {
     return new TelegramResources(assetsBase)
-  } catch {
-    return undefined
-  }
 }
