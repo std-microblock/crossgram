@@ -1,17 +1,23 @@
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 
-/** Synthesized `config` pointing all DCs at this server. */
+/**
+ * Telegram Desktop starts new accounts on DC 2, while config enumeration and
+ * media sessions may use other IDs. Every logical DC terminates at this relay.
+ */
+export const RELAY_DC_IDS = [1, 2, 3, 4, 5, 6] as const
+
+/** Synthesized `config` pointing every logical DC at this server. */
 export function makeConfig(dcId: number, host = '127.0.0.1', port = 4430): tl.TlObject {
   const now = Math.floor(Date.now() / 1000)
   return {
     _: 'config', flags: 0, defaultP2pContacts: false, preloadFeaturedStickers: false,
     revokePmInbox: false, blockedMode: false, forceTryIpv6: false, date: now, expires: now + 3600,
     testMode: false, thisDc: dcId,
-    dcOptions: [{
+    dcOptions: RELAY_DC_IDS.map(id => ({
       _: 'dcOption', flags: 0, ipv6: false, mediaOnly: false, tcpoOnly: true, cdn: false, static: true,
-      id: dcId, ipAddress: host, port,
-    }],
+      id, ipAddress: host, port,
+    })),
     dcTxtDomainName: '', chatSizeMax: 200, megagroupSizeMax: 200000, forwardedCountMax: 100,
     onlineUpdatePeriodMs: 120000, offlineBlurTimeoutMs: 5000, offlineIdleTimeoutMs: 30000,
     onlineCloudTimeoutMs: 300000, notifyCloudDelayMs: 30000, notifyDefaultDelayMs: 1500,

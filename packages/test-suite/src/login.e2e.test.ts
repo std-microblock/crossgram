@@ -316,8 +316,10 @@ describe('bridge login e2e', () => {
       const config = await callRpc(resumed, key, resumedSid, { _: 'help.getConfig' }, 15)
       expect(config).toMatchObject({
         _: 'config', thisDc: 1,
-        dcOptions: [{ id: 1, ipAddress: '127.0.0.1', tcpoOnly: true }],
       })
+      expect((config as any).dcOptions).toEqual([1, 2, 3, 4, 5, 6].map(id => expect.objectContaining({
+        id, ipAddress: '127.0.0.1', port: 4430, tcpoOnly: true, static: true,
+      })))
       dbg('post-login sync ok:', state._, status._, filters._, countries._)
 
       const contacts = await callRpc(resumed, key, resumedSid, {
