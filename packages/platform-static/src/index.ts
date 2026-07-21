@@ -168,14 +168,15 @@ export class StaticPlatform implements IMPlatform {
       const bytes = await consumeSource(part.media.source, mediaIndex, options)
       const mediaId = `${messageId}:media:${mediaIndex}:${'m'.repeat(128)}`
       this._storeMedia(mediaId, bytes)
+      const dimensions = part.media.kind === 'image' ? imageDimensions(bytes) : undefined
       const media: IMMedia = {
         id: mediaId,
         kind: part.media.kind,
         name: part.media.name,
         mimeType: part.media.mimeType,
         size: bytes.length,
-        width: part.media.width,
-        height: part.media.height,
+        width: part.media.width ?? dimensions?.width,
+        height: part.media.height ?? dimensions?.height,
         locator: { mediaId },
       }
       output.push({ type: 'media', media })
@@ -499,6 +500,47 @@ function textMessage(
   timestamp: number,
 ): IMMessage {
   return { id, conversationId, senderId, timestamp, content: { parts: [{ type: 'text', text }] } }
+}
+
+function imageDimensions(bytes: Uint8Array): { width: number, height: number } | undefined {
+  if (
+    bytes.length >= 24
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[12] === 0x49 && bytes[13] === 0x48 && bytes[14] === 0x44 && bytes[15] === 0x52
+  ) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const width = view.getUint32(16)
+    const height = view.getUint32(20)
+    return width > 0 && height > 0 ? { width, height } : undefined
+  }
+
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let offset = 2
+  while (offset + 3 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset++
+      continue
+    }
+    while (offset < bytes.length && bytes[offset] === 0xff) offset++
+    const marker = bytes[offset++]
+    if (marker === undefined || marker === 0xd9 || marker === 0xda) break
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue
+    if (offset + 2 > bytes.length) break
+    const segmentLength = view.getUint16(offset)
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) break
+    if (isJpegStartOfFrame(marker) && segmentLength >= 7) {
+      const height = view.getUint16(offset + 3)
+      const width = view.getUint16(offset + 5)
+      return width > 0 && height > 0 ? { width, height } : undefined
+    }
+    offset += segmentLength
+  }
+  return undefined
+}
+
+function isJpegStartOfFrame(marker: number): boolean {
+  return marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
 }
 
 function clone<T>(value: T): T {

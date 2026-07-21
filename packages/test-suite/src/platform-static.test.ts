@@ -319,6 +319,32 @@ describe('StaticPlatform', () => {
     expect(imageBytes.subarray(0, 8)).toEqual(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]))
   })
 
+  it('reads PNG and JPEG dimensions from uploaded photo bytes', async () => {
+    const png = new Uint8Array(24)
+    png.set([0x89, 0x50, 0x4e, 0x47], 0)
+    png.set([0x49, 0x48, 0x44, 0x52], 12)
+    new DataView(png.buffer).setUint32(16, 1240)
+    new DataView(png.buffer).setUint32(20, 1754)
+    const jpeg = new Uint8Array([
+      0xff, 0xd8,
+      0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+      0xff, 0xc2, 0x00, 0x08, 0x08, 0x05, 0x00, 0x03, 0x88, 0x00,
+      0xff, 0xd9,
+    ])
+
+    const sent = await new StaticPlatform().sendMessage(session, { id: 'qq-group' }, {
+      parts: [
+        { type: 'media', media: mediaInput('image', [[...png]], 'dimensions.png') },
+        { type: 'media', media: mediaInput('image', [[...jpeg]], 'dimensions.jpg') },
+      ],
+    })
+
+    expect(sent.content.parts).toMatchObject([
+      { type: 'media', media: { width: 1240, height: 1754 } },
+      { type: 'media', media: { width: 904, height: 1280 } },
+    ])
+  })
+
   it('waits for subscribe handlers, stores incoming group messages, deduplicates, and unsubscribes', async () => {
     const platform = new StaticPlatform()
     const order: string[] = []
