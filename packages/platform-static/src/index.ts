@@ -6,8 +6,8 @@ import type {
   IMConversation, IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent,
   IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageContent, IMMessageInput,
   IMPageQuery, IMPlatform, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
-} from '@mtproto-relay/cordis-plugin-bridge'
-import { resolvePlatformPluginId } from '@mtproto-relay/cordis-plugin-bridge'
+} from '@mtproto-relay/bridge'
+import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 
 export interface StaticPlatformOptions {
   now?: () => number
@@ -449,7 +449,7 @@ export class StaticPlatform implements IMPlatform {
 }
 
 async function consumeSource(
-  source: import('@mtproto-relay/cordis-plugin-bridge').IMMediaSource,
+  source: import('@mtproto-relay/bridge').IMMediaSource,
   mediaIndex: number,
   options: IMTransferOptions,
 ): Promise<Uint8Array> {

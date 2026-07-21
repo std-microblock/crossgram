@@ -3,7 +3,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { RpcError } from '@mtproto-relay/cordis-plugin-mtproto'
+import { RpcError } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
 import type {
   IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMPlatform, IMUser, PlatformSession,
