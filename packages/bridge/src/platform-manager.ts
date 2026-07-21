@@ -123,6 +123,7 @@ export class PlatformSubscriptionManager {
     await Promise.all(rows.map(async (row) => {
       const session = sessionFromRow(row)
       try {
+        await this._store.pruneUpdateDeliveries(session.platformSessionId)
         await this.ensure(session)
       } catch (error) {
         this._onError(error, session)

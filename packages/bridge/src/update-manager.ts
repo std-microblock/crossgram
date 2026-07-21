@@ -186,6 +186,10 @@ export class UpdateManager {
         ? { _: 'updates.differenceTooLong', pts: state.pts }
         : { _: 'updates.differenceEmpty', date: state.date, seq: state.seq }
     }
+    const first = deliveries[0]
+    if (first.pts !== request.pts + first.ptsCount) {
+      return { _: 'updates.differenceTooLong', pts: state.pts }
+    }
     if (deliveries.some((delivery) => !delivery.payload)) {
       return { _: 'updates.differenceTooLong', pts: state.pts }
     }

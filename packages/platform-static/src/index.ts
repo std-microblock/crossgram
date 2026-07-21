@@ -28,7 +28,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'static')
   ctx.imPlatform.register(new StaticPlatform({
     ...config,
-    eventIntervalMs: config.eventIntervalMs ?? 1_000,
+    // Synthetic traffic is opt-in. Enabling it by default creates an unbounded
+    // durable update stream for every historical active platform session.
+    eventIntervalMs: config.eventIntervalMs ?? 0,
     historySize: config.historySize ?? 10_000,
   }), id)
 }

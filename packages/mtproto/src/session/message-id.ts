@@ -33,7 +33,12 @@ export class ServerMessageIdGenerator {
     const low = ((frac & ~3) | 1) >>> 0
     let msgId = new Long(low, secs, false)
     if (msgId.lessThanOrEqual(this._lastMsgId)) {
-      msgId = this._lastMsgId.add(4)
+      // _lastMsgId may be a client id (0 mod 4). Adding four would preserve
+      // that client parity and Telegram Desktop rejects the response as a bad
+      // msg_id. Advance to the first strictly greater server id (1 mod 4).
+      const remainder = this._lastMsgId.getLowBitsUnsigned() & 3
+      const delta = ((1 - remainder) & 3) || 4
+      msgId = this._lastMsgId.add(delta)
     }
     this._lastMsgId = msgId
     return msgId

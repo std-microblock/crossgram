@@ -236,6 +236,10 @@ export function defineModels(ctx: Context): void {
     seq: 'unsigned', date: 'unsigned', published: 'boolean', payload: 'text',
   }, {
     primary: 'messageId', autoInc: true,
-    unique: ['eventKey'], indexes: ['platformSessionId'],
+    unique: ['eventKey'],
+    indexes: [
+      ['platformSessionId', 'published', 'pts'],
+      ['platformSessionId', 'pts'],
+    ],
   })
 }

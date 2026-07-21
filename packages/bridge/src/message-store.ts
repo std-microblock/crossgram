@@ -42,12 +42,16 @@ export interface StoredHistoryQuery {
 }
 
 const MESSAGE_ID_MIDPOINT = 0x40000000
+export const UPDATE_DELIVERY_RETENTION = 1_000
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
   private _writeTail = Promise.resolve()
 
-  constructor(private readonly _database: Database) {}
+  constructor(
+    private readonly _database: Database,
+    private readonly _updateDeliveryRetention = UPDATE_DELIVERY_RETENTION,
+  ) {}
 
   async ingest(
     session: PlatformSession,
@@ -375,7 +379,7 @@ export class MessageStore {
   }
 
   async prepareUpdateDelivery(eventKey: string, platformSessionId: string, ptsCount: number, date: number) {
-    return this._write(() => this._database.withTransaction(async (database) => {
+    const delivery = await this._write(() => this._database.withTransaction(async (database) => {
       const [existing] = await database.get('mtproto_update_delivery', { eventKey })
       if (existing) return existing
       const [current] = await database.get('mtproto_update_state', { platformSessionId })
@@ -392,6 +396,8 @@ export class MessageStore {
         payload: '',
       })
     }))
+    await this.pruneUpdateDeliveries(platformSessionId)
+    return delivery
   }
 
   async getUpdateDelivery(eventKey: string) {
@@ -412,16 +418,16 @@ export class MessageStore {
   }
 
   async getPendingUpdateDeliveries(platformSessionId: string) {
-    const rows = await this._database.get('mtproto_update_delivery', {
+    return this._database.select('mtproto_update_delivery', {
       platformSessionId, published: false,
-    })
-    return rows.sort((left, right) => left.pts - right.pts || left.messageId - right.messageId)
+    }).orderBy('pts').execute()
   }
 
-  async getUpdateDeliveriesAfter(platformSessionId: string, pts: number) {
-    const rows = await this._database.get('mtproto_update_delivery', { platformSessionId })
-    return rows.filter((row) => row.pts > pts)
-      .sort((left, right) => left.pts - right.pts || left.messageId - right.messageId)
+  async getUpdateDeliveriesAfter(platformSessionId: string, pts: number, limit = 101) {
+    return this._database.select('mtproto_update_delivery', {
+      platformSessionId,
+      pts: { $gt: pts },
+    }).orderBy('pts').limit(limit).execute()
   }
 
   async getConversation(
@@ -581,6 +587,22 @@ export class MessageStore {
     const [conversation] = await this._database.get('mtproto_im_conversation', { id })
     if (!conversation) throw new Error(`message references missing conversation ${id}`)
     return conversation.platformConversationId
+  }
+
+  async pruneUpdateDeliveries(platformSessionId: string): Promise<void> {
+    const retain = Math.max(0, Math.trunc(this._updateDeliveryRetention))
+    await this._write(async () => {
+      const rows = await this._database.select('mtproto_update_delivery', { platformSessionId })
+        .orderBy('messageId', 'desc')
+        .limit(retain + 1)
+        .execute()
+      if (rows.length <= retain) return
+      const cutoff = rows.at(-1)!.messageId
+      await this._database.remove('mtproto_update_delivery', {
+        platformSessionId,
+        messageId: { $lte: cutoff },
+      })
+    })
   }
 
   private async _write<T>(callback: () => Promise<T>): Promise<T> {

@@ -277,7 +277,10 @@ function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap 
   const plain = ige.decrypt(ct)
   const reader = new TlBinaryReader(readerMap, plain)
   reader.seek(16) // salt(8) + session_id(8)
-  reader.long(true) // msg_id
+  const msgId = reader.long(true)
+  // Telegram Desktop rejects server messages whose low bits retain the
+  // client's 0 mod 4 parity, even when their timestamp and encryption are valid.
+  expect(msgId.getLowBitsUnsigned() & 3).toBe(1)
   reader.uint() // seq_no
   reader.uint() // length
   return reader

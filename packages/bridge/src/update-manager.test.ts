@@ -34,7 +34,7 @@ afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createHarness() {
+async function createHarness(updateDeliveryRetention?: number) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -48,7 +48,7 @@ async function createHarness() {
     authKeyId: '8899aabbccddeeff', platformId: session.platformId, platformSessionId: 'other-session',
   })
   const sent: Array<{ authKeyId: Uint8Array, update: tl.TypeUpdates }> = []
-  const store = new MessageStore(ctx.database)
+  const store = new MessageStore(ctx.database, updateDeliveryRetention)
   const manager = new UpdateManager(
     ctx.database, new PlatformRegistry([[session.platformId, platform]]), store,
     (authKeyId, update) => sent.push({ authKeyId, update }),
@@ -310,5 +310,35 @@ describe('UpdateManager', () => {
       state: { pts: 3, seq: 2 },
     })
     expect(() => roundTrip(difference)).not.toThrow()
+  })
+
+  it('bounds the update journal and reports differenceTooLong across a pruned pts gap', async () => {
+    const { ctx, store } = await createHarness(3)
+    const manager = new UpdateManager(
+      ctx.database,
+      new PlatformRegistry([[session.platformId, platform]]),
+      store,
+      () => 0,
+    )
+    const conversation: IMConversation = { id: 'bounded', kind: 'direct', title: 'Bounded' }
+    for (let index = 1; index <= 4; index++) {
+      const message: IMMessage = {
+        id: `bounded-${index}`,
+        conversationId: conversation.id,
+        senderId: 'alice',
+        timestamp: 100 + index,
+        content: { parts: [{ type: 'text', text: `message ${index}` }] },
+      }
+      const result = await store.ingest(session, conversation, message)
+      await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    }
+
+    const retained = await ctx.database.select('mtproto_update_delivery', {
+      platformSessionId: session.platformSessionId,
+    }).orderBy('pts').execute()
+    expect(retained.map((delivery) => delivery.pts)).toEqual([3, 4, 5])
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toEqual({ _: 'updates.differenceTooLong', pts: 5 })
   })
 })

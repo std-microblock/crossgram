@@ -74,6 +74,25 @@ describe('StaticPlatform', () => {
     await service.dispose()
   })
 
+  it('does not generate durable demo traffic unless an interval is configured', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    const service = ctx.plugin((serviceCtx) => { new IMPlatformService(serviceCtx) })
+    const plugin = ctx.plugin(loadedStaticPlugin('static-default'))
+    try {
+      await Promise.all([service, plugin])
+      const events: import('@mtproto-relay/bridge').IMEvent[] = []
+      const unsubscribe = await ctx.imPlatform.require('static-default').subscribe(session, (event) => events.push(event))
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(events).toEqual([])
+      await unsubscribe()
+    } finally {
+      await plugin.dispose()
+      await service.dispose()
+      vi.useRealTimers()
+    }
+  })
+
   it('exposes direct, group, channel, and subchannel dialogs through bounded pages', async () => {
     const platform = new StaticPlatform()
     expect(platform.capabilities).toMatchObject({
