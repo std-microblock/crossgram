@@ -57,9 +57,6 @@ export const startupRpcHandlers: Readonly<Record<string, StartupHandler>> = {
   'messages.getSavedReactionTags': () => ({
     _: 'messages.savedReactionTags', tags: [], hash: Long.ZERO,
   } as unknown as tl.TlObject),
-  'messages.getAvailableEffects': () => ({
-    _: 'messages.availableEffects', hash: 0, effects: [], documents: [],
-  } as unknown as tl.TlObject),
   'payments.getStarGiftActiveAuctions': () => ({
     _: 'payments.starGiftActiveAuctions', auctions: [], users: [], chats: [],
   } as unknown as tl.TlObject),

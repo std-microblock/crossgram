@@ -1,0 +1,6 @@
+# 生成的二进制资源（TGS/webp/png），由 telegram-tgs-assets 的 `tgs-assets fetch` 重新生成。
+# 不进版本库；本地开发时直接存在于磁盘即可被 bridge 通过 upload.getFile 提供。
+# index.json 保留（文本元数据，供 bridge 运行时读取）。
+assets/**/*.tgs
+assets/**/*.webp
+assets/**/*.png

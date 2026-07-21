@@ -20,7 +20,6 @@ describe('post-login startup responses', () => {
       'help.getPromoData',
       'help.getTermsOfServiceUpdate',
       'messages.getAttachMenuBots',
-      'messages.getAvailableEffects',
       'messages.getEmojiGroups',
       'messages.getEmojiStickerGroups',
       'messages.getFeaturedEmojiStickers',

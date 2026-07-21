@@ -23,7 +23,7 @@
 - id: static
   name: '@mtproto-relay/platform-static'
   config:
-    eventIntervalMs: 1000
+    eventIntervalMs: 20000
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:
@@ -31,8 +31,8 @@
 - id: aa143c36
   name: '@cordisjs/plugin-server-acl'
 - id: 8357f09b
-  label: Database
   name: '@cordisjs/plugin-group'
+  label: Database
   config:
     - id: 5b69b05e
       name: '@cordisjs/plugin-database'
@@ -66,8 +66,8 @@
       name: '@cordisjs/plugin-sso-oauth'
       disabled: true
 - id: 0c9db8e2
-  label: WebUI
   name: '@cordisjs/plugin-group'
+  label: WebUI
   config:
     - id: 4430a808
       name: '@cordisjs/plugin-webui'
@@ -90,8 +90,8 @@
     - id: f9c1a8b2
       name: '@cordisjs/plugin-webui-sso'
 - id: 375b963c
-  label: Development
   name: '@cordisjs/plugin-group'
+  label: Development
   config:
     - id: e1e36558
       name: '@cordisjs/plugin-hmr'
