@@ -1,6 +1,7 @@
 import type { Context } from 'cordis'
-import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import type {
   IMConversation, IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent,
   IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageContent, IMMessageInput,
@@ -11,12 +12,16 @@ import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 export interface StaticPlatformOptions {
   now?: () => number
   instanceId?: string
+  /** Durable media directory. Set to undefined for an in-memory test adapter. */
+  mediaPath?: string
   transferChunkSize?: number
   eventIntervalMs?: number
   historySize?: number
 }
 
 export interface Config {
+  instanceId?: string
+  mediaPath?: string
   transferChunkSize?: number
   eventIntervalMs?: number
   historySize?: number
@@ -29,8 +34,13 @@ const seededImage = new Uint8Array(readFileSync(new URL('./test-image.png', impo
 /** Cordis plugin entrypoint. Each plugin instance registers one isolated adapter. */
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'static')
+  const mediaPath = config.mediaPath
+    ?? (process.env.NODE_ENV === 'test' ? undefined : resolve(process.cwd(), 'data/static-media', id))
   ctx.imPlatform.register(new StaticPlatform({
     ...config,
+    // Keep media storage stable across HMR and process restarts. Message IDs
+    // still use a per-instance nonce to avoid sequence collisions after restart.
+    mediaPath,
     // Synthetic traffic is opt-in. Enabling it by default creates an unbounded
     // durable update stream for every historical active platform session.
     eventIntervalMs: config.eventIntervalMs ?? 0,
@@ -58,6 +68,7 @@ export class StaticPlatform implements IMPlatform {
   private readonly _eventIntervalMs: number
   private readonly _historySize: number
   private readonly _instanceId: string
+  private readonly _mediaPath?: string
   private readonly _users = new Map<string, IMUser>()
   private readonly _conversations = new Map<string, IMConversation>()
   private readonly _messages = new Map<string, IMMessage[]>()
@@ -74,6 +85,8 @@ export class StaticPlatform implements IMPlatform {
     this._eventIntervalMs = options.eventIntervalMs ?? 0
     this._historySize = Math.max(0, Math.trunc(options.historySize ?? 10_000))
     this._instanceId = options.instanceId ?? randomUUID()
+    this._mediaPath = options.mediaPath
+    if (this._mediaPath) mkdirSync(this._mediaPath, { recursive: true })
     this._seed()
   }
 
@@ -154,7 +167,7 @@ export class StaticPlatform implements IMPlatform {
       }
       const bytes = await consumeSource(part.media.source, mediaIndex, options)
       const mediaId = `${messageId}:media:${mediaIndex}:${'m'.repeat(128)}`
-      this._media.set(mediaId, bytes)
+      this._storeMedia(mediaId, bytes)
       const media: IMMedia = {
         id: mediaId,
         kind: part.media.kind,
@@ -208,7 +221,7 @@ export class StaticPlatform implements IMPlatform {
       ? media.locator.mediaId
       : media.id
     if (typeof mediaId !== 'string') throw new Error('static media locator is invalid')
-    const stored = this._media.get(mediaId)
+    const stored = this._loadMedia(mediaId)
     if (!stored) throw new Error(`static media not found: ${mediaId}`)
     const offset = Math.max(0, options.offset ?? 0)
     const end = Math.min(stored.length, offset + (options.limit ?? stored.length))
@@ -280,7 +293,7 @@ export class StaticPlatform implements IMPlatform {
   }
 
   mediaBytes(mediaId: string): Uint8Array | undefined {
-    return this._media.get(mediaId)?.slice()
+    return this._loadMedia(mediaId)?.slice()
   }
 
   private _append(message: IMMessage): void {
@@ -381,8 +394,8 @@ export class StaticPlatform implements IMPlatform {
     )))
     const imageId = 'seed:image'
     const fileId = 'seed:file'
-    this._media.set(imageId, seededImage)
-    this._media.set(fileId, new TextEncoder().encode('static seeded file'))
+    this._storeMedia(imageId, seededImage)
+    this._storeMedia(fileId, new TextEncoder().encode('static seeded file'))
     this._append({
       id: 'group:album', sourceIds: ['group:album:photo', 'group:album:file'],
       conversationId: 'qq-group', senderId: 'carol', timestamp: 1_700_000_700,
@@ -407,6 +420,30 @@ export class StaticPlatform implements IMPlatform {
         ],
       },
     })
+  }
+
+  private _storeMedia(mediaId: string, bytes: Uint8Array): void {
+    this._media.set(mediaId, bytes)
+    if (!this._mediaPath) return
+    const path = this._mediaFile(mediaId)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, bytes)
+  }
+
+  private _loadMedia(mediaId: string): Uint8Array | undefined {
+    const cached = this._media.get(mediaId)
+    if (cached) return cached
+    if (!this._mediaPath) return undefined
+    const path = this._mediaFile(mediaId)
+    if (!existsSync(path)) return undefined
+    const bytes = new Uint8Array(readFileSync(path))
+    this._media.set(mediaId, bytes)
+    return bytes
+  }
+
+  private _mediaFile(mediaId: string): string {
+    const digest = createHash('sha256').update(mediaId).digest('hex')
+    return join(this._mediaPath!, `${digest}.bin`)
   }
 }
 

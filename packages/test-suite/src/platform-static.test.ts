@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { IMPlatformService } from '@mtproto-relay/bridge'
 import type {
   IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMTransferProgress, PlatformSession,
@@ -271,6 +274,24 @@ describe('StaticPlatform', () => {
     const medias = sent.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
     expect(platform.mediaBytes(medias[0].id)).toEqual(new Uint8Array([1, 2, 3]))
     expect(platform.mediaBytes(medias[1].id)).toEqual(new Uint8Array([4, 5, 6]))
+  })
+
+  it('reopens uploaded media from a new platform instance', async () => {
+    const mediaPath = await mkdtemp(join(tmpdir(), 'static-platform-media-'))
+    try {
+      const first = new StaticPlatform({ instanceId: 'persistent-static', mediaPath })
+      const sent = await first.sendMessage(session, { id: 'group-b' }, {
+        parts: [{ type: 'media', media: mediaInput('file', [[1, 2], [3, 4]], 'persist.bin') }],
+      })
+      const media = sent.content.parts.find((part) => part.type === 'media')
+      if (!media || media.type !== 'media') throw new Error('sent media missing')
+
+      const second = new StaticPlatform({ instanceId: 'persistent-static', mediaPath })
+      const bytes = await collect(second.downloadMedia(session, media.media))
+      expect(bytes).toEqual(new Uint8Array([1, 2, 3, 4]))
+    } finally {
+      await rm(mediaPath, { recursive: true, force: true })
+    }
   })
 
   it('downloads seeded and sent media by range with progressive chunks', async () => {
