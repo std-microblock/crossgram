@@ -3,12 +3,12 @@ import { Context } from 'cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { IMPlatformService } from '@mtproto-relay/bridge'
+import { IMPlatformService } from '@mtproto-relay/cordis-plugin-bridge'
 import type {
   IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMTransferProgress, PlatformSession,
-} from '@mtproto-relay/bridge'
-import { StaticPlatform } from '@mtproto-relay/platform-static'
-import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
+} from '@mtproto-relay/cordis-plugin-bridge'
+import { StaticPlatform } from '@mtproto-relay/cordis-plugin-platform-static'
+import * as staticPlatformPlugin from '@mtproto-relay/cordis-plugin-platform-static'
 
 const session: PlatformSession = {
   platformSessionId: 'static-session', platformId: 'static', userId: 'self', credentials: {}, metadata: {},
@@ -84,7 +84,7 @@ describe('StaticPlatform', () => {
     const plugin = ctx.plugin(loadedStaticPlugin('static-default'))
     try {
       await Promise.all([service, plugin])
-      const events: import('@mtproto-relay/bridge').IMEvent[] = []
+      const events: import('@mtproto-relay/cordis-plugin-bridge').IMEvent[] = []
       const unsubscribe = await ctx.imPlatform.require('static-default').subscribe(session, (event) => { events.push(event) })
       await vi.advanceTimersByTimeAsync(10_000)
       expect(events).toEqual([])
@@ -124,7 +124,7 @@ describe('StaticPlatform', () => {
 
   it('runs Group A new, edit, and delete events in order and mutates history', async () => {
     const platform = new StaticPlatform({ now: () => 1_900_000_000, instanceId: 'test-run' })
-    const events: import('@mtproto-relay/bridge').IMEvent[] = []
+    const events: import('@mtproto-relay/cordis-plugin-bridge').IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     await platform.tick(session)
 
@@ -151,8 +151,8 @@ describe('StaticPlatform', () => {
   it('names live and sent events independently across reconstructed platform instances', async () => {
     const first = new StaticPlatform({ now: () => 1_900_000_000, instanceId: 'before-hmr' })
     const second = new StaticPlatform({ now: () => 1_900_000_000, instanceId: 'after-hmr' })
-    const firstEvents: import('@mtproto-relay/bridge').IMEvent[] = []
-    const secondEvents: import('@mtproto-relay/bridge').IMEvent[] = []
+    const firstEvents: import('@mtproto-relay/cordis-plugin-bridge').IMEvent[] = []
+    const secondEvents: import('@mtproto-relay/cordis-plugin-bridge').IMEvent[] = []
     const unsubscribeFirst = await first.subscribe(session, (event) => { firstEvents.push(event) })
     const unsubscribeSecond = await second.subscribe(session, (event) => { secondEvents.push(event) })
     await first.tick(session)
@@ -172,7 +172,7 @@ describe('StaticPlatform', () => {
     vi.useFakeTimers()
     try {
       const platform = new StaticPlatform({ eventIntervalMs: 1_000, now: () => 1_900_000_000 })
-      const events: import('@mtproto-relay/bridge').IMEvent[] = []
+      const events: import('@mtproto-relay/cordis-plugin-bridge').IMEvent[] = []
       const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
       await vi.advanceTimersByTimeAsync(2_000)
       expect(events.map((event) => event.type)).toEqual([
@@ -189,7 +189,7 @@ describe('StaticPlatform', () => {
 
   it('mirrors messages sent to Group B into Group C as another user', async () => {
     const platform = new StaticPlatform({ now: () => 1_900_000_100 })
-    const events: import('@mtproto-relay/bridge').IMEvent[] = []
+    const events: import('@mtproto-relay/cordis-plugin-bridge').IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     const sent = await platform.sendMessage(session, { id: 'group-b' }, {
       parts: [{ type: 'text', text: 'mirror this' }],
@@ -372,7 +372,7 @@ describe('StaticPlatform', () => {
     await expect(platform.getDialogs(session, { cursor: 'bad' })).rejects.toThrow('invalid static cursor')
     await expect(platform.getHistory(session, { id: 'missing' })).rejects.toThrow('conversation not found')
     await expect(platform.sendMessage(session, { id: 'alice' }, { parts: [] })).rejects.toThrow('message is empty')
-    const missing: import('@mtproto-relay/bridge').IMMedia = {
+    const missing: import('@mtproto-relay/cordis-plugin-bridge').IMMedia = {
       id: 'missing', kind: 'file', locator: { mediaId: 'missing' },
     }
     await expect(collect(platform.downloadMedia(session, missing))).rejects.toThrow('media not found')

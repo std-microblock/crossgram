@@ -5,17 +5,17 @@
 - id: 4cd8d0ee
   name: '@cordisjs/plugin-http-socks'
 - id: mtproto01
-  name: '@mtproto-relay/mtproto'
+  name: '@mtproto-relay/cordis-plugin-mtproto'
   config:
     port: 4430
     host: 127.0.0.1
     rsaKeyPath: ./data/rsa-key.json
     authKeyStorePath: ./data/auth-keys.json
 - id: bridge01
-  name: '@mtproto-relay/bridge'
+  name: '@mtproto-relay/cordis-plugin-bridge'
   config: {}
 - id: static
-  name: '@mtproto-relay/platform-static'
+  name: '@mtproto-relay/cordis-plugin-platform-static'
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:

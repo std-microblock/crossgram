@@ -1,7 +1,6 @@
 {
   "name": "mtproto-relay-cordis",
   "version": "0.6.0",
-  "private": false,
   "files": [
     ".env",
     "cordis.yml"

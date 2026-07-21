@@ -1,5 +1,5 @@
 {
-  "name": "@mtproto-relay/mtproto",
+  "name": "@mtproto-relay/cordis-plugin-mtproto",
   "version": "0.1.0",
   "private": true,
   "type": "module",
