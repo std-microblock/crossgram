@@ -50,6 +50,15 @@ describe('MTProto debug serialization', () => {
       payload: { _: 'rpc_result', reqMsgId: Long.ONE, result: { _: 'users.userFull', user: {} } },
     }, 1)
     expect(event.name).toBe('rpc_result -> users.userFull')
+    expect(event.requestMessageId).toBe('0x1')
+  })
+
+  it('labels wrapped calls with their underlying RPC method', () => {
+    const event = serializeDebugEvent({
+      direction: 'client->server', phase: 'message', connectionId: 'conn-1', timestamp: 1,
+      payload: { _: 'invokeWithLayer', layer: 228, query: { _: 'messages.getHistory' } },
+    }, 1)
+    expect(event.name).toBe('invokeWithLayer -> messages.getHistory')
   })
 
   it('terminates circular and excessively deep values', () => {
