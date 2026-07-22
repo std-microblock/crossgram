@@ -53,6 +53,20 @@ describe('MTProto RPC event grouping', () => {
     expect(filterEventGroups(groups, 'missing')).toEqual([])
     expect(filterEventGroups(groups, '   ')).toBe(groups)
   })
+
+  it('includes or excludes an exact call/result type selected from the context menu', () => {
+    const groups = groupRpcEvents([
+      event(1, { messageId: '0x40', name: 'messages.getHistory' }),
+      event(2, {
+        direction: 'server->client', name: 'rpc_result -> messages.messages', requestMessageId: '0x40',
+      }),
+      event(3, { name: 'updates.getState' }),
+    ])
+
+    expect(filterEventGroups(groups, '', { mode: 'include', value: 'messages.getHistory' })).toEqual([groups[0]])
+    expect(filterEventGroups(groups, '', { mode: 'include', value: 'rpc_result -> messages.messages' })).toEqual([groups[0]])
+    expect(filterEventGroups(groups, '', { mode: 'exclude', value: 'messages.getHistory' })).toEqual([groups[1]])
+  })
 })
 
 function event(id: number, overrides: Partial<CapturedMtprotoEvent> = {}): CapturedMtprotoEvent {

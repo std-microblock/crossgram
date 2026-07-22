@@ -97,6 +97,33 @@
   color: var(--fg3);
 }
 
+.type-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg1);
+  color: var(--fg0);
+  cursor: pointer;
+  font: 12px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.type-filter-pill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.type-filter-pill .k-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
 .capture-stats {
   display: flex;
   align-items: center;
@@ -144,7 +171,7 @@
 
 .debug-virtual-content {
   position: relative;
-  min-width: 1240px;
+  min-width: 1340px;
   width: 100%;
 }
 
@@ -165,11 +192,12 @@
 }
 
 .event-header {
-  display: flex;
+  display: grid;
   align-items: center;
   gap: 8px;
   box-sizing: border-box;
   width: 100%;
+  grid-template-columns: 18px minmax(220px, 1fr) 104px 58px 80px 116px 56px 164px 134px 210px 64px;
   height: 43px;
   padding: 4px 12px 4px 8px;
   border: 0;
@@ -203,7 +231,6 @@
 .event-header > code,
 .event-header > span,
 .event-phase {
-  flex: 0 0 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -226,8 +253,6 @@
 }
 
 .event-name {
-  flex: 1 1 220px !important;
-  min-width: 180px !important;
   color: var(--fg0);
   font-weight: 600;
 }
@@ -267,13 +292,16 @@
 }
 
 .event-phase {
-  width: 64px;
   font-size: 11px;
   text-align: right;
 }
 
+.event-result-empty {
+  color: var(--fg3);
+  text-align: center;
+}
+
 .rpc-result-summary {
-  width: 190px;
   color: var(--fg1);
   opacity: 0.48;
   filter: grayscale(1);
@@ -283,8 +311,42 @@
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
-  opacity: 0.55;
-  filter: grayscale(1);
+}
+
+.debug-context-menu {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  min-width: 220px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg1);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 24%);
+}
+
+.context-menu-title {
+  max-width: 340px;
+  padding: 6px 8px;
+  overflow: hidden;
+  color: var(--fg2);
+  font: 11px ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-context-menu button {
+  padding: 7px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--fg0);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.debug-context-menu button:hover {
+  background: var(--bg-hover);
 }
 
 .payload-label {
