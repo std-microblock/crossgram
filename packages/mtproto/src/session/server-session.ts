@@ -13,7 +13,7 @@ import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector, unwrapRpcRequest } from '../rpc/dispatcher.js'
 import type { RpcDispatch, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
-import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
+import { CURRENT_API_LAYER, getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 
 // TL constructor IDs for MTProto service messages
@@ -37,6 +37,11 @@ class UnknownStoredAuthKey extends Error {
     super('unknown or expired auth key')
   }
 }
+
+// A client may be authorized before its first invokeWithLayer request arrives.
+// Keep this bounded because updates are only queued during that short handshake
+// window and must not become an unbounded memory sink if a client disappears.
+const MAX_PENDING_UPDATES = 256
 
 /** Serialize a Long to 8 little-endian bytes (matches an 8-byte auth key id). */
 function longToBytesLE(v: Long): Uint8Array {
@@ -82,6 +87,7 @@ export class ServerSession {
   private _authorized = false
   private _apiLayer: number | null = null
   private _responseWriterMap: TlWriterMap
+  private _pendingUpdates: tl.TypeUpdates[] = []
   private _queuedAcks: Long[] = []
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
@@ -98,6 +104,7 @@ export class ServerSession {
     private readonly _authKeyData: AuthKeyDataStore,
     private readonly _keyStore?: AuthKeyStore,
     private readonly _debug?: MtprotoDebugListener,
+    private readonly _onApiLayer?: (authKeyId: Uint8Array, layer: number) => void,
   ) {
     this._permAuthKey = new ServerAuthKey(_crypto, _log, _readerMap)
     this._msgIdGen = new ServerMessageIdGenerator()
@@ -133,12 +140,32 @@ export class ServerSession {
    */
   sendUpdate(update: tl.TypeUpdates): void {
     if (!this._authorized) return
+    if (this._apiLayer === null) {
+      if (this._pendingUpdates.length >= MAX_PENDING_UPDATES) {
+        this._log.warn('client API layer was not negotiated before update queue overflow; closing connection')
+        this._pendingUpdates = []
+        this._connection.close()
+        return
+      }
+      this._pendingUpdates.push(update)
+      this._log.debug('queued server update until client API layer is negotiated (pending=%d)', this._pendingUpdates.length)
+      return
+    }
     const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
     this._sendEncryptedMessage(serialized, true, update)
   }
 
   get authKeyId(): Uint8Array | null {
     return this._permAuthKey.ready ? this._permAuthKey.id : null
+  }
+
+  get apiLayer(): number | null {
+    return this._apiLayer
+  }
+
+  /** Apply an API layer learned by another connection using the same auth key. */
+  applyApiLayer(layer: number): void {
+    this._setApiLayer(layer, false)
   }
 
   // ── Internal: data handling ──
@@ -731,7 +758,14 @@ export class ServerSession {
     // Capture it on the MTProto session before constructing the handler context
     // or serializing this request's response. Later unwrapped requests reuse it.
     const unwrapped = unwrapRpcRequest(request)
-    if (unwrapped.apiLayer !== null) this._setApiLayer(unwrapped.apiLayer)
+    if (unwrapped.apiLayer !== null) {
+      this._setApiLayer(unwrapped.apiLayer)
+    } else if (this._apiLayer === null) {
+      // Clients that use the current schema may omit invokeWithLayer entirely.
+      // MTProto-only media traffic never reaches this branch and continues to
+      // inherit the layer negotiated by an API connection with the same key.
+      this._setApiLayer(CURRENT_API_LAYER)
+    }
 
     const ctx: ServerRpcContext = {
       connection: this._connection,
@@ -760,7 +794,7 @@ export class ServerSession {
 
   // ── Sending ──
 
-  private _setApiLayer(layer: number | null): void {
+  private _setApiLayer(layer: number | null, publish = true): void {
     if (layer === this._apiLayer) return
     this._apiLayer = layer
     this._responseWriterMap = getApiLayerWriterMap(this._writerMap, layer)
@@ -770,6 +804,10 @@ export class ServerSession {
       layer === null ? 'none' : resolveApiSchemaProfile(layer) ?? 'none',
       layer === null ? 0 : resolveApiSchemaLayer(layer) ?? 0,
     )
+    if (publish && layer !== null && this._permAuthKey.ready) this._onApiLayer?.(this._permAuthKey.id, layer)
+    const pending = this._pendingUpdates
+    this._pendingUpdates = []
+    for (const update of pending) this.sendUpdate(update)
   }
 
   private _sendNewSessionCreated(): void {

@@ -77,6 +77,7 @@ export class Mtproto extends Service {
   private readonly _routes = new Map<string, RpcDispatcher>()
   private readonly _routeRefs = new Map<string, number>()
   private readonly _authRoutes = new Map<string, string>()
+  private readonly _authApiLayers = new Map<string, number>()
   private readonly _routeResolvers = new Set<RouteResolver>()
   private _connectionSeq = 0
   private _server: Server | null = null
@@ -172,7 +173,10 @@ export class Mtproto extends Service {
 
   /** Broadcast a server-initiated update to all authorized sessions. */
   broadcastUpdate(update: tl.TypeUpdates): void {
-    for (const session of this._sessions) session.sendUpdate(update)
+    for (const session of this._sessions) {
+      this._applyKnownApiLayer(session)
+      session.sendUpdate(update)
+    }
   }
 
   /** Send an update only to connections authenticated with the given permanent auth key. */
@@ -180,6 +184,7 @@ export class Mtproto extends Service {
     let delivered = 0
     for (const session of this._sessions) {
       if (equalBytes(session.authKeyId, authKeyId)) {
+        this._applyKnownApiLayer(session)
         session.sendUpdate(update)
         delivered++
       }
@@ -239,6 +244,7 @@ export class Mtproto extends Service {
       this._authKeyData,
       this._authKeyStore,
       (event) => this.onDebug.emit({ ...event, connectionId }),
+      (authKeyId, layer) => this._rememberApiLayer(authKeyId, layer),
     )
     this._sessions.add(session)
     connection.onClose.add(() => {
@@ -260,6 +266,22 @@ export class Mtproto extends Service {
       this._routes.set(routeId, route)
     }
     return route
+  }
+
+  private _rememberApiLayer(authKeyId: Uint8Array, layer: number): void {
+    const key = bytesHex(authKeyId)
+    this._authApiLayers.set(key, layer)
+    for (const session of this._sessions) {
+      if (equalBytes(session.authKeyId, authKeyId)) session.applyApiLayer(layer)
+    }
+  }
+
+  private _applyKnownApiLayer(session: ServerSession): void {
+    if (session.apiLayer !== null) return
+    const authKeyId = session.authKeyId
+    if (!authKeyId) return
+    const layer = this._authApiLayers.get(bytesHex(authKeyId))
+    if (layer !== undefined) session.applyApiLayer(layer)
   }
 
   private async _dispatch(ctx: ServerRpcContext, request: tl.RpcMethod): Promise<RpcResult> {
