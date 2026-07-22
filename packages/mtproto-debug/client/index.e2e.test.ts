@@ -2,14 +2,21 @@
 
 import { mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick, ref } from 'vue'
+import type { Ref } from 'vue'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
 
-const rpcState = vi.hoisted(() => ({ data: undefined as unknown }))
+const rpcState = vi.hoisted(() => ({ data: undefined as unknown, current: undefined as unknown }))
 
 vi.mock('@cordisjs/client', async () => {
   const { ref } = await import('vue')
-  return { useRpc: () => ref(rpcState.data) }
+  return {
+    useRpc: () => {
+      const current = ref(rpcState.data)
+      rpcState.current = current
+      return current
+    },
+  }
 })
 
 import { DebugPage, EventRow } from './index.js'
@@ -73,6 +80,7 @@ describe('MTProto debug client', () => {
     expect(header.get('.event-auth').text()).toBe('key:deadbeef')
     expect(header.get('.event-session').text()).toBe('sid:0x200')
     expect(header.get('.rpc-result-summary').text()).toContain('messages.messages')
+    expect(header.element.children).toHaveLength(11)
     expect(wrapper.find('.event-detail').exists()).toBe(false)
 
     await header.trigger('click')
@@ -80,6 +88,7 @@ describe('MTProto debug client', () => {
     expect(wrapper.get('.event-detail').text()).toContain('messages.getHistory')
     expect(wrapper.get('.rpc-result-detail').text()).toContain('rpc_result')
     expect(wrapper.get('.rpc-result-detail').classes()).toContain('rpc-result-detail')
+    expect(getComputedStyle(wrapper.get('.rpc-result-detail').element).filter).not.toContain('grayscale')
   })
 
   it('virtualizes a large stream and keeps a correlated result at the call row', async () => {
@@ -117,6 +126,66 @@ describe('MTProto debug client', () => {
     expect(wrapper.get('.event-detail').exists()).toBe(true)
     expect(wrapper.findAll('.debug-event').length).toBeLessThan(100)
   })
+
+  it('opens type actions on right click and applies an exact-only filter', async () => {
+    rpcState.data = debugData([
+      event(1, { name: 'messages.getHistory' }),
+      event(2, { name: 'updates.getState' }),
+    ])
+    const wrapper = mount(DebugPage, {
+      global: { stubs: { 'k-layout': layoutStub, 'k-icon': iconStub } },
+    })
+    await nextTick()
+
+    await wrapper.get('.event-header').trigger('contextmenu', { clientX: 30, clientY: 40 })
+    await nextTick()
+    const menu = document.body.querySelector('.debug-context-menu') as HTMLElement
+    expect(menu).not.toBeNull()
+    expect(wrapper.find('.debug-context-menu').exists()).toBe(false)
+    expect(menu.getAttribute('style')).toContain('left: 30px')
+    expect(menu.textContent).toContain('Only messages.getHistory')
+    expect(menu.textContent).toContain('Exclude messages.getHistory')
+
+    menu.querySelector('button')!.click()
+    await nextTick()
+
+    expect(wrapper.get('.type-filter-pill').text()).toContain('only: messages.getHistory')
+    expect(wrapper.findAll('.event-name').map(node => node.text())).toEqual(['messages.getHistory'])
+  })
+
+  it('follows new events only while the user remains at the bottom', async () => {
+    rpcState.data = debugData(Array.from({ length: 50 }, (_, index) => event(index + 1)))
+    const wrapper = mount(DebugPage, {
+      global: { stubs: { 'k-layout': layoutStub, 'k-icon': iconStub } },
+    })
+    await nextTick()
+    const viewport = wrapper.get('.debug-virtual-viewport').element as HTMLElement
+    const scrollHeight = 2_200
+    let scrollTop = 0
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 600 })
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(viewport, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: value => { scrollTop = Math.max(0, Math.min(Number(value), scrollHeight - 600)) },
+    })
+
+    viewport.scrollTop = 1_585
+    viewport.dispatchEvent(new Event('scroll'))
+    debugRef().events.shift()
+    debugRef().events.push(event(51))
+    await nextTick()
+    await nextTick()
+    expect(viewport.scrollTop).toBe(1_600)
+
+    viewport.scrollTop = 1_200
+    viewport.dispatchEvent(new Event('scroll'))
+    debugRef().events.shift()
+    debugRef().events.push(event(52))
+    await nextTick()
+    await nextTick()
+    expect(viewport.scrollTop).toBe(1_200)
+  })
 })
 
 const layoutStub = defineComponent({
@@ -135,11 +204,16 @@ function debugData(events: CapturedMtprotoEvent[]): MtprotoDebugData {
   return {
     events,
     dropped: 0,
+    maxEvents: 2_000,
     capturing: true,
     start: vi.fn(async () => undefined),
     pause: vi.fn(async () => undefined),
     clear: vi.fn(async () => undefined),
   }
+}
+
+function debugRef(): MtprotoDebugData {
+  return (rpcState.current as Ref<MtprotoDebugData>).value
 }
 
 function event(id: number, overrides: Partial<CapturedMtprotoEvent> = {}): CapturedMtprotoEvent {

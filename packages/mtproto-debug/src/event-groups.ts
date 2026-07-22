@@ -35,11 +35,20 @@ export function groupRpcEvents(events: CapturedMtprotoEvent[]): EventGroup[] {
   return groups
 }
 
-export function filterEventGroups(groups: EventGroup[], filter: string): EventGroup[] {
+export function filterEventGroups(
+  groups: EventGroup[],
+  filter: string,
+  typeFilter?: { mode: 'include' | 'exclude', value: string },
+): EventGroup[] {
   const terms = filter.trim().toLowerCase().split(/\s+/).filter(Boolean)
-  if (!terms.length) return groups
-  return groups.filter(group => terms.every(term =>
-    group.event.searchText.includes(term) || !!group.result?.searchText.includes(term)))
+  if (!terms.length && !typeFilter) return groups
+  return groups.filter(group => {
+    if (terms.length && !terms.every(term =>
+      group.event.searchText.includes(term) || !!group.result?.searchText.includes(term))) return false
+    if (!typeFilter) return true
+    const matches = group.event.name === typeFilter.value || group.result?.name === typeFilter.value
+    return typeFilter.mode === 'include' ? matches : !matches
+  })
 }
 
 export function countGroupedEvents(groups: EventGroup[]): number {
