@@ -77,14 +77,15 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
 
   it('streams an image through IMPlatform only to MicroBlock', async () => {
     const target = await platform.client.resolveConversation('direct', directTarget)
-    const png = Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-      'base64',
-    )
+    const imagePath = new URL('../../platform-static/src/test-image.png', import.meta.url)
+    const image = await stat(imagePath)
     const sent = await platform.sendMessage(session, { id: target.id }, {
       parts: [{ type: 'media', media: {
-        kind: 'image', name: 'platform-qqnt-e2e.png', mimeType: 'image/png', size: png.length,
-        source: { size: png.length, async *stream() { yield png } },
+        kind: 'image', name: basename(imagePath.pathname), mimeType: 'image/png', size: image.size,
+        source: {
+          size: image.size,
+          async *stream() { for await (const chunk of createReadStream(imagePath)) yield new Uint8Array(chunk) },
+        },
       } }],
     })
     expect(sent.conversationId).toBe(target.id)
