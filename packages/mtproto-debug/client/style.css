@@ -315,7 +315,7 @@
 
 .debug-context-menu {
   position: fixed;
-  z-index: 20;
+  z-index: 200;
   display: grid;
   min-width: 220px;
   padding: 4px;
