@@ -48,9 +48,9 @@ function mediaInput(kind: 'image' | 'file', chunks: number[][], name: string): I
 
 function loadedStaticPlugin(id: string, config: staticPlatformPlugin.Config = {}) {
   const plugin = (ctx: Context) => {
-    ;(ctx.fiber as typeof ctx.fiber & {
-      entry?: { id: string, options: { id: string } }
-    }).entry = { id: `parent:${id}`, options: { id } }
+    ;(ctx.fiber as unknown as {
+      entry?: { id: string, options: { id: string, name: string } }
+    }).entry = { id: `parent:${id}`, options: { id, name: id } }
     staticPlatformPlugin.apply(ctx, config)
   }
   plugin.inject = ['imPlatform', 'imSticker']

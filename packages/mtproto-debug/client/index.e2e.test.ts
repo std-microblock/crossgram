@@ -72,7 +72,7 @@ describe('MTProto debug client', () => {
     const header = wrapper.get('.event-header')
 
     expect(wrapper.find('.event-meta').exists()).toBe(false)
-    expect(header.get('.event-time').exists()).toBe(true)
+    expect(header.find('.event-time').exists()).toBe(true)
     expect(header.get('.direction-label').text()).toBe('C -> S')
     expect(header.get('.event-connection').text()).toBe('conn-1')
     expect(header.get('.event-message').text()).toBe('0x100')
@@ -114,7 +114,7 @@ describe('MTProto debug client', () => {
     await nextTick()
 
     const renderedRows = wrapper.findAll('.debug-event')
-    expect(wrapper.get('.debug-virtual-viewport').exists()).toBe(true)
+    expect(wrapper.find('.debug-virtual-viewport').exists()).toBe(true)
     expect(renderedRows.length).toBeGreaterThan(0)
     expect(renderedRows.length).toBeLessThan(100)
     expect(wrapper.findAll('.rpc-result-summary')).toHaveLength(1)
@@ -123,7 +123,7 @@ describe('MTProto debug client', () => {
     await wrapper.get('.event-header').trigger('click')
     await nextTick()
 
-    expect(wrapper.get('.event-detail').exists()).toBe(true)
+    expect(wrapper.find('.event-detail').exists()).toBe(true)
     expect(wrapper.findAll('.debug-event').length).toBeLessThan(100)
   })
 

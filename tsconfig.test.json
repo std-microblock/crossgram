@@ -3,13 +3,21 @@
   "compilerOptions": {
     "module": "esnext",
     "moduleResolution": "bundler",
+    "target": "es2024",
+    "lib": ["es2024", "dom"],
+    "jsx": "preserve",
     "noEmit": true,
     "composite": false,
+    "incremental": false,
     "types": [
       "node",
     ],
   },
   "include": [
-    "**/*",
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
+    "scripts/**/*.mjs",
+    "types/**/*.d.ts",
   ],
+  "exclude": ["node_modules", "**/dist/**", "**/cache/**"],
 }
