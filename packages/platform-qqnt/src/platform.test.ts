@@ -39,6 +39,59 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('keeps the full buddy address book separate from recent dialogs and exposes avatars', async () => {
+    const platform = new QQNTPlatform()
+    const avatar = {
+      id: 'avatar:user:u1', kind: 'image' as const, name: 'avatar.png', size: 12,
+      locator: {
+        messageId: 'avatar:u1', elementId: 'avatar:u1', chatType: 1 as const,
+        peerUid: 'u1', kind: 'image' as const, fileName: 'avatar.png', filePath: '/tmp/avatar.png',
+      },
+    }
+    platform.client.getContacts = vi.fn(async () => ({
+      users: [{ id: 'u1', numericId: '10001', name: 'Friend', avatar }],
+    }))
+    const contacts = await platform.getContacts(session, { limit: 500 })
+    expect(contacts.users).toMatchObject([{
+      id: 'u1', firstName: 'Friend', username: '10001',
+      avatar: { id: 'avatar:user:u1', locator: { filePath: '/tmp/avatar.png' } },
+    }])
+  })
+
+  it('maps QQ cloud-controlled reaction definitions and delegates reaction writes', async () => {
+    const platform = new QQNTPlatform()
+    const context = {
+      available: [{
+        key: '2:128522', title: '嘿嘿',
+        presentation: { type: 'emoji' as const, emoticon: '😊' },
+      }, {
+        key: '1:14', title: '微笑',
+        presentation: {
+          type: 'custom' as const, alt: '[微笑]',
+          resource: {
+            version: 1, format: 'static' as const, mimeType: 'image/png' as const,
+            width: 200, height: 200, size: 10, locator: { filePath: '/tmp/s14.png' },
+          },
+        },
+      }],
+      reactions: [{ key: '2:128522', count: 2, selected: true }],
+      maxSelected: 20,
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => context)
+    platform.client.getMessageReactions = vi.fn(async () => context)
+    platform.client.setMessageReactions = vi.fn(async () => ({
+      ...context, reactions: [{ key: '1:14', count: 1, selected: true }],
+    }))
+    await expect(platform.getAvailableReactions(session, { conversationId: '2:g' }))
+      .resolves.toMatchObject({ available: [{ key: '2:128522' }, { key: '1:14' }] })
+    await expect(platform.getMessageReactions(session, {
+      conversationId: '2:g', messageId: 'm', targetId: 'm',
+    })).resolves.toMatchObject({ reactions: [{ key: '2:128522', selected: true }] })
+    await expect(platform.setMessageReactions(session, {
+      conversationId: '2:g', messageId: 'm', targetId: 'm',
+    }, ['1:14'])).resolves.toMatchObject({ reactions: [{ key: '1:14', selected: true }] })
+  })
+
   it('maps sent media locators and streams downloads with progress', async () => {
     const platform = new QQNTPlatform()
     const locator = {

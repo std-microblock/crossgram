@@ -223,6 +223,23 @@ describe('PlatformDataService', () => {
     await expect(data.getDialogs()).resolves.toEqual([])
     expect(calls).toBe(1)
   })
+
+  it('does not return stale stored dialogs that are absent from an authoritative upstream page', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const store = new MessageStore(database)
+    await store.upsertConversation(session, { id: '1:legacy-user', kind: 'direct', title: 'Legacy' })
+    platform.getDialogs = async () => ({
+      dialogs: [{
+        conversation: { id: 'raw-user', kind: 'direct', title: 'Current' },
+        unreadCount: 0,
+      }],
+    })
+    const data = new PlatformDataService(platform, session, store)
+
+    expect((await data.getDialogs()).map((dialog) => dialog.conversation.id)).toEqual(['raw-user'])
+  })
 })
 
 describe('PlatformRegistry', () => {

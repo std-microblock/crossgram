@@ -217,7 +217,8 @@ export class PlatformDataService {
 
   async getDialogs(query: { limit?: number, afterId?: string } = {}): Promise<IMDialog[]> {
     let upstream: IMDialog[] = []
-    if (this._platform.capabilities.history && this._platform.getDialogs) {
+    const hasUpstream = Boolean(this._platform.capabilities.history && this._platform.getDialogs)
+    if (hasUpstream) {
       const page = await this._platform.getDialogs(this._session, query)
       upstream = page.dialogs
       await this._ingestDialogs(page.dialogs)
@@ -226,14 +227,20 @@ export class PlatformDataService {
       limit: query.limit,
       afterConversationId: query.afterId,
     })
-    const live = new Map(upstream.map((dialog) => [dialog.conversation.id, dialog]))
-    return stored.map((dialog) => ({
-      ...dialog,
-      conversation: {
-        ...dialog.conversation,
-        avatar: live.get(dialog.conversation.id)?.conversation.avatar,
-      },
-    }))
+    if (!hasUpstream) return stored
+    // A history-capable adapter's current page is authoritative. Returning all
+    // previously stored rows leaks removed dialogs and legacy conversation IDs
+    // forever (for example after an adapter fixes its opaque-ID mapping).
+    const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
+    return upstream.map((dialog) => {
+      const cached = persisted.get(dialog.conversation.id)
+      return {
+        ...cached,
+        ...dialog,
+        conversation: { ...cached?.conversation, ...dialog.conversation },
+        lastMessage: dialog.lastMessage ?? cached?.lastMessage,
+      }
+    })
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {

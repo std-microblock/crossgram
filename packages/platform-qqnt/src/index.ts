@@ -2,7 +2,8 @@ import type { Context } from 'cordis'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
-  IMPageQuery, IMPlatform, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
+  IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMTransferOptions,
+  IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
@@ -39,7 +40,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     },
     conversations: { groups: true, channels: false, subchannels: false },
     members: { list: true, administrators: true, permissions: false },
-    avatars: { users: false, conversations: false },
+    avatars: { users: true, conversations: true },
     messageActions: {
       delete: {
         own: { supported: true, maxAgeSeconds: 120 },
@@ -48,6 +49,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       edit: { mode: 'unsupported' },
       forward: { mode: 'unsupported', preservesAuthor: false },
     },
+    reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 20 },
   }
 
   readonly client: QQNTClient
@@ -94,6 +96,20 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
+  async getContacts(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMUserPage<QQMediaLocator>> {
+    const page = await this.client.getContacts({ cursor: query.cursor, limit: query.limit })
+    return {
+      users: page.users.map((user) => ({
+        id: user.id,
+        firstName: user.name,
+        username: user.numericId,
+        avatar: user.avatar ? mapMedia(user.avatar) : undefined,
+        metadata: user.numericId ? { qq: user.numericId } : undefined,
+      })),
+      nextCursor: page.nextCursor,
+    }
+  }
+
   async getHistory(
     _session: PlatformSession,
     conversation: IMConversationRef,
@@ -115,6 +131,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       id: user.id,
       firstName: user.name,
       username: user.numericId,
+      avatar: user.avatar ? mapMedia(user.avatar) : undefined,
       metadata: user.numericId ? { qq: user.numericId } : undefined,
     }
   }
@@ -207,6 +224,64 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       },
     })
   }
+
+  async getAvailableReactions(
+    _session: PlatformSession,
+    _target: IMReactionTarget,
+  ): Promise<IMReactionContext> {
+    return this.client.getReactionCatalog() as Promise<IMReactionContext>
+  }
+
+  async getMessageReactions(
+    _session: PlatformSession,
+    target: import('@mtproto-relay/bridge').IMMessageTarget,
+  ): Promise<IMReactionContext> {
+    return this.client.getMessageReactions(target.conversationId, target.targetId) as Promise<IMReactionContext>
+  }
+
+  async setMessageReactions(
+    _session: PlatformSession,
+    target: import('@mtproto-relay/bridge').IMMessageTarget,
+    reactionKeys: readonly string[],
+  ): Promise<IMReactionContext> {
+    return this.client.setMessageReactions(
+      target.conversationId, target.targetId, reactionKeys,
+    ) as Promise<IMReactionContext>
+  }
+
+  async *downloadReactionResource(
+    _session: PlatformSession,
+    resource: IMReactionResource,
+    options: IMDownloadOptions = {},
+  ): AsyncIterable<Uint8Array> {
+    const locator = resource.locator
+    if (!locator || typeof locator !== 'object' || Array.isArray(locator)
+      || typeof locator.filePath !== 'string') throw new Error('QQ reaction resource has no file path')
+    let transferred = 0
+    yield* this.client.downloadMedia({
+      messageId: `reaction:${locator.filePath}`,
+      elementId: `reaction:${locator.filePath}`,
+      chatType: 1,
+      peerUid: '',
+      kind: 'image',
+      fileName: locator.filePath.split('/').at(-1) ?? 'reaction.png',
+      filePath: locator.filePath,
+      fileSize: resource.size === undefined ? undefined : String(resource.size),
+    }, {
+      offset: options.offset,
+      limit: options.limit,
+      signal: options.signal,
+      onChunk: async (size) => {
+        transferred += size
+        await options.onProgress?.({
+          phase: 'download',
+          mediaIndex: 0,
+          transferredBytes: transferred,
+          totalBytes: resource.size,
+        })
+      },
+    })
+  }
 }
 
 function mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
@@ -214,6 +289,7 @@ function mapConversation(input: WireConversation): IMConversation<QQMediaLocator
     id: input.id,
     kind: input.kind,
     title: input.title,
+    avatar: input.avatar ? mapMedia(input.avatar) : undefined,
     metadata: {
       qqPeerUid: input.peerUid,
       qq: input.peerUin,
@@ -243,6 +319,8 @@ function mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
     senderId: input.senderId,
     timestamp: input.timestamp,
     outgoing: input.outgoing,
+    metadata: input.msgSeq ? { qqMsgSeq: input.msgSeq } : undefined,
+    reactionContext: input.reactionContext as IMReactionContext | undefined,
     content: {
       parts: input.parts.map((part) =>
         part.type === 'text' ? { type: 'text' as const, text: part.text } : {
@@ -256,11 +334,19 @@ function mapEvent(input: WireEvent): IMEvent<QQMediaLocator> {
   if (input.type === 'message') {
     return { type: 'message', conversation: mapConversation(input.conversation), message: mapMessage(input.message) }
   }
-  return {
+  if (input.type === 'message-delete') return {
     type: 'message-delete',
     eventId: input.eventId,
     conversation: mapConversation(input.conversation),
     messageIds: input.messageIds,
+    timestamp: input.timestamp,
+  }
+  return {
+    type: 'message-reactions',
+    eventId: input.eventId,
+    conversation: mapConversation(input.conversation),
+    target: input.target,
+    context: input.context as IMReactionContext,
     timestamp: input.timestamp,
   }
 }

@@ -277,11 +277,26 @@ export class DialogRpc {
   }
 
   async getContacts(): Promise<tl.contacts.RawContacts> {
-    const dialogs = (await this._loadDialogs({ limit: 500 }))
-      .filter((dialog) => dialog.conversation.kind === 'direct')
-      .sort((left, right) =>
-      left.conversation.title.localeCompare(right.conversation.title))
-    const users = await Promise.all(dialogs.map((dialog) => this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
+    const platformUsers: IMUser<any>[] = []
+    if (this._platform.getContacts) {
+      let cursor: string | undefined
+      do {
+        const page = await this._platform.getContacts(this._session, { cursor, limit: 500 })
+        platformUsers.push(...page.users)
+        cursor = page.nextCursor
+      } while (cursor && platformUsers.length < 100_000)
+    }
+    const users = platformUsers.length
+      ? platformUsers
+        .sort((left, right) => left.firstName.localeCompare(right.firstName))
+        .map((user) => {
+          this._conversations.set(user.id, { id: user.id, kind: 'direct', title: user.firstName })
+          return this._makePeerUser(user)
+        })
+      : await Promise.all((await this._loadDialogs({ limit: 500 }))
+        .filter((dialog) => dialog.conversation.kind === 'direct')
+        .sort((left, right) => left.conversation.title.localeCompare(right.conversation.title))
+        .map((dialog) => this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
     return {
       _: 'contacts.contacts',
       contacts: users.map((user) => ({ _: 'contact', userId: user.id, mutual: true })),
