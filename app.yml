@@ -108,3 +108,7 @@
           - external
           - packages
           - app.yml
+- id: mtproto-debug
+  name: '@mtproto-relay/mtproto-debug'
+  config:
+    maxEvents: 2000
