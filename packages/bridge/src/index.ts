@@ -19,13 +19,7 @@ import { UpdateManager } from './update-manager.js'
 import { IMStickerService } from './sticker-provider.js'
 import { StickerRpc } from './sticker-rpc.js'
 import { ReactionRpc } from './reaction-rpc.js'
-import { createTelegramResources } from '@mtproto-relay/telegram-resources'
-
-const telegramResources = createTelegramResources()
-if (!telegramResources) throw new Error(
-  'Telegram official TGS assets not found. '
-  + 'Run `tgs-assets fetch` in the telegram-reactions-tgs repo to generate them.',
-)
+import { TelegramResourceService } from './resource-provider.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -36,6 +30,7 @@ export * from './update-manager.js'
 export * from './sticker-provider.js'
 export * from './sticker-rpc.js'
 export * from './reaction-rpc.js'
+export * from './resource-provider.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
@@ -68,6 +63,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const generation = {}
   const platforms = new IMPlatformService(ctx)
   const stickerProviders = new IMStickerService(ctx)
+  const resources = new TelegramResourceService(ctx)
   const registry = platforms.registry
   const routeId = config.routeId ?? 'bridge:default'
   const rpc = ctx.mtproto.route(routeId)
@@ -93,7 +89,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, stickerProviders.registry,
-    store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
+    resources, store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
   )
 
   ctx.mtproto.resolveRoute(async (requestContext, request) => {
@@ -242,8 +238,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     state.dialogs = new DialogRpc(
       platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
-      new ReactionRpc(platform, session, dcId, telegramResources),
-      telegramResources,
+      new ReactionRpc(platform, session, dcId),
+      resources,
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -472,6 +468,7 @@ function createSessionResolver(
   ctx: Context,
   registry: PlatformRegistry,
   stickerProviders: import('./sticker-provider.js').StickerProviderRegistry,
+  resources: TelegramResourceService,
   store: MessageStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
@@ -508,8 +505,8 @@ function createSessionResolver(
         }
         state.dialogs = new DialogRpc(
           platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
-          new ReactionRpc(platform, session, dcId, telegramResources),
-          telegramResources,
+          new ReactionRpc(platform, session, dcId),
+          resources,
         )
         return state
       })()

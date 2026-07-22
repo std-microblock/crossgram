@@ -5,8 +5,12 @@
   "type": "module",
   "main": "./src/index.ts",
   "cordis": {},
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
   "dependencies": {
     "@mtcute/core": "^0.30.3",
+    "@mtproto-relay/bridge": "workspace:*",
     "long": "^5.3.0"
   }
 }
