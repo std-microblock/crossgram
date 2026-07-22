@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import type {
-  QQMediaLocator, WireConversation, WireEvent, WireMemberPage, WireMessage,
+  QQMediaLocator, WireConversation, WireEvent, WireMemberPage, WireMessage, WireReactionContext,
 } from './protocol.js'
 
 export interface QQNTClientOptions {
@@ -32,6 +32,13 @@ export class QQNTClient {
     return this.json(`/dialogs${queryString(query)}`)
   }
 
+  getContacts(query: { cursor?: string, limit?: number } = {}): Promise<{
+    users: Array<{ id: string, numericId?: string, name: string, avatar?: import('./protocol.js').WireMedia }>
+    nextCursor?: string
+  }> {
+    return this.json(`/contacts${queryString(query)}`)
+  }
+
   getConversation(id: string): Promise<WireConversation> {
     return this.json(`/conversations/${encodeURIComponent(id)}`)
   }
@@ -53,7 +60,13 @@ export class QQNTClient {
     return this.json(`/conversations/${encodeURIComponent(id)}/members${queryString(query)}`)
   }
 
-  getUser(id: string): Promise<{ id: string, numericId?: string, name: string, avatarUrl?: string } | null> {
+  getUser(id: string): Promise<{
+    id: string
+    numericId?: string
+    name: string
+    avatarUrl?: string
+    avatar?: import('./protocol.js').WireMedia
+  } | null> {
     return this.json(`/users/${encodeURIComponent(id)}`, true)
   }
 
@@ -93,6 +106,26 @@ export class QQNTClient {
       method: 'POST',
       body: JSON.stringify({ conversationId, messageIds, forEveryone }),
       headers: this.headers({ 'content-type': 'application/json' }),
+    })
+  }
+
+  getReactionCatalog(): Promise<WireReactionContext> {
+    return this.json('/reactions/catalog')
+  }
+
+  getMessageReactions(conversationId: string, messageId: string): Promise<WireReactionContext> {
+    return this.json(`/messages/reactions${queryString({ conversationId, messageId })}`)
+  }
+
+  setMessageReactions(
+    conversationId: string,
+    messageId: string,
+    reactionKeys: readonly string[],
+  ): Promise<WireReactionContext> {
+    return this.json('/messages/reactions', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ conversationId, messageId, reactionKeys }),
     })
   }
 

@@ -126,6 +126,11 @@ export interface IMConversationMemberPage<TMediaLocator = unknown> {
   nextCursor?: string
 }
 
+export interface IMUserPage<TMediaLocator = unknown> {
+  users: IMUser<TMediaLocator>[]
+  nextCursor?: string
+}
+
 export type IMMediaKind = 'image' | 'file'
 
 export interface IMMedia<TLocator = unknown> {
@@ -200,7 +205,7 @@ export interface IMReactionSummary {
 export interface IMReactionResource {
   version: number
   format: 'static' | 'video'
-  mimeType: 'image/webp' | 'video/webm'
+  mimeType: 'image/webp' | 'image/png' | 'video/webm'
   width: number
   height: number
   size?: number
@@ -335,6 +340,8 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMMessage<TMediaLocator>>
 
   getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage<TMediaLocator>>
+  /** Address-book contacts. This is intentionally separate from recent dialogs. */
+  getContacts?(session: PlatformSession, query?: IMPageQuery): Promise<IMUserPage<TMediaLocator>>
   getHistory?(
     session: PlatformSession,
     conversation: IMConversationRef,

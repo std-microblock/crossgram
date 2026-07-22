@@ -33,7 +33,9 @@ export interface WireMessage {
   senderId: string
   timestamp: number
   outgoing: boolean
+  msgSeq?: string
   parts: Array<{ type: 'text', text: string } | { type: 'media', media: WireMedia }>
+  reactionContext?: WireReactionContext
 }
 
 export interface WireConversation {
@@ -44,6 +46,7 @@ export interface WireConversation {
   peerUin: string
   chatType: 1 | 2
   avatarUrl?: string
+  avatar?: WireMedia
   unreadCount?: number
   lastMessage?: WireMessage
 }
@@ -57,6 +60,38 @@ export type WireEvent =
       messageIds: string[]
       timestamp: number
     }
+  | {
+      type: 'message-reactions'
+      eventId: string
+      conversation: WireConversation
+      target: { conversationId: string, messageId: string, targetId: string }
+      context: WireReactionContext
+      timestamp: number
+    }
+
+export interface WireReactionContext {
+  available: Array<{
+    key: string
+    title?: string
+    presentation:
+      | { type: 'emoji', emoticon: string }
+      | {
+          type: 'custom'
+          alt: string
+          resource: {
+            version: number
+            format: 'static'
+            mimeType: 'image/png'
+            width: number
+            height: number
+            size?: number
+            locator: { filePath: string }
+          }
+        }
+  }>
+  reactions: Array<{ key: string, count: number, selected?: boolean }>
+  maxSelected: number
+}
 
 export interface WireMemberPage {
   members: Array<{

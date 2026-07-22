@@ -17,6 +17,78 @@ const session: PlatformSession = {
 }
 
 describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
+  it('loads the full buddy contacts independently from recent dialogs and streams avatars', async () => {
+    const contacts = await platform.getContacts(session, { limit: 500 })
+    expect(contacts.users).toHaveLength(17)
+    expect(new Set(contacts.users.map((user) => user.id)).size).toBe(17)
+    expect(contacts.users.filter((user) => !user.firstName.trim())).toEqual([])
+    expect(contacts.users.filter((user) => !user.avatar).map((user) => user.id)).toEqual([])
+    const withAvatar = contacts.users[0]
+    let bytes = 0
+    for await (const chunk of platform.downloadMedia(session, withAvatar!.avatar!, { limit: 128 })) bytes += chunk.length
+    expect(bytes).toBe(128)
+  }, 60_000)
+
+  it('loads QQ cloud reactions, streams a SysFace resource, and writes a group reaction', async () => {
+    let context = await platform.getAvailableReactions(session, { conversationId: groupTargets[0] })
+    for (let attempt = 0; !context.available.length && attempt < 20; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      context = await platform.getAvailableReactions(session, { conversationId: groupTargets[0] })
+    }
+    const custom = context.available.find((item) => item.key === '1:14'
+      && item.presentation.type === 'custom')
+    const emoji = context.available.find((item) => item.key === '2:128522')
+    expect(custom).toBeTruthy()
+    expect(emoji).toBeTruthy()
+    if (!custom || custom.presentation.type !== 'custom' || !emoji) return
+    let resourceBytes = 0
+    for await (const chunk of platform.downloadReactionResource(
+      session, custom.presentation.resource, { limit: 128 },
+    )) resourceBytes += chunk.length
+    expect(resourceBytes).toBe(128)
+
+    const target = await platform.client.resolveConversation('group', groupTargets[0])
+    const sent = await platform.sendMessage(session, { id: target.id }, {
+      parts: [{ type: 'text', text: `[reaction IMPlatform e2e] ${new Date().toISOString()}` }],
+    })
+    const received = Promise.withResolvers<Extract<import('@mtproto-relay/bridge').IMEvent, { type: 'message-reactions' }>>()
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      if (event.type !== 'message-reactions' || event.target.messageId !== sent.id) return
+      const selected = new Set(event.context.reactions.filter((item) => item.selected).map((item) => item.key))
+      if (selected.has(custom.key) && selected.has(emoji.key)) received.resolve(event)
+    })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const updated = await platform.setMessageReactions(session, {
+        conversationId: target.id, messageId: sent.id, targetId: sent.id,
+      }, [custom.key, emoji.key])
+      expect(updated.reactions.filter((item) => item.selected).map((item) => item.key).sort())
+        .toEqual([custom.key, emoji.key].sort())
+      await expect(Promise.race([
+        received.promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('reaction SSE event timed out')), 20_000)),
+      ])).resolves.toMatchObject({ type: 'message-reactions', target: { messageId: sent.id } })
+    } finally {
+      await unsubscribe()
+    }
+  }, 90_000)
+
+  it('streams an image through IMPlatform only to MicroBlock', async () => {
+    const target = await platform.client.resolveConversation('direct', directTarget)
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    )
+    const sent = await platform.sendMessage(session, { id: target.id }, {
+      parts: [{ type: 'media', media: {
+        kind: 'image', name: 'platform-qqnt-e2e.png', mimeType: 'image/png', size: png.length,
+        source: { size: png.length, async *stream() { yield png } },
+      } }],
+    })
+    expect(sent.conversationId).toBe(target.id)
+    expect(sent.content.parts).toMatchObject([{ type: 'media', media: { kind: 'image' } }])
+  }, 180_000)
+
   it('sends through the IMPlatform API only to MicroBlock and the two approved groups', async () => {
     const targets = [
       await platform.client.resolveConversation('direct', directTarget),
