@@ -1447,6 +1447,7 @@ describe('bridge login e2e', () => {
         ],
         state: { pts: 4, seq: 3 },
       })
+      expect(await ctx.database.get('mtproto_update_delivery', {})).toEqual([])
 
       const chatId = pushed.chats[0].id
       expect(await callRpc(client, key, sid, {

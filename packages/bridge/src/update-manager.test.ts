@@ -70,7 +70,7 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
-  it('advances durable state and targets only auth keys bound to the source platform session', async () => {
+  it('advances persisted state and targets only auth keys bound to the source platform session', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = {
       id: 'group', kind: 'group', title: 'Group',
@@ -294,7 +294,7 @@ describe('UpdateManager', () => {
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
   })
 
-  it('recovers persisted messages and mutations through updates.getDifference', async () => {
+  it('recovers journaled messages and mutations through updates.getDifference', async () => {
     const { ctx, store } = await createHarness()
     const registry = new PlatformRegistry([[session.platformId, platform]])
     const manager = new UpdateManager(ctx.database, registry, store, () => 0)
@@ -344,12 +344,31 @@ describe('UpdateManager', () => {
       await manager.publish(session, { event: { type: 'message', conversation, message }, result })
     }
 
-    const retained = await ctx.database.select('mtproto_update_delivery', {
-      platformSessionId: session.platformSessionId,
-    }).orderBy('pts').execute()
+    const retained = await store.getUpdateDeliveriesAfter(session.platformSessionId, 1)
     expect(retained.map((delivery) => delivery.pts)).toEqual([3, 4, 5])
     await expect(manager.getDifference(session.platformSessionId, {
       _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
     })).resolves.toEqual({ _: 'updates.differenceTooLong', pts: 5 })
+  })
+
+  it('keeps state but reports differenceTooLong after the in-memory journal is restarted', async () => {
+    const { ctx, store } = await createHarness()
+    const registry = new PlatformRegistry([[session.platformId, platform]])
+    const manager = new UpdateManager(ctx.database, registry, store, () => 0)
+    const conversation: IMConversation = { id: 'restart-gap', kind: 'direct', title: 'Restart Gap' }
+    const message: IMMessage = {
+      id: 'restart-gap-message', conversationId: conversation.id, senderId: 'alice', timestamp: 200,
+      content: { parts: [{ type: 'text', text: 'lost with process memory' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 1 })
+
+    const restartedStore = new MessageStore(ctx.database)
+    const restarted = new UpdateManager(ctx.database, registry, restartedStore, () => 0)
+    expect(await restartedStore.getUpdateDeliveriesAfter(session.platformSessionId, 1)).toEqual([])
+    await expect(restarted.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toEqual({ _: 'updates.differenceTooLong', pts: 2 })
   })
 })
