@@ -14,6 +14,7 @@ import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector, unwrapRpcRequest } from '../rpc/dispatcher.js'
 import type { RpcDispatch, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
 import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
+import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 
 // TL constructor IDs for MTProto service messages
 const RPC_RESULT_ID = 0xF35C6D01
@@ -96,6 +97,7 @@ export class ServerSession {
     private readonly _dispatcher: RpcDispatch,
     private readonly _authKeyData: AuthKeyDataStore,
     private readonly _keyStore?: AuthKeyStore,
+    private readonly _debug?: MtprotoDebugListener,
   ) {
     this._permAuthKey = new ServerAuthKey(_crypto, _log, _readerMap)
     this._msgIdGen = new ServerMessageIdGenerator()
@@ -132,7 +134,7 @@ export class ServerSession {
   sendUpdate(update: tl.TypeUpdates): void {
     if (!this._authorized) return
     const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
-    this._sendEncryptedMessage(serialized, true)
+    this._sendEncryptedMessage(serialized, true, update)
   }
 
   get authKeyId(): Uint8Array | null {
@@ -292,10 +294,18 @@ export class ServerSession {
       const recvPlain = async (): Promise<Uint8Array> => {
         if (handshakeError) throw handshakeError
         if (unencryptedQueue.length > 0) {
-          return unencryptedQueue.shift()!
+          const value = unencryptedQueue.shift()!
+          this._capturePlain(value, 'client->server')
+          return value
         }
         return new Promise((resolve, reject) => {
-          waitingForMessage = { resolve, reject }
+          waitingForMessage = {
+            resolve: (value) => {
+              this._capturePlain(value, 'client->server')
+              resolve(value)
+            },
+            reject,
+          }
         })
       }
 
@@ -307,6 +317,7 @@ export class ServerSession {
         writer.long(messageId)
         writer.uint(length)
         writer.object(message)
+        this._capture('server->client', 'handshake', message, { messageId })
         this._connection.send(writer.result())
       }
 
@@ -427,6 +438,10 @@ export class ServerSession {
     if (constructorId === 0x73f1f8dc) {
       // msg_container: vector of { msg_id, seqno, length, body }
       const count = reader.uint()
+      this._capture('client->server', 'message', { _: 'msg_container', count }, {
+        messageId: msgId,
+        seqNo,
+      })
       for (let i = 0; i < count; i++) {
         const innerMsgId = reader.long(true)
         const innerSeqNo = reader.uint()
@@ -442,6 +457,8 @@ export class ServerSession {
     reader.pos = savedPos
     obj = reader.object() as { _: string }
     const objId = obj._
+
+    this._capture('client->server', 'message', obj, { messageId: msgId, seqNo })
 
     this._log.verbose('<<< %s (msg_id=%s, seq=%d)', objId, msgId.toString(16), seqNo)
 
@@ -503,7 +520,7 @@ export class ServerSession {
       pingId: ping.pingId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, pong)
-    this._sendEncryptedMessage(serialized, true)
+    this._sendEncryptedMessage(serialized, true, pong)
   }
 
   private _handlePingDelayDisconnect(ping: mtp.RawMt_ping_delay_disconnect): void {
@@ -513,7 +530,7 @@ export class ServerSession {
       pingId: ping.pingId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, pong)
-    this._sendEncryptedMessage(serialized, true)
+    this._sendEncryptedMessage(serialized, true, pong)
   }
 
   private _handleGetFutureSalts(msgId: Long, req: mtp.RawMt_get_future_salts): void {
@@ -561,7 +578,7 @@ export class ServerSession {
         writer.uint(s.validUntil)
         writer.long(s.salt)
       }
-      this._sendEncryptedMessage(writer.result(), false)
+      this._sendEncryptedMessage(writer.result(), false, response)
     } catch (e) {
       this._log.error('failed to serialize future_salts: %s', e)
     }
@@ -578,7 +595,7 @@ export class ServerSession {
     }
 
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, response)
-    this._sendEncryptedMessage(serialized, false)
+    this._sendEncryptedMessage(serialized, false, response)
   }
 
   private _handleDestroySession(msgId: Long, req: mtp.RawMt_destroy_session): void {
@@ -587,7 +604,7 @@ export class ServerSession {
       sessionId: req.sessionId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, response)
-    this._sendEncryptedMessage(serialized, false)
+    this._sendEncryptedMessage(serialized, false, response)
   }
 
   private _handleDestroyAuthKey(_msgId: Long): void {
@@ -595,7 +612,7 @@ export class ServerSession {
       _: 'mt_destroy_auth_key_ok',
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, response)
-    this._sendEncryptedMessage(serialized, false)
+    this._sendEncryptedMessage(serialized, false, response)
   }
 
   /**
@@ -635,7 +652,7 @@ export class ServerSession {
     writer.uint(RPC_RESULT_ID)
     writer.long(msgId)
     writer.uint(BOOL_TRUE_ID)
-    this._sendEncryptedMessage(writer.result(), true)
+    this._sendEncryptedMessage(writer.result(), true, { _: 'rpc_result', reqMsgId: msgId, result: { _: 'boolTrue' } })
     this._log.verbose('>>> rpc_result boolTrue for bindTempAuthKey %s', msgId.toString(16))
   }
 
@@ -788,7 +805,7 @@ export class ServerSession {
     writer.long(reqMsgId)
     writer.raw(resultBytes)
 
-    this._sendEncryptedMessage(writer.result(), true)
+    this._sendEncryptedMessage(writer.result(), true, { _: 'rpc_result', reqMsgId: reqMsgId, result })
     if (kind === 'mt_rpc_error') {
       const error = result as mtp.RawMt_rpc_error
       this._log.warn(
@@ -821,7 +838,7 @@ export class ServerSession {
    * The message body should NOT include the msg_id/seq_no/length header —
    * we add it here.
    */
-  private _sendEncryptedMessage(body: Uint8Array, isContentRelated: boolean): void {
+  private _sendEncryptedMessage(body: Uint8Array, isContentRelated: boolean, payload?: unknown): void {
     const msgId = this._msgIdGen.getMessageId(isContentRelated)
     const seqNo = this._msgIdGen.getSeqNo(isContentRelated)
 
@@ -832,7 +849,59 @@ export class ServerSession {
     writer.raw(body)
 
     const encrypted = this._sendKey.encryptMessage(writer.result(), this._serverSalt, this._sessionId)
+    this._capture('server->client', 'message', payload ?? this._decodeDebugBody(body), {
+      messageId: msgId,
+      seqNo,
+    })
     this._connection.send(encrypted)
+  }
+
+  private _capturePlain(data: Uint8Array, direction: MtprotoDebugEvent['direction']): void {
+    try {
+      const reader = new TlBinaryReader(this._readerMap, data, 20)
+      const payload = reader.object()
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+      const messageId = new Long(view.getInt32(8, true), view.getInt32(12, true))
+      this._capture(direction, 'handshake', payload, { messageId })
+    } catch (error) {
+      this._capture(direction, 'handshake', { _: 'unparsed', bytes: data.length }, {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  private _decodeDebugBody(body: Uint8Array): unknown {
+    try {
+      return new TlBinaryReader(this._readerMap, body).object()
+    } catch {
+      const constructorId = body.length >= 4
+        ? new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(0, true)
+        : null
+      return { _: 'unparsed', constructorId, bytes: body.length }
+    }
+  }
+
+  private _capture(
+    direction: MtprotoDebugEvent['direction'],
+    phase: MtprotoDebugEvent['phase'],
+    payload: unknown,
+    extra: Pick<MtprotoDebugEvent, 'messageId' | 'seqNo' | 'error'> = {},
+  ): void {
+    if (!this._debug) return
+    try {
+      this._debug({
+        direction,
+        phase,
+        connectionId: 'unknown',
+        timestamp: Date.now(),
+        authKeyId: this._permAuthKey.ready ? new Uint8Array(this._permAuthKey.id) : null,
+        sessionId: this._sessionId,
+        payload,
+        ...extra,
+      })
+    } catch (error) {
+      this._log.warn('MTProto debug listener failed: %s', error instanceof Error ? error.message : error)
+    }
   }
 
   // ── Acks ──

@@ -19,6 +19,7 @@ import { ObfuscatedPacketCodec, type tl } from '@mtcute/core'
 import Long from 'long'
 import { Context } from 'cordis'
 import { Mtproto } from '../service.js'
+import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import { generateRsaKeyPair } from '../crypto/rsa-keygen.js'
 import { bareVector } from '../rpc/dispatcher.js'
@@ -295,7 +296,7 @@ function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap 
   return reader
 }
 
-async function startServer(): Promise<{
+async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   port: number
   pubKey: any
   uploadedParts: Uint8Array[]
@@ -309,6 +310,7 @@ async function startServer(): Promise<{
   const ctx = new Context()
   const fiber = ctx.plugin(Mtproto, { port: 0, host: '127.0.0.1', rsaKey, log })
   await fiber
+  if (onDebug) ctx.mtproto.onDebug.add(onDebug)
 
   ctx.mtproto.register('help.getConfig', async () => ({
     _: 'config', flags: 0, defaultP2pContacts: false, preloadFeaturedStickers: false,
@@ -398,7 +400,8 @@ async function startServer(): Promise<{
 describe('e2e: obfuscated transport + PFS + RPC', () => {
   it('completes perm handshake and answers an RPC over the perm key', async () => {
     await crypto.initialize?.()
-    const { port, pubKey, stop } = await startServer()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop } = await startServer((event) => debugEvents.push(event))
     try {
       const client = await TestClient.connect(port)
       const perm = await doClientHandshake(client, pubKey, false)
@@ -413,6 +416,33 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const config = await readRpcResult(client, perm)
       expect(config._).toBe('config')
       expect(config.thisDc).toBe(1)
+
+      expect(debugEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          direction: 'client->server', phase: 'connection',
+          connectionId: 'conn-1', payload: expect.objectContaining({ _: 'connection_opened' }),
+        }),
+        expect.objectContaining({
+          direction: 'client->server', phase: 'handshake', connectionId: 'conn-1',
+          messageId: expect.any(Long), payload: expect.objectContaining({ _: 'mt_req_pq_multi' }),
+        }),
+        expect.objectContaining({
+          direction: 'server->client', phase: 'handshake', connectionId: 'conn-1',
+          messageId: expect.any(Long), payload: expect.objectContaining({ _: 'mt_resPQ' }),
+        }),
+        expect.objectContaining({
+          direction: 'client->server', phase: 'message', connectionId: 'conn-1',
+          messageId: expect.any(Long), seqNo: expect.any(Number),
+          payload: expect.objectContaining({ _: 'help.getConfig' }),
+        }),
+        expect.objectContaining({
+          direction: 'server->client', phase: 'message', connectionId: 'conn-1',
+          messageId: expect.any(Long), seqNo: expect.any(Number),
+          payload: expect.objectContaining({
+            _: 'rpc_result', result: expect.objectContaining({ _: 'config' }),
+          }),
+        }),
+      ]))
 
       const getUsers = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'users.getUsers',

@@ -15,6 +15,8 @@ import { RpcDispatcher, unwrapRpcRequest, type RpcHandler, type RpcResult } from
 import type { ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
 import { createCordisLogManager } from './cordis-logger.js'
+import { Emitter } from '@fuman/utils'
+import type { MtprotoDebugEvent } from './debug.js'
 
 export interface MtprotoConfig {
   /** TCP port to listen on (default: 4430; 0 = ephemeral) */
@@ -62,6 +64,7 @@ export interface RouteRegistrar {
 export class Mtproto extends Service {
   readonly rsaKey: ServerRsaKey
   readonly dispatcher = new RpcDispatcher()
+  readonly onDebug = new Emitter<MtprotoDebugEvent>()
 
   private readonly _crypto: ICryptoProvider
   private readonly _readerMap: TlReaderMap
@@ -75,6 +78,7 @@ export class Mtproto extends Service {
   private readonly _routeRefs = new Map<string, number>()
   private readonly _authRoutes = new Map<string, string>()
   private readonly _routeResolvers = new Set<RouteResolver>()
+  private _connectionSeq = 0
   private _server: Server | null = null
 
   constructor(ctx: Context, public config: MtprotoConfig = {}) {
@@ -206,11 +210,21 @@ export class Mtproto extends Service {
   }
 
   private _handleConnection(socket: Socket): void {
+    const connectionId = `conn-${++this._connectionSeq}`
     const connLog = this._log.create(`conn:${socket.remoteAddress}:${socket.remotePort}`)
     socket.setNoDelay(true)
     socket.setKeepAlive(true)
     this._sockets.add(socket)
     socket.on('close', () => this._sockets.delete(socket))
+
+    this.onDebug.emit({
+      direction: 'client->server', phase: 'connection', connectionId,
+      timestamp: Date.now(), payload: {
+        _: 'connection_opened',
+        remoteAddress: socket.remoteAddress ?? null,
+        remotePort: socket.remotePort ?? null,
+      },
+    })
 
     const connection = new ServerConnection(socket, this._crypto, connLog)
     const session = new ServerSession(
@@ -224,9 +238,16 @@ export class Mtproto extends Service {
       { dispatch: (ctx, request) => this._dispatch(ctx, request) },
       this._authKeyData,
       this._authKeyStore,
+      (event) => this.onDebug.emit({ ...event, connectionId }),
     )
     this._sessions.add(session)
-    connection.onClose.add(() => this._sessions.delete(session))
+    connection.onClose.add(() => {
+      this._sessions.delete(session)
+      this.onDebug.emit({
+        direction: 'client->server', phase: 'connection', connectionId,
+        timestamp: Date.now(), payload: { _: 'connection_closed' },
+      })
+    })
 
     session.start()
     connection.start()
