@@ -181,7 +181,7 @@ type IMEvent =
 
 `message-edit` 必须携带编辑后的完整 `IMMessage`，并保持原 message ID；`message-delete.messageIds` 可以使用主 ID 或任意 `sourceIds` alias。mutation 的 `eventId` 是平台侧 opaque 操作 ID，同一 edit/delete 重投时必须保持不变。
 
-message 和 mutation 事件先事务入库并生成/复用投影，再通过持久化 delivery/outbox 保留 `pts/seq`，最后只向绑定该 platform session 的 auth key 推送 `updateNew*`、`updateEdit*` 或 `updateDelete*`。发送失败时平台重投会复用原 `pts/seq`；已成功发布的 event ID 不会重复推送。
+message 和 mutation 事件先事务入库并生成/复用投影，再通过进程内有界 delivery journal 保留 `pts/seq`，最后只向绑定该 platform session 的 auth key 推送 `updateNew*`、`updateEdit*` 或 `updateDelete*`。`pts/seq` 状态仍持久化；进程重启会丢失增量 journal，客户端下次同步时收到 `updates.differenceTooLong` 并走全量同步。发送失败时平台重投会复用原 `pts/seq`；已成功发布的 event ID 不会重复推送。
 
 撤回采用 tombstone：消息不会再出现在 dialogs/history/getMessages，但外部 ID、alias 和 Telegram message ID 映射继续保留，确保撤回 update、重试和重启后的 ID 都稳定。
 
@@ -345,7 +345,7 @@ interface IMReactionContext {
 }
 ```
 
-bridge 将 context 独立入库，通过持久化 delivery/outbox 发布 `updateMessageReactions`。Custom resource 的 synthetic Document ID 包含 session、conversation、native key 和 resource version，避免跨 guild 泄漏或资源更新后命中旧缓存。
+bridge 将 context 独立入库，通过进程内 delivery journal 发布 `updateMessageReactions`。Custom resource 的 synthetic Document ID 包含 session、conversation、native key 和 resource version，避免跨 guild 泄漏或资源更新后命中旧缓存。
 
 `messages.getAvailableReactions` 是 bridge 账号级 Telegram 标准 reaction catalog；`ChatFull.availableReactions` 才是平台针对当前 chat 返回的允许集合。
 

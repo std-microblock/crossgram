@@ -229,7 +229,8 @@ describe('MessageStore', () => {
     expect(first).toMatchObject({ messageId: 1, eventKey: 'event:first', pts: 2, seq: 1 })
     expect(second).toMatchObject({ messageId: 2, eventKey: 'event:second', pts: 4, seq: 2 })
     expect(repeated).toEqual(first)
-    expect(await ctx.database.get('mtproto_update_delivery', {})).toHaveLength(2)
+    expect(await store.getUpdateDeliveriesAfter(session.platformSessionId, 1)).toEqual([first, second])
+    expect(await ctx.database.get('mtproto_update_delivery', {})).toEqual([])
   })
 
   it('rejects mismatched conversation payloads without writing partial rows', async () => {

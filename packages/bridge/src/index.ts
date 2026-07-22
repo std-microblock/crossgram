@@ -27,6 +27,7 @@ export * from './message-actions.js'
 export * from './platform-manager.js'
 export * from './upload-manager.js'
 export * from './update-manager.js'
+export * from './update-journal.js'
 export * from './sticker-provider.js'
 export * from './sticker-rpc.js'
 export * from './reaction-rpc.js'
@@ -130,6 +131,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   ctx.effect(async () => {
     await ctx.database.prepared()
+    // Delivery rows from pre-memory-journal versions are no longer used.
+    await ctx.database.remove('mtproto_update_delivery', {})
     await subscriptions.startActiveSessions()
     return () => subscriptions.stop()
   })

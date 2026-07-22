@@ -7,6 +7,7 @@ import {
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
   type IMReactionContext, type JsonValue, type PlatformSession,
 } from './platform.js'
+import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
 
 export interface IngestResult {
   message: IMMessageRow
@@ -57,7 +58,8 @@ export class MessageStore {
 
   constructor(
     private readonly _database: Database,
-    private readonly _updateDeliveryRetention = UPDATE_DELIVERY_RETENTION,
+    updateDeliveryRetention = UPDATE_DELIVERY_RETENTION,
+    private readonly _updateJournal: UpdateDeliveryJournal = new MemoryUpdateDeliveryJournal(updateDeliveryRetention),
   ) {}
 
   async ingest(
@@ -463,55 +465,47 @@ export class MessageStore {
   }
 
   async prepareUpdateDelivery(eventKey: string, platformSessionId: string, ptsCount: number, date: number) {
-    const delivery = await this._write(() => this._database.withTransaction(async (database) => {
-      const [existing] = await database.get('mtproto_update_delivery', { eventKey })
+    return this._write(async () => {
+      const existing = await this._updateJournal.get(eventKey)
       if (existing) return existing
-      const [current] = await database.get('mtproto_update_state', { platformSessionId })
-      const state = {
-        platformSessionId,
-        pts: (current?.pts ?? 1) + ptsCount,
-        qts: current?.qts ?? 0,
-        seq: (current?.seq ?? 0) + 1,
-        date,
-      }
-      await database.upsert('mtproto_update_state', [state])
-      return database.create('mtproto_update_delivery', {
+
+      const state = await this._database.withTransaction(async (database) => {
+        const [current] = await database.get('mtproto_update_state', { platformSessionId })
+        const next = {
+          platformSessionId,
+          pts: (current?.pts ?? 1) + ptsCount,
+          qts: current?.qts ?? 0,
+          seq: (current?.seq ?? 0) + 1,
+          date,
+        }
+        await database.upsert('mtproto_update_state', [next])
+        return next
+      })
+      return this._updateJournal.create({
         eventKey, platformSessionId, pts: state.pts, ptsCount, seq: state.seq, date, published: false,
         payload: '',
       })
-    }))
-    await this.pruneUpdateDeliveries(platformSessionId)
-    return delivery
+    })
   }
 
   async getUpdateDelivery(eventKey: string) {
-    const [delivery] = await this._database.get('mtproto_update_delivery', { eventKey })
-    return delivery
+    return this._updateJournal.get(eventKey)
   }
 
   async markUpdatePublished(eventKey: string): Promise<void> {
-    await this._write(async () => {
-      await this._database.set('mtproto_update_delivery', { eventKey }, { published: true })
-    })
+    await this._write(() => this._updateJournal.markPublished(eventKey))
   }
 
   async setUpdatePayload(eventKey: string, payload: string): Promise<void> {
-    await this._write(async () => {
-      await this._database.set('mtproto_update_delivery', { eventKey }, { payload })
-    })
+    await this._write(() => this._updateJournal.setPayload(eventKey, payload))
   }
 
   async getPendingUpdateDeliveries(platformSessionId: string) {
-    return this._database.select('mtproto_update_delivery', {
-      platformSessionId, published: false,
-    }).orderBy('pts').execute()
+    return this._updateJournal.getPending(platformSessionId)
   }
 
   async getUpdateDeliveriesAfter(platformSessionId: string, pts: number, limit = 101) {
-    return this._database.select('mtproto_update_delivery', {
-      platformSessionId,
-      pts: { $gt: pts },
-    }).orderBy('pts').limit(limit).execute()
+    return this._updateJournal.getAfter(platformSessionId, pts, limit)
   }
 
   async getConversation(
@@ -714,19 +708,7 @@ export class MessageStore {
   }
 
   async pruneUpdateDeliveries(platformSessionId: string): Promise<void> {
-    const retain = Math.max(0, Math.trunc(this._updateDeliveryRetention))
-    await this._write(async () => {
-      const rows = await this._database.select('mtproto_update_delivery', { platformSessionId })
-        .orderBy('messageId', 'desc')
-        .limit(retain + 1)
-        .execute()
-      if (rows.length <= retain) return
-      const cutoff = rows.at(-1)!.messageId
-      await this._database.remove('mtproto_update_delivery', {
-        platformSessionId,
-        messageId: { $lte: cutoff },
-      })
-    })
+    await this._write(() => this._updateJournal.prune(platformSessionId))
   }
 
   private async _write<T>(callback: () => Promise<T>): Promise<T> {
