@@ -1,0 +1,294 @@
+import type { Context } from 'cordis'
+import type {
+  IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
+  IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
+  IMPageQuery, IMPlatform, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
+} from '@mtproto-relay/bridge'
+import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
+import { QQNTClient, type QQNTClientOptions } from './client.js'
+import type {
+  QQMediaLocator, WireConversation, WireEvent, WireMedia, WireMessage,
+} from './protocol.js'
+
+export interface Config {
+  endpoint?: string
+  token?: string
+}
+
+export const name = 'im-platform-qqnt'
+export const inject = ['imPlatform']
+
+export function apply(ctx: Context, config: Config = {}): void {
+  const id = resolvePlatformPluginId(ctx, 'qqnt')
+  ctx.imPlatform.register(new QQNTPlatform(config), id)
+}
+
+export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
+  readonly platformKind = 'qq'
+  readonly capabilities: PlatformCapabilities = {
+    history: true,
+    send: {
+      text: true,
+      images: true,
+      files: true,
+      mixed: true,
+      maxTextLength: 20_000,
+      // QQ's path-based native API can accept several images, but the local
+      // streaming endpoint intentionally keeps one request == one media stream.
+      maxMedia: 1,
+    },
+    conversations: { groups: true, channels: false, subchannels: false },
+    members: { list: true, administrators: true, permissions: false },
+    avatars: { users: false, conversations: false },
+    messageActions: {
+      delete: {
+        own: { supported: true, maxAgeSeconds: 120 },
+        others: { supported: true, maxAgeSeconds: 120 },
+      },
+      edit: { mode: 'unsupported' },
+      forward: { mode: 'unsupported', preservesAuthor: false },
+    },
+  }
+
+  readonly client: QQNTClient
+
+  constructor(options: QQNTClientOptions = {}) {
+    this.client = new QQNTClient(options)
+  }
+
+  async subscribe(
+    _session: PlatformSession,
+    handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+  ): Promise<Unsubscribe> {
+    const controller = new AbortController()
+    const running = this.subscribeLoop(handler, controller.signal)
+    return async () => {
+      controller.abort()
+      await running
+    }
+  }
+
+  private async subscribeLoop(
+    handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        await this.client.subscribe((event) => handler(mapEvent(event)), signal)
+      } catch {
+        if (signal.aborted) return
+      }
+      await abortableDelay(1_000, signal)
+    }
+  }
+
+  async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
+    const response = await this.client.getDialogs({ cursor: query.cursor, limit: query.limit })
+    return {
+      dialogs: response.conversations.map((conversation) => ({
+        conversation: mapConversation(conversation),
+        unreadCount: conversation.unreadCount ?? 0,
+        lastMessage: conversation.lastMessage ? mapMessage(conversation.lastMessage) : undefined,
+      })),
+      nextCursor: response.nextCursor,
+    }
+  }
+
+  async getHistory(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    query: IMHistoryQuery = {},
+  ): Promise<IMHistoryPage<QQMediaLocator>> {
+    const response = await this.client.getHistory(conversation.id, {
+      cursor: query.cursor,
+      limit: query.limit,
+      beforeId: query.before?.id,
+      afterId: query.after?.id,
+    })
+    return { messages: response.messages.map(mapMessage), nextCursor: response.nextCursor }
+  }
+
+  async getUser(_session: PlatformSession, userId: string): Promise<IMUser<QQMediaLocator> | null> {
+    const user = await this.client.getUser(userId)
+    if (!user) return null
+    return {
+      id: user.id,
+      firstName: user.name,
+      username: user.numericId,
+      metadata: user.numericId ? { qq: user.numericId } : undefined,
+    }
+  }
+
+  async getConversationMembers(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    query: IMPageQuery = {},
+  ): Promise<IMConversationMemberPage<QQMediaLocator>> {
+    const page = await this.client.getMembers(conversation.id, { cursor: query.cursor, limit: query.limit })
+    return {
+      members: page.members.map((member): IMConversationMember<QQMediaLocator> => ({
+        user: {
+          id: member.user.id,
+          firstName: member.user.name,
+          username: member.user.numericId,
+          metadata: member.user.numericId ? { qq: member.user.numericId } : undefined,
+        },
+        role: member.role,
+        permissions: permissions(member.role),
+      })),
+      total: page.total,
+      nextCursor: page.nextCursor,
+    }
+  }
+
+  async getConversationMember(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+  ): Promise<IMConversationMember<QQMediaLocator> | null> {
+    let cursor: string | undefined
+    do {
+      const page = await this.getConversationMembers(session, conversation, { cursor, limit: 500 })
+      const found = page.members.find((member) => member.user.id === userId)
+      if (found) return found
+      cursor = page.nextCursor
+    } while (cursor)
+    return null
+  }
+
+  async sendMessage(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    content: IMMessageInput,
+    options: IMTransferOptions = {},
+  ): Promise<IMMessage<QQMediaLocator>> {
+    const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n') || undefined
+    const mediaParts = content.parts.filter((part) => part.type === 'media')
+    if (content.parts.some((part) => part.type === 'sticker')) throw new Error('QQNT native stickers are not implemented')
+    if (mediaParts.length > 1) throw new Error('QQNT streaming transport supports at most one media per logical message')
+    const part = mediaParts[0]
+    const media = part?.type === 'media' ? {
+      kind: part.media.kind,
+      name: part.media.name ?? `upload-${Date.now()}`,
+      mimeType: part.media.mimeType,
+      source: part.media.source,
+    } : undefined
+    return mapMessage(await this.client.sendMessage(conversation.id, text, media, options))
+  }
+
+  async deleteMessages(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    messageIds: readonly string[],
+    options: import('@mtproto-relay/bridge').IMDeleteMessagesOptions,
+  ): Promise<void> {
+    await this.client.deleteMessages(conversation.id, messageIds, options.forEveryone)
+  }
+
+  async *downloadMedia(
+    _session: PlatformSession,
+    media: IMMedia<QQMediaLocator>,
+    options: IMDownloadOptions = {},
+  ): AsyncIterable<Uint8Array> {
+    if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
+    let transferred = 0
+    yield* this.client.downloadMedia(media.locator, {
+      offset: options.offset,
+      limit: options.limit,
+      signal: options.signal,
+      onChunk: async (size) => {
+        transferred += size
+        await options.onProgress?.({
+          phase: 'download',
+          mediaIndex: 0,
+          transferredBytes: transferred,
+          totalBytes: options.limit === undefined ? media.size : Math.min(options.limit, media.size ?? options.limit),
+        })
+      },
+    })
+  }
+}
+
+function mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
+  return {
+    id: input.id,
+    kind: input.kind,
+    title: input.title,
+    metadata: {
+      qqPeerUid: input.peerUid,
+      qq: input.peerUin,
+      chatType: input.chatType,
+    },
+  }
+}
+
+function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
+  return {
+    id: input.id,
+    kind: input.kind,
+    name: input.name,
+    mimeType: input.mimeType,
+    size: input.size,
+    width: input.width,
+    height: input.height,
+    locator: input.locator,
+  }
+}
+
+function mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
+  return {
+    id: input.id,
+    sourceIds: input.sourceIds,
+    conversationId: input.conversationId,
+    senderId: input.senderId,
+    timestamp: input.timestamp,
+    outgoing: input.outgoing,
+    content: {
+      parts: input.parts.map((part) =>
+        part.type === 'text' ? { type: 'text' as const, text: part.text } : {
+          type: 'media' as const, media: mapMedia(part.media),
+        }),
+    },
+  }
+}
+
+function mapEvent(input: WireEvent): IMEvent<QQMediaLocator> {
+  if (input.type === 'message') {
+    return { type: 'message', conversation: mapConversation(input.conversation), message: mapMessage(input.message) }
+  }
+  return {
+    type: 'message-delete',
+    eventId: input.eventId,
+    conversation: mapConversation(input.conversation),
+    messageIds: input.messageIds,
+    timestamp: input.timestamp,
+  }
+}
+
+function permissions(role: 'owner' | 'administrator' | 'member') {
+  const administrator = role === 'owner' || role === 'administrator'
+  return {
+    manageConversation: administrator,
+    manageMembers: administrator,
+    deleteAnyMessage: administrator,
+    editAnyMessage: false,
+    pinMessages: administrator,
+    inviteMembers: true,
+  }
+}
+
+async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(done, ms)
+    signal.addEventListener('abort', done, { once: true })
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+  })
+}
+
+export type { QQMediaLocator } from './protocol.js'
+export { QQNTClient } from './client.js'
