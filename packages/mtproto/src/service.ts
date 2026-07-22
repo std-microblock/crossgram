@@ -245,6 +245,7 @@ export class Mtproto extends Service {
       this._authKeyStore,
       (event) => this.onDebug.emit({ ...event, connectionId }),
       (authKeyId, layer) => this._rememberApiLayer(authKeyId, layer),
+      (authKeyId) => this._authApiLayers.get(bytesHex(authKeyId)),
     )
     this._sessions.add(session)
     connection.onClose.add(() => {

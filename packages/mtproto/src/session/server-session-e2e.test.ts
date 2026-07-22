@@ -19,6 +19,7 @@ import { ObfuscatedPacketCodec, type tl } from '@mtcute/core'
 import Long from 'long'
 import { Context } from 'cordis'
 import { Mtproto } from '../service.js'
+import { CURRENT_API_LAYER } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import { generateRsaKeyPair } from '../crypto/rsa-keygen.js'
@@ -125,6 +126,24 @@ async function sendPlain(client: TestClient, obj: { _: string, [k: string]: unkn
   w.uint(len)
   w.object(obj)
   await client.send(w.result())
+}
+
+function serializeInitializedRpc(query: object, layer = CURRENT_API_LAYER): Uint8Array {
+  return TlBinaryWriter.serializeObject(__tlWriterMap, {
+    _: 'invokeWithLayer',
+    layer,
+    query: {
+      _: 'initConnection',
+      apiId: 1,
+      deviceModel: 'mtproto-relay test',
+      systemVersion: 'test',
+      appVersion: 'test',
+      systemLangCode: 'en',
+      langPack: '',
+      langCode: 'en',
+      query,
+    },
+  } as { _: string })
 }
 
 /** Telegram Desktop's TCP endpoint probe uses the legacy req_pq constructor. */
@@ -415,6 +434,14 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const req = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' })
       await client.send(clientEncrypt(perm, req, perm.salt, sessionLong, 4))
 
+      const notInitialized = await readRpcResult(client, perm)
+      expect(notInitialized).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'CONNECTION_NOT_INITED',
+      })
+
+      const initializedReq = serializeInitializedRpc({ _: 'help.getConfig' })
+      await client.send(clientEncrypt(perm, initializedReq, perm.salt, sessionLong, 5))
+
       const config = await readRpcResult(client, perm)
       expect(config._).toBe('config')
       expect(config.thisDc).toBe(1)
@@ -478,7 +505,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       await bindTempAuthKey(client, perm, temp, sessionLong)
 
       // Now a real RPC over the temp key.
-      const req = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' })
+      const req = serializeInitializedRpc({ _: 'help.getConfig' })
       await client.send(clientEncrypt(temp, req, temp.salt, sessionLong, 6))
       const config = await readRpcResult(client, temp)
       expect(config._).toBe('config')
@@ -594,7 +621,8 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const perm = await doClientHandshake(c1, pubKey, false)
       const firstSession = new Long(0x11111111, 0x11111111)
       const appConfigReq = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getAppConfig', hash: 0 } as { _: string })
-      await c1.send(clientEncrypt(perm, appConfigReq, perm.salt, firstSession, 4))
+      const initializedAppConfigReq = serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 })
+      await c1.send(clientEncrypt(perm, initializedAppConfigReq, perm.salt, firstSession, 4))
       const firstConfig = await readRpcResult(c1, perm)
       expect(firstConfig).toMatchObject({ _: 'help.appConfig', hash: 1 })
       c1.close()
@@ -625,7 +653,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const perm = await doClientHandshake(api, pubKey, false)
       const apiSession = new Long(0x33333333, 0x33333333)
       const configReq = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' })
-      await api.send(clientEncrypt(perm, configReq, perm.salt, apiSession, 4))
+      await api.send(clientEncrypt(perm, serializeInitializedRpc({ _: 'help.getConfig' }), perm.salt, apiSession, 4))
       await readRpcResult(api, perm)
       api.close()
 
@@ -685,6 +713,15 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     try {
       const api = await TestClient.connect(port)
       const perm = await doClientHandshake(api, pubKey, false)
+      const apiSession = new Long(0x46464646, 0x46464646)
+      await api.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        perm.salt,
+        apiSession,
+        4,
+      ))
+      expect((await readRpcResult(api, perm))._).toBe('config')
       api.close()
 
       const config = await TestClient.connect(port)
