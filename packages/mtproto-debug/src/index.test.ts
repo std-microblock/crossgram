@@ -46,16 +46,17 @@ describe('MTProto debug Cordis entry', () => {
     emit('first.call')
     emit('second.call')
     emit('third.call')
+    await data.pause()
     expect(data.events.map(event => event.name)).toEqual(['second.call', 'third.call'])
     expect(data.dropped).toBe(1)
 
-    await data.pause()
     emit('paused.call')
     expect(data.events.map(event => event.name)).toEqual(['second.call', 'third.call'])
     expect(data.capturing).toBe(false)
 
     await data.start()
     emit('resumed.call')
+    await data.pause()
     expect(data.events.map(event => event.name)).toEqual(['third.call', 'resumed.call'])
     expect(data.dropped).toBe(2)
 
