@@ -105,9 +105,13 @@ export class DialogRpc {
       .slice()
       .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0))
 
-    // Allocate each peer's message IDs oldest-first before exposing topMessage.
-    // This preserves Telegram's monotonic ID semantics for offset/max/min filters.
-    await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
+    // A persisted dialog lastMessage was already projected during getDialogs.
+    // Re-fetching history for every such row turns a single dialog-list request
+    // into up to 100 upstream history calls. The no-store path still needs the
+    // history pass to allocate Telegram message IDs oldest-first.
+    await Promise.all(all.map((dialog) => this._store && dialog.lastMessage
+      ? Promise.resolve()
+      : this._loadHistory(dialog.conversation.id)))
     const materialized = await Promise.all(all.map((dialog) => this._materializeDialog(dialog)))
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
@@ -1218,10 +1222,25 @@ export class DialogRpc {
         ? [await this._getPeerUser(source.lastMessage.senderId)]
         : []
     const chat = source.conversation.kind === 'direct' ? undefined : this._makeChat(source.conversation)
-    const projected = source.lastMessage
+    let projected = source.lastMessage
       ? this._historyCache.get(platformPeerId)?.filter((item) =>
           item.source.id === source.lastMessage!.id || item.source.sourceIds?.includes(source.lastMessage!.id))
       : undefined
+    if (source.lastMessage && !projected?.length && this._store) {
+      const stored = await this._store.findProjectedByPlatformId(
+        this._session.platformSessionId,
+        platformPeerId,
+        source.lastMessage.id,
+      )
+      projected = stored?.parts.map((part): MaterializedMessage => ({
+        source: stored.source,
+        tlId: part.tlMessageId,
+        ordinal: part.ordinal,
+        groupedId: part.groupedId ?? undefined,
+        media: stored.media.find((entry) => entry.id === part.mediaId),
+      })).sort((left, right) => right.tlId - left.tlId)
+      for (const item of projected ?? []) this._rememberMessage(item)
+    }
     const top = projected?.[0]
     const topMessage = top?.tlId ?? (source.lastMessage ? this._messageId(platformPeerId, source.lastMessage.id) : 0)
     const message = source.lastMessage
