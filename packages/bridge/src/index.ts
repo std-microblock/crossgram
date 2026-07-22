@@ -29,6 +29,7 @@ if (!telegramResources) throw new Error(
 
 export * from './platform.js'
 export * from './message-store.js'
+export * from './message-actions.js'
 export * from './platform-manager.js'
 export * from './upload-manager.js'
 export * from './update-manager.js'
