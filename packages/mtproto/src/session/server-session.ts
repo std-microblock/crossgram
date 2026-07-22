@@ -894,7 +894,7 @@ export class ServerSession {
         phase,
         connectionId: 'unknown',
         timestamp: Date.now(),
-        authKeyId: this._permAuthKey.ready ? new Uint8Array(this._permAuthKey.id) : null,
+        authKeyId: this._sendKey.ready ? new Uint8Array(this._sendKey.id) : null,
         sessionId: this._sessionId,
         payload,
         ...extra,
