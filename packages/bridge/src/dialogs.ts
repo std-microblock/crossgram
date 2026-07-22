@@ -105,13 +105,12 @@ export class DialogRpc {
       .slice()
       .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0))
 
-    // A persisted dialog lastMessage was already projected during getDialogs.
-    // Re-fetching history for every such row turns a single dialog-list request
-    // into up to 100 upstream history calls. The no-store path still needs the
-    // history pass to allocate Telegram message IDs oldest-first.
-    await Promise.all(all.map((dialog) => this._store && dialog.lastMessage
-      ? Promise.resolve()
-      : this._loadHistory(dialog.conversation.id)))
+    // PlatformDataService has already persisted any previews exposed by
+    // getDialogs. Never fan a stored dialog-list request out into upstream
+    // history calls, including for rows whose platform preview is temporarily
+    // absent during cold start. The no-store path still allocates Telegram IDs
+    // oldest-first from history.
+    if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
     const materialized = await Promise.all(all.map((dialog) => this._materializeDialog(dialog)))
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {

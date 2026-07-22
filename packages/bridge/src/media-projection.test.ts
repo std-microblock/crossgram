@@ -109,6 +109,18 @@ describe('rich-media projection', () => {
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
+  it('does not fetch history for a stored dialog whose cold-start preview is absent', async () => {
+    const store = await createStore()
+    const getHistory = vi.fn(async () => ({ messages: [album] }))
+    const getDialogs = vi.fn(async () => ({ dialogs: [{ conversation, unreadCount: 0 }] }))
+    const result = await new DialogRpc({ ...platform, getDialogs, getHistory }, session, store)
+      .getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+
+    expect(getHistory).not.toHaveBeenCalled()
+    expect(result.dialogs).toMatchObject([{ topMessage: 0 }])
+    expect(result.messages).toEqual([])
+  })
+
   it('expands mixed media into consecutive ungrouped Telegram messages', async () => {
     const store = await createStore()
     const rpc = new DialogRpc(platform, session, store)
