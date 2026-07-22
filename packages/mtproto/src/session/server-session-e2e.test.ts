@@ -302,6 +302,7 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   uploadedParts: Uint8Array[]
   transferAuthKeyIds: Uint8Array[]
   downloadBytes: Uint8Array
+  broadcastUpdate: (update: tl.TypeUpdates) => void
   stop: () => Promise<void>
 }> {
   const rsaKey = generateRsaKeyPair()
@@ -393,6 +394,7 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
   return {
     port: ctx.mtproto.port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes,
+    broadcastUpdate: (update) => ctx.mtproto.broadcastUpdate(update),
     stop: () => Promise.resolve(fiber.dispose()),
   }
 }
@@ -488,7 +490,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
 
   it('uses the complete AyuGram layer 224 profile and retains it for later calls', async () => {
     await crypto.initialize?.()
-    const { port, pubKey, stop } = await startServer()
+    const { port, pubKey, stop, broadcastUpdate } = await startServer()
     try {
       const client = await TestClient.connect(port)
       const perm = await doClientHandshake(client, pubKey, false)
@@ -500,10 +502,30 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 20, hash: Long.ZERO,
       }
 
+      // Authorization can complete before the first invokeWithLayer request.
+      // An update delivered in this window must be held until the server knows
+      // that this client expects the layer-224 Message constructor.
+      broadcastUpdate({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewMessage',
+          message: {
+            _: 'message', id: 99,
+            fromId: { _: 'peerUser', userId: 42 },
+            peerId: { _: 'peerUser', userId: 42 },
+            date: nowSec(), message: 'queued before layer negotiation',
+          },
+          pts: 1, ptsCount: 1,
+        }],
+        users: [], chats: [], date: nowSec(), seq: 1,
+      } as unknown as tl.TypeUpdates)
+
       const wrapped = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'invokeWithLayer', layer: 224, query: getDialogs,
       } as { _: string })
       await client.send(clientEncrypt(perm, wrapped, perm.salt, sessionLong, 8))
+      const queued = clientDecrypt(perm, await client.read(), ayugramReaderMap!).object() as any
+      expect(queued.updates).toMatchObject([{ message: { _: 'message', id: 99, message: 'queued before layer negotiation' } }])
       const first = await readRpcResult(client, perm, ayugramReaderMap!)
       expect(first.messages).toMatchObject([{ _: 'message', message: 'layer:224' }])
       expect(first.users).toMatchObject([{ _: 'user', firstName: 'Alice' }])
@@ -521,6 +543,42 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       expect(fullUser).toMatchObject({
         _: 'users.userFull', fullUser: { _: 'userFull', id: 42, commonChatsCount: 0 },
       })
+
+      // Media connections reuse the permanent auth key but normally do not send
+      // invokeWithLayer themselves. They must inherit the layer negotiated by
+      // the main connection before receiving the same account update.
+      const media = await TestClient.connect(port)
+      const mediaSession = new Long(0x24242424, 0x24242424)
+      const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_ping', pingId: Long.fromNumber(224),
+      } as unknown as { _: string })
+      await media.send(clientEncrypt(perm, ping, perm.salt, mediaSession, 20))
+      await readEncryptedObject(media, perm, 'mt_pong')
+      broadcastUpdate({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewMessage',
+          message: {
+            _: 'message', id: 100,
+            fromId: { _: 'peerUser', userId: 42 },
+            peerId: { _: 'peerUser', userId: 42 },
+            date: nowSec(), message: 'shared layer update',
+          },
+          pts: 2, ptsCount: 1,
+        }],
+        users: [], chats: [], date: nowSec(), seq: 2,
+      } as unknown as tl.TypeUpdates)
+      let mediaUpdate: any
+      for (;;) {
+        const frame = await media.read()
+        const probe = clientDecrypt(perm, frame, __tlReaderMap)
+        const constructor = probe.uint()
+        if (constructor === 0x62d6b459) continue // msgs_ack emitted for the ping
+        mediaUpdate = clientDecrypt(perm, frame, ayugramReaderMap!).object()
+        break
+      }
+      expect(mediaUpdate.updates).toMatchObject([{ message: { _: 'message', id: 100, message: 'shared layer update' } }])
+      media.close()
       client.close()
     } finally {
       await stop()
