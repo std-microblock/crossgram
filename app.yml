@@ -14,6 +14,9 @@
 - id: bridge01
   name: '@mtproto-relay/bridge'
   config: {}
+- id: telegram-resources
+  name: '@mtproto-relay/telegram-resources'
+  config: {}
 - id: relay01
   name: '@mtproto-relay/relay'
   disabled: true

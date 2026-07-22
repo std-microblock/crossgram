@@ -1,4 +1,5 @@
 import type { tl } from '@mtcute/core'
+import type { TelegramResourceProvider } from '@mtproto-relay/bridge'
 import Long from 'long'
 import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
@@ -77,7 +78,13 @@ function assetsOf(item: { assets: AssetRef[] | Record<string, AssetRef> }): Asse
   return Array.isArray(item.assets) ? item.assets : Object.values(item.assets)
 }
 
-export class TelegramResources {
+function requireAsset(assets: Record<string, AssetRef>, name: string): AssetRef {
+  const asset = assets[name]
+  if (!asset) throw new Error(`Telegram resource index is missing required asset: ${name}`)
+  return asset
+}
+
+export class TelegramResources implements TelegramResourceProvider {
   private readonly _index: IndexFile
   private readonly _assetsBase: URL
   private readonly _idToFile = new Map<string, string>()
@@ -97,7 +104,10 @@ export class TelegramResources {
     }
   }
 
-  private _toDoc(meta: DocMeta): tl.RawDocument {
+  private _toDoc(meta: DocMeta): tl.RawDocument
+  private _toDoc(meta: DocMeta | undefined): tl.RawDocument | undefined
+  private _toDoc(meta: DocMeta | undefined): tl.RawDocument | undefined {
+    if (!meta) return
     return {
       _: 'document',
       id: Long.fromString(meta.id),
@@ -107,9 +117,13 @@ export class TelegramResources {
       mimeType: meta.mimeType,
       size: meta.size,
       dcId: meta.dcId,
-      attributes: meta.attributes as unknown as tl.TypeDocumentAttribute[],
-      thumbs: meta.thumbs as unknown as tl.TypePhotoSize[],
-      videoThumbs: (meta.videoThumbs ?? []) as unknown as tl.TypeVideoSize[],
+      attributes: meta.attributes.map(reviveTlValue) as tl.TypeDocumentAttribute[],
+      thumbs: meta.thumbs.length
+        ? meta.thumbs.map(reviveTlValue) as tl.TypePhotoSize[]
+        : undefined,
+      videoThumbs: meta.videoThumbs?.length
+        ? meta.videoThumbs.map(reviveTlValue) as tl.TypeVideoSize[]
+        : undefined,
     }
   }
 
@@ -120,8 +134,7 @@ export class TelegramResources {
       for (const a of assetsOf(e)) {
         if (seen.has(a.doc.id)) continue
         seen.add(a.doc.id)
-        const d = this._toDoc(a.doc)
-        if (d) out.push(d)
+        out.push(this._toDoc(a.doc))
       }
     }
     return out
@@ -133,18 +146,23 @@ export class TelegramResources {
       hash: this._index.feeds.reactions ?? 0,
       reactions: this._index.reactions.map((r) => ({
         _: 'availableReaction',
-        flags: (r.inactive ? 1 : 0) | (r.premium ? 4 : 0),
+        inactive: r.inactive || undefined,
+        premium: r.premium || undefined,
         reaction: r.emoji,
         title: r.title,
-        staticIcon: this._toDoc(r.assets.static_icon?.doc),
-        appearAnimation: this._toDoc(r.assets.appear_animation?.doc),
-        selectAnimation: this._toDoc(r.assets.select_animation?.doc),
-        activateAnimation: this._toDoc(r.assets.activate_animation?.doc),
-        effectAnimation: this._toDoc(r.assets.effect_animation?.doc),
+        staticIcon: this._toDoc(requireAsset(r.assets, 'static_icon').doc),
+        appearAnimation: this._toDoc(requireAsset(r.assets, 'appear_animation').doc),
+        selectAnimation: this._toDoc(requireAsset(r.assets, 'select_animation').doc),
+        activateAnimation: this._toDoc(requireAsset(r.assets, 'activate_animation').doc),
+        effectAnimation: this._toDoc(requireAsset(r.assets, 'effect_animation').doc),
         aroundAnimation: this._toDoc(r.assets.around_animation?.doc),
         centerIcon: this._toDoc(r.assets.center_icon?.doc),
       })),
     }
+  }
+
+  getAvailableReactions(): tl.messages.RawAvailableReactions {
+    return this.availableReactions()
   }
 
   stickerSet(kind: StickerKind): tl.messages.RawStickerSet {
@@ -164,26 +182,34 @@ export class TelegramResources {
     }
   }
 
+  getStickerSet(kind: StickerKind): tl.messages.RawStickerSet {
+    return this.stickerSet(kind)
+  }
+
   availableEffects(): tl.messages.RawAvailableEffects {
     const documents = this._collectDocs(this._index.effects)
     return {
       _: 'messages.availableEffects',
       hash: this._index.feeds.effects ?? 0,
-      effects: this._index.effects.map((e) => {
-        const hasStatic = !!e.assets.static_icon
-        const hasAnim = !!e.assets.effect_animation
-        return {
-          _: 'availableEffect',
-          flags: (hasStatic ? 1 : 0) | (hasAnim ? 2 : 0) | (e.premium_required ? 4 : 0),
-          id: Long.fromString(e.id),
-          emoticon: e.emoticon,
-          staticIconId: Long.fromString(e.assets.static_icon.doc.id),
-          effectStickerId: Long.fromString(e.assets.effect_sticker.doc.id),
-          effectAnimationId: Long.fromString(e.assets.effect_animation.doc.id),
-        }
-      }),
+      effects: this._index.effects.map((e) => ({
+        _: 'availableEffect',
+        premiumRequired: e.premium_required || undefined,
+        id: Long.fromString(e.id),
+        emoticon: e.emoticon,
+        staticIconId: e.assets.static_icon
+          ? Long.fromString(e.assets.static_icon.doc.id)
+          : undefined,
+        effectStickerId: Long.fromString(requireAsset(e.assets, 'effect_sticker').doc.id),
+        effectAnimationId: e.assets.effect_animation
+          ? Long.fromString(e.assets.effect_animation.doc.id)
+          : undefined,
+      })),
       documents,
     }
+  }
+
+  getAvailableEffects(): tl.messages.RawAvailableEffects {
+    return this.availableEffects()
   }
 
   /** 按 doc id 取本地字节；返回 undefined 表示这不是官方资源（交给 bridge 其它逻辑处理）。 */
@@ -216,9 +242,28 @@ export class TelegramResources {
   }
 }
 
-/** 惰性创建；资源缺失（未 fetch）时返回 undefined，bridge 退回到原有占位逻辑。 */
-export function createTelegramResources(
-  assetsBase?: URL,
-): TelegramResources | undefined {
-    return new TelegramResources(assetsBase)
+function reviveTlValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reviveTlValue)
+  if (!value || typeof value !== 'object') return value
+
+  const input = value as Record<string, unknown>
+  const output: Record<string, unknown> = {}
+  for (const [key, nested] of Object.entries(input)) {
+    if (key === 'bytes' && typeof nested === 'string') {
+      output[key] = Buffer.from(nested, 'hex')
+    } else if (
+      (key === 'id' || key === 'accessHash' || key === 'documentId')
+      && (typeof nested === 'string' || typeof nested === 'number')
+    ) {
+      output[key] = Long.fromString(String(nested))
+    } else {
+      output[key] = reviveTlValue(nested)
+    }
+  }
+  return output
+}
+
+/** 直接创建资源 provider；通常应通过本包的 Cordis 插件完成注册。 */
+export function createTelegramResources(assetsBase?: URL): TelegramResources {
+  return new TelegramResources(assetsBase)
 }

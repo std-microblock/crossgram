@@ -22,6 +22,7 @@ import { Mtproto, AbridgedPacketCodec, generateRsaKeyPair } from '@mtproto-relay
 import * as bridge from '@mtproto-relay/bridge'
 import * as relay from '@mtproto-relay/relay'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
+import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
@@ -237,6 +238,7 @@ async function startApp(options: {
       authKeyStorePath: options.authKeyStorePath,
     }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
+    ctx.plugin(telegramResourcesPlugin),
     ...(options.relayConfig ? [ctx.plugin(relay, options.relayConfig)] : []),
     options.platform
       ? ctx.plugin(makePlatformPlugin(options.platform.id, options.platform.adapter))
@@ -770,7 +772,7 @@ describe('bridge login e2e', () => {
         [{ _: 'help.getPeerProfileColors', hash: 0 }, 'help.peerColors'],
         [{ _: 'messages.getAvailableReactions', hash: 0 }, 'messages.availableReactions'],
         [{ _: 'account.getDefaultEmojiStatuses', hash: Long.ZERO }, 'account.emojiStatuses'],
-        [{ _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetAnimatedEmoji' }, hash: 0 }, 'messages.stickerSetNotModified'],
+        [{ _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetAnimatedEmoji' }, hash: 0 }, 'messages.stickerSet'],
         [{ _: 'help.getPromoData' }, 'help.promoDataEmpty'],
         [{ _: 'help.getTermsOfServiceUpdate' }, 'help.termsOfServiceUpdateEmpty'],
         [{ _: 'messages.getEmojiGroups', hash: 0 }, 'messages.emojiGroups'],
@@ -869,18 +871,18 @@ describe('bridge login e2e', () => {
         _: 'messages.availableReactions',
         reactions: expect.arrayContaining([
           expect.objectContaining({
-            reaction: '👍', title: 'Like',
+            reaction: '👍', title: 'Thumbs Up',
             staticIcon: expect.objectContaining({ mimeType: 'image/webp' }),
-            appearAnimation: expect.objectContaining({ mimeType: 'image/webp' }),
+            appearAnimation: expect.objectContaining({ mimeType: 'application/x-tgsticker' }),
           }),
-          expect.objectContaining({ reaction: '❤️', title: 'Love' }),
-          expect.objectContaining({ reaction: '😂', title: 'Laugh' }),
-          expect.objectContaining({ reaction: '😢', title: 'Sad' }),
+          expect.objectContaining({ reaction: '❤', title: 'Red Heart' }),
+          expect.objectContaining({ reaction: '😂', title: 'Face with Tears of Joy' }),
+          expect.objectContaining({ reaction: '😢', title: 'Crying Face' }),
           expect.objectContaining({ reaction: '🔥', title: 'Fire' }),
-          expect.objectContaining({ reaction: '🎉', title: 'Party' }),
-          expect.objectContaining({ reaction: '👏', title: 'Clap' }),
-          expect.objectContaining({ reaction: '🤔', title: 'Thinking' }),
-          expect.objectContaining({ reaction: '🤯', title: 'Mind Blown' }),
+          expect.objectContaining({ reaction: '🎉', title: 'Party Popper' }),
+          expect.objectContaining({ reaction: '👏', title: 'Clapping Hands' }),
+          expect.objectContaining({ reaction: '🤔', title: 'Thinking Face' }),
+          expect.objectContaining({ reaction: '🤯', title: 'Exploding Head' }),
         ]),
       })
       const topReactions = await callRpc(resumed, key, resumedSid, {

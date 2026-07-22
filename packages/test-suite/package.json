@@ -16,6 +16,7 @@
     "@mtproto-relay/mtproto": "workspace:*",
     "@mtproto-relay/relay": "workspace:*",
     "@mtproto-relay/platform-static": "workspace:*",
+    "@mtproto-relay/telegram-resources": "workspace:*",
     "cordis": "^4.0.0-rc.5",
     "long": "^5.3.0"
   }
