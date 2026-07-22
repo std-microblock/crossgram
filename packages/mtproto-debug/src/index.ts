@@ -5,7 +5,7 @@ import { serializeDebugEvent } from './serialize.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 
 export const name = 'mtproto-debug'
-export const inject = ['mtproto', 'webui', 'timer']
+export const inject = ['mtproto', 'webui']
 
 export interface Config {
   maxEvents?: number
@@ -23,6 +23,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const maxEvents = config.maxEvents ?? 2_000
   let nextId = 0
   let pending: CapturedMtprotoEvent[] = []
+  let flushTimer: ReturnType<typeof setTimeout> | undefined
 
   const data: MtprotoDebugData = {
     capturing: !(config.initiallyPaused ?? false),
@@ -33,10 +34,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       entry.mutate(value => { value.capturing = true })
     },
     async pause() {
+      if (flushTimer) clearTimeout(flushTimer)
+      flushTimer = undefined
       flush()
       entry.mutate(value => { value.capturing = false })
     },
     async clear() {
+      if (flushTimer) clearTimeout(flushTimer)
+      flushTimer = undefined
       pending = []
       entry.mutate((value) => {
         value.events.splice(0)
@@ -65,7 +70,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     })
   }
-  const scheduleFlush = ctx.throttle(flush, 50)
+  const scheduleFlush = () => {
+    if (flushTimer) return
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined
+      flush()
+    }, 50)
+  }
   const onDebug = (event: MtprotoDebugEvent) => {
     if (!data.capturing) return
     pending.push(serializeDebugEvent(event, ++nextId))
@@ -75,6 +86,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.mtproto.onDebug.add(onDebug)
   ctx.effect(() => () => {
     ctx.mtproto.onDebug.remove(onDebug)
+    if (flushTimer) clearTimeout(flushTimer)
+    flushTimer = undefined
     pending = []
   }, 'mtproto-debug.capture')
 }
