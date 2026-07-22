@@ -23,6 +23,30 @@ export interface PlatformCapabilities {
     channels: boolean
     subchannels: boolean
   }
+  members?: {
+    list: boolean
+    administrators: boolean
+    permissions: boolean
+  }
+  avatars?: {
+    users: boolean
+    conversations: boolean
+  }
+  messageActions?: {
+    delete: {
+      own: IMMessageDeleteRule
+      others: IMMessageDeleteRule
+    }
+    edit: {
+      mode: 'native' | 'delete-and-resend' | 'unsupported'
+      /** Omitted means the platform does not impose a fixed age limit. */
+      maxAgeSeconds?: number
+    }
+    forward: {
+      mode: 'native' | 'copy' | 'unsupported'
+      preservesAuthor: boolean
+    }
+  }
   stickers?: {
     native: boolean
     upload: boolean
@@ -37,6 +61,12 @@ export interface PlatformCapabilities {
   }
 }
 
+export interface IMMessageDeleteRule {
+  supported: boolean
+  /** Omitted means messages of any age may be deleted. */
+  maxAgeSeconds?: number
+}
+
 /** An authenticated platform session (created by the HTTP auth flow). */
 export interface PlatformSession {
   platformSessionId: string
@@ -46,12 +76,12 @@ export interface PlatformSession {
   metadata: JsonObject
 }
 
-export interface IMUser {
+export interface IMUser<TMediaLocator = unknown> {
   id: string
   firstName: string
   lastName?: string
   username?: string
-  avatarUrl?: string
+  avatar?: IMMedia<TMediaLocator>
   metadata?: JsonObject
 }
 
@@ -59,19 +89,46 @@ export interface IMConversationRef {
   id: string
 }
 
-export interface IMConversation extends IMConversationRef {
+export interface IMConversation<TMediaLocator = unknown> extends IMConversationRef {
   kind: IMConversationKind
   title: string
   /** Parent channel/category/thread owner on hierarchical platforms such as Discord. */
   parentId?: string
   /** Guild, workspace, or other top-level platform container. */
   spaceId?: string
+  avatar?: IMMedia<TMediaLocator>
   metadata?: JsonObject
+}
+
+export type IMConversationRole = 'owner' | 'administrator' | 'member' | 'guest'
+
+export interface IMConversationPermissions {
+  manageConversation: boolean
+  manageMembers: boolean
+  deleteAnyMessage: boolean
+  editAnyMessage: boolean
+  pinMessages: boolean
+  inviteMembers: boolean
+}
+
+export interface IMConversationMember<TMediaLocator = unknown> {
+  user: IMUser<TMediaLocator>
+  role: IMConversationRole
+  permissions: IMConversationPermissions
+  joinedAt?: number
+  title?: string
+  metadata?: JsonObject
+}
+
+export interface IMConversationMemberPage<TMediaLocator = unknown> {
+  members: IMConversationMember<TMediaLocator>[]
+  total?: number
+  nextCursor?: string
 }
 
 export type IMMediaKind = 'image' | 'file'
 
-export interface IMMedia {
+export interface IMMedia<TLocator = unknown> {
   /** Opaque platform media ID. It is never parsed or truncated by the bridge. */
   id: string
   kind: IMMediaKind
@@ -80,8 +137,8 @@ export interface IMMedia {
   size?: number
   width?: number
   height?: number
-  /** Opaque data needed by downloadMedia(). */
-  locator?: JsonValue
+  /** Adapter-owned, typed data needed by downloadMedia(). */
+  locator?: TLocator
 }
 
 export interface IMMediaSource {
@@ -93,9 +150,9 @@ export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
   source: IMMediaSource
 }
 
-export type IMMessagePart =
+export type IMMessagePart<TMediaLocator = unknown> =
   | { type: 'text', text: string }
-  | { type: 'media', media: IMMedia }
+  | { type: 'media', media: IMMedia<TMediaLocator> }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMSticker }
 
 export type IMMessageInputPart =
@@ -103,8 +160,8 @@ export type IMMessageInputPart =
   | { type: 'media', media: IMMediaInput }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMStickerSendPlan }
 
-export interface IMMessageContent {
-  parts: IMMessagePart[]
+export interface IMMessageContent<TMediaLocator = unknown> {
+  parts: IMMessagePart<TMediaLocator>[]
 }
 
 export interface IMMessageInput {
@@ -112,14 +169,14 @@ export interface IMMessageInput {
   replyToId?: string
 }
 
-export interface IMMessage {
+export interface IMMessage<TMediaLocator = unknown> {
   /** Logical platform message ID. Strings may be arbitrarily long. */
   id: string
   /** Physical platform IDs represented by this logical message, for example a Telegram album. */
   sourceIds?: string[]
   conversationId: string
   senderId: string
-  content: IMMessageContent
+  content: IMMessageContent<TMediaLocator>
   timestamp: number
   outgoing?: boolean
   /** Opaque platform grouping key, retained for album reconciliation. */
@@ -170,16 +227,26 @@ export interface IMMessageTarget {
   targetId: string
 }
 
+export interface IMDeleteMessagesOptions {
+  /** Request deletion for every participant instead of only the current user. */
+  forEveryone: boolean
+}
+
+export interface IMForwardMessagesOptions {
+  dropAuthor?: boolean
+  replyToId?: string
+}
+
 export interface IMReactionTarget {
   conversationId: string
   messageId?: string
   targetId?: string
 }
 
-export interface IMDialog {
-  conversation: IMConversation
+export interface IMDialog<TMediaLocator = unknown> {
+  conversation: IMConversation<TMediaLocator>
   unreadCount: number
-  lastMessage?: IMMessage
+  lastMessage?: IMMessage<TMediaLocator>
 }
 
 export interface IMPageQuery {
@@ -201,13 +268,13 @@ export interface IMHistoryQuery extends IMPageQuery {
   after?: IMHistoryAnchor
 }
 
-export interface IMDialogPage {
-  dialogs: IMDialog[]
+export interface IMDialogPage<TMediaLocator = unknown> {
+  dialogs: IMDialog<TMediaLocator>[]
   nextCursor?: string
 }
 
-export interface IMHistoryPage {
-  messages: IMMessage[]
+export interface IMHistoryPage<TMediaLocator = unknown> {
+  messages: IMMessage<TMediaLocator>[]
   nextCursor?: string
 }
 
@@ -228,22 +295,22 @@ export interface IMDownloadOptions extends IMTransferOptions {
   limit?: number
 }
 
-export type IMEvent =
-  | { type: 'message', message: IMMessage, conversation: IMConversation }
-  | { type: 'message-edit', eventId: string, message: IMMessage, conversation: IMConversation }
+export type IMEvent<TMediaLocator = unknown> =
+  | { type: 'message', message: IMMessage<TMediaLocator>, conversation: IMConversation<TMediaLocator> }
+  | { type: 'message-edit', eventId: string, message: IMMessage<TMediaLocator>, conversation: IMConversation<TMediaLocator> }
   | {
       type: 'message-delete'
       eventId: string
-      conversation: IMConversation
+      conversation: IMConversation<TMediaLocator>
       messageIds: string[]
       timestamp: number
     }
-  | { type: 'conversation', conversation: IMConversation }
+  | { type: 'conversation', conversation: IMConversation<TMediaLocator> }
   | { type: 'read', conversationId: string, upToMessageId: string }
   | {
       type: 'message-reactions'
       eventId: string
-      conversation: IMConversation
+      conversation: IMConversation<TMediaLocator>
       target: IMMessageTarget
       context: IMReactionContext
       timestamp: number
@@ -251,29 +318,61 @@ export type IMEvent =
 
 export type Unsubscribe = () => void | Promise<void>
 
-export interface IMPlatform {
+export interface IMPlatform<TMediaLocator = unknown> {
   readonly platformKind?: string
   readonly capabilities: PlatformCapabilities
 
-  subscribe(session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe>
+  subscribe(
+    session: PlatformSession,
+    handler: (event: IMEvent<TMediaLocator>) => void | Promise<void>,
+  ): Promise<Unsubscribe>
 
   sendMessage(
     session: PlatformSession,
     conversation: IMConversationRef,
     content: IMMessageInput,
     options?: IMTransferOptions,
-  ): Promise<IMMessage>
+  ): Promise<IMMessage<TMediaLocator>>
 
-  getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage>
+  getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage<TMediaLocator>>
   getHistory?(
     session: PlatformSession,
     conversation: IMConversationRef,
     query?: IMHistoryQuery,
-  ): Promise<IMHistoryPage>
-  getUser?(session: PlatformSession, userId: string): Promise<IMUser | null>
+  ): Promise<IMHistoryPage<TMediaLocator>>
+  getUser?(session: PlatformSession, userId: string): Promise<IMUser<TMediaLocator> | null>
+  getConversationMember?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+  ): Promise<IMConversationMember<TMediaLocator> | null>
+  getConversationMembers?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    query?: IMPageQuery,
+  ): Promise<IMConversationMemberPage<TMediaLocator>>
+  deleteMessages?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    messageIds: readonly string[],
+    options: IMDeleteMessagesOptions,
+  ): Promise<void>
+  editMessage?(
+    session: PlatformSession,
+    target: IMMessageTarget,
+    content: IMMessageInput,
+    options?: IMTransferOptions,
+  ): Promise<IMMessage<TMediaLocator>>
+  forwardMessages?(
+    session: PlatformSession,
+    from: IMConversationRef,
+    messageIds: readonly string[],
+    to: IMConversationRef,
+    options?: IMForwardMessagesOptions,
+  ): Promise<IMMessage<TMediaLocator>[]>
   downloadMedia?(
     session: PlatformSession,
-    media: IMMedia,
+    media: IMMedia<TMediaLocator>,
     options?: IMDownloadOptions,
   ): AsyncIterable<Uint8Array>
   setMessageReactions?(
@@ -296,14 +395,14 @@ export interface IMPlatform {
   ): AsyncIterable<Uint8Array>
 }
 
-export function messageText(message: IMMessage): string {
+export function messageText(message: IMMessage<unknown>): string {
   return message.content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
 }
 
-export function messageMedia(message: IMMessage): IMMedia[] {
+export function messageMedia<TMediaLocator>(message: IMMessage<TMediaLocator>): IMMedia<TMediaLocator>[] {
   return message.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
 }
 
-export function messageStickers(message: IMMessage): import('./sticker-provider.js').IMSticker[] {
+export function messageStickers(message: IMMessage<unknown>): import('./sticker-provider.js').IMSticker[] {
   return message.content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
 }

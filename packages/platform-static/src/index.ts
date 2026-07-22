@@ -3,9 +3,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import type {
-  IMConversation, IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent,
-  IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageContent, IMMessageInput,
-  IMPageQuery, IMPlatform, IMReactionContext, IMReactionDefinition, IMReactionResource,
+  IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
+  IMDialogPage, IMDownloadOptions, IMEvent, IMForwardMessagesOptions, IMHistoryPage, IMHistoryQuery,
+  IMMedia, IMMessage, IMMessageContent, IMMessageInput, IMMessageTarget, IMPageQuery, IMPlatform,
+  IMReactionContext, IMReactionDefinition, IMReactionResource,
   IMSticker, IMStickerAsset, IMStickerPack, IMStickerProvider,
   IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession,
   StickerProviderContext, Unsubscribe,
@@ -33,6 +34,10 @@ export interface Config {
 export const name = 'im-platform-static'
 export const inject = ['imPlatform', 'imSticker']
 
+export interface StaticMediaLocator {
+  mediaId: string
+}
+
 const seededImage = new Uint8Array(readFileSync(new URL('./test-image.png', import.meta.url)))
 const staticStickerAsset = new Uint8Array(readFileSync(new URL('./assets/static.webp', import.meta.url)))
 const videoStickerAsset = new Uint8Array(readFileSync(new URL('./assets/video.webm', import.meta.url)))
@@ -59,7 +64,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 }
 
 /** Complete in-memory reference adapter used for development and conformance tests. */
-export class StaticPlatform implements IMPlatform {
+export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
   readonly platformKind = 'static'
   readonly capabilities: PlatformCapabilities = {
     history: true,
@@ -72,6 +77,17 @@ export class StaticPlatform implements IMPlatform {
       maxMedia: 10,
     },
     conversations: { groups: true, channels: true, subchannels: true },
+    members: { list: true, administrators: true, permissions: true },
+    avatars: { users: true, conversations: true },
+    messageActions: {
+      delete: {
+        own: { supported: true, maxAgeSeconds: 120 },
+        // StaticPlatform models services whose moderators may remove all history.
+        others: { supported: true },
+      },
+      edit: { mode: 'native' },
+      forward: { mode: 'native', preservesAuthor: true },
+    },
     stickers: { native: true, upload: true, formats: ['static', 'video'] },
     reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 11 },
   }
@@ -83,11 +99,11 @@ export class StaticPlatform implements IMPlatform {
   private readonly _instanceId: string
   private readonly _mediaPath?: string
   private readonly _providerIdPrefix: string
-  private readonly _users = new Map<string, IMUser>()
-  private readonly _conversations = new Map<string, IMConversation>()
-  private readonly _messages = new Map<string, IMMessage[]>()
+  private readonly _users = new Map<string, IMUser<StaticMediaLocator>>()
+  private readonly _conversations = new Map<string, IMConversation<StaticMediaLocator>>()
+  private readonly _messages = new Map<string, IMMessage<StaticMediaLocator>[]>()
   private readonly _media = new Map<string, Uint8Array>()
-  private readonly _subscribers = new Map<string, Set<(event: IMEvent) => void | Promise<void>>>()
+  private readonly _subscribers = new Map<string, Set<(event: IMEvent<StaticMediaLocator>) => void | Promise<void>>>()
   private readonly _timers = new Map<string, ReturnType<typeof setInterval>>()
   private readonly _tickTails = new Map<string, Promise<void>>()
   private _sequence = 1_000
@@ -107,7 +123,7 @@ export class StaticPlatform implements IMPlatform {
 
   async subscribe(
     session: PlatformSession,
-    handler: (event: IMEvent) => void | Promise<void>,
+    handler: (event: IMEvent<StaticMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
     const handlers = this._subscribers.get(session.platformSessionId) ?? new Set()
     handlers.add(handler)
@@ -125,8 +141,8 @@ export class StaticPlatform implements IMPlatform {
     }
   }
 
-  async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage> {
-    const dialogs = [...this._conversations.values()].map((conversation): IMDialog => {
+  async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<StaticMediaLocator>> {
+    const dialogs = [...this._conversations.values()].map((conversation): IMDialog<StaticMediaLocator> => {
       const messages = this._messages.get(conversation.id) ?? []
       return { conversation: clone(conversation), unreadCount: 0, lastMessage: clone(messages.at(-1)) }
     }).sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0))
@@ -142,7 +158,7 @@ export class StaticPlatform implements IMPlatform {
     _session: PlatformSession,
     conversation: IMConversationRef,
     query: IMHistoryQuery = {},
-  ): Promise<IMHistoryPage> {
+  ): Promise<IMHistoryPage<StaticMediaLocator>> {
     this._requireConversation(conversation.id)
     const newestFirst = [...(this._messages.get(conversation.id) ?? [])].reverse()
     let start = pageStart(newestFirst.map((message) => message.id), query.cursor, query.before?.id)
@@ -159,7 +175,7 @@ export class StaticPlatform implements IMPlatform {
     }
   }
 
-  async getUser(_session: PlatformSession, userId: string): Promise<IMUser | null> {
+  async getUser(_session: PlatformSession, userId: string): Promise<IMUser<StaticMediaLocator> | null> {
     return clone(this._users.get(userId) ?? null)
   }
 
@@ -168,11 +184,11 @@ export class StaticPlatform implements IMPlatform {
     conversation: IMConversationRef,
     content: IMMessageInput,
     options: IMTransferOptions = {},
-  ): Promise<IMMessage> {
+  ): Promise<IMMessage<StaticMediaLocator>> {
     const target = this._requireConversation(conversation.id)
     this._validateContent(content)
     const messageId = this._messageId(target.id)
-    const output: IMMessageContent['parts'] = []
+    const output: IMMessageContent<StaticMediaLocator>['parts'] = []
     const sourceIds: string[] = []
     let mediaIndex = 0
     for (const part of content.parts) {
@@ -189,7 +205,7 @@ export class StaticPlatform implements IMPlatform {
       const mediaId = `${messageId}:media:${mediaIndex}:${'m'.repeat(128)}`
       this._storeMedia(mediaId, bytes)
       const dimensions = part.media.kind === 'image' ? imageDimensions(bytes) : undefined
-      const media: IMMedia = {
+      const media: IMMedia<StaticMediaLocator> = {
         id: mediaId,
         kind: part.media.kind,
         name: part.media.name,
@@ -203,7 +219,7 @@ export class StaticPlatform implements IMPlatform {
       sourceIds.push(`${messageId}:physical:${mediaIndex}`)
       mediaIndex++
     }
-    const message: IMMessage = {
+    const message: IMMessage<StaticMediaLocator> = {
       id: messageId,
       sourceIds: sourceIds.length ? sourceIds : undefined,
       conversationId: target.id,
@@ -215,7 +231,7 @@ export class StaticPlatform implements IMPlatform {
     }
     this._append(message)
     if (target.id === 'group-b') {
-      const mirror: IMMessage = {
+      const mirror: IMMessage<StaticMediaLocator> = {
         id: `${messageId}:mirror:${'c'.repeat(128)}`,
         sourceIds: message.sourceIds?.map((id) => `${id}:mirror`),
         conversationId: 'group-c',
@@ -233,9 +249,137 @@ export class StaticPlatform implements IMPlatform {
     return clone(message)
   }
 
+  async getConversationMember(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+  ): Promise<IMConversationMember<StaticMediaLocator> | null> {
+    const page = await this.getConversationMembers(session, conversation, { limit: 500 })
+    return clone(page.members.find((member) => member.user.id === userId) ?? null)
+  }
+
+  async getConversationMembers(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    query: IMPageQuery = {},
+  ): Promise<IMConversationMemberPage<StaticMediaLocator>> {
+    const target = this._requireConversation(conversation.id)
+    const memberIds = target.kind === 'direct'
+      ? [session.userId, target.id]
+      : [session.userId, 'alice', 'bob', 'carol']
+    const uniqueIds = [...new Set(memberIds)]
+    const members = uniqueIds.flatMap((id): IMConversationMember<StaticMediaLocator>[] => {
+      const user = id === session.userId
+        ? {
+            id, firstName: typeof session.metadata.firstName === 'string' ? session.metadata.firstName : 'Static User',
+            lastName: typeof session.metadata.lastName === 'string' ? session.metadata.lastName : undefined,
+            username: typeof session.metadata.username === 'string' ? session.metadata.username : undefined,
+            avatar: this._avatar(`user:${id}`),
+          }
+        : this._users.get(id)
+      if (!user) return []
+      const owner = id === session.userId
+      const administrator = id === 'alice'
+      return [{
+        user: clone(user), role: owner ? 'owner' : administrator ? 'administrator' : 'member',
+        permissions: {
+          manageConversation: owner || administrator,
+          manageMembers: owner || administrator,
+          deleteAnyMessage: owner || administrator,
+          editAnyMessage: owner,
+          pinMessages: owner || administrator,
+          inviteMembers: true,
+        },
+        joinedAt: 1_600_000_000,
+        title: administrator ? 'Moderator' : undefined,
+      }]
+    })
+    const start = pageStart(members.map((member) => member.user.id), query.cursor, query.afterId)
+    const limit = clampLimit(query.limit)
+    return {
+      members: clone(members.slice(start, start + limit)), total: members.length,
+      nextCursor: start + limit < members.length ? String(start + limit) : undefined,
+    }
+  }
+
+  async deleteMessages(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    messageIds: readonly string[],
+  ): Promise<void> {
+    const target = this._requireConversation(conversation.id)
+    const requested = new Set(messageIds)
+    this._messages.set(target.id, (this._messages.get(target.id) ?? []).filter((message) =>
+      !requested.has(message.id) && !message.sourceIds?.some((id) => requested.has(id))))
+  }
+
+  async editMessage(
+    _session: PlatformSession,
+    target: IMMessageTarget,
+    content: IMMessageInput,
+    options: IMTransferOptions = {},
+  ): Promise<IMMessage<StaticMediaLocator>> {
+    const messages = this._messages.get(this._requireConversation(target.conversationId).id) ?? []
+    const index = messages.findIndex((message) =>
+      message.id === target.messageId || message.id === target.targetId || message.sourceIds?.includes(target.targetId))
+    if (index < 0) throw new Error(`static edit target not found: ${target.targetId}`)
+    this._validateContent(content)
+    const original = messages[index]
+    const parts: IMMessageContent<StaticMediaLocator>['parts'] = []
+    let mediaIndex = 0
+    for (const part of content.parts) {
+      if (part.type === 'text') parts.push({ ...part })
+      else if (part.type === 'sticker') {
+        parts.push({ type: 'sticker', sticker: await this._consumeSticker(part.sticker, options, mediaIndex++) })
+      } else {
+        const bytes = await consumeSource(part.media.source, mediaIndex, options)
+        const mediaId = `${original.id}:edit:${++this._sequence}:${mediaIndex}`
+        this._storeMedia(mediaId, bytes)
+        const dimensions = part.media.kind === 'image' ? imageDimensions(bytes) : undefined
+        parts.push({ type: 'media', media: {
+          id: mediaId, kind: part.media.kind, name: part.media.name, mimeType: part.media.mimeType,
+          size: bytes.length, width: part.media.width ?? dimensions?.width,
+          height: part.media.height ?? dimensions?.height, locator: { mediaId },
+        } })
+        mediaIndex++
+      }
+    }
+    const edited = {
+      ...original, content: { parts }, metadata: { ...(original.metadata ?? {}), editedAt: this._now() },
+    }
+    messages[index] = edited
+    return clone(edited)
+  }
+
+  async forwardMessages(
+    session: PlatformSession,
+    from: IMConversationRef,
+    messageIds: readonly string[],
+    to: IMConversationRef,
+    options: IMForwardMessagesOptions = {},
+  ): Promise<IMMessage<StaticMediaLocator>[]> {
+    const sources = this._messages.get(this._requireConversation(from.id).id) ?? []
+    const destination = this._requireConversation(to.id)
+    const forwarded = messageIds.map((id) => {
+      const source = sources.find((message) => message.id === id || message.sourceIds?.includes(id))
+      if (!source) throw new Error(`static forward source not found: ${id}`)
+      const output: IMMessage<StaticMediaLocator> = {
+        ...clone(source), id: this._messageId(destination.id), sourceIds: undefined,
+        conversationId: destination.id, senderId: session.userId, timestamp: this._now(), outgoing: true,
+        metadata: {
+          ...(source.metadata ?? {}), forwardedFromConversationId: from.id,
+          forwardedFromMessageId: source.id, forwardAuthorPreserved: !options.dropAuthor,
+        },
+      }
+      this._append(output)
+      return output
+    })
+    return clone(forwarded)
+  }
+
   async *downloadMedia(
     _session: PlatformSession,
-    media: IMMedia,
+    media: IMMedia<StaticMediaLocator>,
     options: IMDownloadOptions = {},
   ): AsyncIterable<Uint8Array> {
     const mediaId = typeof media.locator === 'object' && media.locator && !Array.isArray(media.locator)
@@ -328,7 +472,7 @@ export class StaticPlatform implements IMPlatform {
 
   async emitReactions(
     session: PlatformSession,
-    conversation: IMConversation,
+    conversation: IMConversation<StaticMediaLocator>,
     messageId: string,
     context: IMReactionContext,
     eventId = `reaction:${messageId}:${this._now()}`,
@@ -346,8 +490,8 @@ export class StaticPlatform implements IMPlatform {
   /** Insert an incoming message and wait until every subscribed bridge handler has committed it. */
   async emitMessage(
     session: PlatformSession,
-    conversation: IMConversation,
-    message: IMMessage,
+    conversation: IMConversation<StaticMediaLocator>,
+    message: IMMessage<StaticMediaLocator>,
   ): Promise<void> {
     this._conversations.set(conversation.id, clone(conversation))
     this._append(clone(message))
@@ -374,7 +518,7 @@ export class StaticPlatform implements IMPlatform {
 
     const editTarget = active.at(-1)
     if (editTarget) {
-      const edited: IMMessage = {
+      const edited: IMMessage<StaticMediaLocator> = {
         ...clone(editTarget),
         content: { parts: [{ type: 'text', text: `Group A edited message ${sequence}` }] },
         metadata: { ...(editTarget.metadata ?? {}), revision: sequence },
@@ -401,7 +545,7 @@ export class StaticPlatform implements IMPlatform {
     return this._loadMedia(mediaId)?.slice()
   }
 
-  private _append(message: IMMessage): void {
+  private _append(message: IMMessage<StaticMediaLocator>): void {
     const messages = this._messages.get(message.conversationId) ?? []
     const existing = messages.findIndex((item) => item.id === message.id || item.sourceIds?.some((id) => message.sourceIds?.includes(id)))
     if (existing >= 0) messages[existing] = message
@@ -425,12 +569,12 @@ export class StaticPlatform implements IMPlatform {
     this._timers.set(session.platformSessionId, timer)
   }
 
-  private async _dispatch(session: PlatformSession, event: IMEvent): Promise<void> {
+  private async _dispatch(session: PlatformSession, event: IMEvent<StaticMediaLocator>): Promise<void> {
     const handlers = [...(this._subscribers.get(session.platformSessionId) ?? [])]
     await Promise.all(handlers.map((handler) => handler(clone(event))))
   }
 
-  private _requireConversation(id: string): IMConversation {
+  private _requireConversation(id: string): IMConversation<StaticMediaLocator> {
     const conversation = this._conversations.get(id)
     if (!conversation) throw new Error(`static conversation not found: ${id}`)
     return conversation
@@ -481,19 +625,31 @@ export class StaticPlatform implements IMPlatform {
     return `static:${this._instanceId}:${conversationId}:${++this._sequence}:${'x'.repeat(256)}`
   }
 
+  private _avatar(owner: string): IMMedia<StaticMediaLocator> {
+    const mediaId = `avatar:${owner}`
+    if (!this._loadMedia(mediaId)) this._storeMedia(mediaId, seededImage)
+    return {
+      id: mediaId, kind: 'image', name: `${owner.replaceAll(':', '-')}.png`, mimeType: 'image/png',
+      size: seededImage.length, width: 1240, height: 1754, locator: { mediaId },
+    }
+  }
+
   private _seed(): void {
-    const users: IMUser[] = [
-      { id: 'alice', firstName: 'Alice', username: 'alice' },
-      { id: 'bob', firstName: 'Bob', username: 'bob' },
-      { id: 'carol', firstName: 'Carol', username: 'carol' },
-      { id: 'mirror-user', firstName: 'Mirror User', username: 'mirror_user' },
-      { id: 'self', firstName: 'Static User', username: 'static_user' },
+    const users: IMUser<StaticMediaLocator>[] = [
+      { id: 'alice', firstName: 'Alice', username: 'alice', avatar: this._avatar('user:alice') },
+      { id: 'bob', firstName: 'Bob', username: 'bob', avatar: this._avatar('user:bob') },
+      { id: 'carol', firstName: 'Carol', username: 'carol', avatar: this._avatar('user:carol') },
+      { id: 'mirror-user', firstName: 'Mirror User', username: 'mirror_user', avatar: this._avatar('user:mirror-user') },
+      { id: 'self', firstName: 'Static User', username: 'static_user', avatar: this._avatar('user:self') },
     ]
     for (const user of users) this._users.set(user.id, user)
-    const conversations: IMConversation[] = [
-      { id: 'alice', kind: 'direct', title: 'Alice' },
-      { id: 'bob', kind: 'direct', title: 'Bob' },
-      { id: 'qq-group', kind: 'group', title: 'Static QQ Group', metadata: { participantsCount: 3 } },
+    const conversations: IMConversation<StaticMediaLocator>[] = [
+      { id: 'alice', kind: 'direct', title: 'Alice', avatar: this._avatar('user:alice') },
+      { id: 'bob', kind: 'direct', title: 'Bob', avatar: this._avatar('user:bob') },
+      {
+        id: 'qq-group', kind: 'group', title: 'Static QQ Group',
+        avatar: this._avatar('conversation:qq-group'), metadata: { participantsCount: 4 },
+      },
       { id: 'group-a', kind: 'group', title: 'Group A - Live Mutations', metadata: { participantsCount: 3 } },
       { id: 'group-b', kind: 'group', title: 'Group B - Mirror Source', metadata: { participantsCount: 3 } },
       {
@@ -892,7 +1048,7 @@ function textMessage(
   senderId: string,
   text: string,
   timestamp: number,
-): IMMessage {
+): IMMessage<StaticMediaLocator> {
   return { id, conversationId, senderId, timestamp, content: { parts: [{ type: 'text', text }] } }
 }
 
