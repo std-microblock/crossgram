@@ -151,7 +151,7 @@
 
 .event-header {
   display: grid;
-  grid-template-columns: 16px 106px 58px minmax(180px, 1fr) 78px 72px;
+  grid-template-columns: 16px minmax(180px, 1fr) 72px;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -186,7 +186,6 @@
 
 .event-header time,
 .event-header code,
-.direction-label,
 .event-phase {
   min-width: 0;
   overflow: hidden;
@@ -214,7 +213,6 @@
   font-weight: 600;
 }
 
-.connection-id,
 .event-phase {
   color: var(--fg2);
 }
@@ -222,6 +220,55 @@
 .event-phase {
   font-size: 11px;
   text-align: right;
+}
+
+.event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 14px;
+  min-height: 28px;
+  padding: 3px 12px 5px 27px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--fg2);
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.meta-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.meta-item code,
+.meta-item time {
+  overflow: hidden;
+  color: var(--fg1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta-label {
+  color: var(--fg3);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.payload-label {
+  margin-bottom: 3px;
+  color: var(--fg3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.event-error {
+  margin-top: 8px;
+  color: var(--debug-red);
+  white-space: pre-wrap;
 }
 
 .event-detail {
@@ -312,11 +359,11 @@
   }
 
   .event-header {
-    grid-template-columns: 16px 88px 52px minmax(120px, 1fr);
+    grid-template-columns: 16px minmax(120px, 1fr) 52px;
   }
 
-  .connection-id,
-  .event-phase {
-    display: none;
+  .event-meta {
+    gap: 3px 9px;
+    padding-left: 24px;
   }
 }

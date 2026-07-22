@@ -67,14 +67,22 @@ const EventRow = defineComponent({
           onClick: () => { expanded.value = !expanded.value },
         }, [
           h('span', { class: ['event-chevron', { expanded: expanded.value }] }, '\u203a'),
-          h('time', { datetime: new Date(event.timestamp).toISOString() }, formatTime(event.timestamp)),
-          h('span', { class: 'direction-label' }, direction),
           h('code', { class: 'event-name', title: event.name }, event.name),
-          h('code', { class: 'connection-id' }, event.connectionId),
           h('span', { class: 'event-phase' }, event.phase),
         ]),
+        h('div', { class: 'event-meta', role: 'row' }, [
+          h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'time'), h('time', { datetime: new Date(event.timestamp).toISOString() }, formatTime(event.timestamp))]),
+          h('span', { class: ['meta-item', 'direction-label'] }, [h('span', { class: 'meta-label' }, 'direction'), direction]),
+          h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'connection'), h('code', event.connectionId)]),
+          event.messageId && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'message'), h('code', event.messageId)]),
+          event.seqNo !== undefined && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'seq'), h('code', String(event.seqNo))]),
+          event.authKeyId && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'auth key'), h('code', event.authKeyId)]),
+          event.sessionId && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'session'), h('code', event.sessionId)]),
+        ]),
         expanded.value && h('div', { class: 'event-detail' }, [
-          h(JsonNode, { value: eventForDisplay(event), depth: 0 }),
+          h('div', { class: 'payload-label' }, 'payload'),
+          h(JsonNode, { value: event.payload, depth: 0 }),
+          event.error && h('div', { class: 'event-error' }, event.error),
         ]),
       ])
     }
@@ -165,9 +173,4 @@ export default function apply(ctx: Context): void {
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp)
   return `${date.toLocaleTimeString(undefined, { hour12: false })}.${String(date.getMilliseconds()).padStart(3, '0')}`
-}
-
-function eventForDisplay(event: CapturedMtprotoEvent): Omit<CapturedMtprotoEvent, 'searchText'> {
-  const { searchText: _searchText, ...visible } = event
-  return visible
 }
