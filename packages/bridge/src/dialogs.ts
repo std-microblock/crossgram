@@ -2,9 +2,13 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  messageText, type IMDialog, type IMMediaInput, type IMMessage, type IMMessageInput,
-  type IMPlatform, type IMTransferProgress, type IMUser, type PlatformSession,
+  messageText, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMMedia, type IMMediaInput,
+  type IMMessage, type IMMessageInput, type IMPlatform, type IMTransferProgress, type IMUser,
+  type PlatformSession,
 } from './platform.js'
+import {
+  MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
+} from './message-actions.js'
 import { makeUser } from './synthetic.js'
 import type { MessageStore } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
@@ -68,9 +72,11 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
+  private readonly _avatarMedia = new Map<string, IMMedia<any>>()
+  private readonly _actions: PlatformMessageActions
 
   constructor(
-    private readonly _platform: IMPlatform,
+    private readonly _platform: IMPlatform<any>,
     private readonly _session: PlatformSession,
     store?: MessageStore,
     private readonly _uploads?: UploadManager,
@@ -80,6 +86,7 @@ export class DialogRpc {
     private readonly _reactions?: ReactionRpc,
     private readonly _resources?: TelegramResources,
   ) {
+    this._actions = new PlatformMessageActions(_platform, _session)
     this._selfId = this._allocate(`self:${_session.platformSessionId}`, new Map())
     if (store) {
       this._store = store
@@ -321,10 +328,8 @@ export class DialogRpc {
     const peerId = this._tlToPeer.get(req.chatId)
     const conversation = peerId ? this._conversation(peerId) : undefined
     if (!conversation || conversation.kind !== 'group') throw new RpcError(400, 'CHAT_ID_INVALID')
-    const participantIds = Array.isArray(conversation.metadata?.participantIds)
-      ? conversation.metadata.participantIds.filter((id): id is string => typeof id === 'string')
-      : []
-    const participantUsers = await Promise.all(participantIds.map((id) => this._getPeerUser(id)))
+    const members = await this._allMembers(conversation.id)
+    const participantUsers = members.map((member) => this._makeMemberUser(member))
     const reactionContext = await this._platform.getAvailableReactions?.(
       this._session, { conversationId: conversation.id },
     )
@@ -334,12 +339,19 @@ export class DialogRpc {
         _: 'chatFull', id: req.chatId, about: '',
         participants: {
           _: 'chatParticipants', chatId: req.chatId,
-          participants: [
-            { _: 'chatParticipantCreator', userId: this._selfId },
-            ...participantUsers.map((user): tl.RawChatParticipant => ({
-              _: 'chatParticipant', userId: user.id, inviterId: this._selfId, date: 0,
-            })),
-          ], version: 1,
+          participants: members.map((member): tl.TypeChatParticipant => {
+            const userId = member.user.id === this._session.userId ? this._selfId : this._peerId(member.user.id)
+            if (member.role === 'owner') return { _: 'chatParticipantCreator', userId }
+            if (member.role === 'administrator') {
+              return {
+                _: 'chatParticipantAdmin', userId, inviterId: this._selfId,
+                date: member.joinedAt ?? 0, rank: member.title,
+              }
+            }
+            return {
+              _: 'chatParticipant', userId, inviterId: this._selfId, date: member.joinedAt ?? 0,
+            }
+          }), version: 1,
         },
         notifySettings: { _: 'peerNotifySettings' },
         availableReactions: this._reactions?.chatReactions(conversation.id, reactionContext),
@@ -432,13 +444,18 @@ export class DialogRpc {
   ): Promise<tl.channels.RawChannelParticipant> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
-    if (req.participant._ !== 'inputPeerSelf') throw new RpcError(400, 'USER_NOT_PARTICIPANT')
+    const members = await this._allMembers(conversation.id)
+    const userId = req.participant._ === 'inputPeerSelf'
+      ? this._session.userId
+      : req.participant._ === 'inputPeerUser'
+        ? this._tlToPeer.get(req.participant.userId)
+        : undefined
+    const member = members.find((item) => item.user.id === userId)
+    if (!member) throw new RpcError(400, 'USER_NOT_PARTICIPANT')
     return {
       _: 'channels.channelParticipant',
-      participant: {
-        _: 'channelParticipantSelf', userId: this._selfId, inviterId: this._selfId, date: 0,
-      },
-      chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
+      participant: this._makeChannelParticipant(member),
+      chats: [this._makeChat(conversation)], users: [this._makeMemberUser(member)],
     }
   }
 
@@ -447,15 +464,23 @@ export class DialogRpc {
   ): Promise<tl.channels.RawChannelParticipants> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
-    const includeSelf = req.filter._ === 'channelParticipantsRecent'
-      || req.filter._ === 'channelParticipantsAdmins'
-    const participant: tl.TypeChannelParticipant = req.filter._ === 'channelParticipantsAdmins'
-      ? { _: 'channelParticipantCreator', userId: this._selfId, adminRights: makeAdminRights() }
-      : { _: 'channelParticipantSelf', userId: this._selfId, inviterId: this._selfId, date: 0 }
+    let members = await this._allMembers(conversation.id)
+    if (req.filter._ === 'channelParticipantsAdmins') {
+      members = members.filter((member) => member.role === 'owner' || member.role === 'administrator')
+    } else if (req.filter._ === 'channelParticipantsSearch') {
+      const query = req.filter.q.toLocaleLowerCase()
+      members = members.filter((member) =>
+        `${member.user.firstName} ${member.user.lastName ?? ''} ${member.user.username ?? ''}`
+          .toLocaleLowerCase().includes(query))
+    } else if (req.filter._ !== 'channelParticipantsRecent') {
+      members = []
+    }
+    const total = members.length
+    members = members.slice(Math.max(0, req.offset), Math.max(0, req.offset) + Math.max(0, req.limit))
     return {
-      _: 'channels.channelParticipants', count: includeSelf ? 1 : 0,
-      participants: includeSelf ? [participant] : [],
-      chats: [this._makeChat(conversation)], users: includeSelf ? [this._makeSelfUser()] : [],
+      _: 'channels.channelParticipants', count: total,
+      participants: members.map((member) => this._makeChannelParticipant(member)),
+      chats: [this._makeChat(conversation)], users: members.map((member) => this._makeMemberUser(member)),
     }
   }
 
@@ -520,6 +545,180 @@ export class DialogRpc {
     })
   }
 
+  async deleteMessages(
+    req: tl.messages.RawDeleteMessagesRequest | tl.channels.RawDeleteMessagesRequest,
+    channel?: tl.TypeInputChannel,
+  ): Promise<tl.messages.RawAffectedMessages> {
+    if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    await this._hydratePeers()
+    const expectedConversation = channel ? this._resolveChannel(channel).id : undefined
+    const grouped = new Map<string, Array<{
+      source: IMMessage<any>
+      targetId: string
+    }>>()
+    for (const tlId of req.id) {
+      const projected = await this._store.findProjectedByTlId(
+        this._session.platformSessionId, tlId, expectedConversation,
+      )
+      if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+      const ordinal = projected.parts.find((part) => part.tlMessageId === tlId)?.ordinal ?? 0
+      const targets = grouped.get(projected.source.conversationId) ?? []
+      targets.push({
+        source: projected.source,
+        targetId: projected.source.sourceIds?.[ordinal] ?? projected.source.id,
+      })
+      grouped.set(projected.source.conversationId, targets)
+    }
+
+    const affected = new Set<number>()
+    for (const [conversationId, targets] of grouped) {
+      const conversation = this._conversation(conversationId)
+      const policy = this._platform.capabilities.messageActions?.delete
+      const now = Math.floor(Date.now() / 1000)
+      const allowed = targets.every(({ source }) => messageRuleAllows(
+        source.outgoing || source.senderId === this._session.userId ? policy?.own : policy?.others,
+        source.timestamp,
+        now,
+      ))
+      if (!allowed) throw new RpcError(400, 'MESSAGE_DELETE_FORBIDDEN')
+      try {
+        await this._actions.delete(
+          conversation,
+          [...new Set(targets.map((target) => target.targetId))],
+          req._ === 'channels.deleteMessages' || !!req.revoke,
+        )
+      } catch (error) {
+        this._throwMessageAction(error, 'MESSAGE_DELETE_FORBIDDEN')
+      }
+      const result = await this._store.deleteMessages(
+        this._session, conversation, [...new Set(targets.map((target) => target.source.id))],
+      )
+      result.tlMessageIds.forEach((id) => affected.add(id))
+      const cache = this._historyCache.get(conversationId)
+      if (cache) this._historyCache.set(conversationId, cache.filter((item) => !affected.has(item.tlId)))
+    }
+    const ptsCount = affected.size
+    const pts = await this._reservePts(ptsCount, Math.floor(Date.now() / 1000))
+    return { _: 'messages.affectedMessages', pts, ptsCount }
+  }
+
+  async editMessage(req: tl.messages.RawEditMessageRequest): Promise<tl.TypeUpdates> {
+    if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
+    if (req.media || req.richMessage || req.message === undefined) throw new RpcError(400, 'MESSAGE_EDIT_UNSUPPORTED')
+    if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
+    if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
+      throw new RpcError(400, 'MESSAGE_TOO_LONG')
+    }
+    await this._hydratePeers()
+    const conversationId = this._resolvePeer(req.peer)
+    const projected = await this._store.findProjectedByTlId(
+      this._session.platformSessionId, req.id, conversationId,
+    )
+    if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+    const editPolicy = this._platform.capabilities.messageActions?.edit
+    if (
+      editPolicy?.maxAgeSeconds !== undefined
+      && Math.floor(Date.now() / 1000) - projected.source.timestamp > editPolicy.maxAgeSeconds
+    ) {
+      throw new RpcError(400, 'MESSAGE_EDIT_TIME_EXPIRED')
+    }
+    const ordinal = projected.parts.find((part) => part.tlMessageId === req.id)?.ordinal ?? 0
+    let edited: Awaited<ReturnType<PlatformMessageActions['edit']>>
+    try {
+      edited = await this._actions.edit({
+        conversationId, messageId: projected.source.id,
+        targetId: projected.source.sourceIds?.[ordinal] ?? projected.source.id,
+      }, { parts: [{ type: 'text', text: req.message }] })
+    } catch (error) {
+      this._throwMessageAction(error, 'MESSAGE_EDIT_FORBIDDEN')
+    }
+    const conversation = this._conversation(conversationId)
+    const source: IMMessage<any> = { ...edited!.message, conversationId, outgoing: true }
+    const now = source.timestamp || Math.floor(Date.now() / 1000)
+    const updates: tl.TypeUpdate[] = []
+    let ptsCount = 0
+    if (edited!.replacedMessageId) {
+      const deleted = await this._store.deleteMessages(
+        this._session, conversation, [edited!.replacedMessageId],
+      )
+      ptsCount += deleted.tlMessageIds.length
+      updates.push({
+        _: conversation.kind === 'channel' ? 'updateDeleteChannelMessages' : 'updateDeleteMessages',
+        ...(conversation.kind === 'channel' ? { channelId: this._peerId(conversationId) } : {}),
+        messages: deleted.tlMessageIds, pts: 0, ptsCount: deleted.tlMessageIds.length,
+      } as tl.TypeUpdate)
+    }
+    const persisted = await this._store.ingest(this._session, conversation, source)
+    ptsCount += edited!.replacedMessageId ? persisted.projection.length : 1
+    let pts = await this._reservePts(ptsCount, now) - ptsCount
+    for (const update of updates) {
+      if (update._ === 'updateDeleteMessages' || update._ === 'updateDeleteChannelMessages') {
+        update.pts = pts += update.ptsCount
+      }
+    }
+    if (edited!.replacedMessageId) {
+      for (const part of persisted.projection) {
+        const item = await this._projectedItem(part.tlMessageId, conversationId)
+        updates.push({
+          _: conversation.kind === 'channel' ? 'updateNewChannelMessage' : 'updateNewMessage',
+          message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+        } as tl.TypeUpdate)
+      }
+    } else {
+      const item = await this._projectedItem(req.id, conversationId)
+      updates.push({
+        _: conversation.kind === 'channel' ? 'updateEditChannelMessage' : 'updateEditMessage',
+        message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+      } as tl.TypeUpdate)
+    }
+    return this._updates(conversation, updates, now)
+  }
+
+  async forwardMessages(req: tl.messages.RawForwardMessagesRequest): Promise<tl.TypeUpdates> {
+    if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
+    if (req.id.length !== req.randomId.length) throw new RpcError(400, 'RANDOM_ID_INVALID')
+    await this._hydratePeers()
+    const fromId = this._resolvePeer(req.fromPeer)
+    const toId = this._resolveMessageTarget(req.toPeer, req.replyTo)
+    const sourceIds: string[] = []
+    for (const tlId of req.id) {
+      const projected = await this._store.findProjectedByTlId(this._session.platformSessionId, tlId, fromId)
+      if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+      const ordinal = projected.parts.find((part) => part.tlMessageId === tlId)?.ordinal ?? 0
+      sourceIds.push(projected.source.sourceIds?.[ordinal] ?? projected.source.id)
+    }
+    let forwarded: IMMessage<any>[]
+    try {
+      forwarded = await this._actions.forward(
+        { id: fromId }, sourceIds, { id: toId }, { dropAuthor: req.dropAuthor },
+      )
+    } catch (error) {
+      this._throwMessageAction(error, 'MESSAGE_FORWARD_FORBIDDEN')
+    }
+    const conversation = this._conversation(toId)
+    const projections = []
+    for (const output of forwarded!) {
+      const source: IMMessage<any> = { ...output, conversationId: toId, outgoing: true }
+      const persisted = await this._store.ingest(this._session, conversation, source)
+      projections.push(...persisted.projection)
+    }
+    let pts = await this._reservePts(projections.length, Math.floor(Date.now() / 1000)) - projections.length
+    const updates: tl.TypeUpdate[] = []
+    for (const [index, part] of projections.entries()) {
+      const item = await this._projectedItem(part.tlMessageId, toId)
+      if (req.randomId[index]) {
+        updates.push({ _: 'updateMessageID', id: part.tlMessageId, randomId: req.randomId[index] })
+      }
+      updates.push({
+        _: conversation.kind === 'channel' ? 'updateNewChannelMessage' : 'updateNewMessage',
+        message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+      } as tl.TypeUpdate)
+    }
+    return this._updates(conversation, updates, Math.floor(Date.now() / 1000))
+  }
+
   async uploadMedia(req: UploadMediaRequest): Promise<tl.TypeMessageMedia> {
     if (!this._uploads) throw new RpcError(400, 'MEDIA_UPLOAD_UNAVAILABLE')
     await this._hydratePeers()
@@ -539,6 +738,15 @@ export class DialogRpc {
       return {
         _: 'upload.file', type: { _: 'storage.fileWebp' },
         mtime: Math.floor(Date.now() / 1000), bytes,
+      }
+    }
+    if (req.location._ === 'inputPeerPhotoFileLocation') {
+      const media = this._avatarMedia.get(req.location.photoId.toString())
+        ?? await this._resolveAvatarMedia(req.location.peer, req.location.photoId)
+      if (!media || !this._platform.downloadMedia) throw new RpcError(400, 'LOCATION_INVALID')
+      return {
+        _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: Math.floor(Date.now() / 1000),
+        bytes: await this._downloadMediaRange(media, offset, req.limit),
       }
     }
     if (req.location._ !== 'inputDocumentFileLocation' && req.location._ !== 'inputPhotoFileLocation') {
@@ -583,15 +791,39 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
+    return {
+      _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp,
+      bytes: await this._downloadMediaRange(stored.media, offset, req.limit),
+    }
+  }
+
+  private async _resolveAvatarMedia(peer: tl.TypeInputPeer, photoId: Long): Promise<IMMedia<any> | undefined> {
+    await this._hydratePeers()
+    let media: IMMedia<any> | undefined
+    if (peer._ === 'inputPeerSelf') {
+      media = (await this._platform.getUser?.(this._session, this._session.userId))?.avatar
+    } else if (peer._ === 'inputPeerUser') {
+      const userId = this._tlToPeer.get(peer.userId)
+      if (userId) media = (await this._platform.getUser?.(this._session, userId))?.avatar
+    } else if (peer._ === 'inputPeerChat' || peer._ === 'inputPeerChannel') {
+      const conversationId = this._tlToPeer.get(inputPeerId(peer))
+      if (conversationId) media = this._conversation(conversationId).avatar
+    }
+    if (!media || stableId(`avatar:${media.id}`) !== photoId.toNumber()) return
+    this._avatarMedia.set(photoId.toString(), media)
+    return media
+  }
+
+  private async _downloadMediaRange(media: IMMedia<any>, offset: number, limit: number): Promise<Uint8Array> {
+    if (!this._platform.downloadMedia) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
     const chunks: Uint8Array[] = []
     let size = 0
-    const stream = this._platform.downloadMedia(this._session, stored.media, {
-      offset,
-      limit: req.limit,
+    const stream = this._platform.downloadMedia(this._session, media, {
+      offset, limit,
       onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
     })
     for await (const chunk of stream) {
-      const remaining = req.limit - size
+      const remaining = limit - size
       if (remaining <= 0) break
       const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk
       chunks.push(accepted)
@@ -603,9 +835,7 @@ export class DialogRpc {
       bytes.set(chunk, position)
       position += chunk.length
     }
-    return {
-      _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp, bytes,
-    }
+    return bytes
   }
 
   async getAvailableReactions(): Promise<tl.messages.RawAvailableReactions> {
@@ -914,6 +1144,39 @@ export class DialogRpc {
     }
   }
 
+  private async _projectedItem(tlMessageId: number, conversationId: string): Promise<MaterializedMessage> {
+    const projected = await this._store?.findProjectedByTlId(
+      this._session.platformSessionId, tlMessageId, conversationId,
+    )
+    if (!projected) throw new RpcError(500, 'MESSAGE_PROJECTION_NOT_FOUND')
+    const part = projected.parts.find((entry) => entry.tlMessageId === tlMessageId)
+    if (!part) throw new RpcError(500, 'MESSAGE_PROJECTION_NOT_FOUND')
+    const item: MaterializedMessage = {
+      source: projected.source, tlId: part.tlMessageId, ordinal: part.ordinal,
+      groupedId: part.groupedId ?? undefined,
+      media: projected.media.find((entry) => entry.id === part.mediaId),
+    }
+    this._rememberMessage(item)
+    return item
+  }
+
+  private _updates(
+    conversation: import('./platform.js').IMConversation,
+    updates: tl.TypeUpdate[],
+    date: number,
+  ): tl.TypeUpdates {
+    return {
+      _: 'updates', updates, users: [this._makeSelfUser()],
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)], date, seq: 0,
+    }
+  }
+
+  private _throwMessageAction(error: unknown, fallback: string): never {
+    if (error instanceof RpcError) throw error
+    if (error instanceof MessageActionUnavailableError) throw new RpcError(400, fallback)
+    throw new RpcError(400, fallback)
+  }
+
   private async _reservePts(count: number, date: number): Promise<number> {
     if (this._store) {
       return (await this._store.advancePts(this._session.platformSessionId, count, date)).pts
@@ -1083,15 +1346,64 @@ export class DialogRpc {
     return this._makePeerUser(user ?? { id: peerId, firstName: fallbackName ?? peerId })
   }
 
+  private async _allMembers(conversationId: string): Promise<IMConversationMember<any>[]> {
+    if (!this._platform.capabilities.members?.list || !this._platform.getConversationMembers) return []
+    const members: IMConversationMember<any>[] = []
+    let cursor: string | undefined
+    do {
+      const page = await this._platform.getConversationMembers(
+        this._session, { id: conversationId }, { cursor, limit: 100 },
+      )
+      members.push(...page.members)
+      cursor = page.nextCursor
+    } while (cursor && members.length < 10_000)
+    for (const member of members) {
+      if (member.user.id !== this._session.userId) this._peerId(member.user.id)
+    }
+    return members
+  }
+
+  private _makeMemberUser(member: IMConversationMember<any>): tl.RawUser {
+    return member.user.id === this._session.userId
+      ? this._makeSelfUser(member.user.avatar)
+      : this._makePeerUser(member.user)
+  }
+
+  private _makeChannelParticipant(member: IMConversationMember<any>): tl.TypeChannelParticipant {
+    const self = member.user.id === this._session.userId
+    const userId = self ? this._selfId : this._peerId(member.user.id)
+    if (member.role === 'owner') {
+      return {
+        _: 'channelParticipantCreator', userId,
+        adminRights: makeAdminRights(member.permissions), rank: member.title,
+      }
+    }
+    if (member.role === 'administrator') {
+      return {
+        _: 'channelParticipantAdmin', self: self || undefined, userId,
+        promotedBy: this._selfId, date: member.joinedAt ?? 0,
+        adminRights: makeAdminRights(member.permissions), rank: member.title,
+      }
+    }
+    if (self) {
+      return {
+        _: 'channelParticipantSelf', userId, inviterId: this._selfId,
+        date: member.joinedAt ?? 0, rank: member.title,
+      }
+    }
+    return { _: 'channelParticipant', userId, date: member.joinedAt ?? 0, rank: member.title }
+  }
+
   private _makePeerUser(user: IMUser): tl.RawUser {
     return makeUser({
       id: this._peerId(user.id), firstName: user.firstName,
       lastName: user.lastName, username: user.username,
       contact: true, mutualContact: true,
+      photo: user.avatar ? this._makeAvatarPhoto(user.avatar, 'user') : undefined,
     })
   }
 
-  private _makeSelfUser(): tl.RawUser {
+  private _makeSelfUser(avatar?: IMMedia<any>): tl.RawUser {
     return makeUser({
       id: this._selfId,
       self: true,
@@ -1099,6 +1411,7 @@ export class DialogRpc {
       firstName: String(this._session.metadata.firstName ?? 'Bridge'),
       lastName: this._session.metadata.lastName as string | undefined,
       username: this._session.metadata.username as string | undefined,
+      photo: avatar ? this._makeAvatarPhoto(avatar, 'user') : undefined,
     })
   }
 
@@ -1149,7 +1462,8 @@ export class DialogRpc {
     const id = this._peerId(conversation.id)
     if (conversation.kind === 'group') {
       return {
-        _: 'chat', creator: true, id, title: conversation.title, photo: { _: 'chatPhotoEmpty' },
+        _: 'chat', creator: true, id, title: conversation.title,
+        photo: conversation.avatar ? this._makeAvatarPhoto(conversation.avatar, 'chat') : { _: 'chatPhotoEmpty' },
         participantsCount: Number(conversation.metadata?.participantsCount ?? 0), date: 0, version: 1,
       }
     }
@@ -1158,9 +1472,19 @@ export class DialogRpc {
       _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
       forum: !broadcast && this._subchannels(conversation.id).length > 0 || undefined,
-      photo: { _: 'chatPhotoEmpty' }, date: 0,
+      photo: conversation.avatar ? this._makeAvatarPhoto(conversation.avatar, 'chat') : { _: 'chatPhotoEmpty' }, date: 0,
       participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
     }
+  }
+
+  private _makeAvatarPhoto(media: IMMedia<any>, kind: 'user'): tl.RawUserProfilePhoto
+  private _makeAvatarPhoto(media: IMMedia<any>, kind: 'chat'): tl.RawChatPhoto
+  private _makeAvatarPhoto(media: IMMedia<any>, kind: 'user' | 'chat'): tl.RawUserProfilePhoto | tl.RawChatPhoto {
+    const photoId = Long.fromNumber(stableId(`avatar:${media.id}`))
+    this._avatarMedia.set(photoId.toString(), media)
+    return kind === 'user'
+      ? { _: 'userProfilePhoto', photoId, dcId: this._dcId }
+      : { _: 'chatPhoto', photoId, dcId: this._dcId }
   }
 
   private _isSubchannel(conversation: import('./platform.js').IMConversation): boolean {
@@ -1253,11 +1577,20 @@ export class DialogRpc {
   }
 }
 
-function makeAdminRights(): tl.RawChatAdminRights {
+function makeAdminRights(permissions?: IMConversationPermissions): tl.RawChatAdminRights {
   return {
-    _: 'chatAdminRights', changeInfo: true, postMessages: true, editMessages: true,
-    deleteMessages: true, banUsers: true, inviteUsers: true, pinMessages: true,
-    addAdmins: true, manageCall: true, manageTopics: true, other: true,
+    _: 'chatAdminRights',
+    changeInfo: permissions?.manageConversation ?? true,
+    postMessages: permissions?.manageConversation ?? true,
+    editMessages: permissions?.editAnyMessage ?? true,
+    deleteMessages: permissions?.deleteAnyMessage ?? true,
+    banUsers: permissions?.manageMembers ?? true,
+    inviteUsers: permissions?.inviteMembers ?? true,
+    pinMessages: permissions?.pinMessages ?? true,
+    addAdmins: permissions?.manageMembers ?? true,
+    manageCall: permissions?.manageConversation ?? true,
+    manageTopics: permissions?.manageConversation ?? true,
+    other: permissions?.manageConversation ?? true,
   }
 }
 

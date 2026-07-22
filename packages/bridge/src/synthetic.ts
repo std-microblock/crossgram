@@ -48,6 +48,7 @@ export function makeUser(opts: {
   username?: string | null
   phone?: string | null
   premium?: boolean
+  photo?: tl.TypeUserProfilePhoto
 }): tl.RawUser {
   return {
     _: 'user',
@@ -62,6 +63,7 @@ export function makeUser(opts: {
     lastName: opts.lastName ?? undefined,
     username: opts.username ?? undefined,
     phone: opts.phone ?? undefined,
+    photo: opts.photo,
     status: { _: 'userStatusRecently' },
   } as unknown as tl.RawUser
 }

@@ -7,7 +7,7 @@ import { IMPlatformService, IMStickerService } from '@mtproto-relay/bridge'
 import type {
   IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMTransferProgress, PlatformSession,
 } from '@mtproto-relay/bridge'
-import { StaticPlatform } from '@mtproto-relay/platform-static'
+import { StaticPlatform, type StaticMediaLocator } from '@mtproto-relay/platform-static'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 
 const session: PlatformSession = {
@@ -195,8 +195,8 @@ describe('StaticPlatform', () => {
 
   it('sets reactions authoritatively and emits reaction snapshots with backpressure', async () => {
     const platform = new StaticPlatform({ now: () => 1_900_000_050 })
-    const conversation: IMConversation = { id: 'qq-group', kind: 'group', title: 'Static QQ Group' }
-    const events: import('@mtproto-relay/bridge').IMEvent[] = []
+    const conversation: IMConversation<StaticMediaLocator> = { id: 'qq-group', kind: 'group', title: 'Static QQ Group' }
+    const events: import('@mtproto-relay/bridge').IMEvent<StaticMediaLocator>[] = []
     const unsubscribe = await platform.subscribe(session, async (event) => {
       await Promise.resolve()
       events.push(event)
@@ -452,8 +452,8 @@ describe('StaticPlatform', () => {
       await Promise.resolve()
       order.push(`end:${event.type}`)
     })
-    const conversation: IMConversation = { id: 'new-group', kind: 'group', title: 'New Group' }
-    const message: IMMessage = {
+    const conversation: IMConversation<StaticMediaLocator> = { id: 'new-group', kind: 'group', title: 'New Group' }
+    const message: IMMessage<StaticMediaLocator> = {
       id: `incoming:${'i'.repeat(8_192)}`, conversationId: conversation.id, senderId: 'alice', timestamp: 2_000_000_000,
       content: { parts: [{ type: 'text', text: 'incoming' }] },
     }
@@ -471,7 +471,7 @@ describe('StaticPlatform', () => {
     await expect(platform.getDialogs(session, { cursor: 'bad' })).rejects.toThrow('invalid static cursor')
     await expect(platform.getHistory(session, { id: 'missing' })).rejects.toThrow('conversation not found')
     await expect(platform.sendMessage(session, { id: 'alice' }, { parts: [] })).rejects.toThrow('message is empty')
-    const missing: import('@mtproto-relay/bridge').IMMedia = {
+    const missing: import('@mtproto-relay/bridge').IMMedia<StaticMediaLocator> = {
       id: 'missing', kind: 'file', locator: { mediaId: 'missing' },
     }
     await expect(collect(platform.downloadMedia(session, missing))).rejects.toThrow('media not found')

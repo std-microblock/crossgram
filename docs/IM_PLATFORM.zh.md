@@ -67,6 +67,7 @@ interface IMConversation {
   title: string
   parentId?: string
   spaceId?: string
+  avatar?: IMMedia<PlatformMediaLocator>
   metadata?: JsonObject
 }
 ```
@@ -79,7 +80,47 @@ interface IMConversation {
 
 消息事件必须携带完整 conversation，不能只给 conversation ID。这样 push-only 平台首次收到群消息时也能独立完成入库。
 
+### 3.1 成员、管理员与权限
+
+`getConversationMembers()` 使用 cursor 分页返回 `IMConversationMember`；`getConversationMember()` 用于单成员查询。角色只有 `owner / administrator / member / guest`，具体操作权限放在 `IMConversationPermissions`，不要通过角色名推断：
+
+```ts
+interface IMConversationMember<L> {
+  user: IMUser<L>
+  role: 'owner' | 'administrator' | 'member' | 'guest'
+  permissions: {
+    manageConversation: boolean
+    manageMembers: boolean
+    deleteAnyMessage: boolean
+    editAnyMessage: boolean
+    pinMessages: boolean
+    inviteMembers: boolean
+  }
+  joinedAt?: number
+  title?: string
+}
+```
+
+`members.administrators` 表示平台能区分管理员，`members.permissions` 表示权限字段来自平台真实数据。bridge 将其投影为 Telegram participant/admin rights；不能获取成员时不要伪造当前用户为群主。
+
 ## 4. 消息内容
+
+`IMMedia` 的 locator 是 adapter 自己声明的泛型，不是 `JsonValue`。用户头像和群头像也使用同一套 `IMMedia<L>` / `downloadMedia()`：
+
+```ts
+interface QQMediaLocator {
+  fileId: string
+  downloadToken: string
+}
+
+class QQPlatform implements IMPlatform<QQMediaLocator> {
+  async *downloadMedia(session, media: IMMedia<QQMediaLocator>) {
+    // media.locator?.downloadToken 在此处保持静态类型。
+  }
+}
+```
+
+消息、用户、会话和事件沿用同一个 locator 泛型。只有 bridge 的数据库持久化边界会把 locator 显式序列化；平台实现中不得用 `JsonValue` 或无类型字段代替 locator 模板。
 
 发送统一使用一个接口：
 
@@ -143,6 +184,16 @@ type IMEvent =
 message 和 mutation 事件先事务入库并生成/复用投影，再通过持久化 delivery/outbox 保留 `pts/seq`，最后只向绑定该 platform session 的 auth key 推送 `updateNew*`、`updateEdit*` 或 `updateDelete*`。发送失败时平台重投会复用原 `pts/seq`；已成功发布的 event ID 不会重复推送。
 
 撤回采用 tombstone：消息不会再出现在 dialogs/history/getMessages，但外部 ID、alias 和 Telegram message ID 映射继续保留，确保撤回 update、重试和重启后的 ID 都稳定。
+
+### 6.1 下游主动 mutation
+
+`capabilities.messageActions` 同时声明策略和语义：
+
+- `delete.own / delete.others` 分别声明是否支持撤回自己的消息和管理员撤回他人消息；`maxAgeSeconds` 省略表示不限时间。
+- `edit.mode` 为 `native / delete-and-resend / unsupported`。`delete-and-resend` 由 bridge 严格按“成功撤回旧消息后再发送新消息”执行；撤回失败时不会发送。
+- `forward.mode` 为 `native / copy / unsupported`，`preservesAuthor` 明确平台是否保留原作者署名。
+
+原子方法为 `deleteMessages()`、`editMessage()` 和 `forwardMessages()`。目标 ID 使用 `sourceIds` 中对应的物理 ID；adapter 不解析 Telegram 数字 ID。原生编辑必须保持平台逻辑 message ID；撤回重发会向 Telegram 客户端发布 delete + new update，而不是伪造保持 ID 的 edit。
 
 adapter 可以提供 at-least-once 事件；不要求自己实现 exactly-once。事件 handler 抛错时不得静默推进不可恢复的远端 cursor。
 
@@ -316,6 +367,8 @@ bridge 将 context 独立入库，通过持久化 delivery/outbox 发布 `update
 12. 万级历史只返回请求窗口，深分页不在单次 RPC 中全量入库。
 13. 平台 native sticker 与独立 Provider sticker 同时出现在 catalog，均可下载、发送并进入统一 recent/favorite。
 14. Unicode/custom-emoji reaction 均可从 reaction pack 映射、发送、写入历史并通过 push update 发布。
+15. owner/admin/member、权限、成员分页和管理员筛选与平台数据一致。
+16. 用户/群头像通过带类型 locator 的 `IMMedia` range 下载；原生编辑、撤回重发、限时/不限时撤回及转发策略均有覆盖。
 
 bridge 内部行为测试位于 `packages/bridge/src`，包括 `message-store.test.ts`、`platform-manager.test.ts`、`media-projection.test.ts`、`media-send.test.ts` 和 `conversation-kinds.test.ts`。
 
@@ -327,7 +380,7 @@ test-suite -> platform-static -> bridge -> mtproto
 ```
 
 - `platform-static.test.ts` 直接验证 Cordis 多例、Group A 每秒 new/edit/delete、Group B→C 用户镜像、Group D 万级分页、混合媒体、传输进度、subscribe 背压和错误行为。
-- `login.e2e.test.ts` 通过真实 MTProto socket 验证登录/重连/重启、new/edit/delete 推送和 tombstone、B→C bridge history、万级历史窗口入库、群相册、文件传输及 channel/subchannel。
+- `login.e2e.test.ts` 通过真实 MTProto socket 验证登录/重连/重启、new/edit/delete 推送和 tombstone、主动编辑/撤回/转发、成员与管理员权限、用户/群头像下载、B→C bridge history、万级历史窗口入库、群相册、文件传输及 channel/subchannel。
 
 运行 adapter 契约与跨包 e2e：
 

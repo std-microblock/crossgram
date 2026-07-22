@@ -38,11 +38,17 @@ function source(conversation: IMConversation): IMMessage {
 }
 
 const sentTargets: string[] = []
+const actionCalls: string[] = []
 const platform: IMPlatform = {
   capabilities: {
     history: true,
     send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
     conversations: { groups: true, channels: true, subchannels: true },
+    members: { list: true, administrators: true, permissions: true },
+    messageActions: {
+      delete: { own: { supported: true, maxAgeSeconds: 120 }, others: { supported: true } },
+      edit: { mode: 'native' }, forward: { mode: 'native', preservesAuthor: true },
+    },
   },
   async subscribe() { return () => {} },
   async getDialogs() {
@@ -53,6 +59,21 @@ const platform: IMPlatform = {
     return { messages: [source(conversation)] }
   },
   async getUser(_session, id) { return { id, firstName: id } },
+  async getConversationMembers(_session, target) {
+    if (target.id === 'direct') return { members: [], total: 0 }
+    const permissions = (admin: boolean) => ({
+      manageConversation: admin, manageMembers: admin, deleteAnyMessage: admin,
+      editAnyMessage: admin, pinMessages: admin, inviteMembers: true,
+    })
+    return {
+      total: 3,
+      members: [
+        { user: { id: 'self', firstName: 'Self' }, role: 'owner' as const, permissions: permissions(true) },
+        { user: { id: 'alice', firstName: 'Alice' }, role: 'administrator' as const, permissions: permissions(true) },
+        { user: { id: 'bob', firstName: 'Bob' }, role: 'member' as const, permissions: permissions(false) },
+      ],
+    }
+  },
   async sendMessage(_session, target, content) {
     sentTargets.push(target.id)
     return {
@@ -61,12 +82,31 @@ const platform: IMPlatform = {
       content: { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) },
     }
   },
+  async deleteMessages(_session, target, ids, options) {
+    actionCalls.push(`delete:${target.id}:${ids.join(',')}:${options.forEveryone}`)
+  },
+  async editMessage(_session, target, content) {
+    actionCalls.push(`edit:${target.conversationId}:${target.targetId}`)
+    return {
+      ...source(conversations.find((item) => item.id === target.conversationId)!),
+      id: target.messageId, outgoing: true, senderId: 'self',
+      content: { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) },
+    }
+  },
+  async forwardMessages(_session, from, ids, to) {
+    actionCalls.push(`forward:${from.id}:${ids.join(',')}:${to.id}`)
+    return ids.map((id, index) => ({
+      id: `forwarded-${index}`, conversationId: to.id, senderId: 'self', outgoing: true,
+      timestamp: 200 + index, content: { parts: [{ type: 'text' as const, text: `forwarded ${id}` }] },
+    }))
+  },
 }
 
 const disposals: Array<() => Promise<void>> = []
 
 afterEach(async () => {
   sentTargets.length = 0
+  actionCalls.length = 0
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
@@ -156,6 +196,99 @@ describe('conversation kinds', () => {
     expect(contacts.users).toMatchObject([{ _: 'user', firstName: 'direct' }])
   })
 
+  it('projects edit, forward, and administrator deletion through platform actions', async () => {
+    const { rpc } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const groupId = stableId('peer:group')
+    const directId = stableId('peer:direct')
+    const groupPeer = { _: 'inputPeerChat' as const, chatId: groupId }
+    const directPeer = { _: 'inputPeerUser' as const, userId: directId, accessHash: Long.ZERO }
+    const groupHistory = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+    const groupMessageId = (groupHistory.messages[0] as tl.RawMessage).id
+
+    const edited = await rpc.editMessage({
+      _: 'messages.editMessage', peer: groupPeer, id: groupMessageId, message: 'edited via abstraction',
+    }) as tl.RawUpdates
+    expect(edited.updates).toMatchObject([{
+      _: 'updateEditMessage', message: { id: groupMessageId, message: 'edited via abstraction' },
+    }])
+
+    const forwarded = await rpc.forwardMessages({
+      _: 'messages.forwardMessages', fromPeer: groupPeer, id: [groupMessageId],
+      randomId: [Long.fromNumber(99)], toPeer: directPeer,
+    }) as tl.RawUpdates
+    expect(forwarded.updates).toMatchObject([
+      { _: 'updateMessageID', randomId: Long.fromNumber(99) },
+      { _: 'updateNewMessage', message: { message: 'forwarded message-group' } },
+    ])
+
+    await expect(rpc.deleteMessages({
+      _: 'messages.deleteMessages', revoke: true, id: [groupMessageId],
+    })).resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
+    expect(actionCalls).toEqual([
+      'edit:group:message-group',
+      'forward:group:message-group:direct',
+      'delete:group:message-group:true',
+    ])
+  })
+
+  it('projects delete-and-resend editing as delete plus new-message updates', async () => {
+    const actions = platform.capabilities.messageActions!
+    const originalMode = actions.edit.mode
+    actions.edit.mode = 'delete-and-resend'
+    try {
+      const { rpc } = await createRpc()
+      await rpc.getDialogs(dialogsRequest())
+      const groupId = stableId('peer:group')
+      const groupPeer = { _: 'inputPeerChat' as const, chatId: groupId }
+      const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+      const originalId = (history.messages[0] as tl.RawMessage).id
+
+      const result = await rpc.editMessage({
+        _: 'messages.editMessage', peer: groupPeer, id: originalId, message: 'replacement body',
+      }) as tl.RawUpdates
+      expect(result.updates).toMatchObject([
+        { _: 'updateDeleteMessages', messages: [originalId], ptsCount: 1 },
+        { _: 'updateNewMessage', message: { message: 'replacement body' }, ptsCount: 1 },
+      ])
+      expect((result.updates[1] as tl.RawUpdateNewMessage).message).not.toMatchObject({ id: originalId })
+      expect(actionCalls).toEqual(['delete:group:message-group:true'])
+      expect(sentTargets).toEqual(['group'])
+    } finally {
+      actions.edit.mode = originalMode
+    }
+  })
+
+  it('enforces own-message delete and edit windows while leaving administrator deletion unlimited', async () => {
+    const actions = platform.capabilities.messageActions!
+    const originalEditLimit = actions.edit.maxAgeSeconds
+    actions.edit.maxAgeSeconds = 1
+    try {
+      const { rpc } = await createRpc()
+      await rpc.getDialogs(dialogsRequest())
+      const groupId = stableId('peer:group')
+      const groupPeer = { _: 'inputPeerChat' as const, chatId: groupId }
+      const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+      const incomingId = (history.messages[0] as tl.RawMessage).id
+      await expect(rpc.editMessage({
+        _: 'messages.editMessage', peer: groupPeer, id: incomingId, message: 'too late',
+      })).rejects.toMatchObject({ text: 'MESSAGE_EDIT_TIME_EXPIRED' })
+
+      const sent = await rpc.sendMessage({
+        _: 'messages.sendMessage', peer: groupPeer, message: 'old own message', randomId: Long.fromNumber(101),
+      })
+      await expect(rpc.deleteMessages({
+        _: 'messages.deleteMessages', revoke: true, id: [sent.id],
+      })).rejects.toMatchObject({ text: 'MESSAGE_DELETE_FORBIDDEN' })
+
+      await expect(rpc.deleteMessages({
+        _: 'messages.deleteMessages', revoke: true, id: [incomingId],
+      })).resolves.toMatchObject({ ptsCount: 1 })
+    } finally {
+      actions.edit.maxAgeSeconds = originalEditLimit
+    }
+  })
+
   it('serves the peer metadata RPCs required by desktop group and channel views', async () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())
@@ -189,12 +322,15 @@ describe('conversation kinds', () => {
       _: 'messages.chatFull', fullChat: { _: 'channelFull', id: channelId, participantsCount: 42 },
     })
     expect(self).toMatchObject({
-      _: 'channels.channelParticipant', participant: { _: 'channelParticipantSelf' },
+      _: 'channels.channelParticipant', participant: { _: 'channelParticipantCreator' },
     })
-    expect(participants).toMatchObject({ _: 'channels.channelParticipants', count: 1 })
+    expect(participants).toMatchObject({ _: 'channels.channelParticipants', count: 3 })
     expect(admins).toMatchObject({
-      _: 'channels.channelParticipants', count: 1,
-      participants: [{ _: 'channelParticipantCreator', adminRights: { manageTopics: true } }],
+      _: 'channels.channelParticipants', count: 2,
+      participants: [
+        { _: 'channelParticipantCreator', adminRights: { manageTopics: true } },
+        { _: 'channelParticipantAdmin', adminRights: { deleteMessages: true } },
+      ],
     })
     expect(sendAs).toMatchObject({ _: 'channels.sendAsPeers', peers: [{ peer: { _: 'peerUser' } }] })
     for (const result of [groupSettings, fullGroup, fullChannel, self, participants, admins, sendAs]) {
