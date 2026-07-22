@@ -216,14 +216,24 @@ export class PlatformDataService {
   ) {}
 
   async getDialogs(query: { limit?: number, afterId?: string } = {}): Promise<IMDialog[]> {
+    let upstream: IMDialog[] = []
     if (this._platform.capabilities.history && this._platform.getDialogs) {
       const page = await this._platform.getDialogs(this._session, query)
+      upstream = page.dialogs
       await this._ingestDialogs(page.dialogs)
     }
-    return this._store.listDialogs(this._session.platformSessionId, {
+    const stored = await this._store.listDialogs(this._session.platformSessionId, {
       limit: query.limit,
       afterConversationId: query.afterId,
     })
+    const live = new Map(upstream.map((dialog) => [dialog.conversation.id, dialog]))
+    return stored.map((dialog) => ({
+      ...dialog,
+      conversation: {
+        ...dialog.conversation,
+        avatar: live.get(dialog.conversation.id)?.conversation.avatar,
+      },
+    }))
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {

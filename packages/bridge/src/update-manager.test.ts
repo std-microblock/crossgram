@@ -25,7 +25,12 @@ const platform: IMPlatform = {
   },
   async subscribe() { return () => {} },
   async sendMessage() { throw new Error('unused') },
-  async getUser(_session, id) { return { id, firstName: `User ${id}` } },
+  async getUser(_session, id) {
+    return {
+      id, firstName: `User ${id}`,
+      avatar: { id: `avatar-${id}`, kind: 'image' as const, locator: { userId: id } },
+    }
+  },
 }
 
 const disposals: Array<() => Promise<void>> = []
@@ -67,7 +72,10 @@ function roundTrip<T>(object: T): T {
 describe('UpdateManager', () => {
   it('advances durable state and targets only auth keys bound to the source platform session', async () => {
     const { store, manager, sent } = await createHarness()
-    const conversation: IMConversation = { id: 'group', kind: 'group', title: 'Group' }
+    const conversation: IMConversation = {
+      id: 'group', kind: 'group', title: 'Group',
+      avatar: { id: 'avatar-group', kind: 'image', locator: { conversationId: 'group' } },
+    }
     const message: IMMessage = {
       id: 'incoming', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_000,
       content: { parts: [{ type: 'text', text: 'pushed' }] },
@@ -80,8 +88,11 @@ describe('UpdateManager', () => {
     expect(sent[0].update).toMatchObject({
       _: 'updates', seq: 1,
       updates: [{ _: 'updateNewMessage', pts: 2, ptsCount: 1, message: { message: 'pushed' } }],
-      chats: [{ _: 'chat', title: 'Group' }],
-      users: [{ _: 'user', self: true }, { _: 'user', firstName: 'User alice' }],
+      chats: [{ _: 'chat', title: 'Group', photo: { _: 'chatPhoto', dcId: 1 } }],
+      users: [
+        { _: 'user', self: true },
+        { _: 'user', firstName: 'User alice', photo: { _: 'userProfilePhoto', dcId: 1 } },
+      ],
     })
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 1 })
     expect(() => roundTrip(sent[0].update)).not.toThrow()

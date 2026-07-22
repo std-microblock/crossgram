@@ -279,7 +279,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
         : this._users.get(id)
       if (!user) return []
       const owner = id === session.userId
-      const administrator = id === 'alice'
+      const administrator = !owner && id === (session.userId === 'alice' ? 'bob' : 'alice')
       return [{
         user: clone(user), role: owner ? 'owner' : administrator ? 'administrator' : 'member',
         permissions: {
@@ -306,6 +306,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
     _session: PlatformSession,
     conversation: IMConversationRef,
     messageIds: readonly string[],
+    _options: import('@mtproto-relay/bridge').IMDeleteMessagesOptions,
   ): Promise<void> {
     const target = this._requireConversation(conversation.id)
     const requested = new Set(messageIds)

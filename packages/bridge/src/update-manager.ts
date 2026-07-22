@@ -40,7 +40,9 @@ export class UpdateManager {
     }
     await this._publishMessage(
       session,
-      committed as Exclude<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+      committed as Exclude<CommittedPlatformEvent, {
+        event: { type: 'message-delete' | 'message-reactions' }
+      }>,
     )
   }
 
@@ -74,7 +76,7 @@ export class UpdateManager {
     void pts
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users: [],
-      chats: displayConversation.kind === 'direct' ? [] : [makeUpdateChat(displayConversation)],
+      chats: displayConversation.kind === 'direct' ? [] : [makeUpdateChat(displayConversation, false, this._dcId)],
       date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
@@ -83,7 +85,9 @@ export class UpdateManager {
 
   private async _publishMessage(
     session: PlatformSession,
-    committed: Exclude<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+    committed: Exclude<CommittedPlatformEvent, {
+      event: { type: 'message-delete' | 'message-reactions' }
+    }>,
   ): Promise<void> {
     const { event, result } = committed
     const isEdit = event.type === 'message-edit'
@@ -138,11 +142,12 @@ export class UpdateManager {
         firstName: sender?.firstName ?? event.message.senderId,
         lastName: sender?.lastName,
         username: sender?.username,
+        photo: sender?.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
       }),
     ]
     const chats = displayConversation.kind === 'direct'
       ? []
-      : [makeUpdateChat(displayConversation, topicId !== undefined)]
+      : [makeUpdateChat(displayConversation, topicId !== undefined, this._dcId)]
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
@@ -186,7 +191,9 @@ export class UpdateManager {
     const payload: tl.RawUpdates = {
       _: 'updates', updates: [update as tl.TypeUpdate],
       users: [],
-      chats: displayConversation.kind === 'direct' ? [] : [makeUpdateChat(displayConversation, !!event.conversation.parentId)],
+      chats: displayConversation.kind === 'direct'
+        ? []
+        : [makeUpdateChat(displayConversation, !!event.conversation.parentId, this._dcId)],
       date: delivery.date,
       seq: delivery.seq,
     }
@@ -322,11 +329,14 @@ function makeUpdateMessage(
   } as tl.RawMessage
 }
 
-function makeUpdateChat(conversation: IMConversation, forum = false): tl.TypeChat {
+function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {
   const id = stableId(`peer:${conversation.id}`)
   if (conversation.kind === 'group') {
     return {
-      _: 'chat', creator: true, id, title: conversation.title, photo: { _: 'chatPhotoEmpty' },
+      _: 'chat', creator: true, id, title: conversation.title,
+      photo: conversation.avatar
+        ? makeUpdateAvatar(conversation.avatar.id, dcId, 'chat')
+        : { _: 'chatPhotoEmpty' },
       participantsCount: Number(conversation.metadata?.participantsCount ?? 0), date: 0, version: 1,
     }
   }
@@ -335,9 +345,24 @@ function makeUpdateChat(conversation: IMConversation, forum = false): tl.TypeCha
     _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
     broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
     forum: forum || undefined,
-    photo: { _: 'chatPhotoEmpty' }, date: 0,
+    photo: conversation.avatar
+      ? makeUpdateAvatar(conversation.avatar.id, dcId, 'chat')
+      : { _: 'chatPhotoEmpty' }, date: 0,
     participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
   }
+}
+
+function makeUpdateAvatar(mediaId: string, dcId: number, kind: 'user'): tl.RawUserProfilePhoto
+function makeUpdateAvatar(mediaId: string, dcId: number, kind: 'chat'): tl.RawChatPhoto
+function makeUpdateAvatar(
+  mediaId: string,
+  dcId: number,
+  kind: 'user' | 'chat',
+): tl.RawUserProfilePhoto | tl.RawChatPhoto {
+  const photoId = Long.fromNumber(stableId(`avatar:${mediaId}`))
+  return kind === 'user'
+    ? { _: 'userProfilePhoto', photoId, dcId }
+    : { _: 'chatPhoto', photoId, dcId }
 }
 
 function hexBytes(value: string): Uint8Array {

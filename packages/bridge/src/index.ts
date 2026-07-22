@@ -279,6 +279,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.sendMedia(req as tl.messages.RawSendMediaRequest))
   rpc.register('messages.sendMultiMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMultiMedia(req as tl.messages.RawSendMultiMediaRequest))
+  rpc.register('messages.deleteMessages', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.deleteMessages(req as tl.messages.RawDeleteMessagesRequest))
+  rpc.register('channels.deleteMessages', async (rpc, req) => {
+    const request = req as tl.channels.RawDeleteMessagesRequest
+    return (await requireBridgeSession(rpc)).dialogs.deleteMessages(request, request.channel)
+  })
+  rpc.register('messages.editMessage', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.editMessage(req as tl.messages.RawEditMessageRequest))
+  rpc.register('messages.forwardMessages', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.forwardMessages(req as tl.messages.RawForwardMessagesRequest))
   rpc.register('messages.setTyping', async (rpc) => {
     await requireBridgeSession(rpc)
     return { _: 'boolTrue' } as unknown as tl.TlObject

@@ -333,6 +333,16 @@ describe('bridge login e2e', () => {
       expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
       expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
       const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      expect(alice.photo).toMatchObject({ _: 'userProfilePhoto', dcId: 1 })
+      const avatar = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPeerPhotoFileLocation',
+          peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+          photoId: alice.photo.photoId,
+        },
+      }, 17)
+      expect([...avatar.bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
 
       const users = await callRpc(resumed, key, resumedSid, {
         _: 'users.getUsers',
@@ -369,6 +379,7 @@ describe('bridge login e2e', () => {
         'Group B - Mirror Source', 'general', 'Reaction & Sticker Lab', 'Group D - Long History',
       ])
       const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
+      expect(group.photo).toMatchObject({ _: 'chatPhoto', dcId: 1 })
       const mirrorSourceGroup = dialogs.chats.find((chat: any) => chat.title === 'Group B - Mirror Source')
       const mirrorTargetGroup = dialogs.chats.find((chat: any) => chat.title === 'Group C - Mirror Target')
       const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')
@@ -663,7 +674,20 @@ describe('bridge login e2e', () => {
         participant: { _: 'inputPeerSelf' },
       }, 67)
       expect(participant).toMatchObject({
-        _: 'channels.channelParticipant', participant: { _: 'channelParticipantSelf' },
+        _: 'channels.channelParticipant', participant: { _: 'channelParticipantCreator' },
+      })
+      const channelMembers = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getParticipants',
+        channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        filter: { _: 'channelParticipantsRecent' }, offset: 0, limit: 100, hash: Long.ZERO,
+      }, 68)
+      expect(channelMembers).toMatchObject({
+        _: 'channels.channelParticipants', count: 3,
+        participants: [
+          { _: 'channelParticipantCreator' },
+          { _: 'channelParticipantAdmin', adminRights: { deleteMessages: true } },
+          { _: 'channelParticipant' },
+        ],
       })
       const sendAs = await callRpc(resumed, key, resumedSid, {
         _: 'channels.getSendAs',
@@ -1221,6 +1245,42 @@ describe('bridge login e2e', () => {
         _: 'messages.reorderStickerSets',
         order: [pluginSet.id],
       }, 218)).toEqual({ _: 'boolTrue' })
+
+      const edited = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.editMessage',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        id: sentMessage.id, message: 'Edited through MTProto',
+      }, 220)
+      expect(edited).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateEditMessage', ptsCount: 1,
+          message: { id: sentMessage.id, message: 'Edited through MTProto' },
+        }],
+      })
+      const forwarded = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.forwardMessages',
+        fromPeer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        id: [sentMessage.id], randomId: [Long.fromNumber(900)],
+        toPeer: { _: 'inputPeerChat', chatId: group.id },
+      }, 222)
+      expect(forwarded).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(900) },
+          { _: 'updateNewMessage', message: { message: 'Edited through MTProto' }, ptsCount: 1 },
+        ],
+      })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.deleteMessages', revoke: true, id: [sentMessage.id],
+      }, 224)).toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
+      const afterDelete = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 226)
+      expect(afterDelete.messages.some((item: any) => item.id === sentMessage.id)).toBe(false)
       dbg('bridge contacts/dialogs/history/send ok')
 
       resumed.close()
