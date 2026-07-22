@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -84,12 +84,31 @@ function historyRequest(): tl.messages.RawGetHistoryRequest {
   }
 }
 
+function dialogsRequest(): tl.messages.RawGetDialogsRequest {
+  return {
+    _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+    offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+  }
+}
+
 function wireRoundTrip<T>(object: T): T {
   const bytes = TlBinaryWriter.serializeObject(__tlWriterMap, object as tl.TlObject)
   return new TlBinaryReader(__tlReaderMap, bytes).object() as T
 }
 
 describe('rich-media projection', () => {
+  it('materializes persisted dialog previews without fetching every conversation history', async () => {
+    const store = await createStore()
+    const getHistory = vi.fn(async () => ({ messages: [album] }))
+    const result = await new DialogRpc({ ...platform, getHistory }, session, store)
+      .getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+
+    expect(getHistory).not.toHaveBeenCalled()
+    expect(result.dialogs).toHaveLength(1)
+    expect((result.messages[0] as tl.RawMessage).media?._).toBe('messageMediaDocument')
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('expands mixed media into consecutive ungrouped Telegram messages', async () => {
     const store = await createStore()
     const rpc = new DialogRpc(platform, session, store)

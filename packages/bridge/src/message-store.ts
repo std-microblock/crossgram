@@ -356,6 +356,32 @@ export class MessageStore {
     }
   }
 
+  async findProjectedByPlatformId(
+    platformSessionId: string,
+    platformConversationId: string,
+    platformMessageId: string,
+  ): Promise<ProjectedMessage | undefined> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return
+    const [alias] = await this._database.get('mtproto_im_message_alias', {
+      platformSessionId,
+      conversationId: conversation.id,
+      platformMessageId,
+    })
+    if (!alias) return
+    const [row] = await this._database.get('mtproto_im_message', { id: alias.messageId })
+    if (!row || row.deleted) return
+    return {
+      source: await this._hydrateMessage(row),
+      parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+      media: await this._database.select('mtproto_im_media', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+    }
+  }
+
   async getOldestTlMessageId(
     platformSessionId: string,
     platformConversationId: string,
