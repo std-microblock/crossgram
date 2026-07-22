@@ -62,7 +62,8 @@ export class StickerRpc {
     if (req.stickerset._ === 'inputStickerSetID') ref = this._sets.get(req.stickerset.id.toNumber())
     if (req.stickerset._ === 'inputStickerSetShortName') {
       const packs = await this._listPacks()
-      const found = packs.find(({ pack }) => this._shortName(pack) === req.stickerset.shortName)
+      const shortName = req.stickerset.shortName
+      const found = packs.find(({ pack }) => this._shortName(pack) === shortName)
       if (found) ref = { providerId: found.providerId, packId: found.pack.packId }
     }
     if (!ref) throw new RpcError(400, 'STICKERSET_INVALID')
@@ -115,7 +116,7 @@ export class StickerRpc {
     }
   }
 
-  async saveRecentSticker(req: tl.messages.RawSaveRecentStickerRequest): Promise<tl.RawBool> {
+  async saveRecentSticker(req: tl.messages.RawSaveRecentStickerRequest): Promise<tl.TlObject> {
     const resolved = await this._resolveInputDocument(req.id)
     if (req.unsave) {
       await this._database.remove('mtproto_sticker_recent', {
@@ -127,15 +128,15 @@ export class StickerRpc {
     } else {
       await this.markUsed(resolved, req.attached ?? false)
     }
-    return { _: 'boolTrue' }
+    return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
-  async clearRecentStickers(req: tl.messages.RawClearRecentStickersRequest): Promise<tl.RawBool> {
+  async clearRecentStickers(req: tl.messages.RawClearRecentStickersRequest): Promise<tl.TlObject> {
     await this._database.remove('mtproto_sticker_recent', {
       platformSessionId: this._session.platformSessionId,
       attached: req.attached ?? false,
     })
-    return { _: 'boolTrue' }
+    return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
   async getFavedStickers(_req: tl.messages.RawGetFavedStickersRequest): Promise<tl.messages.TypeFavedStickers> {
@@ -154,7 +155,7 @@ export class StickerRpc {
     }
   }
 
-  async faveSticker(req: tl.messages.RawFaveStickerRequest): Promise<tl.RawBool> {
+  async faveSticker(req: tl.messages.RawFaveStickerRequest): Promise<tl.TlObject> {
     const resolved = await this._resolveInputDocument(req.id)
     const query = {
       platformSessionId: this._session.platformSessionId,
@@ -165,7 +166,7 @@ export class StickerRpc {
     else await this._database.upsert('mtproto_sticker_favorite', [{ ...query, createdAt: new Date() }], [
       'platformSessionId', 'providerId', 'providerStickerId',
     ])
-    return { _: 'boolTrue' }
+    return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
   async installStickerSet(
@@ -187,17 +188,17 @@ export class StickerRpc {
     return { _: 'messages.stickerSetInstallResultSuccess' }
   }
 
-  async uninstallStickerSet(req: tl.messages.RawUninstallStickerSetRequest): Promise<tl.RawBool> {
+  async uninstallStickerSet(req: tl.messages.RawUninstallStickerSetRequest): Promise<tl.TlObject> {
     const ref = await this._resolveSet(req.stickerset)
     await this._database.remove('mtproto_sticker_set_install', {
       platformSessionId: this._session.platformSessionId,
       providerId: ref.providerId,
       providerPackId: ref.packId,
     })
-    return { _: 'boolTrue' }
+    return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
-  async reorderStickerSets(req: tl.messages.RawReorderStickerSetsRequest): Promise<tl.RawBool> {
+  async reorderStickerSets(req: tl.messages.RawReorderStickerSetsRequest): Promise<tl.TlObject> {
     await this._listPacks()
     for (const [sortOrder, id] of req.order.entries()) {
       const ref = this._sets.get(id.toNumber())
@@ -208,10 +209,10 @@ export class StickerRpc {
         providerPackId: ref.packId,
       }, { sortOrder })
     }
-    return { _: 'boolTrue' }
+    return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
-  async toggleStickerSets(req: tl.messages.RawToggleStickerSetsRequest): Promise<tl.RawBool> {
+  async toggleStickerSets(req: tl.messages.RawToggleStickerSetsRequest): Promise<tl.TlObject> {
     for (const input of req.stickersets) {
       const ref = await this._resolveSet(input)
       const query = {
@@ -231,7 +232,7 @@ export class StickerRpc {
         }], ['platformSessionId', 'providerId', 'providerPackId'])
       }
     }
-    return { _: 'boolTrue' }
+    return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
   async resolveSend(id: tl.TypeInputDocument): Promise<{
@@ -261,7 +262,7 @@ export class StickerRpc {
     const [existing] = await this._database.get('mtproto_sticker_recent', query)
     await this._database.upsert('mtproto_sticker_recent', [{
       ...query, useCount: (existing?.useCount ?? 0) + 1, lastUsedAt: new Date(),
-    }], ['platformSessionId', 'providerId', 'providerStickerId', 'attached'])
+    }], ['platformSessionId', 'providerId', 'providerStickerId', 'attached'] as any)
   }
 
   private async markUsed(resolved: ResolvedSticker, attached = false): Promise<void> {

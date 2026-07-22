@@ -218,15 +218,15 @@ export const DebugPage = defineComponent({
     }
 
     return () => {
-      const Layout = resolveComponent('k-layout')
-      const Icon = resolveComponent('k-icon')
+      const Layout = resolveComponent('k-layout') as ReturnType<typeof defineComponent>
+      const Icon = resolveComponent('k-icon') as ReturnType<typeof defineComponent>
       const content = visibleGroups.value.length
         ? <main ref={scrollElement} class="debug-virtual-viewport">
           <div class="debug-virtual-content" style={{ height: `${virtualizer.value.getTotalSize()}px` }}>
             {virtualRows.value.map((row) => {
               const group = visibleGroups.value[row.index]
               return <div
-                key={row.key}
+                key={String(row.key)}
                 ref={element => virtualizer.value.measureElement(element as HTMLElement | null)}
                 class="debug-virtual-row"
                 data-index={row.index}

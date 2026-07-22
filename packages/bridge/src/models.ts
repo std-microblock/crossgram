@@ -1,6 +1,6 @@
 import type { Context } from 'cordis'
 import type {
-  IMConversationKind, IMMediaKind, IMReactionActor, IMReactionDefinition, JsonObject, JsonValue,
+  IMConversationKind, IMMediaKind, JsonObject, JsonValue,
 } from './platform.js'
 
 export interface AuthSessionRow {
@@ -160,8 +160,8 @@ export interface IMMessageReactionRow {
   nativeReactionKey: string
   count: number
   selected: boolean
-  recentActors: IMReactionActor[]
-  definition: IMReactionDefinition
+  recentActors: Record<string, unknown>[]
+  definition: Record<string, unknown>
   updatedAt: Date
 }
 

@@ -5,7 +5,8 @@ import type {
 import {
   messageMedia, messageText,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
-  type IMReactionContext, type JsonValue, type PlatformSession,
+  type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
+  type JsonValue, type PlatformSession,
 } from './platform.js'
 import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
 
@@ -661,10 +662,11 @@ export class MessageStore {
       groupId: row.platformGroupId ?? undefined,
       metadata: row.metadata,
       reactionContext: reactions.length ? {
-        available: reactions.map((reaction) => reaction.definition),
+        available: reactions.map((reaction) => reaction.definition as unknown as IMReactionDefinition),
         reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
           key: reaction.nativeReactionKey, count: reaction.count,
-          selected: reaction.selected, recentActors: reaction.recentActors,
+          selected: reaction.selected,
+          recentActors: reaction.recentActors as unknown as IMReactionActor[],
         })),
         maxSelected: Number(row.metadata.reactionMaxSelected ?? 1),
       } : undefined,
@@ -695,8 +697,9 @@ export class MessageStore {
       const reaction = summaries.get(key)
       return {
       messageId, nativeReactionKey: key, count: reaction?.count ?? 0,
-      selected: reaction?.selected ?? false, recentActors: reaction?.recentActors ?? [],
-      definition, updatedAt: now,
+      selected: reaction?.selected ?? false,
+      recentActors: (reaction?.recentActors ?? []) as unknown as Record<string, unknown>[],
+      definition: definition as unknown as Record<string, unknown>, updatedAt: now,
     }
     }), ['messageId', 'nativeReactionKey'])
   }

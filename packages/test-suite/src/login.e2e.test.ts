@@ -1313,6 +1313,7 @@ describe('bridge login e2e', () => {
             output.push(part)
             continue
           }
+          if (part.type !== 'media') throw new Error('sticker input is not supported by this harness')
           const chunks: Uint8Array[] = []
           let size = 0
           for await (const chunk of part.media.source.stream({ signal: options?.signal })) {
