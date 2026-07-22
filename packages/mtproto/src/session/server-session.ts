@@ -13,7 +13,7 @@ import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector, unwrapRpcRequest } from '../rpc/dispatcher.js'
 import type { RpcDispatch, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
-import { CURRENT_API_LAYER, getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
+import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 
 // TL constructor IDs for MTProto service messages
@@ -105,6 +105,7 @@ export class ServerSession {
     private readonly _keyStore?: AuthKeyStore,
     private readonly _debug?: MtprotoDebugListener,
     private readonly _onApiLayer?: (authKeyId: Uint8Array, layer: number) => void,
+    private readonly _getApiLayer?: (authKeyId: Uint8Array) => number | undefined,
   ) {
     this._permAuthKey = new ServerAuthKey(_crypto, _log, _readerMap)
     this._msgIdGen = new ServerMessageIdGenerator()
@@ -760,11 +761,20 @@ export class ServerSession {
     const unwrapped = unwrapRpcRequest(request)
     if (unwrapped.apiLayer !== null) {
       this._setApiLayer(unwrapped.apiLayer)
-    } else if (this._apiLayer === null) {
-      // Clients that use the current schema may omit invokeWithLayer entirely.
-      // MTProto-only media traffic never reaches this branch and continues to
-      // inherit the layer negotiated by an API connection with the same key.
-      this._setApiLayer(CURRENT_API_LAYER)
+    } else if (this._apiLayer === null && this._permAuthKey.ready) {
+      const inherited = this._getApiLayer?.(this._permAuthKey.id)
+      if (inherited !== undefined) this._setApiLayer(inherited, false)
+    }
+    if (this._apiLayer === null) {
+      // The API layer is not part of the DH handshake and cannot be inferred
+      // from a bare RPC. Telegram clients retry this request after receiving
+      // CONNECTION_NOT_INITED with invokeWithLayer(initConnection(...)).
+      this._sendRpcResult(msgId, {
+        _: 'mt_rpc_error',
+        errorCode: 400,
+        errorMessage: 'CONNECTION_NOT_INITED',
+      } as mtp.RawMt_rpc_error, unwrapped.request._)
+      return
     }
 
     const ctx: ServerRpcContext = {

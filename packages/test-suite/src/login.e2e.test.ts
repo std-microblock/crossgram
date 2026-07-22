@@ -18,7 +18,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
-import { Mtproto, AbridgedPacketCodec, generateRsaKeyPair } from '@mtproto-relay/mtproto'
+import { Mtproto, AbridgedPacketCodec, CURRENT_API_LAYER, generateRsaKeyPair } from '@mtproto-relay/mtproto'
 import * as bridge from '@mtproto-relay/bridge'
 import * as relay from '@mtproto-relay/relay'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
@@ -179,7 +179,33 @@ function clientDecrypt(key: ClientKey, data: Uint8Array): TlBinaryReader {
   return reader
 }
 
-async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj: object, sub: number): Promise<any> {
+const initializedApiKeys = new Set<string>()
+
+function initializedRpc(query: object): object {
+  return {
+    _: 'invokeWithLayer',
+    layer: CURRENT_API_LAYER,
+    query: {
+      _: 'initConnection',
+      apiId: 1,
+      deviceModel: 'mtproto-relay test',
+      systemVersion: 'test',
+      appVersion: 'test',
+      systemLangCode: 'en',
+      langPack: '',
+      langCode: 'en',
+      query,
+    },
+  }
+}
+
+async function sendRpc(
+  client: TestClient,
+  key: ClientKey,
+  sessionId: Long,
+  obj: object,
+  sub: number,
+): Promise<any> {
   const body = TlBinaryWriter.serializeObject(__tlWriterMap, obj as any)
   await client.send(clientEncrypt(key, body, key.salt, sessionId, sub))
   for (let i = 0; i < 12; i++) {
@@ -202,6 +228,22 @@ async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj:
     try { reader.object() } catch { /* service msg */ }
   }
   throw new Error('no rpc_result')
+}
+
+async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj: object, sub: number): Promise<any> {
+  const keyId = Buffer.from(key.authKeyId).toString('hex')
+  if (!initializedApiKeys.has(keyId)) {
+    const result = await sendRpc(client, key, sessionId, initializedRpc(obj), sub)
+    initializedApiKeys.add(keyId)
+    return result
+  }
+
+  const result = await sendRpc(client, key, sessionId, obj, sub)
+  if (result?._ !== 'mt_rpc_error' || result.errorMessage !== 'CONNECTION_NOT_INITED') return result
+
+  const retried = await sendRpc(client, key, sessionId, initializedRpc(obj), sub + 1)
+  initializedApiKeys.add(keyId)
+  return retried
 }
 
 async function readPush(client: TestClient, key: ClientKey): Promise<any> {
