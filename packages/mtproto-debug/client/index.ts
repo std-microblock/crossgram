@@ -1,6 +1,8 @@
 import type { Context } from 'cordis'
 import { computed, defineComponent, h, ref, resolveComponent } from 'vue'
 import { useRpc } from '@cordisjs/client'
+import { useVirtualizer } from '@tanstack/vue-virtual'
+import { countGroupedEvents, filterEventGroups, groupRpcEvents } from '../src/event-groups.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
 import './style.css'
 
@@ -51,62 +53,85 @@ const JsonNode = defineComponent({
   },
 })
 
-const EventRow = defineComponent({
+export const EventRow = defineComponent({
   name: 'MtprotoEventRow',
   props: {
     event: { type: Object as () => CapturedMtprotoEvent, required: true },
+    result: { type: Object as () => CapturedMtprotoEvent, required: false },
+    expanded: { type: Boolean, default: false },
   },
-  setup(props) {
-    const expanded = ref(false)
+  emits: ['toggle'],
+  setup(props, { emit }) {
     return () => {
       const event = props.event
       const direction = event.direction === 'client->server' ? 'C -> S' : 'S -> C'
       return h('article', { class: ['debug-event', `direction-${event.direction.replace('->', '-')}`] }, [
         h('button', {
-          type: 'button', class: 'event-header', 'aria-expanded': expanded.value,
-          onClick: () => { expanded.value = !expanded.value },
+          type: 'button', class: 'event-header', 'aria-expanded': props.expanded,
+          onClick: () => emit('toggle'),
         }, [
-          h('span', { class: ['event-chevron', { expanded: expanded.value }] }, '\u203a'),
+          h('span', { class: ['event-chevron', { expanded: props.expanded }] }, '\u203a'),
           h('code', { class: 'event-name', title: event.name }, event.name),
+          h('time', { class: 'event-time', title: 'timestamp', datetime: new Date(event.timestamp).toISOString() }, formatTime(event.timestamp)),
+          h('span', { class: 'direction-label', title: 'direction' }, direction),
+          h('code', { class: 'event-connection', title: 'connection' }, event.connectionId),
+          event.messageId && h('code', { class: 'event-message', title: 'message id' }, event.messageId),
+          event.seqNo !== undefined && h('code', { class: 'event-seq', title: 'sequence number' }, `seq:${event.seqNo}`),
+          event.authKeyId && h('code', { class: 'event-auth', title: 'auth key id' }, `key:${event.authKeyId}`),
+          event.sessionId && h('code', { class: 'event-session', title: 'session id' }, `sid:${event.sessionId}`),
+          props.result && h('code', { class: 'rpc-result-summary', title: props.result.name }, `result:${props.result.name}`),
           h('span', { class: 'event-phase' }, event.phase),
         ]),
-        h('div', { class: 'event-meta', role: 'row' }, [
-          h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'time'), h('time', { datetime: new Date(event.timestamp).toISOString() }, formatTime(event.timestamp))]),
-          h('span', { class: ['meta-item', 'direction-label'] }, [h('span', { class: 'meta-label' }, 'direction'), direction]),
-          h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'connection'), h('code', event.connectionId)]),
-          event.messageId && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'message'), h('code', event.messageId)]),
-          event.seqNo !== undefined && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'seq'), h('code', String(event.seqNo))]),
-          event.authKeyId && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'auth key'), h('code', event.authKeyId)]),
-          event.sessionId && h('span', { class: 'meta-item' }, [h('span', { class: 'meta-label' }, 'session'), h('code', event.sessionId)]),
-        ]),
-        expanded.value && h('div', { class: 'event-detail' }, [
+        props.expanded && h('div', { class: 'event-detail' }, [
           h('div', { class: 'payload-label' }, 'payload'),
           h(JsonNode, { value: event.payload, depth: 0 }),
           event.error && h('div', { class: 'event-error' }, event.error),
+          props.result && h('div', { class: 'rpc-result-detail' }, [
+            h('div', { class: 'payload-label' }, 'result payload'),
+            h(JsonNode, { value: props.result.payload, depth: 0 }),
+            props.result.error && h('div', { class: 'event-error' }, props.result.error),
+          ]),
         ]),
       ])
     }
   },
 })
 
-const DebugPage = defineComponent({
+export const DebugPage = defineComponent({
   name: 'MtprotoDebugPage',
   setup() {
     const data = useRpc<MtprotoDebugData>()
     const filter = ref('')
     const busy = ref(false)
     const error = ref('')
-    const visibleEvents = computed(() => {
-      const terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean)
-      if (!terms.length) return data.value.events
-      return data.value.events.filter(event => terms.every(term => event.searchText.includes(term)))
-    })
+    const expanded = ref(new Set<number>())
+    const scrollElement = ref<HTMLElement | null>(null)
+    const groups = computed(() => groupRpcEvents(data.value.events))
+    const visibleGroups = computed(() => filterEventGroups(groups.value, filter.value))
+    const visibleEventCount = computed(() => countGroupedEvents(visibleGroups.value))
+    const virtualizer = useVirtualizer(computed(() => ({
+      count: visibleGroups.value.length,
+      getScrollElement: () => scrollElement.value,
+      estimateSize: () => 44,
+      getItemKey: (index: number) => visibleGroups.value[index]?.event.id ?? index,
+      initialRect: { width: 1200, height: 600 },
+      overscan: 12,
+    })))
+    const virtualRows = computed(() => virtualizer.value.getVirtualItems())
+
+    const toggle = (id: number) => {
+      const next = new Set(expanded.value)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      expanded.value = next
+    }
 
     const run = async (action: 'start' | 'pause' | 'clear') => {
       busy.value = true
       error.value = ''
       try {
         await data.value[action]()
+        if (action === 'clear') expanded.value = new Set()
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : String(cause)
       } finally {
@@ -144,17 +169,36 @@ const DebugPage = defineComponent({
             onClick: () => run('clear'),
           }, h(Icon, { name: 'trash' })),
           h('div', { class: 'capture-stats' }, [
-            h('span', `${visibleEvents.value.length} / ${data.value.events.length}`),
+            h('span', `${visibleEventCount.value} / ${data.value.events.length}`),
             data.value.dropped > 0 && h('span', `${data.value.dropped} dropped`),
             h('span', { class: ['capture-state', { active: data.value.capturing }] }, data.value.capturing ? 'capturing' : 'paused'),
           ]),
           error.value && h('span', { class: 'control-error', title: error.value }, error.value),
         ]),
-        default: () => h('main', { class: 'debug-stream' }, [
-          visibleEvents.value.length
-            ? visibleEvents.value.map(event => h(EventRow, { key: event.id, event }))
-            : h('div', { class: 'empty-state' }, filter.value ? 'No matching MTProto events.' : 'No MTProto events captured.'),
-        ]),
+        default: () => visibleGroups.value.length
+          ? h('main', { ref: scrollElement, class: 'debug-virtual-viewport' }, [
+            h('div', {
+              class: 'debug-virtual-content',
+              style: { height: `${virtualizer.value.getTotalSize()}px` },
+            }, virtualRows.value.map(row => {
+              const group = visibleGroups.value[row.index]
+              return h('div', {
+                key: row.key,
+                ref: (element: unknown) => virtualizer.value.measureElement(element as HTMLElement | null),
+                class: 'debug-virtual-row',
+                'data-index': row.index,
+                style: { transform: `translateY(${row.start}px)` },
+              }, [
+                h(EventRow, {
+                  event: group.event,
+                  result: group.result,
+                  expanded: expanded.value.has(group.event.id),
+                  onToggle: () => toggle(group.event.id),
+                }),
+              ])
+            })),
+          ])
+          : h('div', { class: 'empty-state' }, filter.value ? 'No matching MTProto events.' : 'No MTProto events captured.'),
       })
     }
   },

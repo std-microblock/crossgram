@@ -6,6 +6,7 @@ export interface CapturedMtprotoEvent {
   connectionId: string
   name: string
   messageId?: string
+  requestMessageId?: string
   seqNo?: number
   authKeyId?: string | null
   sessionId?: string

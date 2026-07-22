@@ -15,6 +15,7 @@ export function serializeDebugEvent(event: MtprotoDebugEvent, id: number): Captu
     connectionId: event.connectionId,
     name: getEventName(payload),
     messageId: toLongString(event.messageId),
+    requestMessageId: getRequestMessageId(payload),
     seqNo: event.seqNo,
     authKeyId: event.authKeyId instanceof Uint8Array ? toHex(event.authKeyId) : event.authKeyId,
     sessionId: toLongString(event.sessionId),
@@ -77,14 +78,29 @@ function getEventName(payload: unknown): string {
   if (!payload || typeof payload !== 'object') return 'unknown'
   const object = payload as Record<string, unknown>
   const name = typeof object._ === 'string' ? object._ : 'unknown'
-  if (name !== 'rpc_result' || !object.result || typeof object.result !== 'object') return name
-  const resultName = (object.result as Record<string, unknown>)._ 
-  return typeof resultName === 'string' ? `${name} -> ${resultName}` : name
+  if (name === 'rpc_result' && object.result && typeof object.result === 'object') {
+    const resultName = (object.result as Record<string, unknown>)._
+    return typeof resultName === 'string' ? `${name} -> ${resultName}` : name
+  }
+  if (object.query && typeof object.query === 'object') {
+    const queryName = (object.query as Record<string, unknown>)._
+    return typeof queryName === 'string' ? `${name} -> ${queryName}` : name
+  }
+  return name
+}
+
+function getRequestMessageId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  const object = payload as Record<string, unknown>
+  if (object._ !== 'rpc_result') return undefined
+  return toLongString(object.reqMsgId)
 }
 
 function toLongString(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
   if (Long.isLong(value)) return value.isNegative() ? `-0x${value.negate().toString(16)}` : `0x${value.toString(16)}`
+  if (typeof value === 'object' && value && '$type' in value && value.$type === 'Long'
+    && 'hex' in value && typeof value.hex === 'string') return value.hex
   return String(value)
 }
 
