@@ -74,7 +74,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         others: { supported: true, maxAgeSeconds: 120 },
       },
       edit: { mode: 'unsupported' },
-      forward: { mode: 'unsupported', preservesAuthor: false },
+      forward: { mode: 'native', preservesAuthor: true },
     },
     reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 20 },
     stickers: { native: true, upload: false, formats: ['static', 'animated', 'video'] },
@@ -337,6 +337,59 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: import('@mtproto-relay/bridge').IMDeleteMessagesOptions,
   ): Promise<void> {
     await this.client.deleteMessages(conversation.id, messageIds, options.forEveryone)
+  }
+
+  async forwardMessages(
+    session: PlatformSession,
+    from: IMConversationRef,
+    messageIds: readonly string[],
+    to: IMConversationRef,
+    options: import('@mtproto-relay/bridge').IMForwardMessagesOptions = {},
+  ): Promise<IMMessage<QQMediaLocator>[]> {
+    if (!messageIds.length) return []
+    if (options.dropAuthor) {
+      const outputs: IMMessage<QQMediaLocator>[] = []
+      for (const messageId of messageIds) {
+        const wire = await this.client.getMessage(from.id, messageId)
+        if (!wire) throw new Error(`QQ source message not found: ${messageId}`)
+        const source = mapMessage(wire, this.memberName, this.reactionCatalog, this.stickerProviderId)
+        const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
+          if (part.type === 'text') return { ...part }
+          if (part.type === 'sticker') return {
+            type: 'sticker' as const,
+            sticker: {
+              type: 'native' as const,
+              providerId: part.sticker.providerId,
+              stickerId: part.sticker.stickerId,
+              packId: part.sticker.packId,
+              reference: part.sticker.locator!,
+            },
+          }
+          if (!part.media.locator) throw new Error(`QQ source media has no locator: ${part.media.id}`)
+          return {
+            type: 'media' as const,
+            media: {
+              kind: part.media.kind, name: part.media.name, mimeType: part.media.mimeType,
+              size: part.media.size, width: part.media.width, height: part.media.height,
+              source: {
+                size: part.media.size,
+                stream: ({ signal } = {}) => this.client.downloadMedia(part.media.locator!, { signal }),
+              },
+            },
+          }
+        })
+        outputs.push(await this.sendMessage(session, to, {
+          parts,
+          replyToId: options.replyToId,
+        }))
+      }
+      return outputs
+    }
+    const merged = messageIds.length > 1
+    const messages = await this.client.forwardMessages(from.id, messageIds, to.id, merged)
+    return messages.map((message) => mapMessage(
+      message, this.memberName, this.reactionCatalog, this.stickerProviderId,
+    ))
   }
 
   async *downloadMedia(

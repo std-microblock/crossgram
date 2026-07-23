@@ -185,6 +185,30 @@ export class QQNTClient {
     })
   }
 
+  async getMessage(conversationId: string, messageId: string): Promise<WireMessage | null> {
+    const response = await this.fetchImpl(`${this.endpoint}/messages/get`, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ conversationId, messageId }),
+    })
+    if (response.status === 404) return null
+    return responseJson(response)
+  }
+
+  async forwardMessages(
+    from: string,
+    messageIds: readonly string[],
+    to: string,
+    merged: boolean,
+  ): Promise<WireMessage[]> {
+    const response = await this.json<{ messages: WireMessage[] }>('/messages/forward', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ from, to, messageIds, merged }),
+    })
+    return response.messages
+  }
+
   getReactionCatalog(): Promise<WireReactionContext> {
     return this.json('/reactions/catalog')
   }
