@@ -13,6 +13,7 @@ export interface QQMediaLocator {
   md5?: string
   sha?: string
   sha3?: string
+  avatarUin?: string
 }
 
 export interface WireMedia {
@@ -33,6 +34,13 @@ export interface WireMessage {
   senderId: string
   timestamp: number
   outgoing: boolean
+  sender?: {
+    id: string
+    numericId?: string
+    name: string
+    alias?: string
+    avatar?: WireMedia
+  }
   msgSeq?: string
   parts: Array<{ type: 'text', text: string } | { type: 'media', media: WireMedia }>
   reactionContext?: WireReactionContext
@@ -95,7 +103,14 @@ export interface WireReactionContext {
 
 export interface WireMemberPage {
   members: Array<{
-    user: { id: string, numericId?: string, name: string, avatarUrl?: string }
+    user: {
+      id: string
+      numericId?: string
+      name: string
+      alias?: string
+      avatarUrl?: string
+      avatar?: WireMedia
+    }
     role: 'owner' | 'administrator' | 'member'
   }>
   total?: number

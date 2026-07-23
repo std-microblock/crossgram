@@ -9,6 +9,14 @@ const session: PlatformSession = {
 describe('QQNTPlatform mapping', () => {
   it('maps opaque QQ IDs and member roles without numeric coercion', async () => {
     const platform = new QQNTPlatform()
+    const avatar = {
+      id: 'avatar:user:u_very_long_opaque', kind: 'image' as const, mimeType: 'image/jpeg',
+      locator: {
+        messageId: 'avatar:user:u_very_long_opaque', elementId: 'avatar:user:u_very_long_opaque',
+        chatType: 1 as const, peerUid: 'u_very_long_opaque', kind: 'image' as const,
+        fileName: '1715311957.jpg', avatarUin: '1715311957',
+      },
+    }
     platform.client.getDialogs = vi.fn(async () => ({
       conversations: [{
         id: '2:1058754719', kind: 'group' as const, title: 'Test Group',
@@ -18,7 +26,10 @@ describe('QQNTPlatform mapping', () => {
     }))
     platform.client.getMembers = vi.fn(async () => ({
       members: [{
-        user: { id: 'u_very_long_opaque', numericId: '1715311957', name: 'MicroBlock' },
+        user: {
+          id: 'u_very_long_opaque', numericId: '1715311957',
+          name: 'Profile Name', alias: 'Group Alias', avatar,
+        },
         role: 'administrator' as const,
       }],
       total: 1,
@@ -33,9 +44,34 @@ describe('QQNTPlatform mapping', () => {
     })
     const members = await platform.getConversationMembers(session, { id: '2:1058754719' })
     expect(members.members[0]).toMatchObject({
-      user: { id: 'u_very_long_opaque', username: '1715311957' },
+      user: {
+        id: 'u_very_long_opaque',
+        firstName: 'Group Alias',
+        username: '1715311957',
+        avatar: { locator: { avatarUin: '1715311957' } },
+        metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
+      },
       role: 'administrator',
       permissions: { manageMembers: true, editAnyMessage: false },
+    })
+  })
+
+  it('can use the profile nickname instead of a conversation-scoped group alias', async () => {
+    const platform = new QQNTPlatform({ memberName: 'nickname' })
+    platform.client.getMembers = vi.fn(async () => ({
+      members: [{
+        user: {
+          id: 'member', numericId: '42', name: 'Profile Name', alias: 'Group Alias',
+        },
+        role: 'member' as const,
+      }],
+      total: 1,
+    }))
+    await expect(platform.getConversationMembers(session, { id: 'group' })).resolves.toMatchObject({
+      members: [{ user: {
+        firstName: 'Profile Name',
+        metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
+      } }],
     })
   })
 
@@ -85,6 +121,17 @@ describe('QQNTPlatform mapping', () => {
         },
         message: {
           id: 'm1', conversationId: '1058754719', senderId: 'member',
+          sender: {
+            id: 'member', numericId: '42', name: 'Profile Name', alias: 'Group Alias',
+            avatar: {
+              id: 'avatar:user:member', kind: 'image', mimeType: 'image/jpeg',
+              locator: {
+                messageId: 'avatar:user:member', elementId: 'avatar:user:member',
+                chatType: 1, peerUid: 'member', kind: 'image',
+                fileName: '42.jpg', avatarUin: '42',
+              },
+            },
+          },
           timestamp: 1, outgoing: false, parts: [{ type: 'text', text: 'hello' }],
         },
       })
@@ -97,6 +144,14 @@ describe('QQNTPlatform mapping', () => {
       conversation: {
         title: 'Bridge Test Group',
         avatar: { id: 'avatar:group:1058754719', locator: { filePath: '/tmp/group.png' } },
+      },
+      message: {
+        sender: {
+          firstName: 'Group Alias',
+          username: '42',
+          avatar: { locator: { avatarUin: '42' } },
+          metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
+        },
       },
     })
     await unsubscribe()

@@ -181,6 +181,8 @@ export interface IMMessage<TMediaLocator = unknown> {
   sourceIds?: string[]
   conversationId: string
   senderId: string
+  /** Sender profile as observed in this conversation, including any conversation-scoped display name. */
+  sender?: IMUser<TMediaLocator>
   content: IMMessageContent<TMediaLocator>
   timestamp: number
   outgoing?: boolean

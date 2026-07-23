@@ -78,6 +78,11 @@ describe('UpdateManager', () => {
     }
     const message: IMMessage = {
       id: 'incoming', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_000,
+      sender: {
+        id: 'alice',
+        firstName: 'Group Alias',
+        avatar: { id: 'avatar-alias', kind: 'image', locator: { userId: 'alice' } },
+      },
       content: { parts: [{ type: 'text', text: 'pushed' }] },
     }
     const result = await store.ingest(session, conversation, message)
@@ -91,7 +96,7 @@ describe('UpdateManager', () => {
       chats: [{ _: 'chat', title: 'Group', photo: { _: 'chatPhoto', dcId: 1 } }],
       users: [
         { _: 'user', self: true },
-        { _: 'user', firstName: 'User alice', photo: { _: 'userProfilePhoto', dcId: 1 } },
+        { _: 'user', firstName: 'Group Alias', photo: { _: 'userProfilePhoto', dcId: 1 } },
       ],
     })
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 1 })

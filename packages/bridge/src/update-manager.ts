@@ -131,7 +131,8 @@ export class UpdateManager {
     if (!updates.length) return
 
     const platform = this._registry.require(session.platformId)
-    const sender = await platform.getUser?.(session, event.message.senderId)
+    const sender = event.message.sender
+      ?? await platform.getUser?.(session, event.message.senderId)
     const users = [
       makeUser({
         id: stableId(`self:${session.platformSessionId}`), self: true, premium: true,

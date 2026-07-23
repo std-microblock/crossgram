@@ -65,6 +65,16 @@ describe('MessageStore', () => {
       sourceIds: physicalIds,
       conversationId,
       senderId: `sender:${'s'.repeat(16_000)}`,
+      sender: {
+        id: `sender:${'s'.repeat(16_000)}`,
+        firstName: 'Conversation Alias',
+        username: '1715311957',
+        avatar: {
+          id: 'avatar:user:sender',
+          kind: 'image',
+          locator: { avatarUin: '1715311957' },
+        },
+      },
       timestamp: 1_800_000_001,
       groupId: `album:${'g'.repeat(16_000)}`,
       content: {
@@ -123,6 +133,15 @@ describe('MessageStore', () => {
       ])
     expect((await store.findByExternalId(session.platformSessionId, conversationId, physicalIds[1]))?.id)
       .toBe(first.message.id)
+    await expect(store.readHistory(session.platformSessionId, conversationId)).resolves.toMatchObject([{
+      sender: {
+        id: message.senderId,
+        firstName: 'Conversation Alias',
+        username: '1715311957',
+        avatar: { locator: { avatarUin: '1715311957' } },
+      },
+      metadata: {},
+    }])
   })
 
   it('merges repeated history and event deliveries through any physical alias', async () => {
