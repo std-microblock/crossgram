@@ -20,8 +20,12 @@ import { IMStickerService } from './sticker-provider.js'
 import { StickerRpc } from './sticker-rpc.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { TelegramResourceService } from './resource-provider.js'
-import { provisionPlatformAccount } from './platform-account.js'
+import { PlatformAccountProvisioner, type ProvisionedPlatformAccount } from './platform-account.js'
 import { verifyLoginCode } from './login-code.js'
+import {
+  makePlatformAccountView, makeUnavailableAccountView,
+  type PlatformAccountDashboardData,
+} from './account-dashboard.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -36,9 +40,10 @@ export * from './reaction-rpc.js'
 export * from './resource-provider.js'
 export * from './login-code.js'
 export * from './platform-account.js'
+export * from './account-dashboard.js'
 
 export const name = 'mtproto-bridge'
-export const inject = ['mtproto', 'database', 'model', 'server']
+export const inject = ['mtproto', 'database', 'model', 'server', 'webui']
 
 export interface BridgeConfig {
   /** Account route exposed to the MTProto service (default: bridge:default). */
@@ -46,7 +51,7 @@ export interface BridgeConfig {
   dcId?: number
   serverHost?: string
   serverPort?: number
-  /** HTTP path prefix for the auth API (default: /api). */
+  /** HTTP prefix for platform account assets (default: /api). */
   apiPrefix?: string
   uploadPath?: string
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
@@ -73,6 +78,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const routeId = config.routeId ?? 'bridge:default'
   const rpc = ctx.mtproto.route(routeId)
   const dcId = config.dcId ?? 1
+  const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database)
@@ -96,12 +102,94 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     resources, store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
   )
 
+  const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
+  const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
+  const accountErrors = new Map<string, unknown>()
+  const dashboard: PlatformAccountDashboardData = {
+    accounts: [],
+    updatedAt: Date.now(),
+    async refresh() {
+      await ctx.database.prepared()
+      await Promise.allSettled(registry.ids.map(platformId => provision(platformId)))
+      publishAccounts()
+    },
+  }
+  const dashboardEntry = ctx.webui.addEntry({
+    baseUrl: import.meta.url,
+    source: '../client/index.ts',
+    manifest: '../dist/manifest.json',
+    routes: ['/platform-accounts'],
+  }, dashboard)
+
+  const publishAccounts = (now = Date.now()) => {
+    dashboardEntry.mutate((value) => {
+      value.updatedAt = now
+      value.accounts = registry.ids.sort().map((platformId) => {
+        const platform = registry.require(platformId)
+        const kind = platform.platformKind ?? platformId
+        const account = provisionedAccounts.get(platformId)
+        if (account) return makePlatformAccountView(platformId, kind, account, apiPrefix, now)
+        if (!platform.getAccount) return makeUnavailableAccountView(platformId, kind, 'unsupported')
+        const error = accountErrors.get(platformId)
+        return makeUnavailableAccountView(platformId, kind, error ? 'error' : 'loading', error)
+      })
+    })
+  }
+
   const provision = async (platformId: string) => {
     const platform = registry.get(platformId)
     if (!platform?.getAccount) return
-    const provisioned = await provisionPlatformAccount(ctx.database, platformId, platform)
-    if (provisioned) await subscriptions.ensure(provisioned.session)
+    try {
+      const provisioned = await accountProvisioner.provision(platformId, platform)
+      if (!provisioned) return
+      provisionedAccounts.set(platformId, provisioned)
+      accountErrors.delete(platformId)
+      publishAccounts()
+      await subscriptions.ensure(provisioned.session)
+    } catch (error) {
+      provisionedAccounts.delete(platformId)
+      accountErrors.set(platformId, error)
+      publishAccounts()
+      throw error
+    }
   }
+
+  ctx.effect(() => {
+    const timer = setInterval(() => publishAccounts(), 1_000)
+    return () => clearInterval(timer)
+  }, 'mtproto-bridge.account-codes')
+
+  ctx.server.get(`${apiPrefix}/platforms/:platform/avatar`, async (req, res) => {
+    const platformId = (req.params as { platform: string }).platform
+    const account = provisionedAccounts.get(platformId)
+    const platform = registry.get(platformId)
+    const avatar = account?.profile.avatar
+    if (!account || !platform?.downloadMedia || !avatar) {
+      res.status = 404
+      res.json({ error: 'platform avatar not available' })
+      return
+    }
+    const maxBytes = 8 * 1024 * 1024
+    if (avatar.size && avatar.size > maxBytes) {
+      res.status = 413
+      res.json({ error: 'platform avatar is too large' })
+      return
+    }
+    const chunks: Buffer[] = []
+    let size = 0
+    for await (const chunk of platform.downloadMedia(account.session, avatar, { limit: maxBytes })) {
+      size += chunk.length
+      if (size > maxBytes) {
+        res.status = 413
+        res.json({ error: 'platform avatar is too large' })
+        return
+      }
+      chunks.push(Buffer.from(chunk))
+    }
+    res.headers.set('content-type', avatar.mimeType ?? 'application/octet-stream')
+    res.headers.set('cache-control', 'private, max-age=30')
+    res.body = Buffer.concat(chunks)
+  })
 
   ctx.mtproto.resolveRoute(async (requestContext, request) => {
     if (requestContext.authKeyId) {
@@ -134,6 +222,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         ))
     } else {
       ctx.logger('bridge').info('IM platform unregistered: %s', platformId)
+      provisionedAccounts.delete(platformId)
+      accountErrors.delete(platformId)
+      publishAccounts()
       void subscriptions.stopPlatform(platformId).catch((error) => ctx.logger('bridge').warn(
         'failed to stop platform sessions (%s): %s', platformId, String(error),
       ))

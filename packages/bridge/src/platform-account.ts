@@ -11,6 +11,24 @@ export interface ProvisionedPlatformAccount {
   session: PlatformSession
 }
 
+/** Coalesce startup scans and registry events for the same platform entry. */
+export class PlatformAccountProvisioner {
+  private readonly _pending = new Map<string, Promise<ProvisionedPlatformAccount | undefined>>()
+
+  constructor(private readonly _database: Database) {}
+
+  provision(platformId: string, platform: IMPlatform): Promise<ProvisionedPlatformAccount | undefined> {
+    const existing = this._pending.get(platformId)
+    if (existing) return existing
+    const pending = provisionPlatformAccount(this._database, platformId, platform)
+    this._pending.set(platformId, pending)
+    pending.finally(() => {
+      if (this._pending.get(platformId) === pending) this._pending.delete(platformId)
+    }).catch(() => {})
+    return pending
+  }
+}
+
 /**
  * Ask an adapter for its own account and keep exactly one canonical login
  * identity for that Cordis platform entry.

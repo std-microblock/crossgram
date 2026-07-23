@@ -21,7 +21,7 @@ function jsToTsPlugin(): Plugin {
 export default defineConfig({
   plugins: [jsToTsPlugin()],
   test: {
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'client/**/*.test.ts', 'client/**/*.test.tsx'],
     testTimeout: 30000,
   },
 })

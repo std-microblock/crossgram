@@ -7,6 +7,7 @@
     "@cordisjs/plugin-database": "^4.0.0",
     "@cordisjs/plugin-database-sqlite": "^5.0.0",
     "@cordisjs/plugin-server": "^1.6.0",
+    "@cordisjs/plugin-webui": "^0.8.1",
     "@fuman/io": "^0.0.20",
     "@fuman/utils": "^0.0.20",
     "@mtcute/core": "^0.30.3",

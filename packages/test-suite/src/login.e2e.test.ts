@@ -18,6 +18,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
+import WebUI from '@cordisjs/plugin-webui'
 import { Mtproto, AbridgedPacketCodec, CURRENT_API_LAYER, generateRsaKeyPair } from '@mtproto-relay/mtproto'
 import * as bridge from '@mtproto-relay/bridge'
 import * as relay from '@mtproto-relay/relay'
@@ -289,6 +290,7 @@ async function startApp(options: {
     ctx.plugin(Database),
     ctx.plugin(SQLiteDriver, { path: options.databasePath ?? ':memory:' }),
     ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
+    ctx.plugin(WebUI, { devMode: false, uiPath: '', apiPath: '/api', selfUrl: '' }),
     ctx.plugin(Mtproto, {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,
@@ -333,6 +335,22 @@ describe('bridge login e2e', () => {
       const platformLogin = await waitForPlatformLogin(ctx, 'static')
       const phone = platformLogin.auth.virtualPhone
       dbg('platform supplied identity and bridge provisioned phone', phone)
+      const accountEntry = Object.values(ctx.webui.entries)
+        .find(entry => entry.files.routes?.includes('/platform-accounts'))
+      expect(accountEntry?.data).toMatchObject({
+        accounts: [{
+          platformId: 'static', platformKind: 'static', status: 'ready',
+          displayName: 'Static User', username: 'static_user', userId: 'self',
+          virtualPhone: `+${phone}`, loginCode: expect.stringMatching(/^\d{6}$/),
+        }],
+      })
+      expect(JSON.stringify(accountEntry?.data)).not.toContain(platformLogin.auth.totpSecret)
+
+      const avatarResponse = await fetch(`http://127.0.0.1:${ctx.server.port}/api/platforms/static/avatar`)
+      expect(avatarResponse.status).toBe(200)
+      expect(avatarResponse.headers.get('content-type')).toBe('image/png')
+      expect([...new Uint8Array(await avatarResponse.arrayBuffer()).subarray(0, 8)])
+        .toEqual([137, 80, 78, 71, 13, 10, 26, 10])
 
       const client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)

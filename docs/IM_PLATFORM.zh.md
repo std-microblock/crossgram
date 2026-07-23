@@ -44,9 +44,27 @@ export function apply(ctx: Context, config: Config) {
 }
 ```
 
-bridge 不注册默认 adapter。平台插件注册后，bridge 会自动为该 ID 下数据库中已有的 active session 补订阅；同一 session 的多个 MTProto 连接不会重复订阅。平台插件卸载时只停止该平台的订阅，其他实例不受影响。
+bridge 不注册默认 adapter。平台插件注册后，bridge 会调用 `getAccount()` 获取当前平台用户，自动创建或刷新该 Cordis entry 唯一的 active session，并为它分配稳定虚拟手机号；同一 session 的多个 MTProto 连接不会重复订阅。平台插件卸载时只停止该平台的订阅，其他实例不受影响。
 
 `subscribe()` handler 返回的 Promise 有背压语义。adapter 应等待它结束再确认/提交自己的消费游标，否则进程在入库前退出可能丢消息。
+
+### 1.1 当前平台账号
+
+账号资料必须由 adapter 自己提供，bridge 不接受外部注册请求，也不会生成用户 ID、姓名或头像：
+
+```ts
+interface IMPlatformAccount<L> {
+  user: IMUser<L> // id / firstName / lastName / username / avatar
+  credentials?: JsonValue
+}
+
+interface IMPlatform<L> {
+  getAccount(): Promise<IMPlatformAccount<L>>
+  // ...
+}
+```
+
+同一个 Cordis platform entry 对应一个账号和一个虚拟手机号。bridge 在 `/platform-accounts` 页面展示平台资料、手机号和每 30 秒轮换的六位 TOTP 登录码。`user.avatar` 继续使用 adapter 的 typed `IMMedia<L>`，页面头像由 bridge 调用 `downloadMedia()` 读取；TOTP secret 和 credentials 不会下发到浏览器。
 
 ## 2. ID 与幂等
 
