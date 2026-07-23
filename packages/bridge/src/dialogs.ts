@@ -342,39 +342,8 @@ export class DialogRpc {
 
   async getFullChat(req: tl.messages.RawGetFullChatRequest): Promise<tl.messages.RawChatFull> {
     await this._hydratePeers()
-    const peerId = this._tlToPeer.get(req.chatId)
-    const conversation = peerId ? this._conversation(peerId) : undefined
-    if (!conversation || !this._isTelegramGroup(conversation)) throw new RpcError(400, 'CHAT_ID_INVALID')
-    const members = await this._allMembers(conversation.id)
-    const participantUsers = members.map((member) => this._makeMemberUser(member))
-    const reactionContext = await this._platform.getAvailableReactions?.(
-      this._session, { conversationId: conversation.id },
-    )
-    return {
-      _: 'messages.chatFull',
-      fullChat: {
-        _: 'chatFull', id: req.chatId, about: '',
-        participants: {
-          _: 'chatParticipants', chatId: req.chatId,
-          participants: members.map((member): tl.TypeChatParticipant => {
-            const userId = member.user.id === this._session.userId ? this._selfId : this._peerId(member.user.id)
-            if (member.role === 'owner') return { _: 'chatParticipantCreator', userId }
-            if (member.role === 'administrator') {
-              return {
-                _: 'chatParticipantAdmin', userId, inviterId: this._selfId,
-                date: member.joinedAt ?? 0, rank: member.title,
-              }
-            }
-            return {
-              _: 'chatParticipant', userId, inviterId: this._selfId, date: member.joinedAt ?? 0,
-            }
-          }), version: 1,
-        },
-        notifySettings: { _: 'peerNotifySettings' },
-        availableReactions: this._reactions?.chatReactions(conversation.id, reactionContext),
-      },
-      chats: [this._makeChat(conversation)], users: uniqueUsers([this._makeSelfUser(), ...participantUsers]),
-    }
+    void req
+    throw new RpcError(400, 'CHAT_ID_INVALID')
   }
 
   async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
@@ -1550,7 +1519,7 @@ export class DialogRpc {
     if (!id) throw new RpcError(400, 'PEER_ID_INVALID')
     const conversation = this._conversation(id)
     if (peer._ === 'inputPeerUser' && conversation.kind !== 'direct') throw new RpcError(400, 'PEER_ID_INVALID')
-    if (peer._ === 'inputPeerChat' && !this._isTelegramGroup(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
+    if (peer._ === 'inputPeerChat') throw new RpcError(400, 'PEER_ID_INVALID')
     if (peer._ === 'inputPeerChannel' && !this._isTelegramChannel(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
     return id
   }
@@ -1581,19 +1550,11 @@ export class DialogRpc {
       : conversation
     const id = this._peerId(target.id)
     if (this._isTelegramChannel(target)) return { _: 'peerChannel', channelId: id }
-    if (target.kind === 'group') return { _: 'peerChat', chatId: id }
     return { _: 'peerUser', userId: id }
   }
 
   private _makeChat(conversation: import('./platform.js').IMConversation): tl.TypeChat {
     const id = this._peerId(conversation.id)
-    if (this._isTelegramGroup(conversation)) {
-      return {
-        _: 'chat', creator: true, id, title: conversation.title,
-        photo: conversation.avatar ? this._makeAvatarPhoto(conversation.avatar, 'chat') : { _: 'chatPhotoEmpty' },
-        participantsCount: Number(conversation.metadata?.participantsCount ?? 0), date: 0, version: 1,
-      }
-    }
     const broadcast = conversation.metadata?.broadcast === true
     return {
       _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
@@ -1621,12 +1582,7 @@ export class DialogRpc {
   }
 
   private _isTelegramChannel(conversation: import('./platform.js').IMConversation): boolean {
-    return conversation.kind === 'channel'
-      || conversation.kind === 'group' && this._platform.capabilities.members?.paginated === true
-  }
-
-  private _isTelegramGroup(conversation: import('./platform.js').IMConversation): boolean {
-    return conversation.kind === 'group' && !this._isTelegramChannel(conversation)
+    return conversation.kind === 'channel' || conversation.kind === 'group'
   }
 
   private _subchannels(parentId: string): import('./platform.js').IMConversation[] {

@@ -103,10 +103,9 @@ interface IMConversationMember<L> {
 
 `members.administrators` 表示平台能区分管理员，`members.permissions` 表示权限字段来自平台真实数据。bridge 将其投影为 Telegram participant/admin rights；不能获取成员时不要伪造当前用户为群主。
 
-群平台若支持真实的 cursor 分页，应声明 `members.paginated: true`。bridge 会把该平台的
-`group` 投影为 Telegram megagroup，让客户端通过 `channels.getParticipants(offset, limit)`
-按需获取成员；未声明时仍投影为 Telegram basic chat，而 `messages.getFullChat` 的协议结构
-要求一次返回完整成员列表。
+bridge 会把所有平台 `group` 投影为 Telegram megagroup，不使用 basic chat。客户端通过
+`channels.getParticipants(offset, limit)` 按需获取成员；bridge 负责把 Telegram offset
+映射到平台的 opaque cursor。
 
 ## 4. 消息内容
 

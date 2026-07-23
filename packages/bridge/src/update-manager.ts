@@ -121,8 +121,8 @@ export class UpdateManager {
       )
       updates.push({
         _: isEdit
-          ? event.conversation.kind === 'channel' ? 'updateEditChannelMessage' : 'updateEditMessage'
-          : event.conversation.kind === 'channel' ? 'updateNewChannelMessage' : 'updateNewMessage',
+          ? event.conversation.kind !== 'direct' ? 'updateEditChannelMessage' : 'updateEditMessage'
+          : event.conversation.kind !== 'direct' ? 'updateNewChannelMessage' : 'updateNewMessage',
         message,
         pts: ++pts,
         ptsCount: 1,
@@ -175,7 +175,7 @@ export class UpdateManager {
       ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
         ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
       : event.conversation
-    const update = event.conversation.kind === 'channel'
+    const update = event.conversation.kind !== 'direct'
       ? {
           _: 'updateDeleteChannelMessages',
           channelId: stableId(`peer:${displayConversation.id}`),
@@ -305,11 +305,9 @@ function makeUpdateMessage(
   topicId?: number,
 ): tl.RawMessage {
   const peerId = stableId(`peer:${conversation.id}`)
-  const peer: tl.TypePeer = conversation.kind === 'group'
-    ? { _: 'peerChat', chatId: peerId }
-    : conversation.kind === 'channel'
-      ? { _: 'peerChannel', channelId: peerId }
-      : { _: 'peerUser', userId: peerId }
+  const peer: tl.TypePeer = conversation.kind === 'direct'
+    ? { _: 'peerUser', userId: peerId }
+    : { _: 'peerChannel', channelId: peerId }
   return {
     _: 'message', out: source.outgoing || undefined, id,
     fromId: {
@@ -332,15 +330,6 @@ function makeUpdateMessage(
 
 function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {
   const id = stableId(`peer:${conversation.id}`)
-  if (conversation.kind === 'group') {
-    return {
-      _: 'chat', creator: true, id, title: conversation.title,
-      photo: conversation.avatar
-        ? makeUpdateAvatar(conversation.avatar.id, dcId, 'chat')
-        : { _: 'chatPhotoEmpty' },
-      participantsCount: Number(conversation.metadata?.participantsCount ?? 0), date: 0, version: 1,
-    }
-  }
   const broadcast = conversation.metadata?.broadcast === true
   return {
     _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
@@ -377,11 +366,9 @@ function hexBytes(value: string): Uint8Array {
 
 function conversationPeer(conversation: IMConversation): tl.TypePeer {
   const id = stableId(`peer:${conversation.id}`)
-  return conversation.kind === 'group'
-    ? { _: 'peerChat', chatId: id }
-    : conversation.kind === 'channel'
-      ? { _: 'peerChannel', channelId: id }
-      : { _: 'peerUser', userId: id }
+  return conversation.kind === 'direct'
+    ? { _: 'peerUser', userId: id }
+    : { _: 'peerChannel', channelId: id }
 }
 
 function makeMessageReactions(

@@ -413,8 +413,8 @@ describe('bridge login e2e', () => {
       expect(dialogs._).toBe('messages.dialogs')
       expect(dialogs.dialogs).toHaveLength(9)
       expect(dialogs.dialogs.map((dialog: any) => dialog.peer._)).toEqual([
-        'peerChat', 'peerChat', 'peerChat', 'peerChat',
-        'peerChannel', 'peerUser', 'peerUser', 'peerChat', 'peerChat',
+        'peerChannel', 'peerChannel', 'peerChannel', 'peerChannel',
+        'peerChannel', 'peerUser', 'peerUser', 'peerChannel', 'peerChannel',
       ])
       expect(new Set(dialogs.users.map((user: any) => user.firstName)))
         .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
@@ -423,6 +423,7 @@ describe('bridge login e2e', () => {
         'Group B - Mirror Source', 'general', 'Reaction & Sticker Lab', 'Group D - Long History',
       ])
       const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
+      expect(group).toMatchObject({ _: 'channel', megagroup: true })
       expect(group.photo).toMatchObject({ _: 'chatPhoto', dcId: 1 })
       const mirrorSourceGroup = dialogs.chats.find((chat: any) => chat.title === 'Group B - Mirror Source')
       const mirrorTargetGroup = dialogs.chats.find((chat: any) => chat.title === 'Group C - Mirror Target')
@@ -469,7 +470,7 @@ describe('bridge login e2e', () => {
 
       const groupHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
-        peer: { _: 'inputPeerChat', chatId: group.id },
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 2,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 30)
@@ -481,7 +482,7 @@ describe('bridge login e2e', () => {
       expect(groupHistory.messages.map((item: any) => item.groupedId)).toEqual([undefined, undefined])
       const reactionHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
-        peer: { _: 'inputPeerChat', chatId: group.id },
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 10,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 31)
@@ -511,7 +512,7 @@ describe('bridge login e2e', () => {
 
       const longHistoryFirst = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
-        peer: { _: 'inputPeerChat', chatId: longHistoryGroup.id },
+        peer: { _: 'inputPeerChannel', channelId: longHistoryGroup.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 33)
@@ -519,7 +520,7 @@ describe('bridge login e2e', () => {
       expect(longHistoryFirst.messages[0].message).toBe('Group D history message 10000')
       const longHistorySecond = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
-        peer: { _: 'inputPeerChat', chatId: longHistoryGroup.id },
+        peer: { _: 'inputPeerChannel', channelId: longHistoryGroup.id, accessHash: Long.ZERO },
         offsetId: longHistoryFirst.messages.at(-1).id,
         offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
@@ -570,7 +571,8 @@ describe('bridge login e2e', () => {
         bytes: new TextEncoder().encode('static socket file'),
       }, 43)).toEqual({ _: 'boolTrue' })
       const sentAlbum = await callRpc(resumed, key, resumedSid, {
-        _: 'messages.sendMultiMedia', peer: { _: 'inputPeerChat', chatId: group.id },
+        _: 'messages.sendMultiMedia',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         multiMedia: [
           {
             _: 'inputSingleMedia', randomId: Long.fromNumber(800), message: 'socket album',
@@ -594,7 +596,7 @@ describe('bridge login e2e', () => {
         { randomId: Long.fromNumber(801) },
       ])
       const sentAlbumMessages = sentAlbum.updates
-        .filter((update: any) => update._ === 'updateNewMessage')
+        .filter((update: any) => update._ === 'updateNewChannelMessage')
         .map((update: any) => update.message)
       expect(sentAlbumMessages.map((item: any) => item.message)).toEqual(['socket album', ''])
       expect(sentAlbumMessages.map((item: any) => item.media?._)).toEqual([
@@ -614,18 +616,19 @@ describe('bridge login e2e', () => {
 
       const sentToMirrorSource = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMessage',
-        peer: { _: 'inputPeerChat', chatId: mirrorSourceGroup.id },
+        peer: { _: 'inputPeerChannel', channelId: mirrorSourceGroup.id, accessHash: Long.ZERO },
         message: 'bridge mirror check', randomId: Long.fromNumber(802),
       }, 47)
       expect(sentToMirrorSource).toMatchObject({ _: 'updateShortSentMessage', out: true })
       const mirroredHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
-        peer: { _: 'inputPeerChat', chatId: mirrorTargetGroup.id },
+        peer: { _: 'inputPeerChannel', channelId: mirrorTargetGroup.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 49)
       expect(mirroredHistory.messages).toMatchObject([{
-        _: 'message', message: 'bridge mirror check', peerId: { _: 'peerChat', chatId: mirrorTargetGroup.id },
+        _: 'message', message: 'bridge mirror check',
+        peerId: { _: 'peerChannel', channelId: mirrorTargetGroup.id },
       }])
       expect(mirroredHistory.users).toContainEqual(expect.objectContaining({
         firstName: 'Mirror User',
@@ -640,7 +643,8 @@ describe('bridge login e2e', () => {
         bytes: new TextEncoder().encode('upload'),
       }, 53)).toEqual({ _: 'boolTrue' })
       const stagedMedia = await callRpc(resumed, key, resumedSid, {
-        _: 'messages.uploadMedia', peer: { _: 'inputPeerChat', chatId: group.id },
+        _: 'messages.uploadMedia',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         media: {
           _: 'inputMediaUploadedDocument',
           file: { _: 'inputFileBig', id: Long.fromNumber(803), parts: 2, name: 'desktop.txt' },
@@ -662,7 +666,8 @@ describe('bridge login e2e', () => {
       }, 57)
       expect(new TextDecoder().decode(stagedPreview.bytes)).toBe('upload')
       const stagedSent = await callRpc(resumed, key, resumedSid, {
-        _: 'messages.sendMedia', peer: { _: 'inputPeerChat', chatId: group.id },
+        _: 'messages.sendMedia',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         randomId: Long.fromNumber(803), message: 'desktop two-stage',
         media: {
           _: 'inputMediaDocument',
@@ -677,7 +682,7 @@ describe('bridge login e2e', () => {
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(803) },
           {
-            _: 'updateNewMessage',
+            _: 'updateNewChannelMessage',
             message: { message: 'desktop two-stage', media: { _: 'messageMediaDocument' } },
           },
         ],
@@ -694,7 +699,8 @@ describe('bridge login e2e', () => {
       expect(new TextDecoder().decode(finalFile.bytes)).toBe('desktop-upload')
 
       expect(await callRpc(resumed, key, resumedSid, {
-        _: 'messages.setTyping', peer: { _: 'inputPeerChat', chatId: group.id },
+        _: 'messages.setTyping',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         action: { _: 'sendMessageUploadDocumentAction', progress: 0 },
       }, 62)).toEqual({ _: 'boolTrue' })
 
@@ -778,7 +784,8 @@ describe('bridge login e2e', () => {
       })
 
       const documentSearch = await callRpc(resumed, key, resumedSid, {
-        _: 'messages.search', peer: { _: 'inputPeerChat', chatId: group.id }, q: '',
+        _: 'messages.search',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO }, q: '',
         filter: { _: 'inputMessagesFilterDocument' }, minDate: 0, maxDate: 0,
         offsetId: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 79)
@@ -793,10 +800,12 @@ describe('bridge login e2e', () => {
         }),
       })]))
       expect(await callRpc(resumed, key, resumedSid, {
-        _: 'messages.readHistory', peer: { _: 'inputPeerChat', chatId: group.id }, maxId: 0x40000010,
+        _: 'messages.readHistory',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO }, maxId: 0x40000010,
       }, 81)).toMatchObject({ _: 'messages.affectedMessages', ptsCount: 0 })
       expect(await callRpc(resumed, key, resumedSid, {
-        _: 'messages.getScheduledHistory', peer: { _: 'inputPeerChat', chatId: group.id }, hash: Long.ZERO,
+        _: 'messages.getScheduledHistory',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO }, hash: Long.ZERO,
       }, 83)).toMatchObject({ _: 'messages.messages', messages: [] })
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'updates.getChannelDifference', force: true,
@@ -945,7 +954,8 @@ describe('bridge login e2e', () => {
         ],
       })
       await callRpc(resumed, key, resumedSid, {
-        _: 'messages.getFullChat', chatId: reactionStickerLab.id,
+        _: 'channels.getFullChannel',
+        channel: { _: 'inputChannel', channelId: reactionStickerLab.id, accessHash: Long.ZERO },
       }, 178)
       const emojiStickerSets = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getEmojiStickers', hash: Long.ZERO,
@@ -1037,7 +1047,7 @@ describe('bridge login e2e', () => {
 
       const reacted = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendReaction',
-        peer: { _: 'inputPeerChat', chatId: group.id },
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         msgId: reactionMessage.id,
         reaction: [
           { _: 'reactionEmoji', emoticon: '👍' },
@@ -1057,7 +1067,7 @@ describe('bridge login e2e', () => {
       })
       const reactionList = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessageReactionsList',
-        peer: { _: 'inputPeerChat', chatId: group.id },
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         id: reactionMessage.id,
         offset: '', limit: 100,
       }, 190)
@@ -1115,34 +1125,35 @@ describe('bridge login e2e', () => {
       })
       const sentNativeSticker = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMedia',
-        peer: { _: 'inputPeerChat', chatId: group.id },
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         media: inputSticker(nativePack.documents[0]),
         message: '',
         randomId: Long.fromNumber(901),
       }, 192)
       expect(sentNativeSticker._).toBe('updates')
-      const nativeStickerUpdate = sentNativeSticker.updates.find((update: any) => update._ === 'updateNewMessage')
+      const nativeStickerUpdate = sentNativeSticker.updates
+        .find((update: any) => update._ === 'updateNewChannelMessage')
       expect(nativeStickerUpdate.message.media._).toBe('messageMediaDocument')
       expect(nativeStickerUpdate.message.media.document.attributes)
         .toEqual(expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeSticker' })]))
       const sentPluginSticker = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMedia',
-        peer: { _: 'inputPeerChat', chatId: group.id },
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         media: inputSticker(pluginDocument),
         message: '',
         randomId: Long.fromNumber(902),
       }, 194)
       expect(sentPluginSticker._).toBe('updates')
-      expect(sentPluginSticker.updates.find((update: any) => update._ === 'updateNewMessage'))
+      expect(sentPluginSticker.updates.find((update: any) => update._ === 'updateNewChannelMessage'))
         .toMatchObject({ message: { media: { _: 'messageMediaDocument' } } })
       const sentLooseSticker = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMedia',
-        peer: { _: 'inputPeerChat', chatId: group.id },
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         media: inputSticker(looseStickerDocument),
         message: '',
         randomId: Long.fromNumber(903),
       }, 195)
-      expect(sentLooseSticker.updates.find((update: any) => update._ === 'updateNewMessage'))
+      expect(sentLooseSticker.updates.find((update: any) => update._ === 'updateNewChannelMessage'))
         .toMatchObject({
           message: {
             media: {
@@ -1191,7 +1202,8 @@ describe('bridge login e2e', () => {
       }, 204)).toMatchObject({ _: 'messages.recentStickers', stickers: [] })
 
       const labFull = await callRpc(resumed, key, resumedSid, {
-        _: 'messages.getFullChat', chatId: reactionStickerLab.id,
+        _: 'channels.getFullChannel',
+        channel: { _: 'inputChannel', channelId: reactionStickerLab.id, accessHash: Long.ZERO },
       }, 206)
       expect(labFull).toMatchObject({
         _: 'messages.chatFull',
@@ -1203,7 +1215,8 @@ describe('bridge login e2e', () => {
         },
       })
       const qqFull = await callRpc(resumed, key, resumedSid, {
-        _: 'messages.getFullChat', chatId: group.id,
+        _: 'channels.getFullChannel',
+        channel: { _: 'inputChannel', channelId: group.id, accessHash: Long.ZERO },
       }, 207)
       expect(qqFull.fullChat.availableReactions).toMatchObject({
         _: 'chatReactionsSome',
@@ -1215,7 +1228,7 @@ describe('bridge login e2e', () => {
       })
       const labHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
-        peer: { _: 'inputPeerChat', chatId: reactionStickerLab.id },
+        peer: { _: 'inputPeerChannel', channelId: reactionStickerLab.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 10,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 208)
@@ -1232,7 +1245,7 @@ describe('bridge login e2e', () => {
         .find((item: any) => item.reaction._ === 'reactionCustomEmoji').reaction
       const customReacted = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendReaction',
-        peer: { _: 'inputPeerChat', chatId: reactionStickerLab.id },
+        peer: { _: 'inputPeerChannel', channelId: reactionStickerLab.id, accessHash: Long.ZERO },
         msgId: labHistory.messages[1].id,
         reaction: [customLabReaction],
       }, 209)
@@ -1306,13 +1319,13 @@ describe('bridge login e2e', () => {
         _: 'messages.forwardMessages',
         fromPeer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         id: [sentMessage.id], randomId: [Long.fromNumber(900)],
-        toPeer: { _: 'inputPeerChat', chatId: group.id },
+        toPeer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
       }, 222)
       expect(forwarded).toMatchObject({
         _: 'updates',
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(900) },
-          { _: 'updateNewMessage', message: { message: 'Edited through MTProto' }, ptsCount: 1 },
+          { _: 'updateNewChannelMessage', message: { message: 'Edited through MTProto' }, ptsCount: 1 },
         ],
       })
       expect(await callRpc(resumed, key, resumedSid, {
@@ -1436,10 +1449,10 @@ describe('bridge login e2e', () => {
       expect(pushed).toMatchObject({
         _: 'updates', seq: 1,
         updates: [{
-          _: 'updateNewMessage', pts: 2, ptsCount: 1,
-          message: { peerId: { _: 'peerChat' }, message: 'arrived by subscribe' },
+          _: 'updateNewChannelMessage', pts: 2, ptsCount: 1,
+          message: { peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
         }],
-        chats: [{ _: 'chat', title: 'Push Group' }],
+        chats: [{ _: 'channel', megagroup: true, title: 'Push Group' }],
       })
       const [stored] = await ctx.database.get('mtproto_im_message', {})
       expect(stored).toMatchObject({ primaryPlatformMessageId: message.id, text: 'arrived by subscribe' })
@@ -1456,7 +1469,7 @@ describe('bridge login e2e', () => {
       expect(editedPush).toMatchObject({
         _: 'updates', seq: 2,
         updates: [{
-          _: 'updateEditMessage', pts: 3, ptsCount: 1,
+          _: 'updateEditChannelMessage', pts: 3, ptsCount: 1,
           message: { id: pushed.updates[0].message.id, message: 'edited by subscribe' },
         }],
       })
@@ -1471,7 +1484,7 @@ describe('bridge login e2e', () => {
       expect(deletedPush).toMatchObject({
         _: 'updates', seq: 3,
         updates: [{
-          _: 'updateDeleteMessages', pts: 4, ptsCount: 1,
+          _: 'updateDeleteChannelMessages', pts: 4, ptsCount: 1,
           messages: [pushed.updates[0].message.id],
         }],
       })
@@ -1485,8 +1498,8 @@ describe('bridge login e2e', () => {
         _: 'updates.difference',
         newMessages: [{ _: 'message', message: 'arrived by subscribe' }],
         otherUpdates: [
-          { _: 'updateEditMessage', message: { message: 'edited by subscribe' } },
-          { _: 'updateDeleteMessages', messages: [pushed.updates[0].message.id] },
+          { _: 'updateEditChannelMessage', message: { message: 'edited by subscribe' } },
+          { _: 'updateDeleteChannelMessages', messages: [pushed.updates[0].message.id] },
         ],
         state: { pts: 4, seq: 3 },
       })
@@ -1502,7 +1515,9 @@ describe('bridge login e2e', () => {
         bytes: new TextEncoder().encode('through'),
       }, 14)).toEqual({ _: 'boolTrue' })
       const sentMedia = await callRpc(client, key, sid, {
-        _: 'messages.sendMedia', peer: { _: 'inputPeerChat', chatId }, randomId: Long.fromNumber(700),
+        _: 'messages.sendMedia',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        randomId: Long.fromNumber(700),
         message: 'file caption',
         media: {
           _: 'inputMediaUploadedDocument',
@@ -1514,7 +1529,10 @@ describe('bridge login e2e', () => {
         _: 'updates',
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(700) },
-          { _: 'updateNewMessage', message: { message: 'file caption', media: { _: 'messageMediaDocument' } } },
+          {
+            _: 'updateNewChannelMessage',
+            message: { message: 'file caption', media: { _: 'messageMediaDocument' } },
+          },
         ],
       })
       expect(new TextDecoder().decode(remoteBytes)).toBe('stream-through')
