@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import type { PlatformSession } from '@mtproto-relay/bridge'
+import { PlatformMessageActions } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
@@ -9,6 +10,24 @@ const session: PlatformSession = {
 }
 
 describe('QQNTPlatform mapping', () => {
+  it('edits QQ messages by recalling the old message and resending the replacement', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.deleteMessages = vi.fn(async () => {})
+    platform.client.sendMessage = vi.fn(async (_conversation, text) => ({
+      id: 'replacement', conversationId: '2:group', senderId: 'self', timestamp: 20, outgoing: true,
+      parts: [{ type: 'text' as const, text: text! }],
+    }))
+    const actions = new PlatformMessageActions(platform, session)
+
+    const edited = await actions.edit({
+      conversationId: '2:group', messageId: 'logical-old', targetId: 'opaque-native-old',
+    }, { parts: [{ type: 'text', text: 'replacement text' }] })
+
+    expect(platform.client.deleteMessages).toHaveBeenCalledWith('2:group', ['opaque-native-old'], true)
+    expect(platform.client.sendMessage).toHaveBeenCalledOnce()
+    expect(edited).toMatchObject({ message: { id: 'replacement' }, replacedMessageId: 'logical-old' })
+  })
+
   it('uses QQ merged forward only for multiple preserved-source messages', async () => {
     const platform = new QQNTPlatform()
     platform.client.forwardMessages = vi.fn(async (_from, ids, to, merged) => [{
