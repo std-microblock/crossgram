@@ -155,16 +155,24 @@ export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
   source: IMMediaSource
 }
 
-export type IMTextEntity = {
-  type: 'mention'
-  /** UTF-16 code-unit offset, matching Telegram and JavaScript string indexing. */
-  offset: number
-  length: number
-  /** Opaque platform user ID. */
-  userId: string
-  /** Optional platform display/account number (QQ UIN, etc.). */
-  numericId?: string
-}
+export type IMTextEntity =
+  | {
+      type: 'mention'
+      /** UTF-16 code-unit offset, matching Telegram and JavaScript string indexing. */
+      offset: number
+      length: number
+      /** Opaque platform user ID. */
+      userId: string
+      /** Optional platform display/account number (QQ UIN, etc.). */
+      numericId?: string
+    }
+  | {
+      type: 'custom-emoji'
+      offset: number
+      length: number
+      /** Definition includes the platform-native key and downloadable visual resource. */
+      definition: IMReactionDefinition
+    }
 
 export type IMMessagePart<TMediaLocator = unknown> =
   | { type: 'text', text: string, entities?: IMTextEntity[] }

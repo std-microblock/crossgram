@@ -1461,14 +1461,21 @@ export class DialogRpc {
     const textParts = source.content.parts.filter((part) => part.type === 'text')
     for (const [index, part] of textParts.entries()) {
       for (const entity of part.entities ?? []) {
-        if (entity.type !== 'mention' || entity.offset < 0 || entity.length <= 0
-          || entity.offset + entity.length > part.text.length) continue
-        output.push({
-          _: 'messageEntityMentionName',
-          offset: base + entity.offset,
-          length: entity.length,
-          userId: this._peerId(entity.userId),
-        })
+        if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > part.text.length) continue
+        if (entity.type === 'mention') {
+          output.push({
+            _: 'messageEntityMentionName',
+            offset: base + entity.offset,
+            length: entity.length,
+            userId: this._peerId(entity.userId),
+          })
+        } else if (entity.definition.presentation.type === 'custom' && this._reactions) {
+          const reaction = this._reactions.toTlReaction(source.conversationId, entity.definition)
+          if (reaction._ === 'reactionCustomEmoji') output.push({
+            _: 'messageEntityCustomEmoji', offset: base + entity.offset, length: entity.length,
+            documentId: reaction.documentId,
+          })
+        }
       }
       base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
     }
@@ -1478,8 +1485,15 @@ export class DialogRpc {
   private _inputTextPart(text: string, entities?: tl.TypeMessageEntity[]): IMMessageInput['parts'][number] {
     const mapped: IMTextEntity[] = []
     for (const entity of entities ?? []) {
-      if (entity._ !== 'inputMessageEntityMentionName' && entity._ !== 'messageEntityMentionName') continue
       const input = entity as any
+      if (entity._ === 'messageEntityCustomEmoji') {
+        const definition = this._reactions?.resolveCustomEmoji(Number(input.documentId))
+        if (definition && input.offset >= 0 && input.length > 0 && input.offset + input.length <= text.length) {
+          mapped.push({ type: 'custom-emoji', offset: input.offset, length: input.length, definition })
+        }
+        continue
+      }
+      if (entity._ !== 'inputMessageEntityMentionName' && entity._ !== 'messageEntityMentionName') continue
       let userId: string | undefined
       if (input.userId?._ === 'inputUserSelf') userId = this._session.userId
       else if (input.userId?._ === 'inputUser') userId = this._tlToPeer.get(Number(input.userId.userId))

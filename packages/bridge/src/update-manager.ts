@@ -115,9 +115,15 @@ export class UpdateManager {
       )
       if (!projected) continue
       const media = projected.media.find((item) => item.id === part.mediaId)
+      const replied = projected.source.replyToId
+        ? await this._store.findProjectedByPlatformId(
+            session.platformSessionId, event.conversation.id, projected.source.replyToId,
+          )
+        : undefined
       const message = makeUpdateMessage(
         session.platformSessionId, displayConversation, projected.source, part.tlMessageId, part.ordinal,
         part.groupedId ?? undefined, media, this._dcId, topicId,
+        replied?.parts[0]?.tlMessageId,
       )
       updates.push({
         _: isEdit
@@ -303,6 +309,7 @@ function makeUpdateMessage(
   media?: import('./models.js').IMMediaRow,
   dcId = 1,
   topicId?: number,
+  replyToTlId?: number,
 ): tl.RawMessage {
   const peerId = stableId(`peer:${conversation.id}`)
   const peer: tl.TypePeer = conversation.kind === 'direct'
@@ -315,17 +322,47 @@ function makeUpdateMessage(
       userId: source.outgoing ? stableId(`self:${platformSessionId}`) : stableId(`peer:${source.senderId}`),
     },
     peerId: peer,
-    replyTo: topicId && topicId !== id ? {
+    replyTo: replyToTlId ? {
+      _: 'messageReplyHeader', replyToMsgId: replyToTlId,
+    } : topicId && topicId !== id ? {
       _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
     } : undefined,
     date: source.timestamp,
     message: ordinal === 0 ? messageText(source) : '',
+    entities: ordinal === 0 ? makeMessageEntities(source, platformSessionId) : undefined,
     media: media ? makeTlMessageMedia(media, source.timestamp, dcId) : undefined,
     groupedId: groupedId ? Long.fromString(groupedId) : undefined,
     reactions: source.reactionContext?.reactions.length
       ? makeMessageReactions(source, platformSessionId)
       : undefined,
   } as tl.RawMessage
+}
+
+function makeMessageEntities(message: IMMessage, platformSessionId: string): tl.TypeMessageEntity[] | undefined {
+  const entities: tl.TypeMessageEntity[] = []
+  const textParts = message.content.parts.filter((part) => part.type === 'text')
+  let base = 0
+  for (const [index, part] of textParts.entries()) {
+    for (const entity of part.entities ?? []) {
+      if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > part.text.length) continue
+      if (entity.type === 'mention') {
+        entities.push({
+          _: 'messageEntityMentionName', offset: base + entity.offset, length: entity.length,
+          userId: stableId(`peer:${entity.userId}`),
+        })
+      } else if (entity.definition.presentation.type === 'custom') {
+        entities.push({
+          _: 'messageEntityCustomEmoji', offset: base + entity.offset, length: entity.length,
+          documentId: Long.fromNumber(stableId([
+            'reaction-resource', 1, platformSessionId, message.conversationId,
+            entity.definition.key, entity.definition.presentation.resource.version,
+          ].join(':'))),
+        })
+      }
+    }
+    base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
+  }
+  return entities.length ? entities : undefined
 }
 
 function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {

@@ -14,7 +14,7 @@ import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
-  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireReactionState,
+  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireReactionState, WireTextPart,
 } from './protocol.js'
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
@@ -102,7 +102,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     session: PlatformSession,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
-    await this.ensureReactionCatalog()
+    await this.ensureReactionCatalog().catch(() => undefined)
     const controller = new AbortController()
     const running = this.subscribeLoop(session.platformSessionId, handler, controller.signal)
     return async () => {
@@ -131,6 +131,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
+    await this.ensureReactionCatalog().catch(() => undefined)
     const response = await this.client.getDialogs({ cursor: query.cursor, limit: query.limit })
     for (const conversation of response.conversations) {
       if (conversation.firstUnread?.msgSeq) this.firstUnreadSeq.set(conversation.id, conversation.firstUnread.msgSeq)
@@ -144,7 +145,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           ? mapMessage(
               conversation.lastMessage,
               this.memberName,
-              conversation.kind === 'group' ? this.reactionCatalog : undefined,
+              this.reactionCatalog,
               this.stickerProviderId,
             )
           : undefined,
@@ -152,7 +153,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           ? mapMessage(
               conversation.readInboxMaxMessage,
               this.memberName,
-              conversation.kind === 'group' ? this.reactionCatalog : undefined,
+              this.reactionCatalog,
               this.stickerProviderId,
             )
           : undefined,
@@ -180,6 +181,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<QQMediaLocator>> {
+    await this.ensureReactionCatalog()
     const response = await this.client.getHistory(conversation.id, {
       cursor: query.cursor,
       limit: query.limit,
@@ -193,7 +195,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       messages: response.messages.map((message) => mapMessage(
         message,
         this.memberName,
-        this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
+        this.reactionCatalog,
         this.stickerProviderId,
       )),
       nextCursor: response.nextCursor,
@@ -275,7 +277,17 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const textParts = content.parts.flatMap((part) => part.type === 'text' ? [{
       type: 'text' as const,
       text: part.text,
-      entities: part.entities?.map((entity) => ({ ...entity })),
+      entities: part.entities?.flatMap<NonNullable<WireTextPart['entities']>[number]>((entity) => {
+        if (entity.type === 'mention') return [{ ...entity }]
+        const match = /^1:(\d+)$/.exec(entity.definition.key)
+        return match ? [{
+          type: 'qq-face' as const,
+          offset: entity.offset,
+          length: entity.length,
+          faceId: match[1],
+          faceType: 1,
+        }] : []
+      }),
     }] : [])
     const text = textParts.map((part) => part.text).join('\n') || undefined
     const mediaParts = content.parts.filter((part) => part.type === 'media')
@@ -309,7 +321,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           conversation.id, text, media, options, originRequestId, sticker, textParts, content.replyToId,
         ),
         this.memberName,
-        this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
+        this.reactionCatalog,
         this.stickerProviderId,
       )
     } finally {
@@ -547,7 +559,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         message: mapMessage(
           input.message,
           this.memberName,
-          conversation.kind === 'group' ? this.reactionCatalog : undefined,
+          this.reactionCatalog,
           this.stickerProviderId,
         ),
       }
@@ -635,25 +647,30 @@ function mapMessage(
       maxSelected: input.reactionContext.maxSelected,
     } : undefined,
     content: {
-      parts: mapParts(input, stickerProviderId),
+      parts: mapParts(input, stickerProviderId, reactionCatalog),
     },
   }
 }
 
-function mapParts(input: WireMessage, stickerProviderId: string): IMMessage<QQMediaLocator>['content']['parts'] {
+function mapParts(
+  input: WireMessage,
+  stickerProviderId: string,
+  reactionCatalog?: IMReactionContext,
+): IMMessage<QQMediaLocator>['content']['parts'] {
   const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
   for (const part of input.parts) {
     if (part.type === 'text') {
+      const normalized = normalizeTextPart(part, reactionCatalog)
       const previous = parts.at(-1)
       if (previous?.type === 'text') {
         const offset = previous.text.length
-        previous.text += part.text
+        previous.text += normalized.text
         previous.entities = [
           ...(previous.entities ?? []),
-          ...(part.entities ?? []).map((entity) => ({ ...entity, offset: entity.offset + offset })),
+          ...(normalized.entities ?? []).map((entity) => ({ ...entity, offset: entity.offset + offset })),
         ]
       } else {
-        parts.push({ type: 'text', text: part.text, entities: part.entities?.map((entity) => ({ ...entity })) })
+        parts.push(normalized)
       }
     } else if (part.type === 'sticker') {
       parts.push({
@@ -677,6 +694,30 @@ function mapParts(input: WireMessage, stickerProviderId: string): IMMessage<QQMe
     }
   }
   return parts
+}
+
+function normalizeTextPart(
+  part: Extract<WireMessage['parts'][number], { type: 'text' }>,
+  reactionCatalog?: IMReactionContext,
+): Extract<IMMessage<QQMediaLocator>['content']['parts'][number], { type: 'text' }> {
+  const face = part.entities?.find((entity) => entity.type === 'qq-face')
+  if (face && face.offset === 0 && face.length === part.text.length) {
+    const definition = reactionCatalog?.available.find((item) => item.key === `1:${face.faceId}`)
+    if (definition?.presentation.type === 'emoji') {
+      return { type: 'text', text: definition.presentation.emoticon }
+    }
+    if (definition?.presentation.type === 'custom') {
+      const text = definition.presentation.alt
+      return {
+        type: 'text', text,
+        entities: [{ type: 'custom-emoji', offset: 0, length: text.length, definition }],
+      }
+    }
+  }
+  return {
+    type: 'text', text: part.text,
+    entities: part.entities?.flatMap((entity) => entity.type === 'mention' ? [{ ...entity }] : []),
+  }
 }
 
 function memberDisplayName(
