@@ -52,12 +52,26 @@ interface ResolvedStickerInput {
   stickerId: string
 }
 
+interface CachedMediaDownload {
+  bytes: Uint8Array
+  cachedAt: number
+}
+
 /**
  * Per-authorized-session bridge for dialog/history RPCs. Telegram's numeric
  * peer/message IDs are allocated here and reverse-mapped to opaque platform IDs.
  */
 export class DialogRpc {
   private static readonly PEER_HYDRATION_TTL_MS = 5_000
+  /**
+   * Telegram Desktop opens several download sessions and requests adjacent
+   * 128 KiB ranges concurrently. Small media is cheaper to fetch once and
+   * slice locally than to fan every range out to an adapter such as QQNT.
+   */
+  private static readonly MEDIA_CACHE_ITEM_LIMIT = 32 * 1024 * 1024
+  private static readonly MEDIA_CACHE_TOTAL_LIMIT = 64 * 1024 * 1024
+  private static readonly MEDIA_CACHE_ENTRY_LIMIT = 256
+  private static readonly MEDIA_CACHE_TTL_MS = 60_000
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
@@ -75,6 +89,9 @@ export class DialogRpc {
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
+  private readonly _mediaDownloads = new Map<string, Promise<Uint8Array>>()
+  private readonly _mediaDownloadCache = new Map<string, CachedMediaDownload>()
+  private _mediaDownloadCacheSize = 0
   private readonly _memberCursors = new Map<string, Map<number, string | null>>()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
@@ -833,6 +850,64 @@ export class DialogRpc {
   }
 
   private async _downloadMediaRange(media: IMMedia<any>, offset: number, limit: number): Promise<Uint8Array> {
+    if (!this._platform.downloadMedia) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
+    if (media.size !== undefined
+      && Number.isSafeInteger(media.size)
+      && media.size >= 0
+      && media.size <= DialogRpc.MEDIA_CACHE_ITEM_LIMIT) {
+      const bytes = await this._downloadCacheableMedia(media)
+      return bytes.subarray(Math.min(offset, bytes.length), Math.min(offset + limit, bytes.length))
+    }
+    return this._readMediaRange(media, offset, limit)
+  }
+
+  private async _downloadCacheableMedia(media: IMMedia<any>): Promise<Uint8Array> {
+    const key = `${media.kind}:${media.id}:${media.size}`
+    const cached = this._mediaDownloadCache.get(key)
+    if (cached) {
+      if (Date.now() - cached.cachedAt <= DialogRpc.MEDIA_CACHE_TTL_MS) {
+        // Map insertion order doubles as the LRU order.
+        this._mediaDownloadCache.delete(key)
+        this._mediaDownloadCache.set(key, cached)
+        return cached.bytes
+      }
+      this._deleteCachedMedia(key, cached)
+    }
+
+    const active = this._mediaDownloads.get(key)
+    if (active) return active
+
+    const download = this._readMediaRange(media, 0, media.size!)
+    this._mediaDownloads.set(key, download)
+    try {
+      const bytes = await download
+      this._cacheMediaDownload(key, bytes)
+      return bytes
+    } finally {
+      if (this._mediaDownloads.get(key) === download) this._mediaDownloads.delete(key)
+    }
+  }
+
+  private _cacheMediaDownload(key: string, bytes: Uint8Array): void {
+    if (bytes.length > DialogRpc.MEDIA_CACHE_ITEM_LIMIT) return
+    const existing = this._mediaDownloadCache.get(key)
+    if (existing) this._deleteCachedMedia(key, existing)
+    while (this._mediaDownloadCache.size >= DialogRpc.MEDIA_CACHE_ENTRY_LIMIT
+      || this._mediaDownloadCacheSize + bytes.length > DialogRpc.MEDIA_CACHE_TOTAL_LIMIT) {
+      const oldest = this._mediaDownloadCache.entries().next().value as [string, CachedMediaDownload] | undefined
+      if (!oldest) break
+      this._deleteCachedMedia(oldest[0], oldest[1])
+    }
+    this._mediaDownloadCache.set(key, { bytes, cachedAt: Date.now() })
+    this._mediaDownloadCacheSize += bytes.length
+  }
+
+  private _deleteCachedMedia(key: string, cached: CachedMediaDownload): void {
+    if (!this._mediaDownloadCache.delete(key)) return
+    this._mediaDownloadCacheSize -= cached.bytes.length
+  }
+
+  private async _readMediaRange(media: IMMedia<any>, offset: number, limit: number): Promise<Uint8Array> {
     if (!this._platform.downloadMedia) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
     const chunks: Uint8Array[] = []
     let size = 0

@@ -1362,6 +1362,7 @@ describe('bridge login e2e', () => {
   it('persists a push-only platform event and delivers it only after commit', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let remoteBytes = new Uint8Array()
+    let mediaDownloadCalls = 0
     const transferProgress: bridge.IMTransferProgress[] = []
     const platformId = 'push-e2e'
     const platform: bridge.IMPlatform = {
@@ -1411,6 +1412,7 @@ describe('bridge login e2e', () => {
         }
       },
       async *downloadMedia(_session, _media, options) {
+        mediaDownloadCalls++
         const offset = options?.offset ?? 0
         const bytes = remoteBytes.subarray(offset, offset + (options?.limit ?? remoteBytes.length))
         await options?.onProgress?.({
@@ -1550,18 +1552,28 @@ describe('bridge login e2e', () => {
       })
       expect(new TextDecoder().decode(remoteBytes)).toBe('stream-through')
       const sentDocument = sentMedia.updates[1].message.media.document
+      const sentLocation = {
+        _: 'inputDocumentFileLocation', id: sentDocument.id, accessHash: sentDocument.accessHash,
+        fileReference: sentDocument.fileReference, thumbSize: '',
+      } as const
       const downloaded = await callRpc(client, key, sid, {
         _: 'upload.getFile', offset: 7, limit: 7,
-        location: {
-          _: 'inputDocumentFileLocation', id: sentDocument.id, accessHash: sentDocument.accessHash,
-          fileReference: sentDocument.fileReference, thumbSize: '',
-        },
+        location: sentLocation,
       }, 18)
       expect(new TextDecoder().decode(downloaded.bytes)).toBe('through')
+      const firstHalf = await callRpc(client, key, sid, {
+        _: 'upload.getFile', offset: 0, limit: 7, location: sentLocation,
+      }, 20)
+      const overlapping = await callRpc(client, key, sid, {
+        _: 'upload.getFile', offset: 4, limit: 6, location: sentLocation,
+      }, 22)
+      expect(new TextDecoder().decode(firstHalf.bytes)).toBe('stream-')
+      expect(new TextDecoder().decode(overlapping.bytes)).toBe('am-thr')
+      expect(mediaDownloadCalls).toBe(1)
       expect(transferProgress).toMatchObject([
         { phase: 'upload', transferredBytes: 7, totalBytes: 14 },
         { phase: 'upload', transferredBytes: 14, totalBytes: 14 },
-        { phase: 'download', transferredBytes: 7, totalBytes: 7 },
+        { phase: 'download', transferredBytes: 14, totalBytes: 14 },
       ])
     } finally {
       client?.close()
