@@ -428,6 +428,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   // ── Contacts / users ──
   rpc.register('contacts.getContacts', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getContacts())
+  rpc.register('contacts.resolveUsername', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.resolveUsername(req as tl.contacts.RawResolveUsernameRequest))
   rpc.register('users.getUsers', async (rpc, req) =>
     bareVector(await (await requireBridgeSession(rpc)).dialogs.getUsers(req as tl.users.RawGetUsersRequest)))
   rpc.register('users.getFullUser', async (rpc, req) =>

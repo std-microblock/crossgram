@@ -53,12 +53,21 @@ interface ResolvedStickerInput {
   stickerId: string
 }
 
+interface ConversationPreview {
+  description: string
+}
+
 /**
  * Per-authorized-session bridge for dialog/history RPCs. Telegram's numeric
  * peer/message IDs are allocated here and reverse-mapped to opaque platform IDs.
  */
 export class DialogRpc {
   private static readonly PEER_HYDRATION_TTL_MS = 5_000
+  /** Linked non-dialog peers must be resolvable from every MTProto connection. */
+  private static readonly VIRTUAL_CONVERSATIONS = new Map<
+    string,
+    Map<number, import('./platform.js').IMConversation>
+  >()
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
@@ -79,6 +88,7 @@ export class DialogRpc {
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
   private readonly _memberCursors = new Map<string, Map<number, string | null>>()
+  private readonly _conversationPreviews = new Map<string, ConversationPreview>()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peerHydration?: Promise<void>
@@ -119,6 +129,7 @@ export class DialogRpc {
     // absent during cold start. The no-store path still allocates Telegram IDs
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
+    await this._prepareConversationPreviews(all.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []))
     const materialized = await Promise.all(all.map((dialog) => this._materializeDialog(dialog)))
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
@@ -171,6 +182,7 @@ export class DialogRpc {
         : 0
     const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
+    await this._prepareConversationPreviews(page.map((item) => item.source))
     const conversation = this._conversation(peerId)
     const senders = await this._messageSenders(page.map((item) => item.source))
     const peerUser = conversation.kind === 'direct'
@@ -210,6 +222,7 @@ export class DialogRpc {
     })
     const start = Math.max(0, req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
+    await this._prepareConversationPreviews(page.map((item) => item.source))
     const users = await this._messageSenders(page.map((item) => item.source))
     return {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
@@ -335,6 +348,24 @@ export class DialogRpc {
     }
   }
 
+  resolveUsername(req: tl.contacts.RawResolveUsernameRequest): tl.contacts.RawResolvedPeer {
+    const match = /^bridgechat_(\d+)$/.exec(req.username)
+    const tlId = match ? Number(match[1]) : 0
+    const conversation = tlId
+      ? DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId)?.get(tlId)
+      : undefined
+    if (!conversation || !this._isVirtualConversation(conversation)) {
+      throw new RpcError(400, 'USERNAME_NOT_OCCUPIED')
+    }
+    this._conversations.set(conversation.id, conversation)
+    this._peerToTl.set(conversation.id, tlId)
+    this._tlToPeer.set(tlId, conversation.id)
+    return {
+      _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: tlId },
+      chats: [this._makeChat(conversation)], users: [],
+    }
+  }
+
   async getUsers(req: tl.users.RawGetUsersRequest): Promise<tl.TypeUser[]> {
     await this._hydratePeers()
     return Promise.all(req.id.map((input) => this._getInputUser(input)))
@@ -370,8 +401,21 @@ export class DialogRpc {
 
   async getFullChat(req: tl.messages.RawGetFullChatRequest): Promise<tl.messages.RawChatFull> {
     await this._hydratePeers()
-    void req
-    throw new RpcError(400, 'CHAT_ID_INVALID')
+    const conversation = this._resolveChat(req.chatId)
+    return {
+      _: 'messages.chatFull',
+      fullChat: {
+        _: 'chatFull', id: req.chatId, about: '',
+        participants: {
+          _: 'chatParticipants', chatId: req.chatId,
+          participants: [{ _: 'chatParticipantCreator', userId: this._selfId }],
+          version: 1,
+        },
+        chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
+        notifySettings: { _: 'peerNotifySettings' }, botInfo: [],
+      },
+      chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
+    }
   }
 
   async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
@@ -727,6 +771,7 @@ export class DialogRpc {
       this._throwMessageAction(error, 'MESSAGE_FORWARD_FORBIDDEN')
     }
     const conversation = this._conversation(toId)
+    await this._prepareConversationPreviews(forwarded!)
     const projections = []
     for (const output of forwarded!) {
       const source: IMMessage<any> = { ...output, conversationId: toId, outgoing: true }
@@ -1521,23 +1566,65 @@ export class DialogRpc {
     if (!linked || linked.type !== 'conversation-link') return
 
     const url = this._conversationLinkUrl(linked.conversation)
+    const preview = this._conversationPreviews.get(linked.conversation.id)
     return {
       _: 'messageMediaWebPage', manual: true, safe: true,
       webpage: {
         _: 'webPage',
         id: Long.fromNumber(stableId(`conversation-preview:${linked.conversation.id}`)),
         url, displayUrl: linked.conversation.title, hash: 0,
-        type: 'telegram_message', siteName: '聊天记录',
+        type: 'telegram_message',
         title: linked.conversation.title,
-        description: '点击查看合并转发消息',
+        description: preview?.description || '点击查看合并转发消息',
       },
     }
   }
 
+  private async _prepareConversationPreviews(messages: readonly IMMessage[]): Promise<void> {
+    if (!this._platform.getHistory) return
+    const linked = new Map<string, import('./platform.js').IMConversation>()
+    for (const message of messages) {
+      for (const part of message.content.parts) {
+        if (part.type !== 'text') continue
+        for (const entity of part.entities ?? []) {
+          if (entity.type !== 'conversation-link' || !this._isVirtualConversation(entity.conversation)) continue
+          this._conversationLinkUrl(entity.conversation)
+          if (!this._conversationPreviews.has(entity.conversation.id)) {
+            linked.set(entity.conversation.id, entity.conversation)
+          }
+        }
+      }
+    }
+    await Promise.all([...linked.values()].map(async (conversation) => {
+      try {
+        const page = await this._platform.getHistory!(this._session, { id: conversation.id })
+        const lines = page.messages.slice(0, 3).map((message) => this._conversationPreviewLine(message))
+        this._conversationPreviews.set(conversation.id, {
+          description: lines.join('\n') || `${page.messages.length} 条转发消息`,
+        })
+      } catch {
+        // A preview is optional; the virtual chat remains addressable even if
+        // the upstream cannot expand the merged-forward summary right now.
+      }
+    }))
+  }
+
+  private _conversationPreviewLine(message: IMMessage): string {
+    const sender = message.sender
+      ? `${message.sender.firstName}${message.sender.lastName ? ` ${message.sender.lastName}` : ''}`
+      : message.senderId
+    const text = messageText(message).trim()
+      || (message.content.parts.some((part) => part.type === 'sticker') ? '[表情]' : '[媒体]')
+    return `${sender}: ${text}`
+  }
+
   private _conversationLinkUrl(conversation: import('./platform.js').IMConversation): string {
-    const channelId = this._peerId(conversation.id)
+    const chatId = this._peerId(conversation.id)
     this._conversations.set(conversation.id, conversation)
-    return `tg://privatepost?channel=${channelId}&post=1`
+    const shared = DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId) ?? new Map()
+    shared.set(chatId, conversation)
+    DialogRpc.VIRTUAL_CONVERSATIONS.set(this._session.platformSessionId, shared)
+    return `tg://resolve?domain=bridgechat_${chatId}`
   }
 
   private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
@@ -1753,13 +1840,40 @@ export class DialogRpc {
     if (peer._ !== 'inputPeerUser' && peer._ !== 'inputPeerChat' && peer._ !== 'inputPeerChannel') {
       throw new RpcError(400, 'PEER_ID_INVALID')
     }
-    const id = this._tlToPeer.get(inputPeerId(peer))
+    const tlId = inputPeerId(peer)
+    let id = this._tlToPeer.get(tlId)
+    if (!id && peer._ === 'inputPeerChat') {
+      const virtual = DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId)?.get(tlId)
+      if (virtual) {
+        this._conversations.set(virtual.id, virtual)
+        this._peerToTl.set(virtual.id, tlId)
+        this._tlToPeer.set(tlId, virtual.id)
+        id = virtual.id
+      }
+    }
     if (!id) throw new RpcError(400, 'PEER_ID_INVALID')
     const conversation = this._conversation(id)
     if (peer._ === 'inputPeerUser' && conversation.kind !== 'direct') throw new RpcError(400, 'PEER_ID_INVALID')
-    if (peer._ === 'inputPeerChat') throw new RpcError(400, 'PEER_ID_INVALID')
+    if (peer._ === 'inputPeerChat' && !this._isVirtualConversation(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
     if (peer._ === 'inputPeerChannel' && !this._isTelegramChannel(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
     return id
+  }
+
+  private _resolveChat(chatId: number): import('./platform.js').IMConversation {
+    let peerId = this._tlToPeer.get(chatId)
+    if (!peerId) {
+      const virtual = DialogRpc.VIRTUAL_CONVERSATIONS
+        .get(this._session.platformSessionId)?.get(chatId)
+      if (virtual) {
+        this._conversations.set(virtual.id, virtual)
+        this._peerToTl.set(virtual.id, chatId)
+        this._tlToPeer.set(chatId, virtual.id)
+        peerId = virtual.id
+      }
+    }
+    const conversation = peerId ? this._conversation(peerId) : undefined
+    if (!conversation || !this._isVirtualConversation(conversation)) throw new RpcError(400, 'CHAT_ID_INVALID')
+    return conversation
   }
 
   private _resolveChannel(channel: tl.TypeInputChannel): import('./platform.js').IMConversation {
@@ -1783,6 +1897,9 @@ export class DialogRpc {
   }
 
   private _conversationPeer(conversation: import('./platform.js').IMConversation): tl.TypePeer {
+    if (this._isVirtualConversation(conversation)) {
+      return { _: 'peerChat', chatId: this._peerId(conversation.id) }
+    }
     const target = this._isSubchannel(conversation)
       ? this._conversation(conversation.parentId!)
       : conversation
@@ -1793,6 +1910,13 @@ export class DialogRpc {
 
   private _makeChat(conversation: import('./platform.js').IMConversation): tl.TypeChat {
     const id = this._peerId(conversation.id)
+    if (this._isVirtualConversation(conversation)) {
+      return {
+        _: 'chat', creator: true, id, title: conversation.title,
+        photo: conversation.avatar ? this._makeAvatarPhoto(conversation.avatar, 'chat') : { _: 'chatPhotoEmpty' },
+        participantsCount: 1, date: 0, version: 1,
+      }
+    }
     const broadcast = conversation.metadata?.broadcast === true
     return {
       _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
@@ -1820,7 +1944,12 @@ export class DialogRpc {
   }
 
   private _isTelegramChannel(conversation: import('./platform.js').IMConversation): boolean {
-    return conversation.kind === 'channel' || conversation.kind === 'group'
+    return !this._isVirtualConversation(conversation)
+      && (conversation.kind === 'channel' || conversation.kind === 'group')
+  }
+
+  private _isVirtualConversation(conversation: import('./platform.js').IMConversation): boolean {
+    return conversation.metadata?.virtual === true
   }
 
   private _subchannels(parentId: string): import('./platform.js').IMConversation[] {
