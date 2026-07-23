@@ -35,6 +35,7 @@ class DialogTestPlatform implements IMPlatform {
     bob: [this._message('1', 'bob', 'Meeting at 3?', 1_700_000_200)],
   }
   private _sequence = 100
+  lastInput?: IMMessageInput
 
   async subscribe() { return () => {} }
 
@@ -43,8 +44,11 @@ class DialogTestPlatform implements IMPlatform {
     conversation: { id: string },
     content: IMMessageInput,
   ): Promise<IMMessage> {
+    this.lastInput = content
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
     const message = this._message(String(++this._sequence), conversation.id, text, Math.floor(Date.now() / 1000), true)
+    message.content = { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) }
+    message.replyToId = content.replyToId
     ;(this._messages[conversation.id] ??= []).push(message)
     return message
   }
@@ -343,6 +347,32 @@ describe('DialogRpc', () => {
     expect(sent).toHaveLength(1)
     expect(sent[0]).toMatchObject({ _: 'message', id: first.id, out: true })
     expect(() => wireRoundTrip(first)).not.toThrow()
+  })
+
+  it('maps Telegram mention-name entities to opaque platform users and back', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+    const aliceId = rpc.peerTlId('alice')
+    const bobId = rpc.peerTlId('bob')
+    const sent = await rpc.sendMessage(sendMessageRequest(aliceId, {
+      message: 'hello @Bob', randomId: Long.fromNumber(998),
+      entities: [{
+        _: 'inputMessageEntityMentionName', offset: 6, length: 4,
+        userId: { _: 'inputUser', userId: bobId, accessHash: Long.ZERO },
+      }],
+    }))
+
+    expect(platform.lastInput).toEqual({ parts: [{
+      type: 'text', text: 'hello @Bob',
+      entities: [{ type: 'mention', offset: 6, length: 4, userId: 'bob' }],
+    }], replyToId: undefined })
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const message = history.messages.find((item) => item._ === 'message' && item.id === sent.id)
+    expect(message).toMatchObject({
+      _: 'message',
+      entities: [{ _: 'messageEntityMentionName', offset: 6, length: 4, userId: bobId }],
+    })
   })
 
   it('validates send capabilities, text length, scheduling, and unknown peers', async () => {

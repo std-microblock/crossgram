@@ -272,7 +272,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     content: IMMessageInput,
     options: IMTransferOptions = {},
   ): Promise<IMMessage<QQMediaLocator>> {
-    const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n') || undefined
+    const textParts = content.parts.flatMap((part) => part.type === 'text' ? [{
+      type: 'text' as const,
+      text: part.text,
+      entities: part.entities?.map((entity) => ({ ...entity })),
+    }] : [])
+    const text = textParts.map((part) => part.text).join('\n') || undefined
     const mediaParts = content.parts.filter((part) => part.type === 'media')
     const stickerParts = content.parts.filter((part) => part.type === 'sticker')
     if (stickerParts.length > 1 || stickerParts.length && mediaParts.length) {
@@ -300,7 +305,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     this.originSessions.set(originRequestId, session.platformSessionId)
     try {
       return mapMessage(
-        await this.client.sendMessage(conversation.id, text, media, options, originRequestId, sticker),
+        await this.client.sendMessage(
+          conversation.id, text, media, options, originRequestId, sticker, textParts, content.replyToId,
+        ),
         this.memberName,
         this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
         this.stickerProviderId,
@@ -620,6 +627,7 @@ function mapMessage(
     } : undefined,
     timestamp: input.timestamp,
     outgoing: input.outgoing,
+    replyToId: input.replyToId,
     metadata: input.msgSeq ? { qqMsgSeq: input.msgSeq } : undefined,
     reactionContext: input.reactionContext ? {
       available: reactionCatalog?.available ?? [],
@@ -627,9 +635,28 @@ function mapMessage(
       maxSelected: input.reactionContext.maxSelected,
     } : undefined,
     content: {
-      parts: input.parts.map((part) =>
-        part.type === 'text' ? { type: 'text' as const, text: part.text }
-          : part.type === 'sticker' ? {
+      parts: mapParts(input, stickerProviderId),
+    },
+  }
+}
+
+function mapParts(input: WireMessage, stickerProviderId: string): IMMessage<QQMediaLocator>['content']['parts'] {
+  const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
+  for (const part of input.parts) {
+    if (part.type === 'text') {
+      const previous = parts.at(-1)
+      if (previous?.type === 'text') {
+        const offset = previous.text.length
+        previous.text += part.text
+        previous.entities = [
+          ...(previous.entities ?? []),
+          ...(part.entities ?? []).map((entity) => ({ ...entity, offset: entity.offset + offset })),
+        ]
+      } else {
+        parts.push({ type: 'text', text: part.text, entities: part.entities?.map((entity) => ({ ...entity })) })
+      }
+    } else if (part.type === 'sticker') {
+      parts.push({
               type: 'sticker' as const,
               sticker: {
                 providerId: stickerProviderId,
@@ -644,10 +671,12 @@ function mapMessage(
                 version: part.sticker.version,
                 locator: part.sticker.reference as never,
               },
-            }
-          : { type: 'media' as const, media: mapMedia(part.media) }),
-    },
+      })
+    } else {
+      parts.push({ type: 'media', media: mapMedia(part.media) })
+    }
   }
+  return parts
 }
 
 function memberDisplayName(

@@ -3,6 +3,7 @@ import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage,
   WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
+  WireTextPart,
 } from './protocol.js'
 
 export interface QQNTClientOptions {
@@ -143,10 +144,14 @@ export class QQNTClient {
     options: IMTransferOptions = {},
     originRequestId?: string,
     sticker?: QQStickerReference,
+    textParts?: WireTextPart[],
+    replyToId?: string,
   ): Promise<WireMessage> {
     const manifest = {
       conversationId,
       text,
+      textParts,
+      replyToId,
       originRequestId,
       sticker,
       media: media ? [{

@@ -3,7 +3,7 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
   messageText, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMMedia, type IMMediaInput,
-  type IMMessage, type IMMessageInput, type IMPlatform, type IMTransferProgress, type IMUser,
+  type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
 import {
@@ -528,7 +528,7 @@ export class DialogRpc {
     return this._sendMediaOnce(req.randomId.toString(), async () => {
       const resolved = await this._resolveSendMedia(req.media)
       const parts: IMMessageInput['parts'] = []
-      if (req.message) parts.push({ type: 'text', text: req.message })
+      if (req.message) parts.push(this._inputTextPart(req.message, req.entities))
       if ('sticker' in resolved) {
         parts.push({ type: 'sticker', sticker: resolved.sticker })
         const updates = await this._sendRichContent(req.peer, { parts }, [], [req.randomId], req.replyTo)
@@ -549,7 +549,7 @@ export class DialogRpc {
       const mediaResolved = resolved as ResolvedMediaUpload[]
       const parts: IMMessageInput['parts'] = []
       const captions = req.multiMedia.map((item) => item.message).filter(Boolean)
-      if (captions.length) parts.push({ type: 'text', text: captions.join('\n') })
+      if (captions.length) parts.push(this._multiMediaCaption(req.multiMedia))
       for (const item of mediaResolved) parts.push({ type: 'media', media: item.media })
       return this._sendRichContent(
         req.peer,
@@ -1004,10 +1004,11 @@ export class DialogRpc {
 
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(req.peer, req.replyTo)
+    const replyToId = await this._resolveReplyToId(peerId, req.replyTo)
     const sent = await this._platform.sendMessage(
       this._session,
       { id: peerId },
-      { parts: [{ type: 'text', text: req.message }] },
+      { parts: [this._inputTextPart(req.message, req.entities)], replyToId },
     )
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     let persisted: Awaited<ReturnType<MessageStore['ingest']>> | undefined
@@ -1129,7 +1130,10 @@ export class DialogRpc {
 
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(inputPeer, replyTo)
-    const sent = await this._platform.sendMessage(this._session, { id: peerId }, content, {
+    const replyToId = await this._resolveReplyToId(peerId, replyTo)
+    const sent = await this._platform.sendMessage(this._session, { id: peerId }, {
+      ...content, replyToId,
+    }, {
       onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
     })
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
@@ -1415,9 +1419,10 @@ export class DialogRpc {
       id: tlId,
       fromId: { _: 'peerUser', userId: source.outgoing ? this._selfId : this._peerId(source.senderId) },
       peerId: this._conversationPeer(conversation),
-      replyTo: this._topicReplyHeader(conversation, tlId),
+      replyTo: this._messageReplyHeader(source) ?? this._topicReplyHeader(conversation, tlId),
       date: source.timestamp,
       message: item.ordinal === 0 ? messageText(source) : '',
+      entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
       media: item.media
         ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
         : source.content.parts.find((part) => part.type === 'sticker')
@@ -1440,6 +1445,77 @@ export class DialogRpc {
       platformMessageId: item.source.id,
       ordinal: item.ordinal,
     })
+  }
+
+  private _messageReplyHeader(source: IMMessage): tl.RawMessageReplyHeader | undefined {
+    if (!source.replyToId) return
+    const replyToMsgId = this._messageToTl.get(
+      `${source.conversationId}\u0000${source.replyToId}\u00000`,
+    )
+    return replyToMsgId ? { _: 'messageReplyHeader', replyToMsgId } : undefined
+  }
+
+  private _messageEntities(source: IMMessage): tl.TypeMessageEntity[] | undefined {
+    const output: tl.TypeMessageEntity[] = []
+    let base = 0
+    const textParts = source.content.parts.filter((part) => part.type === 'text')
+    for (const [index, part] of textParts.entries()) {
+      for (const entity of part.entities ?? []) {
+        if (entity.type !== 'mention' || entity.offset < 0 || entity.length <= 0
+          || entity.offset + entity.length > part.text.length) continue
+        output.push({
+          _: 'messageEntityMentionName',
+          offset: base + entity.offset,
+          length: entity.length,
+          userId: this._peerId(entity.userId),
+        })
+      }
+      base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
+    }
+    return output.length ? output : undefined
+  }
+
+  private _inputTextPart(text: string, entities?: tl.TypeMessageEntity[]): IMMessageInput['parts'][number] {
+    const mapped: IMTextEntity[] = []
+    for (const entity of entities ?? []) {
+      if (entity._ !== 'inputMessageEntityMentionName' && entity._ !== 'messageEntityMentionName') continue
+      const input = entity as any
+      let userId: string | undefined
+      if (input.userId?._ === 'inputUserSelf') userId = this._session.userId
+      else if (input.userId?._ === 'inputUser') userId = this._tlToPeer.get(Number(input.userId.userId))
+      else if (input.userId !== undefined) userId = this._tlToPeer.get(Number(input.userId))
+      if (!userId || input.offset < 0 || input.length <= 0 || input.offset + input.length > text.length) continue
+      mapped.push({ type: 'mention', offset: input.offset, length: input.length, userId })
+    }
+    return { type: 'text', text, entities: mapped.length ? mapped : undefined }
+  }
+
+  private _multiMediaCaption(items: SendMultiMediaRequest['multiMedia']): IMMessageInput['parts'][number] {
+    const parts = items.filter((item) => item.message).map((item) =>
+      this._inputTextPart(item.message, item.entities))
+    const text = parts.map((part) => part.type === 'text' ? part.text : '').join('\n')
+    const entities: IMTextEntity[] = []
+    let base = 0
+    for (const [index, part] of parts.entries()) {
+      if (part.type === 'text') {
+        entities.push(...(part.entities ?? []).map((entity) => ({ ...entity, offset: entity.offset + base })))
+        base += part.text.length + (index + 1 < parts.length ? 1 : 0)
+      }
+    }
+    return { type: 'text', text, entities: entities.length ? entities : undefined }
+  }
+
+  private async _resolveReplyToId(
+    conversationId: string,
+    replyTo?: tl.TypeInputReplyTo,
+  ): Promise<string | undefined> {
+    if (replyTo?._ !== 'inputReplyToMessage' || !this._store) return
+    const projected = await this._store.findProjectedByTlId(
+      this._session.platformSessionId, replyTo.replyToMsgId, conversationId,
+    )
+    if (!projected) return
+    const ordinal = projected.parts.find((part) => part.tlMessageId === replyTo.replyToMsgId)?.ordinal ?? 0
+    return projected.source.sourceIds?.[ordinal] ?? projected.source.id
   }
 
   private _emptyMessages(conversation: import('./platform.js').IMConversation): tl.messages.RawMessages {
