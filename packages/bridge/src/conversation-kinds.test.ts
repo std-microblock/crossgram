@@ -38,6 +38,7 @@ function source(conversation: IMConversation): IMMessage {
 }
 
 const sentTargets: string[] = []
+const sentInputs: Array<import('./platform.js').IMMessageInput> = []
 const actionCalls: string[] = []
 const platform: IMPlatform = {
   capabilities: {
@@ -76,10 +77,12 @@ const platform: IMPlatform = {
   },
   async sendMessage(_session, target, content) {
     sentTargets.push(target.id)
+    sentInputs.push(content)
     return {
       id: `sent-${sentTargets.length}`, conversationId: target.id, senderId: 'self', outgoing: true,
       timestamp: 100 + sentTargets.length,
       content: { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) },
+      replyToId: content.replyToId,
     }
   },
   async deleteMessages(_session, target, ids, options) {
@@ -106,6 +109,7 @@ const disposals: Array<() => Promise<void>> = []
 
 afterEach(async () => {
   sentTargets.length = 0
+  sentInputs.length = 0
   actionCalls.length = 0
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
@@ -190,6 +194,22 @@ describe('conversation kinds', () => {
     await expect(rpc.getHistory(historyRequest({
       _: 'inputPeerUser', userId: groupId, accessHash: Long.ZERO,
     }))).rejects.toMatchObject({ text: 'PEER_ID_INVALID' })
+  })
+
+  it('resolves Telegram reply IDs back to opaque platform message IDs', async () => {
+    const { rpc } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const groupId = stableId('peer:group')
+    const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
+    const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+    const replied = history.messages[0] as tl.RawMessage
+
+    await rpc.sendMessage({
+      _: 'messages.sendMessage', peer: groupPeer, message: 'native reply', randomId: Long.fromNumber(88),
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId: replied.id },
+    })
+
+    expect(sentInputs.at(-1)).toMatchObject({ replyToId: 'message-group' })
   })
 
   it('keeps contacts limited to direct conversations', async () => {

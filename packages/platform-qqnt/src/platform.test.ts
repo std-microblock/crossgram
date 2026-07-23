@@ -9,6 +9,42 @@ const session: PlatformSession = {
 }
 
 describe('QQNTPlatform mapping', () => {
+  it('round-trips QQ mention entities and opaque reply IDs', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent', conversationId: '2:group', senderId: 'self', timestamp: 10, outgoing: true,
+      replyToId: 'opaque-original',
+      parts: [{
+        type: 'text' as const, text: 'hello ',
+      }, {
+        type: 'text' as const, text: '@Alice',
+        entities: [{ type: 'mention' as const, offset: 0, length: 6, userId: 'u_alice', numericId: '12345' }],
+      }],
+    }))
+
+    const sent = await platform.sendMessage(session, { id: '2:group' }, {
+      replyToId: 'opaque-original',
+      parts: [{
+        type: 'text', text: 'hello @Alice',
+        entities: [{ type: 'mention', offset: 6, length: 6, userId: 'u_alice', numericId: '12345' }],
+      }],
+    })
+
+    const call = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(call[6]).toEqual([{
+      type: 'text', text: 'hello @Alice',
+      entities: [{ type: 'mention', offset: 6, length: 6, userId: 'u_alice', numericId: '12345' }],
+    }])
+    expect(call[7]).toBe('opaque-original')
+    expect(sent).toMatchObject({
+      replyToId: 'opaque-original',
+      content: { parts: [{
+        type: 'text', text: 'hello @Alice',
+        entities: [{ type: 'mention', offset: 6, length: 6, userId: 'u_alice', numericId: '12345' }],
+      }] },
+    })
+  })
+
   it('registers native sticker plans and maps QQ stickers back to the provider', async () => {
     const platform = new QQNTPlatform({}, 'qq-provider')
     const reference = {

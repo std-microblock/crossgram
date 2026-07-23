@@ -95,12 +95,25 @@ export interface WireMessage {
   msgSeq?: string
   /** Correlates a local HTTP send with its QQ listener echo. */
   originRequestId?: string
+  replyToId?: string
   parts: Array<
-    | { type: 'text', text: string }
+    | WireTextPart
     | { type: 'media', media: WireMedia }
     | { type: 'sticker', sticker: WireSticker }
   >
   reactionContext?: WireReactionState
+}
+
+export interface WireTextPart {
+  type: 'text'
+  text: string
+  entities?: Array<{
+    type: 'mention'
+    offset: number
+    length: number
+    userId: string
+    numericId?: string
+  }>
 }
 
 export interface WireConversation {

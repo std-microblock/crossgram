@@ -155,13 +155,24 @@ export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
   source: IMMediaSource
 }
 
+export type IMTextEntity = {
+  type: 'mention'
+  /** UTF-16 code-unit offset, matching Telegram and JavaScript string indexing. */
+  offset: number
+  length: number
+  /** Opaque platform user ID. */
+  userId: string
+  /** Optional platform display/account number (QQ UIN, etc.). */
+  numericId?: string
+}
+
 export type IMMessagePart<TMediaLocator = unknown> =
-  | { type: 'text', text: string }
+  | { type: 'text', text: string, entities?: IMTextEntity[] }
   | { type: 'media', media: IMMedia<TMediaLocator> }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMSticker }
 
 export type IMMessageInputPart =
-  | { type: 'text', text: string }
+  | { type: 'text', text: string, entities?: IMTextEntity[] }
   | { type: 'media', media: IMMediaInput }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMStickerSendPlan }
 
@@ -190,6 +201,8 @@ export interface IMMessage<TMediaLocator = unknown> {
   groupId?: string
   metadata?: JsonObject
   reactionContext?: IMReactionContext
+  /** Opaque platform message ID referenced by this reply. */
+  replyToId?: string
 }
 
 export interface IMReactionActor {
