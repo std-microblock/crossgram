@@ -99,6 +99,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         conversation: this.mapConversation(conversation),
         unreadCount: conversation.unreadCount ?? 0,
         lastMessage: conversation.lastMessage ? mapMessage(conversation.lastMessage, this.memberName) : undefined,
+        readInboxMaxMessage: conversation.readInboxMaxMessage
+          ? mapMessage(conversation.readInboxMaxMessage, this.memberName)
+          : undefined,
       })),
       nextCursor: response.nextCursor,
     }

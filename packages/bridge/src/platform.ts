@@ -254,6 +254,8 @@ export interface IMDialog<TMediaLocator = unknown> {
   conversation: IMConversation<TMediaLocator>
   unreadCount: number
   lastMessage?: IMMessage<TMediaLocator>
+  /** Last platform message known to be read, when the upstream exposes an exact unread boundary. */
+  readInboxMaxMessage?: IMMessage<TMediaLocator>
 }
 
 export interface IMPageQuery {

@@ -268,6 +268,14 @@ export class PlatformDataService {
     for (const dialog of dialogs) {
       await this._store.upsertConversation(this._session, dialog.conversation, dialog.unreadCount)
       if (dialog.lastMessage) await this._store.ingest(this._session, dialog.conversation, dialog.lastMessage)
+      if (dialog.readInboxMaxMessage) {
+        await this._store.ingest(
+          this._session,
+          dialog.conversation,
+          dialog.readInboxMaxMessage,
+          { allocation: 'history' },
+        )
+      }
     }
   }
 }

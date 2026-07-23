@@ -146,6 +146,34 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(second)).not.toThrow()
   })
 
+  it('maps an exact upstream unread boundary to readInboxMaxId', async () => {
+    class UnreadPlatform extends DialogTestPlatform {
+      override async getDialogs(): Promise<IMDialogPage> {
+        const page = await super.getDialogs()
+        const alice = page.dialogs.find((dialog) => dialog.conversation.id === 'alice')!
+        alice.unreadCount = 1
+        alice.readInboxMaxMessage = {
+          id: '1', conversationId: 'alice', senderId: 'alice',
+          timestamp: 1_700_000_000, content: { parts: [{ type: 'text', text: 'Hey there!' }] },
+        }
+        return page
+      }
+    }
+    const rpc = new DialogRpc(new UnreadPlatform(), session)
+
+    const result = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
+    const alice = result.dialogs.find((dialog) =>
+      dialog._ === 'dialog'
+      && dialog.peer._ === 'peerUser'
+      && dialog.peer.userId === rpc.peerTlId('alice')) as tl.RawDialog
+
+    expect(alice).toMatchObject({
+      unreadCount: 1,
+    })
+    expect(alice.readInboxMaxId).toBeGreaterThan(0)
+    expect(alice.readInboxMaxId).toBeLessThan(alice.topMessage)
+  })
+
   it('returns a serializable empty pinned-dialog page for folder merging', () => {
     const result = new DialogRpc(new DialogTestPlatform(), session).getPinnedDialogs()
     expect(result).toMatchObject({
