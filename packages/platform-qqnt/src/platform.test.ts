@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import sharp from 'sharp'
 import type { PlatformSession } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
 
@@ -131,6 +132,9 @@ describe('QQNTPlatform mapping', () => {
     }))
     await platform.getDialogs(session)
     const received = Promise.withResolvers<unknown>()
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [], reactions: [], maxSelected: 20,
+    }))
     platform.client.subscribe = vi.fn(async (handler, signal) => {
       await handler({
         type: 'message',
@@ -196,18 +200,43 @@ describe('QQNTPlatform mapping', () => {
       maxSelected: 20,
     }
     platform.client.getReactionCatalog = vi.fn(async () => context)
-    platform.client.getMessageReactions = vi.fn(async () => context)
-    platform.client.setMessageReactions = vi.fn(async () => ({
-      ...context, reactions: [{ key: '1:14', count: 1, selected: true }],
+    const png = await sharp({
+      create: { width: 1, height: 1, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+    }).png().toBuffer()
+    platform.client.downloadMedia = vi.fn(async function* () { yield png })
+    platform.client.getMessageReactions = vi.fn(async () => ({
+      reactions: context.reactions, maxSelected: 20,
     }))
-    await expect(platform.getAvailableReactions(session, { conversationId: '2:g' }))
-      .resolves.toMatchObject({ available: [{ key: '2:128522' }, { key: '1:14' }] })
+    platform.client.setMessageReactions = vi.fn(async () => ({
+      reactions: [{ key: '1:14', count: 1, selected: true }], maxSelected: 20,
+    }))
+    const catalog = await platform.getAvailableReactions(session, { conversationId: '2:g' })
+    expect(catalog).toMatchObject({
+      available: [{
+        key: '2:128522',
+      }, {
+        key: '1:14',
+        presentation: {
+          resource: { mimeType: 'image/webp', width: 100, height: 100 },
+        },
+      }],
+    })
+    const custom = catalog.available[1]!
+    if (custom.presentation.type !== 'custom') throw new Error('expected custom reaction')
+    const cached: Uint8Array[] = []
+    for await (const chunk of platform.downloadReactionResource(
+      session, custom.presentation.resource, { offset: 8, limit: 4 },
+    )) cached.push(chunk)
+    expect(Buffer.concat(cached).toString()).toBe('WEBP')
     await expect(platform.getMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm',
     })).resolves.toMatchObject({ reactions: [{ key: '2:128522', selected: true }] })
     await expect(platform.setMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm',
     }, ['1:14'])).resolves.toMatchObject({ reactions: [{ key: '1:14', selected: true }] })
+    await expect(platform.getAvailableReactions(session, { conversationId: '1:u' }))
+      .resolves.toEqual({ available: [], reactions: [], maxSelected: 0 })
+    expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(1)
   })
 
   it('maps sent media locators and streams downloads with progress', async () => {

@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import type {
-  QQMediaLocator, WireConversation, WireEvent, WireMemberPage, WireMessage, WireReactionContext,
+  QQMediaLocator, WireConversation, WireEvent, WireMemberPage, WireMessage, WireReactionContext, WireReactionState,
 } from './protocol.js'
 
 export interface QQNTClientOptions {
@@ -114,7 +114,7 @@ export class QQNTClient {
     return this.json('/reactions/catalog')
   }
 
-  getMessageReactions(conversationId: string, messageId: string): Promise<WireReactionContext> {
+  getMessageReactions(conversationId: string, messageId: string): Promise<WireReactionState> {
     return this.json(`/messages/reactions${queryString({ conversationId, messageId })}`)
   }
 
@@ -122,7 +122,7 @@ export class QQNTClient {
     conversationId: string,
     messageId: string,
     reactionKeys: readonly string[],
-  ): Promise<WireReactionContext> {
+  ): Promise<WireReactionState> {
     return this.json('/messages/reactions', false, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
