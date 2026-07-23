@@ -174,6 +174,38 @@ describe('DialogRpc', () => {
     expect(alice.readInboxMaxId).toBeLessThan(alice.topMessage)
   })
 
+  it('returns messages on both sides of an unread boundary requested with negative add_offset', async () => {
+    class UnreadPlatform extends DialogTestPlatform {
+      override async getDialogs(): Promise<IMDialogPage> {
+        const page = await super.getDialogs()
+        const alice = page.dialogs.find((dialog) => dialog.conversation.id === 'alice')!
+        alice.unreadCount = 1
+        alice.readInboxMaxMessage = {
+          id: '1', conversationId: 'alice', senderId: 'alice',
+          timestamp: 1_700_000_000, content: { parts: [{ type: 'text', text: 'Hey there!' }] },
+        }
+        return page
+      }
+    }
+    const rpc = new DialogRpc(new UnreadPlatform(), session)
+    const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
+    const alice = dialogs.dialogs.find((dialog) =>
+      dialog._ === 'dialog'
+      && dialog.peer._ === 'peerUser'
+      && dialog.peer.userId === rpc.peerTlId('alice')) as tl.RawDialog
+
+    const history = await rpc.getHistory(getHistoryRequest(rpc.peerTlId('alice'), {
+      offsetId: alice.readInboxMaxId,
+      addOffset: -25,
+      limit: 50,
+    })) as tl.messages.RawMessages
+
+    expect(history.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual([
+      'How are you?', 'Hey there!',
+    ])
+    expect(() => wireRoundTrip(history)).not.toThrow()
+  })
+
   it('returns a serializable empty pinned-dialog page for folder merging', () => {
     const result = new DialogRpc(new DialogTestPlatform(), session).getPinnedDialogs()
     expect(result).toMatchObject({

@@ -165,6 +165,13 @@ describe('StaticPlatform', () => {
     expect(after.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['group-b', 'discord-support'])
     expect(all.find((dialog) => dialog.conversation.id === 'discord-support')?.conversation)
       .toMatchObject({ parentId: 'discord-general', spaceId: 'discord-guild' })
+    expect(all.find((dialog) => dialog.conversation.id === 'alice')).toMatchObject({
+      unreadCount: 1,
+      lastMessage: { id: 'direct:alice:2', content: { parts: [{ type: 'text', text: 'How are you?' }] } },
+      readInboxMaxMessage: {
+        id: 'direct:alice:1', content: { parts: [{ type: 'text', text: 'Hey there!' }] },
+      },
+    })
   })
 
   it('runs Group A new, edit, and delete events in order and mutates history', async () => {

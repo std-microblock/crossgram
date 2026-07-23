@@ -212,4 +212,45 @@ describe('rich-media projection', () => {
     expect((await store.readHistory(session.platformSessionId, conversation.id, { limit: 100 })).length)
       .toBeLessThanOrEqual(6)
   })
+
+  it('lets an adapter fetch around unread state for a persisted negative-offset window', async () => {
+    const store = await createStore()
+    const messages = ['old', 'read', 'unread', 'latest'].map((id, index): IMMessage => ({
+      id,
+      conversationId: conversation.id,
+      senderId: 'alice',
+      timestamp: index + 1,
+      content: { parts: [{ type: 'text', text: id }] },
+    }))
+    const queries: Array<{ limit?: number, before?: { id: string } }> = []
+    const unreadPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: [{
+          conversation,
+          unreadCount: 2,
+          lastMessage: messages[3],
+          readInboxMaxMessage: messages[1],
+        }] }
+      },
+      async getHistory(_session, _conversation, query) {
+        queries.push({ limit: query?.limit, before: query?.before })
+        return { messages }
+      },
+    }
+    const rpc = new DialogRpc(unreadPlatform, session, store)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const dialog = dialogs.dialogs[0] as tl.RawDialog
+    const history = await rpc.getHistory({
+      ...historyRequest(),
+      offsetId: dialog.readInboxMaxId,
+      addOffset: -2,
+      limit: 3,
+    }) as tl.messages.RawMessages
+
+    expect(queries).toEqual([{ limit: 6, before: undefined }])
+    expect(history.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual([
+      'unread', 'read', 'old',
+    ])
+  })
 })

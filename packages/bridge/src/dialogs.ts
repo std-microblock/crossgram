@@ -69,6 +69,7 @@ export class DialogRpc {
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
   private readonly _historyCache = new Map<string, MaterializedMessage[]>()
+  private readonly _readInboxMaxMessageIds = new Map<string, string>()
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
@@ -144,13 +145,25 @@ export class DialogRpc {
     const peerId = this._resolvePeer(req.peer)
     const all = await this._loadHistory(peerId, req)
     const filtered = all.filter((item) => {
-      if (req.offsetId > 0 && item.tlId >= req.offsetId) return false
+      // A negative add_offset asks for a window which starts before (newer
+      // than) offset_id. Keep both sides of the anchor until the window has
+      // been selected below; filtering here used to make every unread-window
+      // request empty.
+      if (req.addOffset >= 0 && req.offsetId > 0 && item.tlId >= req.offsetId) return false
       if (req.offsetDate > 0 && item.source.timestamp >= req.offsetDate) return false
       if (req.maxId > 0 && item.tlId >= req.maxId) return false
       if (req.minId > 0 && item.tlId <= req.minId) return false
       return true
     })
-    const start = Math.max(0, req.addOffset)
+    const anchorIndex = req.addOffset < 0 && req.offsetId > 0
+      ? filtered.findIndex((item) => item.tlId === req.offsetId)
+      : -1
+    const offsetIndex = anchorIndex >= 0
+      ? anchorIndex + 1
+      : req.addOffset < 0 && req.offsetId > 0
+        ? filtered.findIndex((item) => item.tlId < req.offsetId)
+        : 0
+    const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
     const conversation = this._conversation(peerId)
     const senders = await this._messageSenders(page.map((item) => item.source))
@@ -1275,17 +1288,36 @@ export class DialogRpc {
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, anchorId, peerId)
         : undefined
       const fetchLimit = Math.max(1, Math.min(
-        (request.limit ?? 1) + Math.max(0, request.addOffset ?? 0) + 1,
+        (request.limit ?? 1) + Math.abs(request.addOffset ?? 0) + 1,
         200,
       ))
-      await this._data.getHistory(peerId, {
-        limit: fetchLimit,
-        before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
-      })
+      const negativeOffset = (request.addOffset ?? 0) < 0
+      const readInboxMaxMessageId = this._readInboxMaxMessageIds.get(peerId)
+      const aroundUnread = negativeOffset && anchor && (
+        anchor.source.id === readInboxMaxMessageId
+        || anchor.source.sourceIds?.includes(readInboxMaxMessageId ?? '')
+      )
+      if (aroundUnread) {
+        // Telegram Desktop opens an unread dialog with
+        // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
+        // perform their initial unread-aware fetch (QQNT uses firstUnreadSeq).
+        await this._data.getHistory(peerId, { limit: fetchLimit })
+      } else if (negativeOffset && anchor) {
+        // A generic jump also needs both sides of its anchor, but must not be
+        // mistaken for QQNT's conversation-level unread anchor.
+        const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
+        await this._data.getHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
+        await this._data.getHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
+      } else {
+        await this._data.getHistory(peerId, {
+          limit: fetchLimit,
+          before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
+        })
+      }
       const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
         limit: fetchLimit,
         beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
-        maxTimestamp: anchor?.source.timestamp,
+        maxTimestamp: !negativeOffset ? anchor?.source.timestamp : undefined,
       })
       const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
         const item: MaterializedMessage = {
@@ -1331,7 +1363,14 @@ export class DialogRpc {
     const dialogs = this._data
       ? await this._data.getDialogs(query)
       : (await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)).dialogs
-    for (const dialog of dialogs) this._conversations.set(dialog.conversation.id, dialog.conversation)
+    for (const dialog of dialogs) {
+      this._conversations.set(dialog.conversation.id, dialog.conversation)
+      if (dialog.readInboxMaxMessage) {
+        this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
+      } else {
+        this._readInboxMaxMessageIds.delete(dialog.conversation.id)
+      }
+    }
     return dialogs.filter((dialog) => !this._isSubchannel(dialog.conversation))
   }
 
