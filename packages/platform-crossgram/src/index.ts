@@ -2,6 +2,7 @@ import type { Context } from 'cordis'
 import sharp from 'sharp'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
@@ -11,6 +12,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
+import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireReactionState,
 } from './protocol.js'
@@ -23,17 +25,30 @@ export interface Config extends QQNTClientOptions {
    * `groupAlias` prefers the conversation-scoped group card when available.
    */
   memberName?: MemberNameMode
+  /** Directory used for transformed stickers and optionally all QQ images. */
+  mediaCachePath?: string
+  /** Cache every downloaded QQ image and normalize it to WebP. */
+  cacheAndConvertImages?: boolean
+  /** Override the bundled FFmpeg executable used for GIF/APNG to WebM conversion. */
+  ffmpegPath?: string
 }
 
 export const name = 'im-platform-qqnt'
-export const inject = ['imPlatform', 'imSticker']
+export const inject = ['imPlatform', 'imSticker', 'database', 'model']
 
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'qqnt')
   const stickerProviderId = `${id}:stickers`
-  const platform = new QQNTPlatform(config, stickerProviderId)
+  defineQQMediaCacheModel(ctx)
+  const mediaCache = new QQMediaCache({
+    path: config.mediaCachePath ?? resolve(process.cwd(), 'data', 'qqnt-media-cache', id),
+    cacheAndConvertImages: config.cacheAndConvertImages,
+    ffmpegPath: config.ffmpegPath,
+    database: ctx.database,
+  })
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache)
   ctx.imPlatform.register(platform, id)
-  ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId), stickerProviderId)
+  ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId, mediaCache), stickerProviderId)
 }
 
 export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
@@ -62,7 +77,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       forward: { mode: 'unsupported', preservesAuthor: false },
     },
     reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 20 },
-    stickers: { native: true, upload: false, formats: ['static', 'animated'] },
+    stickers: { native: true, upload: false, formats: ['static', 'animated', 'video'] },
   }
 
   readonly client: QQNTClient
@@ -74,7 +89,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly memberName: MemberNameMode
   private readonly originSessions = new Map<string, string>()
 
-  constructor(options: Config = {}, private readonly stickerProviderId = 'qqnt:stickers') {
+  constructor(
+    options: Config = {},
+    private readonly stickerProviderId = 'qqnt:stickers',
+    private readonly mediaCache?: QQMediaCache,
+  ) {
     this.client = new QQNTClient(options)
     this.memberName = options.memberName ?? 'groupAlias'
   }
@@ -307,6 +326,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: IMDownloadOptions = {},
   ): AsyncIterable<Uint8Array> {
     if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
+    if (this.mediaCache?.cacheAndConvertImages && media.kind === 'image') {
+      yield* this.mediaCache.downloadImage(media, {
+        size: media.size,
+        stream: ({ signal } = {}) => this.client.downloadMedia(media.locator!, { signal }),
+      }, options)
+      return
+    }
     let transferred = 0
     yield* this.client.downloadMedia(media.locator, {
       offset: options.offset,
