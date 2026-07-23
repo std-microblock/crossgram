@@ -73,6 +73,7 @@ export class DialogRpc {
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
+  private readonly _memberCursors = new Map<string, Map<number, string | null>>()
   private readonly _actions: PlatformMessageActions
 
   constructor(
@@ -343,7 +344,7 @@ export class DialogRpc {
     await this._hydratePeers()
     const peerId = this._tlToPeer.get(req.chatId)
     const conversation = peerId ? this._conversation(peerId) : undefined
-    if (!conversation || conversation.kind !== 'group') throw new RpcError(400, 'CHAT_ID_INVALID')
+    if (!conversation || !this._isTelegramGroup(conversation)) throw new RpcError(400, 'CHAT_ID_INVALID')
     const members = await this._allMembers(conversation.id)
     const participantUsers = members.map((member) => this._makeMemberUser(member))
     const reactionContext = await this._platform.getAvailableReactions?.(
@@ -458,13 +459,14 @@ export class DialogRpc {
   ): Promise<tl.channels.RawChannelParticipant> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
-    const members = await this._allMembers(conversation.id)
     const userId = req.participant._ === 'inputPeerSelf'
       ? this._session.userId
       : req.participant._ === 'inputPeerUser'
         ? this._tlToPeer.get(req.participant.userId)
         : undefined
-    const member = members.find((item) => item.user.id === userId)
+    const member = userId && this._platform.getConversationMember
+      ? await this._platform.getConversationMember(this._session, { id: conversation.id }, userId)
+      : (await this._allMembers(conversation.id)).find((item) => item.user.id === userId)
     if (!member) throw new RpcError(400, 'USER_NOT_PARTICIPANT')
     return {
       _: 'channels.channelParticipant',
@@ -478,6 +480,20 @@ export class DialogRpc {
   ): Promise<tl.channels.RawChannelParticipants> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
+    const offset = Math.max(0, req.offset)
+    const limit = Math.max(0, req.limit)
+    if (req.filter._ === 'channelParticipantsRecent') {
+      const page = await this._memberPage(conversation.id, offset, limit)
+      const count = page.total
+        ?? (Number(conversation.metadata?.participantsCount ?? 0)
+          || offset + page.members.length + (page.nextCursor ? 1 : 0))
+      return {
+        _: 'channels.channelParticipants', count,
+        participants: page.members.map((member) => this._makeChannelParticipant(member)),
+        chats: [this._makeChat(conversation)],
+        users: page.members.map((member) => this._makeMemberUser(member)),
+      }
+    }
     let members = await this._allMembers(conversation.id)
     if (req.filter._ === 'channelParticipantsAdmins') {
       members = members.filter((member) => member.role === 'owner' || member.role === 'administrator')
@@ -486,11 +502,11 @@ export class DialogRpc {
       members = members.filter((member) =>
         `${member.user.firstName} ${member.user.lastName ?? ''} ${member.user.username ?? ''}`
           .toLocaleLowerCase().includes(query))
-    } else if (req.filter._ !== 'channelParticipantsRecent') {
+    } else {
       members = []
     }
     const total = members.length
-    members = members.slice(Math.max(0, req.offset), Math.max(0, req.offset) + Math.max(0, req.limit))
+    members = members.slice(offset, offset + limit)
     return {
       _: 'channels.channelParticipants', count: total,
       participants: members.map((member) => this._makeChannelParticipant(member)),
@@ -658,8 +674,8 @@ export class DialogRpc {
       )
       ptsCount += deleted.tlMessageIds.length
       updates.push({
-        _: conversation.kind === 'channel' ? 'updateDeleteChannelMessages' : 'updateDeleteMessages',
-        ...(conversation.kind === 'channel' ? { channelId: this._peerId(conversationId) } : {}),
+        _: this._isTelegramChannel(conversation) ? 'updateDeleteChannelMessages' : 'updateDeleteMessages',
+        ...(this._isTelegramChannel(conversation) ? { channelId: this._peerId(conversationId) } : {}),
         messages: deleted.tlMessageIds, pts: 0, ptsCount: deleted.tlMessageIds.length,
       } as tl.TypeUpdate)
     }
@@ -675,14 +691,14 @@ export class DialogRpc {
       for (const part of persisted.projection) {
         const item = await this._projectedItem(part.tlMessageId, conversationId)
         updates.push({
-          _: conversation.kind === 'channel' ? 'updateNewChannelMessage' : 'updateNewMessage',
+          _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
           message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
         } as tl.TypeUpdate)
       }
     } else {
       const item = await this._projectedItem(req.id, conversationId)
       updates.push({
-        _: conversation.kind === 'channel' ? 'updateEditChannelMessage' : 'updateEditMessage',
+        _: this._isTelegramChannel(conversation) ? 'updateEditChannelMessage' : 'updateEditMessage',
         message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
       } as tl.TypeUpdate)
     }
@@ -726,7 +742,7 @@ export class DialogRpc {
         updates.push({ _: 'updateMessageID', id: part.tlMessageId, randomId: req.randomId[index] })
       }
       updates.push({
-        _: conversation.kind === 'channel' ? 'updateNewChannelMessage' : 'updateNewMessage',
+        _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
         message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
       } as tl.TypeUpdate)
     }
@@ -1152,8 +1168,9 @@ export class DialogRpc {
         updates.push({ _: 'updateMessageID', id: part.tlMessageId, randomId })
       }
       updates.push({
-        _: 'updateNewMessage', message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
-      } as tl.RawUpdateNewMessage)
+        _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
+        message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+      } as tl.TypeUpdate)
     }
     const target = this._conversation(peerId)
     return {
@@ -1439,6 +1456,40 @@ export class DialogRpc {
     return members
   }
 
+  private async _memberPage(
+    conversationId: string,
+    offset: number,
+    limit: number,
+  ): Promise<import('./platform.js').IMConversationMemberPage<any>> {
+    if (!this._platform.capabilities.members?.list || !this._platform.getConversationMembers || limit <= 0) {
+      return { members: [] }
+    }
+    let cursors = this._memberCursors.get(conversationId)
+    if (!cursors) {
+      cursors = new Map([[0, null]])
+      this._memberCursors.set(conversationId, cursors)
+    }
+    let start = [...cursors.keys()].filter((known) => known <= offset).sort((a, b) => b - a)[0] ?? 0
+    let cursor = cursors.get(start) ?? undefined
+    let knownTotal: number | undefined
+    while (start < offset) {
+      const skipped = await this._platform.getConversationMembers(
+        this._session, { id: conversationId }, { cursor, limit: offset - start },
+      )
+      knownTotal = skipped.total ?? knownTotal
+      start += skipped.members.length
+      cursor = skipped.nextCursor
+      if (cursor) cursors.set(start, cursor)
+      if (!cursor || !skipped.members.length) return { members: [], total: knownTotal ?? start }
+    }
+    const page = await this._platform.getConversationMembers(
+      this._session, { id: conversationId }, { cursor, limit },
+    )
+    const nextOffset = offset + page.members.length
+    if (page.nextCursor) cursors.set(nextOffset, page.nextCursor)
+    return page
+  }
+
   private _makeMemberUser(member: IMConversationMember<any>): tl.RawUser {
     return member.user.id === this._session.userId
       ? this._makeSelfUser(member.user.avatar)
@@ -1497,10 +1548,10 @@ export class DialogRpc {
     }
     const id = this._tlToPeer.get(inputPeerId(peer))
     if (!id) throw new RpcError(400, 'PEER_ID_INVALID')
-    const kind = this._conversation(id).kind
-    if (peer._ === 'inputPeerUser' && kind !== 'direct') throw new RpcError(400, 'PEER_ID_INVALID')
-    if (peer._ === 'inputPeerChat' && kind !== 'group') throw new RpcError(400, 'PEER_ID_INVALID')
-    if (peer._ === 'inputPeerChannel' && kind !== 'channel') throw new RpcError(400, 'PEER_ID_INVALID')
+    const conversation = this._conversation(id)
+    if (peer._ === 'inputPeerUser' && conversation.kind !== 'direct') throw new RpcError(400, 'PEER_ID_INVALID')
+    if (peer._ === 'inputPeerChat' && !this._isTelegramGroup(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
+    if (peer._ === 'inputPeerChannel' && !this._isTelegramChannel(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
     return id
   }
 
@@ -1508,7 +1559,7 @@ export class DialogRpc {
     if (channel._ !== 'inputChannel') throw new RpcError(400, 'CHANNEL_INVALID')
     const peerId = this._tlToPeer.get(channel.channelId)
     const conversation = peerId ? this._conversation(peerId) : undefined
-    if (!conversation || conversation.kind !== 'channel') throw new RpcError(400, 'CHANNEL_INVALID')
+    if (!conversation || !this._isTelegramChannel(conversation)) throw new RpcError(400, 'CHANNEL_INVALID')
     return conversation
   }
 
@@ -1529,14 +1580,14 @@ export class DialogRpc {
       ? this._conversation(conversation.parentId!)
       : conversation
     const id = this._peerId(target.id)
+    if (this._isTelegramChannel(target)) return { _: 'peerChannel', channelId: id }
     if (target.kind === 'group') return { _: 'peerChat', chatId: id }
-    if (target.kind === 'channel') return { _: 'peerChannel', channelId: id }
     return { _: 'peerUser', userId: id }
   }
 
   private _makeChat(conversation: import('./platform.js').IMConversation): tl.TypeChat {
     const id = this._peerId(conversation.id)
-    if (conversation.kind === 'group') {
+    if (this._isTelegramGroup(conversation)) {
       return {
         _: 'chat', creator: true, id, title: conversation.title,
         photo: conversation.avatar ? this._makeAvatarPhoto(conversation.avatar, 'chat') : { _: 'chatPhotoEmpty' },
@@ -1567,6 +1618,15 @@ export class DialogRpc {
     return conversation.kind === 'channel'
       && !!conversation.parentId
       && this._conversations.get(conversation.parentId)?.kind === 'channel'
+  }
+
+  private _isTelegramChannel(conversation: import('./platform.js').IMConversation): boolean {
+    return conversation.kind === 'channel'
+      || conversation.kind === 'group' && this._platform.capabilities.members?.paginated === true
+  }
+
+  private _isTelegramGroup(conversation: import('./platform.js').IMConversation): boolean {
+    return conversation.kind === 'group' && !this._isTelegramChannel(conversation)
   }
 
   private _subchannels(parentId: string): import('./platform.js').IMConversation[] {
