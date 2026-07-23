@@ -292,21 +292,35 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     content: IMMessageInput,
     options: IMTransferOptions = {},
   ): Promise<IMMessage<QQMediaLocator>> {
-    const textParts = content.parts.flatMap((part) => part.type === 'text' ? [{
-      type: 'text' as const,
-      text: part.text,
-      entities: part.entities?.flatMap<NonNullable<WireTextPart['entities']>[number]>((entity) => {
-        if (entity.type === 'mention') return [{ ...entity }]
+    const resolvedMentionUsers = new Map<string, Promise<string | undefined>>()
+    const textParts: WireTextPart[] = []
+    for (const part of content.parts) {
+      if (part.type !== 'text') continue
+      const entities: NonNullable<WireTextPart['entities']> = []
+      for (const entity of part.entities ?? []) {
+        if (entity.type === 'mention') {
+          let numericId = entity.numericId
+          if (!numericId) {
+            let pending = resolvedMentionUsers.get(entity.userId)
+            if (!pending) {
+              pending = this.client.getUser(entity.userId)
+                .then((user) => user?.numericId)
+                .catch(() => undefined)
+              resolvedMentionUsers.set(entity.userId, pending)
+            }
+            numericId = await pending
+          }
+          entities.push({ ...entity, numericId })
+          continue
+        }
         const match = /^1:(\d+)$/.exec(entity.definition.key)
-        return match ? [{
-          type: 'qq-face' as const,
-          offset: entity.offset,
-          length: entity.length,
-          faceId: match[1],
-          faceType: 1,
-        }] : []
-      }),
-    }] : [])
+        if (match) entities.push({
+          type: 'qq-face', offset: entity.offset, length: entity.length,
+          faceId: match[1], faceType: 1,
+        })
+      }
+      textParts.push({ type: 'text', text: part.text, entities: entities.length ? entities : undefined })
+    }
     const text = textParts.map((part) => part.text).join('\n') || undefined
     const mediaParts = content.parts.filter((part) => part.type === 'media')
     const stickerParts = content.parts.filter((part) => part.type === 'sticker')
