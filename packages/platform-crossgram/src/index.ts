@@ -673,7 +673,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       id,
       kind: 'group',
       title: title || '聊天记录',
-      metadata: { qqTemporaryMultiForward: true },
+      metadata: { virtual: true, qqTemporaryMultiForward: true },
     }
     this.multiForwardLocators.set(id, locator)
     this.conversations.set(id, conversation)

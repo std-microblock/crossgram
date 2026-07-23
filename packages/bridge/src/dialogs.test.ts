@@ -402,7 +402,9 @@ describe('DialogRpc', () => {
 
   it('renders an addressable non-dialog conversation as a Telegram message preview card', async () => {
     const platform = new DialogTestPlatform()
-    const temporary = { id: 'temporary-forward', kind: 'group' as const, title: '聊天记录' }
+    const temporary = {
+      id: 'temporary-forward', kind: 'group' as const, title: '聊天记录', metadata: { virtual: true },
+    }
     platform.addMessage('alice', {
       id: 'merged', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
       content: { parts: [{
@@ -412,7 +414,13 @@ describe('DialogRpc', () => {
     })
     platform.addMessage(temporary.id, {
       id: 'inside', conversationId: temporary.id, senderId: 'bob', timestamp: 1_700_000_251,
+      sender: { id: 'bob', firstName: 'Bob' },
       content: { parts: [{ type: 'text', text: 'forwarded content' }] },
+    })
+    platform.addMessage(temporary.id, {
+      id: 'inside-2', conversationId: temporary.id, senderId: 'alice', timestamp: 1_700_000_252,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: { parts: [{ type: 'text', text: 'work' }] },
     })
     const rpc = new DialogRpc(platform, session)
     await rpc.getDialogs(getDialogsRequest())
@@ -422,24 +430,60 @@ describe('DialogRpc', () => {
     const temporaryId = rpc.peerTlId(temporary.id)
     expect(merged.entities).toMatchObject([{
       _: 'messageEntityTextUrl', offset: 0, length: 1,
-      url: `tg://privatepost?channel=${temporaryId}&post=1`,
+      url: `tg://resolve?domain=bridgechat_${temporaryId}`,
     }])
     expect(merged.media).toMatchObject({
       _: 'messageMediaWebPage', manual: true, safe: true,
       webpage: {
         _: 'webPage',
-        url: `tg://privatepost?channel=${temporaryId}&post=1`,
+        url: `tg://resolve?domain=bridgechat_${temporaryId}`,
         displayUrl: '聊天记录', type: 'telegram_message',
-        siteName: '聊天记录', title: '聊天记录', description: '点击查看合并转发消息',
+        title: '聊天记录', description: 'Bob: forwarded content\nAlice: work',
       },
     })
-    expect(history.chats).toMatchObject([{ _: 'channel', id: temporaryId, title: '聊天记录' }])
+    expect(history.chats).toMatchObject([{ _: 'chat', id: temporaryId, title: '聊天记录' }])
     expect(() => wireRoundTrip(history)).not.toThrow()
 
     const inside = await rpc.getHistory(getHistoryRequest(temporaryId, {
-      peer: { _: 'inputPeerChannel', channelId: temporaryId, accessHash: Long.ZERO },
+      peer: { _: 'inputPeerChat', chatId: temporaryId },
     })) as tl.messages.RawMessages
-    expect(inside.messages).toMatchObject([{ _: 'message', message: 'forwarded content' }])
+    expect(inside.messages).toMatchObject([
+      { _: 'message', message: 'work' },
+      { _: 'message', message: 'forwarded content' },
+    ])
+
+    // Telegram Desktop opens chats through multiple MTProto connections.
+    // A fresh DialogRpc must resolve the linked virtual peer and serve the
+    // bootstrap requests without calling nonexistent upstream member APIs.
+    const freshRpc = new DialogRpc(platform, session)
+    const peer = { _: 'inputPeerChat' as const, chatId: temporaryId }
+    expect(freshRpc.resolveUsername({
+      _: 'contacts.resolveUsername', username: `bridgechat_${temporaryId}`,
+    })).toMatchObject({
+      _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: temporaryId },
+      chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
+    })
+    await expect(freshRpc.getScheduledHistory({
+      _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,
+    })).resolves.toMatchObject({ _: 'messages.messages', messages: [] })
+    await expect(freshRpc.getFullChat({ _: 'messages.getFullChat', chatId: temporaryId }))
+      .resolves.toMatchObject({
+        _: 'messages.chatFull',
+        fullChat: {
+          _: 'chatFull', id: temporaryId,
+          participants: { _: 'chatParticipants', participants: [{ _: 'chatParticipantCreator' }] },
+        },
+        chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
+      })
+    await expect(freshRpc.getFullChannel({
+      _: 'channels.getFullChannel',
+      channel: { _: 'inputChannel', channelId: temporaryId, accessHash: Long.ZERO },
+    })).rejects.toMatchObject({ code: 400, text: 'CHANNEL_INVALID' } satisfies Partial<RpcError>)
+    await expect(freshRpc.getHistory(getHistoryRequest(temporaryId, { peer })))
+      .resolves.toMatchObject({ messages: [
+        { _: 'message', message: 'work' },
+        { _: 'message', message: 'forwarded content' },
+      ] })
   })
 
   it('maps platform inline custom emoji entities to Telegram documents and back', async () => {

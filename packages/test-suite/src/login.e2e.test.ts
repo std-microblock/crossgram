@@ -1395,6 +1395,135 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
+  it('opens a merged-forward preview through a virtual basic chat on a fresh socket', async () => {
+    const parent: bridge.IMConversation = {
+      id: 'parent-room', kind: 'group', title: 'Parent room',
+    }
+    const virtual: bridge.IMConversation = {
+      id: 'virtual-forward', kind: 'group', title: 'Alice 和 Bob 的聊天记录',
+      metadata: { virtual: true },
+    }
+    const merged: bridge.IMMessage = {
+      id: 'merged-root', conversationId: parent.id, senderId: 'alice', timestamp: 1_700_001_000,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: { parts: [{
+        type: 'text', text: '\u200b',
+        entities: [{ type: 'conversation-link', offset: 0, length: 1, conversation: virtual }],
+      }] },
+    }
+    const nested: bridge.IMMessage = {
+      id: 'nested-1', conversationId: virtual.id, senderId: 'bob', timestamp: 1_700_000_999,
+      sender: { id: 'bob', firstName: 'Bob' },
+      content: { parts: [{ type: 'text', text: 'nested over a fresh socket' }] },
+    }
+    let virtualMemberCalls = 0
+    let virtualReactionCalls = 0
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+        members: { list: true, administrators: true, permissions: true },
+        reactions: { read: true, write: false, events: false, actorList: false, maxSelected: 0 },
+      },
+      async getAccount() {
+        return { credentials: {}, user: { id: 'self', firstName: 'Virtual Test User' } }
+      },
+      async subscribe() { return () => {} },
+      async getDialogs() {
+        return { dialogs: [{ conversation: parent, unreadCount: 0, lastMessage: merged }] }
+      },
+      async getHistory(_session, conversation) {
+        return { messages: conversation.id === virtual.id ? [nested] : [merged] }
+      },
+      async getUser(_session, id) {
+        return id === 'alice' ? { id, firstName: 'Alice' }
+          : id === 'bob' ? { id, firstName: 'Bob' }
+            : null
+      },
+      async sendMessage() {
+        throw new Error('sending is disabled for the virtual preview e2e platform')
+      },
+      async getConversationMembers() {
+        virtualMemberCalls++
+        throw new Error('virtual conversation must not query upstream members')
+      },
+      async getAvailableReactions() {
+        virtualReactionCalls++
+        throw new Error('virtual conversation must not query upstream reactions')
+      },
+    }
+    const platformId = 'virtual-preview-e2e'
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, platformId)
+      const client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x34567890, 0x3abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 6)
+      const parentChat = dialogs.chats.find((chat: any) => chat.title === parent.title)
+      const parentHistory = await callRpc(client, key, sid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: parentChat.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 8)
+      const preview = parentHistory.messages[0]
+      const virtualChat = parentHistory.chats.find((chat: any) => chat.title === virtual.title)
+      expect(preview).toMatchObject({
+        _: 'message',
+        media: {
+          _: 'messageMediaWebPage', safe: true,
+          webpage: {
+            _: 'webPage', type: 'telegram_message', title: virtual.title,
+            url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+          },
+        },
+      })
+
+      client.close()
+      const fresh = await TestClient.connect(port)
+      const freshSid = new Long(0x45678901, 0x4abc, false)
+      const peer = { _: 'inputPeerChat', chatId: virtualChat.id }
+      expect(await callRpc(fresh, key, freshSid, {
+        _: 'contacts.resolveUsername', username: `bridgechat_${virtualChat.id}`,
+      }, 10)).toMatchObject({
+        _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualChat.id },
+        chats: [{ _: 'chat', id: virtualChat.id }],
+      })
+      expect(await callRpc(fresh, key, freshSid, {
+        _: 'messages.getFullChat', chatId: virtualChat.id,
+      }, 12)).toMatchObject({
+        _: 'messages.chatFull',
+        fullChat: { _: 'chatFull', id: virtualChat.id, participants: { _: 'chatParticipants' } },
+        chats: [{ _: 'chat', id: virtualChat.id }],
+      })
+      expect(await callRpc(fresh, key, freshSid, {
+        _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,
+      }, 14)).toMatchObject({ _: 'messages.messages', messages: [] })
+      expect(await callRpc(fresh, key, freshSid, {
+        _: 'messages.getHistory', peer,
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 16)).toMatchObject({ messages: [{ message: 'nested over a fresh socket' }] })
+      expect(virtualMemberCalls).toBe(0)
+      expect(virtualReactionCalls).toBe(0)
+      fresh.close()
+    } finally {
+      await stop()
+    }
+  }, 30000)
+
   it('persists a push-only platform event and delivers it only after commit', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let remoteBytes = new Uint8Array()
