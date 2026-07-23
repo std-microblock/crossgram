@@ -157,6 +157,7 @@ export class StickerRpc {
 
   async faveSticker(req: tl.messages.RawFaveStickerRequest): Promise<tl.TlObject> {
     const resolved = await this._resolveInputDocument(req.id)
+    await resolved.provider.setSavedSticker?.(this._context(), resolved.sticker, !req.unfave)
     const query = {
       platformSessionId: this._session.platformSessionId,
       providerId: resolved.providerId,

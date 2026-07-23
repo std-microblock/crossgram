@@ -1,7 +1,8 @@
 import { Readable } from 'node:stream'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import type {
-  QQMediaLocator, WireConversation, WireEvent, WireMemberPage, WireMessage, WireReactionContext, WireReactionState,
+  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage,
+  WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
 } from './protocol.js'
 
 export interface QQNTClientOptions {
@@ -71,6 +72,63 @@ export class QQNTClient {
     return this.json(`/users/${encodeURIComponent(id)}`, true)
   }
 
+  getStickerPacks(query: { cursor?: string, limit?: number } = {}): Promise<{
+    packs: WireStickerPackSummary[]
+    nextCursor?: string
+  }> {
+    return this.json(`/stickers/packs${queryString(query)}`)
+  }
+
+  getStickerPack(packId: string): Promise<WireStickerPack | null> {
+    return this.json(`/stickers/packs/${encodeURIComponent(packId)}`, true)
+  }
+
+  getSticker(stickerId: string): Promise<WireSticker | null> {
+    return this.json(`/stickers/${encodeURIComponent(stickerId)}`, true)
+  }
+
+  getSavedStickers(query: { cursor?: string, limit?: number } = {}): Promise<{
+    stickers: WireSticker[]
+    nextCursor?: string
+  }> {
+    return this.json(`/stickers/saved${queryString(query)}`)
+  }
+
+  stickerSource(reference: QQStickerReference, size?: number): IMMediaSource {
+    const client = this
+    return {
+      size,
+      async *stream(options = {}) {
+        const response = await client.fetchImpl(`${client.endpoint}/stickers/asset`, {
+          method: 'POST',
+          headers: client.headers({ 'content-type': 'application/json' }),
+          body: JSON.stringify(reference),
+          signal: options.signal,
+        })
+        if (!response.ok) throw new Error(await responseError(response))
+        if (!response.body) throw new Error('QQNT sticker response has no body')
+        const reader = response.body.getReader()
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) return
+            if (value?.length) yield value
+          }
+        } finally {
+          reader.releaseLock()
+        }
+      },
+    }
+  }
+
+  async setSavedSticker(reference: QQStickerReference, saved: boolean): Promise<void> {
+    await this.json('/stickers/saved', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ reference, saved }),
+    })
+  }
+
   async sendMessage(
     conversationId: string,
     text: string | undefined,
@@ -84,11 +142,13 @@ export class QQNTClient {
     } | undefined,
     options: IMTransferOptions = {},
     originRequestId?: string,
+    sticker?: QQStickerReference,
   ): Promise<WireMessage> {
     const manifest = {
       conversationId,
       text,
       originRequestId,
+      sticker,
       media: media ? [{
         kind: media.kind, name: media.name, mimeType: media.mimeType, size: media.source.size,
         width: media.width, height: media.height,

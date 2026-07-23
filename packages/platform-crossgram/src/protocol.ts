@@ -27,6 +27,57 @@ export interface WireMedia {
   locator: QQMediaLocator
 }
 
+export type QQStickerReference =
+  | {
+      kind: 'market'
+      packageId: string
+      stickerId: string
+      name: string
+      key: string
+      width: number
+      height: number
+      animated: boolean
+      staticPath?: string
+      dynamicPath?: string
+      favoriteResId?: string
+    }
+  | {
+      kind: 'favorite'
+      resId: string
+      path: string
+      name: string
+      md5?: string
+      size?: number
+      width?: number
+      height?: number
+      animated: boolean
+      locator?: QQMediaLocator
+    }
+
+export interface WireSticker {
+  stickerId: string
+  packId?: string
+  title?: string
+  format: 'static' | 'animated'
+  mimeType: string
+  width?: number
+  height?: number
+  size?: number
+  version?: number
+  reference: QQStickerReference
+}
+
+export interface WireStickerPackSummary {
+  packId: string
+  title: string
+  count?: number
+  version?: number
+}
+
+export interface WireStickerPack extends WireStickerPackSummary {
+  stickers: WireSticker[]
+}
+
 export interface WireMessage {
   id: string
   sourceIds?: string[]
@@ -44,7 +95,11 @@ export interface WireMessage {
   msgSeq?: string
   /** Correlates a local HTTP send with its QQ listener echo. */
   originRequestId?: string
-  parts: Array<{ type: 'text', text: string } | { type: 'media', media: WireMedia }>
+  parts: Array<
+    | { type: 'text', text: string }
+    | { type: 'media', media: WireMedia }
+    | { type: 'sticker', sticker: WireSticker }
+  >
   reactionContext?: WireReactionState
 }
 
