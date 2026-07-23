@@ -31,6 +31,10 @@
   name: '@mtproto-relay/platform-qqnt'
   config:
     endpoint: http://127.0.0.1:18768/v1
+- id: mtproto-debug
+  name: '@mtproto-relay/mtproto-debug'
+  config:
+    maxEvents: 2000
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:
@@ -107,7 +111,3 @@
           - external
           - packages
           - app.yml
-- id: mtproto-debug
-  name: '@mtproto-relay/mtproto-debug'
-  config:
-    maxEvents: 2000
