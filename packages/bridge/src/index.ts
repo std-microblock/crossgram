@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
 import Long from 'long'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
-import type { JsonValue, PlatformSession } from './platform.js'
+import type { PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
@@ -20,6 +20,8 @@ import { IMStickerService } from './sticker-provider.js'
 import { StickerRpc } from './sticker-rpc.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { TelegramResourceService } from './resource-provider.js'
+import { provisionPlatformAccount } from './platform-account.js'
+import { verifyLoginCode } from './login-code.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -32,6 +34,8 @@ export * from './sticker-provider.js'
 export * from './sticker-rpc.js'
 export * from './reaction-rpc.js'
 export * from './resource-provider.js'
+export * from './login-code.js'
+export * from './platform-account.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server']
@@ -57,8 +61,8 @@ interface BridgeSessionState {
 
 /**
  * Bridge backend — a native cordis plugin. Translates MTProto RPC to an IM
- * platform. Auth is out-of-band: an HTTP endpoint mints a virtual phone + login
- * code (stored via minato), which the client enters to log in.
+ * platform. Each adapter supplies its own current-user profile; bridge assigns
+ * one stable virtual phone and a 30-second login code to the Cordis entry.
  */
 export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const generation = {}
@@ -69,7 +73,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const routeId = config.routeId ?? 'bridge:default'
   const rpc = ctx.mtproto.route(routeId)
   const dcId = config.dcId ?? 1
-  const apiPrefix = config.apiPrefix ?? '/api'
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database)
@@ -92,6 +95,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx, registry, stickerProviders.registry,
     resources, store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
   )
+
+  const provision = async (platformId: string) => {
+    const platform = registry.get(platformId)
+    if (!platform?.getAccount) return
+    const provisioned = await provisionPlatformAccount(ctx.database, platformId, platform)
+    if (provisioned) await subscriptions.ensure(provisioned.session)
+  }
 
   ctx.mtproto.resolveRoute(async (requestContext, request) => {
     if (requestContext.authKeyId) {
@@ -116,6 +126,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         .then(async () => {
           const migrated = await migrateQualifiedPlatformIds(ctx.database, platformId)
           if (migrated) ctx.logger('bridge').info('migrated %d qualified platform sessions to %s', migrated, platformId)
+          await provision(platformId)
           await subscriptions.startActiveSessions(platformId)
         })
         .catch((error) => ctx.logger('bridge').warn(
@@ -133,59 +144,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     await ctx.database.prepared()
     // Delivery rows from pre-memory-journal versions are no longer used.
     await ctx.database.remove('mtproto_update_delivery', {})
+    await Promise.all(registry.ids.map(platformId => provision(platformId)))
     await subscriptions.startActiveSessions()
     return () => subscriptions.stop()
-  })
-
-  // ── HTTP auth: mint a virtual phone + login code for a platform identity ──
-  ctx.server.post(`${apiPrefix}/auth/:platform/complete`, async (req, res) => {
-    const body = (await req.json().catch(() => ({}))) as {
-      credentials?: JsonValue
-      metadata?: { firstName?: string, lastName?: string, username?: string, userId?: string }
-    }
-    const platformId = (req.params as { platform: string }).platform
-    if (!registry.get(platformId)) {
-      res.status = 404
-      res.json({ error: 'platform not available' })
-      return
-    }
-    if (!body.credentials) {
-      res.status = 400
-      res.json({ error: 'credentials required' })
-      return
-    }
-
-    const sessionId = randomHex(16)
-    const userId = body.metadata?.userId ?? randomHex(8)
-    await ctx.database.create('mtproto_platform_session', {
-      id: sessionId,
-      platformId,
-      userId,
-      credentials: body.credentials,
-      metadata: {
-        firstName: body.metadata?.firstName ?? 'User',
-        lastName: body.metadata?.lastName,
-        username: body.metadata?.username,
-      },
-      active: true,
-      createdAt: new Date(),
-    })
-
-    const platformCode = String(platformId.length % 100).padStart(2, '0')
-    // Store digits only — clients send the phone with '+' for sendCode but
-    // WITHOUT '+' for signIn, so we normalize to digits everywhere.
-    const virtualPhone = `999${platformCode}${String(Math.floor(Math.random() * 1e10)).padStart(10, '0')}`
-    const loginCode = String(Math.floor(100000 + Math.random() * 900000))
-    await ctx.database.create('mtproto_auth_session', {
-      id: randomHex(16),
-      virtualPhone,
-      loginCode,
-      platformId,
-      platformSessionId: sessionId,
-      used: false,
-    })
-
-    res.json({ sessionId, virtualPhone: `+${virtualPhone}`, loginCode, platform: platformId, userId })
   })
 
   // ── Synthetic / config ──
@@ -200,7 +161,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const phone = normPhone((req as unknown as { phoneNumber: string }).phoneNumber)
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
-    if (auth.used) throw new RpcError(400, 'AUTH_KEY_ALREADY_REGISTERED')
     return {
       _: 'auth.sentCode',
       flags: 0,
@@ -213,9 +173,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const { phoneNumber, phoneCode } = req as unknown as { phoneNumber: string, phoneCode: string }
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: normPhone(phoneNumber) })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
-    if (auth.loginCode !== phoneCode) throw new RpcError(400, 'PHONE_CODE_INVALID')
-
-    await ctx.database.set('mtproto_auth_session', { id: auth.id }, { used: true })
+    if (!verifyLoginCode(auth.totpSecret, phoneCode)) throw new RpcError(400, 'PHONE_CODE_INVALID')
     const [ps] = await ctx.database.get('mtproto_platform_session', { id: auth.platformSessionId })
     if (!ps) throw new RpcError(500, 'PLATFORM_SESSION_NOT_FOUND')
 
@@ -252,6 +210,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       self: true,
       premium: true,
       firstName: (ps.metadata.firstName as string) ?? 'Bridge',
+      lastName: ps.metadata.lastName as string | undefined,
+      username: ps.metadata.username as string | undefined,
       phone: phoneNumber,
     })
     return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
@@ -454,12 +414,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     _: 'updateShort', update: { _: 'updateConfig' }, date: Math.floor(Date.now() / 1000),
   })
   ctx.logger('bridge').info('bridge backend registered (platforms: %s)', registry.ids.join(', '))
-}
-
-function randomHex(bytes: number): string {
-  let s = ''
-  for (let i = 0; i < bytes; i++) s += Math.floor(Math.random() * 256).toString(16).padStart(2, '0')
-  return s
 }
 
 /** Normalize a phone to digits only — clients send '+' for sendCode but not for signIn. */

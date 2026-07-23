@@ -209,7 +209,7 @@ async function sendRpc(
   const body = TlBinaryWriter.serializeObject(__tlWriterMap, obj as any)
   await client.send(clientEncrypt(key, body, key.salt, sessionId, sub))
   for (let i = 0; i < 12; i++) {
-    const reader = clientDecrypt(key, await client.read())
+    const reader = clientDecrypt(key, await readRpcFrame(client, String((obj as any)._)))
     const saved = reader.pos
     const id = reader.uint()
     if (id === 0xf35c6d01) {
@@ -228,6 +228,20 @@ async function sendRpc(
     try { reader.object() } catch { /* service msg */ }
   }
   throw new Error('no rpc_result')
+}
+
+async function readRpcFrame(client: TestClient, method: string): Promise<Uint8Array> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      client.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`RPC timed out: ${method}`)), 5_000)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj: object, sub: number): Promise<any> {
@@ -293,6 +307,18 @@ async function startApp(options: {
   return { ctx, port: ctx.mtproto.port, pubKey, rsaKey, stop }
 }
 
+async function waitForPlatformLogin(ctx: Context, platformId: string) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const [auth] = await ctx.database.get('mtproto_auth_session', { platformId })
+    if (auth) {
+      const [session] = await ctx.database.get('mtproto_platform_session', { id: auth.platformSessionId })
+      if (session) return { auth, session }
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`platform login was not provisioned: ${platformId}`)
+}
+
 function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
   const plugin = (ctx: Context) => { ctx.imPlatform.register(platform, id) }
   plugin.inject = ['imPlatform']
@@ -304,16 +330,9 @@ describe('bridge login e2e', () => {
     const { ctx, port, pubKey, stop } = await startApp()
     dbg('app started, mtproto port', port)
     try {
-      // Seed a virtual phone directly via minato (bypass HTTP).
-      await ctx.database.create('mtproto_platform_session', {
-        id: 'ps1', platformId: 'static', userId: 'alice',
-        credentials: { t: 'x' }, metadata: { firstName: 'Alice' }, active: true, createdAt: new Date(),
-      })
-      await ctx.database.create('mtproto_auth_session', {
-        id: 'as1', virtualPhone: '99900123', loginCode: '123456',
-        platformId: 'static', platformSessionId: 'ps1', used: false,
-      })
-      dbg('seeded phone')
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      const phone = platformLogin.auth.virtualPhone
+      dbg('platform supplied identity and bridge provisioned phone', phone)
 
       const client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
@@ -327,23 +346,26 @@ describe('bridge login e2e', () => {
       expect(loginToken.token).toHaveLength(32)
 
       const sent = await callRpc(client, key, sid, {
-        _: 'auth.sendCode', phoneNumber: '+99900123', apiId: 1, apiHash: 'x',
+        _: 'auth.sendCode', phoneNumber: `+${phone}`, apiId: 1, apiHash: 'x',
         settings: { _: 'codeSettings' },
       }, 4)
       dbg('sendCode result', sent._)
       expect(sent._).toBe('auth.sentCode')
 
       const auth = await callRpc(client, key, sid, {
-        _: 'auth.signIn', phoneNumber: '99900123',
-        phoneCodeHash: (sent as any).phoneCodeHash, phoneCode: '123456',
+        _: 'auth.signIn', phoneNumber: phone,
+        phoneCodeHash: (sent as any).phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
       }, 6)
       dbg('signIn result', auth._)
       expect(auth._).toBe('auth.authorization')
-      expect((auth as any).user.firstName).toBe('Alice')
+      expect((auth as any).user.firstName).toBe('Static User')
       const [binding] = await ctx.database.get('mtproto_auth_binding', {
         authKeyId: Buffer.from(key.authKeyId).toString('hex'),
       })
-      expect(binding).toMatchObject({ platformId: 'static', platformSessionId: 'ps1' })
+      expect(binding).toMatchObject({
+        platformId: 'static', platformSessionId: platformLogin.session.id,
+      })
 
       // Telegram Desktop opens a fresh main connection after login. Reuse only
       // the permanent auth key; all bridge identity and dialog ID maps must
@@ -432,7 +454,7 @@ describe('bridge login e2e', () => {
       const generalChannel = dialogs.chats.find((chat: any) => chat.title === 'general')
       expect(generalChannel).toMatchObject({ _: 'channel', megagroup: true, forum: true })
       const [supportConversation] = await ctx.database.get('mtproto_im_conversation', {
-        platformSessionId: 'ps1', platformConversationId: 'discord-support',
+        platformSessionId: platformLogin.session.id, platformConversationId: 'discord-support',
       })
       expect(supportConversation).toMatchObject({
         kind: 'channel', parentPlatformConversationId: 'discord-general', spacePlatformId: 'discord-guild',
@@ -469,7 +491,7 @@ describe('bridge login e2e', () => {
       expect(history.messages.map((message: any) => message.message)).toEqual([
         'How are you?', 'Hey there!',
       ])
-      expect(history.users.some((user: any) => user.self && user.firstName === 'Alice')).toBe(true)
+      expect(history.users.some((user: any) => user.self && user.firstName === 'Static User')).toBe(true)
 
       const message = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessages',
@@ -545,7 +567,7 @@ describe('bridge login e2e', () => {
         ...longHistorySecond.messages.map((item: any) => item.id),
       ]).size).toBe(200)
       const [longConversation] = await ctx.database.get('mtproto_im_conversation', {
-        platformSessionId: 'ps1', platformConversationId: 'group-d',
+        platformSessionId: platformLogin.session.id, platformConversationId: 'group-d',
       })
       const persistedLongHistory = await ctx.database.get('mtproto_im_message', {
         conversationId: longConversation.id,
@@ -745,10 +767,11 @@ describe('bridge login e2e', () => {
         filter: { _: 'channelParticipantsRecent' }, offset: 0, limit: 100, hash: Long.ZERO,
       }, 68)
       expect(channelMembers).toMatchObject({
-        _: 'channels.channelParticipants', count: 3,
+        _: 'channels.channelParticipants', count: 4,
         participants: [
           { _: 'channelParticipantCreator' },
           { _: 'channelParticipantAdmin', adminRights: { deleteMessages: true } },
+          { _: 'channelParticipant' },
           { _: 'channelParticipant' },
         ],
       })
@@ -1091,18 +1114,13 @@ describe('bridge login e2e', () => {
         ]),
       })
       const staticAdapter = ctx.imPlatform.require('static') as staticPlatformPlugin.StaticPlatform
+      const adapterSession = bridge.sessionFromRow(platformLogin.session)
       const pushedContext = await staticAdapter.getAvailableReactions(
-        {
-          platformSessionId: 'ps1', platformId: 'static', userId: 'alice',
-          credentials: { t: 'x' }, metadata: { firstName: 'Alice' },
-        },
+        adapterSession,
         { conversationId: 'qq-group', messageId: 'group:2', targetId: 'group:2' },
       )
       await staticAdapter.emitReactions(
-        {
-          platformSessionId: 'ps1', platformId: 'static', userId: 'alice',
-          credentials: { t: 'x' }, metadata: { firstName: 'Alice' },
-        },
+        adapterSession,
         { id: 'qq-group', kind: 'group', title: 'Static QQ Group' },
         'group:2',
         {
@@ -1357,7 +1375,7 @@ describe('bridge login e2e', () => {
     } finally {
       await stop()
     }
-  }, 15000)
+  }, 30000)
 
   it('persists a push-only platform event and delivers it only after commit', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
@@ -1435,8 +1453,8 @@ describe('bridge login e2e', () => {
         metadata: { firstName: 'Push User' }, active: true, createdAt: new Date(),
       })
       await ctx.database.create('mtproto_auth_session', {
-        id: 'push-auth', virtualPhone: '99900777', loginCode: '777777',
-        platformId, platformSessionId: 'push-ps', used: false,
+        id: 'push-auth', virtualPhone: '99900777', totpSecret: '22'.repeat(20),
+        platformId, platformSessionId: 'push-ps',
       })
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
@@ -1445,7 +1463,8 @@ describe('bridge login e2e', () => {
         _: 'auth.sendCode', phoneNumber: '+99900777', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
       }, 4)
       const authorization = await callRpc(client, key, sid, {
-        _: 'auth.signIn', phoneNumber: '99900777', phoneCodeHash: code.phoneCodeHash, phoneCode: '777777',
+        _: 'auth.signIn', phoneNumber: '99900777', phoneCodeHash: code.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode('22'.repeat(20)),
       }, 6)
       expect(authorization._).toBe('auth.authorization')
       expect(handler).toBeTypeOf('function')
@@ -1581,26 +1600,19 @@ describe('bridge login e2e', () => {
 
     try {
       first = await startApp({ rsaKey, databasePath, authKeyStorePath })
-      await first.ctx.database.create('mtproto_platform_session', {
-        id: 'persisted-ps', platformId: 'static', userId: 'persisted-user',
-        credentials: { token: 'persisted' }, metadata: { firstName: 'Persisted' },
-        active: true, createdAt: new Date(),
-      })
-      await first.ctx.database.create('mtproto_auth_session', {
-        id: 'persisted-auth', virtualPhone: '99900456', loginCode: '654321',
-        platformId: 'static', platformSessionId: 'persisted-ps', used: false,
-      })
+      const platformLogin = await waitForPlatformLogin(first.ctx, 'static')
 
       client = await TestClient.connect(first.port)
       const key = await doClientHandshake(client, first.pubKey)
       const sid = new Long(0x3456789a, 0x3abc, false)
       const sentCode = await callRpc(client, key, sid, {
-        _: 'auth.sendCode', phoneNumber: '+99900456', apiId: 1, apiHash: 'x',
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
         settings: { _: 'codeSettings' },
       }, 4)
       const authorization = await callRpc(client, key, sid, {
-        _: 'auth.signIn', phoneNumber: '99900456',
-        phoneCodeHash: sentCode.phoneCodeHash, phoneCode: '654321',
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sentCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
       }, 6)
       expect(authorization._).toBe('auth.authorization')
       const stickerSets = await callRpc(client, key, sid, {
@@ -1806,15 +1818,7 @@ describe('relay e2e', () => {
 
     try {
       first = await startApp({ rsaKey, databasePath, authKeyStorePath, relayConfig })
-      await first.ctx.database.create('mtproto_platform_session', {
-        id: 'route-bridge-ps', platformId: 'static', userId: 'bridge-user',
-        credentials: { token: 'bridge' }, metadata: { firstName: 'Bridge Route' },
-        active: true, createdAt: new Date(),
-      })
-      await first.ctx.database.create('mtproto_auth_session', {
-        id: 'route-bridge-auth', virtualPhone: '99900888', loginCode: '888888',
-        platformId: 'static', platformSessionId: 'route-bridge-ps', used: false,
-      })
+      const platformLogin = await waitForPlatformLogin(first.ctx, 'static')
 
       bridgeClient = await TestClient.connect(first.port)
       const bridgeKey = await doClientHandshake(bridgeClient, first.pubKey)
@@ -1823,13 +1827,14 @@ describe('relay e2e', () => {
         _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
       }, 2)).toMatchObject({ _: 'auth.loginToken' })
       const bridgeCode = await callRpc(bridgeClient, bridgeKey, bridgeSid, {
-        _: 'auth.sendCode', phoneNumber: '+99900888', apiId: 1, apiHash: 'x',
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
         settings: { _: 'codeSettings' },
       }, 4)
       expect(await callRpc(bridgeClient, bridgeKey, bridgeSid, {
-        _: 'auth.signIn', phoneNumber: '99900888',
-        phoneCodeHash: bridgeCode.phoneCodeHash, phoneCode: '888888',
-      }, 6)).toMatchObject({ _: 'auth.authorization', user: { firstName: 'Bridge Route' } })
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: bridgeCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 6)).toMatchObject({ _: 'auth.authorization', user: { firstName: 'Static User' } })
 
       relayClient = await TestClient.connect(first.port)
       const relayKey = await doClientHandshake(relayClient, first.pubKey)

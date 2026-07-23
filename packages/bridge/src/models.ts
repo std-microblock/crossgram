@@ -6,10 +6,9 @@ import type {
 export interface AuthSessionRow {
   id: string
   virtualPhone: string
-  loginCode: string
+  totpSecret: string
   platformId: string
   platformSessionId: string
-  used: boolean
 }
 
 export interface PlatformSessionRow {
@@ -200,9 +199,9 @@ declare module '@cordisjs/plugin-database' {
 /** Register all bridge models. The project is pre-release, so these are the canonical schemas. */
 export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_auth_session', {
-    id: 'string', virtualPhone: 'string', loginCode: 'string', platformId: 'string',
-    platformSessionId: 'string', used: 'boolean',
-  }, { primary: 'id' })
+    id: 'string', virtualPhone: 'string', totpSecret: 'string', platformId: 'string',
+    platformSessionId: 'string',
+  }, { primary: 'id', unique: ['virtualPhone', 'platformId'] })
 
   ctx.model.extend('mtproto_platform_session', {
     id: 'string', platformId: 'string', userId: 'string', credentials: 'json', metadata: 'json',

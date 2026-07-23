@@ -98,6 +98,24 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     this.memberName = options.memberName ?? 'groupAlias'
   }
 
+  async getAccount() {
+    const status = await this.client.status()
+    const userId = status.selfUid ?? status.selfUin
+    if (!status.ready || !userId) throw new Error('QQNT account is not ready')
+    const user = await this.client.getUser(userId)
+    if (!user) throw new Error(`QQNT current user is unavailable: ${userId}`)
+    return {
+      credentials: {},
+      user: {
+        id: user.id,
+        firstName: user.name,
+        username: user.numericId ?? status.selfUin,
+        avatar: user.avatar ? mapMedia(user.avatar) : undefined,
+        metadata: user.numericId ? { qq: user.numericId } : undefined,
+      },
+    }
+  }
+
   async subscribe(
     session: PlatformSession,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,

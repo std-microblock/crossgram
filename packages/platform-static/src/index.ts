@@ -121,6 +121,10 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
     this._seed()
   }
 
+  async getAccount() {
+    return { credentials: {}, user: clone(this._users.get('self')!) }
+  }
+
   async subscribe(
     session: PlatformSession,
     handler: (event: IMEvent<StaticMediaLocator>) => void | Promise<void>,

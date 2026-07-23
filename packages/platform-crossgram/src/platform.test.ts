@@ -10,6 +10,38 @@ const session: PlatformSession = {
 }
 
 describe('QQNTPlatform mapping', () => {
+  it('supplies the current QQ account identity and avatar to bridge', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 1, ready: true, selfUin: '10001', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'u_self', numericId: '10001', name: 'Platform Alice',
+      avatar: {
+        id: 'avatar-self', kind: 'image' as const, mimeType: 'image/jpeg',
+        locator: {
+          messageId: 'profile', elementId: 'avatar-self', chatType: 1 as const,
+          peerUid: 'u_self', kind: 'image' as const, fileName: 'avatar.jpg',
+        },
+      },
+    }))
+
+    await expect(platform.getAccount()).resolves.toMatchObject({
+      credentials: {},
+      user: {
+        id: 'u_self', firstName: 'Platform Alice', username: '10001',
+        avatar: { id: 'avatar-self', kind: 'image' }, metadata: { qq: '10001' },
+      },
+    })
+    expect(platform.client.getUser).toHaveBeenCalledWith('u_self')
+  })
+
+  it('refuses to invent an account while QQNT is not ready', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({ protocolVersion: 1, ready: false }))
+    await expect(platform.getAccount()).rejects.toThrow('not ready')
+  })
+
   it('edits QQ messages by recalling the old message and resending the replacement', async () => {
     const platform = new QQNTPlatform()
     platform.client.deleteMessages = vi.fn(async () => {})

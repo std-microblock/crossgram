@@ -76,6 +76,12 @@ export interface PlatformSession {
   metadata: JsonObject
 }
 
+/** The adapter-owned identity represented by one Cordis platform entry. */
+export interface IMPlatformAccount<TMediaLocator = unknown> {
+  user: IMUser<TMediaLocator>
+  credentials?: JsonValue
+}
+
 export interface IMUser<TMediaLocator = unknown> {
   id: string
   firstName: string
@@ -351,6 +357,9 @@ export type Unsubscribe = () => void | Promise<void>
 export interface IMPlatform<TMediaLocator = unknown> {
   readonly platformKind?: string
   readonly capabilities: PlatformCapabilities
+
+  /** Resolve the platform's current user; bridge never invents profile fields. */
+  getAccount?(): Promise<IMPlatformAccount<TMediaLocator>>
 
   subscribe(
     session: PlatformSession,
