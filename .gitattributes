@@ -5,4 +5,5 @@
 *.ico -text
 *.gif -text
 *.webp -text
+*.webm -text
 yarn-*.cjs linguist-vendored

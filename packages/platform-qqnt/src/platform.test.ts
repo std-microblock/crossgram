@@ -211,12 +211,21 @@ describe('QQNTPlatform mapping', () => {
         key: '2:128522', title: '嘿嘿',
         presentation: { type: 'emoji' as const, emoticon: '😊' },
       }, {
+        key: '1:265', title: '辣眼睛',
+        presentation: {
+          type: 'custom' as const, alt: '[辣眼睛]',
+          resource: {
+            version: 1, format: 'static' as const, mimeType: 'image/png' as const,
+            width: 200, height: 200, size: 10, locator: { filePath: '/tmp/s265.png' },
+          },
+        },
+      }, {
         key: '1:14', title: '微笑',
         presentation: {
           type: 'custom' as const, alt: '[微笑]',
           resource: {
-            version: 1, format: 'static' as const, mimeType: 'image/png' as const,
-            width: 200, height: 200, size: 10, locator: { filePath: '/tmp/s14.png' },
+            version: 2, format: 'video' as const, mimeType: 'video/webm' as const,
+            width: 128, height: 128, locator: { filePath: '/tmp/s14.png', assetKey: 'sysface/s14.webm' },
           },
         },
       }],
@@ -239,9 +248,14 @@ describe('QQNTPlatform mapping', () => {
       available: [{
         key: '2:128522',
       }, {
-        key: '1:14',
+        key: '1:265',
         presentation: {
           resource: { mimeType: 'image/webp', width: 100, height: 100 },
+        },
+      }, {
+        key: '1:14',
+        presentation: {
+          resource: { format: 'video', mimeType: 'video/webm', width: 100, height: 100 },
         },
       }],
     })
@@ -252,6 +266,16 @@ describe('QQNTPlatform mapping', () => {
       session, custom.presentation.resource, { offset: 8, limit: 4 },
     )) cached.push(chunk)
     expect(Buffer.concat(cached).toString()).toBe('WEBP')
+    const animated = catalog.available[2]!
+    if (animated.presentation.type !== 'custom') throw new Error('expected animated custom reaction')
+    expect(animated.presentation.resource).toMatchObject({
+      format: 'video', mimeType: 'video/webm', width: 100, height: 100, size: expect.any(Number),
+    })
+    const webm: Uint8Array[] = []
+    for await (const chunk of platform.downloadReactionResource(
+      session, animated.presentation.resource, { offset: 0, limit: 4 },
+    )) webm.push(chunk)
+    expect(Buffer.concat(webm)).toEqual(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
     await expect(platform.getMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm',
     })).resolves.toMatchObject({ reactions: [{ key: '2:128522', selected: true }] })

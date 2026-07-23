@@ -784,8 +784,9 @@ export class DialogRpc {
       const reaction = await this._reactions?.getFile(req.location.id.toNumber(), offset, req.limit)
       if (reaction) {
         return {
-          _: 'upload.file', type: { _: 'storage.fileWebp' },
-          mtime: Math.floor(Date.now() / 1000), bytes: reaction,
+          _: 'upload.file',
+          type: { _: reaction.mimeType === 'image/webp' ? 'storage.fileWebp' : 'storage.fileUnknown' },
+          mtime: Math.floor(Date.now() / 1000), bytes: reaction.bytes,
         }
       }
       const sticker = await this._stickers?.getFile(req.location.id.toNumber(), offset, req.limit)

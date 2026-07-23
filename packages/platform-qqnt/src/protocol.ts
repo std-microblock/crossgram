@@ -91,12 +91,12 @@ export interface WireReactionDefinition {
         alt: string
         resource: {
           version: number
-          format: 'static'
-          mimeType: 'image/png'
+          format: 'static' | 'video'
+          mimeType: 'image/png' | 'video/webm'
           width: number
           height: number
           size?: number
-          locator: { filePath: string }
+          locator: { filePath: string, assetKey?: string }
         }
       }
 }
