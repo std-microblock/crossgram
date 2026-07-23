@@ -122,7 +122,9 @@ function wireRoundTrip<T>(object: T): T {
 
 describe('DialogRpc', () => {
   it('builds serializable dialogs, users, and top messages in newest-first order', async () => {
-    const rpc = new DialogRpc(new DialogTestPlatform(), session)
+    const platform = new DialogTestPlatform()
+    const getUser = vi.spyOn(platform, 'getUser')
+    const rpc = new DialogRpc(platform, session)
     const result = await rpc.getDialogs(getDialogsRequest())
     const decoded = wireRoundTrip(result) as tl.messages.RawDialogs
 
@@ -136,6 +138,24 @@ describe('DialogRpc', () => {
       _: 'dialog', unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0,
       notifySettings: { _: 'peerNotifySettings' },
     })
+    expect(getUser).not.toHaveBeenCalled()
+  })
+
+  it('coalesces and caches repeated platform user lookups', async () => {
+    const platform = new DialogTestPlatform()
+    const getUser = vi.spyOn(platform, 'getUser')
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+    const alice = { _: 'inputUser' as const, userId: rpc.peerTlId('alice'), accessHash: Long.ZERO }
+
+    const users = await rpc.getUsers({ _: 'users.getUsers', id: [alice, alice] })
+    await rpc.getUsers({ _: 'users.getUsers', id: [alice] })
+
+    expect(users).toMatchObject([
+      { _: 'user', firstName: 'Alice', username: 'alice' },
+      { _: 'user', firstName: 'Alice', username: 'alice' },
+    ])
+    expect(getUser).toHaveBeenCalledTimes(1)
   })
 
   it('paginates dialogs using limit and offset peer', async () => {
