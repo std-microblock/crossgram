@@ -118,6 +118,12 @@ export interface IMStickerProvider {
     context: StickerProviderContext,
     sticker: IMSticker,
   ): Promise<IMStickerSendPlan | null>
+  /** Mirror Telegram's favorite toggle into the platform-native saved collection. */
+  setSavedSticker?(
+    context: StickerProviderContext,
+    sticker: IMSticker,
+    saved: boolean,
+  ): Promise<void>
 }
 
 export class StickerProviderRegistry {

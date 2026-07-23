@@ -10,8 +10,9 @@ import type {
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
+import { QQStickerProvider } from './sticker-provider.js'
 import type {
-  QQMediaLocator, WireConversation, WireEvent, WireMedia, WireMessage, WireReactionState,
+  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireReactionState,
 } from './protocol.js'
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
@@ -25,11 +26,14 @@ export interface Config extends QQNTClientOptions {
 }
 
 export const name = 'im-platform-qqnt'
-export const inject = ['imPlatform']
+export const inject = ['imPlatform', 'imSticker']
 
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'qqnt')
-  ctx.imPlatform.register(new QQNTPlatform(config), id)
+  const stickerProviderId = `${id}:stickers`
+  const platform = new QQNTPlatform(config, stickerProviderId)
+  ctx.imPlatform.register(platform, id)
+  ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId), stickerProviderId)
 }
 
 export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
@@ -58,6 +62,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       forward: { mode: 'unsupported', preservesAuthor: false },
     },
     reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 20 },
+    stickers: { native: true, upload: false, formats: ['static', 'animated'] },
   }
 
   readonly client: QQNTClient
@@ -69,7 +74,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly memberName: MemberNameMode
   private readonly originSessions = new Map<string, string>()
 
-  constructor(options: Config = {}) {
+  constructor(options: Config = {}, private readonly stickerProviderId = 'qqnt:stickers') {
     this.client = new QQNTClient(options)
     this.memberName = options.memberName ?? 'groupAlias'
   }
@@ -121,6 +126,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               conversation.lastMessage,
               this.memberName,
               conversation.kind === 'group' ? this.reactionCatalog : undefined,
+              this.stickerProviderId,
             )
           : undefined,
         readInboxMaxMessage: conversation.readInboxMaxMessage
@@ -128,6 +134,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               conversation.readInboxMaxMessage,
               this.memberName,
               conversation.kind === 'group' ? this.reactionCatalog : undefined,
+              this.stickerProviderId,
             )
           : undefined,
       })),
@@ -168,6 +175,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         message,
         this.memberName,
         this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
+        this.stickerProviderId,
       )),
       nextCursor: response.nextCursor,
     }
@@ -247,7 +255,18 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMMessage<QQMediaLocator>> {
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n') || undefined
     const mediaParts = content.parts.filter((part) => part.type === 'media')
-    if (content.parts.some((part) => part.type === 'sticker')) throw new Error('QQNT native stickers are not implemented')
+    const stickerParts = content.parts.filter((part) => part.type === 'sticker')
+    if (stickerParts.length > 1 || stickerParts.length && mediaParts.length) {
+      throw new Error('QQNT supports one sticker or one streamed media item per message')
+    }
+    const stickerPart = stickerParts[0]
+    let sticker: QQStickerReference | undefined
+    if (stickerPart?.type === 'sticker') {
+      if (stickerPart.sticker.type !== 'native') {
+        throw new Error('QQNT only accepts native QQ sticker send plans')
+      }
+      sticker = stickerPart.sticker.reference as unknown as QQStickerReference
+    }
     if (mediaParts.length > 1) throw new Error('QQNT streaming transport supports at most one media per logical message')
     const part = mediaParts[0]
     const media = part?.type === 'media' ? {
@@ -262,9 +281,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     this.originSessions.set(originRequestId, session.platformSessionId)
     try {
       return mapMessage(
-        await this.client.sendMessage(conversation.id, text, media, options, originRequestId),
+        await this.client.sendMessage(conversation.id, text, media, options, originRequestId, sticker),
         this.memberName,
         this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
+        this.stickerProviderId,
       )
     } finally {
       const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
@@ -495,6 +515,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           input.message,
           this.memberName,
           conversation.kind === 'group' ? this.reactionCatalog : undefined,
+          this.stickerProviderId,
         ),
       }
     }
@@ -553,6 +574,7 @@ function mapMessage(
   input: WireMessage,
   memberName: MemberNameMode,
   reactionCatalog?: IMReactionContext,
+  stickerProviderId = 'qqnt:stickers',
 ): IMMessage<QQMediaLocator> {
   return {
     id: input.id,
@@ -580,9 +602,24 @@ function mapMessage(
     } : undefined,
     content: {
       parts: input.parts.map((part) =>
-        part.type === 'text' ? { type: 'text' as const, text: part.text } : {
-          type: 'media' as const, media: mapMedia(part.media),
-        }),
+        part.type === 'text' ? { type: 'text' as const, text: part.text }
+          : part.type === 'sticker' ? {
+              type: 'sticker' as const,
+              sticker: {
+                providerId: stickerProviderId,
+                stickerId: part.sticker.stickerId,
+                packId: part.sticker.packId,
+                title: part.sticker.title,
+                format: part.sticker.format,
+                mimeType: part.sticker.mimeType,
+                width: part.sticker.width,
+                height: part.sticker.height,
+                size: part.sticker.size,
+                version: part.sticker.version,
+                locator: part.sticker.reference as never,
+              },
+            }
+          : { type: 'media' as const, media: mapMedia(part.media) }),
     },
   }
 }
@@ -637,3 +674,4 @@ async function mapConcurrent<T, R>(
 
 export type { QQMediaLocator } from './protocol.js'
 export { QQNTClient } from './client.js'
+export { QQStickerProvider } from './sticker-provider.js'

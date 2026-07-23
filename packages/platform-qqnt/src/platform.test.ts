@@ -2,12 +2,71 @@ import { describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import type { PlatformSession } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
+import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
   platformSessionId: 'qq-session', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
 }
 
 describe('QQNTPlatform mapping', () => {
+  it('registers native sticker plans and maps QQ stickers back to the provider', async () => {
+    const platform = new QQNTPlatform({}, 'qq-provider')
+    const reference = {
+      kind: 'market' as const, packageId: '42', stickerId: 'wave', name: 'Wave', key: 'secret',
+      width: 320, height: 180, animated: true,
+    }
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent-sticker', conversationId: 'u', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{ type: 'sticker' as const, sticker: {
+        stickerId: 'market:42:wave', packId: '42', title: 'Wave',
+        format: 'animated' as const, mimeType: 'image/gif', width: 320, height: 180,
+        reference,
+      } }],
+    }))
+
+    const sent = await platform.sendMessage(session, { id: 'u' }, { parts: [{
+      type: 'sticker',
+      sticker: {
+        type: 'native', providerId: 'qq-provider', stickerId: 'market:42:wave', packId: '42',
+        reference,
+      },
+    }] })
+
+    expect((platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![5]).toEqual(reference)
+    expect(sent.content.parts).toMatchObject([{
+      type: 'sticker', sticker: {
+        providerId: 'qq-provider', stickerId: 'market:42:wave', format: 'animated',
+        locator: reference,
+      },
+    }])
+  })
+
+  it('exposes QQ packs, assets, and native favorite mutation through the sticker provider', async () => {
+    const platform = new QQNTPlatform()
+    const provider = new QQStickerProvider(platform.client, 'qq-provider')
+    const reference = {
+      kind: 'favorite' as const, resId: 'fav', path: '/tmp/fav.png', name: 'fav.png',
+      width: 1, height: 1, animated: false,
+    }
+    platform.client.getStickerPack = vi.fn(async () => ({
+      packId: 'favorites', title: 'Favorites', stickers: [{
+        stickerId: 'favorite:fav', format: 'static' as const, mimeType: 'image/png',
+        width: 1, height: 1, reference,
+      }],
+    }))
+    platform.client.stickerSource = vi.fn(() => ({ async *stream() { yield new Uint8Array([1, 2, 3]) } }))
+    platform.client.setSavedSticker = vi.fn(async () => {})
+
+    const pack = await provider.getPack({ session, platformKind: 'qq' }, 'favorites')
+    expect(pack?.stickers[0]).toMatchObject({ providerId: 'qq-provider', stickerId: 'favorite:fav' })
+    const asset = await provider.openAsset({ session, platformKind: 'qq' }, pack!.stickers[0])
+    const chunks: number[] = []
+    for await (const chunk of asset.source.stream()) chunks.push(...chunk)
+    expect(chunks).toEqual([1, 2, 3])
+    await provider.setSavedSticker({ session, platformKind: 'qq' }, pack!.stickers[0], true)
+    expect(platform.client.setSavedSticker).toHaveBeenCalledWith(reference, true)
+  })
+
   it('suppresses only the originating session listener echo', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
