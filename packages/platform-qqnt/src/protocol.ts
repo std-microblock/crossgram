@@ -57,6 +57,7 @@ export interface WireConversation {
   avatar?: WireMedia
   unreadCount?: number
   lastMessage?: WireMessage
+  firstUnread?: { msgSeq: string, msgTime: string }
   readInboxMaxMessage?: WireMessage
 }
 

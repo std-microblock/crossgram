@@ -22,6 +22,7 @@ describe('QQNTPlatform mapping', () => {
         id: '2:1058754719', kind: 'group' as const, title: 'Test Group',
         peerUid: '1058754719', peerUin: '1058754719', chatType: 2 as const,
         unreadCount: 7,
+        firstUnread: { msgSeq: 'opaque-seq-42', msgTime: '1700000001' },
         readInboxMaxMessage: {
           id: 'read-42', conversationId: '2:1058754719', senderId: 'member',
           timestamp: 1_700_000_000, outgoing: false,
@@ -39,6 +40,7 @@ describe('QQNTPlatform mapping', () => {
       }],
       total: 1,
     }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [] }))
     const dialogs = await platform.getDialogs(session)
     expect(dialogs.dialogs[0]).toMatchObject({
       conversation: {
@@ -50,6 +52,14 @@ describe('QQNTPlatform mapping', () => {
         id: 'read-42',
         content: { parts: [{ type: 'text', text: 'last read' }] },
       },
+    })
+    await platform.getHistory(session, { id: '2:1058754719' }, { limit: 50 })
+    expect(platform.client.getHistory).toHaveBeenCalledWith('2:1058754719', {
+      cursor: undefined,
+      limit: 50,
+      beforeId: undefined,
+      afterId: undefined,
+      aroundUnreadSeq: 'opaque-seq-42',
     })
     const members = await platform.getConversationMembers(session, { id: '2:1058754719' })
     expect(members.members[0]).toMatchObject({
