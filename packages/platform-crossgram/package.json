@@ -16,6 +16,7 @@
     "vitest": "^2.1.9"
   },
   "scripts": {
+    "import:reactions": "node scripts/import-reactions.mjs",
     "test": "vitest run",
     "test:e2e": "QQNT_BRIDGE_E2E=1 vitest run src/e2e.test.ts"
   }

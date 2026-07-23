@@ -1,5 +1,6 @@
 import type { Context } from 'cordis'
 import sharp from 'sharp'
+import { readFile } from 'node:fs/promises'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
@@ -363,6 +364,31 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const available = await mapConcurrent(source.available, 8, async (definition) => {
       if (definition.presentation.type !== 'custom') return definition
       const { resource } = definition.presentation
+      if (resource.format === 'video') {
+        const assetKey = resource.locator.assetKey
+        if (!assetKey || !/^sysface\/s\d+\.webm$/.test(assetKey)) {
+          throw new Error(`invalid QQ animated reaction asset: ${String(assetKey)}`)
+        }
+        const bytes = await readFile(new URL(`../assets/reactions/${assetKey}`, import.meta.url))
+        const cacheKey = `${definition.key}:${resource.version}:webm-v1`
+        this.reactionResources.set(cacheKey, bytes)
+        return {
+          ...definition,
+          presentation: {
+            ...definition.presentation,
+            resource: {
+              ...resource,
+              version: resource.version * 100 + 2,
+              format: 'video' as const,
+              mimeType: 'video/webm' as const,
+              width: 100,
+              height: 100,
+              size: bytes.length,
+              locator: { cacheKey },
+            },
+          },
+        }
+      }
       const filePath = resource.locator.filePath
       const chunks: Uint8Array[] = []
       let size = 0
