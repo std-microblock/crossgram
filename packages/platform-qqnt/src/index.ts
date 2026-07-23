@@ -73,7 +73,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         own: { supported: true, maxAgeSeconds: 120 },
         others: { supported: true, maxAgeSeconds: 120 },
       },
-      edit: { mode: 'unsupported' },
+      edit: { mode: 'delete-and-resend', maxAgeSeconds: 120 },
       forward: { mode: 'native', preservesAuthor: true },
     },
     reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 20 },
