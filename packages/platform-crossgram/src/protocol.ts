@@ -42,6 +42,8 @@ export interface WireMessage {
     avatar?: WireMedia
   }
   msgSeq?: string
+  /** Correlates a local HTTP send with its QQ listener echo. */
+  originRequestId?: string
   parts: Array<{ type: 'text', text: string } | { type: 'media', media: WireMedia }>
   reactionContext?: WireReactionState
 }

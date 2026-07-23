@@ -8,6 +8,48 @@ const session: PlatformSession = {
 }
 
 describe('QQNTPlatform mapping', () => {
+  it('suppresses only the originating session listener echo', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    let wireHandler: ((event: any) => void | Promise<void>) | undefined
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      wireHandler = handler
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    platform.client.sendMessage = vi.fn(async (_conversation, _text, _media, _options, originRequestId) => ({
+      id: 'sent', conversationId: 'u', senderId: 'self', timestamp: 10, outgoing: true,
+      originRequestId, parts: [{ type: 'text' as const, text: 'hello' }],
+    }))
+    const other = { ...session, platformSessionId: 'other-session' }
+    const ownEvents: unknown[] = []
+    const otherEvents: unknown[] = []
+    const unsubscribeOwn = await platform.subscribe(session, (event) => { ownEvents.push(event) })
+    const unsubscribeOther = await platform.subscribe(other, (event) => { otherEvents.push(event) })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const sent = await platform.sendMessage(session, { id: 'u' }, {
+      parts: [{ type: 'text', text: 'hello' }],
+    })
+    const originRequestId = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![4]
+    const echo = {
+      type: 'message' as const,
+      conversation: { id: 'u', kind: 'direct' as const, title: 'u', peerUid: 'u', peerUin: '1', chatType: 1 as const },
+      message: {
+        id: 'sent', conversationId: 'u', senderId: 'self', timestamp: 10, outgoing: true,
+        originRequestId, parts: [{ type: 'text' as const, text: 'hello' }],
+      },
+    }
+    // Each subscription owns an SSE connection; exercise the same wire event against both handlers.
+    const handlers = (platform.client.subscribe as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0])
+    await handlers[0](echo)
+    await handlers[1](echo)
+    expect(sent.id).toBe('sent')
+    expect(ownEvents).toEqual([])
+    expect(otherEvents).toHaveLength(1)
+    await unsubscribeOwn()
+    await unsubscribeOther()
+    expect(wireHandler).toBeTypeOf('function')
+  })
+
   it('maps opaque QQ IDs and member roles without numeric coercion', async () => {
     const platform = new QQNTPlatform()
     const avatar = {

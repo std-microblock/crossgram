@@ -79,7 +79,9 @@ async function createHarness(failSends = 0) {
         remoteFiles.push(remote)
         const media: IMMedia = {
           id: `remote-${mediaIndex}`, kind: part.media.kind, name: part.media.name,
-          mimeType: part.media.mimeType, size: part.media.size, locator: { remote: mediaIndex },
+          mimeType: part.media.mimeType, size: part.media.size,
+          width: part.media.width, height: part.media.height,
+          locator: { remote: mediaIndex },
         }
         outputParts.push({ type: 'media', media })
         mediaIndex++
@@ -301,17 +303,22 @@ describe('media send streaming', () => {
   })
 
   it('stages photos with the configured media DC and sends them by reference', async () => {
-    const { platform, uploads, store, consumed } = await createHarness()
+    const { platform, uploads, store, consumed, inputs } = await createHarness()
     const rpc = new DialogRpc(platform, session, store, uploads, undefined, 5)
-    await uploads.savePart(session.platformSessionId, '89', 0, new Uint8Array([137, 80, 78, 71]))
+    const png = new Uint8Array(24)
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    new DataView(png.buffer).setUint32(16, 1096)
+    new DataView(png.buffer).setUint32(20, 892)
+    await uploads.savePart(session.platformSessionId, '89', 0, png)
     const uploaded = await rpc.uploadMedia({
       _: 'messages.uploadMedia', peer: peer(),
       media: { _: 'inputMediaUploadedPhoto', file: inputFile(89, 1, 'photo.png') },
     }) as tl.RawMessageMediaPhoto
     const photo = uploaded.photo as tl.RawPhoto
     expect(photo).toMatchObject({ _: 'photo', dcId: 5 })
+    expect(photo.sizes[0]).toMatchObject({ _: 'photoSize', w: 1096, h: 892 })
 
-    await expect(rpc.sendMedia({
+    const sent = await rpc.sendMedia({
       _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(89), message: 'photo',
       media: {
         _: 'inputMediaPhoto',
@@ -320,14 +327,20 @@ describe('media send streaming', () => {
           fileReference: photo.fileReference,
         },
       },
-    })).resolves.toMatchObject({
+    })
+    expect(sent).toMatchObject({
       _: 'updates',
       updates: [
         { _: 'updateMessageID', randomId: Long.fromNumber(89) },
-        { _: 'updateNewMessage', message: { media: { _: 'messageMediaPhoto' } } },
+        { _: 'updateNewMessage', message: {
+          media: { _: 'messageMediaPhoto', photo: { sizes: [{ w: 1096, h: 892 }] } },
+        } },
       ],
     })
-    expect([...consumed[0][0]]).toEqual([137, 80, 78, 71])
+    expect(inputs[0].parts).toContainEqual(expect.objectContaining({
+      type: 'media', media: expect.objectContaining({ width: 1096, height: 892 }),
+    }))
+    expect([...consumed[0][0]]).toEqual([...png])
   })
 
   it('rejects missing parts before invoking the platform', async () => {
