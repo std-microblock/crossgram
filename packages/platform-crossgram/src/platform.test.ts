@@ -65,15 +65,42 @@ describe('QQNTPlatform mapping', () => {
     platform.client.forwardMessages = vi.fn(async (_from, ids, to, merged) => [{
       id: merged ? 'merged' : `forwarded-${ids[0]}`, conversationId: to,
       senderId: 'self', timestamp: 10, outgoing: true,
-      parts: [{ type: 'text' as const, text: merged ? '[聊天记录]' : 'forwarded' }],
+      parts: merged ? [{
+        type: 'multi-forward' as const, title: 'Alice 和 Bob 的聊天记录',
+        locator: { conversationId: 'from', rootMessageId: 'merged' },
+      }] : [{ type: 'text' as const, text: 'forwarded' }],
     }])
 
     await expect(platform.forwardMessages(session, { id: 'from' }, ['a'], { id: 'to' }))
       .resolves.toMatchObject([{ id: 'forwarded-a' }])
-    await expect(platform.forwardMessages(session, { id: 'from' }, ['a', 'b'], { id: 'to' }))
-      .resolves.toMatchObject([{ id: 'merged' }])
+    const merged = await platform.forwardMessages(session, { id: 'from' }, ['a', 'b'], { id: 'to' })
+    expect(merged).toMatchObject([{ id: 'merged', content: { parts: [{
+      type: 'text', text: '\u200b', entities: [{
+        type: 'conversation-link', offset: 0, length: 1,
+        conversation: { kind: 'group', title: 'Alice 和 Bob 的聊天记录' },
+      }],
+    }] } }])
     expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(1, 'from', ['a'], 'to', false)
     expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(2, 'from', ['a', 'b'], 'to', true)
+
+    const link = merged[0].content.parts[0]
+    if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getMultiForwardMessages = vi.fn(async () => [{
+      id: 'nested-message', conversationId: 'from', senderId: 'alice', timestamp: 9, outgoing: false,
+      parts: [{ type: 'text' as const, text: 'nested content' }],
+    }])
+    await expect(platform.getHistory(session, link.entities[0].conversation)).resolves.toMatchObject({
+      messages: [{
+        id: 'nested-message', conversationId: link.entities[0].conversation.id,
+        content: { parts: [{ type: 'text', text: 'nested content' }] },
+      }],
+    })
+    expect(platform.client.getMultiForwardMessages).toHaveBeenCalledWith({
+      conversationId: 'from', rootMessageId: 'merged',
+    })
   })
 
   it('re-sends content instead of retaining QQ source attribution when dropAuthor is requested', async () => {

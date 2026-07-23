@@ -100,8 +100,15 @@ export interface WireMessage {
     | WireTextPart
     | { type: 'media', media: WireMedia }
     | { type: 'sticker', sticker: WireSticker }
+    | { type: 'multi-forward', title: string, locator: WireMultiForwardLocator }
   >
   reactionContext?: WireReactionState
+}
+
+export interface WireMultiForwardLocator {
+  conversationId: string
+  rootMessageId: string
+  parentMessageId?: string
 }
 
 export interface WireTextPart {

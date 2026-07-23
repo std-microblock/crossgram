@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import type {
-  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage,
+  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
   WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
   WireTextPart,
 } from './protocol.js'
@@ -193,6 +193,15 @@ export class QQNTClient {
     })
     if (response.status === 404) return null
     return responseJson(response)
+  }
+
+  async getMultiForwardMessages(locator: WireMultiForwardLocator): Promise<WireMessage[]> {
+    const response = await this.json<{ messages: WireMessage[] }>('/messages/multi-forward', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(locator),
+    })
+    return response.messages
   }
 
   async forwardMessages(
