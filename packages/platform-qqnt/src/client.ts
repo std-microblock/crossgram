@@ -74,14 +74,24 @@ export class QQNTClient {
   async sendMessage(
     conversationId: string,
     text: string | undefined,
-    media: { kind: 'image' | 'file', name: string, mimeType?: string, source: IMMediaSource } | undefined,
+    media: {
+      kind: 'image' | 'file'
+      name: string
+      mimeType?: string
+      width?: number
+      height?: number
+      source: IMMediaSource
+    } | undefined,
     options: IMTransferOptions = {},
+    originRequestId?: string,
   ): Promise<WireMessage> {
     const manifest = {
       conversationId,
       text,
+      originRequestId,
       media: media ? [{
         kind: media.kind, name: media.name, mimeType: media.mimeType, size: media.source.size,
+        width: media.width, height: media.height,
       }] : undefined,
     }
     const headers = this.headers({

@@ -1,5 +1,6 @@
 import type { Context } from 'cordis'
 import sharp from 'sharp'
+import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
@@ -66,6 +67,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalog?: IMReactionContext
   private reactionCatalogPromise?: Promise<IMReactionContext>
   private readonly memberName: MemberNameMode
+  private readonly originSessions = new Map<string, string>()
 
   constructor(options: Config = {}) {
     this.client = new QQNTClient(options)
@@ -73,12 +75,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async subscribe(
-    _session: PlatformSession,
+    session: PlatformSession,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
     await this.ensureReactionCatalog()
     const controller = new AbortController()
-    const running = this.subscribeLoop(handler, controller.signal)
+    const running = this.subscribeLoop(session.platformSessionId, handler, controller.signal)
     return async () => {
       controller.abort()
       await running
@@ -86,12 +88,17 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private async subscribeLoop(
+    platformSessionId: string,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
     signal: AbortSignal,
   ): Promise<void> {
     while (!signal.aborted) {
       try {
-        await this.client.subscribe((event) => handler(this.mapEvent(event)), signal)
+        await this.client.subscribe((event) => {
+          if (event.type === 'message' && event.message.originRequestId
+            && this.originSessions.get(event.message.originRequestId) === platformSessionId) return
+          return handler(this.mapEvent(event))
+        }, signal)
       } catch {
         if (signal.aborted) return
       }
@@ -233,7 +240,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async sendMessage(
-    _session: PlatformSession,
+    session: PlatformSession,
     conversation: IMConversationRef,
     content: IMMessageInput,
     options: IMTransferOptions = {},
@@ -247,13 +254,22 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       kind: part.media.kind,
       name: part.media.name ?? `upload-${Date.now()}`,
       mimeType: part.media.mimeType,
+      width: part.media.width,
+      height: part.media.height,
       source: part.media.source,
     } : undefined
-    return mapMessage(
-      await this.client.sendMessage(conversation.id, text, media, options),
-      this.memberName,
-      this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
-    )
+    const originRequestId = randomUUID()
+    this.originSessions.set(originRequestId, session.platformSessionId)
+    try {
+      return mapMessage(
+        await this.client.sendMessage(conversation.id, text, media, options, originRequestId),
+        this.memberName,
+        this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
+      )
+    } finally {
+      const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
+      timer.unref()
+    }
   }
 
   async deleteMessages(

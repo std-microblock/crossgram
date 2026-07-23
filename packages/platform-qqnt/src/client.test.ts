@@ -13,7 +13,10 @@ describe('QQNTClient streaming transport', () => {
 
   it('streams upload chunks and reports monotonic progress', async () => {
     const received: Buffer[] = []
+    let manifest: Record<string, any> | undefined
     server = createServer(async (request, response) => {
+      const encoded = request.headers['x-qqnt-manifest']
+      if (typeof encoded === 'string') manifest = JSON.parse(Buffer.from(encoded, 'base64url').toString())
       try {
         for await (const chunk of request) received.push(Buffer.from(chunk))
       } catch {
@@ -33,12 +36,16 @@ describe('QQNTClient streaming transport', () => {
     const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4, 5])]
     const progress: number[] = []
     const message = await client.sendMessage('1:uid', 'caption', {
-      kind: 'file', name: 'x.bin',
+      kind: 'file', name: 'x.bin', width: 320, height: 200,
       source: { size: 5, async *stream() { yield* chunks } },
-    }, { onProgress: (item) => { progress.push(item.transferredBytes) } })
+    }, { onProgress: (item) => { progress.push(item.transferredBytes) } }, 'origin-1')
     expect(message.id).toBe('sent')
     expect(Buffer.concat(received)).toEqual(Buffer.from([1, 2, 3, 4, 5]))
     expect(progress).toEqual([2, 5])
+    expect(manifest).toMatchObject({
+      conversationId: '1:uid', originRequestId: 'origin-1',
+      media: [{ width: 320, height: 200 }],
+    })
   })
 
   it('does not silently accept a short media source', async () => {

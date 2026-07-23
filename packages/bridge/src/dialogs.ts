@@ -17,6 +17,7 @@ import type { StagedMedia, UploadedFile, UploadManager } from './upload-manager.
 import type { StickerRpc } from './sticker-rpc.js'
 import type { ReactionRpc } from './reaction-rpc.js'
 import type { TelegramResourceService } from './resource-provider.js'
+import { probeImageDimensions } from './image-dimensions.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
@@ -1054,12 +1055,15 @@ export class DialogRpc {
     const attribute = media._ === 'inputMediaUploadedDocument'
       ? media.attributes.find((item) => item._ === 'documentAttributeFilename')
       : undefined
+    const detected = kind === 'image' ? await probeImageDimensions(upload.source) : undefined
     return {
       media: {
         kind,
         name: attribute?._ === 'documentAttributeFilename' ? attribute.fileName : file.name,
         mimeType: media._ === 'inputMediaUploadedDocument' ? media.mimeType : inferImageMime(file.name),
         size: upload.source.size,
+        width: detected?.width,
+        height: detected?.height,
         source: upload.source,
       },
       upload,
