@@ -9,6 +9,42 @@ const session: PlatformSession = {
 }
 
 describe('QQNTPlatform mapping', () => {
+  it('uses QQ merged forward only for multiple preserved-source messages', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.forwardMessages = vi.fn(async (_from, ids, to, merged) => [{
+      id: merged ? 'merged' : `forwarded-${ids[0]}`, conversationId: to,
+      senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{ type: 'text' as const, text: merged ? '[聊天记录]' : 'forwarded' }],
+    }])
+
+    await expect(platform.forwardMessages(session, { id: 'from' }, ['a'], { id: 'to' }))
+      .resolves.toMatchObject([{ id: 'forwarded-a' }])
+    await expect(platform.forwardMessages(session, { id: 'from' }, ['a', 'b'], { id: 'to' }))
+      .resolves.toMatchObject([{ id: 'merged' }])
+    expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(1, 'from', ['a'], 'to', false)
+    expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(2, 'from', ['a', 'b'], 'to', true)
+  })
+
+  it('re-sends content instead of retaining QQ source attribution when dropAuthor is requested', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getMessage = vi.fn(async (_conversation, messageId) => ({
+      id: messageId, conversationId: 'from', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{ type: 'text' as const, text: `copy ${messageId}` }],
+    }))
+    platform.client.forwardMessages = vi.fn()
+    platform.client.sendMessage = vi.fn(async (_conversation, text) => ({
+      id: `resent-${text}`, conversationId: 'to', senderId: 'self', timestamp: 2, outgoing: true,
+      parts: [{ type: 'text' as const, text: text! }],
+    }))
+
+    const outputs = await platform.forwardMessages(
+      session, { id: 'from' }, ['a', 'b'], { id: 'to' }, { dropAuthor: true },
+    )
+    expect(outputs.map((message) => message.id)).toEqual(['resent-copy a', 'resent-copy b'])
+    expect(platform.client.forwardMessages).not.toHaveBeenCalled()
+    expect(platform.client.getMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('projects inline QQ faces as Telegram custom emoji data and restores their face index', async () => {
     const platform = new QQNTPlatform()
     const png = await sharp({
