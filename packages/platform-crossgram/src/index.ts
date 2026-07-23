@@ -59,6 +59,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   readonly client: QQNTClient
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
+  private readonly firstUnreadSeq = new Map<string, string>()
   private readonly memberName: MemberNameMode
 
   constructor(options: Config = {}) {
@@ -94,6 +95,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
     const response = await this.client.getDialogs({ cursor: query.cursor, limit: query.limit })
+    for (const conversation of response.conversations) {
+      if (conversation.firstUnread?.msgSeq) this.firstUnreadSeq.set(conversation.id, conversation.firstUnread.msgSeq)
+      else this.firstUnreadSeq.delete(conversation.id)
+    }
     return {
       dialogs: response.conversations.map((conversation) => ({
         conversation: this.mapConversation(conversation),
@@ -131,6 +136,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       limit: query.limit,
       beforeId: query.before?.id,
       afterId: query.after?.id,
+      aroundUnreadSeq: !query.cursor && !query.before && !query.after
+        ? this.firstUnreadSeq.get(conversation.id)
+        : undefined,
     })
     return {
       messages: response.messages.map((message) => mapMessage(message, this.memberName)),

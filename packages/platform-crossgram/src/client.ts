@@ -52,6 +52,7 @@ export class QQNTClient {
     limit?: number
     beforeId?: string
     afterId?: string
+    aroundUnreadSeq?: string
   } = {}): Promise<{ messages: WireMessage[], nextCursor?: string }> {
     return this.json(`/conversations/${encodeURIComponent(id)}/history${queryString(query)}`)
   }
