@@ -9,6 +9,53 @@ const session: PlatformSession = {
 }
 
 describe('QQNTPlatform mapping', () => {
+  it('projects inline QQ faces as Telegram custom emoji data and restores their face index', async () => {
+    const platform = new QQNTPlatform()
+    const png = await sharp({
+      create: { width: 16, height: 16, channels: 4, background: { r: 240, g: 190, b: 30, alpha: 1 } },
+    }).png().toBuffer()
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [{
+        key: '1:14', title: '微笑',
+        presentation: {
+          type: 'custom' as const, alt: '🙂',
+          resource: {
+            version: 1, format: 'static' as const, mimeType: 'image/png' as const,
+            width: 16, height: 16, size: png.length, locator: { filePath: '/qq/s14.png' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    }))
+    platform.client.downloadMedia = vi.fn(async function* () { yield png })
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'face-message', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        parts: [{
+          type: 'text' as const, text: '[微笑]',
+          entities: [{ type: 'qq-face' as const, offset: 0, length: 4, faceId: '14', faceType: 1 }],
+        }],
+      }],
+    }))
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    const text = history.messages[0].content.parts[0]
+    expect(text).toMatchObject({
+      type: 'text', text: '🙂',
+      entities: [{ type: 'custom-emoji', offset: 0, length: 2, definition: { key: '1:14' } }],
+    })
+
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent-face', conversationId: '2:group', senderId: 'self', timestamp: 2, outgoing: true,
+      parts: [{ type: 'text' as const, text: '🙂' }],
+    }))
+    await platform.sendMessage(session, { id: '2:group' }, { parts: [text as any] })
+    expect((platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![6]).toMatchObject([{
+      type: 'text', text: '🙂',
+      entities: [{ type: 'qq-face', offset: 0, length: 2, faceId: '14', faceType: 1 }],
+    }])
+  })
+
   it('round-trips QQ mention entities and opaque reply IDs', async () => {
     const platform = new QQNTPlatform()
     platform.client.sendMessage = vi.fn(async () => ({

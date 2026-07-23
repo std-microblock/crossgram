@@ -5,6 +5,7 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
+import { ReactionRpc } from './reaction-rpc.js'
 import type {
   IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMPlatform, IMUser, PlatformSession,
 } from './platform.js'
@@ -36,6 +37,10 @@ class DialogTestPlatform implements IMPlatform {
   }
   private _sequence = 100
   lastInput?: IMMessageInput
+
+  addMessage(conversationId: string, message: IMMessage): void {
+    ;(this._messages[conversationId] ??= []).push(message)
+  }
 
   async subscribe() { return () => {} }
 
@@ -373,6 +378,52 @@ describe('DialogRpc', () => {
       _: 'message',
       entities: [{ _: 'messageEntityMentionName', offset: 6, length: 4, userId: bobId }],
     })
+  })
+
+  it('maps platform inline custom emoji entities to Telegram documents and back', async () => {
+    const platform = new DialogTestPlatform()
+    const definition = {
+      key: '1:14', title: 'QQ 微笑',
+      presentation: {
+        type: 'custom' as const, alt: '🙂',
+        resource: {
+          version: 1, format: 'static' as const, mimeType: 'image/png' as const,
+          width: 32, height: 32, size: 3, locator: { faceId: '14' },
+        },
+      },
+    }
+    platform.addMessage('alice', {
+      id: 'face', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_300,
+      content: { parts: [{
+        type: 'text', text: '🙂',
+        entities: [{ type: 'custom-emoji', offset: 0, length: 2, definition }],
+      }] },
+    })
+    const reactions = new ReactionRpc(platform, session)
+    const rpc = new DialogRpc(platform, session, undefined, undefined, undefined, 1, undefined, reactions)
+    await rpc.getDialogs(getDialogsRequest())
+    const aliceId = rpc.peerTlId('alice')
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const face = history.messages.find((item) => item._ === 'message' && item.message === '🙂') as tl.RawMessage
+    expect(face.entities).toMatchObject([{
+      _: 'messageEntityCustomEmoji', offset: 0, length: 2,
+    }])
+    const documentId = (face.entities![0] as any).documentId as Long
+    const [document] = rpc.getCustomEmojiDocuments({
+      _: 'messages.getCustomEmojiDocuments', documentId: [documentId],
+    })
+    expect(document.attributes).toContainEqual(expect.objectContaining({
+      _: 'documentAttributeCustomEmoji', alt: '🙂',
+    }))
+
+    await rpc.sendMessage(sendMessageRequest(aliceId, {
+      message: '🙂', randomId: Long.fromNumber(999),
+      entities: [{ _: 'messageEntityCustomEmoji', offset: 0, length: 2, documentId }],
+    }))
+    expect(platform.lastInput).toMatchObject({ parts: [{
+      type: 'text', text: '🙂',
+      entities: [{ type: 'custom-emoji', offset: 0, length: 2, definition: { key: '1:14' } }],
+    }] })
   })
 
   it('validates send capabilities, text length, scheduling, and unknown peers', async () => {
