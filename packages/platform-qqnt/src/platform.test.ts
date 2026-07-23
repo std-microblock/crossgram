@@ -22,6 +22,11 @@ describe('QQNTPlatform mapping', () => {
         id: '2:1058754719', kind: 'group' as const, title: 'Test Group',
         peerUid: '1058754719', peerUin: '1058754719', chatType: 2 as const,
         unreadCount: 7,
+        readInboxMaxMessage: {
+          id: 'read-42', conversationId: '2:1058754719', senderId: 'member',
+          timestamp: 1_700_000_000, outgoing: false,
+          parts: [{ type: 'text' as const, text: 'last read' }],
+        },
       }],
     }))
     platform.client.getMembers = vi.fn(async () => ({
@@ -41,6 +46,10 @@ describe('QQNTPlatform mapping', () => {
         metadata: { qqPeerUid: '1058754719', qq: '1058754719', chatType: 2 },
       },
       unreadCount: 7,
+      readInboxMaxMessage: {
+        id: 'read-42',
+        content: { parts: [{ type: 'text', text: 'last read' }] },
+      },
     })
     const members = await platform.getConversationMembers(session, { id: '2:1058754719' })
     expect(members.members[0]).toMatchObject({

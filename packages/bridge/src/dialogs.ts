@@ -1217,6 +1217,9 @@ export class DialogRpc {
         ? [await this._getMessageSender(source.lastMessage)]
         : []
     const chat = source.conversation.kind === 'direct' ? undefined : this._makeChat(source.conversation)
+    const unpersistedReadInboxMaxId = source.unreadCount > 0 && source.readInboxMaxMessage && !this._store
+      ? this._messageId(platformPeerId, source.readInboxMaxMessage.id)
+      : undefined
     let projected = source.lastMessage
       ? this._historyCache.get(platformPeerId)?.filter((item) =>
           item.source.id === source.lastMessage!.id || item.source.sourceIds?.includes(source.lastMessage!.id))
@@ -1238,6 +1241,29 @@ export class DialogRpc {
     }
     const top = projected?.[0]
     const topMessage = top?.tlId ?? (source.lastMessage ? this._messageId(platformPeerId, source.lastMessage.id) : 0)
+    let readInboxMaxId = source.unreadCount > 0 ? 0 : topMessage
+    if (source.unreadCount > 0 && source.readInboxMaxMessage) {
+      let readProjection = this._historyCache.get(platformPeerId)?.filter((item) =>
+        item.source.id === source.readInboxMaxMessage!.id
+        || item.source.sourceIds?.includes(source.readInboxMaxMessage!.id))
+      if (!readProjection?.length && this._store) {
+        const stored = await this._store.findProjectedByPlatformId(
+          this._session.platformSessionId,
+          platformPeerId,
+          source.readInboxMaxMessage.id,
+        )
+        readProjection = stored?.parts.map((part): MaterializedMessage => ({
+          source: stored.source,
+          tlId: part.tlMessageId,
+          ordinal: part.ordinal,
+          groupedId: part.groupedId ?? undefined,
+          media: stored.media.find((entry) => entry.id === part.mediaId),
+        }))
+      }
+      readInboxMaxId = readProjection?.reduce((maximum, item) => Math.max(maximum, item.tlId), 0)
+        ?? unpersistedReadInboxMaxId
+        ?? this._messageId(platformPeerId, source.readInboxMaxMessage.id)
+    }
     const message = source.lastMessage
       ? this._makeMessage(top ?? { source: source.lastMessage, tlId: topMessage, ordinal: 0 })
       : undefined
@@ -1245,7 +1271,7 @@ export class DialogRpc {
       _: 'dialog',
       peer,
       topMessage,
-      readInboxMaxId: source.unreadCount > 0 ? 0 : topMessage,
+      readInboxMaxId,
       readOutboxMaxId: topMessage,
       unreadCount: source.unreadCount,
       unreadMentionsCount: 0,
