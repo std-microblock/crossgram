@@ -103,6 +103,11 @@ interface IMConversationMember<L> {
 
 `members.administrators` 表示平台能区分管理员，`members.permissions` 表示权限字段来自平台真实数据。bridge 将其投影为 Telegram participant/admin rights；不能获取成员时不要伪造当前用户为群主。
 
+群平台若支持真实的 cursor 分页，应声明 `members.paginated: true`。bridge 会把该平台的
+`group` 投影为 Telegram megagroup，让客户端通过 `channels.getParticipants(offset, limit)`
+按需获取成员；未声明时仍投影为 Telegram basic chat，而 `messages.getFullChat` 的协议结构
+要求一次返回完整成员列表。
+
 ## 4. 消息内容
 
 `IMMedia` 的 locator 是 adapter 自己声明的泛型，不是 `JsonValue`。用户头像和群头像也使用同一套 `IMMedia<L>` / `downloadMedia()`：

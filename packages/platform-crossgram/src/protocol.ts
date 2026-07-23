@@ -55,6 +55,8 @@ export interface WireConversation {
   chatType: 1 | 2
   avatarUrl?: string
   avatar?: WireMedia
+  participantCount?: number
+  selfRole?: 'owner' | 'administrator' | 'member'
   unreadCount?: number
   lastMessage?: WireMessage
   firstUnread?: { msgSeq: string, msgTime: string }

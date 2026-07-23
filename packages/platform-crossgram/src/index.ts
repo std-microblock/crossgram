@@ -45,7 +45,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       maxMedia: 1,
     },
     conversations: { groups: true, channels: false, subchannels: false },
-    members: { list: true, administrators: true, permissions: false },
+    members: { list: true, administrators: true, permissions: false, paginated: true },
     avatars: { users: true, conversations: true },
     messageActions: {
       delete: {
@@ -209,6 +209,18 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     userId: string,
   ): Promise<IMConversationMember<QQMediaLocator> | null> {
+    const known = this.conversations.get(conversation.id)
+    const selfRole = known?.metadata?.qqSelfRole
+    if (
+      userId === session.userId
+      && (selfRole === 'owner' || selfRole === 'administrator' || selfRole === 'member')
+    ) {
+      const user = await this.getUser(session, userId)
+      if (user) return { user, role: selfRole, permissions: permissions(selfRole) }
+    }
+    // Opening a Telegram megagroup commonly probes inputPeerSelf. Never turn a
+    // temporarily missing group profile into a full QQ member-list scan.
+    if (userId === session.userId) return null
     let cursor: string | undefined
     do {
       const page = await this.getConversationMembers(session, conversation, { cursor, limit: 500 })
@@ -476,6 +488,8 @@ function mapConversation(input: WireConversation): IMConversation<QQMediaLocator
       qqPeerUid: input.peerUid,
       qq: input.peerUin,
       chatType: input.chatType,
+      ...(input.participantCount === undefined ? {} : { participantsCount: input.participantCount }),
+      ...(input.selfRole ? { qqSelfRole: input.selfRole } : {}),
     },
   }
 }

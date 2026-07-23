@@ -110,7 +110,7 @@ afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createRpc() {
+async function createRpc(selectedPlatform: IMPlatform = platform) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -120,7 +120,7 @@ async function createRpc() {
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { ctx, rpc: new DialogRpc(platform, session, new MessageStore(ctx.database)) }
+  return { ctx, rpc: new DialogRpc(selectedPlatform, session, new MessageStore(ctx.database)) }
 }
 
 function dialogsRequest(): tl.messages.RawGetDialogsRequest {
@@ -336,6 +336,73 @@ describe('conversation kinds', () => {
     for (const result of [groupSettings, fullGroup, fullChannel, self, participants, admins, sendAs]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
+  })
+
+  it('projects cursor-paginated groups as megagroups and only requests the Telegram member window', async () => {
+    const calls: Array<{ cursor?: string, limit?: number }> = []
+    const allMembers = ['self', 'alice', 'bob', 'carol', 'dave'].map((id, index) => ({
+      user: { id, firstName: id },
+      role: index === 0 ? 'owner' as const : 'member' as const,
+      permissions: {
+        manageConversation: index === 0, manageMembers: index === 0,
+        deleteAnyMessage: index === 0, editAnyMessage: false,
+        pinMessages: index === 0, inviteMembers: true,
+      },
+    }))
+    const paginatedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        members: { ...platform.capabilities.members!, paginated: true },
+      },
+      async getConversationMembers(_session, _target, query = {}) {
+        calls.push(query)
+        const start = Number(query.cursor?.replace('cursor-', '') ?? 0)
+        const limit = query.limit ?? 100
+        const members = allMembers.slice(start, start + limit)
+        const next = start + members.length
+        return {
+          members,
+          total: allMembers.length,
+          nextCursor: next < allMembers.length ? `cursor-${next}` : undefined,
+        }
+      },
+    }
+    const { rpc } = await createRpc(paginatedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const groupId = stableId('peer:group')
+    const group = { _: 'inputChannel' as const, channelId: groupId, accessHash: Long.ZERO }
+    expect(dialogs.dialogs.find((dialog) =>
+      dialog.peer._ === 'peerChannel' && dialog.peer.channelId === groupId)).toBeDefined()
+    expect(dialogs.chats).toContainEqual(expect.objectContaining({
+      _: 'channel', title: 'QQ Group', megagroup: true,
+    }))
+
+    await rpc.getFullChannel({ _: 'channels.getFullChannel', channel: group })
+    expect(calls).toEqual([])
+
+    const first = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsRecent' },
+      offset: 0, limit: 2, hash: Long.ZERO,
+    })
+    const second = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsRecent' },
+      offset: 2, limit: 2, hash: Long.ZERO,
+    })
+    expect(calls).toEqual([
+      { cursor: undefined, limit: 2 },
+      { cursor: 'cursor-2', limit: 2 },
+    ])
+    expect(first).toMatchObject({
+      _: 'channels.channelParticipants', count: 5,
+      users: [{ firstName: 'Bridge' }, { firstName: 'alice' }],
+    })
+    expect(second).toMatchObject({
+      _: 'channels.channelParticipants', count: 5,
+      users: [{ firstName: 'bob' }, { firstName: 'carol' }],
+    })
+    expect(() => roundTrip(first)).not.toThrow()
+    expect(() => roundTrip(second)).not.toThrow()
   })
 
   it('projects known child channels as forum topics and routes topic sends to the child', async () => {

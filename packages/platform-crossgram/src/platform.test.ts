@@ -22,6 +22,7 @@ describe('QQNTPlatform mapping', () => {
       conversations: [{
         id: '2:1058754719', kind: 'group' as const, title: 'Test Group',
         peerUid: '1058754719', peerUin: '1058754719', chatType: 2 as const,
+        participantCount: 42, selfRole: 'owner' as const,
         unreadCount: 7,
         firstUnread: { msgSeq: 'opaque-seq-42', msgTime: '1700000001' },
         readInboxMaxMessage: {
@@ -42,11 +43,17 @@ describe('QQNTPlatform mapping', () => {
       total: 1,
     }))
     platform.client.getHistory = vi.fn(async () => ({ messages: [] }))
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'self', numericId: '10000', name: 'Bridge',
+    }))
     const dialogs = await platform.getDialogs(session)
     expect(dialogs.dialogs[0]).toMatchObject({
       conversation: {
         id: '2:1058754719', kind: 'group',
-        metadata: { qqPeerUid: '1058754719', qq: '1058754719', chatType: 2 },
+        metadata: {
+          qqPeerUid: '1058754719', qq: '1058754719', chatType: 2,
+          participantsCount: 42, qqSelfRole: 'owner',
+        },
       },
       unreadCount: 7,
       readInboxMaxMessage: {
@@ -62,6 +69,14 @@ describe('QQNTPlatform mapping', () => {
       afterId: undefined,
       aroundUnreadSeq: 'opaque-seq-42',
     })
+    await expect(platform.getConversationMember(
+      session, { id: '2:1058754719' }, 'self',
+    )).resolves.toMatchObject({
+      user: { id: 'self', firstName: 'Bridge' },
+      role: 'owner',
+      permissions: { manageMembers: true },
+    })
+    expect(platform.client.getMembers).not.toHaveBeenCalled()
     const members = await platform.getConversationMembers(session, { id: '2:1058754719' })
     expect(members.members[0]).toMatchObject({
       user: {
@@ -93,6 +108,15 @@ describe('QQNTPlatform mapping', () => {
         metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
       } }],
     })
+  })
+
+  it('does not scan the full member list when a self-role probe arrives before group metadata', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getMembers = vi.fn(async () => ({ members: [], total: 0 }))
+    await expect(platform.getConversationMember(
+      session, { id: 'cold-group' }, session.userId,
+    )).resolves.toBeNull()
+    expect(platform.client.getMembers).not.toHaveBeenCalled()
   })
 
   it('keeps the full buddy address book separate from recent dialogs and exposes avatars', async () => {
