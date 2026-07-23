@@ -14,7 +14,8 @@ import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
-  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireReactionState, WireTextPart,
+  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireMultiForwardLocator,
+  WireReactionState, WireTextPart,
 } from './protocol.js'
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
@@ -88,6 +89,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalogPromise?: Promise<IMReactionContext>
   private readonly memberName: MemberNameMode
   private readonly originSessions = new Map<string, string>()
+  private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
 
   constructor(
     options: Config = {},
@@ -160,20 +162,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         conversation: this.mapConversation(conversation),
         unreadCount: conversation.unreadCount ?? 0,
         lastMessage: conversation.lastMessage
-          ? mapMessage(
-              conversation.lastMessage,
-              this.memberName,
-              this.reactionCatalog,
-              this.stickerProviderId,
-            )
+          ? this.mapMessage(conversation.lastMessage)
           : undefined,
         readInboxMaxMessage: conversation.readInboxMaxMessage
-          ? mapMessage(
-              conversation.readInboxMaxMessage,
-              this.memberName,
-              this.reactionCatalog,
-              this.stickerProviderId,
-            )
+          ? this.mapMessage(conversation.readInboxMaxMessage)
           : undefined,
       })),
       nextCursor: response.nextCursor,
@@ -200,6 +192,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<QQMediaLocator>> {
     await this.ensureReactionCatalog()
+    const multiForward = this.multiForwardLocators.get(conversation.id)
+    if (multiForward) {
+      const messages = await this.client.getMultiForwardMessages(multiForward)
+      return {
+        messages: messages.slice(0, query.limit ?? messages.length).map((message) => ({
+          ...this.mapMessage(message),
+          conversationId: conversation.id,
+        })),
+      }
+    }
     const response = await this.client.getHistory(conversation.id, {
       cursor: query.cursor,
       limit: query.limit,
@@ -210,12 +212,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         : undefined,
     })
     return {
-      messages: response.messages.map((message) => mapMessage(
-        message,
-        this.memberName,
-        this.reactionCatalog,
-        this.stickerProviderId,
-      )),
+      messages: response.messages.map((message) => this.mapMessage(message)),
       nextCursor: response.nextCursor,
     }
   }
@@ -313,6 +310,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           entities.push({ ...entity, numericId })
           continue
         }
+        if (entity.type === 'conversation-link') continue
         const match = /^1:(\d+)$/.exec(entity.definition.key)
         if (match) entities.push({
           type: 'qq-face', offset: entity.offset, length: entity.length,
@@ -348,13 +346,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const originRequestId = randomUUID()
     this.originSessions.set(originRequestId, session.platformSessionId)
     try {
-      return mapMessage(
+      return this.mapMessage(
         await this.client.sendMessage(
           conversation.id, text, media, options, originRequestId, sticker, textParts, content.replyToId,
         ),
-        this.memberName,
-        this.reactionCatalog,
-        this.stickerProviderId,
       )
     } finally {
       const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
@@ -384,7 +379,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       for (const messageId of messageIds) {
         const wire = await this.client.getMessage(from.id, messageId)
         if (!wire) throw new Error(`QQ source message not found: ${messageId}`)
-        const source = mapMessage(wire, this.memberName, this.reactionCatalog, this.stickerProviderId)
+        const source = this.mapMessage(wire)
         const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
           if (part.type === 'text') return { ...part }
           if (part.type === 'sticker') return {
@@ -419,9 +414,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
     const merged = messageIds.length > 1
     const messages = await this.client.forwardMessages(from.id, messageIds, to.id, merged)
-    return messages.map((message) => mapMessage(
-      message, this.memberName, this.reactionCatalog, this.stickerProviderId,
-    ))
+    return messages.map((message) => this.mapMessage(message))
   }
 
   async *downloadMedia(
@@ -641,12 +634,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       return {
         type: 'message',
         conversation,
-        message: mapMessage(
-          input.message,
-          this.memberName,
-          this.reactionCatalog,
-          this.stickerProviderId,
-        ),
+        message: this.mapMessage(input.message),
       }
     }
     if (input.type === 'message-delete') return {
@@ -668,6 +656,28 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       },
       timestamp: input.timestamp,
     }
+  }
+
+  private mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
+    return mapMessage(
+      input, this.memberName, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
+    )
+  }
+
+  private readonly registerMultiForward = (
+    title: string,
+    locator: WireMultiForwardLocator,
+  ): IMConversation<QQMediaLocator> => {
+    const id = multiForwardConversationId(locator)
+    const conversation: IMConversation<QQMediaLocator> = {
+      id,
+      kind: 'group',
+      title: title || '聊天记录',
+      metadata: { qqTemporaryMultiForward: true },
+    }
+    this.multiForwardLocators.set(id, locator)
+    this.conversations.set(id, conversation)
+    return conversation
   }
 }
 
@@ -705,6 +715,7 @@ function mapMessage(
   memberName: MemberNameMode,
   reactionCatalog?: IMReactionContext,
   stickerProviderId = 'qqnt:stickers',
+  registerMultiForward?: (title: string, locator: WireMultiForwardLocator) => IMConversation<QQMediaLocator>,
 ): IMMessage<QQMediaLocator> {
   return {
     id: input.id,
@@ -732,7 +743,7 @@ function mapMessage(
       maxSelected: input.reactionContext.maxSelected,
     } : undefined,
     content: {
-      parts: mapParts(input, stickerProviderId, reactionCatalog),
+      parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward),
     },
   }
 }
@@ -741,6 +752,7 @@ function mapParts(
   input: WireMessage,
   stickerProviderId: string,
   reactionCatalog?: IMReactionContext,
+  registerMultiForward?: (title: string, locator: WireMultiForwardLocator) => IMConversation<QQMediaLocator>,
 ): IMMessage<QQMediaLocator>['content']['parts'] {
   const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
   for (const part of input.parts) {
@@ -757,6 +769,12 @@ function mapParts(
       } else {
         parts.push(normalized)
       }
+    } else if (part.type === 'multi-forward') {
+      const conversation = registerMultiForward?.(part.title, part.locator)
+      parts.push({
+        type: 'text', text: '\u200b',
+        entities: conversation ? [{ type: 'conversation-link', offset: 0, length: 1, conversation }] : undefined,
+      })
     } else if (part.type === 'sticker') {
       parts.push({
               type: 'sticker' as const,
@@ -779,6 +797,12 @@ function mapParts(
     }
   }
   return parts
+}
+
+function multiForwardConversationId(locator: WireMultiForwardLocator): string {
+  return `qqnt-multi-forward:${JSON.stringify([
+    locator.conversationId, locator.rootMessageId, locator.parentMessageId ?? '',
+  ])}`
 }
 
 function normalizeTextPart(

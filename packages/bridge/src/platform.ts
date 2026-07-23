@@ -179,6 +179,13 @@ export type IMTextEntity =
       /** Definition includes the platform-native key and downloadable visual resource. */
       definition: IMReactionDefinition
     }
+  | {
+      type: 'conversation-link'
+      offset: number
+      length: number
+      /** A non-dialog conversation made addressable by this message. */
+      conversation: IMConversation
+    }
 
 export type IMMessagePart<TMediaLocator = unknown> =
   | { type: 'text', text: string, entities?: IMTextEntity[] }

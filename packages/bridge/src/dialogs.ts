@@ -181,7 +181,10 @@ export class DialogRpc {
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
       messages: page.map((item) => this._makeMessage(item)),
       topics: [],
-      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      chats: uniqueChats([
+        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
+        ...this._linkedChats(page.map((item) => item.source)),
+      ]),
       users: uniqueUsers([...peerUser, ...senders, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
   }
@@ -212,7 +215,10 @@ export class DialogRpc {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
       messages: page.map((item) => this._makeMessage(item)), topics: [],
-      chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
+      chats: uniqueChats([
+        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
+        ...this._linkedChats(page.map((item) => item.source)),
+      ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
   }
@@ -235,6 +241,7 @@ export class DialogRpc {
     await this._hydrateAllMessages()
     const users = new Map<number, tl.RawUser>()
     const messages: tl.TypeMessage[] = []
+    const linkedSources: IMMessage[] = []
 
     for (const input of req.id) {
       const requestedId = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
@@ -276,6 +283,7 @@ export class DialogRpc {
         continue
       }
       messages.push(this._makeMessage(found))
+      linkedSources.push(found.source)
       const sender = await this._getMessageSender(found.source)
       users.set(sender.id, sender)
     }
@@ -283,7 +291,8 @@ export class DialogRpc {
     const self = this._makeSelfUser()
     users.set(self.id, self)
     return {
-      _: 'messages.messages', messages, topics: [], chats: [], users: [...users.values()],
+      _: 'messages.messages', messages, topics: [],
+      chats: this._linkedChats(linkedSources), users: [...users.values()],
     } as unknown as tl.messages.TypeMessages
   }
 
@@ -1486,6 +1495,13 @@ export class DialogRpc {
             length: entity.length,
             userId: this._peerId(entity.userId),
           })
+        } else if (entity.type === 'conversation-link') {
+          const channelId = this._peerId(entity.conversation.id)
+          this._conversations.set(entity.conversation.id, entity.conversation)
+          output.push({
+            _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
+            url: `tg://privatepost?channel=${channelId}&post=1`,
+          })
         } else if (entity.definition.presentation.type === 'custom' && this._reactions) {
           const reaction = this._reactions.toTlReaction(source.conversationId, entity.definition)
           if (reaction._ === 'reactionCustomEmoji') output.push({
@@ -1497,6 +1513,24 @@ export class DialogRpc {
       base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
     }
     return output.length ? output : undefined
+  }
+
+  private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
+    const conversations = new Map<string, import('./platform.js').IMConversation>()
+    for (const message of messages) {
+      for (const part of message.content.parts) {
+        if (part.type !== 'text') continue
+        for (const entity of part.entities ?? []) {
+          if (entity.type !== 'conversation-link') continue
+          conversations.set(entity.conversation.id, entity.conversation)
+        }
+      }
+    }
+    return [...conversations.values()].map((conversation) => {
+      this._conversations.set(conversation.id, conversation)
+      this._peerId(conversation.id)
+      return this._makeChat(conversation)
+    })
   }
 
   private _inputTextPart(text: string, entities?: tl.TypeMessageEntity[]): IMMessageInput['parts'][number] {

@@ -152,9 +152,13 @@ export class UpdateManager {
         photo: sender?.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
       }),
     ]
-    const chats = displayConversation.kind === 'direct'
-      ? []
-      : [makeUpdateChat(displayConversation, topicId !== undefined, this._dcId)]
+    const chats = [
+      ...(displayConversation.kind === 'direct'
+        ? []
+        : [makeUpdateChat(displayConversation, topicId !== undefined, this._dcId)]),
+      ...linkedConversations(event.message).map((conversation) =>
+        makeUpdateChat(conversation, false, this._dcId)),
+    ]
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
@@ -350,6 +354,11 @@ function makeMessageEntities(message: IMMessage, platformSessionId: string): tl.
           _: 'messageEntityMentionName', offset: base + entity.offset, length: entity.length,
           userId: stableId(`peer:${entity.userId}`),
         })
+      } else if (entity.type === 'conversation-link') {
+        entities.push({
+          _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
+          url: `tg://privatepost?channel=${stableId(`peer:${entity.conversation.id}`)}&post=1`,
+        })
       } else if (entity.definition.presentation.type === 'custom') {
         entities.push({
           _: 'messageEntityCustomEmoji', offset: base + entity.offset, length: entity.length,
@@ -363,6 +372,17 @@ function makeMessageEntities(message: IMMessage, platformSessionId: string): tl.
     base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
   }
   return entities.length ? entities : undefined
+}
+
+function linkedConversations(message: IMMessage): import('./platform.js').IMConversation[] {
+  const conversations = new Map<string, import('./platform.js').IMConversation>()
+  for (const part of message.content.parts) {
+    if (part.type !== 'text') continue
+    for (const entity of part.entities ?? []) {
+      if (entity.type === 'conversation-link') conversations.set(entity.conversation.id, entity.conversation)
+    }
+  }
+  return [...conversations.values()]
 }
 
 function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {

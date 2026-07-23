@@ -400,6 +400,38 @@ describe('DialogRpc', () => {
     })
   })
 
+  it('links zero-width text to an addressable non-dialog conversation', async () => {
+    const platform = new DialogTestPlatform()
+    const temporary = { id: 'temporary-forward', kind: 'group' as const, title: '聊天记录' }
+    platform.addMessage('alice', {
+      id: 'merged', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
+      content: { parts: [{
+        type: 'text', text: '\u200b',
+        entities: [{ type: 'conversation-link', offset: 0, length: 1, conversation: temporary }],
+      }] },
+    })
+    platform.addMessage(temporary.id, {
+      id: 'inside', conversationId: temporary.id, senderId: 'bob', timestamp: 1_700_000_251,
+      content: { parts: [{ type: 'text', text: 'forwarded content' }] },
+    })
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+    const aliceId = rpc.peerTlId('alice')
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const merged = history.messages.find((item) => item._ === 'message' && item.id > 0) as tl.RawMessage
+    const temporaryId = rpc.peerTlId(temporary.id)
+    expect(merged.entities).toMatchObject([{
+      _: 'messageEntityTextUrl', offset: 0, length: 1,
+      url: `tg://privatepost?channel=${temporaryId}&post=1`,
+    }])
+    expect(history.chats).toMatchObject([{ _: 'channel', id: temporaryId, title: '聊天记录' }])
+
+    const inside = await rpc.getHistory(getHistoryRequest(temporaryId, {
+      peer: { _: 'inputPeerChannel', channelId: temporaryId, accessHash: Long.ZERO },
+    })) as tl.messages.RawMessages
+    expect(inside.messages).toMatchObject([{ _: 'message', message: 'forwarded content' }])
+  })
+
   it('maps platform inline custom emoji entities to Telegram documents and back', async () => {
     const platform = new DialogTestPlatform()
     const definition = {
