@@ -185,7 +185,12 @@ export interface WireReactionContext extends WireReactionState {
 }
 
 export interface WireReactionState {
-  reactions: Array<{ key: string, count: number, selected?: boolean }>
+  reactions: Array<{
+    key: string
+    count: number
+    selected?: boolean
+    recentActors?: Array<{ userId: string, timestamp?: number }>
+  }>
   maxSelected: number
 }
 

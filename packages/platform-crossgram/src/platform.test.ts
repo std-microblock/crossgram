@@ -509,7 +509,11 @@ describe('QQNTPlatform mapping', () => {
     }).png().toBuffer()
     platform.client.downloadMedia = vi.fn(async function* () { yield png })
     platform.client.getMessageReactions = vi.fn(async () => ({
-      reactions: context.reactions, maxSelected: 20,
+      reactions: [{
+        ...context.reactions[0],
+        recentActors: [{ userId: 'actor-a' }, { userId: 'actor-b' }],
+      }],
+      maxSelected: 20,
     }))
     platform.client.setMessageReactions = vi.fn(async () => ({
       reactions: [{ key: '1:14', count: 1, selected: true }], maxSelected: 20,
@@ -549,7 +553,10 @@ describe('QQNTPlatform mapping', () => {
     expect(Buffer.concat(webm)).toEqual(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
     await expect(platform.getMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm',
-    })).resolves.toMatchObject({ reactions: [{ key: '2:128522', selected: true }] })
+    })).resolves.toMatchObject({ reactions: [{
+      key: '2:128522', selected: true,
+      recentActors: [{ userId: 'actor-a' }, { userId: 'actor-b' }],
+    }] })
     await expect(platform.setMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm',
     }, ['1:14'])).resolves.toMatchObject({ reactions: [{ key: '1:14', selected: true }] })

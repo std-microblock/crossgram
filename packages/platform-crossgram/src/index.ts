@@ -76,7 +76,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       edit: { mode: 'delete-and-resend', maxAgeSeconds: 120 },
       forward: { mode: 'native', preservesAuthor: true },
     },
-    reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 20 },
+    reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
     stickers: { native: true, upload: false, formats: ['static', 'animated', 'video'] },
   }
 
