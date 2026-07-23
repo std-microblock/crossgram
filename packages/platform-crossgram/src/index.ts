@@ -53,6 +53,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   readonly client: QQNTClient
+  private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
 
   constructor(options: QQNTClientOptions = {}) {
     this.client = new QQNTClient(options)
@@ -76,7 +77,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<void> {
     while (!signal.aborted) {
       try {
-        await this.client.subscribe((event) => handler(mapEvent(event)), signal)
+        await this.client.subscribe((event) => handler(this.mapEvent(event)), signal)
       } catch {
         if (signal.aborted) return
       }
@@ -88,7 +89,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const response = await this.client.getDialogs({ cursor: query.cursor, limit: query.limit })
     return {
       dialogs: response.conversations.map((conversation) => ({
-        conversation: mapConversation(conversation),
+        conversation: this.mapConversation(conversation),
         unreadCount: conversation.unreadCount ?? 0,
         lastMessage: conversation.lastMessage ? mapMessage(conversation.lastMessage) : undefined,
       })),
@@ -282,6 +283,44 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       },
     })
   }
+
+  private mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
+    const current = this.conversations.get(input.id)
+    const mapped = mapConversation(input)
+    const fallbackTitles = new Set([input.id, input.peerUid, input.peerUin].filter(Boolean))
+    const title = current?.title && fallbackTitles.has(mapped.title) ? current.title : mapped.title
+    const conversation: IMConversation<QQMediaLocator> = {
+      ...current,
+      ...mapped,
+      title,
+      avatar: mapped.avatar ?? current?.avatar,
+      metadata: { ...current?.metadata, ...mapped.metadata },
+    }
+    this.conversations.set(conversation.id, conversation)
+    return conversation
+  }
+
+  private mapEvent(input: WireEvent): IMEvent<QQMediaLocator> {
+    const conversation = this.mapConversation(input.conversation)
+    if (input.type === 'message') {
+      return { type: 'message', conversation, message: mapMessage(input.message) }
+    }
+    if (input.type === 'message-delete') return {
+      type: 'message-delete',
+      eventId: input.eventId,
+      conversation,
+      messageIds: input.messageIds,
+      timestamp: input.timestamp,
+    }
+    return {
+      type: 'message-reactions',
+      eventId: input.eventId,
+      conversation,
+      target: input.target,
+      context: input.context as IMReactionContext,
+      timestamp: input.timestamp,
+    }
+  }
 }
 
 function mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
@@ -327,27 +366,6 @@ function mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
           type: 'media' as const, media: mapMedia(part.media),
         }),
     },
-  }
-}
-
-function mapEvent(input: WireEvent): IMEvent<QQMediaLocator> {
-  if (input.type === 'message') {
-    return { type: 'message', conversation: mapConversation(input.conversation), message: mapMessage(input.message) }
-  }
-  if (input.type === 'message-delete') return {
-    type: 'message-delete',
-    eventId: input.eventId,
-    conversation: mapConversation(input.conversation),
-    messageIds: input.messageIds,
-    timestamp: input.timestamp,
-  }
-  return {
-    type: 'message-reactions',
-    eventId: input.eventId,
-    conversation: mapConversation(input.conversation),
-    target: input.target,
-    context: input.context as IMReactionContext,
-    timestamp: input.timestamp,
   }
 }
 
