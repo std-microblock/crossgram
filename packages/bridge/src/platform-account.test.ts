@@ -3,7 +3,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import { defineModels } from './models.js'
-import { provisionPlatformAccount } from './platform-account.js'
+import { PlatformAccountProvisioner, provisionPlatformAccount } from './platform-account.js'
 import type { IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession } from './platform.js'
 
 const disposals: Array<() => Promise<void>> = []
@@ -82,6 +82,25 @@ describe('platform-owned account provisioning', () => {
     await expect(provisionPlatformAccount(database, 'legacy', adapter)).resolves.toBeUndefined()
     expect(await database.get('mtproto_platform_session', {})).toEqual([])
     expect(await database.get('mtproto_auth_session', {})).toEqual([])
+  })
+
+  it('coalesces concurrent startup and registry provisioning into one database identity', async () => {
+    const database = await createDatabase()
+    const adapter = platform()
+    const getAccount = adapter.getAccount!.bind(adapter)
+    let calls = 0
+    adapter.getAccount = async () => {
+      calls++
+      await new Promise(resolve => setTimeout(resolve, 5))
+      return getAccount()
+    }
+    const provisioner = new PlatformAccountProvisioner(database)
+    const results = await Promise.all(Array.from({ length: 20 }, () => provisioner.provision('qqnt', adapter)))
+
+    expect(calls).toBe(1)
+    expect(new Set(results.map(result => result!.auth.id)).size).toBe(1)
+    expect(await database.get('mtproto_platform_session', { platformId: 'qqnt' })).toHaveLength(1)
+    expect(await database.get('mtproto_auth_session', { platformId: 'qqnt' })).toHaveLength(1)
   })
 
   it('rejects incomplete platform identity instead of inventing a user', async () => {

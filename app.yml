@@ -30,7 +30,7 @@
 - id: qqnt
   name: '@mtproto-relay/platform-qqnt'
   config:
-    endpoint: http://127.0.0.1:18767/v1
+    endpoint: http://127.0.0.1:18768/v1
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:
