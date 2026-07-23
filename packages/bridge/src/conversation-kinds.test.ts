@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -9,6 +9,7 @@ import Long from 'long'
 import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
+import { ReactionRpc } from './reaction-rpc.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
@@ -124,7 +125,16 @@ async function createRpc(selectedPlatform: IMPlatform = platform) {
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { ctx, rpc: new DialogRpc(selectedPlatform, session, new MessageStore(ctx.database)) }
+  const reactions = selectedPlatform.capabilities.reactions
+    ? new ReactionRpc(selectedPlatform, session)
+    : undefined
+  return {
+    ctx,
+    rpc: new DialogRpc(
+      selectedPlatform, session, new MessageStore(ctx.database),
+      undefined, undefined, 1, undefined, reactions,
+    ),
+  }
 }
 
 function dialogsRequest(): tl.messages.RawGetDialogsRequest {
@@ -147,6 +157,62 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('conversation kinds', () => {
+  it('refreshes and returns the platform users behind message reactions', async () => {
+    const reactionContext = {
+      available: [{
+        key: 'like',
+        presentation: { type: 'emoji' as const, emoticon: '👍' },
+      }],
+      reactions: [{ key: 'like', count: 3 }],
+      maxSelected: 1,
+    }
+    const getMessageReactions = vi.fn(async () => ({
+      ...reactionContext,
+      reactions: [{
+        key: 'like', count: 3,
+        recentActors: [{ userId: 'alice' }, { userId: 'bob' }],
+      }],
+    }))
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: false, events: false, actorList: true, maxSelected: 1 },
+      },
+      async getDialogs() {
+        const conversation = conversations.find((item) => item.id === 'group')!
+        return { dialogs: [{
+          conversation,
+          unreadCount: 0,
+          lastMessage: { ...source(conversation), reactionContext },
+        }] }
+      },
+      getMessageReactions,
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+    const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
+
+    await expect(rpc.getMessageReactionsList({
+      _: 'messages.getMessageReactionsList', peer, id: message.id, offset: '', limit: 100,
+    })).resolves.toMatchObject({
+      _: 'messages.messageReactionsList',
+      count: 3,
+      reactions: [
+        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: rpc.peerTlId('alice') } },
+        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: rpc.peerTlId('bob') } },
+      ],
+      users: expect.arrayContaining([
+        expect.objectContaining({ _: 'user', firstName: 'alice' }),
+        expect.objectContaining({ _: 'user', firstName: 'bob' }),
+      ]),
+    })
+    expect(getMessageReactions).toHaveBeenCalledWith(session, {
+      conversationId: 'group', messageId: 'message-group', targetId: 'message-group',
+    })
+  })
+
   it('materializes direct, group, and hierarchical channel dialogs with the correct peer types', async () => {
     const { ctx, rpc } = await createRpc()
     const result = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs

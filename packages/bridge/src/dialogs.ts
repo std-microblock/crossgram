@@ -963,7 +963,17 @@ export class DialogRpc {
     const peerId = this._resolvePeer(req.peer)
     const projected = await this._store?.findProjectedByTlId(this._session.platformSessionId, req.id, peerId)
     if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
-    const context = projected.source.reactionContext
+    const target = {
+      conversationId: peerId,
+      messageId: projected.source.id,
+      targetId: projected.source.sourceIds?.[0] ?? projected.source.id,
+    }
+    const refreshed = await this._platform.getMessageReactions?.(this._session, target)
+    const context = refreshed
+      ? (await this._store!.setReactions(
+          this._session, this._conversation(peerId), target, refreshed,
+        )).message.reactionContext
+      : projected.source.reactionContext
     const filter = req.reaction && context
       ? this._reactions!.resolveInput(peerId, req.reaction, context).key
       : undefined
@@ -977,7 +987,8 @@ export class DialogRpc {
       .map((id) => this._getPeerUser(id)))
     return {
       _: 'messages.messageReactionsList',
-      count: actors.length,
+      count: (context?.reactions ?? []).reduce((count, summary) =>
+        summary.key === filter || filter === undefined ? count + summary.count : count, 0),
       reactions: actors.map(({ summary, actor }) => ({
         _: 'messagePeerReaction',
         peerId: { _: 'peerUser', userId: this._peerId(actor.userId) },
