@@ -446,6 +446,19 @@ describe('bridge login e2e', () => {
         state: { _: 'updates.state', pts: 1 },
       })
 
+      const aliceDialog = dialogs.dialogs.find((dialog: any) =>
+        dialog.peer._ === 'peerUser' && dialog.peer.userId === alice.id)
+      expect(aliceDialog).toMatchObject({ unreadCount: 1 })
+      const unreadWindow = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        offsetId: aliceDialog.readInboxMaxId, offsetDate: 0, addOffset: -25, limit: 50,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 25)
+      expect(unreadWindow.messages.map((message: any) => message.message)).toEqual([
+        'How are you?', 'Hey there!',
+      ])
+
       const history = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },

@@ -144,7 +144,16 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<StaticMediaLocator>> {
     const dialogs = [...this._conversations.values()].map((conversation): IMDialog<StaticMediaLocator> => {
       const messages = this._messages.get(conversation.id) ?? []
-      return { conversation: clone(conversation), unreadCount: 0, lastMessage: clone(messages.at(-1)) }
+      // Keep one deterministic unread dialog in the reference adapter. This
+      // exercises the same read_inbox_max_id + negative add_offset flow used by
+      // Telegram Desktop against real adapters such as QQNT.
+      const unread = conversation.id === 'alice' && messages.length >= 2
+      return {
+        conversation: clone(conversation),
+        unreadCount: unread ? 1 : 0,
+        lastMessage: clone(messages.at(-1)),
+        readInboxMaxMessage: unread ? clone(messages.at(-2)) : undefined,
+      }
     }).sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0))
     const start = pageStart(dialogs.map((dialog) => dialog.conversation.id), query.cursor, query.afterId)
     const limit = clampLimit(query.limit)
