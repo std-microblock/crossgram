@@ -1455,7 +1455,7 @@ export class DialogRpc {
           ? this._stickers?.makeMessageMedia(
               source.content.parts.find((part) => part.type === 'sticker')!.sticker,
             )
-          : undefined,
+          : this._conversationPreviewMedia(source),
       groupedId: item.groupedId ? Long.fromString(item.groupedId) : undefined,
       reactions: source.reactionContext?.reactions.length
         ? this._reactions?.messageReactions(source.conversationId, source)
@@ -1496,11 +1496,9 @@ export class DialogRpc {
             userId: this._peerId(entity.userId),
           })
         } else if (entity.type === 'conversation-link') {
-          const channelId = this._peerId(entity.conversation.id)
-          this._conversations.set(entity.conversation.id, entity.conversation)
           output.push({
             _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
-            url: `tg://privatepost?channel=${channelId}&post=1`,
+            url: this._conversationLinkUrl(entity.conversation),
           })
         } else if (entity.definition.presentation.type === 'custom' && this._reactions) {
           const reaction = this._reactions.toTlReaction(source.conversationId, entity.definition)
@@ -1513,6 +1511,33 @@ export class DialogRpc {
       base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
     }
     return output.length ? output : undefined
+  }
+
+  private _conversationPreviewMedia(source: IMMessage): tl.RawMessageMediaWebPage | undefined {
+    const linked = source.content.parts
+      .filter((part) => part.type === 'text')
+      .flatMap((part) => part.entities ?? [])
+      .find((entity) => entity.type === 'conversation-link')
+    if (!linked || linked.type !== 'conversation-link') return
+
+    const url = this._conversationLinkUrl(linked.conversation)
+    return {
+      _: 'messageMediaWebPage', manual: true, safe: true,
+      webpage: {
+        _: 'webPage',
+        id: Long.fromNumber(stableId(`conversation-preview:${linked.conversation.id}`)),
+        url, displayUrl: linked.conversation.title, hash: 0,
+        type: 'telegram_message', siteName: '聊天记录',
+        title: linked.conversation.title,
+        description: '点击查看合并转发消息',
+      },
+    }
+  }
+
+  private _conversationLinkUrl(conversation: import('./platform.js').IMConversation): string {
+    const channelId = this._peerId(conversation.id)
+    this._conversations.set(conversation.id, conversation)
+    return `tg://privatepost?channel=${channelId}&post=1`
   }
 
   private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
