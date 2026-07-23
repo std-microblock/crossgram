@@ -8,6 +8,9 @@
   config:
     endpoint: http://127.0.0.1:18767/v1
     # token: optional-shared-secret
+    # groupAlias (default) uses the current group's card when present.
+    # nickname always uses the user's QQ profile nickname.
+    memberName: groupAlias
 ```
 
 The transport uses JSON for metadata, SSE for ordered incoming events, a
@@ -27,7 +30,11 @@ confirms or rejects the message. Memory use remains bounded.
 - Buddy and Group list updates only enrich names/avatars and do not turn every
   entity into a recent dialog.
 
-User and group avatars are exposed through the same ranged media stream.
+The member API keeps the QQ profile nickname and conversation-scoped group
+alias as separate fields. The adapter selects one with `memberName`, while
+preserving both values in user metadata. User avatars use QQ's fixed qlogo
+endpoint and group avatars continue to use QQNT's avatar service; both are
+exposed through the same ranged media stream.
 
 Reactions are populated from QQ's downloaded cloud-control emoji config
 (`getEmojiResourcePath(0)`). Unicode QQ emoji are mapped to Telegram emoji

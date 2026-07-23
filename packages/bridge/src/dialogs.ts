@@ -152,8 +152,7 @@ export class DialogRpc {
     const start = Math.max(0, req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
     const conversation = this._conversation(peerId)
-    const senderIds = [...new Set(page.map((item) => item.source.senderId))]
-    const senders = await Promise.all(senderIds.map((senderId) => this._getPeerUser(senderId)))
+    const senders = await this._messageSenders(page.map((item) => item.source))
     const peerUser = conversation.kind === 'direct'
       ? [await this._getPeerUser(peerId, conversation.title)]
       : []
@@ -188,8 +187,7 @@ export class DialogRpc {
     })
     const start = Math.max(0, req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
-    const users = await Promise.all([...new Set(page.map((item) => item.source.senderId))]
-      .map((senderId) => this._getPeerUser(senderId)))
+    const users = await this._messageSenders(page.map((item) => item.source))
     return {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
@@ -258,7 +256,7 @@ export class DialogRpc {
         continue
       }
       messages.push(this._makeMessage(found))
-      const sender = await this._getPeerUser(found.source.senderId)
+      const sender = await this._getMessageSender(found.source)
       users.set(sender.id, sender)
     }
 
@@ -417,8 +415,7 @@ export class DialogRpc {
       : 0
     const limit = req._ === 'messages.getForumTopics' ? clampLimit(req.limit) : materialized.length
     const page = materialized.slice(offset, offset + limit)
-    const users = await Promise.all([...new Set(page.map((item) => item.top.source.senderId))]
-      .map((senderId) => this._getPeerUser(senderId)))
+    const users = await this._messageSenders(page.map((item) => item.top.source))
     return {
       _: 'messages.forumTopics', count: materialized.length,
       topics: page.map((item) => item.topic),
@@ -447,8 +444,7 @@ export class DialogRpc {
     })
     const page = filtered.slice(Math.max(0, req.addOffset), Math.max(0, req.addOffset) + clampLimit(req.limit))
     const topic = (await this._materializeTopic(this._conversation(parentId), child)).topic
-    const users = await Promise.all([...new Set(page.map((item) => item.source.senderId))]
-      .map((senderId) => this._getPeerUser(senderId)))
+    const users = await this._messageSenders(page.map((item) => item.source))
     return {
       _: 'messages.channelMessages', pts: this._pts, count: filtered.length,
       messages: page.map((item) => this._makeMessage(item)), topics: [topic],
@@ -1218,7 +1214,7 @@ export class DialogRpc {
     const users = source.conversation.kind === 'direct'
       ? [await this._getPeerUser(platformPeerId, source.conversation.title)]
       : source.lastMessage
-        ? [await this._getPeerUser(source.lastMessage.senderId)]
+        ? [await this._getMessageSender(source.lastMessage)]
         : []
     const chat = source.conversation.kind === 'direct' ? undefined : this._makeChat(source.conversation)
     let projected = source.lastMessage
@@ -1385,6 +1381,19 @@ export class DialogRpc {
   private async _getPeerUser(peerId: string, fallbackName?: string): Promise<tl.RawUser> {
     const user = await this._platform.getUser?.(this._session, peerId)
     return this._makePeerUser(user ?? { id: peerId, firstName: fallbackName ?? peerId })
+  }
+
+  private async _getMessageSender(message: IMMessage<any>): Promise<tl.RawUser> {
+    if (message.senderId === this._session.userId) return this._makeSelfUser(message.sender?.avatar)
+    return message.sender
+      ? this._makePeerUser(message.sender)
+      : this._getPeerUser(message.senderId)
+  }
+
+  private async _messageSenders(messages: readonly IMMessage<any>[]): Promise<tl.RawUser[]> {
+    const senders = new Map<string, IMMessage<any>>()
+    for (const message of messages) senders.set(message.senderId, message)
+    return Promise.all([...senders.values()].map((message) => this._getMessageSender(message)))
   }
 
   private async _allMembers(conversationId: string): Promise<IMConversationMember<any>[]> {

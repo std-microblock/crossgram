@@ -11,9 +11,14 @@ import type {
   QQMediaLocator, WireConversation, WireEvent, WireMedia, WireMessage,
 } from './protocol.js'
 
-export interface Config {
-  endpoint?: string
-  token?: string
+export type MemberNameMode = 'nickname' | 'groupAlias'
+
+export interface Config extends QQNTClientOptions {
+  /**
+   * `nickname` always exposes the QQ profile nickname.
+   * `groupAlias` prefers the conversation-scoped group card when available.
+   */
+  memberName?: MemberNameMode
 }
 
 export const name = 'im-platform-qqnt'
@@ -54,9 +59,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   readonly client: QQNTClient
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
+  private readonly memberName: MemberNameMode
 
-  constructor(options: QQNTClientOptions = {}) {
+  constructor(options: Config = {}) {
     this.client = new QQNTClient(options)
+    this.memberName = options.memberName ?? 'groupAlias'
   }
 
   async subscribe(
@@ -91,7 +98,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       dialogs: response.conversations.map((conversation) => ({
         conversation: this.mapConversation(conversation),
         unreadCount: conversation.unreadCount ?? 0,
-        lastMessage: conversation.lastMessage ? mapMessage(conversation.lastMessage) : undefined,
+        lastMessage: conversation.lastMessage ? mapMessage(conversation.lastMessage, this.memberName) : undefined,
       })),
       nextCursor: response.nextCursor,
     }
@@ -122,7 +129,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       beforeId: query.before?.id,
       afterId: query.after?.id,
     })
-    return { messages: response.messages.map(mapMessage), nextCursor: response.nextCursor }
+    return {
+      messages: response.messages.map((message) => mapMessage(message, this.memberName)),
+      nextCursor: response.nextCursor,
+    }
   }
 
   async getUser(_session: PlatformSession, userId: string): Promise<IMUser<QQMediaLocator> | null> {
@@ -147,9 +157,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       members: page.members.map((member): IMConversationMember<QQMediaLocator> => ({
         user: {
           id: member.user.id,
-          firstName: member.user.name,
+          firstName: memberDisplayName(member.user, this.memberName),
           username: member.user.numericId,
-          metadata: member.user.numericId ? { qq: member.user.numericId } : undefined,
+          avatar: member.user.avatar ? mapMedia(member.user.avatar) : undefined,
+          metadata: {
+            ...(member.user.numericId ? { qq: member.user.numericId } : {}),
+            qqName: member.user.name,
+            ...(member.user.alias ? { qqGroupAlias: member.user.alias } : {}),
+          },
         },
         role: member.role,
         permissions: permissions(member.role),
@@ -191,7 +206,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       mimeType: part.media.mimeType,
       source: part.media.source,
     } : undefined
-    return mapMessage(await this.client.sendMessage(conversation.id, text, media, options))
+    return mapMessage(await this.client.sendMessage(conversation.id, text, media, options), this.memberName)
   }
 
   async deleteMessages(
@@ -303,7 +318,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private mapEvent(input: WireEvent): IMEvent<QQMediaLocator> {
     const conversation = this.mapConversation(input.conversation)
     if (input.type === 'message') {
-      return { type: 'message', conversation, message: mapMessage(input.message) }
+      return { type: 'message', conversation, message: mapMessage(input.message, this.memberName) }
     }
     if (input.type === 'message-delete') return {
       type: 'message-delete',
@@ -350,12 +365,23 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
   }
 }
 
-function mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
+function mapMessage(input: WireMessage, memberName: MemberNameMode): IMMessage<QQMediaLocator> {
   return {
     id: input.id,
     sourceIds: input.sourceIds,
     conversationId: input.conversationId,
     senderId: input.senderId,
+    sender: input.sender ? {
+      id: input.sender.id,
+      firstName: memberDisplayName(input.sender, memberName),
+      username: input.sender.numericId,
+      avatar: input.sender.avatar ? mapMedia(input.sender.avatar) : undefined,
+      metadata: {
+        ...(input.sender.numericId ? { qq: input.sender.numericId } : {}),
+        qqName: input.sender.name,
+        ...(input.sender.alias ? { qqGroupAlias: input.sender.alias } : {}),
+      },
+    } : undefined,
     timestamp: input.timestamp,
     outgoing: input.outgoing,
     metadata: input.msgSeq ? { qqMsgSeq: input.msgSeq } : undefined,
@@ -367,6 +393,13 @@ function mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
         }),
     },
   }
+}
+
+function memberDisplayName(
+  user: { name: string, alias?: string },
+  mode: MemberNameMode,
+): string {
+  return mode === 'groupAlias' ? user.alias?.trim() || user.name : user.name
 }
 
 function permissions(role: 'owner' | 'administrator' | 'member') {

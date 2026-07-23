@@ -6,7 +6,7 @@ import {
   messageMedia, messageText,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
   type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
-  type JsonValue, type PlatformSession,
+  type IMUser, type JsonObject, type JsonValue, type PlatformSession,
 } from './platform.js'
 import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
 
@@ -52,6 +52,7 @@ export interface StoredHistoryQuery {
 
 const MESSAGE_ID_MIDPOINT = 0x40000000
 export const UPDATE_DELIVERY_RETENTION = 1_000
+const STORED_SENDER_KEY = '__mtprotoRelaySender'
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
@@ -101,6 +102,7 @@ export class MessageStore {
       }
 
       const created = !message
+      const storedMetadata = messageMetadata(source)
       const changed = !message || (!message.deleted && (
         message.senderPlatformUserId !== source.senderId
         || message.text !== messageText(source)
@@ -108,7 +110,7 @@ export class MessageStore {
         || message.timestamp !== source.timestamp
         || message.outgoing !== (source.outgoing ?? false)
         || message.platformGroupId !== (source.groupId ?? null)
-        || JSON.stringify(message.metadata) !== JSON.stringify(source.metadata ?? {})
+        || JSON.stringify(message.metadata) !== JSON.stringify(storedMetadata)
       ))
       if (!message) {
         message = await database.create('mtproto_im_message', {
@@ -122,7 +124,7 @@ export class MessageStore {
           outgoing: source.outgoing ?? false,
           deleted: false,
           platformGroupId: source.groupId ?? null,
-          metadata: source.metadata ?? {},
+          metadata: storedMetadata,
           createdAt: now,
           updatedAt: now,
         })
@@ -134,7 +136,7 @@ export class MessageStore {
           timestamp: source.timestamp,
           outgoing: source.outgoing ?? false,
           platformGroupId: source.groupId ?? null,
-          metadata: source.metadata ?? {},
+          metadata: storedMetadata,
           updatedAt: now,
         })
         ;[message] = await database.get('mtproto_im_message', { id: message.id })
@@ -651,16 +653,18 @@ export class MessageStore {
       .orderBy('ordinal').execute()
     const reactions = await this._database.select('mtproto_im_message_reaction', { messageId: row.id })
       .orderBy('id').execute()
+    const { sender, metadata } = hydrateMessageMetadata(row.metadata)
     return {
       id: row.primaryPlatformMessageId,
       sourceIds: aliases.map((alias) => alias.platformMessageId),
       conversationId: (await this._conversationId(row.conversationId)),
       senderId: row.senderPlatformUserId,
+      sender,
       content: row.content as unknown as IMMessageContent,
       timestamp: row.timestamp,
       outgoing: row.outgoing,
       groupId: row.platformGroupId ?? undefined,
-      metadata: row.metadata,
+      metadata,
       reactionContext: reactions.length ? {
         available: reactions.map((reaction) => reaction.definition as unknown as IMReactionDefinition),
         reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
@@ -736,6 +740,31 @@ function toConversation(row: IMConversationRow): IMConversation {
     spaceId: row.spacePlatformId ?? undefined,
     metadata: row.metadata,
   }
+}
+
+function messageMetadata(message: IMMessage): JsonObject {
+  return {
+    ...message.metadata,
+    ...(message.sender
+      ? { [STORED_SENDER_KEY]: message.sender as unknown as JsonValue }
+      : {}),
+  }
+}
+
+function hydrateMessageMetadata(metadata: JsonObject): {
+  sender?: IMUser
+  metadata: JsonObject
+} {
+  const publicMetadata = { ...metadata }
+  delete publicMetadata[STORED_SENDER_KEY]
+  const candidate = metadata[STORED_SENDER_KEY]
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return { metadata: publicMetadata }
+  }
+  const sender = candidate as unknown as IMUser
+  return typeof sender.id === 'string' && typeof sender.firstName === 'string'
+    ? { sender, metadata: publicMetadata }
+    : { metadata: publicMetadata }
 }
 
 function clampDatabaseLimit(limit: number): number {

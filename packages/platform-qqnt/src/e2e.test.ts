@@ -23,6 +23,8 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     expect(new Set(contacts.users.map((user) => user.id)).size).toBe(17)
     expect(contacts.users.filter((user) => !user.firstName.trim())).toEqual([])
     expect(contacts.users.filter((user) => !user.avatar).map((user) => user.id)).toEqual([])
+    expect(contacts.users.every((user) =>
+      user.avatar?.locator?.avatarUin === user.username)).toBe(true)
     const withAvatar = contacts.users[0]
     let bytes = 0
     for await (const chunk of platform.downloadMedia(session, withAvatar!.avatar!, { limit: 128 })) bytes += chunk.length
