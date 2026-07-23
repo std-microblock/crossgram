@@ -33,10 +33,10 @@
   },
   "devDependencies": {
     "@cordisjs/client": "^0.8.1",
-    "@vue/test-utils": "^2.4.6",
     "@fuman/io": "^0.0.20",
     "@fuman/utils": "^0.0.20",
     "@mtcute/node": "^0.30.3",
+    "@vue/test-utils": "^2.4.6",
     "happy-dom": "^18.0.1",
     "vue": "^3.5.33"
   }
