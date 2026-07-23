@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
@@ -234,6 +234,28 @@ describe('DialogRpc', () => {
     const afterNewest = await rpc.getHistory(getHistoryRequest(aliceId, { offsetId: newest.id })) as tl.messages.RawMessages
     expect(afterNewest.messages).toEqual([oldest])
     expect(() => wireRoundTrip(full)).not.toThrow()
+  })
+
+  it('coalesces and briefly caches peer hydration while opening a dialog', async () => {
+    const platform = new DialogTestPlatform()
+    const getDialogs = vi.spyOn(platform, 'getDialogs')
+    const rpc = new DialogRpc(platform, session)
+    const aliceId = stableId('peer:alice')
+    const peer = { _: 'inputPeerUser' as const, userId: aliceId, accessHash: Long.ZERO }
+
+    await Promise.all([
+      rpc.getHistory(getHistoryRequest(aliceId)),
+      rpc.getPeerSettings({ _: 'messages.getPeerSettings', peer }),
+      rpc.readHistory({ _: 'messages.readHistory', peer, maxId: 123 }),
+    ])
+    await rpc.getScheduledHistory({ _: 'messages.getScheduledHistory', peer, hash: Long.ZERO })
+
+    expect(getDialogs).toHaveBeenCalledTimes(1)
+
+    // An explicit dialog-list request remains a refresh and bypasses the
+    // short-lived hydration cache.
+    await rpc.getDialogs(getDialogsRequest())
+    expect(getDialogs).toHaveBeenCalledTimes(2)
   })
 
   it('serves desktop search, read-state, and scheduled-history requests', async () => {
