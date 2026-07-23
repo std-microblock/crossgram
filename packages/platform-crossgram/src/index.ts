@@ -45,7 +45,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       maxMedia: 1,
     },
     conversations: { groups: true, channels: false, subchannels: false },
-    members: { list: true, administrators: true, permissions: false, paginated: true },
+    members: { list: true, administrators: true, permissions: false },
     avatars: { users: true, conversations: true },
     messageActions: {
       delete: {

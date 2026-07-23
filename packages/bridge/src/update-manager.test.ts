@@ -92,8 +92,8 @@ describe('UpdateManager', () => {
     expect(Buffer.from(sent[0].authKeyId).toString('hex')).toBe('0011223344556677')
     expect(sent[0].update).toMatchObject({
       _: 'updates', seq: 1,
-      updates: [{ _: 'updateNewMessage', pts: 2, ptsCount: 1, message: { message: 'pushed' } }],
-      chats: [{ _: 'chat', title: 'Group', photo: { _: 'chatPhoto', dcId: 1 } }],
+      updates: [{ _: 'updateNewChannelMessage', pts: 2, ptsCount: 1, message: { message: 'pushed' } }],
+      chats: [{ _: 'channel', title: 'Group', megagroup: true, photo: { _: 'chatPhoto', dcId: 1 } }],
       users: [
         { _: 'user', self: true },
         { _: 'user', firstName: 'Group Alias', photo: { _: 'userProfilePhoto', dcId: 1 } },
@@ -196,7 +196,7 @@ describe('UpdateManager', () => {
       result: editResult,
     })
     expect((sent[1].update as tl.RawUpdates).updates).toMatchObject([{
-      _: 'updateEditMessage', pts: 3, ptsCount: 1,
+      _: 'updateEditChannelMessage', pts: 3, ptsCount: 1,
       message: { id: tlMessageId, message: 'edited' },
     }])
     expect((await store.readHistory(session.platformSessionId, conversation.id))[0])
@@ -220,7 +220,7 @@ describe('UpdateManager', () => {
       result: deleted,
     })
     expect((sent[2].update as tl.RawUpdates).updates).toMatchObject([{
-      _: 'updateDeleteMessages', messages: [tlMessageId], pts: 4, ptsCount: 1,
+      _: 'updateDeleteChannelMessages', messages: [tlMessageId], pts: 4, ptsCount: 1,
     }])
     expect(await store.readHistory(session.platformSessionId, conversation.id)).toEqual([])
     expect(await store.findProjectedByTlId(session.platformSessionId, tlMessageId, conversation.id)).toBeUndefined()
@@ -294,7 +294,7 @@ describe('UpdateManager', () => {
     await expect(manager.retryPending(session.platformSessionId)).resolves.toBe(1)
     expect(sent).toMatchObject([{
       _: 'updates', seq: 1,
-      updates: [{ _: 'updateNewMessage', pts: 2, message: { message: 'persist before push' } }],
+      updates: [{ _: 'updateNewChannelMessage', pts: 2, message: { message: 'persist before push' } }],
     }])
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
   })

@@ -146,10 +146,10 @@ describe('conversation kinds', () => {
   it('materializes direct, group, and hierarchical channel dialogs with the correct peer types', async () => {
     const { ctx, rpc } = await createRpc()
     const result = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
-    expect(result.dialogs.map((dialog) => dialog.peer._)).toEqual(['peerChannel', 'peerChat', 'peerUser'])
+    expect(result.dialogs.map((dialog) => dialog.peer._)).toEqual(['peerChannel', 'peerChannel', 'peerUser'])
     expect(result.chats).toMatchObject([
       { _: 'channel', title: 'Discord / general', megagroup: true, forum: true, participantsCount: 42 },
-      { _: 'chat', title: 'QQ Group', participantsCount: 23 },
+      { _: 'channel', title: 'QQ Group', megagroup: true, participantsCount: 23 },
     ])
     expect(result.users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual([
       'sender-parent-channel', 'sender-group', 'direct',
@@ -161,22 +161,25 @@ describe('conversation kinds', () => {
     expect(() => roundTrip(result)).not.toThrow()
   })
 
-  it('accepts chat/channel input peers, returns sender users, and sends to the original target IDs', async () => {
+  it('accepts channel input peers for groups, returns sender users, and sends to the original target IDs', async () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())
     const groupId = stableId('peer:group')
     const channelId = stableId('peer:parent-channel')
-    const group = await rpc.getHistory(historyRequest({ _: 'inputPeerChat', chatId: groupId })) as tl.messages.RawMessages
+    const group = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
     const channel = await rpc.getHistory(historyRequest({
       _: 'inputPeerChannel', channelId, accessHash: Long.ZERO,
     })) as tl.messages.RawMessages
-    expect((group.messages[0] as tl.RawMessage).peerId).toEqual({ _: 'peerChat', chatId: groupId })
+    expect((group.messages[0] as tl.RawMessage).peerId).toEqual({ _: 'peerChannel', channelId: groupId })
     expect((channel.messages[0] as tl.RawMessage).peerId).toEqual({ _: 'peerChannel', channelId })
     expect(group.users).toMatchObject([{ _: 'user', firstName: 'sender-group' }, { _: 'user' }])
     expect(channel.chats).toMatchObject([{ _: 'channel', title: 'Discord / general' }])
 
     await rpc.sendMessage({
-      _: 'messages.sendMessage', peer: { _: 'inputPeerChat', chatId: groupId },
+      _: 'messages.sendMessage',
+      peer: { _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO },
       message: 'to group', randomId: Long.ONE,
     })
     await rpc.sendMessage({
@@ -201,7 +204,7 @@ describe('conversation kinds', () => {
     await rpc.getDialogs(dialogsRequest())
     const groupId = stableId('peer:group')
     const directId = stableId('peer:direct')
-    const groupPeer = { _: 'inputPeerChat' as const, chatId: groupId }
+    const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
     const directPeer = { _: 'inputPeerUser' as const, userId: directId, accessHash: Long.ZERO }
     const groupHistory = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
     const groupMessageId = (groupHistory.messages[0] as tl.RawMessage).id
@@ -210,7 +213,7 @@ describe('conversation kinds', () => {
       _: 'messages.editMessage', peer: groupPeer, id: groupMessageId, message: 'edited via abstraction',
     }) as tl.RawUpdates
     expect(edited.updates).toMatchObject([{
-      _: 'updateEditMessage', message: { id: groupMessageId, message: 'edited via abstraction' },
+      _: 'updateEditChannelMessage', message: { id: groupMessageId, message: 'edited via abstraction' },
     }])
 
     const forwarded = await rpc.forwardMessages({
@@ -240,7 +243,7 @@ describe('conversation kinds', () => {
       const { rpc } = await createRpc()
       await rpc.getDialogs(dialogsRequest())
       const groupId = stableId('peer:group')
-      const groupPeer = { _: 'inputPeerChat' as const, chatId: groupId }
+      const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
       const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
       const originalId = (history.messages[0] as tl.RawMessage).id
 
@@ -248,8 +251,8 @@ describe('conversation kinds', () => {
         _: 'messages.editMessage', peer: groupPeer, id: originalId, message: 'replacement body',
       }) as tl.RawUpdates
       expect(result.updates).toMatchObject([
-        { _: 'updateDeleteMessages', messages: [originalId], ptsCount: 1 },
-        { _: 'updateNewMessage', message: { message: 'replacement body' }, ptsCount: 1 },
+        { _: 'updateDeleteChannelMessages', messages: [originalId], ptsCount: 1 },
+        { _: 'updateNewChannelMessage', message: { message: 'replacement body' }, ptsCount: 1 },
       ])
       expect((result.updates[1] as tl.RawUpdateNewMessage).message).not.toMatchObject({ id: originalId })
       expect(actionCalls).toEqual(['delete:group:message-group:true'])
@@ -267,7 +270,7 @@ describe('conversation kinds', () => {
       const { rpc } = await createRpc()
       await rpc.getDialogs(dialogsRequest())
       const groupId = stableId('peer:group')
-      const groupPeer = { _: 'inputPeerChat' as const, chatId: groupId }
+      const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
       const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
       const incomingId = (history.messages[0] as tl.RawMessage).id
       await expect(rpc.editMessage({
@@ -294,13 +297,18 @@ describe('conversation kinds', () => {
     await rpc.getDialogs(dialogsRequest())
     const groupId = stableId('peer:group')
     const channelId = stableId('peer:parent-channel')
+    const group = { _: 'inputChannel' as const, channelId: groupId, accessHash: Long.ZERO }
     const channel = { _: 'inputChannel' as const, channelId, accessHash: Long.ZERO }
 
     const groupSettings = await rpc.getPeerSettings({
-      _: 'messages.getPeerSettings', peer: { _: 'inputPeerChat', chatId: groupId },
+      _: 'messages.getPeerSettings',
+      peer: { _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO },
     })
-    const fullGroup = await rpc.getFullChat({ _: 'messages.getFullChat', chatId: groupId })
+    const fullGroup = await rpc.getFullChannel({ _: 'channels.getFullChannel', channel: group })
     const fullChannel = await rpc.getFullChannel({ _: 'channels.getFullChannel', channel })
+    await expect(rpc.getFullChat({
+      _: 'messages.getFullChat', chatId: groupId,
+    })).rejects.toMatchObject({ text: 'CHAT_ID_INVALID' })
     const self = await rpc.getChannelParticipant({
       _: 'channels.getParticipant', channel, participant: { _: 'inputPeerSelf' },
     })
@@ -317,7 +325,9 @@ describe('conversation kinds', () => {
     })
 
     expect(groupSettings).toMatchObject({ _: 'messages.peerSettings', chats: [{ title: 'QQ Group' }] })
-    expect(fullGroup).toMatchObject({ _: 'messages.chatFull', fullChat: { _: 'chatFull', id: groupId } })
+    expect(fullGroup).toMatchObject({
+      _: 'messages.chatFull', fullChat: { _: 'channelFull', id: groupId, participantsCount: 23 },
+    })
     expect(fullChannel).toMatchObject({
       _: 'messages.chatFull', fullChat: { _: 'channelFull', id: channelId, participantsCount: 42 },
     })
@@ -338,7 +348,7 @@ describe('conversation kinds', () => {
     }
   })
 
-  it('projects cursor-paginated groups as megagroups and only requests the Telegram member window', async () => {
+  it('projects every group as a megagroup and only requests the Telegram member window', async () => {
     const calls: Array<{ cursor?: string, limit?: number }> = []
     const allMembers = ['self', 'alice', 'bob', 'carol', 'dave'].map((id, index) => ({
       user: { id, firstName: id },
@@ -351,10 +361,6 @@ describe('conversation kinds', () => {
     }))
     const paginatedPlatform: IMPlatform = {
       ...platform,
-      capabilities: {
-        ...platform.capabilities,
-        members: { ...platform.capabilities.members!, paginated: true },
-      },
       async getConversationMembers(_session, _target, query = {}) {
         calls.push(query)
         const start = Number(query.cursor?.replace('cursor-', '') ?? 0)

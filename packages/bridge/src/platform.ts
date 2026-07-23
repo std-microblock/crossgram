@@ -27,12 +27,6 @@ export interface PlatformCapabilities {
     list: boolean
     administrators: boolean
     permissions: boolean
-    /**
-     * Project group conversations as Telegram megagroups so member pages can
-     * be requested through channels.getParticipants instead of embedding the
-     * complete list in messages.getFullChat.
-     */
-    paginated?: boolean
   }
   avatars?: {
     users: boolean
