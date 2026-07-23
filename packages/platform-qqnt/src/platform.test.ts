@@ -58,6 +58,50 @@ describe('QQNTPlatform mapping', () => {
     }])
   })
 
+  it('keeps cached conversation identity fields when an incremental event is incomplete', async () => {
+    const platform = new QQNTPlatform()
+    const avatar = {
+      id: 'avatar:group:1058754719', kind: 'image' as const,
+      locator: {
+        messageId: 'avatar:group:1058754719', elementId: 'avatar:group:1058754719',
+        chatType: 2 as const, peerUid: '1058754719', kind: 'image' as const,
+        fileName: 'group.png', filePath: '/tmp/group.png',
+      },
+    }
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [{
+        id: '1058754719', kind: 'group' as const, title: 'Bridge Test Group',
+        peerUid: '1058754719', peerUin: '1058754719', chatType: 2 as const, avatar,
+      }],
+    }))
+    await platform.getDialogs(session)
+    const received = Promise.withResolvers<unknown>()
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      await handler({
+        type: 'message',
+        conversation: {
+          id: '1058754719', kind: 'group', title: '1058754719',
+          peerUid: '1058754719', peerUin: '1058754719', chatType: 2,
+        },
+        message: {
+          id: 'm1', conversationId: '1058754719', senderId: 'member',
+          timestamp: 1, outgoing: false, parts: [{ type: 'text', text: 'hello' }],
+        },
+      })
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const unsubscribe = await platform.subscribe(session, (event) => received.resolve(event))
+
+    await expect(received.promise).resolves.toMatchObject({
+      type: 'message',
+      conversation: {
+        title: 'Bridge Test Group',
+        avatar: { id: 'avatar:group:1058754719', locator: { filePath: '/tmp/group.png' } },
+      },
+    })
+    await unsubscribe()
+  })
+
   it('maps QQ cloud-controlled reaction definitions and delegates reaction writes', async () => {
     const platform = new QQNTPlatform()
     const context = {
