@@ -400,7 +400,7 @@ describe('DialogRpc', () => {
     })
   })
 
-  it('links zero-width text to an addressable non-dialog conversation', async () => {
+  it('renders an addressable non-dialog conversation as a Telegram message preview card', async () => {
     const platform = new DialogTestPlatform()
     const temporary = { id: 'temporary-forward', kind: 'group' as const, title: '聊天记录' }
     platform.addMessage('alice', {
@@ -424,7 +424,17 @@ describe('DialogRpc', () => {
       _: 'messageEntityTextUrl', offset: 0, length: 1,
       url: `tg://privatepost?channel=${temporaryId}&post=1`,
     }])
+    expect(merged.media).toMatchObject({
+      _: 'messageMediaWebPage', manual: true, safe: true,
+      webpage: {
+        _: 'webPage',
+        url: `tg://privatepost?channel=${temporaryId}&post=1`,
+        displayUrl: '聊天记录', type: 'telegram_message',
+        siteName: '聊天记录', title: '聊天记录', description: '点击查看合并转发消息',
+      },
+    })
     expect(history.chats).toMatchObject([{ _: 'channel', id: temporaryId, title: '聊天记录' }])
+    expect(() => wireRoundTrip(history)).not.toThrow()
 
     const inside = await rpc.getHistory(getHistoryRequest(temporaryId, {
       peer: { _: 'inputPeerChannel', channelId: temporaryId, accessHash: Long.ZERO },
