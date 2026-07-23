@@ -1,4 +1,5 @@
 import type { Context } from 'cordis'
+import sharp from 'sharp'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
@@ -8,7 +9,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import type {
-  QQMediaLocator, WireConversation, WireEvent, WireMedia, WireMessage,
+  QQMediaLocator, WireConversation, WireEvent, WireMedia, WireMessage, WireReactionState,
 } from './protocol.js'
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
@@ -60,6 +61,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   readonly client: QQNTClient
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
   private readonly firstUnreadSeq = new Map<string, string>()
+  private readonly reactionResources = new Map<string, Uint8Array>()
+  private reactionCatalog?: IMReactionContext
+  private reactionCatalogPromise?: Promise<IMReactionContext>
   private readonly memberName: MemberNameMode
 
   constructor(options: Config = {}) {
@@ -71,6 +75,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     _session: PlatformSession,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
+    await this.ensureReactionCatalog()
     const controller = new AbortController()
     const running = this.subscribeLoop(handler, controller.signal)
     return async () => {
@@ -103,9 +108,19 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       dialogs: response.conversations.map((conversation) => ({
         conversation: this.mapConversation(conversation),
         unreadCount: conversation.unreadCount ?? 0,
-        lastMessage: conversation.lastMessage ? mapMessage(conversation.lastMessage, this.memberName) : undefined,
+        lastMessage: conversation.lastMessage
+          ? mapMessage(
+              conversation.lastMessage,
+              this.memberName,
+              conversation.kind === 'group' ? this.reactionCatalog : undefined,
+            )
+          : undefined,
         readInboxMaxMessage: conversation.readInboxMaxMessage
-          ? mapMessage(conversation.readInboxMaxMessage, this.memberName)
+          ? mapMessage(
+              conversation.readInboxMaxMessage,
+              this.memberName,
+              conversation.kind === 'group' ? this.reactionCatalog : undefined,
+            )
           : undefined,
       })),
       nextCursor: response.nextCursor,
@@ -141,7 +156,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         : undefined,
     })
     return {
-      messages: response.messages.map((message) => mapMessage(message, this.memberName)),
+      messages: response.messages.map((message) => mapMessage(
+        message,
+        this.memberName,
+        this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
+      )),
       nextCursor: response.nextCursor,
     }
   }
@@ -217,7 +236,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       mimeType: part.media.mimeType,
       source: part.media.source,
     } : undefined
-    return mapMessage(await this.client.sendMessage(conversation.id, text, media, options), this.memberName)
+    return mapMessage(
+      await this.client.sendMessage(conversation.id, text, media, options),
+      this.memberName,
+      this.isGroupConversation(conversation.id) ? this.reactionCatalog : undefined,
+    )
   }
 
   async deleteMessages(
@@ -254,16 +277,24 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   async getAvailableReactions(
     _session: PlatformSession,
-    _target: IMReactionTarget,
+    target: IMReactionTarget,
   ): Promise<IMReactionContext> {
-    return this.client.getReactionCatalog() as Promise<IMReactionContext>
+    if (!this.isGroupConversation(target.conversationId)) {
+      return { available: [], reactions: [], maxSelected: 0 }
+    }
+    return this.ensureReactionCatalog()
   }
 
   async getMessageReactions(
     _session: PlatformSession,
     target: import('@mtproto-relay/bridge').IMMessageTarget,
   ): Promise<IMReactionContext> {
-    return this.client.getMessageReactions(target.conversationId, target.targetId) as Promise<IMReactionContext>
+    if (!this.isGroupConversation(target.conversationId)) {
+      return { available: [], reactions: [], maxSelected: 0 }
+    }
+    return this.withReactionCatalog(
+      await this.client.getMessageReactions(target.conversationId, target.targetId),
+    )
   }
 
   async setMessageReactions(
@@ -271,9 +302,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     target: import('@mtproto-relay/bridge').IMMessageTarget,
     reactionKeys: readonly string[],
   ): Promise<IMReactionContext> {
-    return this.client.setMessageReactions(
+    if (!this.isGroupConversation(target.conversationId)) {
+      throw new Error('QQ reactions are unavailable in direct conversations')
+    }
+    return this.withReactionCatalog(await this.client.setMessageReactions(
       target.conversationId, target.targetId, reactionKeys,
-    ) as Promise<IMReactionContext>
+    ))
   }
 
   async *downloadReactionResource(
@@ -283,31 +317,102 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): AsyncIterable<Uint8Array> {
     const locator = resource.locator
     if (!locator || typeof locator !== 'object' || Array.isArray(locator)
-      || typeof locator.filePath !== 'string') throw new Error('QQ reaction resource has no file path')
-    let transferred = 0
-    yield* this.client.downloadMedia({
-      messageId: `reaction:${locator.filePath}`,
-      elementId: `reaction:${locator.filePath}`,
-      chatType: 1,
-      peerUid: '',
-      kind: 'image',
-      fileName: locator.filePath.split('/').at(-1) ?? 'reaction.png',
-      filePath: locator.filePath,
-      fileSize: resource.size === undefined ? undefined : String(resource.size),
-    }, {
-      offset: options.offset,
-      limit: options.limit,
-      signal: options.signal,
-      onChunk: async (size) => {
-        transferred += size
-        await options.onProgress?.({
-          phase: 'download',
-          mediaIndex: 0,
-          transferredBytes: transferred,
-          totalBytes: resource.size,
-        })
-      },
+      || typeof locator.cacheKey !== 'string') throw new Error('QQ reaction resource is not cached')
+    if (options.signal?.aborted) throw options.signal.reason ?? new Error('download aborted')
+    const cached = this.reactionResources.get(locator.cacheKey)
+    if (!cached) throw new Error(`QQ reaction resource cache miss: ${locator.cacheKey}`)
+    const start = Math.min(cached.length, Math.max(0, options.offset ?? 0))
+    const end = options.limit === undefined
+      ? cached.length
+      : Math.min(cached.length, start + Math.max(0, options.limit))
+    const output = cached.subarray(start, end)
+    if (!output.length) return
+    await options.onProgress?.({
+      phase: 'download',
+      mediaIndex: 0,
+      transferredBytes: output.length,
+      totalBytes: resource.size,
     })
+    yield output
+  }
+
+  private ensureReactionCatalog(): Promise<IMReactionContext> {
+    if (this.reactionCatalog) return Promise.resolve(this.reactionCatalog)
+    if (this.reactionCatalogPromise) return this.reactionCatalogPromise
+    const pending = this.loadReactionCatalog()
+    this.reactionCatalogPromise = pending
+    return pending.finally(() => {
+      if (this.reactionCatalogPromise === pending) this.reactionCatalogPromise = undefined
+    })
+  }
+
+  private async loadReactionCatalog(): Promise<IMReactionContext> {
+    const source = await this.client.getReactionCatalog()
+    const available = await mapConcurrent(source.available, 8, async (definition) => {
+      if (definition.presentation.type !== 'custom') return definition
+      const { resource } = definition.presentation
+      const filePath = resource.locator.filePath
+      const chunks: Uint8Array[] = []
+      let size = 0
+      for await (const chunk of this.client.downloadMedia({
+        messageId: `reaction:${filePath}`,
+        elementId: `reaction:${filePath}`,
+        chatType: 1,
+        peerUid: '',
+        kind: 'image',
+        fileName: filePath.split('/').at(-1) ?? 'reaction.png',
+        filePath,
+        fileSize: resource.size === undefined ? undefined : String(resource.size),
+      })) {
+        chunks.push(chunk)
+        size += chunk.length
+      }
+      const sourceBytes = new Uint8Array(size)
+      let offset = 0
+      for (const chunk of chunks) {
+        sourceBytes.set(chunk, offset)
+        offset += chunk.length
+      }
+      const bytes = await sharp(sourceBytes)
+        .resize(100, 100, { fit: 'contain' })
+        .webp({ lossless: true })
+        .toBuffer()
+      const cacheKey = `${definition.key}:${resource.version}:webp-v1`
+      this.reactionResources.set(cacheKey, bytes)
+      return {
+        ...definition,
+        presentation: {
+          ...definition.presentation,
+          resource: {
+            ...resource,
+            version: resource.version * 100 + 1,
+            mimeType: 'image/webp' as const,
+            width: 100,
+            height: 100,
+            size: bytes.length,
+            locator: { cacheKey },
+          },
+        },
+      }
+    })
+    const catalog: IMReactionContext = {
+      available,
+      reactions: [],
+      maxSelected: source.maxSelected,
+    }
+    this.reactionCatalog = catalog
+    return catalog
+  }
+
+  private async withReactionCatalog(state: WireReactionState): Promise<IMReactionContext> {
+    const catalog = await this.ensureReactionCatalog()
+    return { available: catalog.available, reactions: state.reactions, maxSelected: state.maxSelected }
+  }
+
+  private isGroupConversation(conversationId: string): boolean {
+    const known = this.conversations.get(conversationId)
+    if (known) return known.kind === 'group'
+    return conversationId.startsWith('2:') || /^\d+$/.test(conversationId)
   }
 
   private mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
@@ -329,7 +434,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private mapEvent(input: WireEvent): IMEvent<QQMediaLocator> {
     const conversation = this.mapConversation(input.conversation)
     if (input.type === 'message') {
-      return { type: 'message', conversation, message: mapMessage(input.message, this.memberName) }
+      return {
+        type: 'message',
+        conversation,
+        message: mapMessage(
+          input.message,
+          this.memberName,
+          conversation.kind === 'group' ? this.reactionCatalog : undefined,
+        ),
+      }
     }
     if (input.type === 'message-delete') return {
       type: 'message-delete',
@@ -343,7 +456,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       eventId: input.eventId,
       conversation,
       target: input.target,
-      context: input.context as IMReactionContext,
+      context: {
+        available: conversation.kind === 'group' ? this.reactionCatalog?.available ?? [] : [],
+        reactions: input.context.reactions,
+        maxSelected: conversation.kind === 'group' ? input.context.maxSelected : 0,
+      },
       timestamp: input.timestamp,
     }
   }
@@ -376,7 +493,11 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
   }
 }
 
-function mapMessage(input: WireMessage, memberName: MemberNameMode): IMMessage<QQMediaLocator> {
+function mapMessage(
+  input: WireMessage,
+  memberName: MemberNameMode,
+  reactionCatalog?: IMReactionContext,
+): IMMessage<QQMediaLocator> {
   return {
     id: input.id,
     sourceIds: input.sourceIds,
@@ -396,7 +517,11 @@ function mapMessage(input: WireMessage, memberName: MemberNameMode): IMMessage<Q
     timestamp: input.timestamp,
     outgoing: input.outgoing,
     metadata: input.msgSeq ? { qqMsgSeq: input.msgSeq } : undefined,
-    reactionContext: input.reactionContext as IMReactionContext | undefined,
+    reactionContext: input.reactionContext ? {
+      available: reactionCatalog?.available ?? [],
+      reactions: input.reactionContext.reactions,
+      maxSelected: input.reactionContext.maxSelected,
+    } : undefined,
     content: {
       parts: input.parts.map((part) =>
         part.type === 'text' ? { type: 'text' as const, text: part.text } : {
@@ -436,6 +561,22 @@ async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
       resolve()
     }
   })
+}
+
+async function mapConcurrent<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const output = new Array<R>(values.length)
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (next < values.length) {
+      const index = next++
+      output[index] = await mapper(values[index]!)
+    }
+  }))
+  return output
 }
 
 export type { QQMediaLocator } from './protocol.js'

@@ -43,7 +43,7 @@ export interface WireMessage {
   }
   msgSeq?: string
   parts: Array<{ type: 'text', text: string } | { type: 'media', media: WireMedia }>
-  reactionContext?: WireReactionContext
+  reactionContext?: WireReactionState
 }
 
 export interface WireConversation {
@@ -75,30 +75,35 @@ export type WireEvent =
       eventId: string
       conversation: WireConversation
       target: { conversationId: string, messageId: string, targetId: string }
-      context: WireReactionContext
+      context: WireReactionState
       timestamp: number
     }
 
-export interface WireReactionContext {
-  available: Array<{
-    key: string
-    title?: string
-    presentation:
-      | { type: 'emoji', emoticon: string }
-      | {
-          type: 'custom'
-          alt: string
-          resource: {
-            version: number
-            format: 'static'
-            mimeType: 'image/png'
-            width: number
-            height: number
-            size?: number
-            locator: { filePath: string }
-          }
+export interface WireReactionDefinition {
+  key: string
+  title?: string
+  presentation:
+    | { type: 'emoji', emoticon: string }
+    | {
+        type: 'custom'
+        alt: string
+        resource: {
+          version: number
+          format: 'static'
+          mimeType: 'image/png'
+          width: number
+          height: number
+          size?: number
+          locator: { filePath: string }
         }
-  }>
+      }
+}
+
+export interface WireReactionContext extends WireReactionState {
+  available: WireReactionDefinition[]
+}
+
+export interface WireReactionState {
   reactions: Array<{ key: string, count: number, selected?: boolean }>
   maxSelected: number
 }
