@@ -267,8 +267,8 @@ describe('PlatformRegistry', () => {
       active: true, createdAt: new Date(),
     })
     await database.create('mtproto_auth_session', {
-      id: 'legacy-auth', virtualPhone: '99900001', loginCode: '123456',
-      platformId: legacyId, platformSessionId: 'legacy-session', used: true,
+      id: 'legacy-auth', virtualPhone: '99900001', totpSecret: '11'.repeat(20),
+      platformId: legacyId, platformSessionId: 'legacy-session',
     })
     await database.create('mtproto_auth_binding', {
       authKeyId: '0011223344556677', platformId: legacyId, platformSessionId: 'legacy-session',
