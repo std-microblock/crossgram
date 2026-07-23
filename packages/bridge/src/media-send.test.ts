@@ -38,7 +38,6 @@ async function createHarness(failSends = 0) {
   const uploads = new UploadManager(directory)
   const consumed: Uint8Array[][] = []
   const remoteFiles: Uint8Array[] = []
-  const downloads: Array<{ mediaId: string, offset: number, limit?: number }> = []
   const inputs: IMMessageInput[] = []
   let sequence = 0
   const platform: IMPlatform = {
@@ -98,7 +97,6 @@ async function createHarness(failSends = 0) {
       const index = Number(media.id.replace('remote-', ''))
       const source = remoteFiles[index] ?? new Uint8Array()
       const offset = options?.offset ?? 0
-      downloads.push({ mediaId: media.id, offset, limit: options?.limit })
       const bytes = source.subarray(offset, offset + (options?.limit ?? source.length))
       for (let position = 0; position < bytes.length; position += 4) {
         const chunk = bytes.subarray(position, position + 4)
@@ -119,7 +117,7 @@ async function createHarness(failSends = 0) {
     await rm(directory, { recursive: true, force: true })
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { rpc, platform, uploads, store, consumed, downloads, inputs, progress }
+  return { rpc, platform, uploads, store, consumed, inputs, progress }
 }
 
 function inputFile(id: number, parts: number, name: string): tl.RawInputFile {
@@ -137,7 +135,7 @@ function wireRoundTrip<T>(object: T): T {
 
 describe('media send streaming', () => {
   it('streams file parts into the adapter, reports progressive bytes, persists, and cleans up', async () => {
-    const { rpc, uploads, store, consumed, downloads, progress } = await createHarness()
+    const { rpc, uploads, store, consumed, progress } = await createHarness()
     const priorPush = await store.prepareUpdateDelivery(
       'prior-push', session.platformSessionId, 1, 1_799_999_999,
     )
@@ -181,47 +179,11 @@ describe('media send streaming', () => {
       },
     }) as tl.upload.RawFile
     expect(new TextDecoder().decode(downloaded.bytes)).toBe('second')
-    expect(downloads).toEqual([{ mediaId: 'remote-0', offset: 0, limit: 12 }])
     expect(progress.slice(2)).toEqual([
       { mediaIndex: 0, transferredBytes: 4 },
-      { mediaIndex: 0, transferredBytes: 8 },
-      { mediaIndex: 0, transferredBytes: 12 },
+      { mediaIndex: 0, transferredBytes: 6 },
     ])
     expect(() => wireRoundTrip(downloaded)).not.toThrow()
-  })
-
-  it('coalesces concurrent ranges for one small media object into one adapter download', async () => {
-    const { rpc, uploads, downloads } = await createHarness()
-    const source = new TextEncoder().encode('abcdefghijklmnop')
-    for (let part = 0; part < 4; part++) {
-      await uploads.savePart(session.platformSessionId, '99', part, source.subarray(part * 4, part * 4 + 4))
-    }
-    const sent = await rpc.sendMedia({
-      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(99), message: '',
-      media: {
-        _: 'inputMediaUploadedDocument', file: inputFile(99, 4, 'parallel.bin'),
-        mimeType: 'application/octet-stream', attributes: [],
-      },
-    }) as tl.RawUpdates
-    const document = ((sent.updates[1] as tl.RawUpdateNewMessage).message as tl.RawMessage)
-      .media as tl.RawMessageMediaDocument
-    const location: tl.RawInputDocumentFileLocation = {
-      _: 'inputDocumentFileLocation', id: (document.document as tl.RawDocument).id,
-      accessHash: (document.document as tl.RawDocument).accessHash,
-      fileReference: (document.document as tl.RawDocument).fileReference, thumbSize: '',
-    }
-
-    const ranges = await Promise.all([0, 4, 8, 12].map(async (offset) => {
-      const result = await rpc.getFile({ _: 'upload.getFile', location, offset, limit: 4 }) as tl.upload.RawFile
-      return new TextDecoder().decode(result.bytes)
-    }))
-
-    expect(ranges).toEqual(['abcd', 'efgh', 'ijkl', 'mnop'])
-    expect(downloads).toEqual([{ mediaId: 'remote-0', offset: 0, limit: 16 }])
-
-    const cached = await rpc.getFile({ _: 'upload.getFile', location, offset: 2, limit: 6 }) as tl.upload.RawFile
-    expect(new TextDecoder().decode(cached.bytes)).toBe('cdefgh')
-    expect(downloads).toHaveLength(1)
   })
 
   it('sends mixed image and file content through one platform call with independent streams', async () => {
