@@ -57,6 +57,7 @@ interface ResolvedStickerInput {
  * peer/message IDs are allocated here and reverse-mapped to opaque platform IDs.
  */
 export class DialogRpc {
+  private static readonly PEER_HYDRATION_TTL_MS = 5_000
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
@@ -76,6 +77,8 @@ export class DialogRpc {
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
   private readonly _memberCursors = new Map<string, Map<number, string | null>>()
   private readonly _actions: PlatformMessageActions
+  private _peersHydratedAt = 0
+  private _peerHydration?: Promise<void>
 
   constructor(
     private readonly _platform: IMPlatform<any>,
@@ -562,7 +565,9 @@ export class DialogRpc {
     channel?: tl.TypeInputChannel,
   ): Promise<tl.messages.RawAffectedMessages> {
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
-    await this._hydratePeers()
+    // Message ownership and action policy must be evaluated against a fresh
+    // upstream preview rather than the short-lived read-side peer cache.
+    await this._hydratePeers(true)
     const expectedConversation = channel ? this._resolveChannel(channel).id : undefined
     const grouped = new Map<string, Array<{
       source: IMMessage<any>
@@ -1351,11 +1356,22 @@ export class DialogRpc {
     await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
   }
 
-  private async _hydratePeers(): Promise<void> {
-    const dialogs = await this._loadDialogs()
-    for (const dialog of dialogs) {
-      this._conversations.set(dialog.conversation.id, dialog.conversation)
-      this._peerId(dialog.conversation.id)
+  private async _hydratePeers(force = false): Promise<void> {
+    if (!force && Date.now() - this._peersHydratedAt < DialogRpc.PEER_HYDRATION_TTL_MS) return
+    if (this._peerHydration) return this._peerHydration
+
+    const pending = this._loadDialogs().then((dialogs) => {
+      for (const dialog of dialogs) {
+        this._conversations.set(dialog.conversation.id, dialog.conversation)
+        this._peerId(dialog.conversation.id)
+      }
+      this._peersHydratedAt = Date.now()
+    })
+    this._peerHydration = pending
+    try {
+      await pending
+    } finally {
+      if (this._peerHydration === pending) this._peerHydration = undefined
     }
   }
 
