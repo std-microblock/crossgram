@@ -3,6 +3,7 @@ import type {
   StickerPageQuery, StickerProviderContext,
 } from '@mtproto-relay/bridge'
 import type { QQNTClient } from './client.js'
+import type { QQMediaCache } from './media-cache.js'
 import type { QQStickerReference, WireSticker, WireStickerPack } from './protocol.js'
 
 /** Exposes QQ market packs and the account's QQ favorite collection. */
@@ -12,6 +13,7 @@ export class QQStickerProvider implements IMStickerProvider {
   constructor(
     private readonly client: QQNTClient,
     private readonly providerId: string,
+    private readonly mediaCache?: QQMediaCache,
   ) {}
 
   async listPacks(_context: StickerProviderContext, query: StickerPageQuery = {}) {
@@ -43,13 +45,16 @@ export class QQStickerProvider implements IMStickerProvider {
   async openAsset(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset> {
     const reference = sticker.locator as unknown as QQStickerReference | undefined
     if (!reference) throw new Error(`QQ sticker ${sticker.stickerId} has no native reference`)
-    return {
+    const original: IMStickerAsset = {
       source: this.client.stickerSource(reference, sticker.size),
-      mimeType: sticker.mimeType,
+      mimeType: reference.animated ? 'image/gif' : 'image/png',
       size: sticker.size,
       width: sticker.width,
       height: sticker.height,
     }
+    return this.mediaCache
+      ? this.mediaCache.openSticker({ ...sticker, format: reference.animated ? 'animated' : 'static' }, original)
+      : { ...original, mimeType: sticker.mimeType }
   }
 
   async prepareSend(_context: StickerProviderContext, sticker: IMSticker) {
@@ -82,7 +87,7 @@ export class QQStickerProvider implements IMStickerProvider {
   }
 
   private mapSticker(sticker: WireSticker): IMSticker {
-    return {
+    const mapped: IMSticker = {
       providerId: this.providerId,
       stickerId: sticker.stickerId,
       packId: sticker.packId,
@@ -95,5 +100,6 @@ export class QQStickerProvider implements IMStickerProvider {
       version: sticker.version,
       locator: sticker.reference as unknown as JsonValue,
     }
+    return this.mediaCache?.projectSticker(mapped) ?? mapped
   }
 }
