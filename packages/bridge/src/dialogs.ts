@@ -73,6 +73,8 @@ export class DialogRpc {
   private readonly _historyCache = new Map<string, MaterializedMessage[]>()
   private readonly _readInboxMaxMessageIds = new Map<string, string>()
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
+  private readonly _peerUsers = new Map<string, tl.RawUser>()
+  private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
@@ -1236,7 +1238,11 @@ export class DialogRpc {
     this._conversations.set(platformPeerId, source.conversation)
     const peer = this._conversationPeer(source.conversation)
     const users = source.conversation.kind === 'direct'
-      ? [await this._getPeerUser(platformPeerId, source.conversation.title)]
+      ? [this._makePeerUser({
+          id: platformPeerId,
+          firstName: source.conversation.title,
+          avatar: source.conversation.avatar,
+        })]
       : source.lastMessage
         ? [await this._getMessageSender(source.lastMessage)]
         : []
@@ -1552,15 +1558,27 @@ export class DialogRpc {
   }
 
   private async _getPeerUser(peerId: string, fallbackName?: string): Promise<tl.RawUser> {
-    const user = await this._platform.getUser?.(this._session, peerId)
-    return this._makePeerUser(user ?? { id: peerId, firstName: fallbackName ?? peerId })
+    const cached = this._peerUsers.get(peerId)
+    if (cached) return cached
+    const pending = this._pendingPeerUsers.get(peerId)
+    if (pending) return pending
+    const lookup = Promise.resolve(this._platform.getUser?.(this._session, peerId))
+      .then((user) => this._makePeerUser(user ?? { id: peerId, firstName: fallbackName ?? peerId }))
+      .then((user) => {
+        this._peerUsers.set(peerId, user)
+        return user
+      })
+      .finally(() => this._pendingPeerUsers.delete(peerId))
+    this._pendingPeerUsers.set(peerId, lookup)
+    return lookup
   }
 
   private async _getMessageSender(message: IMMessage<any>): Promise<tl.RawUser> {
     if (message.senderId === this._session.userId) return this._makeSelfUser(message.sender?.avatar)
-    return message.sender
-      ? this._makePeerUser(message.sender)
-      : this._getPeerUser(message.senderId)
+    if (!message.sender) return this._getPeerUser(message.senderId)
+    const user = this._makePeerUser(message.sender)
+    this._peerUsers.set(message.senderId, user)
+    return user
   }
 
   private async _messageSenders(messages: readonly IMMessage<any>[]): Promise<tl.RawUser[]> {
