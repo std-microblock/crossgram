@@ -1,0 +1,69 @@
+import { describe, expect, it } from 'vitest'
+import { Config as bridgeConfig } from '../../bridge/src/index.js'
+import { Config as debugConfig } from '../../mtproto-debug/src/index.js'
+import { Config as mtprotoConfig } from '../../mtproto/src/index.js'
+import { Config as qqntConfig } from '../../platform-qqnt/src/index.js'
+import { Config as staticConfig } from '../../platform-static/src/index.js'
+import { Config as relayConfig } from '../../relay/src/index.js'
+import { Config as resourcesConfig } from '../../telegram-resources/src/index.js'
+
+const cases = [
+  ['bridge', bridgeConfig, ['routeId', 'dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath']],
+  ['debug', debugConfig, ['maxEvents', 'initiallyPaused']],
+  ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
+  ['qqnt', qqntConfig, [
+    'endpoint', 'token', 'memberName', 'mediaCachePath', 'mediaDownloadMode',
+    'autoDownloadFileSizeLimit', 'previewMaxDimension', 'ffmpegPath',
+  ]],
+  ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
+  ['relay', relayConfig, ['apiId', 'apiHash', 'storagePath', 'disableUpdates', 'routeId']],
+  ['resources', resourcesConfig, ['assetsPath', 'providerId']],
+] as const
+
+describe('plugin config schemas', () => {
+  it.each(cases)('%s exposes every editable field with WebUI metadata', (_name, schema, fields) => {
+    const json = schema.toJSON()
+    const root = json.refs[json.uid]
+    expect(root.type).toBe('object')
+    const visibleFields = Object.keys(root.dict ?? {})
+    expect(visibleFields).toEqual(fields)
+    for (const uid of Object.values(root.dict ?? {})) {
+      expect(json.refs[uid as unknown as number].meta.description).toBeTruthy()
+    }
+  })
+
+  it('applies defaults without dropping programmatic injection options', () => {
+    const clientFactory = () => undefined
+    expect(mtprotoConfig({ crypto: 'injected-for-test' })).toMatchObject({
+      port: 4430,
+      host: '127.0.0.1',
+      crypto: 'injected-for-test',
+    })
+    expect(relayConfig({ apiId: 12345, apiHash: 'hash', clientFactory })).toEqual({
+      apiId: 12345,
+      apiHash: 'hash',
+      storagePath: 'data/relay',
+      disableUpdates: true,
+      routeId: 'relay:official',
+      clientFactory,
+    })
+  })
+
+  it('rejects invalid values at the field path', () => {
+    expect(() => bridgeConfig({ serverPort: 65_536 })).toThrow(/serverPort/)
+    expect(() => qqntConfig({ mediaDownloadMode: 'eager' as 'auto' })).toThrow(/mediaDownloadMode/)
+    expect(() => staticConfig({ transferChunkSize: 0 })).toThrow(/transferChunkSize/)
+    expect(() => relayConfig({ apiId: 0, apiHash: '' })).toThrow(/apiId/)
+  })
+
+  it('marks relay credentials required and hides its API hash input', () => {
+    expect(() => relayConfig({})).toThrow(/apiId/)
+    const json = relayConfig.toJSON()
+    const root = json.refs[json.uid]
+    const apiId = json.refs[root.dict!.apiId as unknown as number]
+    const apiHash = json.refs[root.dict!.apiHash as unknown as number]
+    expect(apiId.meta.required).toBe(true)
+    expect(apiHash.meta.required).toBe(true)
+    expect(apiHash.meta.role).toBe('secret')
+  })
+})

@@ -1,6 +1,7 @@
 import type { Context } from 'cordis'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import z from 'schemastery'
 import { TelegramResources } from './store.js'
 
 export {
@@ -21,6 +22,13 @@ export interface Config {
   /** 注册 ID；需要同时挂载多个资源集时用于区分。 */
   providerId?: string
 }
+
+export const Config = z.object({
+  assetsPath: z.string()
+    .description('Directory containing index.json and the Telegram resource assets.'),
+  providerId: z.string().default('telegram-official')
+    .description('Registry ID used when multiple Telegram resource sets are mounted.'),
+})
 
 export function apply(ctx: Context, config: Config = {}): void {
   const assetsBase = config.assetsPath

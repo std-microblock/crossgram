@@ -9,6 +9,7 @@
     "cordis": "^4.0.0-rc.5"
   },
   "dependencies": {
-    "@mtproto-relay/bridge": "workspace:*"
+    "@mtproto-relay/bridge": "workspace:*",
+    "schemastery": "^3.18.0"
   }
 }

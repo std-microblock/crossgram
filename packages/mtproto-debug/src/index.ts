@@ -94,5 +94,3 @@ export function apply(ctx: Context, config: Config = {}): void {
 
 export type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 export { serializeDebugEvent, toDebugJson } from './serialize.js'
-
-export default Object.assign(apply, { inject })

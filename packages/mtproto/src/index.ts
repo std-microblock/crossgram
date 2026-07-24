@@ -1,4 +1,4 @@
-export { Mtproto, default } from './service.js'
+export { Config, Mtproto, default } from './service.js'
 export type { MtprotoConfig, RouteRegistrar, RouteResolver } from './service.js'
 
 export { RpcDispatcher, bareVector, isBareVector, unwrapRpcRequest } from './rpc/dispatcher.js'
