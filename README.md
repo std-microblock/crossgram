@@ -23,138 +23,209 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 | **官方 Telegram 透传（relay）** | `@mtproto-relay/relay` | ✅ |
 | 微信 / Discord / 其它 | — | 🚧 |
 
-### 能力矩阵
+<details>
+<summary>能力矩阵</summary>
 
-> 符号：✅ 已支持 · ⚠️ 部分支持 · ❌ 不会支持 · 🗓️ 规划中
+> ✅ 已支持 · ⚠️ 部分支持 · ❌ 不会支持 · 🗓️ 在规划中
 
-| 能力 | QQ | Demo 实现 (static) | Telegram |
+<details open>
+<summary>历史记录 <code>history</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
 |---|:---:|:---:|:---:|
-| 发送: 文字 | ✅ | ✅ | ✅ |
-| 发送: 图片 | ✅ | ✅ | ✅ |
-| 发送: 文件 | ✅ | ✅ | ✅ |
-| 接收: 历史记录 | ✅ | ✅ | ✅ |
-| 接收: 平台消息灰字 | 🗓️ | 🗓️ | ✅ |
-| 接收: 群公告 | 🗓️ | 🗓️ | ✅ |
+| 历史消息拉取 | ✅ | ✅ | ✅ |
+
+</details>
+
+<details open>
+<summary>发送 <code>send</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
+| 文字 | ✅ | ✅ | ✅ |
+| 图片 | ✅ | ✅ | ✅ |
+| 文件 | ✅ | ✅ | ✅ |
+| 图文混排 | ✅ | ✅ | ✅ |
+
+</details>
+
+<details open>
+<summary>会话类型 <code>conversations</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
 | 私聊 (direct) | ✅ | ✅ | ✅ |
 | 群聊 (group) | ✅ | ✅ | ✅ |
 | 频道 (channel) | ❌ | ✅ | ✅ |
 | 子频道 / 话题 (subchannel) | ❌ | ✅ | ✅ |
-| 消息撤回 | ✅ | ✅ | ✅ |
+| 群公告（接收） | 🗓️ | 🗓️ | ✅ |
+
+</details>
+
+<details open>
+<summary>成员与权限 <code>members</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
+| 成员列表 | ✅ | ✅ | ✅ |
+| 管理员信息 | ✅ | ✅ | ✅ |
+| 成员权限 | ❌ | ✅ | ✅ |
+| 移除群成员 | 🗓️ | ❌ | ✅ |
+| 入群申请管理 | 🗓️ | ❌ | ✅ |
+| 管理群公告 | 🗓️ | ❌ | ✅ |
+
+</details>
+
+<details open>
+<summary>消息操作 <code>messageActions</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
+| 撤回自己的消息 | ✅ | ✅ | ✅ |
+| 撤回他人消息（管理员） | ✅ | ✅ | ✅ |
 | 编辑消息 | 撤回重发 | ✅ | ✅ |
 | 转发 | ✅ | ✅ | ✅ |
 | 合并转发 | ✅ | ❌ | ❌ |
-| 成员列表 | ✅ | ✅ | ✅ |
-| 头像 | ✅ | ✅ | ✅ |
-| 管理员: 撤回消息 | ✅ | ✅ | ✅ |
-| 管理员: 移除群成员 | 🗓️ | ❌ | ✅ |
-| 管理员: 入群申请管理 | 🗓️ | ❌ | ✅ |
-| 管理员: 管理群公告 | 🗓️ | ❌ | ✅ |
-| 消息响应（reaction） | ✅ | ✅ | ✅ |
-| 平台表情包: 查看 | ✅ | ✅ | ✅ |
-| 平台表情包: 收藏管理 | ✅ | ✅ | ✅ |
-| 平台表情包: 上传下载 | ❌ | ❌ | ✅ |
-| 红包/转账 | ❌ | ❌ | ❌ |
-| 小程序 | ❌ | ❌ | ✅ |
+
+</details>
+
+<details open>
+<summary>消息响应 <code>reactions</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
+| 读取 | ✅ | ✅ | ✅ |
+| 发送 | ✅ | ✅ | ✅ |
+| 实时事件 | ✅ | ✅ | ✅ |
+| 显示点赞者 | ✅ | ✅ | ✅ |
+
+</details>
+
+<details open>
+<summary>头像 <code>avatars</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
+| 用户头像 | ✅ | ✅ | ✅ |
+| 会话头像 | ✅ | ✅ | ✅ |
+
+</details>
+
+<details open>
+<summary>表情包 <code>stickers</code></summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
+| 查看 | ✅ | ✅ | ✅ |
+| 收藏管理 | ✅ | ✅ | ✅ |
+| 上传/下载 | ❌ | ❌ | ✅ |
+
+</details>
+
+<details open>
+<summary>其它</summary>
+
+| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|
+| 系统消息（灰字） | 🗓️ | 🗓️ | ✅ |
+| 小程序（Web App） | ❌ | ❌ | ✅ |
+| Stories / Premium 等 | ❌ | ❌ | ✅ |
 | 语音 / 视频通话 | ❌ | ❌ | ❌ |
 | Secret Chat | ❌ | ❌ | ❌ |
-| Stories / Premium 等 | ❌ | ❌ | ✅ |
+| 红包 / 转账 | ❌ | ❌ | ❌ |
 
-----
+</details>
+</details>
 
-## 开始使用
+## 快速开始
 
-### 启动服务器
-
-#### 方式 A：本地源码运行（开发）
+### 1. 启动服务器
 
 ```bash
 yarn install
-yarn dev
-# 生产模式
-yarn build && yarn start
+yarn dev          # 开发模式
+yarn build && yarn start  # 生产模式
 ```
 
-#### 配置
+首次运行会在 `data/rsa-key.json`（和 `.pem`）自动生成 RSA 密钥，不用手动准备。  
 
-服务器配置在 `app.yml`。首次启动会自动在 `data/rsa-key.json`（及 `data/rsa-key.json.pem`）生成 RSA 密钥对，无需手动准备。常用配置项：
+<details>
+<summary>app.yml 配置</summary>
 
 ```yaml
 - id: mtproto01
   name: '@mtproto-relay/mtproto'
   config:
-    port: 4430                       # 客户端补丁默认指向的端口
-    host: 127.0.0.1                  # 监听地址，对外暴露时改为 0.0.0.0
-    rsaKeyPath: ./data/rsa-key.json  # RSA 密钥，缺失则自动生成
+    port: 4430
+    host: 127.0.0.1
+    rsaKeyPath: ./data/rsa-key.json
 
-- id: qqnt                          # QQ 平台（默认启用）
+- id: qqnt   # QQ 平台
   name: '@mtproto-relay/platform-qqnt'
   config:
     endpoint: http://127.0.0.1:18767/v1
     mediaDownloadMode: auto
-
-# 下面两个默认 disabled，按需启用：
-- id: static                        # 参考平台（演示 / 测试）
-  name: '@mtproto-relay/platform-static'
-  disabled: true
-- id: relay01                       # 官方 Telegram 透传
-  name: '@mtproto-relay/relay'
-  disabled: true
-  config: { apiId: 0, apiHash: '' }
 ```
+</details>
 
-启动后打开 http://127.0.0.1:3140/platform-accounts
-- 每个平台插件会展示其资料（昵称 / 头像）、自动分配的虚拟手机号（`+999…`）。
-- 页面提供 30 秒轮换的六位登录码，用于客户端登录
+启动后浏览器打开 http://127.0.0.1:3140/platform-accounts  
+页面上会显示桥接平台的资料、自动分配的虚拟手机号（`+999...`）以及每 30 秒轮换的 6 位登录码，这些就是客户端登录要用的。
 
-### 将 Telegram 客户端配置为连接至本服务器
+---
 
-CrossGram 不是独立客户端，而是一个 Telegram 第三方服务器。你需要让一个 Telegram 客户端连接到它。我们现在通过二进制修补来实现将客户端连接至本服务器，以避免重新编译。你也可以重新编译并修改硬编码在客户端代码内的 DC IP，Special Endpoint 和 RSA Key 来将任意 Telegram 客户端连接至本服务器。
+### 2. 给 Telegram 客户端打补丁
 
-#### 支持修补的客户端
+用脚本直接修改二进制文件，替换公钥和服务器地址，不用重新编译。
 
-| 客户端 | 操作系统 | 状态 |
+<details>
+<summary>支持修补的客户端</summary>
+
+| 客户端 | 系统 | 状态 |
 |---|---|---|
 | Telegram Desktop 及其分支 | Windows / macOS / Linux | ✅ |
 | 基于 TDLib 的客户端（Unigram 等） | Windows / Linux | ⚠️ |
-| Telegram Android 及其分支 | Android | 🚧 |
+| Telegram Android 及分支 | Android | 🚧 |
 | Telegram Web / WebK | 浏览器 | 🚧 |
 | Telegram iOS | iOS | 🚧 |
 | 官方 macOS 原生客户端 | macOS | ❌ |
+</details>
 
-#### 用补丁脚本重定向客户端
+#### 用法
 
-脚本位于 [`binary_patch/patch-tdesktop.cjs`](binary_patch/patch-tdesktop.cjs)，它会就地修改客户端二进制，完成三件事：
+脚本位置：`binary_patch/patch-tdesktop.cjs`
 
-1. **替换 RSA 公钥**——让客户端信任本服务器，并拒绝官方 Special Config 回连 Telegram。
-2. **重定向 DC 地址**——把所有内置 IPv4 / IPv6 地址改为 `--host`。
-3. **重定向 DC 端口**——把所有生产 / 测试端口改为 `--port`。
-
-支持 macOS（`.app` 包或裸二进制）、Linux（ELF）、Windows（PE / `.exe`）；兼容 Telegram Desktop、AyuGram、MaterialGram 及任意 TDLib 分支。
-
-示例：
 ```bash
 node binary_patch/patch-tdesktop.cjs /Applications/materialgram.app
 node binary_patch/patch-tdesktop.cjs --port 4430 /usr/bin/telegram-desktop
 node binary_patch/patch-tdesktop.cjs --host 192.168.1.10 --port 4430 --no-resign "Telegram.exe"
 ```
 
-常用参数：
+默认会：
+- 自动用 `data/rsa-key.json.pem` 替换客户端内的 RSA 公钥（也可 `--key` 指定别的 PEM）
+- 把所有内置 DC 地址改成 `--host`（默认 `127.0.0.1`），端口改成 `--port`（默认 `4430`）
+- 生成 `<binary>.original` 备份，macOS 上自动 `codesign` 重签名并去除隔离属性
 
-| 参数 | 说明 | 默认 |
+<details>
+<summary>全部参数说明</summary>
+
+| 参数 | 说明 | 默认值 |
 |---|---|---|
-| `--key <file>` | RSA 公钥 PEM（PKCS#1）。缺省自动寻找 `data/rsa-key.json.pem` | 自动 |
-| `--host <ip>` | 重定向所有 DC 到的 IPv4 地址 | `127.0.0.1` |
-| `--port <n>` | 重定向所有 DC 到的端口 | `4430` |
-| `--no-resign` | 跳过 macOS 重签名（Linux/Windows 或非自动签名） | 关闭 |
-| `--no-backup` | 跳过生成 `<binary>.original` 备份 | 关闭 |
-| `--dry-run` | 只打印将要修改的位置，不写入 | 关闭 |
+| `--key <file>` | RSA 公钥 PEM（PKCS#1） | 自动找 `data/rsa-key.json.pem` |
+| `--host <ip>` | 重定向所有 DC 到的 IPv4 | `127.0.0.1` |
+| `--port <n>` | 重定向端口 | `4430` |
+| `--no-resign` | 跳过 macOS 重签名 | 关闭 |
+| `--no-backup` | 不生成 `.original` 备份 | 关闭 |
+| `--dry-run` | 只打印修改位置，不实际写入 | 关闭 |
+</details>
 
-#### 登录
+---
 
-1. 启动服务器、打好客户端补丁后，打开（补丁后的）客户端。
-2. 输入 `platform-accounts` 页面展示的 **虚拟手机号**（`+999…`）。
-3. 输入页面当前显示的 **六位登录码**。
-4. 进入主界面后即可看到被桥接平台的会话与消息。
+### 3. 登录
+
+1. 启动打好补丁的客户端。
+2. 输入页面上显示的虚拟手机号（`+999...`）。
+3. 输入当前显示的 6 位登录码。
+4. 进入主界面后，就能看到桥接过来的会话和消息了。
 
 ## License
 
