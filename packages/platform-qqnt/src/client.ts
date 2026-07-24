@@ -149,6 +149,7 @@ export class QQNTClient {
       mimeType?: string
       width?: number
       height?: number
+      duration?: number
       source: IMMediaSource
     }> | undefined,
     options: IMTransferOptions = {},
@@ -166,7 +167,7 @@ export class QQNTClient {
       sticker,
       media: media?.map((item) => ({
         kind: item.kind, name: item.name, mimeType: item.mimeType, size: item.source.size,
-        width: item.width, height: item.height,
+        width: item.width, height: item.height, duration: item.duration,
       })),
       mediaFraming: media && media.length > 1 ? 'length-prefixed-v1' : undefined,
     }
@@ -255,17 +256,34 @@ export class QQNTClient {
 
   async *downloadFile(
     locator: QQMediaLocator,
-    options: { signal?: AbortSignal, onChunk?(size: number): Promise<void> | void } = {},
+    options: {
+      signal?: AbortSignal
+      offset?: number
+      limit?: number
+      onChunk?(size: number): Promise<void> | void
+    } = {},
   ): AsyncIterable<Uint8Array> {
+    const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+    const limit = options.limit === undefined ? undefined : Math.max(0, Math.trunc(options.limit))
+    if (limit === 0) return
+    const ranged = offset > 0 || limit !== undefined
+    const end = limit === undefined ? '' : String(offset + limit - 1)
     const response = await this.fetchImpl(`${this.endpoint}/files/download`, {
       method: 'POST',
-      headers: this.headers({ 'content-type': 'application/json' }),
+      headers: this.headers({
+        'content-type': 'application/json',
+        ...(ranged ? { range: `bytes=${offset}-${end}` } : {}),
+      }),
       body: JSON.stringify(locator),
       signal: options.signal,
     })
     if (!response.ok) throw new Error(await responseError(response))
     if (!response.body) throw new Error('QQNT media response has no body')
     const reader = response.body.getReader()
+    // Protocol v12 applies Range at the bridge. A v11 bridge ignores it and
+    // returns 200, so retain a local slicing fallback during rolling upgrades.
+    let skipped = response.status === 206 ? offset : 0
+    let remaining = limit ?? Number.POSITIVE_INFINITY
     let completed = false
     try {
       while (true) {
@@ -275,8 +293,18 @@ export class QQNTClient {
           break
         }
         if (!value?.length) continue
-        await options.onChunk?.(value.length)
-        yield value
+        if (skipped + value.length <= offset) {
+          skipped += value.length
+          continue
+        }
+        const start = Math.max(0, offset - skipped)
+        const accepted = value.subarray(start, start + remaining)
+        skipped += value.length
+        if (!accepted.length) continue
+        remaining -= accepted.length
+        await options.onChunk?.(accepted.length)
+        yield accepted
+        if (remaining <= 0) return
       }
     } finally {
       if (!completed) await reader.cancel().catch(() => undefined)

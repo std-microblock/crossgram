@@ -169,6 +169,7 @@ export class MessageStore {
         size: item.size ?? null,
         width: item.width ?? null,
         height: item.height ?? null,
+        duration: item.duration ?? null,
         preview: item.preview ?? null,
         locator: item.locator ?? null,
       })), ['messageId', 'ordinal'])
@@ -465,6 +466,7 @@ export class MessageStore {
         size: row.size ?? undefined,
         width: row.width ?? undefined,
         height: row.height ?? undefined,
+        duration: row.duration ?? undefined,
         preview: row.preview ?? undefined,
         locator: row.locator,
       },

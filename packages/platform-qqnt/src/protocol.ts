@@ -26,6 +26,7 @@ export interface WireMedia {
   size?: number
   width?: number
   height?: number
+  duration?: number
   locator: QQMediaLocator
 }
 
