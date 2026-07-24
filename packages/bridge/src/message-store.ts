@@ -656,15 +656,11 @@ export class MessageStore {
       if (existing.length) await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId })
     }
     const preferredId = telegramMessageIdFromMetadata(message.metadata)
-    for (const [index, part] of existing.entries()) {
-      const tlMessageId = index === 0 && preferredId ? preferredId : part.tlMessageId
-      if (part.scope === scope && part.tlMessageId === tlMessageId) continue
-      await database.set('mtproto_tl_message_part', { id: part.id }, { scope, tlMessageId })
-      existing[index] = { ...part, scope, tlMessageId }
-    }
     if (existing.length < count) {
       const missing = count - existing.length
-      const ids = existing.length === 0 && preferredId
+      const preferredAvailable = existing.length === 0 && preferredId
+        && !(await database.get('mtproto_tl_message_part', { scope, tlMessageId: preferredId })).length
+      const ids = preferredAvailable
         ? [preferredId, ...(missing > 1
             ? await this._allocateMessageIds(database, scope, missing - 1, allocation)
             : [])]
@@ -703,18 +699,16 @@ export class MessageStore {
   ): Promise<number[]> {
     const counterScope = `${allocation}:${scope}`
     const [counter] = await database.get('mtproto_id_counter', { scope: counterScope })
-    if (allocation === 'live') {
-      const first = counter?.nextId ?? MESSAGE_ID_MIDPOINT
-      const nextId = first + count
-      if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
-      await database.upsert('mtproto_id_counter', [{ scope: counterScope, nextId }])
-      return Array.from({ length: count }, (_, index) => first + index)
+    let nextId = counter?.nextId ?? MESSAGE_ID_MIDPOINT
+    const ids: number[] = []
+    while (ids.length < count) {
+      const candidate = allocation === 'live' ? nextId++ : --nextId
+      if (candidate <= 0 || candidate > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
+      const occupied = await database.get('mtproto_tl_message_part', { scope, tlMessageId: candidate })
+      if (!occupied.length) ids.push(candidate)
     }
-    const end = counter?.nextId ?? MESSAGE_ID_MIDPOINT
-    const first = end - count
-    if (first <= 0) throw new RangeError(`message ID scope exhausted: ${scope}`)
-    await database.upsert('mtproto_id_counter', [{ scope: counterScope, nextId: first }])
-    return Array.from({ length: count }, (_, index) => first + index)
+    await database.upsert('mtproto_id_counter', [{ scope: counterScope, nextId }])
+    return allocation === 'history' ? ids.reverse() : ids
   }
 
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
