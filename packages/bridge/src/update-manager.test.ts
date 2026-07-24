@@ -113,6 +113,34 @@ describe('UpdateManager', () => {
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
   })
 
+  it('includes clickable URL entities in live updates', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'links', kind: 'group', title: 'Links' }
+    const text = '入口：https://example.com/path?q=1，备用 example.org/docs。'
+    const message: IMMessage = {
+      id: 'linked-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_001,
+      content: { parts: [{ type: 'text', text }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = roundTrip(sent[0].update) as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
+    expect(update.message).toMatchObject({
+      _: 'message', message: text,
+      entities: [
+        {
+          _: 'messageEntityUrl', offset: text.indexOf('https://'),
+          length: 'https://example.com/path?q=1'.length,
+        },
+        {
+          _: 'messageEntityUrl', offset: text.indexOf('example.org'),
+          length: 'example.org/docs'.length,
+        },
+      ],
+    })
+  })
+
   it('keeps account and per-channel pts domains independent and replays each channel separately', async () => {
     const { store, manager, sent } = await createHarness()
     const alpha: IMConversation = { id: 'alpha', kind: 'group', title: 'Alpha' }

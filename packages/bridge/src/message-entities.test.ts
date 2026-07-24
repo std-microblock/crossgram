@@ -1,0 +1,73 @@
+import { describe, expect, it } from 'vitest'
+import type { tl } from '@mtcute/core'
+import { withAutoLinkEntities } from './message-entities.js'
+
+describe('withAutoLinkEntities', () => {
+  it('recognizes URL schemes, www hosts, bare domains, ports, and Unicode domains', () => {
+    const text = [
+      'https://example.com/a?q=1#top',
+      'ftp://files.example.org:21/pub',
+      'tg://resolve?domain=telegram',
+      'www.example.net/docs',
+      '例子.测试/路径',
+    ].join(' | ')
+
+    expect(linkTexts(text)).toEqual([
+      'https://example.com/a?q=1#top',
+      'ftp://files.example.org:21/pub',
+      'tg://resolve?domain=telegram',
+      'www.example.net/docs',
+      '例子.测试/路径',
+    ])
+  })
+
+  it('uses UTF-16 offsets and removes sentence punctuation without damaging balanced URL brackets', () => {
+    const text = '😀参见（https://example.com/a_(b)），再看 example.org/docs。'
+    expect(withAutoLinkEntities(text)).toEqual([
+      {
+        _: 'messageEntityUrl',
+        offset: text.indexOf('https://'),
+        length: 'https://example.com/a_(b)'.length,
+      },
+      {
+        _: 'messageEntityUrl',
+        offset: text.indexOf('example.org'),
+        length: 'example.org/docs'.length,
+      },
+    ])
+    expect(text.indexOf('https://')).toBe(5)
+  })
+
+  it('does not produce invalid, email-fragment, or overlapping URL entities', () => {
+    const text = 'mail user@example.com invalid http:// and https://covered.example/path'
+    const coveredOffset = text.indexOf('https://')
+    const existing: tl.TypeMessageEntity[] = [{
+      _: 'messageEntityTextUrl', offset: coveredOffset, length: 'https://covered.example/path'.length,
+      url: 'tg://resolve?domain=covered',
+    }]
+
+    expect(withAutoLinkEntities(text, existing)).toEqual(existing)
+  })
+
+  it('keeps existing entities and orders detected links by their Telegram offsets', () => {
+    const text = 'first.dev @Alice then https://second.dev'
+    const mention: tl.TypeMessageEntity = {
+      _: 'messageEntityMentionName', offset: text.indexOf('@Alice'), length: 6, userId: 42,
+    }
+
+    expect(withAutoLinkEntities(text, [mention])).toEqual([
+      { _: 'messageEntityUrl', offset: 0, length: 'first.dev'.length },
+      mention,
+      {
+        _: 'messageEntityUrl',
+        offset: text.indexOf('https://'),
+        length: 'https://second.dev'.length,
+      },
+    ])
+  })
+})
+
+function linkTexts(text: string): string[] {
+  return (withAutoLinkEntities(text) ?? []).map((entity) =>
+    text.slice(entity.offset, entity.offset + entity.length))
+}

@@ -61,7 +61,7 @@ class DialogTestPlatform implements IMPlatform {
   async getDialogs(): Promise<IMDialogPage> {
     return {
       dialogs: Object.values(this._users).map((user) => ({
-        conversation: { id: user.id, kind: 'direct', title: user.firstName },
+        conversation: { id: user.id, kind: 'direct' as const, title: user.firstName },
         unreadCount: 0,
         lastMessage: this._messages[user.id].at(-1),
       })).sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0)),
@@ -473,6 +473,48 @@ describe('DialogRpc', () => {
       _: 'message',
       entities: [{ _: 'messageEntityMentionName', offset: 6, length: 4, userId: bobId }],
     })
+  })
+
+  it('exposes plain platform links as clickable Telegram entities through serialized history', async () => {
+    const platform = new DialogTestPlatform()
+    const first = '😀 docs: https://example.com/a_(b).'
+    const second = '官网 example.org/guide，@Bob'
+    platform.addMessage('alice', {
+      id: 'linked', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_225,
+      content: { parts: [
+        { type: 'text', text: first },
+        {
+          type: 'text', text: second,
+          entities: [{ type: 'mention', offset: second.indexOf('@Bob'), length: 4, userId: 'bob' }],
+        },
+      ] },
+    })
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+
+    const history = wireRoundTrip(
+      await rpc.getHistory(getHistoryRequest(rpc.peerTlId('alice'))),
+    ) as tl.messages.RawMessages
+    const message = history.messages.find(
+      (item) => item._ === 'message' && item.message.includes('example.com'),
+    ) as tl.RawMessage
+    const text = `${first}\n${second}`
+
+    expect(message.message).toBe(text)
+    expect(message.entities).toEqual([
+      {
+        _: 'messageEntityUrl', offset: text.indexOf('https://'),
+        length: 'https://example.com/a_(b)'.length,
+      },
+      {
+        _: 'messageEntityUrl', offset: text.indexOf('example.org'),
+        length: 'example.org/guide'.length,
+      },
+      {
+        _: 'messageEntityMentionName', offset: text.indexOf('@Bob'), length: 4,
+        userId: rpc.peerTlId('bob'),
+      },
+    ])
   })
 
   it('renders an addressable non-dialog conversation as a Telegram message preview card', async () => {
