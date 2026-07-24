@@ -856,10 +856,14 @@ export class ServerSession {
     this._sendEncryptedMessage(writer.result(), true, { _: 'rpc_result', reqMsgId: reqMsgId, result })
     if (kind === 'mt_rpc_error') {
       const error = result as mtp.RawMt_rpc_error
-      this._log.warn(
-        '>>> rpc_error for %s (%s): %d %s',
+      const args = [
         reqMsgId.toString(16), method ?? 'unknown', error.errorCode, error.errorMessage,
-      )
+      ] as const
+      if (error.errorMessage.startsWith('METHOD_NOT_IMPLEMENTED:')) {
+        this._log.warn('>>> rpc_error for %s (%s): %d %s', ...args)
+      } else {
+        this._log.error('>>> rpc_error for %s (%s): %d %s', ...args)
+      }
     } else {
       this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), kind)
     }
