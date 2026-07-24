@@ -17,6 +17,7 @@ import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from '.
 import { createCordisLogManager } from './cordis-logger.js'
 import { Emitter } from '@fuman/utils'
 import type { MtprotoDebugEvent } from './debug.js'
+import z from 'schemastery'
 
 export interface MtprotoConfig {
   /** TCP port to listen on (default: 4430; 0 = ephemeral) */
@@ -41,6 +42,17 @@ export interface MtprotoConfig {
   log?: Logger | LogManager
 }
 
+export const Config = z.object({
+  port: z.natural().max(65_535).default(4430)
+    .description('TCP port to listen on. Use 0 to select an ephemeral port.'),
+  host: z.string().default('127.0.0.1')
+    .description('Host or IP address to bind the MTProto server to.'),
+  rsaKeyPath: z.string()
+    .description('Path used to load or create the RSA key-pair JSON file.'),
+  authKeyStorePath: z.string()
+    .description('Path used to persist authorized MTProto keys.'),
+})
+
 export type RouteResolver = (
   ctx: ServerRpcContext,
   request: tl.RpcMethod,
@@ -62,6 +74,7 @@ export interface RouteRegistrar {
  * while the listener and live connections stay up.
  */
 export class Mtproto extends Service {
+  static Config = Config
   readonly rsaKey: ServerRsaKey
   readonly dispatcher = new RpcDispatcher()
   readonly onDebug = new Emitter<MtprotoDebugEvent>()

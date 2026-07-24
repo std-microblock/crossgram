@@ -13,6 +13,7 @@
     "@fuman/utils": "^0.0.20",
     "@mtcute/core": "^0.30.3",
     "@mtcute/node": "^0.30.3",
-    "@mtproto-relay/mtproto": "workspace:*"
+    "@mtproto-relay/mtproto": "workspace:*",
+    "schemastery": "^3.18.0"
   }
 }

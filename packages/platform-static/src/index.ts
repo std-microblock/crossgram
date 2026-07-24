@@ -2,6 +2,7 @@ import type { Context } from 'cordis'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import z from 'schemastery'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMForwardMessagesOptions, IMHistoryPage, IMHistoryQuery,
@@ -31,6 +32,19 @@ export interface Config {
   eventIntervalMs?: number
   historySize?: number
 }
+
+export const Config = z.object({
+  instanceId: z.string()
+    .description('Stable instance identifier used in generated message IDs.'),
+  mediaPath: z.string()
+    .description('Directory used to persist media; omit for in-memory storage in tests.'),
+  transferChunkSize: z.natural().min(1).default(64 * 1024)
+    .description('Chunk size in bytes used while streaming media.'),
+  eventIntervalMs: z.natural().default(0)
+    .description('Interval for synthetic events in milliseconds; 0 disables them.'),
+  historySize: z.natural().default(10_000)
+    .description('Number of seeded history messages retained by the reference adapter.'),
+})
 export const name = 'im-platform-static'
 export const inject = ['imPlatform', 'imSticker']
 

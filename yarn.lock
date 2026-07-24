@@ -1656,6 +1656,7 @@ __metadata:
     "@vue/test-utils": "npm:^2.4.6"
     happy-dom: "npm:^18.0.1"
     long: "npm:^5.3.0"
+    schemastery: "npm:^3.18.0"
     vue: "npm:^3.5.33"
   peerDependencies:
     "@cordisjs/plugin-database": ^4.0.0
@@ -1695,6 +1696,7 @@ __metadata:
     "@mtcute/tl-runtime": "npm:^0.30.3"
     "@mtcute/tl-utils": "npm:^0.30.3"
     long: "npm:^5.3.0"
+    schemastery: "npm:^3.18.0"
   peerDependencies:
     cordis: ^4.0.0-rc.5
   languageName: unknown
@@ -1706,6 +1708,7 @@ __metadata:
   dependencies:
     "@mtproto-relay/bridge": "workspace:*"
     ffmpeg-static: "npm:^5.3.0"
+    schemastery: "npm:^3.18.0"
     sharp: "npm:^0.34.4"
     vitest: "npm:^2.1.9"
   peerDependencies:
@@ -1719,6 +1722,7 @@ __metadata:
   resolution: "@mtproto-relay/platform-static@workspace:packages/platform-static"
   dependencies:
     "@mtproto-relay/bridge": "workspace:*"
+    schemastery: "npm:^3.18.0"
   peerDependencies:
     cordis: ^4.0.0-rc.5
   languageName: unknown
@@ -1732,6 +1736,7 @@ __metadata:
     "@mtcute/core": "npm:^0.30.3"
     "@mtcute/node": "npm:^0.30.3"
     "@mtproto-relay/mtproto": "workspace:*"
+    schemastery: "npm:^3.18.0"
   peerDependencies:
     "@cordisjs/plugin-database": ^4.0.0
     cordis: ^4.0.0-rc.5
@@ -1745,6 +1750,7 @@ __metadata:
     "@mtcute/core": "npm:^0.30.3"
     "@mtproto-relay/bridge": "workspace:*"
     long: "npm:^5.3.0"
+    schemastery: "npm:^3.18.0"
   peerDependencies:
     cordis: ^4.0.0-rc.5
   languageName: unknown
@@ -1756,6 +1762,7 @@ __metadata:
   dependencies:
     "@cordisjs/plugin-database": "npm:^4.0.0"
     "@cordisjs/plugin-database-sqlite": "npm:^5.0.0"
+    "@cordisjs/plugin-loader": "npm:^1.0.0-rc.4"
     "@cordisjs/plugin-server": "npm:^1.6.0"
     "@cordisjs/plugin-webui": "npm:^0.8.1"
     "@fuman/io": "npm:^0.0.20"
