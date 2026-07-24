@@ -1709,7 +1709,8 @@ describe('bridge login e2e', () => {
       const conversation: bridge.IMConversation = { id: 'push-group', kind: 'group', title: 'Push Group' }
       const message: bridge.IMMessage = {
         id: `opaque:${'x'.repeat(8_192)}`, conversationId: conversation.id, senderId: 'sender',
-        timestamp: 1_800_000_100, content: { parts: [{ type: 'text', text: 'arrived by subscribe' }] },
+        timestamp: 1_800_000_100, metadata: { qqMsgSeq: '250000', telegramMessageId: 250_000 },
+        content: { parts: [{ type: 'text', text: 'arrived by subscribe' }] },
       }
       await handler!({ type: 'message', conversation, message })
 
@@ -1718,7 +1719,7 @@ describe('bridge login e2e', () => {
         _: 'updates', seq: 1,
         updates: [{
           _: 'updateNewChannelMessage', pts: 2, ptsCount: 1,
-          message: { peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
+          message: { id: 0x40000000, peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
         }],
         chats: [{ _: 'channel', megagroup: true, title: 'Push Group' }],
       })

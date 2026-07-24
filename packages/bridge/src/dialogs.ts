@@ -7,6 +7,7 @@ import {
   type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
+import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
 import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
 } from './message-actions.js'
@@ -1676,6 +1677,10 @@ export class DialogRpc {
     this._messageToTl.set(key, item.tlId)
     const sourceId = item.source.sourceIds?.[item.ordinal]
     if (sourceId) this._messageToTl.set(`${item.source.conversationId}\u0000${sourceId}\u00000`, item.tlId)
+    const nativeSequence = qqMessageSequenceFromMetadata(item.source.metadata)
+    if (nativeSequence !== undefined && item.ordinal === 0) {
+      this._messageToTl.set(qqSequenceKey(item.source.conversationId, nativeSequence), item.tlId)
+    }
     this._tlToMessage.set(item.tlId, {
       peerId: item.source.conversationId,
       platformMessageId: item.source.id,
@@ -1687,7 +1692,27 @@ export class DialogRpc {
     if (!this._store) return
     const targets = new Map<string, { conversationId: string, targetId: string }>()
     for (const message of messages) {
-      if (telegramReplyToMessageId(message)) continue
+      const qqReplySequence = qqReplySequenceFromMetadata(message.metadata)
+      if (qqReplySequence !== undefined) {
+        const key = qqSequenceKey(message.conversationId, qqReplySequence)
+        if (!this._messageToTl.has(key)) {
+          const projected = await this._store.findProjectedByNativeSequence(
+            this._session.platformSessionId, message.conversationId, qqReplySequence,
+          )
+          if (projected) {
+            for (const part of projected.parts) this._rememberMessage({
+              source: projected.source,
+              tlId: part.tlMessageId,
+              ordinal: part.ordinal,
+              groupedId: part.groupedId ?? undefined,
+              media: projected.media.find((entry) => entry.id === part.mediaId),
+            })
+          }
+        }
+        if (this._messageToTl.has(key)) continue
+      } else if (telegramReplyToMessageId(message)) {
+        continue
+      }
       if (!message.replyToId) continue
       const key = `${message.conversationId}\u0000${message.replyToId}\u00000`
       if (!this._messageToTl.has(key)) targets.set(key, {
@@ -1716,7 +1741,12 @@ export class DialogRpc {
   }
 
   private _messageReplyHeader(source: IMMessage): tl.RawMessageReplyHeader | undefined {
-    const nativeReplyTo = telegramReplyToMessageId(source)
+    const qqReplySequence = qqReplySequenceFromMetadata(source.metadata)
+    if (qqReplySequence !== undefined) {
+      const replyToMsgId = this._messageToTl.get(qqSequenceKey(source.conversationId, qqReplySequence))
+      if (replyToMsgId) return { _: 'messageReplyHeader', replyToMsgId }
+    }
+    const nativeReplyTo = qqReplySequence === undefined ? telegramReplyToMessageId(source) : undefined
     if (nativeReplyTo) return { _: 'messageReplyHeader', replyToMsgId: nativeReplyTo }
     if (!source.replyToId) return
     const replyToMsgId = this._messageToTl.get(
@@ -2443,6 +2473,10 @@ function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessa
       attributes: [{ _: 'documentAttributeFilename', fileName: staged.media.name ?? 'file' }],
     },
   }
+}
+
+function qqSequenceKey(conversationId: string, sequence: number): string {
+  return `${conversationId}\u0000qq-sequence:${sequence}`
 }
 
 function safeOffset(value: unknown): number {

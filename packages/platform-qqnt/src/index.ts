@@ -952,7 +952,10 @@ function mapMessage(
     metadata: input.msgSeq || input.originRequestId || input.telegramMessageId || input.telegramReplyToMessageId ? {
       ...(input.msgSeq ? { qqMsgSeq: input.msgSeq } : {}),
       ...(input.telegramMessageId ? { telegramMessageId: input.telegramMessageId } : {}),
-      ...(input.telegramReplyToMessageId ? { telegramReplyToMessageId: input.telegramReplyToMessageId } : {}),
+      ...(input.telegramReplyToMessageId ? {
+        telegramReplyToMessageId: input.telegramReplyToMessageId,
+        qqReplyToMsgSeq: String(input.telegramReplyToMessageId),
+      } : {}),
       ...(input.originRequestId ? { qqOriginRequestId: input.originRequestId } : {}),
     } : undefined,
     reactionContext: input.reactionContext ? {

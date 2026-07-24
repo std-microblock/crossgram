@@ -4,11 +4,14 @@ import type {
 } from './models.js'
 import {
   messageMedia, messageText,
-  telegramMessageIdFromMetadata,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
   type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
   type IMUser, type JsonObject, type JsonValue, type PlatformSession,
 } from './platform.js'
+import {
+  initialTimestampMessageIdEpoch, messageIdBucketStart, qqMessageSequenceFromMetadata,
+  TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS, timestampMessageIdBucket,
+} from './message-id.js'
 import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
 
 export interface IngestResult {
@@ -51,7 +54,7 @@ export interface StoredHistoryQuery {
   maxTimestamp?: number
 }
 
-const MESSAGE_ID_MIDPOINT = 0x40000000
+const TIMESTAMP_ALLOCATION_VERSION = 1
 export const UPDATE_DELIVERY_RETENTION = 1_000
 export const ACCOUNT_UPDATE_SCOPE = 'account'
 const STORED_SENDER_KEY = '__mtprotoRelaySender'
@@ -377,6 +380,32 @@ export class MessageStore {
     }
   }
 
+  async findProjectedByNativeSequence(
+    platformSessionId: string,
+    platformConversationId: string,
+    nativeSequence: number,
+  ): Promise<ProjectedMessage | undefined> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return
+    const [part] = await this._database.select('mtproto_tl_message_part', {
+      platformSessionId,
+      conversationId: conversation.id,
+      nativeSequence,
+    }).orderBy('ordinal').limit(1).execute()
+    if (!part) return
+    const [row] = await this._database.get('mtproto_im_message', { id: part.messageId })
+    if (!row || row.deleted) return
+    return {
+      source: await this._hydrateMessage(row),
+      parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+      media: await this._database.select('mtproto_im_media', { messageId: row.id })
+        .orderBy('ordinal').execute(),
+    }
+  }
+
   async findProjectedByPlatformId(
     platformSessionId: string,
     platformConversationId: string,
@@ -644,10 +673,26 @@ export class MessageStore {
     const scope = conversation.kind !== 'direct'
       ? `channel:${platformSessionId}:${conversation.parentPlatformConversationId ?? conversation.platformConversationId}`
       : `account:${platformSessionId}`
-    const existing = await database.select('mtproto_tl_message_part', { messageId: message.id })
+    const nativeSequence = qqMessageSequenceFromMetadata(message.metadata)
+    let existing = await database.select('mtproto_tl_message_part', { messageId: message.id })
       .orderBy('ordinal').execute()
+    const groupedIdBeforeMigration = existing.find((part) => part.groupedId)?.groupedId ?? null
+    const requiresMigration = existing.some((part) => (
+      part.scope !== scope
+      || part.allocationVersion !== TIMESTAMP_ALLOCATION_VERSION
+      || (nativeSequence !== undefined && part.nativeSequence !== nativeSequence)
+    ))
+    if (requiresMigration) {
+      for (const part of existing) await database.remove('mtproto_tl_message_part', { id: part.id })
+      existing = []
+    } else if (existing.length > count) {
+      for (const part of existing.slice(count)) {
+        await database.remove('mtproto_tl_message_part', { id: part.id })
+      }
+      existing = existing.slice(0, count)
+    }
     const groupable = count > 1 && new Set(media.map((item) => item.kind)).size === 1
-    let groupedId = existing.find((part) => part.groupedId)?.groupedId ?? null
+    let groupedId = existing.find((part) => part.groupedId)?.groupedId ?? groupedIdBeforeMigration
     if (!groupable && groupedId) {
       groupedId = null
       await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId: null })
@@ -655,16 +700,22 @@ export class MessageStore {
       groupedId = String((await this._allocateIds(database, `group:${platformSessionId}`, 1))[0])
       if (existing.length) await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId })
     }
-    const preferredId = telegramMessageIdFromMetadata(message.metadata)
     if (existing.length < count) {
       const missing = count - existing.length
-      const preferredAvailable = existing.length === 0 && preferredId
-        && !(await database.get('mtproto_tl_message_part', { scope, tlMessageId: preferredId })).length
-      const ids = preferredAvailable
-        ? [preferredId, ...(missing > 1
-            ? await this._allocateMessageIds(database, scope, missing - 1, allocation)
-            : [])]
-        : await this._allocateMessageIds(database, scope, missing, allocation)
+      const epoch = await this._messageIdEpoch(database, scope, message.timestamp)
+      const preferredId = timestampMessageIdBucket(epoch, message.timestamp)
+      const bounds = nativeSequence === undefined
+        ? {}
+        : await this._nativeSequenceBounds(database, conversation.id, nativeSequence)
+      const ids = await this._allocateSlottedMessageIds(
+        database,
+        scope,
+        missing,
+        preferredId,
+        allocation,
+        existing.map((part) => part.tlMessageId),
+        bounds,
+      )
       await database.upsert('mtproto_tl_message_part', ids.map((tlMessageId, index) => {
         const ordinal = existing.length + index
         return {
@@ -674,6 +725,8 @@ export class MessageStore {
           mediaId: media[ordinal]?.id ?? null,
           scope,
           tlMessageId,
+          nativeSequence: nativeSequence ?? null,
+          allocationVersion: TIMESTAMP_ALLOCATION_VERSION,
           groupedId,
           ordinal,
         }
@@ -691,24 +744,90 @@ export class MessageStore {
     return Array.from({ length: count }, (_, index) => first + index)
   }
 
-  private async _allocateMessageIds(
+  private async _allocateSlottedMessageIds(
     database: Database,
     scope: string,
     count: number,
+    preferredId: number,
     allocation: 'live' | 'history',
+    existingIds: readonly number[],
+    bounds: { lowerExclusive?: number, upperExclusive?: number },
   ): Promise<number[]> {
-    const counterScope = `${allocation}:${scope}`
-    const [counter] = await database.get('mtproto_id_counter', { scope: counterScope })
-    let nextId = counter?.nextId ?? MESSAGE_ID_MIDPOINT
+    const preferredBucket = messageIdBucketStart(preferredId)
     const ids: number[] = []
-    while (ids.length < count) {
-      const candidate = allocation === 'live' ? nextId++ : --nextId
-      if (candidate <= 0 || candidate > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
-      const occupied = await database.get('mtproto_tl_message_part', { scope, tlMessageId: candidate })
-      if (!occupied.length) ids.push(candidate)
+    const preferForward = allocation === 'live' || count > 1 || existingIds.length > 0
+    for (let distance = 0; ids.length < count; distance++) {
+      const buckets = distance === 0
+        ? [preferredBucket]
+        : preferForward
+          ? [
+              preferredBucket + distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+              preferredBucket - distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+            ]
+          : [
+              preferredBucket - distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+              preferredBucket + distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+            ]
+      for (const bucket of buckets) {
+        if (bucket <= 0 || bucket + TIMESTAMP_MESSAGE_ID_SLOTS - 1 > TELEGRAM_MESSAGE_ID_MAX) continue
+        for (let slot = 0; slot < TIMESTAMP_MESSAGE_ID_SLOTS && ids.length < count; slot++) {
+          const candidate = bucket + slot
+          if (bounds.lowerExclusive !== undefined && candidate <= bounds.lowerExclusive) continue
+          if (bounds.upperExclusive !== undefined && candidate >= bounds.upperExclusive) continue
+          if (existingIds.includes(candidate) || ids.includes(candidate)) continue
+          const occupied = await database.get('mtproto_tl_message_part', { scope, tlMessageId: candidate })
+          if (!occupied.length) ids.push(candidate)
+        }
+      }
+      const boundedSearch = bounds.lowerExclusive !== undefined && bounds.upperExclusive !== undefined
+        ? Math.ceil((bounds.upperExclusive - bounds.lowerExclusive) / TIMESTAMP_MESSAGE_ID_SLOTS) + 2
+        : TELEGRAM_MESSAGE_ID_MAX / TIMESTAMP_MESSAGE_ID_SLOTS
+      if (distance > boundedSearch) {
+        throw new RangeError(`message ID scope exhausted: ${scope}`)
+      }
     }
-    await database.upsert('mtproto_id_counter', [{ scope: counterScope, nextId }])
-    return allocation === 'history' ? ids.reverse() : ids
+    return ids.sort((left, right) => left - right)
+  }
+
+  private async _messageIdEpoch(database: Database, scope: string, timestamp: number): Promise<number> {
+    const [existing] = await database.get('mtproto_message_id_epoch', { scope })
+    if (existing) return existing.epoch
+    const epoch = initialTimestampMessageIdEpoch(timestamp)
+    await database.create('mtproto_message_id_epoch', { scope, epoch })
+    return epoch
+  }
+
+  private async _nativeSequenceBounds(
+    database: Database,
+    conversationId: number,
+    nativeSequence: number,
+  ): Promise<{ lowerExclusive?: number, upperExclusive?: number }> {
+    const [previous] = await database.select('mtproto_tl_message_part', {
+      conversationId,
+      nativeSequence: { $lt: nativeSequence },
+    }).orderBy('nativeSequence', 'desc').limit(1).execute()
+    const [next] = await database.select('mtproto_tl_message_part', {
+      conversationId,
+      nativeSequence: { $gt: nativeSequence },
+    }).orderBy('nativeSequence').limit(1).execute()
+    const previousParts = previous?.nativeSequence === null || previous?.nativeSequence === undefined
+      ? []
+      : await database.get('mtproto_tl_message_part', {
+          conversationId, nativeSequence: previous.nativeSequence,
+        })
+    const nextParts = next?.nativeSequence === null || next?.nativeSequence === undefined
+      ? []
+      : await database.get('mtproto_tl_message_part', {
+          conversationId, nativeSequence: next.nativeSequence,
+        })
+    return {
+      lowerExclusive: previousParts.length
+        ? Math.max(...previousParts.map((part) => part.tlMessageId))
+        : undefined,
+      upperExclusive: nextParts.length
+        ? Math.min(...nextParts.map((part) => part.tlMessageId))
+        : undefined,
+    }
   }
 
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {

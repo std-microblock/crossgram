@@ -32,7 +32,10 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
       messages: [{
         id: 'opaque-qq-id',
-        metadata: { qqMsgSeq: '5850634', telegramMessageId: 5850634, telegramReplyToMessageId: 5850632 },
+        metadata: {
+          qqMsgSeq: '5850634', telegramMessageId: 5850634,
+          telegramReplyToMessageId: 5850632, qqReplyToMsgSeq: '5850632',
+        },
       }],
     })
   })
