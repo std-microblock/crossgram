@@ -21,6 +21,7 @@ import type { StickerRpc } from './sticker-rpc.js'
 import type { ReactionRpc } from './reaction-rpc.js'
 import type { TelegramResourceService } from './resource-provider.js'
 import { probeImageDimensions } from './image-dimensions.js'
+import { withAutoLinkEntities } from './message-entities.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -2365,6 +2366,7 @@ export function projectTlMessage(options: {
       action: { _: 'messageActionCustomAction', message: source.content.serviceAction.text },
     } as tl.RawMessageService
   }
+  const text = ordinal === 0 ? messageText(source) : ''
   return {
     _: 'message', out: source.outgoing || undefined, id: tlId,
     fromId: fromId ?? {
@@ -2382,8 +2384,8 @@ export function projectTlMessage(options: {
       _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
     } : undefined,
     date: source.timestamp,
-    message: ordinal === 0 ? messageText(source) : '',
-    entities: ordinal === 0 ? entities : undefined,
+    message: text,
+    entities: ordinal === 0 ? withAutoLinkEntities(text, entities) : undefined,
     media,
     groupedId: groupedId ? Long.fromString(groupedId) : undefined,
     reactions,
