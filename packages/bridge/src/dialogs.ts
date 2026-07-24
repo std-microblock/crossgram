@@ -141,9 +141,10 @@ export class DialogRpc {
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
     })
-    const all = loaded.dialogs
-      .slice()
-      .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0))
+    // Preserve the platform's authoritative order. Re-sorting each page makes
+    // Telegram's last offset peer point into the middle of the upstream page,
+    // causing the next request to overlap or repeat the first page.
+    const all = loaded.dialogs.slice()
 
     // PlatformDataService has already persisted any previews exposed by
     // getDialogs. Never fan a stored dialog-list request out into upstream
