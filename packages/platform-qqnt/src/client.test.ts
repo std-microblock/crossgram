@@ -35,10 +35,10 @@ describe('QQNTClient streaming transport', () => {
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
     const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4, 5])]
     const progress: number[] = []
-    const message = await client.sendMessage('1:uid', 'caption', {
+    const message = await client.sendMessage('1:uid', 'caption', [{
       kind: 'file', name: 'x.bin', width: 320, height: 200,
       source: { size: 5, async *stream() { yield* chunks } },
-    }, { onProgress: (item) => { progress.push(item.transferredBytes) } }, 'origin-1')
+    }], { onProgress: (item) => { progress.push(item.transferredBytes) } }, 'origin-1')
     expect(message.id).toBe('sent')
     expect(Buffer.concat(received)).toEqual(Buffer.from([1, 2, 3, 4, 5]))
     expect(progress).toEqual([2, 5])
@@ -62,10 +62,46 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
-    await expect(client.sendMessage('1:uid', undefined, {
+    await expect(client.sendMessage('1:uid', undefined, [{
       kind: 'file', name: 'short.bin',
       source: { size: 10, async *stream() { yield new Uint8Array([1, 2]) } },
-    })).rejects.toThrow(/incomplete media source/)
+    }])).rejects.toThrow(/incomplete media source/)
+  })
+
+  it('frames multiple media streams independently and reports per-item progress', async () => {
+    const received: Buffer[] = []
+    let manifest: Record<string, any> | undefined
+    server = createServer(async (request, response) => {
+      const encoded = request.headers['x-qqnt-manifest']
+      if (typeof encoded === 'string') manifest = JSON.parse(Buffer.from(encoded, 'base64url').toString())
+      for await (const chunk of request) received.push(Buffer.from(chunk))
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({
+        id: 'sent', conversationId: '1:uid', senderId: 'self', timestamp: 1, outgoing: true, parts: [],
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const progress: Array<[number, number]> = []
+
+    await client.sendMessage('1:uid', undefined, [{
+      kind: 'image', name: 'one.png', source: { async *stream() { yield Uint8Array.of(1, 2) } },
+    }, {
+      kind: 'image', name: 'two.png', source: { async *stream() { yield Uint8Array.of(3, 4, 5) } },
+    }], { onProgress: (item) => { progress.push([item.mediaIndex, item.transferredBytes]) } })
+
+    expect(Buffer.concat(received)).toEqual(Buffer.from([
+      0, 0, 0, 2, 1, 2, 0, 0, 0, 0,
+      0, 0, 0, 3, 3, 4, 5, 0, 0, 0, 0,
+    ]))
+    expect(progress).toEqual([[0, 2], [1, 3]])
+    expect(manifest).toMatchObject({
+      mediaFraming: 'length-prefixed-v1',
+      media: [{ name: 'one.png' }, { name: 'two.png' }],
+    })
   })
 
   it('downloads a complete file without sending range controls', async () => {

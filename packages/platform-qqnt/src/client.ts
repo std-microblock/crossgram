@@ -141,14 +141,14 @@ export class QQNTClient {
   async sendMessage(
     conversationId: string,
     text: string | undefined,
-    media: {
+    media: Array<{
       kind: 'image' | 'file'
       name: string
       mimeType?: string
       width?: number
       height?: number
       source: IMMediaSource
-    } | undefined,
+    }> | undefined,
     options: IMTransferOptions = {},
     originRequestId?: string,
     sticker?: QQStickerReference,
@@ -162,18 +162,23 @@ export class QQNTClient {
       replyToId,
       originRequestId,
       sticker,
-      media: media ? [{
-        kind: media.kind, name: media.name, mimeType: media.mimeType, size: media.source.size,
-        width: media.width, height: media.height,
-      }] : undefined,
+      media: media?.map((item) => ({
+        kind: item.kind, name: item.name, mimeType: item.mimeType, size: item.source.size,
+        width: item.width, height: item.height,
+      })),
+      mediaFraming: media && media.length > 1 ? 'length-prefixed-v1' : undefined,
     }
     const headers = this.headers({
       'x-qqnt-manifest': Buffer.from(JSON.stringify(manifest)).toString('base64url'),
-      ...(media?.source.size === undefined ? {} : { 'content-length': String(media.source.size) }),
+      ...(media?.length === 1 && media[0].source.size !== undefined
+        ? { 'content-length': String(media[0].source.size) }
+        : {}),
     })
     let body: BodyInit | undefined
     const uploadState: { error?: Error } = {}
-    if (media) body = Readable.from(uploadStream(media.source, options, uploadState)) as unknown as BodyInit
+    if (media?.length) body = Readable.from(media.length === 1
+      ? uploadStream(media[0].source, options, uploadState, 0)
+      : framedUploadStream(media.map((item) => item.source), options, uploadState)) as unknown as BodyInit
     else body = new Uint8Array()
     try {
       const response = await this.fetchImpl(`${this.endpoint}/messages`, {
@@ -341,19 +346,40 @@ async function* uploadStream(
   source: IMMediaSource,
   options: IMTransferOptions,
   state: { error?: Error },
+  mediaIndex: number,
 ): AsyncIterable<Uint8Array> {
   let transferred = 0
   for await (const chunk of source.stream({ signal: options.signal })) {
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('upload aborted')
     transferred += chunk.length
     await options.onProgress?.({
-      phase: 'upload', mediaIndex: 0, transferredBytes: transferred, totalBytes: source.size,
+      phase: 'upload', mediaIndex, transferredBytes: transferred, totalBytes: source.size,
     })
     yield chunk
   }
   if (source.size !== undefined && transferred !== source.size) {
     state.error = new Error(`incomplete media source: expected ${source.size} bytes, streamed ${transferred}`)
     throw state.error
+  }
+}
+
+async function* framedUploadStream(
+  sources: IMMediaSource[],
+  options: IMTransferOptions,
+  state: { error?: Error },
+): AsyncIterable<Uint8Array> {
+  const maxFrame = 64 * 1024
+  for (const [mediaIndex, source] of sources.entries()) {
+    for await (const chunk of uploadStream(source, options, state, mediaIndex)) {
+      for (let offset = 0; offset < chunk.length; offset += maxFrame) {
+        const frame = chunk.subarray(offset, Math.min(chunk.length, offset + maxFrame))
+        const header = Buffer.allocUnsafe(4)
+        header.writeUInt32BE(frame.length)
+        yield header
+        yield frame
+      }
+    }
+    yield Buffer.alloc(4)
   }
 }
 

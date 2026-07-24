@@ -762,6 +762,28 @@ describe('QQNTPlatform mapping', () => {
     expect(chunks).toEqual([1, 2, 3])
     expect(progress).toEqual([2, 3])
   })
+
+  it('keeps multiple image parts in one QQ send plan', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'multi', conversationId: '1:u', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [],
+    }))
+    const source = (value: number) => ({
+      size: 1,
+      async *stream() { yield Uint8Array.of(value) },
+    })
+
+    await platform.sendMessage(session, { id: '1:u' }, { parts: [{
+      type: 'media', media: { kind: 'image', name: 'one.png', source: source(1) },
+    }, {
+      type: 'media', media: { kind: 'image', name: 'two.png', source: source(2) },
+    }] })
+
+    const media = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![2]
+    expect(media).toMatchObject([{ name: 'one.png' }, { name: 'two.png' }])
+    expect(platform.capabilities.send?.maxMedia).toBe(9)
+  })
 })
 
 describe('QQNTPlatform dialogs polling', () => {
