@@ -172,4 +172,36 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     }
     expect(downloaded).toBe(Math.min(4096, info.size))
   }, 240_000)
+
+  it.runIf(Boolean(process.env.QQNT_BRIDGE_E2E_VIDEO_CONVERSATION))(
+    'projects a native QQ video and seeks through two independent byte ranges',
+    async () => {
+      const conversationId = process.env.QQNT_BRIDGE_E2E_VIDEO_CONVERSATION!
+      const history = await platform.getHistory(session, { id: conversationId }, { limit: 100 })
+      const requestedMessage = process.env.QQNT_BRIDGE_E2E_VIDEO_MESSAGE
+      const video = history.messages
+        .filter((message) => !requestedMessage || message.id === requestedMessage)
+        .flatMap((message) => message.content.parts)
+        .find((part) => part.type === 'media' && part.media.mimeType?.startsWith('video/'))
+      if (!video || video.type !== 'media') throw new Error('native QQ video not found in configured history')
+      expect(video.media).toMatchObject({
+        kind: 'file', mimeType: expect.stringMatching(/^video\//),
+        width: expect.any(Number), height: expect.any(Number), duration: expect.any(Number),
+      })
+      expect(video.media.size).toBeGreaterThan(1)
+
+      const size = video.media.size!
+      const chunkSize = Math.min(4096, size)
+      const read = async (offset: number) => {
+        let bytes = 0
+        for await (const chunk of platform.downloadMedia(
+          session, video.media, { offset, limit: chunkSize },
+        )) bytes += chunk.length
+        return bytes
+      }
+      await expect(read(0)).resolves.toBe(chunkSize)
+      await expect(read(size - chunkSize)).resolves.toBe(chunkSize)
+    },
+    180_000,
+  )
 })

@@ -264,6 +264,38 @@ describe('rich-media projection', () => {
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
+  it('projects native MP4 media as a seekable Telegram video with duration', async () => {
+    const store = await createStore()
+    const video: IMMessage = {
+      ...album,
+      id: 'native-video',
+      content: { parts: [{
+        type: 'media',
+        media: {
+          id: 'clip', kind: 'file', name: 'clip.mp4', mimeType: 'video/mp4',
+          size: 1_048_576, width: 1920, height: 1080, duration: 42,
+          locator: { remote: 'clip' },
+        },
+      }] },
+    }
+    const result = await new DialogRpc({
+      ...platform, async getHistory() { return { messages: [video] } },
+    }, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
+    const message = result.messages.find((item) => item._ === 'message') as tl.RawMessage
+
+    expect(message.media).toMatchObject({
+      _: 'messageMediaDocument',
+      document: {
+        _: 'document', mimeType: 'video/mp4', size: 1_048_576,
+        attributes: expect.arrayContaining([expect.objectContaining({
+          _: 'documentAttributeVideo', supportsStreaming: true,
+          duration: 42, w: 1920, h: 1080,
+        })]),
+      },
+    })
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('keeps same-kind media grouped as a Telegram album', async () => {
     const store = await createStore()
     const imageAlbum: IMMessage = {

@@ -762,27 +762,34 @@ describe('QQNTPlatform mapping', () => {
     }
     platform.client.sendMessage = vi.fn(async () => ({
       id: 'm', conversationId: '1:u', senderId: 'self', timestamp: 10, outgoing: true,
-      parts: [{ type: 'media' as const, media: { id: 'e', kind: 'file' as const, name: 'x.bin', size: 3, locator } }],
+      parts: [{ type: 'media' as const, media: {
+        id: 'e', kind: 'file' as const, name: 'clip.mp4', mimeType: 'video/mp4',
+        size: 3, width: 1280, height: 720, duration: 12, locator,
+      } }],
     }))
     const sent = await platform.sendMessage(session, { id: '1:u' }, {
       parts: [{ type: 'media', media: {
-        kind: 'file', name: 'x.bin', size: 3,
+        kind: 'file', name: 'clip.mp4', mimeType: 'video/mp4', size: 3,
+        width: 1280, height: 720, duration: 12,
         source: { size: 3, async *stream() { yield new Uint8Array([1, 2, 3]) } },
       } }],
     })
-    expect(sent.content.parts[0]).toMatchObject({ media: { locator } })
+    expect(sent.content.parts[0]).toMatchObject({ media: {
+      mimeType: 'video/mp4', width: 1280, height: 720, duration: 12, locator,
+    } })
 
-    platform.client.downloadFile = vi.fn(async function* () {
-      yield new Uint8Array([1, 2])
+    platform.client.downloadFile = vi.fn(async function* (_locator, options) {
+      expect(options).toMatchObject({ offset: 1, limit: 2 })
+      yield new Uint8Array([2])
       yield new Uint8Array([3])
     })
     const progress: number[] = []
     const chunks: number[] = []
     for await (const chunk of platform.downloadMedia(session, {
       id: 'e', kind: 'file', size: 3, locator,
-    }, { onProgress: (item) => { progress.push(item.transferredBytes) } })) chunks.push(...chunk)
-    expect(chunks).toEqual([1, 2, 3])
-    expect(progress).toEqual([2, 3])
+    }, { offset: 1, limit: 2, onProgress: (item) => { progress.push(item.transferredBytes) } })) chunks.push(...chunk)
+    expect(chunks).toEqual([2, 3])
+    expect(progress).toEqual([1, 2])
   })
 
   it('keeps multiple image parts in one QQ send plan', async () => {

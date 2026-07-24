@@ -498,6 +498,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       mimeType: part.media.mimeType,
       width: part.media.width,
       height: part.media.height,
+      duration: part.media.duration,
       source: part.media.source,
     }))
     const originRequestId = randomUUID()
@@ -590,9 +591,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       return
     }
     let transferred = 0
-    for await (const chunk of sliceStream(
-      original.stream({ signal: options.signal }), options.offset, options.limit,
-    )) {
+    for await (const chunk of this.client.downloadFile(media.locator, {
+      signal: options.signal, offset: options.offset, limit: options.limit,
+    })) {
       transferred += chunk.length
       await options.onProgress?.({
         phase: 'download', mediaIndex: 0, transferredBytes: transferred,
@@ -932,6 +933,7 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
     size: input.size,
     width: input.width,
     height: input.height,
+    duration: input.duration,
     locator: input.locator,
   }
 }

@@ -157,6 +157,8 @@ export interface IMMedia<TLocator = unknown> {
   size?: number
   width?: number
   height?: number
+  /** Playback duration in seconds for streamable audio/video media. */
+  duration?: number
   /** Optional adapter-generated preview, downloaded through the same media method. */
   preview?: IMMediaPreview<TLocator>
   /** Adapter-owned, typed data needed by downloadMedia(). */
