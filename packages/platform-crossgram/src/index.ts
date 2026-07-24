@@ -47,7 +47,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     ffmpegPath: config.ffmpegPath,
     database: ctx.database,
   })
-  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache)
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, ctx.logger('platform-qqnt'))
   ctx.imPlatform.register(platform, id)
   ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId, mediaCache), stickerProviderId)
 }
@@ -95,6 +95,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: Config = {},
     private readonly stickerProviderId = 'qqnt:stickers',
     private readonly mediaCache?: QQMediaCache,
+    private readonly logger?: QQNTLogger,
   ) {
     this.client = new QQNTClient(options)
     this.memberName = options.memberName ?? 'groupAlias'
@@ -136,15 +137,52 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
     signal: AbortSignal,
   ): Promise<void> {
+    let lastEventId: string | undefined
+    let attempt = 0
     while (!signal.aborted) {
+      attempt++
+      this.logger?.info(
+        'SSE subscribe start session=%s attempt=%d endpoint=%s lastEventId=%s',
+        platformSessionId, attempt, this.client.endpoint, lastEventId ?? '<none>',
+      )
       try {
-        await this.client.subscribe((event) => {
+        await this.client.subscribe(async (event, eventId) => {
+          this.logger?.info(
+            'SSE event received session=%s streamEventId=%s %s',
+            platformSessionId, eventId ?? '<none>', wireEventSummary(event),
+          )
           if (event.type === 'message' && event.message.originRequestId
-            && this.originSessions.get(event.message.originRequestId) === platformSessionId) return
-          return handler(this.mapEvent(event))
-        }, signal)
-      } catch {
+            && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
+            this.logger?.info(
+              'SSE event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
+              platformSessionId, eventId ?? '<none>', event.message.id, event.message.originRequestId,
+            )
+            return
+          }
+          const mapped = this.mapEvent(event)
+          this.logger?.info(
+            'SSE event mapped session=%s streamEventId=%s %s',
+            platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
+          )
+          await handler(mapped)
+          this.logger?.info(
+            'SSE event handled session=%s streamEventId=%s %s',
+            platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
+          )
+        }, signal, {
+          lastEventId,
+          onEventId: (eventId) => { lastEventId = eventId },
+        })
+        if (!signal.aborted) this.logger?.warn(
+          'SSE stream ended session=%s attempt=%d lastEventId=%s; reconnecting',
+          platformSessionId, attempt, lastEventId ?? '<none>',
+        )
+      } catch (error) {
         if (signal.aborted) return
+        this.logger?.warn(
+          'SSE stream failed session=%s attempt=%d lastEventId=%s error=%s; reconnecting',
+          platformSessionId, attempt, lastEventId ?? '<none>', formatError(error),
+        )
       }
       await abortableDelay(1_000, signal)
     }
@@ -679,6 +717,42 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     this.conversations.set(id, conversation)
     return conversation
   }
+}
+
+interface QQNTLogger {
+  info(format: string, ...args: unknown[]): void
+  warn(format: string, ...args: unknown[]): void
+}
+
+function wireEventSummary(event: WireEvent): string {
+  if (event.type === 'message') {
+    return `type=message conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.parts.length}`
+  }
+  if (event.type === 'message-delete') {
+    return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} messages=${event.messageIds.join(',')}`
+  }
+  return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} message=${event.target.messageId} reactions=${event.context.reactions.length}`
+}
+
+function imEventSummary(event: IMEvent<QQMediaLocator>): string {
+  if (event.type === 'message' || event.type === 'message-edit') {
+    return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.content.parts.length}`
+  }
+  if (event.type === 'message-delete') {
+    return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} messages=${event.messageIds.join(',')}`
+  }
+  if (event.type === 'message-reactions') {
+    return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} message=${event.target.messageId} reactions=${event.context.reactions.length}`
+  }
+  if (event.type === 'read') {
+    return `type=read conversation=${event.conversationId} upToMessage=${event.upToMessageId}`
+  }
+  return `type=conversation conversation=${event.conversation.id}`
+}
+
+function formatError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  return error.stack ?? `${error.name}: ${error.message}`
 }
 
 function mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {

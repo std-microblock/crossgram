@@ -113,6 +113,7 @@ export class PlatformSubscriptionManager {
     private readonly _store: MessageStore,
     private readonly _onError: (error: unknown, session?: PlatformSession) => void = () => {},
     private readonly _onEvent?: (session: PlatformSession, event: CommittedPlatformEvent) => void | Promise<void>,
+    private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
 
   async startActiveSessions(platformId?: string): Promise<void> {
@@ -138,10 +139,16 @@ export class PlatformSubscriptionManager {
       return
     }
     const platform = this._registry.require(session.platformId)
+    this._onTrace?.(
+      'platform subscription start platform=%s session=%s', session.platformId, session.platformSessionId,
+    )
     const pending = platform.subscribe(session, (event) => this._enqueue(session, event))
     this._subscriptions.set(session.platformSessionId, { platformId: session.platformId, pending })
     try {
       await pending
+      this._onTrace?.(
+        'platform subscription ready platform=%s session=%s', session.platformId, session.platformSessionId,
+      )
     } catch (error) {
       if (this._subscriptions.get(session.platformSessionId)?.pending === pending) {
         this._subscriptions.delete(session.platformSessionId)
@@ -173,10 +180,20 @@ export class PlatformSubscriptionManager {
 
   private _enqueue(session: PlatformSession, event: IMEvent): Promise<void> {
     const key = session.platformSessionId
+    this._onTrace?.(
+      'platform event enqueue platform=%s session=%s %s queued=%s',
+      session.platformId, key, platformEventSummary(event), this._eventQueues.has(key),
+    )
     const previous = this._eventQueues.get(key) ?? Promise.resolve()
     const current = previous.catch(() => {}).then(() => this._ingestEvent(session, event))
     this._eventQueues.set(key, current)
-    current.catch((error) => this._onError(error, session)).finally(() => {
+    current.catch((error) => {
+      this._onTrace?.(
+        'platform event failed platform=%s session=%s %s error=%s',
+        session.platformId, key, platformEventSummary(event), formatError(error),
+      )
+      this._onError(error, session)
+    }).finally(() => {
       if (this._eventQueues.get(key) === current) this._eventQueues.delete(key)
     })
     return current
@@ -187,7 +204,16 @@ export class PlatformSubscriptionManager {
       await this._store.upsertConversation(session, event.conversation)
     } else if (event.type === 'message') {
       const result = await this._store.ingest(session, event.conversation, event.message)
+      this._onTrace?.(
+        'platform message ingested platform=%s session=%s conversation=%s message=%s created=%s changed=%s projection=%d',
+        session.platformId, session.platformSessionId, event.conversation.id, event.message.id,
+        result.created, result.changed, result.projection.length,
+      )
       await this._onEvent?.(session, { event, result })
+      this._onTrace?.(
+        'platform message committed platform=%s session=%s conversation=%s message=%s',
+        session.platformId, session.platformSessionId, event.conversation.id, event.message.id,
+      )
     } else if (event.type === 'message-edit') {
       const result = await this._store.ingest(session, event.conversation, event.message)
       await this._onEvent?.(session, { event, result })
@@ -199,6 +225,27 @@ export class PlatformSubscriptionManager {
       await this._onEvent?.(session, { event, result })
     }
   }
+}
+
+function platformEventSummary(event: IMEvent): string {
+  if (event.type === 'message' || event.type === 'message-edit') {
+    return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.content.parts.length}`
+  }
+  if (event.type === 'message-delete') {
+    return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} messages=${event.messageIds.join(',')}`
+  }
+  if (event.type === 'message-reactions') {
+    return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} message=${event.target.messageId} reactions=${event.context.reactions.length}`
+  }
+  if (event.type === 'read') {
+    return `type=read conversation=${event.conversationId} upToMessage=${event.upToMessageId}`
+  }
+  return `type=conversation conversation=${event.conversation.id}`
+}
+
+function formatError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  return error.stack ?? `${error.name}: ${error.message}`
 }
 
 export type CommittedPlatformEvent =

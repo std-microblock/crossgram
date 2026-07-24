@@ -79,6 +79,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const rpc = ctx.mtproto.route(routeId)
   const dcId = config.dcId ?? 1
   const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
+  const bridgeLogger = ctx.logger('bridge')
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database)
@@ -87,15 +88,19 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx.database, registry, store,
     (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
     dcId,
+    (format, ...args) => bridgeLogger.info(format, ...args),
   )
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
     registry,
     store,
-    (error, session) => ctx.logger('bridge').warn(
-      'platform subscription failed (%s): %s', session?.platformId ?? 'unknown', String(error),
+    (error, session) => bridgeLogger.warn(
+      'platform subscription failed platform=%s session=%s error=%s',
+      session?.platformId ?? 'unknown', session?.platformSessionId ?? 'unknown',
+      error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error),
     ),
     (session, event) => updates.publish(session, event),
+    (format, ...args) => bridgeLogger.info(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, stickerProviders.registry,

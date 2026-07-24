@@ -18,12 +18,17 @@ export class UpdateManager {
     private readonly _store: MessageStore,
     private readonly _sendUpdate: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number,
     private readonly _dcId = 1,
+    private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
 
   async publish(
     session: PlatformSession,
     committed: CommittedPlatformEvent,
   ): Promise<void> {
+    this._onTrace?.(
+      'update publish start platform=%s session=%s %s',
+      session.platformId, session.platformSessionId, committedEventSummary(committed),
+    )
     if (committed.event.type === 'message-delete') {
       await this._publishDelete(
         session,
@@ -95,11 +100,22 @@ export class UpdateManager {
       ? `${session.platformSessionId}:edit:${event.eventId}`
       : `${session.platformSessionId}:message:${result.message.id}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
-    if (!delivery && isEdit && !result.changed) return
+    if (!delivery && isEdit && !result.changed) {
+      this._onTrace?.('update publish skipped eventKey=%s reason=unchanged-edit', eventKey)
+      return
+    }
     delivery ??= await this._store.prepareUpdateDelivery(
       eventKey, session.platformSessionId, result.projection.length, event.message.timestamp,
     )
-    if (delivery.published) return
+    if (delivery.published) {
+      this._onTrace?.('update publish skipped eventKey=%s reason=already-published', eventKey)
+      return
+    }
+    this._onTrace?.(
+      'update delivery prepared eventKey=%s pts=%d ptsCount=%d seq=%d projection=%d created=%s changed=%s',
+      eventKey, delivery.pts, delivery.ptsCount, delivery.seq, result.projection.length,
+      result.created, result.changed,
+    )
     const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
       ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
         ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
@@ -113,7 +129,13 @@ export class UpdateManager {
       const projected = await this._store.findProjectedByTlId(
         session.platformSessionId, part.tlMessageId, event.conversation.id,
       )
-      if (!projected) continue
+      if (!projected) {
+        this._onTrace?.(
+          'update projection missing eventKey=%s conversation=%s tlMessageId=%d ordinal=%d',
+          eventKey, event.conversation.id, part.tlMessageId, part.ordinal,
+        )
+        continue
+      }
       const media = projected.media.find((item) => item.id === part.mediaId)
       const replied = projected.source.replyToId
         ? await this._store.findProjectedByPlatformId(
@@ -134,7 +156,10 @@ export class UpdateManager {
         ptsCount: 1,
       } as tl.TypeUpdate)
     }
-    if (!updates.length) return
+    if (!updates.length) {
+      this._onTrace?.('update publish skipped eventKey=%s reason=no-projected-updates', eventKey)
+      return
+    }
 
     const platform = this._registry.require(session.platformId)
     const sender = event.message.sender
@@ -163,8 +188,18 @@ export class UpdateManager {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    this._onTrace?.(
+      'update payload stored eventKey=%s updates=%d types=%s pts=%d seq=%d',
+      eventKey, updates.length, updates.map((update) => update._).join(','), delivery.pts, delivery.seq,
+    )
     if (await this._send(session.platformSessionId, payload)) {
       await this._store.markUpdatePublished(eventKey)
+      this._onTrace?.('update published eventKey=%s session=%s', eventKey, session.platformSessionId)
+    } else {
+      this._onTrace?.(
+        'update pending eventKey=%s session=%s reason=no-live-auth-connection',
+        eventKey, session.platformSessionId,
+      )
     }
   }
 
@@ -217,7 +252,23 @@ export class UpdateManager {
   private async _send(platformSessionId: string, payload: tl.RawUpdates): Promise<boolean> {
     const bindings = await this._database.get('mtproto_auth_binding', { platformSessionId })
     let delivered = 0
-    for (const binding of bindings) delivered += this._sendUpdate(hexBytes(binding.authKeyId), payload)
+    this._onTrace?.(
+      'update send start session=%s bindings=%d updates=%d types=%s',
+      platformSessionId, bindings.length, payload.updates.length,
+      payload.updates.map((update) => update._).join(','),
+    )
+    for (const binding of bindings) {
+      const connections = this._sendUpdate(hexBytes(binding.authKeyId), payload)
+      delivered += connections
+      this._onTrace?.(
+        'update send binding session=%s authKey=%s connections=%d',
+        platformSessionId, binding.authKeyId, connections,
+      )
+    }
+    this._onTrace?.(
+      'update send complete session=%s bindings=%d connections=%d',
+      platformSessionId, bindings.length, delivered,
+    )
     return delivered > 0
   }
 
@@ -293,6 +344,20 @@ export class UpdateManager {
     }
     return { _: 'updates.difference', ...difference, state }
   }
+}
+
+function committedEventSummary(committed: CommittedPlatformEvent): string {
+  const { event, result } = committed
+  if (event.type === 'message' || event.type === 'message-edit') {
+    const ingest = result as import('./message-store.js').IngestResult
+    return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} created=${ingest.created} changed=${ingest.changed} projection=${ingest.projection.length}`
+  }
+  if (event.type === 'message-delete') {
+    const deletion = result as import('./message-store.js').DeleteResult
+    return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} changed=${deletion.changed} tlMessages=${deletion.tlMessageIds.length}`
+  }
+  const reactions = result as import('./message-store.js').ReactionResult
+  return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} changed=${reactions.changed} tlMessages=${reactions.tlMessageIds.length}`
 }
 
 function encodeUpdate(update: tl.RawUpdates): string {
