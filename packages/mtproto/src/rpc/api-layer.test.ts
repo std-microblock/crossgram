@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { tl } from '@mtcute/core'
+import Long from 'long'
 import { __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import {
@@ -52,6 +53,26 @@ describe('API layer response writers', () => {
     expect(getApiLayerWriterMap(__tlWriterMap, CURRENT_API_LAYER)).toBe(__tlWriterMap)
     expect(getApiLayerWriterMap(__tlWriterMap, 1)).toBe(__tlWriterMap)
     expect(getApiLayerWriterMap(__tlWriterMap, null)).toBe(__tlWriterMap)
+  })
+  it('serializes a Layer 228 authorization with its generated reader and writer', () => {
+    const authorization = {
+      _: 'auth.authorization', flags: 0, setupPasswordRequired: false,
+      user: {
+        _: 'user', flags: 0, self: true, premium: true, id: 42, accessHash: Long.ZERO,
+        firstName: 'Bridge', phone: '15550000000', status: { _: 'userStatusRecently' },
+      },
+    } as unknown as tl.TlObject
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 228), authorization)
+    expect(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(8, true))
+      .toBe(constructorFromLocalSchema(228, 'user'))
+
+    const readerMap = getApiLayerReaderMap(228)
+    expect(readerMap).not.toBeNull()
+    const decoded = new TlBinaryReader(readerMap!, bytes).object() as { user: tl.RawUser }
+    expect(decoded.user).toMatchObject({
+      _: 'user', self: true, premium: true, id: 42, accessHash: Long.ZERO,
+      firstName: 'Bridge', phone: '15550000000', status: { _: 'userStatusRecently' },
+    })
   })
 
   it('serializes a complete AyuGram layer 224 object graph with its generated reader and writer', () => {
