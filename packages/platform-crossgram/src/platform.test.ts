@@ -88,6 +88,24 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+
+  it('maps QQ wire serviceAction into IMMessage.content.serviceAction', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'system-tip', conversationId: '2:group', senderId: 'system', timestamp: 1, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice joined the group' },
+      parts: [],
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{
+        id: 'system-tip',
+        content: { serviceAction: { type: 'custom', text: 'Alice joined the group' }, parts: [] },
+      }],
+    })
+  })
+
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({

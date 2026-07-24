@@ -467,6 +467,36 @@ describe('UpdateManager', () => {
     expect(() => roundTrip(difference)).not.toThrow()
   })
 
+  it('pushes and replays content.serviceAction through updates.getChannelDifference', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'service-group', kind: 'group', title: 'Service Group' }
+    const message: IMMessage = {
+      id: 'joined', conversationId: conversation.id, senderId: 'alice', timestamp: 60,
+      content: { serviceAction: { type: 'custom', text: 'Alice joined the group' }, parts: [] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    expect(sent[0].update).toMatchObject({
+      _: 'updates',
+      updates: [{
+        _: 'updateNewChannelMessage',
+        message: { _: 'messageService', action: { _: 'messageActionCustomAction', message: 'Alice joined the group' } },
+      }],
+    })
+    const difference = await manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: { _: 'inputChannel', channelId: stableId('peer:service-group'), accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+    })
+    expect(difference).toMatchObject({
+      _: 'updates.channelDifference',
+      newMessages: [{ _: 'messageService', action: { _: 'messageActionCustomAction', message: 'Alice joined the group' } }],
+    })
+    expect(() => roundTrip(sent[0].update)).not.toThrow()
+    expect(() => roundTrip(difference)).not.toThrow()
+  })
+
   it('recovers retained updates without returning unsupported differenceTooLong across a pruned pts gap', async () => {
     const { ctx, store } = await createHarness(3)
     const manager = new UpdateManager(
