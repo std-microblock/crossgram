@@ -141,6 +141,76 @@ describe('DialogRpc', () => {
     expect(getUser).not.toHaveBeenCalled()
   })
 
+  it('projects group content.serviceAction in dialogs and history', async () => {
+    const conversation = { id: 'group', kind: 'group' as const, title: 'Group' }
+    const service: IMMessage = {
+      id: 'joined', conversationId: conversation.id, senderId: 'alice', timestamp: 1_700_000_000,
+      content: { serviceAction: { type: 'custom', text: 'Alice joined the group' }, parts: [] },
+    }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: service }] } },
+      async getHistory() { return { messages: [service] } },
+      async getUser(_session, id) { return { id, firstName: 'Alice' } },
+    }
+    const rpc = new DialogRpc(platform, session)
+    const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
+    const dialog = dialogs.dialogs[0] as tl.RawDialog
+
+    expect(dialogs.messages[0]).toMatchObject({
+      _: 'messageService', id: dialog.topMessage,
+      action: { _: 'messageActionCustomAction', message: 'Alice joined the group' },
+    })
+    const history = await rpc.getHistory({
+      _: 'messages.getHistory', peer: { _: 'inputPeerChannel', channelId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO },
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    expect(history.messages).toMatchObject([{
+      _: 'messageService', action: { _: 'messageActionCustomAction', message: 'Alice joined the group' },
+    }])
+    expect(() => wireRoundTrip(history)).not.toThrow()
+  })
+
+  it('projects direct content.serviceAction in dialogs and history', async () => {
+    const conversation = { id: 'alice', kind: 'direct' as const, title: 'Alice' }
+    const service: IMMessage = {
+      id: 'private-service', conversationId: conversation.id, senderId: conversation.id, timestamp: 1_700_000_000,
+      content: { serviceAction: { type: 'custom', text: 'Alice waved' }, parts: [] },
+    }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: service }] } },
+      async getHistory() { return { messages: [service] } },
+      async getUser(_session, id) { return { id, firstName: 'Alice' } },
+    }
+    const rpc = new DialogRpc(platform, session)
+    const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
+
+    expect(dialogs.messages).toMatchObject([{
+      _: 'messageService',
+      peerId: { _: 'peerUser', userId: rpc.peerTlId(conversation.id) },
+      action: { _: 'messageActionCustomAction', message: 'Alice waved' },
+    }])
+    const history = await rpc.getHistory(getHistoryRequest(rpc.peerTlId(conversation.id))) as tl.messages.RawMessages
+    expect(history.messages).toMatchObject([{
+      _: 'messageService', action: { _: 'messageActionCustomAction', message: 'Alice waved' },
+    }])
+    expect(() => wireRoundTrip(dialogs)).not.toThrow()
+    expect(() => wireRoundTrip(history)).not.toThrow()
+  })
+
   it('coalesces and caches repeated platform user lookups', async () => {
     const platform = new DialogTestPlatform()
     const getUser = vi.spyOn(platform, 'getUser')
