@@ -1,0 +1,2 @@
+assetsPath: Directory containing index.json and the Telegram resource assets.
+providerId: Registry ID used when multiple Telegram resource sets are mounted.

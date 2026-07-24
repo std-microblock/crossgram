@@ -1,0 +1,5 @@
+apiId: 从 my.telegram.org 获取的 Telegram 应用 API ID。
+apiHash: 从 my.telegram.org 获取的 Telegram 应用 API Hash。
+storagePath: 存放上游会话的目录，每个下游授权密钥对应一个会话。
+disableUpdates: 禁用 mtcute 的差异更新循环，同时继续转发服务端原始更新。
+routeId: 向 MTProto 服务公开的账户路由标识。

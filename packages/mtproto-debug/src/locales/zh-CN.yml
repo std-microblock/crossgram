@@ -1,0 +1,2 @@
+maxEvents: 内存中保留的已解码 MTProto 事件数量上限。
+initiallyPaused: 启动后保持暂停，等待用户手动开始捕获。

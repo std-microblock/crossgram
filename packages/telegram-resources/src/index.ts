@@ -2,6 +2,8 @@ import type { Context } from 'cordis'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import z from 'schemastery'
+import enUS from './locales/en-US.yml'
+import zhCN from './locales/zh-CN.yml'
 import { TelegramResources } from './store.js'
 
 export {
@@ -24,10 +26,11 @@ export interface Config {
 }
 
 export const Config = z.object({
-  assetsPath: z.string()
-    .description('Directory containing index.json and the Telegram resource assets.'),
-  providerId: z.string().default('telegram-official')
-    .description('Registry ID used when multiple Telegram resource sets are mounted.'),
+  assetsPath: z.string(),
+  providerId: z.string().default('telegram-official'),
+}).i18n({
+  'en-US': enUS,
+  'zh-CN': zhCN,
 })
 
 export function apply(ctx: Context, config: Config = {}): void {

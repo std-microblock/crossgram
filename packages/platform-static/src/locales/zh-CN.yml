@@ -1,0 +1,5 @@
+instanceId: 生成消息 ID 时使用的稳定实例标识。
+mediaPath: 用于持久化媒体的目录；测试中留空则使用内存存储。
+transferChunkSize: 流式传输媒体时使用的分块大小，单位为字节。
+eventIntervalMs: 生成模拟事件的间隔，单位为毫秒；设为 0 时禁用。
+historySize: 参考适配器保留的初始历史消息数量。

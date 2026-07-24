@@ -1,0 +1,4 @@
+port: MTProto 服务监听的 TCP 端口。设为 0 时使用临时端口。
+host: MTProto 服务绑定的主机名或 IP 地址。
+rsaKeyPath: 用于加载或创建 RSA 密钥对 JSON 文件的路径。
+authKeyStorePath: 用于持久化已授权 MTProto 密钥的路径。

@@ -1,0 +1,5 @@
+instanceId: Stable instance identifier used in generated message IDs.
+mediaPath: Directory used to persist media; omit for in-memory storage in tests.
+transferChunkSize: Chunk size in bytes used while streaming media.
+eventIntervalMs: Interval for synthetic events in milliseconds; 0 disables them.
+historySize: Number of seeded history messages retained by the reference adapter.

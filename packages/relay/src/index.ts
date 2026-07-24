@@ -5,6 +5,8 @@ import { bareVector, RpcError, type RpcResult } from '@mtproto-relay/mtproto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import z from 'schemastery'
+import enUS from './locales/en-US.yml'
+import zhCN from './locales/zh-CN.yml'
 
 export const name = 'mtproto-relay'
 export const inject = ['mtproto', 'database', 'model']
@@ -55,16 +57,14 @@ export interface RelayConfig {
 }
 
 export const Config = z.object({
-  apiId: z.natural().min(1).required()
-    .description('Telegram application API ID from my.telegram.org.'),
-  apiHash: z.string().min(1).required().role('secret')
-    .description('Telegram application API hash from my.telegram.org.'),
-  storagePath: z.string().default('data/relay')
-    .description('Directory containing one upstream session per downstream auth key.'),
-  disableUpdates: z.boolean().default(true)
-    .description('Disable mtcute\'s difference loop while still forwarding raw server updates.'),
-  routeId: z.string().default('relay:official')
-    .description('Account route exposed to the MTProto service.'),
+  apiId: z.natural().min(1).required(),
+  apiHash: z.string().min(1).required().role('secret'),
+  storagePath: z.string().default('data/relay'),
+  disableUpdates: z.boolean().default(true),
+  routeId: z.string().default('relay:official'),
+}).i18n({
+  'en-US': enUS,
+  'zh-CN': zhCN,
 })
 
 interface RelayEntry {

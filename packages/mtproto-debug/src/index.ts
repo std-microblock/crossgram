@@ -3,6 +3,8 @@ import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { serializeDebugEvent } from './serialize.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
+import enUS from './locales/en-US.yml'
+import zhCN from './locales/zh-CN.yml'
 
 export const name = 'mtproto-debug'
 export const inject = ['mtproto', 'webui']
@@ -13,10 +15,11 @@ export interface Config {
 }
 
 export const Config = z.object({
-  maxEvents: z.natural().min(100).max(20_000).default(2_000)
-    .description('Maximum number of decoded MTProto events retained in memory.'),
-  initiallyPaused: z.boolean().default(false)
-    .description('Wait for the user to start capture after startup.'),
+  maxEvents: z.natural().min(100).max(20_000).default(2_000),
+  initiallyPaused: z.boolean().default(false),
+}).i18n({
+  'en-US': enUS,
+  'zh-CN': zhCN,
 })
 
 export function apply(ctx: Context, config: Config = {}): void {

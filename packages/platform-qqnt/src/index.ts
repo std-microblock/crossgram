@@ -2,6 +2,8 @@ import type { Context } from 'cordis'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import z from 'schemastery'
+import enUS from './locales/en-US.yml'
+import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
@@ -38,22 +40,17 @@ export interface Config extends QQNTClientOptions {
 }
 
 export const Config = z.object({
-  endpoint: z.string().default('http://127.0.0.1:18767/v1')
-    .description('Base URL of the QQNT bridge HTTP API.'),
-  token: z.string().role('secret')
-    .description('Bearer token used to authenticate with the QQNT bridge.'),
-  memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias')
-    .description('Name shown for group members.'),
-  mediaCachePath: z.string()
-    .description('Directory used for cached media, previews, stickers, and reactions.'),
-  mediaDownloadMode: z.union([z.const('on-demand'), z.const('auto')]).default('on-demand')
-    .description('Download original media on demand or cache eligible media automatically.'),
-  autoDownloadFileSizeLimit: z.natural().default(10 * 1024 * 1024)
-    .description('Maximum file size in bytes eligible for automatic caching.'),
-  previewMaxDimension: z.natural().min(1).default(320)
-    .description('Maximum width or height of generated image previews.'),
-  ffmpegPath: z.string()
-    .description('FFmpeg executable used to convert GIF and APNG media to WebM.'),
+  endpoint: z.string().default('http://127.0.0.1:18767/v1'),
+  token: z.string().role('secret'),
+  memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
+  mediaCachePath: z.string(),
+  mediaDownloadMode: z.union([z.const('on-demand'), z.const('auto')]).default('on-demand'),
+  autoDownloadFileSizeLimit: z.natural().default(10 * 1024 * 1024),
+  previewMaxDimension: z.natural().min(1).default(320),
+  ffmpegPath: z.string(),
+}).i18n({
+  'en-US': enUS,
+  'zh-CN': zhCN,
 })
 
 export const name = 'im-platform-qqnt'

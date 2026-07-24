@@ -18,6 +18,8 @@ import { createCordisLogManager } from './cordis-logger.js'
 import { Emitter } from '@fuman/utils'
 import type { MtprotoDebugEvent } from './debug.js'
 import z from 'schemastery'
+import enUS from './locales/en-US.yml'
+import zhCN from './locales/zh-CN.yml'
 
 export interface MtprotoConfig {
   /** TCP port to listen on (default: 4430; 0 = ephemeral) */
@@ -43,14 +45,13 @@ export interface MtprotoConfig {
 }
 
 export const Config = z.object({
-  port: z.natural().max(65_535).default(4430)
-    .description('TCP port to listen on. Use 0 to select an ephemeral port.'),
-  host: z.string().default('127.0.0.1')
-    .description('Host or IP address to bind the MTProto server to.'),
-  rsaKeyPath: z.string()
-    .description('Path used to load or create the RSA key-pair JSON file.'),
-  authKeyStorePath: z.string()
-    .description('Path used to persist authorized MTProto keys.'),
+  port: z.natural().max(65_535).default(4430),
+  host: z.string().default('127.0.0.1'),
+  rsaKeyPath: z.string(),
+  authKeyStorePath: z.string(),
+}).i18n({
+  'en-US': enUS,
+  'zh-CN': zhCN,
 })
 
 export type RouteResolver = (
