@@ -533,24 +533,43 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: IMDownloadOptions = {},
   ): AsyncIterable<Uint8Array> {
     const locator = resource.locator
-    if (!locator || typeof locator !== 'object' || Array.isArray(locator)
-      || typeof locator.cacheKey !== 'string') throw new Error('QQ reaction resource is not cached')
+    if (!locator || typeof locator !== 'object' || Array.isArray(locator)) {
+      throw new Error('QQ reaction resource has no usable locator')
+    }
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('download aborted')
-    const cached = this.reactionResources.get(locator.cacheKey)
-    if (!cached) throw new Error(`QQ reaction resource cache miss: ${locator.cacheKey}`)
-    const start = Math.min(cached.length, Math.max(0, options.offset ?? 0))
-    const end = options.limit === undefined
-      ? cached.length
-      : Math.min(cached.length, start + Math.max(0, options.limit))
-    const output = cached.subarray(start, end)
-    if (!output.length) return
-    await options.onProgress?.({
-      phase: 'download',
-      mediaIndex: 0,
-      transferredBytes: output.length,
-      totalBytes: resource.size,
+    if (typeof locator.cacheKey === 'string') {
+      const cached = this.reactionResources.get(locator.cacheKey)
+      if (!cached) throw new Error(`QQ reaction resource cache miss: ${locator.cacheKey}`)
+      const start = Math.min(cached.length, Math.max(0, options.offset ?? 0))
+      const end = options.limit === undefined
+        ? cached.length
+        : Math.min(cached.length, start + Math.max(0, options.limit))
+      const output = cached.subarray(start, end)
+      if (!output.length) return
+      await options.onProgress?.({
+        phase: 'download',
+        mediaIndex: 0,
+        transferredBytes: output.length,
+        totalBytes: resource.size,
+      })
+      yield output
+      return
+    }
+    if (typeof locator.filePath !== 'string') {
+      throw new Error('QQ reaction resource has no cache key or file path')
+    }
+    let transferredBytes = 0
+    yield* this.client.downloadMedia(reactionMediaLocator(locator.filePath, resource.size), {
+      offset: options.offset,
+      limit: options.limit,
+      signal: options.signal,
+      onChunk: async (size) => {
+        transferredBytes += size
+        await options.onProgress?.({
+          phase: 'download', mediaIndex: 0, transferredBytes, totalBytes: resource.size,
+        })
+      },
     })
-    yield output
   }
 
   private ensureReactionCatalog(): Promise<IMReactionContext> {
@@ -575,16 +594,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       const input: IMStickerAsset = {
         source: {
           size: resource.size,
-          stream: ({ signal } = {}) => this.client.downloadMedia({
-            messageId: `reaction:${filePath}`,
-            elementId: `reaction:${filePath}`,
-            chatType: 1,
-            peerUid: '',
-            kind: 'image',
-            fileName: filePath.split('/').at(-1) ?? 'reaction.png',
-            filePath,
-            fileSize: resource.size === undefined ? undefined : String(resource.size),
-          }, { signal }),
+          stream: ({ signal } = {}) => this.client.downloadMedia(
+            reactionMediaLocator(filePath, resource.size), { signal },
+          ),
         },
         mimeType: resource.format === 'video' ? 'image/apng' : 'image/png',
         size: resource.size,
@@ -867,6 +879,19 @@ function mapParts(
     }
   }
   return parts
+}
+
+function reactionMediaLocator(filePath: string, size?: number): QQMediaLocator {
+  return {
+    messageId: `reaction:${filePath}`,
+    elementId: `reaction:${filePath}`,
+    chatType: 1,
+    peerUid: '',
+    kind: 'image',
+    fileName: filePath.split('/').at(-1) ?? 'reaction.png',
+    filePath,
+    fileSize: size === undefined ? undefined : String(size),
+  }
 }
 
 function multiForwardConversationId(locator: WireMultiForwardLocator): string {
