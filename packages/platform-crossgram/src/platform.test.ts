@@ -680,3 +680,250 @@ describe('QQNTPlatform mapping', () => {
     expect(progress).toEqual([2, 3])
   })
 })
+
+describe('QQNTPlatform dialogs polling', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function conversation(id: string, withLastMessage = true, originRequestId?: string) {
+    return {
+      id,
+      kind: 'group' as const,
+      title: id,
+      peerUid: id,
+      peerUin: id,
+      chatType: 2 as const,
+      ...(withLastMessage ? {
+        lastMessage: {
+          id: `${id}-message`, conversationId: id, senderId: 'member', timestamp: 1, outgoing: false,
+          originRequestId, parts: [{ type: 'text' as const, text: id }],
+        },
+      } : {}),
+    }
+  }
+
+  function mockSubscribe(platform: QQNTPlatform) {
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+    })
+  }
+
+  it('uses one limit-100 page as the initial dialogs baseline and ignores nextCursor', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('existing')], nextCursor: 'ignored',
+    }))
+    const events: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(events).toEqual([])
+    expect(platform.client.getDialogs).toHaveBeenCalledOnce()
+    expect(platform.client.getDialogs).toHaveBeenCalledWith({ cursor: undefined, limit: 100 }, expect.any(AbortSignal))
+    await unsubscribe()
+  })
+
+  it('injects a newly discovered dialog with a real last message only once', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    let includeNewConversation = false
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('existing'), ...(includeNewConversation ? [conversation('new-group')] : [])],
+    }))
+    const events: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.advanceTimersByTimeAsync(0)
+    includeNewConversation = true
+    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(events).toMatchObject([{
+      type: 'message', conversation: { id: 'new-group' }, message: { id: 'new-group-message' },
+    }])
+    expect(events).toHaveLength(1)
+    await unsubscribe()
+  })
+
+  it('waits for a real last message before injecting a newly discovered dialog', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    let includeNewConversation = false
+    let newConversationHasMessage = false
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [
+        conversation('existing'),
+        ...(includeNewConversation ? [conversation('new-group', newConversationHasMessage)] : []),
+      ],
+    }))
+    const events: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.advanceTimersByTimeAsync(0)
+    includeNewConversation = true
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(events).toEqual([])
+    newConversationHasMessage = true
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(events).toMatchObject([{
+      type: 'message', conversation: { id: 'new-group' }, message: { id: 'new-group-message' },
+    }])
+    await unsubscribe()
+  })
+
+  it('does not double-deliver a poll message while its SSE delivery is in flight', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    let wireHandler: ((event: any) => Promise<void>) | undefined
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      wireHandler = handler
+      await new Promise<void>((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+    })
+    let includeNewConversation = false
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('existing'), ...(includeNewConversation ? [conversation('new-group')] : [])],
+    }))
+    const handlerStarted = Promise.withResolvers<void>()
+    const releaseHandler = Promise.withResolvers<void>()
+    const handler = vi.fn(async () => {
+      handlerStarted.resolve()
+      await releaseHandler.promise
+    })
+
+    const unsubscribe = await platform.subscribe(session, handler)
+    await vi.advanceTimersByTimeAsync(0)
+    includeNewConversation = true
+    const polling = vi.advanceTimersByTimeAsync(15_000)
+    await handlerStarted.promise
+    await wireHandler!({
+      type: 'message',
+      conversation: conversation('new-group'),
+      message: {
+        id: 'new-group-message', conversationId: 'new-group', senderId: 'member', timestamp: 1, outgoing: false,
+        parts: [{ type: 'text', text: 'new-group' }],
+      },
+    })
+
+    expect(handler).toHaveBeenCalledOnce()
+    releaseHandler.resolve()
+    await polling
+    await unsubscribe()
+  })
+
+  it('retries an un-replayed SSE message through dialogs polling after its handler fails', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    let wireHandler: ((event: any) => Promise<void>) | undefined
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      wireHandler = handler
+      await new Promise<void>((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+    })
+    let includeNewConversation = false
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('existing'), ...(includeNewConversation ? [conversation('new-group')] : [])],
+    }))
+    let attempts = 0
+    const handler = vi.fn(async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('temporary handler failure')
+    })
+
+    const unsubscribe = await platform.subscribe(session, handler)
+    await vi.advanceTimersByTimeAsync(0)
+    includeNewConversation = true
+    await expect(wireHandler!({
+      type: 'message',
+      conversation: conversation('new-group'),
+      message: {
+        id: 'new-group-message', conversationId: 'new-group', senderId: 'member', timestamp: 1, outgoing: false,
+        parts: [{ type: 'text', text: 'new-group' }],
+      },
+    })).rejects.toThrow('temporary handler failure')
+    expect(handler).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(handler).toHaveBeenCalledTimes(2)
+    await unsubscribe()
+  })
+
+  it('suppresses a poll echo for its origin session', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    platform.client.sendMessage = vi.fn(async (_conversation, text, _media, _options, originRequestId) => ({
+      id: 'sent', conversationId: 'new-group', senderId: 'self', timestamp: 1, outgoing: true,
+      originRequestId, parts: [{ type: 'text' as const, text: text! }],
+    }))
+    let includeNewConversation = false
+    let originRequestId: string | undefined
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [
+        conversation('existing'),
+        ...(includeNewConversation ? [conversation('new-group', true, originRequestId)] : []),
+      ],
+    }))
+    const events: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.advanceTimersByTimeAsync(0)
+    await platform.sendMessage(session, { id: 'new-group' }, { parts: [{ type: 'text', text: 'echo' }] })
+    originRequestId = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![4]
+    includeNewConversation = true
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(events).toEqual([])
+    await unsubscribe()
+  })
+
+  it('retries a poll message after its handler fails', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    let includeNewConversation = false
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('existing'), ...(includeNewConversation ? [conversation('new-group')] : [])],
+    }))
+    let attempts = 0
+    const handler = vi.fn(async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('temporary handler failure')
+    })
+
+    const unsubscribe = await platform.subscribe(session, handler)
+    await vi.advanceTimersByTimeAsync(0)
+    includeNewConversation = true
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(handler).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(handler).toHaveBeenCalledTimes(2)
+    await unsubscribe()
+  })
+
+  it('stops dialogs polling after unsubscribe', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+
+    const unsubscribe = await platform.subscribe(session, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(platform.client.getDialogs).toHaveBeenCalledTimes(1)
+    await unsubscribe()
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(platform.client.getDialogs).toHaveBeenCalledTimes(1)
+  })
+})

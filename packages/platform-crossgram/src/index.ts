@@ -35,6 +35,8 @@ export interface Config extends QQNTClientOptions {
 export const name = 'im-platform-qqnt'
 export const inject = ['imPlatform', 'imSticker', 'database', 'model']
 
+const DIALOGS_POLL_INTERVAL_MS = 15_000
+
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'qqnt')
   const stickerProviderId = `${id}:stickers`
@@ -123,7 +125,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<Unsubscribe> {
     await this.ensureReactionCatalog().catch(() => undefined)
     const controller = new AbortController()
-    const running = this.subscribeLoop(session.platformSessionId, handler, controller.signal)
+    const knownConversationIds = new Set<string>()
+    const inFlightMessageKeys = new Set<string>()
+    const running = Promise.all([
+      this.subscribeLoop(session.platformSessionId, handler, knownConversationIds, inFlightMessageKeys, controller.signal),
+      this.subscribeDialogsLoop(
+        session.platformSessionId, handler, knownConversationIds, inFlightMessageKeys, controller.signal,
+      ),
+    ])
     return async () => {
       controller.abort()
       await running
@@ -133,6 +142,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private async subscribeLoop(
     platformSessionId: string,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+    knownConversationIds: Set<string>,
+    inFlightMessageKeys: Set<string>,
     signal: AbortSignal,
   ): Promise<void> {
     let lastEventId: string | undefined
@@ -151,6 +162,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           )
           if (event.type === 'message' && event.message.originRequestId
             && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
+            knownConversationIds.add(event.conversation.id)
             this.logger?.info(
               'SSE event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
               platformSessionId, eventId ?? '<none>', event.message.id, event.message.originRequestId,
@@ -162,7 +174,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             'SSE event mapped session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
           )
-          await handler(mapped)
+          if (mapped.type === 'message') {
+            const delivered = await this.dispatchMessage(handler, mapped, inFlightMessageKeys)
+            if (delivered) knownConversationIds.add(event.conversation.id)
+          } else {
+            await handler(mapped)
+          }
           this.logger?.info(
             'SSE event handled session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
@@ -186,9 +203,69 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
+  private async subscribeDialogsLoop(
+    platformSessionId: string,
+    handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+    knownConversationIds: Set<string>,
+    inFlightMessageKeys: Set<string>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let hasBaseline = false
+    while (!signal.aborted) {
+      try {
+        // QQNT has no revision token; use an incremental cursor when one becomes available.
+        const page = await this.getDialogsPage({ limit: 100 }, signal)
+        if (!hasBaseline) {
+          for (const dialog of page.dialogs) knownConversationIds.add(dialog.conversation.id)
+          hasBaseline = true
+        } else {
+          for (const dialog of page.dialogs) {
+            if (knownConversationIds.has(dialog.conversation.id) || !dialog.lastMessage) continue
+            const originRequestId = dialog.lastMessage.metadata?.qqOriginRequestId
+            if (typeof originRequestId === 'string'
+              && this.originSessions.get(originRequestId) === platformSessionId) {
+              knownConversationIds.add(dialog.conversation.id)
+              continue
+            }
+            const delivered = await this.dispatchMessage(handler, {
+              type: 'message', conversation: dialog.conversation, message: dialog.lastMessage,
+            }, inFlightMessageKeys)
+            if (delivered) knownConversationIds.add(dialog.conversation.id)
+          }
+        }
+      } catch {
+        if (signal.aborted) return
+      }
+      await abortableDelay(DIALOGS_POLL_INTERVAL_MS, signal)
+    }
+  }
+
+  private async dispatchMessage(
+    handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+    event: Extract<IMEvent<QQMediaLocator>, { type: 'message' }>,
+    inFlightMessageKeys: Set<string>,
+  ): Promise<boolean> {
+    const key = `${event.conversation.id}\0${event.message.id}`
+    if (inFlightMessageKeys.has(key)) return false
+    inFlightMessageKeys.add(key)
+    try {
+      await handler(event)
+      return true
+    } finally {
+      inFlightMessageKeys.delete(key)
+    }
+  }
+
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
     await this.ensureReactionCatalog().catch(() => undefined)
-    const response = await this.client.getDialogs({ cursor: query.cursor, limit: query.limit })
+    return this.getDialogsPage(query)
+  }
+
+  private async getDialogsPage(
+    query: IMPageQuery = {},
+    signal?: AbortSignal,
+  ): Promise<IMDialogPage<QQMediaLocator>> {
+    const response = await this.client.getDialogs({ cursor: query.cursor, limit: query.limit }, signal)
     for (const conversation of response.conversations) {
       if (conversation.firstUnread?.msgSeq) this.firstUnreadSeq.set(conversation.id, conversation.firstUnread.msgSeq)
       else this.firstUnreadSeq.delete(conversation.id)
@@ -818,7 +895,10 @@ function mapMessage(
     timestamp: input.timestamp,
     outgoing: input.outgoing,
     replyToId: input.replyToId,
-    metadata: input.msgSeq ? { qqMsgSeq: input.msgSeq } : undefined,
+    metadata: input.msgSeq || input.originRequestId ? {
+      ...(input.msgSeq ? { qqMsgSeq: input.msgSeq } : {}),
+      ...(input.originRequestId ? { qqOriginRequestId: input.originRequestId } : {}),
+    } : undefined,
     reactionContext: input.reactionContext ? {
       available: reactionCatalog?.available ?? [],
       reactions: input.reactionContext.reactions,
