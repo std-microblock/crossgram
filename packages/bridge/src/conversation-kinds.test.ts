@@ -565,9 +565,14 @@ describe('conversation kinds', () => {
       _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsRecent' },
       offset: 2, limit: 2, hash: Long.ZERO,
     })
+    const admins = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsAdmins' },
+      offset: 0, limit: 2, hash: Long.ZERO,
+    })
     expect(calls).toEqual([
       { cursor: undefined, limit: 2 },
       { cursor: 'cursor-2', limit: 2 },
+      { cursor: undefined, limit: 2 },
     ])
     expect(first).toMatchObject({
       _: 'channels.channelParticipants', count: 5,
@@ -576,6 +581,10 @@ describe('conversation kinds', () => {
     expect(second).toMatchObject({
       _: 'channels.channelParticipants', count: 5,
       users: [{ firstName: 'bob' }, { firstName: 'carol' }],
+    })
+    expect(admins).toMatchObject({
+      _: 'channels.channelParticipants', count: 1,
+      users: [{ firstName: 'Bridge' }],
     })
     expect(() => roundTrip(first)).not.toThrow()
     expect(() => roundTrip(second)).not.toThrow()

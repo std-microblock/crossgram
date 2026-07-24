@@ -668,7 +668,13 @@ export class DialogRpc {
         users: page.members.map((member) => this._makeMemberUser(member)),
       }
     }
-    let members = await this._allMembers(conversation.id)
+    // The platform member API is cursor-paged and has no filtered-list
+    // primitive. Do not turn Telegram's eager admin/search probes into a full
+    // upstream scan: filter only the requested member window. The returned
+    // count deliberately describes this bounded result so clients do not
+    // automatically chase every remaining unfiltered page.
+    const page = await this._memberPage(conversation.id, offset, limit)
+    let members = page.members
     if (req.filter._ === 'channelParticipantsAdmins') {
       members = members.filter((member) => member.role === 'owner' || member.role === 'administrator')
     } else if (req.filter._ === 'channelParticipantsSearch') {
@@ -679,8 +685,7 @@ export class DialogRpc {
     } else {
       members = []
     }
-    const total = members.length
-    members = members.slice(offset, offset + limit)
+    const total = offset + members.length
     return {
       _: 'channels.channelParticipants', count: total,
       participants: members.map((member) => this._makeChannelParticipant(member)),
@@ -1931,12 +1936,15 @@ export class DialogRpc {
     if (!this._platform.capabilities.members?.list || !this._platform.getConversationMembers) return []
     const members: IMConversationMember<any>[] = []
     let cursor: string | undefined
+    const seenCursors = new Set<string>()
     do {
       const page = await this._platform.getConversationMembers(
         this._session, { id: conversationId }, { cursor, limit: 100 },
       )
       members.push(...page.members)
       cursor = page.nextCursor
+      if (cursor && seenCursors.has(cursor)) break
+      if (cursor) seenCursors.add(cursor)
     } while (cursor && members.length < 10_000)
     for (const member of members) {
       if (member.user.id !== this._session.userId) this._peerId(member.user.id)
