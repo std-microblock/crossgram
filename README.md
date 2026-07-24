@@ -7,9 +7,6 @@
 
 CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mtcute](https://github.com/mtcute/mtcute) 的 Telegram 服务器端实现。它将 Telegram 桥接到其它平台，以让你在 Telegram 客户端下获得远超原生客户端的聊天体验。
 
-- 把 **Telegram 客户端** 作为 N 合 1 客户端：登录后所有会话来自被桥接的平台。
-- 一个服务器可同时承载多个账户，每个账户按需路由到 **官方 Telegram（relay 透传）** 或 **某 IM 平台（bridge 桥接）**。
-
 ---
 
 ## 支持情况
