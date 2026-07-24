@@ -829,8 +829,22 @@ describe('QQNTPlatform dialogs polling', () => {
 
     expect(events).toEqual([])
     expect(platform.client.getDialogs).toHaveBeenCalledOnce()
-    expect(platform.client.getDialogs).toHaveBeenCalledWith({ cursor: undefined, limit: 100 }, expect.any(AbortSignal))
+    expect(platform.client.getDialogs).toHaveBeenCalledWith({
+      cursor: undefined, afterId: undefined, limit: 100,
+    }, expect.any(AbortSignal))
     await unsubscribe()
+  })
+
+  it('forwards opaque dialog offsets to the bridge', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [conversation('next')] }))
+
+    await platform.getDialogs(session, { afterId: 'opaque-previous', limit: 20 })
+
+    expect(platform.client.getDialogs).toHaveBeenCalledWith({
+      cursor: undefined, afterId: 'opaque-previous', limit: 20,
+    }, undefined)
   })
 
   it('injects a newly discovered dialog with a real last message only once', async () => {
