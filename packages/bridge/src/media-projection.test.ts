@@ -9,7 +9,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, stableId } from './dialogs.js'
+import { DialogRpc, projectTlMessage, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { UploadManager } from './upload-manager.js'
@@ -70,6 +70,19 @@ const platform: IMPlatform = {
 }
 
 const disposals: Array<() => Promise<void>> = []
+
+it('projects platform service actions as Telegram MessageService records', () => {
+  const source: IMMessage = {
+    id: 'gray-tip', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_001,
+    content: { parts: [], serviceAction: { type: 'custom', text: 'Alice戳了戳你' } },
+  }
+  expect(projectTlMessage({
+    platformSessionId: session.platformSessionId, conversation, source, tlId: 7, ordinal: 0,
+  })).toMatchObject({
+    _: 'messageService', id: 7,
+    action: { _: 'messageActionCustomAction', message: 'Alice戳了戳你' },
+  })
+})
 
 afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
