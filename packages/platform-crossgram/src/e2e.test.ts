@@ -187,6 +187,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
       expect(video.media).toMatchObject({
         kind: 'file', mimeType: expect.stringMatching(/^video\//),
         width: expect.any(Number), height: expect.any(Number), duration: expect.any(Number),
+        locator: { videoCodecFormat: expect.any(Number) },
       })
       expect(video.media.size).toBeGreaterThan(1)
 

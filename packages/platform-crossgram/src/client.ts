@@ -268,12 +268,32 @@ export class QQNTClient {
     if (limit === 0) return
     const ranged = offset > 0 || limit !== undefined
     const end = limit === undefined ? '' : String(offset + limit - 1)
-    const response = await this.fetchImpl(`${this.endpoint}/files/download`, {
+    const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
+    let response: Response | undefined
+    if (locator.videoCodecFormat !== undefined) {
+      try {
+        const play = await this.json<{ url: string }>('/files/play-url', false, {
+          method: 'POST',
+          headers: this.headers({ 'content-type': 'application/json' }),
+          body: JSON.stringify(locator),
+          signal: options.signal,
+        })
+        const direct = await this.fetchImpl(play.url, {
+          headers: rangeHeaders,
+          signal: options.signal,
+          redirect: 'follow',
+        })
+        if (direct.ok && direct.body) response = direct
+        else await direct.body?.cancel().catch(() => undefined)
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        // Old bridges, expired URLs, and CDN failures all retain the native
+        // downloadRichMedia path below as a compatibility fallback.
+      }
+    }
+    response ??= await this.fetchImpl(`${this.endpoint}/files/download`, {
       method: 'POST',
-      headers: this.headers({
-        'content-type': 'application/json',
-        ...(ranged ? { range: `bytes=${offset}-${end}` } : {}),
-      }),
+      headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
       body: JSON.stringify(locator),
       signal: options.signal,
     })

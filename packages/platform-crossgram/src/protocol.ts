@@ -13,6 +13,8 @@ export interface QQMediaLocator {
   md5?: string
   sha?: string
   sha3?: string
+  /** Present only for native QQ video elements. 0 h264, 1 h265. */
+  videoCodecFormat?: number
   avatarUin?: string
   /** Platform-local cached asset. Never required by the injected bridge. */
   cachedPath?: string
