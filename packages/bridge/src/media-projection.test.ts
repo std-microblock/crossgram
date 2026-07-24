@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -9,6 +12,7 @@ import Long from 'long'
 import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
+import { UploadManager } from './upload-manager.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
@@ -31,6 +35,10 @@ const album: IMMessage = {
         media: {
           id: 'photo', kind: 'image', name: 'photo.png', mimeType: 'image/png',
           size: 1234, width: 800, height: 600, locator: { remote: 'photo' },
+          preview: {
+            mimeType: 'image/webp', size: 7, width: 320, height: 240,
+            locator: { remote: 'photo-preview' },
+          },
         },
       },
       {
@@ -55,6 +63,10 @@ const platform: IMPlatform = {
   async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: album }] } },
   async getHistory() { return { messages: [album] } },
   async getUser(_session, id) { return { id, firstName: id === 'alice' ? 'Alice' : 'Album room' } },
+  async *downloadMedia(_session, media, options) {
+    const bytes = new TextEncoder().encode((media.locator as { remote: string }).remote)
+    yield bytes.subarray(options?.offset ?? 0, (options?.offset ?? 0) + (options?.limit ?? bytes.length))
+  },
 }
 
 const disposals: Array<() => Promise<void>> = []
@@ -139,7 +151,69 @@ describe('rich-media projection', () => {
       attributes: [{ _: 'documentAttributeFilename', fileName: 'report.pdf' }],
     })
     expect((messages[1].media as tl.RawMessageMediaPhoto).photo).toMatchObject({
-      _: 'photo', accessHash: Long.fromNumber(1), sizes: [{ _: 'photoSize', w: 800, h: 600, size: 1234 }],
+      _: 'photo', accessHash: Long.fromNumber(1), sizes: [
+        { _: 'photoSize', type: 'm', w: 320, h: 240, size: 7 },
+        { _: 'photoSize', type: 'x', w: 800, h: 600, size: 1234 },
+      ],
+    })
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('serves an extracted photo preview through Telegram thumb_size m', async () => {
+    const store = await createStore()
+    const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
+    disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
+    const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
+    const history = await rpc.getHistory(historyRequest()) as tl.messages.RawMessages
+    const media = (history.messages.at(-1) as tl.RawMessage).media as tl.RawMessageMediaPhoto
+    if (media.photo?._ !== 'photo') throw new Error('expected photo')
+    const file = await rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPhotoFileLocation', id: media.photo!.id, accessHash: media.photo!.accessHash,
+        fileReference: media.photo!.fileReference, thumbSize: 'm',
+      },
+      offset: 0, limit: 1024,
+    })
+    if (file._ !== 'upload.file') throw new Error('expected file')
+    expect(new TextDecoder().decode(file.bytes)).toBe('photo-preview')
+  })
+
+  it('projects converted animated images as WebM documents with a preview', async () => {
+    const store = await createStore()
+    const animated: IMMessage = {
+      ...album,
+      id: 'animated-image',
+      content: { parts: [{
+        type: 'media',
+        media: {
+          id: 'animated', kind: 'file', name: 'animated.webm', mimeType: 'video/webm',
+          size: 123, width: 320, height: 180, locator: { remote: 'animated' },
+          preview: {
+            mimeType: 'image/webp', size: 12, width: 160, height: 90,
+            locator: { remote: 'animated-preview' },
+          },
+        },
+      }] },
+    }
+    const result = await new DialogRpc({
+      ...platform, async getHistory() { return { messages: [animated] } },
+    }, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
+    const projected = result.messages.find((message) => message._ === 'message'
+      && message.media?._ === 'messageMediaDocument'
+      && message.media.document?._ === 'document'
+      && message.media.document.mimeType === 'video/webm')
+    expect(projected).toMatchObject({
+      _: 'message', media: {
+        _: 'messageMediaDocument',
+        document: {
+          _: 'document', mimeType: 'video/webm',
+          thumbs: [{ _: 'photoSize', type: 'm', w: 160, h: 90, size: 12 }],
+          attributes: expect.arrayContaining([expect.objectContaining({
+            _: 'documentAttributeVideo', nosound: true, supportsStreaming: true, w: 320, h: 180,
+          })]),
+        },
+      },
     })
     expect(() => wireRoundTrip(result)).not.toThrow()
   })

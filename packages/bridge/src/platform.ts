@@ -139,6 +139,15 @@ export interface IMUserPage<TMediaLocator = unknown> {
 
 export type IMMediaKind = 'image' | 'file'
 
+export interface IMMediaPreview<TLocator = unknown> {
+  mimeType?: string
+  size: number
+  width: number
+  height: number
+  /** Adapter-owned locator for the extracted preview asset. */
+  locator: TLocator
+}
+
 export interface IMMedia<TLocator = unknown> {
   /** Opaque platform media ID. It is never parsed or truncated by the bridge. */
   id: string
@@ -148,6 +157,8 @@ export interface IMMedia<TLocator = unknown> {
   size?: number
   width?: number
   height?: number
+  /** Optional adapter-generated preview, downloaded through the same media method. */
+  preview?: IMMediaPreview<TLocator>
   /** Adapter-owned, typed data needed by downloadMedia(). */
   locator?: TLocator
 }

@@ -142,6 +142,10 @@ class QQPlatform implements IMPlatform<QQMediaLocator> {
 }
 ```
 
+图片可以携带 adapter 已提取的 `preview: { mimeType, size, width, height, locator }`。
+bridge 会把它投影为 Telegram 的 `photoSize(type='m')`，完整图片使用 `type='x'`；客户端请求
+`thumb_size=m` 时，bridge 仍调用同一个 `downloadMedia()`，但传入 preview 的 locator。
+
 消息、用户、会话和事件沿用同一个 locator 泛型。只有 bridge 的数据库持久化边界会把 locator 显式序列化；平台实现中不得用 `JsonValue` 或无类型字段代替 locator 模板。
 
 发送统一使用一个接口：
@@ -249,7 +253,9 @@ bridge 会在 `messages.uploadMedia` 后暂存媒体引用，并允许客户端�
 
 进度是传输过程的观测值，不是第二套上传协议。每个媒体独立使用 `mediaIndex`，`transferredBytes` 必须单调递增；未知总长度时可以不传 `totalBytes`。取消通过 `AbortSignal` 传播。
 
-下载实现 `downloadMedia(session, media, { offset, limit, signal, onProgress })`，应从平台侧尽量按 range 读取。bridge 会再次限制单次 `upload.getFile` 的输出不超过 `limit`，不会把完整远端文件装入内存。
+下载实现 `downloadMedia(session, media, { offset, limit, signal, onProgress })`，range 语义由 adapter
+负责；远端只支持整文件时，adapter 可以从本地缓存读取 range，或边流式丢弃 offset 前的数据。
+bridge 会再次限制单次 `upload.getFile` 的输出不超过 `limit`，不会把完整远端文件装入内存。
 
 ## 8. Capability 与错误
 

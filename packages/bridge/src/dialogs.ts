@@ -866,9 +866,12 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
+    const media = req.location.thumbSize === 'm' && stored.media.preview
+      ? previewMedia(stored.media)
+      : stored.media
     return {
       _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp,
-      bytes: await this._downloadMediaRange(stored.media, offset, req.limit),
+      bytes: await this._downloadMediaRange(media, offset, req.limit),
     }
   }
 
@@ -2149,25 +2152,51 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   const accessHash = Long.fromNumber(media.id)
   const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
   if (media.kind === 'image') {
+    const preview = media.preview
     return {
       _: 'messageMediaPhoto',
       photo: {
         _: 'photo', id, accessHash, fileReference, date: timestamp,
-        sizes: [{
-          _: 'photoSize', type: 'x', w: media.width ?? 1, h: media.height ?? 1,
-          size: Math.min(media.size ?? 0, 0x7fffffff),
-        }],
+        sizes: [
+          ...(preview ? [{
+            _: 'photoSize' as const, type: 'm', w: preview.width, h: preview.height,
+            size: Math.min(preview.size, 0x7fffffff),
+          }] : []),
+          {
+            _: 'photoSize', type: 'x', w: media.width ?? 1, h: media.height ?? 1,
+            size: Math.min(media.size ?? 0, 0x7fffffff),
+          },
+        ],
         dcId,
       },
     }
   }
+  const attributes: tl.TypeDocumentAttribute[] = [
+    { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
+  ]
+  if (media.mimeType === 'video/webm') attributes.push({
+    _: 'documentAttributeVideo', nosound: true, supportsStreaming: true,
+    duration: 0, w: media.width ?? 1, h: media.height ?? 1,
+  })
   return {
     _: 'messageMediaDocument',
     document: {
       _: 'document', id, accessHash, fileReference, date: timestamp,
       mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId,
-      attributes: [{ _: 'documentAttributeFilename', fileName: media.name ?? 'file' }],
+      thumbs: media.preview ? [{
+        _: 'photoSize', type: 'm', w: media.preview.width, h: media.preview.height,
+        size: Math.min(media.preview.size, 0x7fffffff),
+      }] : undefined,
+      attributes,
     },
+  }
+}
+
+function previewMedia(media: IMMedia<any>): IMMedia<any> {
+  const preview = media.preview!
+  return {
+    id: `${media.id}:preview`, kind: 'image', mimeType: preview.mimeType,
+    size: preview.size, width: preview.width, height: preview.height, locator: preview.locator,
   }
 }
 
