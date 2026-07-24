@@ -317,6 +317,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           : undefined,
       })),
       nextCursor: response.nextCursor,
+      total: response.total,
     }
   }
 

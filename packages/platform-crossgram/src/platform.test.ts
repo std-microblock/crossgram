@@ -349,6 +349,7 @@ describe('QQNTPlatform mapping', () => {
       },
     }
     platform.client.getDialogs = vi.fn(async () => ({
+      total: 347,
       conversations: [{
         id: '2:1058754719', kind: 'group' as const, title: 'Test Group',
         peerUid: '1058754719', peerUin: '1058754719', chatType: 2 as const,
@@ -377,6 +378,7 @@ describe('QQNTPlatform mapping', () => {
       id: 'self', numericId: '10000', name: 'Bridge',
     }))
     const dialogs = await platform.getDialogs(session)
+    expect(dialogs.total).toBe(347)
     expect(dialogs.dialogs[0]).toMatchObject({
       conversation: {
         id: '2:1058754719', kind: 'group',

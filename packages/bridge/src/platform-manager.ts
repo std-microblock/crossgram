@@ -3,7 +3,8 @@ import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult } from './message-store.js'
 import type {
-  IMConversation, IMDialog, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMPlatform, PlatformSession, Unsubscribe,
+  IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMPlatform, PlatformSession,
+  Unsubscribe,
 } from './platform.js'
 
 export class PlatformRegistry {
@@ -263,23 +264,28 @@ export class PlatformDataService {
   ) {}
 
   async getDialogs(query: { limit?: number, afterId?: string } = {}): Promise<IMDialog[]> {
+    return (await this.getDialogsPage(query)).dialogs
+  }
+
+  async getDialogsPage(query: { limit?: number, afterId?: string } = {}): Promise<IMDialogPage> {
     let upstream: IMDialog[] = []
+    let upstreamPage: IMDialogPage | undefined
     const hasUpstream = Boolean(this._platform.capabilities.history && this._platform.getDialogs)
     if (hasUpstream) {
-      const page = await this._platform.getDialogs(this._session, query)
-      upstream = page.dialogs
-      await this._ingestDialogs(page.dialogs)
+      upstreamPage = await this._platform.getDialogs(this._session, query)
+      upstream = upstreamPage.dialogs
+      await this._ingestDialogs(upstreamPage.dialogs)
     }
     const stored = await this._store.listDialogs(this._session.platformSessionId, {
       limit: query.limit,
       afterConversationId: query.afterId,
     })
-    if (!hasUpstream) return stored
+    if (!hasUpstream) return { dialogs: stored, total: stored.length }
     // A history-capable adapter's current page is authoritative. Returning all
     // previously stored rows leaks removed dialogs and legacy conversation IDs
     // forever (for example after an adapter fixes its opaque-ID mapping).
     const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
-    return upstream.map((dialog) => {
+    const dialogs = upstream.map((dialog) => {
       const cached = persisted.get(dialog.conversation.id)
       return {
         ...cached,
@@ -288,6 +294,7 @@ export class PlatformDataService {
         lastMessage: dialog.lastMessage ?? cached?.lastMessage,
       }
     })
+    return { dialogs, nextCursor: upstreamPage?.nextCursor, total: upstreamPage?.total }
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {

@@ -175,6 +175,21 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(second)).not.toThrow()
   })
 
+  it('reports the upstream total instead of the limit-plus-one probe size', async () => {
+    class LargeDialogPlatform extends DialogTestPlatform {
+      override async getDialogs(): Promise<IMDialogPage> {
+        return { ...await super.getDialogs(), total: 347, nextCursor: '2' }
+      }
+    }
+    const rpc = new DialogRpc(new LargeDialogPlatform(), session)
+
+    const result = await rpc.getDialogs(getDialogsRequest({ limit: 1 })) as tl.messages.RawDialogsSlice
+
+    expect(result._).toBe('messages.dialogsSlice')
+    expect(result.dialogs).toHaveLength(1)
+    expect(result.count).toBe(347)
+  })
+
   it('maps an exact upstream unread boundary to readInboxMaxId', async () => {
     class UnreadPlatform extends DialogTestPlatform {
       override async getDialogs(): Promise<IMDialogPage> {
