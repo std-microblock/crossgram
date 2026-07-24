@@ -190,6 +190,20 @@ describe('DialogRpc', () => {
     expect(result.count).toBe(347)
   })
 
+  it('forwards a group offset peer as the upstream afterId', async () => {
+    const platform = new DialogTestPlatform()
+    const getDialogs = vi.spyOn(platform, 'getDialogs')
+    const rpc = new DialogRpc(platform, session)
+    const groupTlId = rpc.peerTlId('group-offset')
+
+    await rpc.getDialogs(getDialogsRequest({
+      limit: 1,
+      offsetPeer: { _: 'inputPeerChat', chatId: groupTlId },
+    }))
+
+    expect(getDialogs).toHaveBeenCalledWith(session, { limit: 2, afterId: 'group-offset' })
+  })
+
   it('maps an exact upstream unread boundary to readInboxMaxId', async () => {
     class UnreadPlatform extends DialogTestPlatform {
       override async getDialogs(): Promise<IMDialogPage> {

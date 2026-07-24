@@ -134,9 +134,9 @@ export class DialogRpc {
   }
 
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
-    const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerUser'
-      ? this._tlToPeer.get(req.offsetPeer.userId)
-      : undefined
+    const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
+      ? undefined
+      : this._tlToPeer.get(inputPeerId(req.offsetPeer))
     const loaded = await this._loadDialogPage({
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
@@ -1277,6 +1277,9 @@ export class DialogRpc {
     const attribute = media._ === 'inputMediaUploadedDocument'
       ? media.attributes.find((item) => item._ === 'documentAttributeFilename')
       : undefined
+    const videoAttribute = media._ === 'inputMediaUploadedDocument'
+      ? media.attributes.find((item) => item._ === 'documentAttributeVideo')
+      : undefined
     const detected = kind === 'image' ? await probeImageDimensions(upload.source) : undefined
     return {
       media: {
@@ -1284,8 +1287,9 @@ export class DialogRpc {
         name: attribute?._ === 'documentAttributeFilename' ? attribute.fileName : file.name,
         mimeType: media._ === 'inputMediaUploadedDocument' ? media.mimeType : inferImageMime(file.name),
         size: upload.source.size,
-        width: detected?.width,
-        height: detected?.height,
+        width: detected?.width ?? (videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.w : undefined),
+        height: detected?.height ?? (videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.h : undefined),
+        duration: videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.duration : undefined,
         source: upload.source,
       },
       upload,
@@ -2431,9 +2435,11 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   const attributes: tl.TypeDocumentAttribute[] = [
     { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
   ]
-  if (media.mimeType === 'video/webm') attributes.push({
-    _: 'documentAttributeVideo', nosound: true, supportsStreaming: true,
-    duration: 0, w: media.width ?? 1, h: media.height ?? 1,
+  if (media.mimeType?.startsWith('video/')) attributes.push({
+    _: 'documentAttributeVideo',
+    nosound: media.mimeType === 'video/webm' ? true : undefined,
+    supportsStreaming: true,
+    duration: media.duration ?? 0, w: media.width ?? 1, h: media.height ?? 1,
   })
   return {
     _: 'messageMediaDocument',
@@ -2481,9 +2487,22 @@ function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessa
       mimeType: staged.media.mimeType ?? 'application/octet-stream',
       size: staged.media.size ?? staged.upload.source.size ?? 0,
       dcId,
-      attributes: [{ _: 'documentAttributeFilename', fileName: staged.media.name ?? 'file' }],
+      attributes: documentAttributes(staged.media),
     },
   }
+}
+
+function documentAttributes(media: Pick<IMMedia<any>, 'name' | 'mimeType' | 'width' | 'height' | 'duration'>): tl.TypeDocumentAttribute[] {
+  const attributes: tl.TypeDocumentAttribute[] = [
+    { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
+  ]
+  if (media.mimeType?.startsWith('video/')) attributes.push({
+    _: 'documentAttributeVideo',
+    nosound: media.mimeType === 'video/webm' ? true : undefined,
+    supportsStreaming: true,
+    duration: media.duration ?? 0, w: media.width ?? 1, h: media.height ?? 1,
+  })
+  return attributes
 }
 
 function qqSequenceKey(conversationId: string, sequence: number): string {
