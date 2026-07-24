@@ -835,22 +835,30 @@ describe('QQNTPlatform dialogs polling', () => {
     })
   }
 
-  it('uses one limit-100 page as the initial dialogs baseline and ignores nextCursor', async () => {
+  it('follows every nextCursor page when establishing the initial dialogs baseline', async () => {
     vi.useFakeTimers()
     const platform = new QQNTPlatform()
     mockSubscribe(platform)
-    platform.client.getDialogs = vi.fn(async () => ({
-      conversations: [conversation('existing')], nextCursor: 'ignored',
-    }))
+    platform.client.getDialogs = vi.fn(async ({ cursor }) => cursor === undefined
+      ? { conversations: [conversation('first')], nextCursor: 'page-2' }
+      : cursor === 'page-2'
+        ? { conversations: [conversation('second')], nextCursor: 'page-3' }
+        : { conversations: [conversation('third')] })
     const events: unknown[] = []
 
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     await vi.advanceTimersByTimeAsync(0)
 
     expect(events).toEqual([])
-    expect(platform.client.getDialogs).toHaveBeenCalledOnce()
-    expect(platform.client.getDialogs).toHaveBeenCalledWith({
+    expect(platform.client.getDialogs).toHaveBeenCalledTimes(3)
+    expect(platform.client.getDialogs).toHaveBeenNthCalledWith(1, {
       cursor: undefined, afterId: undefined, limit: 100,
+    }, expect.any(AbortSignal))
+    expect(platform.client.getDialogs).toHaveBeenNthCalledWith(2, {
+      cursor: 'page-2', afterId: undefined, limit: 100,
+    }, expect.any(AbortSignal))
+    expect(platform.client.getDialogs).toHaveBeenNthCalledWith(3, {
+      cursor: 'page-3', afterId: undefined, limit: 100,
     }, expect.any(AbortSignal))
     await unsubscribe()
   })

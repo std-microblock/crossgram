@@ -234,12 +234,24 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     let hasBaseline = false
     while (!signal.aborted) {
       try {
-        // QQNT has no revision token; use an incremental cursor when one becomes available.
-        const page = await this.getDialogsPage({ limit: 100 }, signal)
         if (!hasBaseline) {
-          for (const dialog of page.dialogs) knownConversationIds.add(dialog.conversation.id)
+          // The baseline must include every page. Otherwise a conversation
+          // outside the first page is misclassified as newly received when it
+          // later moves to the top after a message arrives.
+          let cursor: string | undefined
+          const seenCursors = new Set<string>()
+          do {
+            const page = await this.getDialogsPage({ cursor, limit: 100 }, signal)
+            for (const dialog of page.dialogs) knownConversationIds.add(dialog.conversation.id)
+            cursor = page.nextCursor
+            if (cursor && seenCursors.has(cursor)) break
+            if (cursor) seenCursors.add(cursor)
+          } while (cursor && !signal.aborted)
           hasBaseline = true
         } else {
+          // Recent changes move to the first page, so subsequent polling only
+          // needs that page rather than scanning hundreds of dialogs each time.
+          const page = await this.getDialogsPage({ limit: 100 }, signal)
           for (const dialog of page.dialogs) {
             if (knownConversationIds.has(dialog.conversation.id) || !dialog.lastMessage) continue
             const originRequestId = dialog.lastMessage.metadata?.qqOriginRequestId

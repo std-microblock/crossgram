@@ -17,6 +17,22 @@ const session: PlatformSession = {
 }
 
 describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
+  it('walks every recent-dialog page without duplicates', async () => {
+    const ids: string[] = []
+    let cursor: string | undefined
+    const seenCursors = new Set<string>()
+    do {
+      const page = await platform.getDialogs(session, { cursor, limit: 8 })
+      ids.push(...page.dialogs.map((dialog) => dialog.conversation.id))
+      cursor = page.nextCursor
+      expect(cursor ? seenCursors.has(cursor) : false).toBe(false)
+      if (cursor) seenCursors.add(cursor)
+    } while (cursor && ids.length < 10_000)
+
+    expect(ids.length).toBeGreaterThan(8)
+    expect(new Set(ids).size).toBe(ids.length)
+  }, 60_000)
+
   it('loads the full buddy contacts independently from recent dialogs and streams avatars', async () => {
     const contacts = await platform.getContacts(session, { limit: 500 })
     expect(contacts.users).toHaveLength(17)
