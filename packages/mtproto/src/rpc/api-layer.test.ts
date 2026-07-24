@@ -54,6 +54,25 @@ describe('API layer response writers', () => {
     expect(getApiLayerWriterMap(__tlWriterMap, 1)).toBe(__tlWriterMap)
     expect(getApiLayerWriterMap(__tlWriterMap, null)).toBe(__tlWriterMap)
   })
+
+  it.each([227, 228])('round-trips custom service actions for Layer %i', (layer) => {
+    const service: tl.RawMessageService = {
+      _: 'messageService', id: 8,
+      fromId: { _: 'peerUser', userId: 42 },
+      peerId: { _: 'peerChannel', channelId: 7 },
+      date: 1_800_000_000,
+      action: { _: 'messageActionCustomAction', message: 'Alice joined the group' },
+    }
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, layer), service)
+    const readerMap = getApiLayerReaderMap(layer)
+    expect(readerMap).not.toBeNull()
+    const decoded = new TlBinaryReader(readerMap!, bytes).object() as tl.RawMessageService
+    expect(decoded).toMatchObject({
+      _: 'messageService',
+      action: { _: 'messageActionCustomAction', message: 'Alice joined the group' },
+    })
+  })
+
   it('serializes a Layer 228 authorization with its generated reader and writer', () => {
     const authorization = {
       _: 'auth.authorization', flags: 0, setupPasswordRequired: false,
