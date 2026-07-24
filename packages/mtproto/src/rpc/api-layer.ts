@@ -76,7 +76,7 @@ export function resolveApiSchemaProfile(layer: number): string | null {
  * long.
  */
 export function getApiLayerWriterMap(base: TlWriterMap, layer: number | null): TlWriterMap {
-  if (layer === null || layer >= CURRENT_API_LAYER) return base
+  if (layer === null || layer === CURRENT_API_LAYER) return base
   const schemaLayer = resolveApiSchemaLayer(layer)
   if (schemaLayer === null) return base
   return getApiLayerSchemaWriterMap(base, schemaLayer)
