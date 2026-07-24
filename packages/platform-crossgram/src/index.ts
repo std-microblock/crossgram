@@ -172,27 +172,27 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     while (!signal.aborted) {
       attempt++
       this.logger?.info(
-        'SSE subscribe start session=%s attempt=%d endpoint=%s lastEventId=%s',
+        'WebSocket subscribe start session=%s attempt=%d endpoint=%s lastEventId=%s',
         platformSessionId, attempt, this.client.endpoint, lastEventId ?? '<none>',
       )
       try {
         await this.client.subscribe(async (event, eventId) => {
           this.logger?.info(
-            'SSE event received session=%s streamEventId=%s %s',
+            'WebSocket event received session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', wireEventSummary(event),
           )
           if (event.type === 'message' && event.message.originRequestId
             && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
             knownConversationIds.add(event.conversation.id)
             this.logger?.info(
-              'SSE event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
+              'WebSocket event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
               platformSessionId, eventId ?? '<none>', event.message.id, event.message.originRequestId,
             )
             return
           }
           const mapped = this.mapEvent(event)
           this.logger?.info(
-            'SSE event mapped session=%s streamEventId=%s %s',
+            'WebSocket event mapped session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
           )
           if (mapped.type === 'message') {
@@ -202,7 +202,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             await handler(mapped)
           }
           this.logger?.info(
-            'SSE event handled session=%s streamEventId=%s %s',
+            'WebSocket event handled session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
           )
         }, signal, {
@@ -210,13 +210,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           onEventId: (eventId) => { lastEventId = eventId },
         })
         if (!signal.aborted) this.logger?.warn(
-          'SSE stream ended session=%s attempt=%d lastEventId=%s; reconnecting',
+          'WebSocket stream ended session=%s attempt=%d lastEventId=%s; reconnecting',
           platformSessionId, attempt, lastEventId ?? '<none>',
         )
       } catch (error) {
         if (signal.aborted) return
         this.logger?.warn(
-          'SSE stream failed session=%s attempt=%d lastEventId=%s error=%s; reconnecting',
+          'WebSocket stream failed session=%s attempt=%d lastEventId=%s error=%s; reconnecting',
           platformSessionId, attempt, lastEventId ?? '<none>', formatError(error),
         )
       }

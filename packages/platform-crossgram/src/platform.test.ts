@@ -323,7 +323,7 @@ describe('QQNTPlatform mapping', () => {
         originRequestId, parts: [{ type: 'text' as const, text: 'hello' }],
       },
     }
-    // Each subscription owns an SSE connection; exercise the same wire event against both handlers.
+    // Each subscription owns a WebSocket connection; exercise the same wire event against both handlers.
     const handlers = (platform.client.subscribe as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0])
     await handlers[0](echo)
     await handlers[1](echo)
@@ -915,7 +915,7 @@ describe('QQNTPlatform dialogs polling', () => {
     await unsubscribe()
   })
 
-  it('does not double-deliver a poll message while its SSE delivery is in flight', async () => {
+  it('does not double-deliver a poll message while its WebSocket delivery is in flight', async () => {
     vi.useFakeTimers()
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
@@ -955,7 +955,7 @@ describe('QQNTPlatform dialogs polling', () => {
     await unsubscribe()
   })
 
-  it('retries an un-replayed SSE message through dialogs polling after its handler fails', async () => {
+  it('retries an un-replayed WebSocket message through dialogs polling after its handler fails', async () => {
     vi.useFakeTimers()
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))

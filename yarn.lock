@@ -1707,10 +1707,12 @@ __metadata:
   resolution: "@mtproto-relay/platform-qqnt@workspace:packages/platform-crossgram"
   dependencies:
     "@mtproto-relay/bridge": "workspace:*"
+    "@types/ws": "npm:^8.18.1"
     ffmpeg-static: "npm:^5.3.0"
     schemastery: "npm:^3.18.0"
     sharp: "npm:^0.34.4"
     vitest: "npm:^2.1.9"
+    ws: "npm:^8.21.1"
   peerDependencies:
     "@cordisjs/plugin-database": ^4.0.0
     cordis: ^4.0.0-rc.5
@@ -6585,7 +6587,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ws@npm:^8.19.0":
+"ws@npm:^8.19.0, ws@npm:^8.21.1":
   version: 8.21.1
   resolution: "ws@npm:8.21.1"
   peerDependencies:

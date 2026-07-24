@@ -19,7 +19,7 @@
     previewMaxDimension: 320
 ```
 
-The transport uses JSON for metadata, SSE for ordered incoming events, a
+The transport uses JSON for metadata, WebSocket for ordered incoming events, a
 chunked request body for uploads, and a whole-file chunked response for downloads.
 The adapter reads `IMMediaSource.stream()` directly and never constructs a
 complete media `Buffer`.

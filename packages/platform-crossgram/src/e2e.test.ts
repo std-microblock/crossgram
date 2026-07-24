@@ -70,7 +70,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
         .toEqual([custom.key, emoji.key].sort())
       await expect(Promise.race([
         received.promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('reaction SSE event timed out')), 20_000)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('reaction WebSocket event timed out')), 20_000)),
       ])).resolves.toMatchObject({ type: 'message-reactions', target: { messageId: sent.id } })
     } finally {
       await unsubscribe()
