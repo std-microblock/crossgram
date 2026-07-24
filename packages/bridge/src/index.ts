@@ -29,6 +29,7 @@ import {
   makePlatformAccountView, makeUnavailableAccountView,
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
+import { AuthTransferStore } from './auth-transfer.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -44,6 +45,7 @@ export * from './resource-provider.js'
 export * from './login-code.js'
 export * from './platform-account.js'
 export * from './account-dashboard.js'
+export * from './auth-transfer.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui']
@@ -95,6 +97,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const dcId = config.dcId ?? 1
   const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
   const bridgeLogger = ctx.logger('bridge')
+  const authTransfers = new AuthTransferStore()
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database)
@@ -229,6 +232,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       })
       if (binding) return binding.routeId
     }
+    if (request._ === 'auth.importAuthorization') {
+      const transfer = request as tl.auth.RawImportAuthorizationRequest
+      return authTransfers.has(transfer.id, transfer.bytes) ? routeId : undefined
+    }
     if (request._ !== 'auth.sendCode' && request._ !== 'auth.signIn') return
     const phoneNumber = (request as unknown as { phoneNumber?: string }).phoneNumber
     if (!phoneNumber) return
@@ -335,6 +342,56 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       lastName: ps.metadata.lastName as string | undefined,
       username: ps.metadata.username as string | undefined,
       phone: phoneNumber,
+    })
+    return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
+  })
+
+  rpc.register('auth.exportAuthorization', async (rpc, req) => {
+    const request = req as tl.auth.RawExportAuthorizationRequest
+    if (!Number.isInteger(request.dcId) || request.dcId < 1 || request.dcId > 6) {
+      throw new RpcError(400, 'DC_ID_INVALID')
+    }
+    const { session } = await requireBridgeSession(rpc)
+    const exported = authTransfers.issue({
+      platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+    }, request.dcId)
+    return { _: 'auth.exportedAuthorization', ...exported } as tl.auth.RawExportedAuthorization
+  })
+
+  rpc.register('auth.importAuthorization', async (rpc, req) => {
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    const request = req as tl.auth.RawImportAuthorizationRequest
+    const identity = authTransfers.take(request.id, request.bytes)
+    if (!identity) throw new RpcError(400, 'AUTH_BYTES_INVALID')
+
+    const [platformSession] = await ctx.database.get('mtproto_platform_session', {
+      id: identity.platformSessionId,
+      platformId: identity.platformId,
+      active: true,
+    })
+    if (!platformSession) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
+    const [authSession] = await ctx.database.get('mtproto_auth_session', {
+      platformId: identity.platformId,
+      platformSessionId: identity.platformSessionId,
+    })
+    if (!authSession) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+
+    const authKeyId = authKeyHex(rpc.authKeyId)
+    await ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }])
+    await ctx.database.upsert('mtproto_route_binding', [{ authKeyId, routeId, createdAt: new Date() }])
+    ctx.mtproto.bindRoute(rpc.authKeyId, routeId)
+    await requireBridgeSession(rpc)
+
+    const metadata = platformSession.metadata
+    const user = makeUser({
+      id: stableId(`self:${platformSession.id}`),
+      self: true,
+      premium: true,
+      firstName: (metadata.firstName as string) ?? 'Bridge',
+      lastName: metadata.lastName as string | undefined,
+      username: metadata.username as string | undefined,
+      phone: authSession.virtualPhone,
     })
     return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
   })
