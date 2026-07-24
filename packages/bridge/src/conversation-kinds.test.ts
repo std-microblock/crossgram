@@ -257,8 +257,8 @@ describe('conversation kinds', () => {
     })) as tl.messages.RawMessages
 
     expect(result.messages).toMatchObject([
-      { _: 'message', id: 0x40000000, replyTo: { _: 'messageReplyHeader', replyToMsgId: 0x3ffffff0 } },
-      { _: 'message', id: 0x3ffffff0 },
+      { _: 'message', id: 0x40000007, replyTo: { _: 'messageReplyHeader', replyToMsgId: 0x3ffffff7 } },
+      { _: 'message', id: 0x3ffffff7 },
     ])
     expect(getMessage).not.toHaveBeenCalled()
   })

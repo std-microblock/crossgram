@@ -243,13 +243,13 @@ describe('MessageStore', () => {
     const directResult = await store.ingest(session, direct, make('direct-message', direct.id))
 
     expect(groupResult.projection[0]).toMatchObject({
-      tlMessageId: 0x40000000,
+      tlMessageId: 0x40000007,
       nativeSequence: 1_000_000,
       allocationVersion: 1,
       scope: `channel:${session.platformSessionId}:${group.id}`,
     })
     expect(directResult.projection[0]).toMatchObject({
-      tlMessageId: 0x40000000,
+      tlMessageId: 0x40000007,
       nativeSequence: 1_000_000,
       scope: `account:${session.platformSessionId}`,
     })
@@ -274,11 +274,16 @@ describe('MessageStore', () => {
         session, history, make(history.id, index), { allocation: 'history' },
       )).projection[0].tlMessageId)
     }
-    expect(liveIds).toEqual(Array.from({ length: 17 }, (_, index) => 0x40000000 + index))
-    expect(historyIds).toEqual([
-      ...Array.from({ length: 16 }, (_, index) => 0x40000000 + index),
-      0x3ffffff0,
-    ])
+    expect(liveIds[0]).toBe(0x40000007)
+    expect(historyIds[0]).toBe(0x40000007)
+    expect(new Set(liveIds.slice(0, 16))).toEqual(new Set(
+      Array.from({ length: 16 }, (_, index) => 0x40000000 + index),
+    ))
+    expect(new Set(historyIds.slice(0, 16))).toEqual(new Set(
+      Array.from({ length: 16 }, (_, index) => 0x40000000 + index),
+    ))
+    expect(liveIds[16]).toBe(0x40000017)
+    expect(historyIds[16]).toBe(0x3ffffff7)
   })
 
   it('keeps private-chat IDs unique across the whole account when preferred buckets collide', async () => {
@@ -311,7 +316,52 @@ describe('MessageStore', () => {
     const oldest = await store.ingest(session, conversation, make(100), { allocation: 'history' })
     const middle = await store.ingest(session, conversation, make(101), { allocation: 'history' })
     expect([oldest, middle, newest].map((item) => item.projection[0].tlMessageId))
-      .toEqual([0x3fffffe0, 0x3ffffff0, 0x40000000])
+      .toEqual([0x3fffffe7, 0x3ffffff7, 0x40000007])
+  })
+
+  it('keeps midpoint slots open for same-second native sequences delivered out of order', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'same-second-order', kind: 'group' as const, title: 'Same second order' }
+    const make = (sequence: number): IMMessage => ({
+      id: `same-second-${sequence}`, conversationId: conversation.id, senderId: 'sender', timestamp: 100,
+      metadata: { qqMsgSeq: String(sequence) },
+      content: { parts: [{ type: 'text', text: String(sequence) }] },
+    })
+
+    const lower = await store.ingest(session, conversation, make(100))
+    const upper = await store.ingest(session, conversation, make(102))
+    const middle = await store.ingest(session, conversation, make(101))
+    const ids = [lower, middle, upper].map((item) => item.projection[0].tlMessageId)
+
+    expect(ids).toEqual([0x40000007, 0x40000009, 0x4000000b])
+    expect(ids[0]).toBeLessThan(ids[1])
+    expect(ids[1]).toBeLessThan(ids[2])
+  })
+
+  it('falls back to a nearby free slot when legacy adjacent IDs leave no ordered gap', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'legacy-tight-gap', kind: 'group' as const, title: 'Legacy tight gap' }
+    const make = (sequence: number): IMMessage => ({
+      id: `legacy-tight-${sequence}`, conversationId: conversation.id, senderId: 'sender', timestamp: 100,
+      metadata: { qqMsgSeq: String(sequence) },
+      content: { parts: [{ type: 'text', text: String(sequence) }] },
+    })
+    const lower = await store.ingest(session, conversation, make(100))
+    const upper = await store.ingest(session, conversation, make(102))
+    await ctx.database.set('mtproto_tl_message_part', { id: lower.projection[0].id }, {
+      tlMessageId: 0x40000000,
+    })
+    await ctx.database.set('mtproto_tl_message_part', { id: upper.projection[0].id }, {
+      tlMessageId: 0x40000001,
+    })
+
+    const middle = await store.ingest(session, conversation, make(101))
+
+    expect(middle.projection).toMatchObject([{
+      tlMessageId: 0x40000008, nativeSequence: 101, allocationVersion: 1,
+    }])
+    expect(await ctx.database.get('mtproto_im_message', { conversationId: middle.message.conversationId }))
+      .toHaveLength(3)
   })
 
   it('uses free slots beside a sequenced message for gray service rows without msgSeq', async () => {
@@ -322,7 +372,7 @@ describe('MessageStore', () => {
       metadata: { qqMsgSeq: '100' },
       content: { parts: [{ type: 'text', text: 'content' }] },
     }
-    expect((await store.ingest(session, conversation, sequenced)).projection[0].tlMessageId).toBe(0x40000000)
+    expect((await store.ingest(session, conversation, sequenced)).projection[0].tlMessageId).toBe(0x40000007)
     const grayIds: number[] = []
     for (let index = 0; index < 16; index++) {
       grayIds.push((await store.ingest(session, conversation, {
@@ -330,7 +380,10 @@ describe('MessageStore', () => {
         content: { serviceAction: { type: 'custom', text: `gray ${index}` }, parts: [] },
       })).projection[0].tlMessageId)
     }
-    expect(grayIds).toEqual(Array.from({ length: 16 }, (_, index) => 0x40000001 + index))
+    expect(grayIds).toEqual([
+      ...Array.from({ length: 7 }, (_, index) => 0x40000000 + index),
+      ...Array.from({ length: 9 }, (_, index) => 0x40000008 + index),
+    ])
   })
 
   it('migrates a legacy projection into the timestamp allocation version', async () => {
@@ -350,7 +403,7 @@ describe('MessageStore', () => {
       ...source, metadata: { telegramMessageId: 100, qqMsgSeq: '100' },
     })
     expect(migrated.projection[0]).toMatchObject({
-      tlMessageId: 0x40000000, nativeSequence: 100, allocationVersion: 1,
+      tlMessageId: 0x40000007, nativeSequence: 100, allocationVersion: 1,
     })
     await expect(store.findProjectedByTlId(session.platformSessionId, 100, conversation.id)).resolves.toBeUndefined()
     await expect(store.findProjectedByNativeSequence(session.platformSessionId, conversation.id, 100))
