@@ -57,16 +57,7 @@ export class StickerRpc {
       || req.stickerset._ === 'inputStickerSetEmojiDefaultTopicIcons') {
       return { _: 'messages.stickerSetNotModified' }
     }
-    await this._listPacks()
-    let ref: { providerId: string, packId: string } | undefined
-    if (req.stickerset._ === 'inputStickerSetID') ref = this._sets.get(req.stickerset.id.toNumber())
-    if (req.stickerset._ === 'inputStickerSetShortName') {
-      const packs = await this._listPacks()
-      const shortName = req.stickerset.shortName
-      const found = packs.find(({ pack }) => this._shortName(pack) === shortName)
-      if (found) ref = { providerId: found.providerId, packId: found.pack.packId }
-    }
-    if (!ref) throw new RpcError(400, 'STICKERSET_INVALID')
+    const ref = await this._resolveSet(req.stickerset)
     const provider = this._registry.require(ref.providerId)
     const pack = await provider.getPack(this._context(), ref.packId)
     if (!pack) throw new RpcError(400, 'STICKERSET_INVALID')
@@ -435,6 +426,12 @@ export class StickerRpc {
     const { sticker } = item
     const id = this._documentId(item.providerId, sticker.stickerId)
     this._documents.set(id, item)
+    if (sticker.packId) {
+      this._sets.set(this._setId(item.providerId, sticker.packId), {
+        providerId: item.providerId,
+        packId: sticker.packId,
+      })
+    }
     const attributes: tl.TypeDocumentAttribute[] = [{
       _: 'documentAttributeSticker',
       alt: sticker.emoji?.[0] ?? '',
@@ -499,12 +496,15 @@ export class StickerRpc {
   }
 
   private async _resolveSet(input: tl.TypeInputStickerSet): Promise<{ providerId: string, packId: string }> {
-    await this._listPacks()
+    if (input._ === 'inputStickerSetID') {
+      const ref = this._sets.get(input.id.toNumber())
+      if (ref) return ref
+    }
+    const packs = await this._listPacks()
     if (input._ === 'inputStickerSetID') {
       const ref = this._sets.get(input.id.toNumber())
       if (ref) return ref
     } else if (input._ === 'inputStickerSetShortName') {
-      const packs = await this._listPacks()
       const found = packs.find(({ pack }) => this._shortName(pack) === input.shortName)
       if (found) return { providerId: found.providerId, packId: found.pack.packId }
     }
