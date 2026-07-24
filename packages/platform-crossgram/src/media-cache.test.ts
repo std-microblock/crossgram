@@ -2,14 +2,19 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { Context } from 'cordis'
+import Database from '@cordisjs/plugin-database'
+import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
 import type { IMMediaSource, IMSticker } from '@mtproto-relay/bridge'
-import { QQMediaCache } from './media-cache.js'
+import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 
 const temporaryDirectories: string[] = []
+const disposals: Array<() => Promise<void>> = []
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+  await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
 describe('QQMediaCache', () => {
@@ -78,6 +83,35 @@ describe('QQMediaCache', () => {
     expect(secondBytes).toEqual(firstBytes)
     expect(opens).toBe(1)
   }, 30_000)
+
+  it('indexes logical cache keys containing NUL separators in SQLite', async () => {
+    const path = await temporaryDirectory()
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineQQMediaCacheModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+    const png = await sharp({
+      create: { width: 8, height: 8, channels: 4, background: { r: 10, g: 20, b: 30, alpha: 1 } },
+    }).png().toBuffer()
+    const cache = new QQMediaCache({ path, database: ctx.database })
+
+    await cache.openReaction('1:14', 123, 'static', {
+      source: countedSource(png, () => undefined), mimeType: 'image/png', width: 8, height: 8,
+    })
+
+    const [row] = await ctx.database.get('mtproto_qqnt_media_cache', {})
+    expect(row).toMatchObject({ mimeType: 'image/webp', width: 100, height: 100 })
+    expect(row!.key).toMatch(/^[a-f0-9]{64}$/)
+    expect(row!.key).not.toContain('\0')
+  })
 })
 
 async function temporaryDirectory(): Promise<string> {
