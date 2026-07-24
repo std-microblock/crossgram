@@ -69,10 +69,12 @@ describe('QQNTClient streaming transport', () => {
   })
 
   it('parses SSE frames sequentially so handler completion provides backpressure', async () => {
-    server = createServer((_request, response) => {
+    let resumeHeader: string | string[] | undefined
+    server = createServer((request, response) => {
+      resumeHeader = request.headers['last-event-id']
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.write('data: {"type":"message-delete","eventId":"a","conversation":{"id":"2:g","kind":"group","title":"g","peerUid":"g","peerUin":"g","chatType":2},"messageIds":["1"],"timestamp":1}\n\n')
-      response.end('data: {"type":"message-delete","eventId":"b","conversation":{"id":"2:g","kind":"group","title":"g","peerUid":"g","peerUin":"g","chatType":2},"messageIds":["2"],"timestamp":2}\n\n')
+      response.write('id: 10\ndata: {"type":"message-delete","eventId":"a","conversation":{"id":"2:g","kind":"group","title":"g","peerUid":"g","peerUin":"g","chatType":2},"messageIds":["1"],"timestamp":1}\n\n')
+      response.end('id: 11\ndata: {"type":"message-delete","eventId":"b","conversation":{"id":"2:g","kind":"group","title":"g","peerUid":"g","peerUin":"g","chatType":2},"messageIds":["2"],"timestamp":2}\n\n')
     })
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
@@ -80,11 +82,17 @@ describe('QQNTClient streaming transport', () => {
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
     const order: string[] = []
-    await client.subscribe(async (event) => {
-      order.push(`${event.type === 'message-delete' ? event.eventId : '?'}:start`)
+    const acknowledged: string[] = []
+    await client.subscribe(async (event, eventId) => {
+      order.push(`${event.type === 'message-delete' ? event.eventId : '?'}:${eventId}:start`)
       await new Promise((resolve) => setTimeout(resolve, 5))
-      order.push(`${event.type === 'message-delete' ? event.eventId : '?'}:end`)
-    }, new AbortController().signal)
-    expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end'])
+      order.push(`${event.type === 'message-delete' ? event.eventId : '?'}:${eventId}:end`)
+    }, new AbortController().signal, {
+      lastEventId: '9',
+      onEventId: (eventId) => acknowledged.push(eventId),
+    })
+    expect(resumeHeader).toBe('9')
+    expect(order).toEqual(['a:10:start', 'a:10:end', 'b:11:start', 'b:11:end'])
+    expect(acknowledged).toEqual(['10', '11'])
   })
 })

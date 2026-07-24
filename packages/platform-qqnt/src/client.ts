@@ -12,6 +12,11 @@ export interface QQNTClientOptions {
   fetch?: typeof globalThis.fetch
 }
 
+export interface QQNTSubscribeOptions {
+  lastEventId?: string
+  onEventId?(eventId: string): void
+}
+
 export class QQNTClient {
   readonly endpoint: string
   private readonly token?: string
@@ -268,9 +273,16 @@ export class QQNTClient {
     }
   }
 
-  async subscribe(handler: (event: WireEvent) => void | Promise<void>, signal: AbortSignal): Promise<void> {
+  async subscribe(
+    handler: (event: WireEvent, eventId?: string) => void | Promise<void>,
+    signal: AbortSignal,
+    options: QQNTSubscribeOptions = {},
+  ): Promise<void> {
     const response = await this.fetchImpl(`${this.endpoint}/events`, {
-      headers: this.headers({ accept: 'text/event-stream' }),
+      headers: this.headers({
+        accept: 'text/event-stream',
+        ...(options.lastEventId ? { 'last-event-id': options.lastEventId } : {}),
+      }),
       signal,
     })
     if (!response.ok) throw new Error(await responseError(response))
@@ -291,7 +303,11 @@ export class QQNTClient {
             .filter((line) => line.startsWith('data:'))
             .map((line) => line.slice(5).trimStart())
             .join('\n')
-          if (data) await handler(JSON.parse(data) as WireEvent)
+          if (data) {
+            const eventId = frame.split('\n').find((line) => line.startsWith('id:'))?.slice(3).trimStart()
+            await handler(JSON.parse(data) as WireEvent, eventId)
+            if (eventId) options.onEventId?.(eventId)
+          }
         }
       }
     } finally {
