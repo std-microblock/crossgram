@@ -14,6 +14,8 @@ export interface QQMediaLocator {
   sha?: string
   sha3?: string
   avatarUin?: string
+  /** Platform-local cached asset. Never required by the injected bridge. */
+  cachedPath?: string
 }
 
 export interface WireMedia {

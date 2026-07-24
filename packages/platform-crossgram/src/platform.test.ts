@@ -151,7 +151,7 @@ describe('QQNTPlatform mapping', () => {
       }],
       reactions: [], maxSelected: 20,
     }))
-    platform.client.downloadMedia = vi.fn(async function* () { yield png })
+    platform.client.downloadFile = vi.fn(async function* () { yield png })
     platform.client.getHistory = vi.fn(async () => ({
       messages: [{
         id: 'face-message', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
@@ -514,6 +514,92 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
+  it('auto-downloads received images once per QQ hash and publishes cached WebP previews', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-auto-media-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
+      path: cachePath, mediaDownloadMode: 'auto', previewMaxDimension: 6,
+    }))
+    const png = await sharp({
+      create: { width: 12, height: 8, channels: 4, background: { r: 30, g: 90, b: 180, alpha: 1 } },
+    }).png().toBuffer()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.downloadFile = vi.fn(async function* () { yield png })
+    const wireMessage = (id: string) => ({
+      id, conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: `media-${id}`, kind: 'image' as const, name: 'photo.png', mimeType: 'image/png',
+          size: png.length, width: 12, height: 8,
+          locator: {
+            messageId: id, elementId: `element-${id}`, chatType: 2 as const, peerUid: 'group',
+            kind: 'image' as const, fileName: 'photo.png', md5: 'ABCDEF012345',
+          },
+        },
+      }],
+    })
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      for (const id of ['first', 'second']) await handler({
+        type: 'message',
+        conversation: {
+          id: '2:group', kind: 'group', title: 'Group', peerUid: 'group', peerUin: '42', chatType: 2,
+        },
+        message: wireMessage(id),
+      })
+      if (signal.aborted) return
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+    const ready = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      received.push(event)
+      if (received.length === 2) ready.resolve()
+    })
+    await ready.promise
+    await unsubscribe()
+
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
+    expect(received).toHaveLength(2)
+    for (const event of received as any[]) expect(event.message.content.parts[0]).toMatchObject({
+      media: {
+        name: 'photo.webp', mimeType: 'image/webp',
+        locator: { cachedPath: expect.any(String) },
+        preview: {
+          mimeType: 'image/webp', width: 6, height: 4,
+          locator: { cachedPath: expect.any(String) },
+        },
+      },
+    })
+  })
+
+  it('projects animated QQ expression messages as WebM video stickers', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-message-sticker-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'sticker-message', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'sticker' as const,
+        sticker: {
+          stickerId: 'favorite:animated', format: 'animated' as const, mimeType: 'image/gif',
+          width: 128, height: 96,
+          reference: {
+            kind: 'favorite' as const, resId: 'animated', path: '/tmp/animated.gif',
+            name: 'animated.gif', animated: true,
+          },
+        },
+      }],
+    }] }))
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    expect(history.messages[0].content.parts).toMatchObject([{
+      type: 'sticker', sticker: { format: 'video', mimeType: 'video/webm' },
+    }])
+  })
+
   it('maps QQ cloud-controlled reaction definitions and delegates reaction writes', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-cache-'))
     temporaryDirectories.push(cachePath)
@@ -548,7 +634,7 @@ describe('QQNTPlatform mapping', () => {
     const png = await sharp({
       create: { width: 1, height: 1, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
     }).png().toBuffer()
-    platform.client.downloadMedia = vi.fn(async function* () { yield png })
+    platform.client.downloadFile = vi.fn(async function* () { yield png })
     platform.client.getMessageReactions = vi.fn(async () => ({
       reactions: [{
         ...context.reactions[0],
@@ -624,13 +710,12 @@ describe('QQNTPlatform mapping', () => {
       maxSelected: 20,
     }))
     const onProgress = vi.fn()
-    platform.client.downloadMedia = vi.fn(async function* (locator, options) {
+    platform.client.downloadFile = vi.fn(async function* (locator, options) {
       expect(locator).toMatchObject({
         messageId: 'reaction:/tmp/s14.png', fileName: 's14.png', filePath: '/tmp/s14.png', fileSize: '12',
       })
-      expect(options).toMatchObject({ offset: 4, limit: 3 })
-      await options.onChunk?.(3)
-      yield Uint8Array.of(1, 2, 3)
+      expect(options).toMatchObject({ signal: undefined })
+      yield Uint8Array.of(9, 9, 9, 9, 1, 2, 3, 8)
     })
 
     const catalog = await platform.getAvailableReactions(session, { conversationId: '2:g' })
@@ -665,10 +750,8 @@ describe('QQNTPlatform mapping', () => {
     })
     expect(sent.content.parts[0]).toMatchObject({ media: { locator } })
 
-    platform.client.downloadMedia = vi.fn(async function* (_locator, options) {
-      await options.onChunk?.(2)
+    platform.client.downloadFile = vi.fn(async function* () {
       yield new Uint8Array([1, 2])
-      await options.onChunk?.(1)
       yield new Uint8Array([3])
     })
     const progress: number[] = []
