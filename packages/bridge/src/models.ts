@@ -95,6 +95,13 @@ export interface IMMediaRow {
   size: number | null
   width: number | null
   height: number | null
+  preview: {
+    mimeType?: string
+    size: number
+    width: number
+    height: number
+    locator: JsonValue
+  } | null
   locator: JsonValue
 }
 
@@ -261,7 +268,7 @@ export function defineModels(ctx: Context): void {
     id: 'unsigned', messageId: 'unsigned', ordinal: 'unsigned', partIndex: 'unsigned', platformMediaId: 'text',
     kind: 'string', name: { type: 'text', nullable: true }, mimeType: { type: 'text', nullable: true },
     size: { type: 'unsigned', nullable: true }, width: { type: 'unsigned', nullable: true },
-    height: { type: 'unsigned', nullable: true }, locator: 'json',
+    height: { type: 'unsigned', nullable: true }, preview: { type: 'json', nullable: true }, locator: 'json',
   }, {
     primary: 'id', autoInc: true,
     unique: [['messageId', 'ordinal']],
