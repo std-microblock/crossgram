@@ -481,10 +481,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       (await requireBridgeSession(rpc)).session.platformSessionId,
       req as tl.updates.RawGetDifferenceRequest,
     ))
-  rpc.register('updates.getChannelDifference', async (rpc) => {
-    const state = await updates.getState((await requireBridgeSession(rpc)).session.platformSessionId)
-    return { _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts } as tl.updates.RawChannelDifferenceEmpty
-  })
+  rpc.register('updates.getChannelDifference', async (rpc, req) =>
+    updates.getChannelDifference(
+      (await requireBridgeSession(rpc)).session.platformSessionId,
+      req as tl.updates.RawGetChannelDifferenceRequest,
+    ))
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
   rpc.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))

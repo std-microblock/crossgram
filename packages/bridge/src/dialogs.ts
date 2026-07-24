@@ -671,7 +671,11 @@ export class DialogRpc {
       if (cache) this._historyCache.set(conversationId, cache.filter((item) => !affected.has(item.tlId)))
     }
     const ptsCount = affected.size
-    const pts = await this._reservePts(ptsCount, Math.floor(Date.now() / 1000))
+    const pts = await this._reservePts(
+      ptsCount,
+      Math.floor(Date.now() / 1000),
+      expectedConversation ? this._conversation(expectedConversation) : undefined,
+    )
     return { _: 'messages.affectedMessages', pts, ptsCount }
   }
 
@@ -724,7 +728,7 @@ export class DialogRpc {
     }
     const persisted = await this._store.ingest(this._session, conversation, source)
     ptsCount += edited!.replacedMessageId ? persisted.projection.length : 1
-    let pts = await this._reservePts(ptsCount, now) - ptsCount
+    let pts = await this._reservePts(ptsCount, now, conversation) - ptsCount
     for (const update of updates) {
       if (update._ === 'updateDeleteMessages' || update._ === 'updateDeleteChannelMessages') {
         update.pts = pts += update.ptsCount
@@ -778,7 +782,11 @@ export class DialogRpc {
       const persisted = await this._store.ingest(this._session, conversation, source)
       projections.push(...persisted.projection)
     }
-    let pts = await this._reservePts(projections.length, Math.floor(Date.now() / 1000)) - projections.length
+    let pts = await this._reservePts(
+      projections.length,
+      Math.floor(Date.now() / 1000),
+      conversation,
+    ) - projections.length
     const updates: tl.TypeUpdate[] = []
     for (const [index, part] of projections.entries()) {
       const item = await this._projectedItem(part.tlMessageId, toId)
@@ -980,7 +988,6 @@ export class DialogRpc {
     )
     const conversation = this._conversation(peerId)
     const result = await this._store!.setReactions(this._session, conversation, target, updated)
-    const pts = await this._reservePts(1, Math.floor(Date.now() / 1000))
     const update: tl.RawUpdateMessageReactions = {
       _: 'updateMessageReactions',
       peer: this._conversationPeer(conversation),
@@ -1214,7 +1221,7 @@ export class DialogRpc {
     await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
 
     const updates: tl.TypeUpdate[] = []
-    let pts = await this._reservePts(persisted.projection.length, source.timestamp)
+    let pts = await this._reservePts(persisted.projection.length, source.timestamp, conversation)
       - persisted.projection.length
     for (const [index, part] of persisted.projection.entries()) {
       const projected = await this._store.findProjectedByTlId(
@@ -1282,9 +1289,16 @@ export class DialogRpc {
     throw new RpcError(400, fallback)
   }
 
-  private async _reservePts(count: number, date: number): Promise<number> {
+  private async _reservePts(
+    count: number,
+    date: number,
+    conversation?: import('./platform.js').IMConversation,
+  ): Promise<number> {
     if (this._store) {
-      return (await this._store.advancePts(this._session.platformSessionId, count, date)).pts
+      const channelId = conversation && this._isTelegramChannel(conversation)
+        ? this._peerId(conversation.id)
+        : undefined
+      return (await this._store.advancePts(this._session.platformSessionId, count, date, channelId)).pts
     }
     this._pts += count
     return this._pts

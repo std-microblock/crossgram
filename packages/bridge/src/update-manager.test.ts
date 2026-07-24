@@ -5,6 +5,7 @@ import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
+import Long from 'long'
 import { stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
@@ -104,12 +105,63 @@ describe('UpdateManager', () => {
         { _: 'user', firstName: 'Group Alias', photo: { _: 'userProfilePhoto', dcId: 1 } },
       ],
     })
-    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 1 })
+    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
     expect(() => roundTrip(sent[0].update)).not.toThrow()
 
     await manager.publish(session, { event: { type: 'message', conversation, message }, result })
     expect(sent).toHaveLength(1)
-    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 1 })
+    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
+  })
+
+  it('keeps account and per-channel pts domains independent and replays each channel separately', async () => {
+    const { store, manager, sent } = await createHarness()
+    const alpha: IMConversation = { id: 'alpha', kind: 'group', title: 'Alpha' }
+    const beta: IMConversation = { id: 'beta', kind: 'channel', title: 'Beta' }
+    const direct: IMConversation = { id: 'direct-peer', kind: 'direct', title: 'Direct' }
+    const publish = async (conversation: IMConversation, id: string, timestamp: number) => {
+      const message: IMMessage = {
+        id, conversationId: conversation.id, senderId: 'alice', timestamp,
+        content: { parts: [{ type: 'text', text: id }] },
+      }
+      const result = await store.ingest(session, conversation, message)
+      await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    }
+
+    await publish(alpha, 'alpha-1', 10)
+    await publish(beta, 'beta-1', 11)
+    await publish(alpha, 'alpha-2', 12)
+    await publish(direct, 'direct-1', 13)
+
+    expect(sent.map(({ update }) => (update as tl.RawUpdates).updates[0])).toMatchObject([
+      { _: 'updateNewChannelMessage', pts: 2 },
+      { _: 'updateNewChannelMessage', pts: 2 },
+      { _: 'updateNewChannelMessage', pts: 3 },
+      { _: 'updateNewMessage', pts: 2 },
+    ])
+    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 2, seq: 4 })
+    expect(await store.getChannelUpdateState(session.platformSessionId, stableId('peer:alpha')))
+      .toMatchObject({ pts: 3 })
+    expect(await store.getChannelUpdateState(session.platformSessionId, stableId('peer:beta')))
+      .toMatchObject({ pts: 2 })
+
+    const alphaDifference = await manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: { _: 'inputChannel', channelId: stableId('peer:alpha'), accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+    })
+    expect(alphaDifference).toMatchObject({
+      _: 'updates.channelDifference', final: true, pts: 3,
+      newMessages: [{ message: 'alpha-1' }, { message: 'alpha-2' }],
+    })
+    expect(() => roundTrip(alphaDifference)).not.toThrow()
+
+    const accountDifference = await manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })
+    expect(accountDifference).toMatchObject({
+      _: 'updates.difference', newMessages: [{ message: 'direct-1' }],
+      state: { pts: 2, seq: 4 },
+    })
   })
 
   it('emits one update per mixed-media projection without an invalid Telegram album', async () => {
@@ -135,7 +187,7 @@ describe('UpdateManager', () => {
     const messages = payload.updates.map((update) => (update as tl.RawUpdateNewChannelMessage).message as tl.RawMessage)
     expect(messages.map((item) => item.groupedId)).toEqual([undefined, undefined])
     expect(messages.map((item) => item.message)).toEqual(['caption', ''])
-    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 3, seq: 1 })
+    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
   })
 
   it('projects live stickers through the same Telegram message path as history', async () => {
@@ -303,7 +355,7 @@ describe('UpdateManager', () => {
       result: duplicateDelete,
     })
     expect(sent).toHaveLength(3)
-    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 4, seq: 3 })
+    expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 3 })
   })
 
   it('reuses the reserved pts and retries delivery after a send failure', async () => {
@@ -387,7 +439,7 @@ describe('UpdateManager', () => {
     expect(() => roundTrip(difference)).not.toThrow()
   })
 
-  it('bounds the update journal and reports differenceTooLong across a pruned pts gap', async () => {
+  it('recovers retained updates without returning unsupported differenceTooLong across a pruned pts gap', async () => {
     const { ctx, store } = await createHarness(3)
     const manager = new UpdateManager(
       ctx.database,
@@ -412,10 +464,14 @@ describe('UpdateManager', () => {
     expect(retained.map((delivery) => delivery.pts)).toEqual([3, 4, 5])
     await expect(manager.getDifference(session.platformSessionId, {
       _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
-    })).resolves.toEqual({ _: 'updates.differenceTooLong', pts: 5 })
+    })).resolves.toMatchObject({
+      _: 'updates.difference',
+      newMessages: [{ message: 'message 2' }, { message: 'message 3' }, { message: 'message 4' }],
+      state: { pts: 5, seq: 4 },
+    })
   })
 
-  it('keeps state but reports differenceTooLong after the in-memory journal is restarted', async () => {
+  it('realigns state with a supported empty difference after the in-memory journal is restarted', async () => {
     const { ctx, store } = await createHarness()
     const registry = new PlatformRegistry([[session.platformId, platform]])
     const manager = new UpdateManager(ctx.database, registry, store, () => 0)
@@ -433,6 +489,8 @@ describe('UpdateManager', () => {
     expect(await restartedStore.getUpdateDeliveriesAfter(session.platformSessionId, 1)).toEqual([])
     await expect(restarted.getDifference(session.platformSessionId, {
       _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
-    })).resolves.toEqual({ _: 'updates.differenceTooLong', pts: 2 })
+    })).resolves.toMatchObject({
+      _: 'updates.difference', newMessages: [], otherUpdates: [], state: { pts: 2, seq: 1 },
+    })
   })
 })
