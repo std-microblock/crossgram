@@ -64,7 +64,7 @@ class DialogTestPlatform implements IMPlatform {
         conversation: { id: user.id, kind: 'direct', title: user.firstName },
         unreadCount: 0,
         lastMessage: this._messages[user.id].at(-1),
-      })),
+      })).sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0)),
     }
   }
 
