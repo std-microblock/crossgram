@@ -1432,6 +1432,7 @@ export class DialogRpc {
         this._rememberMessage(item)
         return item
       })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+      await this._rememberReplyTargets(history.map((item) => item.source))
       this._historyCache.set(peerId, history)
       return history
     }
@@ -1532,11 +1533,44 @@ export class DialogRpc {
   private _rememberMessage(item: MaterializedMessage): void {
     const key = `${item.source.conversationId}\u0000${item.source.id}\u0000${item.ordinal}`
     this._messageToTl.set(key, item.tlId)
+    const sourceId = item.source.sourceIds?.[item.ordinal]
+    if (sourceId) this._messageToTl.set(`${item.source.conversationId}\u0000${sourceId}\u00000`, item.tlId)
     this._tlToMessage.set(item.tlId, {
       peerId: item.source.conversationId,
       platformMessageId: item.source.id,
       ordinal: item.ordinal,
     })
+  }
+
+  private async _rememberReplyTargets(messages: readonly IMMessage[]): Promise<void> {
+    if (!this._store) return
+    const targets = new Map<string, { conversationId: string, targetId: string }>()
+    for (const message of messages) {
+      if (!message.replyToId) continue
+      const key = `${message.conversationId}\u0000${message.replyToId}\u00000`
+      if (!this._messageToTl.has(key)) targets.set(key, {
+        conversationId: message.conversationId, targetId: message.replyToId,
+      })
+    }
+    await Promise.all([...targets.values()].map(async ({ conversationId, targetId }) => {
+      let projected = await this._store!.findProjectedByPlatformId(
+        this._session.platformSessionId, conversationId, targetId,
+      )
+      if (!projected && this._data) {
+        await this._data.getMessage(conversationId, targetId).catch(() => null)
+        projected = await this._store!.findProjectedByPlatformId(
+          this._session.platformSessionId, conversationId, targetId,
+        )
+      }
+      if (!projected) return
+      for (const part of projected.parts) this._rememberMessage({
+        source: projected.source,
+        tlId: part.tlMessageId,
+        ordinal: part.ordinal,
+        groupedId: part.groupedId ?? undefined,
+        media: projected.media.find((entry) => entry.id === part.mediaId),
+      })
+    }))
   }
 
   private _messageReplyHeader(source: IMMessage): tl.RawMessageReplyHeader | undefined {

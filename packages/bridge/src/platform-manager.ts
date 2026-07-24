@@ -3,7 +3,7 @@ import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult } from './message-store.js'
 import type {
-  IMConversation, IMDialog, IMEvent, IMHistoryPage, IMHistoryQuery, IMPlatform, PlatformSession, Unsubscribe,
+  IMConversation, IMDialog, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMPlatform, PlatformSession, Unsubscribe,
 } from './platform.js'
 
 export class PlatformRegistry {
@@ -309,6 +309,20 @@ export class PlatformDataService {
         this._session.platformSessionId, conversationId, { limit: query.limit ?? 100 },
       ),
     }
+  }
+
+  async getMessage(conversationId: string, messageId: string): Promise<IMMessage | null> {
+    if (!this._platform.getMessage) return null
+    let conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
+    if (!conversation) {
+      await this.getDialogs()
+      conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
+    }
+    conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
+    const message = await this._platform.getMessage(this._session, { id: conversationId }, messageId)
+    if (!message) return null
+    await this._store.ingest(this._session, conversation, message, { allocation: 'history' })
+    return message
   }
 
   private async _ingestDialogs(dialogs: readonly IMDialog[]): Promise<void> {
