@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
+import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
   WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
@@ -287,40 +288,31 @@ export class QQNTClient {
     signal: AbortSignal,
     options: QQNTSubscribeOptions = {},
   ): Promise<void> {
-    const response = await this.fetchImpl(`${this.endpoint}/events`, {
-      headers: this.headers({
-        accept: 'text/event-stream',
-        ...(options.lastEventId ? { 'last-event-id': options.lastEventId } : {}),
-      }),
-      signal,
-    })
-    if (!response.ok) throw new Error(await responseError(response))
-    if (!response.body) throw new Error('QQNT event stream has no body')
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
-    let buffer = ''
+    if (signal.aborted) return
+    const url = new URL(`${this.endpoint}/events/ws`)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    if (options.lastEventId) url.searchParams.set('lastEventId', options.lastEventId)
+    const webSocket = new WebSocket(url, { headers: this.headers() })
+    const messages = new WebSocketMessageQueue(webSocket)
+    const abort = () => webSocket.terminate()
+    signal.addEventListener('abort', abort, { once: true })
     try {
+      await waitForWebSocketOpen(webSocket)
       while (true) {
-        const { done, value } = await reader.read()
+        const { done, value } = await messages.next()
         if (done) return
-        buffer += value
-        while (true) {
-          const boundary = buffer.indexOf('\n\n')
-          if (boundary < 0) break
-          const frame = buffer.slice(0, boundary)
-          buffer = buffer.slice(boundary + 2)
-          const data = frame.split('\n')
-            .filter((line) => line.startsWith('data:'))
-            .map((line) => line.slice(5).trimStart())
-            .join('\n')
-          if (data) {
-            const eventId = frame.split('\n').find((line) => line.startsWith('id:'))?.slice(3).trimStart()
-            await handler(JSON.parse(data) as WireEvent, eventId)
-            if (eventId) options.onEventId?.(eventId)
-          }
-        }
+        const frame = JSON.parse(rawDataText(value)) as { id?: string, event?: WireEvent }
+        if (!frame.event) throw new Error('QQNT WebSocket frame has no event')
+        await handler(frame.event, frame.id)
+        if (frame.id) options.onEventId?.(frame.id)
       }
+    } catch (error) {
+      if (!signal.aborted) throw error
     } finally {
-      reader.releaseLock()
+      signal.removeEventListener('abort', abort)
+      if (webSocket.readyState === WebSocket.OPEN) webSocket.close()
+      else if (webSocket.readyState === WebSocket.CONNECTING) webSocket.terminate()
+      messages.dispose()
     }
   }
 
@@ -340,6 +332,87 @@ export class QQNTClient {
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return { ...(this.token ? { authorization: `Bearer ${this.token}` } : {}), ...extra }
   }
+}
+
+class WebSocketMessageQueue {
+  private readonly values: RawData[] = []
+  private readonly waiters: Array<{
+    resolve(value: IteratorResult<RawData>): void
+    reject(error: unknown): void
+  }> = []
+  private ended = false
+  private error?: unknown
+
+  constructor(private readonly webSocket: WebSocket) {
+    webSocket.on('message', this.onMessage)
+    webSocket.once('close', this.onClose)
+    webSocket.once('error', this.onError)
+  }
+
+  next(): Promise<IteratorResult<RawData>> {
+    const value = this.values.shift()
+    if (value !== undefined) return Promise.resolve({ value, done: false })
+    if (this.error) return Promise.reject(this.error)
+    if (this.ended) return Promise.resolve({ value: undefined, done: true })
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }))
+  }
+
+  dispose(): void {
+    this.webSocket.off('message', this.onMessage)
+    this.webSocket.off('close', this.onClose)
+    this.webSocket.off('error', this.onError)
+    this.finish()
+  }
+
+  private readonly onMessage = (data: RawData) => {
+    const waiter = this.waiters.shift()
+    if (waiter) waiter.resolve({ value: data, done: false })
+    else this.values.push(data)
+  }
+
+  private readonly onClose = () => this.finish()
+
+  private readonly onError = (error: Error) => {
+    this.error = error
+    for (const waiter of this.waiters.splice(0)) waiter.reject(error)
+  }
+
+  private finish(): void {
+    if (this.ended) return
+    this.ended = true
+    for (const waiter of this.waiters.splice(0)) waiter.resolve({ value: undefined, done: true })
+  }
+}
+
+function waitForWebSocketOpen(webSocket: WebSocket): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const open = () => {
+      cleanup()
+      resolve()
+    }
+    const error = (cause: Error) => {
+      cleanup()
+      reject(cause)
+    }
+    const close = (code: number) => {
+      cleanup()
+      reject(new Error(`QQNT WebSocket closed before opening: ${code}`))
+    }
+    const cleanup = () => {
+      webSocket.off('open', open)
+      webSocket.off('error', error)
+      webSocket.off('close', close)
+    }
+    webSocket.once('open', open)
+    webSocket.once('error', error)
+    webSocket.once('close', close)
+  })
+}
+
+function rawDataText(data: RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString()
+  if (data instanceof ArrayBuffer) return Buffer.from(new Uint8Array(data)).toString()
+  return data.toString()
 }
 
 async function* uploadStream(
