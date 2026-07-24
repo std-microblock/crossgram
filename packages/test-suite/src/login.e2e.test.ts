@@ -410,9 +410,43 @@ describe('bridge login e2e', () => {
       })))
       dbg('post-login sync ok:', state._, status._, filters._, countries._)
 
+      // Media and auxiliary DC connections use distinct permanent auth keys.
+      // Copy the logged-in bridge identity to a newly handshaken key exactly as
+      // Telegram Desktop does after reading the six logical DCs above.
+      const exported = await callRpc(resumed, key, resumedSid, {
+        _: 'auth.exportAuthorization', dcId: 2,
+      }, 15)
+      expect(exported).toMatchObject({ _: 'auth.exportedAuthorization' })
+      expect(Long.isLong(exported.id)).toBe(true)
+      expect(exported.bytes).toHaveLength(32)
+
+      const mediaClient = await TestClient.connect(port)
+      const mediaKey = await doClientHandshake(mediaClient, pubKey)
+      const mediaSid = new Long(0x34567890, 0x3abc, false)
+      expect(await callRpc(mediaClient, mediaKey, mediaSid, {
+        _: 'auth.importAuthorization', id: exported.id, bytes: exported.bytes,
+      }, 16)).toMatchObject({
+        _: 'auth.authorization', user: { self: true, firstName: 'Static User' },
+      })
+      expect(await callRpc(mediaClient, mediaKey, mediaSid, {
+        _: 'contacts.getContacts', hash: Long.ZERO,
+      }, 17)).toMatchObject({
+        _: 'contacts.contacts', users: expect.arrayContaining([
+          expect.objectContaining({ firstName: 'Alice' }),
+          expect.objectContaining({ firstName: 'Bob' }),
+        ]),
+      })
+      const [mediaBinding] = await ctx.database.get('mtproto_auth_binding', {
+        authKeyId: Buffer.from(mediaKey.authKeyId).toString('hex'),
+      })
+      expect(mediaBinding).toMatchObject({
+        platformId: 'static', platformSessionId: platformLogin.session.id,
+      })
+      mediaClient.close()
+
       const contacts = await callRpc(resumed, key, resumedSid, {
         _: 'contacts.getContacts', hash: Long.ZERO,
-      }, 16)
+      }, 18)
       expect(contacts._).toBe('contacts.contacts')
       expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
       expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
