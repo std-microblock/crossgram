@@ -244,6 +244,52 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
+  it('returns only requested peer dialogs in request order and deduplicates peers', async () => {
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
+    const aliceId = stableId('peer:alice')
+    const bobId = stableId('peer:bob')
+    const result = await rpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs',
+      peers: [
+        { _: 'inputDialogPeer', peer: { _: 'inputPeerUser', userId: bobId, accessHash: Long.ZERO } },
+        { _: 'inputDialogPeer', peer: { _: 'inputPeerUser', userId: aliceId, accessHash: Long.ZERO } },
+        { _: 'inputDialogPeer', peer: { _: 'inputPeerUser', userId: bobId, accessHash: Long.ZERO } },
+      ],
+    })
+
+    expect(result.dialogs.map((dialog) => dialog.peer)).toEqual([
+      { _: 'peerUser', userId: bobId },
+      { _: 'peerUser', userId: aliceId },
+    ])
+    expect(result.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual([
+      'Meeting at 3?', 'How are you?',
+    ])
+    expect(result.users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual(['Bob', 'Alice'])
+    expect(result.state).toMatchObject({ _: 'updates.state', pts: 1, qts: 0, seq: 0, unreadCount: 0 })
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('expands folder zero, ignores unsupported archived folders, and rejects unknown peers', async () => {
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
+    const all = await rpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs',
+      peers: [
+        { _: 'inputDialogPeerFolder', folderId: 1 },
+        { _: 'inputDialogPeerFolder', folderId: 0 },
+      ],
+    })
+    expect(all.dialogs).toHaveLength(2)
+    expect(() => wireRoundTrip(all)).not.toThrow()
+
+    await expect(rpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs',
+      peers: [{
+        _: 'inputDialogPeer',
+        peer: { _: 'inputPeerUser', userId: 987654321, accessHash: Long.ZERO },
+      }],
+    })).rejects.toMatchObject({ code: 400, text: 'PEER_ID_INVALID' })
+  })
+
   it('returns filtered history and includes peer plus current user metadata', async () => {
     const rpc = new DialogRpc(new DialogTestPlatform(), session)
     // A resumed client can use its cached stable user ID before getDialogs has

@@ -21,6 +21,7 @@ import type { TelegramResourceService } from './resource-provider.js'
 import { probeImageDimensions } from './image-dimensions.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
+type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
 type GetMessagesRequest = tl.messages.RawGetMessagesRequest
 type SendMessageRequest = tl.messages.RawSendMessageRequest
@@ -156,6 +157,55 @@ export class DialogRpc {
       users: uniqueUsers(page.flatMap((item) => item.users)),
     }
     return result as unknown as tl.messages.TypeDialogs
+  }
+
+  async getPeerDialogs(req: GetPeerDialogsRequest): Promise<tl.messages.RawPeerDialogs> {
+    const loaded = await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
+    const byId = new Map(loaded.map((dialog) => {
+      this._peerId(dialog.conversation.id)
+      return [dialog.conversation.id, dialog]
+    }))
+    const selected: IMDialog[] = []
+    const seen = new Set<string>()
+
+    for (const requested of req.peers) {
+      if (requested._ === 'inputDialogPeerFolder') {
+        // The bridge currently exposes one unarchived folder. Telegram clients
+        // may use this constructor to request every dialog in that folder.
+        if (requested.folderId === 0) {
+          for (const dialog of loaded) {
+            if (!seen.has(dialog.conversation.id)) selected.push(dialog)
+            seen.add(dialog.conversation.id)
+          }
+        }
+        continue
+      }
+      const peerId = this._resolvePeer(requested.peer)
+      const dialog = byId.get(peerId)
+      if (!dialog || seen.has(peerId)) continue
+      selected.push(dialog)
+      seen.add(peerId)
+    }
+
+    if (!this._store) {
+      await Promise.all(selected.map((dialog) => this._loadHistory(dialog.conversation.id)))
+    }
+    await this._prepareConversationPreviews(
+      selected.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []),
+    )
+    const materialized = await Promise.all(selected.map((dialog) => this._materializeDialog(dialog)))
+    const state = await this._store?.getUpdateState(this._session.platformSessionId)
+    return {
+      _: 'messages.peerDialogs',
+      dialogs: materialized.map((item) => item.dialog),
+      messages: materialized.flatMap((item) => item.message ? [item.message] : []),
+      chats: uniqueChats(materialized.flatMap((item) => item.chat ? [item.chat] : [])),
+      users: uniqueUsers(materialized.flatMap((item) => item.users)),
+      state: {
+        _: 'updates.state', pts: state?.pts ?? this._pts, qts: state?.qts ?? 0,
+        date: state?.date ?? Math.floor(Date.now() / 1000), seq: state?.seq ?? 0, unreadCount: 0,
+      },
+    }
   }
 
   async getHistory(req: GetHistoryRequest): Promise<tl.messages.TypeMessages> {
