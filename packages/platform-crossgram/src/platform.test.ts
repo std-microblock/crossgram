@@ -606,6 +606,47 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(1)
   })
 
+  it('streams untransformed reaction resources when no media cache is configured', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [{
+        key: '1:14',
+        presentation: {
+          type: 'custom' as const,
+          alt: '[微笑]',
+          resource: {
+            version: 2, format: 'static' as const, mimeType: 'image/png' as const,
+            width: 100, height: 100, size: 12, locator: { filePath: '/tmp/s14.png' },
+          },
+        },
+      }],
+      reactions: [],
+      maxSelected: 20,
+    }))
+    const onProgress = vi.fn()
+    platform.client.downloadMedia = vi.fn(async function* (locator, options) {
+      expect(locator).toMatchObject({
+        messageId: 'reaction:/tmp/s14.png', fileName: 's14.png', filePath: '/tmp/s14.png', fileSize: '12',
+      })
+      expect(options).toMatchObject({ offset: 4, limit: 3 })
+      await options.onChunk?.(3)
+      yield Uint8Array.of(1, 2, 3)
+    })
+
+    const catalog = await platform.getAvailableReactions(session, { conversationId: '2:g' })
+    const definition = catalog.available[0]!
+    if (definition.presentation.type !== 'custom') throw new Error('expected custom reaction')
+    const chunks: Uint8Array[] = []
+    for await (const chunk of platform.downloadReactionResource(
+      session, definition.presentation.resource, { offset: 4, limit: 3, onProgress },
+    )) chunks.push(chunk)
+
+    expect(Buffer.concat(chunks)).toEqual(Buffer.from([1, 2, 3]))
+    expect(onProgress).toHaveBeenCalledWith({
+      phase: 'download', mediaIndex: 0, transferredBytes: 3, totalBytes: 12,
+    })
+  })
+
   it('maps sent media locators and streams downloads with progress', async () => {
     const platform = new QQNTPlatform()
     const locator = {
