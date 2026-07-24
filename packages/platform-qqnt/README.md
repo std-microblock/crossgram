@@ -24,13 +24,15 @@ chunked request body for uploads, and HTTP byte-range responses for downloads.
 The adapter reads `IMMediaSource.stream()` directly and never constructs a
 complete media `Buffer`.
 
-QQNT itself only exposes whole-file downloads. The injected bridge downloads a
-native video once, retains QQ's local file, and serves later Telegram reads with
-standard `Range`/`206 Partial Content` semantics. Native QQ video metadata is
-projected as a Telegram video document with `supports_streaming`, so seeking only
-transfers the requested byte range between platform and bridge. During a rolling
-upgrade, the platform also detects an older bridge's `200` response and safely
-slices it locally.
+For native videos, the platform asks the injected bridge to call QQNT's
+`getVideoPlayUrl`, then requests the signed QQ CDN URL directly with standard
+HTTP `Range` semantics. Native QQ video metadata is projected as a Telegram
+video document with `supports_streaming`, so seeking transfers only the requested
+byte range. The bridge token is never forwarded to the CDN. If the bridge is old,
+the play URL is expired, or the CDN rejects the request, the platform falls back
+to `/files/download`; that path uses `downloadRichMedia` once and serves ranges
+from QQ's local file. A whole-file `200` response from an older bridge is sliced
+locally during rolling upgrades.
 
 In `auto` mode the adapter downloads
 eligible media when a message event arrives, uses `sha3`/`sha`/`md5` as the
