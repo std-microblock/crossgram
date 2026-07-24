@@ -213,23 +213,37 @@ describe('MessageStore', () => {
     expect((await store.ingest(session, channel, make('channel-2', 'channel'))).projection[0].tlMessageId).toBe(0x40000001)
   })
 
-  it('uses a platform-provided Telegram message ID and migrates an existing projection', async () => {
+  it('uses a platform-provided Telegram message ID', async () => {
     const { store } = await createStore()
     const group = { id: 'group', kind: 'group' as const, title: 'Group' }
     const source: IMMessage = {
       id: 'opaque-message', conversationId: 'group', senderId: 'sender', timestamp: 1,
       content: { parts: [{ type: 'text', text: 'hello' }] },
     }
-    const initial = await store.ingest(session, group, source)
-    expect(initial.projection[0].tlMessageId).toBe(0x40000000)
-
-    const migrated = await store.ingest(session, group, {
+    const projected = await store.ingest(session, group, {
       ...source, metadata: { telegramMessageId: 5_850_634 },
     })
-    expect(migrated.projection[0]).toMatchObject({
+    expect(projected.projection[0]).toMatchObject({
       tlMessageId: 5_850_634,
       scope: `channel:${session.platformSessionId}:group`,
     })
+  })
+
+  it('keeps duplicate platform-provided group IDs addressable with a synthetic fallback', async () => {
+    const { store } = await createStore()
+    const group = { id: 'group', kind: 'group' as const, title: 'Group' }
+    const make = (id: string): IMMessage => ({
+      id, conversationId: 'group', senderId: 'sender', timestamp: 1,
+      metadata: { telegramMessageId: 5_850_634 },
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+
+    const first = await store.ingest(session, group, make('content-message'), { allocation: 'history' })
+    const duplicate = await store.ingest(session, group, make('duplicate-event'), { allocation: 'history' })
+    expect(first.projection[0].tlMessageId).toBe(5_850_634)
+    expect(duplicate.projection[0].tlMessageId).not.toBe(5_850_634)
+    await expect(store.readProjectedHistory(session.platformSessionId, 'group', { limit: 10 }))
+      .resolves.toHaveLength(2)
   })
 
   it('disambiguates equal direct and group IDs by conversation kind', async () => {
