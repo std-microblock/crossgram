@@ -7,7 +7,7 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
-  IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMTransferOptions,
+  IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMTransferOptions,
   IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
@@ -79,6 +79,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   readonly platformKind = 'qq'
   readonly capabilities: PlatformCapabilities = {
     history: true,
+    search: true,
     send: {
       text: true,
       images: true,
@@ -359,6 +360,27 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       aroundUnreadSeq: !query.cursor && !query.before && !query.after
         ? this.firstUnreadSeq.get(conversation.id)
         : undefined,
+    })
+    return {
+      messages: response.messages.map((message) => this.mapMessage(message)),
+      nextCursor: response.nextCursor,
+    }
+  }
+
+  async searchMessages(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    query: IMMessageSearchQuery,
+  ): Promise<IMMessageSearchPage<QQMediaLocator>> {
+    await this.ensureReactionCatalog()
+    const response = await this.client.searchMessages(conversation.id, {
+      q: query.query,
+      cursor: query.cursor,
+      limit: query.limit,
+      fromUserId: query.fromUserId,
+      minTimestamp: query.minTimestamp,
+      maxTimestamp: query.maxTimestamp,
+      mediaKind: query.mediaKind,
     })
     return {
       messages: response.messages.map((message) => this.mapMessage(message)),

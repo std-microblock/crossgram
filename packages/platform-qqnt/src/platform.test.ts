@@ -40,6 +40,30 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('maps native message-search pages and forwards every filter', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.searchMessages = vi.fn(async () => ({
+      nextCursor: 'native-next',
+      messages: [{
+        id: 'found', conversationId: '2:group', senderId: 'alice', timestamp: 10, outgoing: false,
+        parts: [{ type: 'text' as const, text: 'needle' }],
+      }],
+    }))
+
+    await expect(platform.searchMessages(session, { id: '2:group' }, {
+      query: 'needle', cursor: 'native-cursor', limit: 30, fromUserId: 'alice',
+      minTimestamp: 5, maxTimestamp: 20, mediaKind: 'image',
+    })).resolves.toMatchObject({
+      messages: [{ id: 'found', content: { parts: [{ type: 'text', text: 'needle' }] } }],
+      nextCursor: 'native-next',
+    })
+    expect(platform.client.searchMessages).toHaveBeenCalledWith('2:group', {
+      q: 'needle', cursor: 'native-cursor', limit: 30, fromUserId: 'alice',
+      minTimestamp: 5, maxTimestamp: 20, mediaKind: 'image',
+    })
+  })
+
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({

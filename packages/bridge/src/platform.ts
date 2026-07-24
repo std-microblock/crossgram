@@ -10,6 +10,8 @@ export type IMConversationKind = 'direct' | 'group' | 'channel'
 
 export interface PlatformCapabilities {
   history: boolean
+  /** Server-side message search. When absent, the bridge falls back to loaded history. */
+  search?: boolean
   send: {
     text: boolean
     images: boolean
@@ -356,6 +358,20 @@ export interface IMHistoryPage<TMediaLocator = unknown> {
   nextCursor?: string
 }
 
+export interface IMMessageSearchQuery extends IMPageQuery {
+  query: string
+  fromUserId?: string
+  minTimestamp?: number
+  maxTimestamp?: number
+  mediaKind?: IMMediaKind
+}
+
+export interface IMMessageSearchPage<TMediaLocator = unknown> {
+  messages: IMMessage<TMediaLocator>[]
+  nextCursor?: string
+  total?: number
+}
+
 export interface IMTransferProgress {
   phase: 'upload' | 'download'
   mediaIndex: number
@@ -423,6 +439,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     query?: IMHistoryQuery,
   ): Promise<IMHistoryPage<TMediaLocator>>
+  searchMessages?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    query: IMMessageSearchQuery,
+  ): Promise<IMMessageSearchPage<TMediaLocator>>
   /** Resolve one opaque platform message, used for reply-target backfill. */
   getMessage?(
     session: PlatformSession,

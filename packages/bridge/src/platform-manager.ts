@@ -3,7 +3,8 @@ import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult } from './message-store.js'
 import type {
-  IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMPlatform, PlatformSession,
+  IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMMessageSearchPage,
+  IMMessageSearchQuery, IMPlatform, PlatformSession,
   Unsubscribe,
 } from './platform.js'
 
@@ -316,6 +317,24 @@ export class PlatformDataService {
         this._session.platformSessionId, conversationId, { limit: query.limit ?? 100 },
       ),
     }
+  }
+
+  async searchMessages(
+    conversationId: string,
+    query: IMMessageSearchQuery,
+  ): Promise<IMMessageSearchPage> {
+    if (!this._platform.searchMessages) return { messages: [] }
+    let conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
+    if (!conversation) {
+      await this.getDialogs()
+      conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
+    }
+    conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
+    const page = await this._platform.searchMessages(this._session, { id: conversationId }, query)
+    for (const message of page.messages.slice().sort((left, right) => right.timestamp - left.timestamp)) {
+      await this._store.ingest(this._session, conversation, message, { allocation: 'history' })
+    }
+    return page
   }
 
   async getMessage(conversationId: string, messageId: string): Promise<IMMessage | null> {

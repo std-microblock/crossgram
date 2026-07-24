@@ -69,6 +69,18 @@ export class QQNTClient {
     return this.json(`/conversations/${encodeURIComponent(id)}/history${queryString(query)}`)
   }
 
+  searchMessages(id: string, query: {
+    q: string
+    cursor?: string
+    limit?: number
+    fromUserId?: string
+    minTimestamp?: number
+    maxTimestamp?: number
+    mediaKind?: 'image' | 'file'
+  }): Promise<{ messages: WireMessage[], nextCursor?: string }> {
+    return this.json(`/conversations/${encodeURIComponent(id)}/search${queryString(query)}`)
+  }
+
   getMembers(id: string, query: { cursor?: string, limit?: number } = {}): Promise<WireMemberPage> {
     return this.json(`/conversations/${encodeURIComponent(id)}/members${queryString(query)}`)
   }
