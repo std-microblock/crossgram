@@ -952,8 +952,10 @@ function mapMessage(
     timestamp: input.timestamp,
     outgoing: input.outgoing,
     replyToId: input.replyToId,
-    metadata: input.msgSeq || input.originRequestId ? {
+    metadata: input.msgSeq || input.originRequestId || input.telegramMessageId || input.telegramReplyToMessageId ? {
       ...(input.msgSeq ? { qqMsgSeq: input.msgSeq } : {}),
+      ...(input.telegramMessageId ? { telegramMessageId: input.telegramMessageId } : {}),
+      ...(input.telegramReplyToMessageId ? { telegramReplyToMessageId: input.telegramReplyToMessageId } : {}),
       ...(input.originRequestId ? { qqOriginRequestId: input.originRequestId } : {}),
     } : undefined,
     reactionContext: input.reactionContext ? {

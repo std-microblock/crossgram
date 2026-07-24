@@ -2,7 +2,8 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  messageText, type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMMedia, type IMMediaInput,
+  messageText, telegramMessageId, telegramReplyToMessageId,
+  type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMMedia, type IMMediaInput,
   type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
@@ -259,8 +260,11 @@ export class DialogRpc {
     for (const input of req.id) {
       const requestedId = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
       let ref = this._tlToMessage.get(requestedId)
+      if (ref && this._conversations.get(ref.peerId)?.kind !== 'direct') ref = undefined
       if (!ref && this._store) {
-        const projected = await this._store.findProjectedByTlId(this._session.platformSessionId, requestedId)
+        const projected = await this._store.findProjectedByTlId(
+          this._session.platformSessionId, requestedId, undefined, 'direct',
+        )
         if (projected) {
           for (const part of projected.parts) {
             this._rememberMessage({
@@ -632,6 +636,7 @@ export class DialogRpc {
     for (const tlId of req.id) {
       const projected = await this._store.findProjectedByTlId(
         this._session.platformSessionId, tlId, expectedConversation,
+        expectedConversation ? undefined : 'direct',
       )
       if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
       const ordinal = projected.parts.find((part) => part.tlMessageId === tlId)?.ordinal ?? 0
@@ -1441,7 +1446,9 @@ export class DialogRpc {
       this._platform, this._session, { id: peerId }, { limit: request.limit },
     )).messages
     const materialized = history.slice().sort((a, b) => a.timestamp - b.timestamp).map((source) => {
-      const item: MaterializedMessage = { source, tlId: this._messageId(peerId, source.id), ordinal: 0 }
+      const item: MaterializedMessage = {
+        source, tlId: telegramMessageId(source) ?? this._messageId(peerId, source.id), ordinal: 0,
+      }
       this._rememberMessage(item)
       return item
     }).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
@@ -1546,6 +1553,7 @@ export class DialogRpc {
     if (!this._store) return
     const targets = new Map<string, { conversationId: string, targetId: string }>()
     for (const message of messages) {
+      if (telegramReplyToMessageId(message)) continue
       if (!message.replyToId) continue
       const key = `${message.conversationId}\u0000${message.replyToId}\u00000`
       if (!this._messageToTl.has(key)) targets.set(key, {
@@ -1574,6 +1582,8 @@ export class DialogRpc {
   }
 
   private _messageReplyHeader(source: IMMessage): tl.RawMessageReplyHeader | undefined {
+    const nativeReplyTo = telegramReplyToMessageId(source)
+    if (nativeReplyTo) return { _: 'messageReplyHeader', replyToMsgId: nativeReplyTo }
     if (!source.replyToId) return
     const replyToMsgId = this._messageToTl.get(
       `${source.conversationId}\u0000${source.replyToId}\u00000`,

@@ -222,13 +222,42 @@ describe('conversation kinds', () => {
       { _: 'channel', title: 'QQ Group', megagroup: true, participantsCount: 23 },
     ])
     expect(result.users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual([
-      'sender-parent-channel', 'sender-group', 'direct',
+      'sender-parent-channel', 'sender-group', 'Direct',
     ])
     const [stored] = await ctx.database.get('mtproto_im_conversation', { platformConversationId: 'subchannel' })
     expect(stored).toMatchObject({
       kind: 'channel', parentPlatformConversationId: 'parent-channel', spacePlatformId: 'guild',
     })
     expect(() => roundTrip(result)).not.toThrow()
+  })
+
+  it('uses native group sequence IDs for messages and reply headers', async () => {
+    const group = conversations.find((item) => item.id === 'group')!
+    const target: IMMessage = {
+      ...source(group), id: 'opaque-target', timestamp: 1,
+      metadata: { telegramMessageId: 5_850_632 },
+    }
+    const reply: IMMessage = {
+      ...source(group), id: 'opaque-reply', timestamp: 2,
+      metadata: { telegramMessageId: 5_850_634, telegramReplyToMessageId: 5_850_632 },
+    }
+    const getMessage = vi.fn(async () => { throw new Error('reply target must not be loaded') })
+    const nativeIdsPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: [{ conversation: group, unreadCount: 0, lastMessage: reply }] } },
+      async getHistory() { return { messages: [reply, target] } },
+      getMessage,
+    }
+    const { rpc } = await createRpc(nativeIdsPlatform)
+    const result = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: stableId('peer:group'), accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
+
+    expect(result.messages).toMatchObject([
+      { _: 'message', id: 5_850_634, replyTo: { _: 'messageReplyHeader', replyToMsgId: 5_850_632 } },
+      { _: 'message', id: 5_850_632 },
+    ])
+    expect(getMessage).not.toHaveBeenCalled()
   })
 
   it('accepts channel input peers for groups, returns sender users, and sends to the original target IDs', async () => {
@@ -312,8 +341,10 @@ describe('conversation kinds', () => {
     ])
 
     await expect(rpc.deleteMessages({
-      _: 'messages.deleteMessages', revoke: true, id: [groupMessageId],
-    })).resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
+      _: 'channels.deleteMessages', channel: { _: 'inputChannel', channelId: groupId, accessHash: Long.ZERO },
+      id: [groupMessageId],
+    }, { _: 'inputChannel', channelId: groupId, accessHash: Long.ZERO }))
+      .resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
     expect(actionCalls).toEqual([
       'edit:group:message-group',
       'forward:group:message-group:direct',
@@ -357,6 +388,7 @@ describe('conversation kinds', () => {
       await rpc.getDialogs(dialogsRequest())
       const groupId = stableId('peer:group')
       const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
+      const groupChannel = { _: 'inputChannel' as const, channelId: groupId, accessHash: Long.ZERO }
       const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
       const incomingId = (history.messages[0] as tl.RawMessage).id
       await expect(rpc.editMessage({
@@ -367,12 +399,12 @@ describe('conversation kinds', () => {
         _: 'messages.sendMessage', peer: groupPeer, message: 'old own message', randomId: Long.fromNumber(101),
       })
       await expect(rpc.deleteMessages({
-        _: 'messages.deleteMessages', revoke: true, id: [sent.id],
-      })).rejects.toMatchObject({ text: 'MESSAGE_DELETE_FORBIDDEN' })
+        _: 'channels.deleteMessages', channel: groupChannel, id: [sent.id],
+      }, groupChannel)).rejects.toMatchObject({ text: 'MESSAGE_DELETE_FORBIDDEN' })
 
       await expect(rpc.deleteMessages({
-        _: 'messages.deleteMessages', revoke: true, id: [incomingId],
-      })).resolves.toMatchObject({ ptsCount: 1 })
+        _: 'channels.deleteMessages', channel: groupChannel, id: [incomingId],
+      }, groupChannel)).resolves.toMatchObject({ ptsCount: 1 })
     } finally {
       actions.edit.maxAgeSeconds = originalEditLimit
     }

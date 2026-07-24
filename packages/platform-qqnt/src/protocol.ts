@@ -95,6 +95,8 @@ export interface WireMessage {
     avatar?: WireMedia
   }
   msgSeq?: string
+  telegramMessageId?: number
+  telegramReplyToMessageId?: number
   /** Correlates a local HTTP send with its QQ listener echo. */
   originRequestId?: string
   replyToId?: string
