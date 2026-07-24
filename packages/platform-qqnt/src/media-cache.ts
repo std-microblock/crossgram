@@ -188,9 +188,12 @@ export class QQMediaCache {
         await rm(temporary, { force: true }).catch(() => undefined)
       }
     }
-    const asset = { key, path: target, mimeType, size: statSync(target).size, width, height }
+    // The logical cache key uses NUL separators to remain unambiguous. Keep
+    // those out of SQL string literals and use the same stable digest that
+    // names the on-disk asset for the optional database index.
+    const asset = { key: digest, path: target, mimeType, size: statSync(target).size, width, height }
     await this.options.database?.upsert('mtproto_qqnt_media_cache', [{
-      key, path: target, mimeType, size: asset.size,
+      key: asset.key, path: target, mimeType, size: asset.size,
       width: width ?? null, height: height ?? null, updatedAt: new Date(),
     }], ['key'])
     return asset
