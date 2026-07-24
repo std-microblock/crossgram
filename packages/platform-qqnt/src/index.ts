@@ -10,7 +10,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
-import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
+import { defineQQMediaCacheModel, QQMediaCache, type MediaDownloadMode } from './media-cache.js'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireMultiForwardLocator,
   WireReactionState, WireTextPart,
@@ -24,10 +24,14 @@ export interface Config extends QQNTClientOptions {
    * `groupAlias` prefers the conversation-scoped group card when available.
    */
   memberName?: MemberNameMode
-  /** Directory used for transformed stickers and optionally all QQ images. */
+  /** Directory used for cached media, previews, stickers, and reactions. */
   mediaCachePath?: string
-  /** Cache every downloaded QQ image and normalize it to WebP. */
-  cacheAndConvertImages?: boolean
+  /** Auto-cache/convert received media, or fetch the untouched original on demand. */
+  mediaDownloadMode?: MediaDownloadMode
+  /** Maximum byte size of files cached automatically. Images are always eligible. */
+  autoDownloadFileSizeLimit?: number
+  /** Maximum width/height of extracted image previews. */
+  previewMaxDimension?: number
   /** Override the bundled FFmpeg executable used for GIF/APNG to WebM conversion. */
   ffmpegPath?: string
 }
@@ -43,7 +47,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   defineQQMediaCacheModel(ctx)
   const mediaCache = new QQMediaCache({
     path: config.mediaCachePath ?? resolve(process.cwd(), 'data', 'qqnt-media-cache', id),
-    cacheAndConvertImages: config.cacheAndConvertImages,
+    mediaDownloadMode: config.mediaDownloadMode,
+    autoDownloadFileSizeLimit: config.autoDownloadFileSizeLimit,
+    previewMaxDimension: config.previewMaxDimension,
     ffmpegPath: config.ffmpegPath,
     database: ctx.database,
   })
@@ -249,7 +255,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (inFlightMessageKeys.has(key)) return false
     inFlightMessageKeys.add(key)
     try {
-      await handler(event)
+      await handler({ ...event, message: await this.prepareReceivedMessage(event.message) })
       return true
     } finally {
       inFlightMessageKeys.delete(key)
@@ -522,7 +528,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               size: part.media.size, width: part.media.width, height: part.media.height,
               source: {
                 size: part.media.size,
-                stream: ({ signal } = {}) => this.client.downloadMedia(part.media.locator!, { signal }),
+                stream: ({ signal } = {}) => this.downloadMedia(session, part.media, { signal }),
               },
             },
           }
@@ -545,28 +551,25 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: IMDownloadOptions = {},
   ): AsyncIterable<Uint8Array> {
     if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
-    if (this.mediaCache?.cacheAndConvertImages && media.kind === 'image') {
-      yield* this.mediaCache.downloadImage(media, {
-        size: media.size,
-        stream: ({ signal } = {}) => this.client.downloadMedia(media.locator!, { signal }),
-      }, options)
+    const original = {
+      size: media.size,
+      stream: ({ signal }: { signal?: AbortSignal } = {}) => this.client.downloadFile(media.locator!, { signal }),
+    }
+    if (this.mediaCache) {
+      yield* this.mediaCache.download(media, original, options)
       return
     }
     let transferred = 0
-    yield* this.client.downloadMedia(media.locator, {
-      offset: options.offset,
-      limit: options.limit,
-      signal: options.signal,
-      onChunk: async (size) => {
-        transferred += size
-        await options.onProgress?.({
-          phase: 'download',
-          mediaIndex: 0,
-          transferredBytes: transferred,
-          totalBytes: options.limit === undefined ? media.size : Math.min(options.limit, media.size ?? options.limit),
-        })
-      },
-    })
+    for await (const chunk of sliceStream(
+      original.stream({ signal: options.signal }), options.offset, options.limit,
+    )) {
+      transferred += chunk.length
+      await options.onProgress?.({
+        phase: 'download', mediaIndex: 0, transferredBytes: transferred,
+        totalBytes: rangedSize(media.size, options.offset, options.limit),
+      })
+      yield chunk
+    }
   }
 
   async getAvailableReactions(
@@ -636,17 +639,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       throw new Error('QQ reaction resource has no cache key or file path')
     }
     let transferredBytes = 0
-    yield* this.client.downloadMedia(reactionMediaLocator(locator.filePath, resource.size), {
-      offset: options.offset,
-      limit: options.limit,
-      signal: options.signal,
-      onChunk: async (size) => {
-        transferredBytes += size
-        await options.onProgress?.({
-          phase: 'download', mediaIndex: 0, transferredBytes, totalBytes: resource.size,
-        })
-      },
-    })
+    for await (const chunk of sliceStream(
+      this.client.downloadFile(reactionMediaLocator(locator.filePath, resource.size), { signal: options.signal }),
+      options.offset, options.limit,
+    )) {
+      transferredBytes += chunk.length
+      await options.onProgress?.({
+        phase: 'download', mediaIndex: 0, transferredBytes, totalBytes: resource.size,
+      })
+      yield chunk
+    }
   }
 
   private ensureReactionCatalog(): Promise<IMReactionContext> {
@@ -671,7 +673,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       const input: IMStickerAsset = {
         source: {
           size: resource.size,
-          stream: ({ signal } = {}) => this.client.downloadMedia(
+          stream: ({ signal } = {}) => this.client.downloadFile(
             reactionMediaLocator(filePath, resource.size), { signal },
           ),
         },
@@ -782,9 +784,44 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
-    return mapMessage(
+    const message = mapMessage(
       input, this.memberName, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
     )
+    if (!this.mediaCache) return message
+    return {
+      ...message,
+      content: {
+        ...message.content,
+        parts: message.content.parts.map((part) => part.type === 'sticker'
+          ? { ...part, sticker: this.mediaCache!.projectSticker(part.sticker) }
+          : part),
+      },
+    }
+  }
+
+  private async prepareReceivedMessage(
+    message: IMMessage<QQMediaLocator>,
+  ): Promise<IMMessage<QQMediaLocator>> {
+    if (!this.mediaCache) return message
+    const parts = await Promise.all(message.content.parts.map(async (part) => {
+      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldAutoDownload(part.media)) {
+        return part
+      }
+      try {
+        const media = await this.mediaCache!.prepareMedia(part.media, {
+          size: part.media.size,
+          stream: ({ signal } = {}) => this.client.downloadFile(part.media.locator!, { signal }),
+        })
+        return { type: 'media' as const, media }
+      } catch (error) {
+        this.logger?.warn(
+          'automatic media cache failed message=%s media=%s error=%s',
+          message.id, part.media.id, formatError(error),
+        )
+        return part
+      }
+    }))
+    return { ...message, content: { ...message.content, parts } }
   }
 
   private readonly registerMultiForward = (
@@ -1021,6 +1058,38 @@ function permissions(role: 'owner' | 'administrator' | 'member') {
     pinMessages: administrator,
     inviteMembers: true,
   }
+}
+
+async function* sliceStream(
+  source: AsyncIterable<Uint8Array>,
+  offset = 0,
+  limit?: number,
+): AsyncIterable<Uint8Array> {
+  let skipped = 0
+  let emitted = 0
+  const start = Math.max(0, Math.trunc(offset))
+  const maximum = limit === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.trunc(limit))
+  if (!maximum) return
+  for await (const chunk of source) {
+    if (skipped + chunk.length <= start) {
+      skipped += chunk.length
+      continue
+    }
+    const chunkStart = Math.max(0, start - skipped)
+    const accepted = chunk.subarray(chunkStart, chunkStart + maximum - emitted)
+    skipped += chunk.length
+    if (accepted.length) {
+      emitted += accepted.length
+      yield accepted
+    }
+    if (emitted >= maximum) return
+  }
+}
+
+function rangedSize(size: number | undefined, offset = 0, limit?: number): number | undefined {
+  if (size === undefined) return limit
+  const available = Math.max(0, size - Math.max(0, Math.trunc(offset)))
+  return limit === undefined ? available : Math.min(available, Math.max(0, Math.trunc(limit)))
 }
 
 async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {

@@ -246,32 +246,33 @@ export class QQNTClient {
     })
   }
 
-  async *downloadMedia(
+  async *downloadFile(
     locator: QQMediaLocator,
-    options: { offset?: number, limit?: number, signal?: AbortSignal, onChunk?(size: number): Promise<void> | void } = {},
+    options: { signal?: AbortSignal, onChunk?(size: number): Promise<void> | void } = {},
   ): AsyncIterable<Uint8Array> {
-    const response = await this.fetchImpl(`${this.endpoint}/media/open`, {
+    const response = await this.fetchImpl(`${this.endpoint}/files/download`, {
       method: 'POST',
-      headers: this.headers({
-        'content-type': 'application/json',
-        'x-qqnt-offset': String(options.offset ?? 0),
-        ...(options.limit === undefined ? {} : { 'x-qqnt-limit': String(options.limit) }),
-      }),
+      headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify(locator),
       signal: options.signal,
     })
     if (!response.ok) throw new Error(await responseError(response))
     if (!response.body) throw new Error('QQNT media response has no body')
     const reader = response.body.getReader()
+    let completed = false
     try {
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) {
+          completed = true
+          break
+        }
         if (!value?.length) continue
         await options.onChunk?.(value.length)
         yield value
       }
     } finally {
+      if (!completed) await reader.cancel().catch(() => undefined)
       reader.releaseLock()
     }
   }

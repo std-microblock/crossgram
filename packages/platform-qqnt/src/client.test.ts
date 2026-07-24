@@ -68,6 +68,32 @@ describe('QQNTClient streaming transport', () => {
     })).rejects.toThrow(/incomplete media source/)
   })
 
+  it('downloads a complete file without sending range controls', async () => {
+    let requestUrl = ''
+    let requestHeaders: import('node:http').IncomingHttpHeaders = {}
+    server = createServer(async (request, response) => {
+      requestUrl = request.url ?? ''
+      requestHeaders = request.headers
+      for await (const _chunk of request) { /* drain locator */ }
+      response.end('complete-file')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const chunks: Uint8Array[] = []
+    for await (const chunk of client.downloadFile({
+      messageId: 'm', elementId: 'e', chatType: 1, peerUid: 'u',
+      kind: 'file', fileName: 'x.bin',
+    })) chunks.push(chunk)
+
+    expect(requestUrl).toBe('/files/download')
+    expect(requestHeaders['x-qqnt-offset']).toBeUndefined()
+    expect(requestHeaders['x-qqnt-limit']).toBeUndefined()
+    expect(Buffer.concat(chunks).toString()).toBe('complete-file')
+  })
+
   it('parses SSE frames sequentially so handler completion provides backpressure', async () => {
     let resumeHeader: string | string[] | undefined
     server = createServer((request, response) => {

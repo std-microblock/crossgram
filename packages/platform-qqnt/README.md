@@ -11,12 +11,32 @@
     # groupAlias (default) uses the current group's card when present.
     # nickname always uses the user's QQ profile nickname.
     memberName: groupAlias
+    # on-demand downloads the untouched original only when Telegram asks.
+    # auto downloads received images and small files immediately, caches them
+    # by QQ's content hash, converts images to WebP, and extracts previews.
+    mediaDownloadMode: auto
+    autoDownloadFileSizeLimit: 10485760
+    previewMaxDimension: 320
 ```
 
 The transport uses JSON for metadata, SSE for ordered incoming events, a
-chunked request body for uploads, and a ranged chunked response for downloads.
+chunked request body for uploads, and a whole-file chunked response for downloads.
 The adapter reads `IMMediaSource.stream()` directly and never constructs a
 complete media `Buffer`.
+
+QQNT only exposes whole-file downloads. In `auto` mode the adapter downloads
+eligible media when a message event arrives, uses `sha3`/`sha`/`md5` as the
+disk-cache identity, converts static images to WebP, converts GIF/APNG images
+to WebM, and creates a WebP preview. A
+cache hit is resolved before creating the QQNT request. Telegram range reads
+then come from the local cached file. In `on-demand` mode (the default), each
+Telegram request streams the original QQ file and slices it locally; no
+conversion or preview generation is attempted.
+
+QQ picture elements other than native normal/QZone photos are exposed as
+stickers. Animated expression pictures and animated sticker assets are
+projected as Telegram video stickers (`video/webm`) rather than image/GIF
+documents.
 
 QQNT's native API accepts local paths rather than byte streams. The injected QQ
 process therefore writes the incoming request incrementally to a private
@@ -58,4 +78,4 @@ QQNT_BRIDGE_E2E=1 pnpm --filter @mtproto-relay/platform-qqnt test:e2e
 They hard-code the requested safety allowlist: direct messages only target
 `MicroBlock (1715311957)`, while group messages only target `1058754719` or
 `1084013940`. Set `QQNT_BRIDGE_E2E_FILE` to additionally test a streamed file
-upload and ranged download.
+upload and platform-side range download.

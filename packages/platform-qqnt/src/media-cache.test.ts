@@ -42,26 +42,78 @@ describe('QQMediaCache', () => {
     expect(opens).toBe(1)
   }, 30_000)
 
-  it('optionally caches all downloaded images as WebP and honors ranges', async () => {
+  it('auto-caches images by QQ hash, converts to WebP, extracts previews, and honors ranges', async () => {
     const path = await temporaryDirectory()
     const png = await sharp({
       create: { width: 20, height: 10, channels: 4, background: { r: 220, g: 50, b: 30, alpha: 1 } },
     }).png().toBuffer()
     let opens = 0
-    const cache = new QQMediaCache({ path, cacheAndConvertImages: true })
+    const cache = new QQMediaCache({ path, mediaDownloadMode: 'auto', previewMaxDimension: 8 })
     const media = {
       id: 'image-opaque', kind: 'image' as const, mimeType: 'image/png', size: png.length,
-      width: 20, height: 10, locator: { path: '/opaque' },
+      width: 20, height: 10,
+      locator: mediaLocator({ messageId: 'first-message', md5: 'AABBCC' }),
     }
 
-    const complete = await collect(cache.downloadImage(media, countedSource(png, () => opens++)))
-    const range = await collect(cache.downloadImage(media, countedSource(png, () => opens++), { offset: 4, limit: 8 }))
+    const prepared = await cache.prepareMedia(media, countedSource(png, () => opens++))
+    const sameHash = await cache.prepareMedia({
+      ...media, id: 'different-id',
+      locator: mediaLocator({ messageId: 'different-message', md5: 'aabbcc' }),
+    }, countedSource(png, () => opens++))
+    const complete = await collect(cache.download(prepared, countedSource(png, () => opens++)))
+    const range = await collect(cache.download(sameHash, countedSource(png, () => opens++), { offset: 4, limit: 8 }))
+    const preview = prepared.preview!
+    const previewBytes = await collect(cache.download({
+      ...prepared, size: preview.size, width: preview.width, height: preview.height,
+      locator: preview.locator,
+    }, countedSource(png, () => opens++)))
 
+    expect(prepared).toMatchObject({
+      name: undefined, mimeType: 'image/webp', width: 20, height: 10,
+      locator: { cachedPath: expect.stringMatching(/\.webp$/) },
+      preview: { mimeType: 'image/webp', width: 8, height: 4, locator: { cachedPath: expect.any(String) } },
+    })
     expect(complete.subarray(0, 4).toString()).toBe('RIFF')
     expect(complete.subarray(8, 12).toString()).toBe('WEBP')
     expect(range).toEqual(complete.subarray(4, 12))
+    expect(previewBytes.subarray(8, 12).toString()).toBe('WEBP')
     expect(opens).toBe(1)
   })
+
+  it('only auto-downloads files within the configured size limit', async () => {
+    const cache = new QQMediaCache({
+      path: await temporaryDirectory(), mediaDownloadMode: 'auto', autoDownloadFileSizeLimit: 4,
+    })
+    expect(cache.shouldAutoDownload({ id: 'small', kind: 'file', size: 4 })).toBe(true)
+    expect(cache.shouldAutoDownload({ id: 'large', kind: 'file', size: 5 })).toBe(false)
+    expect(cache.shouldAutoDownload({ id: 'image', kind: 'image', size: 1_000_000_000 })).toBe(true)
+  })
+
+  it('converts received GIF/APNG images to WebM and keeps a static WebP preview', async () => {
+    const path = await temporaryDirectory()
+    const gif = await sharp({
+      create: { width: 18, height: 12, channels: 4, background: { r: 130, g: 40, b: 210, alpha: 1 } },
+    }).gif().toBuffer()
+    let opens = 0
+    const cache = new QQMediaCache({ path, mediaDownloadMode: 'auto', previewMaxDimension: 9 })
+    const prepared = await cache.prepareMedia({
+      id: 'animated-image', kind: 'image', name: 'animated.gif', mimeType: 'image/gif',
+      size: gif.length, width: 18, height: 12, locator: mediaLocator({ md5: 'animated-hash' }),
+    }, countedSource(gif, () => opens++))
+    const video = await collect(cache.download(prepared, countedSource(gif, () => opens++)))
+    const preview = prepared.preview!
+    const previewBytes = await collect(cache.download({
+      ...prepared, size: preview.size, locator: preview.locator,
+    }, countedSource(gif, () => opens++)))
+
+    expect(prepared).toMatchObject({
+      kind: 'file', name: 'animated.webm', mimeType: 'video/webm',
+      preview: { mimeType: 'image/webp', width: 9, height: 6 },
+    })
+    expect([...video.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
+    expect(previewBytes.subarray(8, 12).toString()).toBe('WEBP')
+    expect(opens).toBe(1)
+  }, 30_000)
 
   it('persists generated reaction WebM files across adapter instances', async () => {
     const path = await temporaryDirectory()
@@ -127,6 +179,13 @@ function countedSource(bytes: Uint8Array, opened: () => void): IMMediaSource {
       opened()
       yield bytes
     },
+  }
+}
+
+function mediaLocator(overrides: Partial<import('./protocol.js').QQMediaLocator> = {}) {
+  return {
+    messageId: 'message', elementId: 'element', chatType: 1 as const, peerUid: 'peer',
+    kind: 'image' as const, fileName: 'image.png', ...overrides,
   }
 }
 
