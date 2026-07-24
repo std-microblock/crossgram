@@ -122,6 +122,39 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('rich-media projection', () => {
+  it('keeps reply headers when the target is outside the requested history window', async () => {
+    const store = await createStore()
+    const target: IMMessage = {
+      id: 'old-target', conversationId: conversation.id, senderId: 'bob', timestamp: 100,
+      content: { parts: [{ type: 'text', text: 'old target' }] },
+    }
+    const filler: IMMessage = {
+      id: 'filler', conversationId: conversation.id, senderId: 'bob', timestamp: 200,
+      content: { parts: [{ type: 'text', text: 'filler' }] },
+    }
+    const reply: IMMessage = {
+      id: 'reply', conversationId: conversation.id, senderId: 'alice', timestamp: 300,
+      replyToId: target.id, content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const replyPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [reply, filler, target] } },
+      async getMessage(_session, _conversation, id) { return id === target.id ? target : null },
+    }
+    const request = { ...historyRequest(), limit: 1 }
+    const result = await new DialogRpc(replyPlatform, session, store)
+      .getHistory(request) as tl.messages.RawMessages
+    const projectedTarget = await store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, target.id,
+    )
+
+    expect(result.messages[0]).toMatchObject({
+      _: 'message', message: 'reply',
+      replyTo: { _: 'messageReplyHeader', replyToMsgId: projectedTarget!.parts[0].tlMessageId },
+    })
+  })
+
   it('materializes persisted dialog previews without fetching every conversation history', async () => {
     const store = await createStore()
     const getHistory = vi.fn(async () => ({ messages: [album] }))
