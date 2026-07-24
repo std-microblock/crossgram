@@ -182,7 +182,7 @@ export interface WireReactionDefinition {
           width: number
           height: number
           size?: number
-          locator: { filePath: string, assetKey?: string }
+          locator: { filePath: string }
         }
       }
 }

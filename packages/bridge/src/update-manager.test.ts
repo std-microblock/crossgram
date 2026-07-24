@@ -39,7 +39,11 @@ afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createHarness(updateDeliveryRetention?: number) {
+async function createHarness(
+  updateDeliveryRetention?: number,
+  targetPlatform: IMPlatform = platform,
+  projectSticker?: ConstructorParameters<typeof UpdateManager>[6],
+) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -55,8 +59,9 @@ async function createHarness(updateDeliveryRetention?: number) {
   const sent: Array<{ authKeyId: Uint8Array, update: tl.TypeUpdates }> = []
   const store = new MessageStore(ctx.database, updateDeliveryRetention)
   const manager = new UpdateManager(
-    ctx.database, new PlatformRegistry([[session.platformId, platform]]), store,
+    ctx.database, new PlatformRegistry([[session.platformId, targetPlatform]]), store,
     (authKeyId, update) => sent.push({ authKeyId, update }),
+    1, undefined, projectSticker,
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -131,6 +136,60 @@ describe('UpdateManager', () => {
     expect(messages.map((item) => item.groupedId)).toEqual([undefined, undefined])
     expect(messages.map((item) => item.message)).toEqual(['caption', ''])
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 3, seq: 1 })
+  })
+
+  it('projects live stickers through the same Telegram message path as history', async () => {
+    const stickerMedia = {
+      _: 'messageMediaDocument',
+      document: { _: 'documentEmpty', id: 42 as never },
+    } as tl.TypeMessageMedia
+    const projected: string[] = []
+    const { store, manager, sent } = await createHarness(undefined, platform, (_session, sticker) => {
+      projected.push(sticker.stickerId)
+      return stickerMedia
+    })
+    const conversation: IMConversation = { id: 'stickers', kind: 'group', title: 'Stickers' }
+    const message: IMMessage = {
+      id: 'live-sticker', conversationId: conversation.id, senderId: 'alice', timestamp: 20,
+      content: { parts: [{ type: 'sticker', sticker: {
+        providerId: 'qq', stickerId: 'favorite:wave', format: 'animated', mimeType: 'image/apng',
+      } }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const update = (sent[0].update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
+    expect(projected).toEqual(['favorite:wave'])
+    expect((update.message as tl.RawMessage).media).toBe(stickerMedia)
+    expect((update.message as tl.RawMessage).media?._).toBe('messageMediaDocument')
+  })
+
+  it('backfills an uncached reply target before publishing the live reply', async () => {
+    const conversation: IMConversation = { id: 'reply-group', kind: 'group', title: 'Replies' }
+    const target: IMMessage = {
+      id: 'opaque-target', conversationId: conversation.id, senderId: 'bob', timestamp: 20,
+      content: { parts: [{ type: 'text', text: 'target' }] },
+    }
+    const getMessage = async (_session: PlatformSession, _conversation: { id: string }, id: string) =>
+      id === target.id ? target : null
+    const replyPlatform: IMPlatform = { ...platform, getMessage }
+    const { store, manager, sent } = await createHarness(undefined, replyPlatform)
+    const reply: IMMessage = {
+      id: 'live-reply', conversationId: conversation.id, senderId: 'alice', timestamp: 21,
+      replyToId: target.id,
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const result = await store.ingest(session, conversation, reply)
+    await manager.publish(session, { event: { type: 'message', conversation, message: reply }, result })
+
+    const storedTarget = await store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, target.id,
+    )
+    const update = (sent[0].update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
+    expect(storedTarget).toBeDefined()
+    expect((update.message as tl.RawMessage).replyTo).toMatchObject({
+      _: 'messageReplyHeader', replyToMsgId: storedTarget!.parts[0].tlMessageId,
+    })
   })
 
   it('publishes subchannel events through the parent forum and topic root', async () => {

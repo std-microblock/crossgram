@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs'
 import { rename, rm } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { Context } from 'cordis'
@@ -63,7 +63,8 @@ export class QQMediaCache {
   constructor(private readonly options: QQMediaCacheOptions) {
     this.path = resolve(options.path)
     this.cacheAndConvertImages = options.cacheAndConvertImages ?? false
-    this.ffmpegPath = options.ffmpegPath || ffmpegStatic || 'ffmpeg'
+    this.ffmpegPath = options.ffmpegPath
+      || (ffmpegStatic && existsSync(ffmpegStatic) ? ffmpegStatic : 'ffmpeg')
     mkdirSync(this.path, { recursive: true })
   }
 
@@ -94,6 +95,30 @@ export class QQMediaCache {
     return {
       source: fileSource(asset.path, asset.size), mimeType: asset.mimeType, size: asset.size,
       width: asset.width, height: asset.height,
+    }
+  }
+
+  async openReaction(
+    key: string,
+    version: number,
+    format: 'static' | 'video',
+    original: IMStickerAsset,
+  ): Promise<IMStickerAsset> {
+    const animated = format === 'video'
+    const kind = animated ? 'reaction-webm-v1' : 'reaction-webp-v1'
+    const asset = await this.ensure(
+      cacheKey(kind, key, version),
+      animated ? 'webm' : 'webp',
+      animated ? 'video/webm' : 'image/webp',
+      100, 100,
+      async (temporary) => {
+        if (animated) await this.convertAnimated(original.source, temporary, 100)
+        else await this.convertStatic(original.source, temporary, 100)
+      },
+    )
+    return {
+      source: fileSource(asset.path, asset.size), mimeType: asset.mimeType, size: asset.size,
+      width: 100, height: 100,
     }
   }
 
@@ -171,24 +196,30 @@ export class QQMediaCache {
     return asset
   }
 
-  private async convertStatic(source: IMMediaSource, output: string): Promise<void> {
+  private async convertStatic(source: IMMediaSource, output: string, squareSize?: number): Promise<void> {
+    const transformer = sharp().rotate()
+    if (squareSize) transformer.resize(squareSize, squareSize, { fit: 'contain' })
     await pipeline(
       Readable.from(source.stream()),
-      sharp().rotate().webp({ quality: 90, effort: 4 }),
+      transformer.webp({ quality: 90, effort: 4 }),
       createWriteStream(output, { flags: 'wx' }),
     )
   }
 
-  private async convertAnimated(source: IMMediaSource, output: string): Promise<void> {
-    if (!existsSync(this.ffmpegPath)) {
+  private async convertAnimated(source: IMMediaSource, output: string, maxDimension = 512): Promise<void> {
+    if (isAbsolute(this.ffmpegPath) && !existsSync(this.ffmpegPath)) {
       throw new Error(`FFmpeg executable is unavailable: ${this.ffmpegPath}`)
     }
     const input = join(this.path, `${randomUUID()}.animated-input`)
     try {
       await pipeline(Readable.from(source.stream()), createWriteStream(input, { flags: 'wx' }))
+      const scale = `scale=${maxDimension}:${maxDimension}:force_original_aspect_ratio=decrease`
+      const videoFilter = maxDimension === 512
+        ? `fps=30,${scale}`
+        : `fps=30,${scale},pad=${maxDimension}:${maxDimension}:(ow-iw)/2:(oh-ih)/2:color=black@0`
       await runProcess(this.ffmpegPath, [
         '-hide_banner', '-loglevel', 'error', '-y', '-i', input,
-        '-an', '-vf', 'fps=30,scale=512:512:force_original_aspect_ratio=decrease',
+        '-an', '-vf', videoFilter,
         '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-auto-alt-ref', '0',
         '-b:v', '0', '-crf', '32', '-f', 'webm', output,
       ])

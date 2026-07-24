@@ -388,6 +388,12 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     query?: IMHistoryQuery,
   ): Promise<IMHistoryPage<TMediaLocator>>
+  /** Resolve one opaque platform message, used for reply-target backfill. */
+  getMessage?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    messageId: string,
+  ): Promise<IMMessage<TMediaLocator> | null>
   getUser?(session: PlatformSession, userId: string): Promise<IMUser<TMediaLocator> | null>
   getConversationMember?(
     session: PlatformSession,
