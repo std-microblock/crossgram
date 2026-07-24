@@ -489,12 +489,28 @@ describe('bridge login e2e', () => {
       const aliceDialog = dialogs.dialogs.find((dialog: any) =>
         dialog.peer._ === 'peerUser' && dialog.peer.userId === alice.id)
       expect(aliceDialog).toMatchObject({ unreadCount: 1 })
+      const peerDialogs = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getPeerDialogs',
+        peers: [{
+          _: 'inputDialogPeer',
+          peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        }],
+      }, 25)
+      expect(peerDialogs).toMatchObject({
+        _: 'messages.peerDialogs',
+        dialogs: [{ peer: { _: 'peerUser', userId: alice.id }, unreadCount: 1 }],
+        messages: [{ _: 'message', message: 'How are you?' }],
+        users: expect.arrayContaining([
+          expect.objectContaining({ _: 'user', id: alice.id, firstName: 'Alice' }),
+        ]),
+        state: { _: 'updates.state', pts: 1 },
+      })
       const unreadWindow = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         offsetId: aliceDialog.readInboxMaxId, offsetDate: 0, addOffset: -25, limit: 50,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 25)
+      }, 26)
       expect(unreadWindow.messages.map((message: any) => message.message)).toEqual([
         'How are you?', 'Hey there!',
       ])
@@ -504,7 +520,7 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 26)
+      }, 27)
       expect(history._).toBe('messages.messages')
       expect(history.messages.map((message: any) => message.message)).toEqual([
         'How are you?', 'Hey there!',

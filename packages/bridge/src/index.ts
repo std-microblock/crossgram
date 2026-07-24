@@ -342,6 +342,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   // ── Messages ──
   rpc.register('messages.getDialogs', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getDialogs(req as tl.messages.RawGetDialogsRequest))
+  rpc.register('messages.getPeerDialogs', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getPeerDialogs(req as tl.messages.RawGetPeerDialogsRequest))
   rpc.register('messages.getHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
   rpc.register('messages.getMessages', async (rpc, req) =>
