@@ -32,11 +32,14 @@ export class QQNTClient {
     return this.json('/status')
   }
 
-  getDialogs(query: { cursor?: string, limit?: number } = {}): Promise<{
+  getDialogs(
+    query: { cursor?: string, limit?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<{
     conversations: WireConversation[]
     nextCursor?: string
   }> {
-    return this.json(`/dialogs${queryString(query)}`)
+    return this.json(`/dialogs${queryString(query)}`, false, { signal })
   }
 
   getContacts(query: { cursor?: string, limit?: number } = {}): Promise<{
