@@ -17,7 +17,7 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 ### 平台实现
 
 | 平台 | 包名 | 状态 |
-|---|---|---|---|
+|---|---|---|
 | **QQ（QQNT）** | `@mtproto-relay/platform-qqnt` | ✅ |
 | **参考实现（static）** | `@mtproto-relay/platform-static` | ✅ |
 | **官方 Telegram 透传（relay）** | `@mtproto-relay/relay` | ✅ |
@@ -148,8 +148,6 @@ node binary_patch/patch-tdesktop.cjs --host 192.168.1.10 --port 4430 --no-resign
 | `--no-resign` | 跳过 macOS 重签名（Linux/Windows 或非自动签名） | 关闭 |
 | `--no-backup` | 跳过生成 `<binary>.original` 备份 | 关闭 |
 | `--dry-run` | 只打印将要修改的位置，不写入 | 关闭 |
-
-> 打补丁前客户端会自动备份为 `<binary>.original`。macOS 上补丁会执行 `codesign --force --deep --sign -` 重新签名并移除 quarantine，如遇权限问题可加 `sudo` 或 `--no-resign` 手动签名。
 
 #### 登录
 
