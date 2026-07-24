@@ -20,6 +20,23 @@ afterEach(async () => {
 })
 
 describe('QQNTPlatform mapping', () => {
+  it('preserves QQ group msgSeq and replayMsgSeq as Telegram message IDs', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'opaque-qq-id', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      msgSeq: '5850634', telegramMessageId: 5850634, telegramReplyToMessageId: 5850632,
+      parts: [{ type: 'text' as const, text: 'reply' }],
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{
+        id: 'opaque-qq-id',
+        metadata: { qqMsgSeq: '5850634', telegramMessageId: 5850634, telegramReplyToMessageId: 5850632 },
+      }],
+    })
+  })
+
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({

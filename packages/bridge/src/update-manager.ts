@@ -6,7 +6,7 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import type { MessageStore } from './message-store.js'
-import type { IMConversation, IMMessage, PlatformSession } from './platform.js'
+import { telegramReplyToMessageId, type IMConversation, type IMMessage, type PlatformSession } from './platform.js'
 import type { IMSticker } from './sticker-provider.js'
 import type { CommittedPlatformEvent, PlatformRegistry } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
@@ -149,12 +149,13 @@ export class UpdateManager {
         continue
       }
       const media = projected.media.find((item) => item.id === part.mediaId)
-      let replied = projected.source.replyToId
+      const nativeReplyTo = telegramReplyToMessageId(projected.source)
+      let replied = !nativeReplyTo && projected.source.replyToId
         ? await this._store.findProjectedByPlatformId(
             session.platformSessionId, event.conversation.id, projected.source.replyToId,
           )
         : undefined
-      if (!replied && projected.source.replyToId && platform.getMessage) {
+      if (!nativeReplyTo && !replied && projected.source.replyToId && platform.getMessage) {
         try {
           const target = await platform.getMessage(
             session, { id: event.conversation.id }, projected.source.replyToId,
@@ -190,7 +191,7 @@ export class UpdateManager {
           ? makeMessageReactions(projected.source, session.platformSessionId)
           : undefined,
         topicId,
-        replyToTlId: replied?.parts[0]?.tlMessageId,
+        replyToTlId: nativeReplyTo ?? replied?.parts[0]?.tlMessageId,
       })
       updates.push({
         _: isEdit

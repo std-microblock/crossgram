@@ -198,7 +198,7 @@ describe('MessageStore', () => {
     await expect(store.allocateIds('account:one', 0)).rejects.toThrow('positive integer')
   })
 
-  it('allocates message IDs account-wide but isolates channel ID scopes', async () => {
+  it('isolates direct, group, and channel message ID scopes', async () => {
     const { store } = await createStore()
     const direct = { id: 'direct', kind: 'direct' as const, title: 'Direct' }
     const group = { id: 'group', kind: 'group' as const, title: 'Group' }
@@ -208,9 +208,49 @@ describe('MessageStore', () => {
       content: { parts: [{ type: 'text', text: id }] },
     })
     expect((await store.ingest(session, direct, make('direct-1', 'direct'))).projection[0].tlMessageId).toBe(0x40000000)
-    expect((await store.ingest(session, group, make('group-1', 'group'))).projection[0].tlMessageId).toBe(0x40000001)
+    expect((await store.ingest(session, group, make('group-1', 'group'))).projection[0].tlMessageId).toBe(0x40000000)
     expect((await store.ingest(session, channel, make('channel-1', 'channel'))).projection[0].tlMessageId).toBe(0x40000000)
     expect((await store.ingest(session, channel, make('channel-2', 'channel'))).projection[0].tlMessageId).toBe(0x40000001)
+  })
+
+  it('uses a platform-provided Telegram message ID and migrates an existing projection', async () => {
+    const { store } = await createStore()
+    const group = { id: 'group', kind: 'group' as const, title: 'Group' }
+    const source: IMMessage = {
+      id: 'opaque-message', conversationId: 'group', senderId: 'sender', timestamp: 1,
+      content: { parts: [{ type: 'text', text: 'hello' }] },
+    }
+    const initial = await store.ingest(session, group, source)
+    expect(initial.projection[0].tlMessageId).toBe(0x40000000)
+
+    const migrated = await store.ingest(session, group, {
+      ...source, metadata: { telegramMessageId: 5_850_634 },
+    })
+    expect(migrated.projection[0]).toMatchObject({
+      tlMessageId: 5_850_634,
+      scope: `channel:${session.platformSessionId}:group`,
+    })
+  })
+
+  it('disambiguates equal direct and group IDs by conversation kind', async () => {
+    const { store } = await createStore()
+    const direct = { id: 'direct', kind: 'direct' as const, title: 'Direct' }
+    const group = { id: 'group', kind: 'group' as const, title: 'Group' }
+    const make = (id: string, conversationId: string): IMMessage => ({
+      id, conversationId, senderId: 'sender', timestamp: 1,
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+    const directResult = await store.ingest(session, direct, make('direct-message', 'direct'))
+    await store.ingest(session, group, {
+      ...make('group-message', 'group'), metadata: { telegramMessageId: directResult.projection[0].tlMessageId },
+    })
+
+    await expect(store.findProjectedByTlId(
+      session.platformSessionId, directResult.projection[0].tlMessageId, undefined, 'direct',
+    )).resolves.toMatchObject({ source: { id: 'direct-message' } })
+    await expect(store.findProjectedByTlId(
+      session.platformSessionId, directResult.projection[0].tlMessageId, undefined, 'group',
+    )).resolves.toMatchObject({ source: { id: 'group-message' } })
   })
 
   it('allocates backward history IDs and returns bounded database pages', async () => {

@@ -239,6 +239,24 @@ export interface IMMessage<TMediaLocator = unknown> {
   replyToId?: string
 }
 
+export function telegramMessageId(message: IMMessage): number | undefined {
+  return telegramMessageIdFromMetadata(message.metadata)
+}
+
+export function telegramReplyToMessageId(message: IMMessage): number | undefined {
+  return positiveInt32(message.metadata?.telegramReplyToMessageId)
+}
+
+export function telegramMessageIdFromMetadata(metadata?: JsonObject): number | undefined {
+  return positiveInt32(metadata?.telegramMessageId)
+}
+
+function positiveInt32(value: JsonValue | undefined): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 0x7fffffff
+    ? value
+    : undefined
+}
+
 export interface IMReactionActor {
   userId: string
   timestamp?: number

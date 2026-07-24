@@ -4,6 +4,7 @@ import type {
 } from './models.js'
 import {
   messageMedia, messageText,
+  telegramMessageIdFromMetadata,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
   type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
   type IMUser, type JsonObject, type JsonValue, type PlatformSession,
@@ -338,6 +339,7 @@ export class MessageStore {
     platformSessionId: string,
     tlMessageId: number,
     platformConversationId?: string,
+    conversationKind?: IMConversation['kind'],
   ): Promise<ProjectedMessage | undefined> {
     let conversationId: number | undefined
     if (platformConversationId) {
@@ -347,11 +349,22 @@ export class MessageStore {
       if (!conversation) return
       conversationId = conversation.id
     }
-    const [part] = await this._database.get('mtproto_tl_message_part', {
+    const parts = await this._database.get('mtproto_tl_message_part', {
       platformSessionId,
       tlMessageId,
       ...(conversationId === undefined ? {} : { conversationId }),
     })
+    let part = parts[0]
+    if (conversationId === undefined && conversationKind) {
+      part = undefined
+      for (const candidate of parts) {
+        const [conversation] = await this._database.get('mtproto_im_conversation', { id: candidate.conversationId })
+        if (conversation?.kind === conversationKind) {
+          part = candidate
+          break
+        }
+      }
+    }
     if (!part) return
     const [row] = await this._database.get('mtproto_im_message', { id: part.messageId })
     if (!row || row.deleted) return
@@ -628,7 +641,7 @@ export class MessageStore {
     allocation: 'live' | 'history',
   ): Promise<TlMessagePartRow[]> {
     const count = Math.max(1, media.length)
-    const scope = conversation.kind === 'channel'
+    const scope = conversation.kind !== 'direct'
       ? `channel:${platformSessionId}:${conversation.parentPlatformConversationId ?? conversation.platformConversationId}`
       : `account:${platformSessionId}`
     const existing = await database.select('mtproto_tl_message_part', { messageId: message.id })
@@ -642,8 +655,20 @@ export class MessageStore {
       groupedId = String((await this._allocateIds(database, `group:${platformSessionId}`, 1))[0])
       if (existing.length) await database.set('mtproto_tl_message_part', { messageId: message.id }, { groupedId })
     }
+    const preferredId = telegramMessageIdFromMetadata(message.metadata)
+    for (const [index, part] of existing.entries()) {
+      const tlMessageId = index === 0 && preferredId ? preferredId : part.tlMessageId
+      if (part.scope === scope && part.tlMessageId === tlMessageId) continue
+      await database.set('mtproto_tl_message_part', { id: part.id }, { scope, tlMessageId })
+      existing[index] = { ...part, scope, tlMessageId }
+    }
     if (existing.length < count) {
-      const ids = await this._allocateMessageIds(database, scope, count - existing.length, allocation)
+      const missing = count - existing.length
+      const ids = existing.length === 0 && preferredId
+        ? [preferredId, ...(missing > 1
+            ? await this._allocateMessageIds(database, scope, missing - 1, allocation)
+            : [])]
+        : await this._allocateMessageIds(database, scope, missing, allocation)
       await database.upsert('mtproto_tl_message_part', ids.map((tlMessageId, index) => {
         const ordinal = existing.length + index
         return {
