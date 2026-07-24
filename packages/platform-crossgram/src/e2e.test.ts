@@ -94,6 +94,27 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     expect(sent.content.parts).toMatchObject([{ type: 'media', media: { kind: 'image' } }])
   }, 180_000)
 
+  it('streams two images in one IMPlatform message only to MicroBlock', async () => {
+    const target = await platform.client.resolveConversation('direct', directTarget)
+    const imagePath = new URL('../../platform-static/src/test-image.png', import.meta.url)
+    const image = await stat(imagePath)
+    const media = (name: string) => ({
+      type: 'media' as const,
+      media: {
+        kind: 'image' as const, name, mimeType: 'image/png', size: image.size,
+        source: {
+          size: image.size,
+          async *stream() { for await (const chunk of createReadStream(imagePath)) yield new Uint8Array(chunk) },
+        },
+      },
+    })
+    const sent = await platform.sendMessage(session, { id: target.id }, {
+      parts: [media(`first-${basename(imagePath.pathname)}`), media(`second-${basename(imagePath.pathname)}`)],
+    })
+    expect(sent.conversationId).toBe(target.id)
+    expect(sent.content.parts.filter((part) => part.type === 'media')).toHaveLength(2)
+  }, 180_000)
+
   it('sends through the IMPlatform API only to MicroBlock and the two approved groups', async () => {
     const targets = [
       await platform.client.resolveConversation('direct', directTarget),
