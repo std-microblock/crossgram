@@ -322,6 +322,7 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   transferAuthKeyIds: Uint8Array[]
   downloadBytes: Uint8Array
   broadcastUpdate: (update: tl.TypeUpdates) => void
+  sendUpdateToAuthKey: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number
   stop: () => Promise<void>
 }> {
   const rsaKey = generateRsaKeyPair()
@@ -345,6 +346,10 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
     meUrlPrefix: 'https://my.telegram.org/', captionLengthMax: 1024, messageLengthMax: 4096,
     webfileDcId: 1, suggestedLangCode: '', langPackVersion: 0, baseLangPackVersion: 0,
     reactionsDefault: { _: 'reactionEmpty' }, autologinToken: '',
+  }))
+
+  ctx.mtproto.register('updates.getState', async () => ({
+    _: 'updates.state', pts: 1, qts: 0, date: nowSec(), seq: 0, unreadCount: 0,
   }))
 
   // A handler returning a bare Vector<X> (0x1cb5c415 + count + items) — the shape
@@ -414,6 +419,7 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   return {
     port: ctx.mtproto.port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes,
     broadcastUpdate: (update) => ctx.mtproto.broadcastUpdate(update),
+    sendUpdateToAuthKey: (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
     stop: () => Promise.resolve(fiber.dispose()),
   }
 }
@@ -607,6 +613,62 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       expect(mediaUpdate.updates).toMatchObject([{ message: { _: 'message', id: 100, message: 'shared layer update' } }])
       media.close()
       client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('targets account updates to the main update session instead of media connections', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop, sendUpdateToAuthKey } = await startServer((event) => debugEvents.push(event))
+    try {
+      const main = await TestClient.connect(port)
+      const perm = await doClientHandshake(main, pubKey, false)
+      const mainSession = new Long(0x31313131, 0x31313131)
+      await main.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'updates.getState' }),
+        perm.salt,
+        mainSession,
+        4,
+      ))
+      expect(await readRpcResult(main, perm)).toMatchObject({ _: 'updates.state', pts: 1 })
+
+      const media = await TestClient.connect(port)
+      const mediaSession = new Long(0x32323232, 0x32323232)
+      await media.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        perm.salt,
+        mediaSession,
+        8,
+      ))
+      expect(await readRpcResult(media, perm)).toMatchObject({ _: 'config', thisDc: 1 })
+
+      debugEvents.length = 0
+      const delivered = sendUpdateToAuthKey(perm.authKeyId, {
+        _: 'updates',
+        updates: [{
+          _: 'updateNewMessage',
+          message: {
+            _: 'message', id: 101,
+            fromId: { _: 'peerUser', userId: 42 },
+            peerId: { _: 'peerUser', userId: 42 },
+            date: nowSec(), message: 'main only',
+          },
+          pts: 2, ptsCount: 1,
+        }],
+        users: [], chats: [], date: nowSec(), seq: 1,
+      } as unknown as tl.TypeUpdates)
+
+      expect(delivered).toBe(1)
+      expect(debugEvents.filter((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'updates'
+      )).map((event) => event.connectionId)).toEqual(['conn-1'])
+      main.close()
+      media.close()
     } finally {
       await stop()
     }

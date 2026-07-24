@@ -181,15 +181,14 @@ export class Mtproto extends Service {
 
   /** Send an update only to connections authenticated with the given permanent auth key. */
   sendUpdateToAuthKey(authKeyId: Uint8Array, update: tl.TypeUpdates): number {
-    let delivered = 0
-    for (const session of this._sessions) {
-      if (equalBytes(session.authKeyId, authKeyId)) {
-        this._applyKnownApiLayer(session)
-        session.sendUpdate(update)
-        delivered++
-      }
+    const candidates = [...this._sessions].filter((session) => equalBytes(session.authKeyId, authKeyId))
+    const updateSessions = candidates.filter((session) => session.acceptsUpdates)
+    const targets = updateSessions.length ? updateSessions : candidates.slice(0, 1)
+    for (const session of targets) {
+      this._applyKnownApiLayer(session)
+      session.sendUpdate(update)
     }
-    return delivered
+    return targets.length
   }
 
   async* [Service.init]() {
