@@ -3,7 +3,8 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
   messageText, telegramMessageId, telegramReplyToMessageId,
-  type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMMedia, type IMMediaInput,
+  type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
+  type IMMedia, type IMMediaInput,
   type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
@@ -136,10 +137,11 @@ export class DialogRpc {
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerUser'
       ? this._tlToPeer.get(req.offsetPeer.userId)
       : undefined
-    const all = (await this._loadDialogs({
+    const loaded = await this._loadDialogPage({
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
-    }))
+    })
+    const all = loaded.dialogs
       .slice()
       .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0))
 
@@ -166,9 +168,11 @@ export class DialogRpc {
 
     const limit = clampLimit(req.limit)
     const page = materialized.slice(start, start + limit)
+    const total = loaded.total ?? (loaded.nextCursor ? all.length + 1 : all.length)
+    const sliced = start > 0 || page.length < total
     const result = {
-      _: start > 0 || page.length < all.length ? 'messages.dialogsSlice' : 'messages.dialogs',
-      ...(start > 0 || page.length < all.length ? { count: all.length } : {}),
+      _: sliced ? 'messages.dialogsSlice' : 'messages.dialogs',
+      ...(sliced ? { count: total } : {}),
       dialogs: page.map((item) => item.dialog),
       messages: page.flatMap((item) => item.message ? [item.message] : []),
       chats: uniqueChats(page.flatMap((item) => item.chat ? [item.chat] : [])),
@@ -1616,9 +1620,16 @@ export class DialogRpc {
   }
 
   private async _loadDialogs(query: { limit?: number, afterId?: string } = { limit: 100 }): Promise<IMDialog[]> {
-    const dialogs = this._data
-      ? await this._data.getDialogs(query)
-      : (await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)).dialogs
+    return (await this._loadDialogPage(query)).dialogs
+  }
+
+  private async _loadDialogPage(
+    query: { limit?: number, afterId?: string } = { limit: 100 },
+  ): Promise<IMDialogPage> {
+    const page = this._data
+      ? await this._data.getDialogsPage(query)
+      : await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)
+    const dialogs = page.dialogs
     for (const dialog of dialogs) {
       this._conversations.set(dialog.conversation.id, dialog.conversation)
       if (dialog.readInboxMaxMessage) {
@@ -1627,7 +1638,7 @@ export class DialogRpc {
         this._readInboxMaxMessageIds.delete(dialog.conversation.id)
       }
     }
-    return dialogs.filter((dialog) => !this._isSubchannel(dialog.conversation))
+    return { ...page, dialogs: dialogs.filter((dialog) => !this._isSubchannel(dialog.conversation)) }
   }
 
   private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {

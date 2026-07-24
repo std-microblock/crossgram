@@ -177,6 +177,7 @@ describe('PlatformDataService', () => {
       if (!query?.cursor) return {
         dialogs: [{ conversation, unreadCount: 4, lastMessage: incoming('2', conversation.id) }],
         nextCursor: 'dialogs-2',
+        total: 347,
       }
       return { dialogs: [], nextCursor: undefined }
     }
@@ -187,8 +188,10 @@ describe('PlatformDataService', () => {
     }
     const data = new PlatformDataService(platform, session, new MessageStore(database))
 
-    const dialogs = await data.getDialogs()
+    const dialogPage = await data.getDialogsPage()
+    const dialogs = dialogPage.dialogs
     expect(dialogCalls).toBe(1)
+    expect(dialogPage).toMatchObject({ total: 347, nextCursor: 'dialogs-2' })
     expect(dialogs).toMatchObject([{ conversation: { id: 'history-room' }, unreadCount: 4 }])
     const history = await data.getHistory(conversation.id)
     expect(historyCalls).toBe(1)

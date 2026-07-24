@@ -39,6 +39,7 @@ export class QQNTClient {
   ): Promise<{
     conversations: WireConversation[]
     nextCursor?: string
+    total?: number
   }> {
     return this.json(`/dialogs${queryString(query)}`, false, { signal })
   }

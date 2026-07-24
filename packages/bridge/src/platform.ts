@@ -345,6 +345,8 @@ export interface IMHistoryQuery extends IMPageQuery {
 export interface IMDialogPage<TMediaLocator = unknown> {
   dialogs: IMDialog<TMediaLocator>[]
   nextCursor?: string
+  /** Total dialogs available upstream, independent of this page's limit. */
+  total?: number
 }
 
 export interface IMHistoryPage<TMediaLocator = unknown> {
