@@ -33,7 +33,7 @@ export class QQNTClient {
   }
 
   getDialogs(
-    query: { cursor?: string, limit?: number } = {},
+    query: { cursor?: string, afterId?: string, limit?: number } = {},
     signal?: AbortSignal,
   ): Promise<{
     conversations: WireConversation[]

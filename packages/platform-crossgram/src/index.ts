@@ -289,7 +289,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     query: IMPageQuery = {},
     signal?: AbortSignal,
   ): Promise<IMDialogPage<QQMediaLocator>> {
-    const response = await this.client.getDialogs({ cursor: query.cursor, limit: query.limit }, signal)
+    const response = await this.client.getDialogs({
+      cursor: query.cursor, afterId: query.afterId, limit: query.limit,
+    }, signal)
     for (const conversation of response.conversations) {
       if (conversation.firstUnread?.msgSeq) this.firstUnreadSeq.set(conversation.id, conversation.firstUnread.msgSeq)
       else this.firstUnreadSeq.delete(conversation.id)
