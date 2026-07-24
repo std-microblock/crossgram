@@ -130,10 +130,19 @@ export interface UpdateStateRow {
   date: number
 }
 
+export interface ChannelUpdateStateRow {
+  id: string
+  platformSessionId: string
+  channelId: string
+  pts: number
+  date: number
+}
+
 export interface UpdateDeliveryRow {
   messageId: number
   eventKey: string
   platformSessionId: string
+  scope: string
   pts: number
   ptsCount: number
   seq: number
@@ -195,6 +204,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_tl_message_part: TlMessagePartRow
     mtproto_id_counter: IdCounterRow
     mtproto_update_state: UpdateStateRow
+    mtproto_channel_update_state: ChannelUpdateStateRow
     mtproto_update_delivery: UpdateDeliveryRow
     mtproto_sticker_recent: StickerRecentRow
     mtproto_sticker_favorite: StickerFavoriteRow
@@ -293,15 +303,22 @@ export function defineModels(ctx: Context): void {
     platformSessionId: 'string', pts: 'unsigned', qts: 'unsigned', seq: 'unsigned', date: 'unsigned',
   }, { primary: 'platformSessionId' })
 
+  ctx.model.extend('mtproto_channel_update_state', {
+    id: 'string', platformSessionId: 'string', channelId: 'string', pts: 'unsigned', date: 'unsigned',
+  }, {
+    primary: 'id',
+    unique: [['platformSessionId', 'channelId']],
+  })
+
   ctx.model.extend('mtproto_update_delivery', {
-    messageId: 'unsigned', eventKey: 'text', platformSessionId: 'string', pts: 'unsigned', ptsCount: 'unsigned',
+    messageId: 'unsigned', eventKey: 'text', platformSessionId: 'string', scope: 'string', pts: 'unsigned', ptsCount: 'unsigned',
     seq: 'unsigned', date: 'unsigned', published: 'boolean', payload: 'text',
   }, {
     primary: 'messageId', autoInc: true,
     unique: ['eventKey'],
     indexes: [
-      ['platformSessionId', 'published', 'pts'],
-      ['platformSessionId', 'pts'],
+      ['platformSessionId', 'published', 'seq'],
+      ['platformSessionId', 'scope', 'pts'],
     ],
   })
 

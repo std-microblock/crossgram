@@ -3,6 +3,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
+import { RpcError } from '@mtproto-relay/mtproto'
 import { makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import type { MessageStore } from './message-store.js'
 import type { IMConversation, IMMessage, PlatformSession } from './platform.js'
@@ -63,14 +64,17 @@ export class UpdateManager {
     const eventKey = `${session.platformSessionId}:reaction:${event.eventId}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
     if (!delivery && !result.changed) return
-    delivery ??= await this._store.prepareUpdateDelivery(
-      eventKey, session.platformSessionId, Math.max(1, result.tlMessageIds.length), event.timestamp,
-    )
-    if (delivery.published) return
     const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
       ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
         ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
       : event.conversation
+    const channelId = displayConversation.kind === 'direct'
+      ? undefined
+      : stableId(`peer:${displayConversation.id}`)
+    delivery ??= await this._store.prepareUpdateDelivery(
+      eventKey, session.platformSessionId, 0, event.timestamp, channelId,
+    )
+    if (delivery.published) return
     const reactions = makeMessageReactions(result.message, session.platformSessionId)
     let pts = delivery.pts - delivery.ptsCount
     const updates = result.tlMessageIds.map((msgId): tl.RawUpdateMessageReactions => ({
@@ -108,8 +112,15 @@ export class UpdateManager {
       this._onTrace?.('update publish skipped eventKey=%s reason=unchanged-edit', eventKey)
       return
     }
+    const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
+      ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
+        ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
+      : event.conversation
+    const channelId = displayConversation.kind === 'direct'
+      ? undefined
+      : stableId(`peer:${displayConversation.id}`)
     delivery ??= await this._store.prepareUpdateDelivery(
-      eventKey, session.platformSessionId, result.projection.length, event.message.timestamp,
+      eventKey, session.platformSessionId, result.projection.length, event.message.timestamp, channelId,
     )
     if (delivery.published) {
       this._onTrace?.('update publish skipped eventKey=%s reason=already-published', eventKey)
@@ -120,10 +131,6 @@ export class UpdateManager {
       eventKey, delivery.pts, delivery.ptsCount, delivery.seq, result.projection.length,
       result.created, result.changed,
     )
-    const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
-      ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
-        ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
-      : event.conversation
     const topicId = event.conversation.kind === 'channel' && event.conversation.parentId
       ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
       : undefined
@@ -249,14 +256,17 @@ export class UpdateManager {
     let delivery = await this._store.getUpdateDelivery(eventKey)
     if (!delivery && !result.changed) return
     if (!result.tlMessageIds.length) return
-    delivery ??= await this._store.prepareUpdateDelivery(
-      eventKey, session.platformSessionId, result.tlMessageIds.length, event.timestamp,
-    )
-    if (delivery.published) return
     const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
       ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
         ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
       : event.conversation
+    const channelId = displayConversation.kind === 'direct'
+      ? undefined
+      : stableId(`peer:${displayConversation.id}`)
+    delivery ??= await this._store.prepareUpdateDelivery(
+      eventKey, session.platformSessionId, result.tlMessageIds.length, event.timestamp, channelId,
+    )
+    if (delivery.published) return
     const update = event.conversation.kind !== 'direct'
       ? {
           _: 'updateDeleteChannelMessages',
@@ -334,17 +344,8 @@ export class UpdateManager {
   ): Promise<tl.updates.TypeDifference> {
     const state = await this.getState(platformSessionId)
     const deliveries = await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts)
-    if (!deliveries.length) {
-      return request.pts < state.pts
-        ? { _: 'updates.differenceTooLong', pts: state.pts }
-        : { _: 'updates.differenceEmpty', date: state.date, seq: state.seq }
-    }
-    const first = deliveries[0]
-    if (first.pts !== request.pts + first.ptsCount) {
-      return { _: 'updates.differenceTooLong', pts: state.pts }
-    }
-    if (deliveries.some((delivery) => !delivery.payload)) {
-      return { _: 'updates.differenceTooLong', pts: state.pts }
+    if (!deliveries.length && request.pts === state.pts) {
+      return { _: 'updates.differenceEmpty', date: state.date, seq: state.seq }
     }
     const requestedLimit = request.ptsLimit ?? request.ptsTotalLimit ?? 100
     const page = deliveries.slice(0, Math.max(1, Math.min(requestedLimit, 100)))
@@ -352,7 +353,7 @@ export class UpdateManager {
     const otherUpdates: tl.TypeUpdate[] = []
     const chats = new Map<string, tl.TypeChat>()
     const users = new Map<string, tl.TypeUser>()
-    for (const delivery of page) {
+    for (const delivery of page.filter((delivery) => delivery.payload)) {
       const payload = decodeUpdate(delivery.payload)
       for (const update of payload.updates) {
         if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
@@ -380,6 +381,39 @@ export class UpdateManager {
       }
     }
     return { _: 'updates.difference', ...difference, state }
+  }
+
+  async getChannelDifference(
+    platformSessionId: string,
+    request: tl.updates.RawGetChannelDifferenceRequest,
+  ): Promise<tl.updates.TypeChannelDifference> {
+    if (request.channel._ !== 'inputChannel') throw new RpcError(400, 'CHANNEL_INVALID')
+    const channelId = request.channel.channelId
+    const state = await this._store.getChannelUpdateState(platformSessionId, channelId)
+    const deliveries = await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts, 101, channelId)
+    if (!deliveries.length) {
+      return { _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts }
+    }
+    const page = deliveries.slice(0, Math.max(1, Math.min(request.limit, 100)))
+    const newMessages: tl.TypeMessage[] = []
+    const otherUpdates: tl.TypeUpdate[] = []
+    const chats = new Map<string, tl.TypeChat>()
+    const users = new Map<string, tl.TypeUser>()
+    for (const delivery of page.filter((delivery) => delivery.payload)) {
+      const payload = decodeUpdate(delivery.payload)
+      for (const update of payload.updates) {
+        if (update._ === 'updateNewChannelMessage') newMessages.push(update.message)
+        else otherUpdates.push(update)
+      }
+      for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
+      for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
+    }
+    for (const delivery of page) await this._store.markUpdatePublished(delivery.eventKey)
+    return {
+      _: 'updates.channelDifference', final: page.length === deliveries.length,
+      pts: page.at(-1)?.pts ?? state.pts,
+      newMessages, otherUpdates, chats: [...chats.values()], users: [...users.values()],
+    }
   }
 }
 

@@ -52,6 +52,7 @@ export interface StoredHistoryQuery {
 
 const MESSAGE_ID_MIDPOINT = 0x40000000
 export const UPDATE_DELIVERY_RETENTION = 1_000
+export const ACCOUNT_UPDATE_SCOPE = 'account'
 const STORED_SENDER_KEY = '__mtprotoRelaySender'
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 
@@ -436,13 +437,32 @@ export class MessageStore {
     }
   }
 
+  async getChannelUpdateState(platformSessionId: string, channelId: number) {
+    const id = channelStateId(platformSessionId, channelId)
+    const [state] = await this._database.get('mtproto_channel_update_state', { id })
+    if (state) return state
+    const account = await this.getUpdateState(platformSessionId)
+    return { id, platformSessionId, channelId: String(channelId), pts: account.pts, date: account.date }
+  }
+
   /** Reserve account pts for an RPC response without advancing the push-update seq. */
-  async advancePts(platformSessionId: string, ptsCount: number, date: number) {
+  async advancePts(platformSessionId: string, ptsCount: number, date: number, channelId?: number) {
     if (!Number.isSafeInteger(ptsCount) || ptsCount <= 0) {
       throw new RangeError('pts count must be a positive integer')
     }
     return this._write(() => this._database.withTransaction(async (database) => {
       const [current] = await database.get('mtproto_update_state', { platformSessionId })
+      if (channelId !== undefined) {
+        const id = channelStateId(platformSessionId, channelId)
+        const [currentChannel] = await database.get('mtproto_channel_update_state', { id })
+        const state = {
+          id, platformSessionId, channelId: String(channelId),
+          pts: (currentChannel?.pts ?? current?.pts ?? 1) + ptsCount,
+          date,
+        }
+        await database.upsert('mtproto_channel_update_state', [state])
+        return state
+      }
       const state = {
         platformSessionId,
         pts: (current?.pts ?? 1) + ptsCount,
@@ -470,25 +490,41 @@ export class MessageStore {
     }))
   }
 
-  async prepareUpdateDelivery(eventKey: string, platformSessionId: string, ptsCount: number, date: number) {
+  async prepareUpdateDelivery(
+    eventKey: string,
+    platformSessionId: string,
+    ptsCount: number,
+    date: number,
+    channelId?: number,
+  ) {
     return this._write(async () => {
       const existing = await this._updateJournal.get(eventKey)
       if (existing) return existing
 
-      const state = await this._database.withTransaction(async (database) => {
+      const allocated = await this._database.withTransaction(async (database) => {
         const [current] = await database.get('mtproto_update_state', { platformSessionId })
-        const next = {
+        const account = {
           platformSessionId,
-          pts: (current?.pts ?? 1) + ptsCount,
+          pts: (current?.pts ?? 1) + (channelId === undefined ? ptsCount : 0),
           qts: current?.qts ?? 0,
           seq: (current?.seq ?? 0) + 1,
           date,
         }
-        await database.upsert('mtproto_update_state', [next])
-        return next
+        await database.upsert('mtproto_update_state', [account])
+        if (channelId === undefined) return { state: account, scope: ACCOUNT_UPDATE_SCOPE, seq: account.seq }
+        const id = channelStateId(platformSessionId, channelId)
+        const [currentChannel] = await database.get('mtproto_channel_update_state', { id })
+        const channel = {
+          id, platformSessionId, channelId: String(channelId),
+          pts: (currentChannel?.pts ?? current?.pts ?? 1) + ptsCount,
+          date,
+        }
+        await database.upsert('mtproto_channel_update_state', [channel])
+        return { state: channel, scope: channelUpdateScope(channelId), seq: account.seq }
       })
       return this._updateJournal.create({
-        eventKey, platformSessionId, pts: state.pts, ptsCount, seq: state.seq, date, published: false,
+        eventKey, platformSessionId, scope: allocated.scope, pts: allocated.state.pts, ptsCount,
+        seq: allocated.seq, date, published: false,
         payload: '',
       })
     })
@@ -510,8 +546,13 @@ export class MessageStore {
     return this._updateJournal.getPending(platformSessionId)
   }
 
-  async getUpdateDeliveriesAfter(platformSessionId: string, pts: number, limit = 101) {
-    return this._updateJournal.getAfter(platformSessionId, pts, limit)
+  async getUpdateDeliveriesAfter(platformSessionId: string, pts: number, limit = 101, channelId?: number) {
+    return this._updateJournal.getAfter(
+      platformSessionId,
+      channelId === undefined ? ACCOUNT_UPDATE_SCOPE : channelUpdateScope(channelId),
+      pts,
+      limit,
+    )
   }
 
   async getConversation(
@@ -719,7 +760,7 @@ export class MessageStore {
   }
 
   async pruneUpdateDeliveries(platformSessionId: string): Promise<void> {
-    await this._write(() => this._updateJournal.prune(platformSessionId))
+    await this._write(() => this._updateJournal.prune(platformSessionId, ACCOUNT_UPDATE_SCOPE))
   }
 
   private async _write<T>(callback: () => Promise<T>): Promise<T> {
@@ -733,6 +774,14 @@ export class MessageStore {
       release()
     }
   }
+}
+
+function channelStateId(platformSessionId: string, channelId: number): string {
+  return `${encodeURIComponent(platformSessionId)}:${channelId}`
+}
+
+function channelUpdateScope(channelId: number): string {
+  return `channel:${channelId}`
 }
 
 function toConversation(row: IMConversationRow): IMConversation {
