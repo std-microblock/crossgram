@@ -487,6 +487,23 @@ describe('MessageStore', () => {
     expect(await ctx.database.get('mtproto_update_delivery', {})).toEqual([])
   })
 
+  it('persists and hydrates content.serviceAction', async () => {
+    const { ctx, store } = await createStore()
+    const conversation: IMConversation = { id: 'direct', kind: 'direct', title: 'Direct' }
+    const message: IMMessage = {
+      id: 'service', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { serviceAction: { type: 'custom', text: 'Alice sent a message' }, parts: [] },
+      metadata: { source: 'qq' },
+    }
+
+    const result = await store.ingest(session, conversation, message)
+    expect(result.projection).toHaveLength(1)
+    const [stored] = await ctx.database.get('mtproto_im_message', { id: result.message.id })
+    expect(stored).toMatchObject({ content: message.content, metadata: { source: 'qq' } })
+    const [hydrated] = await store.readHistory(session.platformSessionId, conversation.id)
+    expect(hydrated).toMatchObject({ id: message.id, content: message.content, metadata: { source: 'qq' } })
+  })
+
   it('rejects mismatched conversation payloads without writing partial rows', async () => {
     const { ctx, store } = await createStore()
     await expect(store.ingest(session, { id: 'one', kind: 'direct', title: 'One' }, {
