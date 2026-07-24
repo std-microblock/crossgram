@@ -1719,7 +1719,7 @@ describe('bridge login e2e', () => {
         _: 'updates', seq: 1,
         updates: [{
           _: 'updateNewChannelMessage', pts: 2, ptsCount: 1,
-          message: { id: 0x40000000, peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
+          message: { id: 0x40000007, peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
         }],
         chats: [{ _: 'channel', megagroup: true, title: 'Push Group' }],
       })

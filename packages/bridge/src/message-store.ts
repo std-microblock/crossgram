@@ -713,6 +713,7 @@ export class MessageStore {
         missing,
         preferredId,
         allocation,
+        nativeSequence !== undefined,
         existing.map((part) => part.tlMessageId),
         bounds,
       )
@@ -750,42 +751,64 @@ export class MessageStore {
     count: number,
     preferredId: number,
     allocation: 'live' | 'history',
+    centerSlots: boolean,
     existingIds: readonly number[],
     bounds: { lowerExclusive?: number, upperExclusive?: number },
   ): Promise<number[]> {
     const preferredBucket = messageIdBucketStart(preferredId)
     const ids: number[] = []
     const preferForward = allocation === 'live' || count > 1 || existingIds.length > 0
-    for (let distance = 0; ids.length < count; distance++) {
-      const buckets = distance === 0
-        ? [preferredBucket]
-        : preferForward
-          ? [
-              preferredBucket + distance * TIMESTAMP_MESSAGE_ID_SLOTS,
-              preferredBucket - distance * TIMESTAMP_MESSAGE_ID_SLOTS,
-            ]
-          : [
-              preferredBucket - distance * TIMESTAMP_MESSAGE_ID_SLOTS,
-              preferredBucket + distance * TIMESTAMP_MESSAGE_ID_SLOTS,
-            ]
-      for (const bucket of buckets) {
-        if (bucket <= 0 || bucket + TIMESTAMP_MESSAGE_ID_SLOTS - 1 > TELEGRAM_MESSAGE_ID_MAX) continue
-        for (let slot = 0; slot < TIMESTAMP_MESSAGE_ID_SLOTS && ids.length < count; slot++) {
-          const candidate = bucket + slot
-          if (bounds.lowerExclusive !== undefined && candidate <= bounds.lowerExclusive) continue
-          if (bounds.upperExclusive !== undefined && candidate >= bounds.upperExclusive) continue
-          if (existingIds.includes(candidate) || ids.includes(candidate)) continue
-          const occupied = await database.get('mtproto_tl_message_part', { scope, tlMessageId: candidate })
-          if (!occupied.length) ids.push(candidate)
+    const collect = async (activeBounds: { lowerExclusive?: number, upperExclusive?: number }) => {
+      const bucketRange = slottedMessageIdBucketRange(activeBounds)
+      if (!bucketRange) return
+      const maxDistance = Math.max(
+        Math.abs(preferredBucket - bucketRange.first),
+        Math.abs(bucketRange.last - preferredBucket),
+      ) / TIMESTAMP_MESSAGE_ID_SLOTS
+      for (let distance = 0; ids.length < count && distance <= maxDistance; distance++) {
+        const buckets = distance === 0
+          ? [preferredBucket]
+          : preferForward
+            ? [
+                preferredBucket + distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+                preferredBucket - distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+              ]
+            : [
+                preferredBucket - distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+                preferredBucket + distance * TIMESTAMP_MESSAGE_ID_SLOTS,
+              ]
+        for (const bucket of buckets) {
+          if (ids.length >= count) break
+          if (bucket < bucketRange.first || bucket > bucketRange.last) continue
+          const first = Math.max(bucket, (activeBounds.lowerExclusive ?? bucket - 1) + 1)
+          const last = Math.min(
+            bucket + TIMESTAMP_MESSAGE_ID_SLOTS - 1,
+            (activeBounds.upperExclusive ?? bucket + TIMESTAMP_MESSAGE_ID_SLOTS) - 1,
+          )
+          const available: number[] = []
+          for (let candidate = first; candidate <= last; candidate++) {
+            if (existingIds.includes(candidate) || ids.includes(candidate)) continue
+            const occupied = await database.get('mtproto_tl_message_part', { scope, tlMessageId: candidate })
+            if (!occupied.length) available.push(candidate)
+          }
+          const candidates = centerSlots
+            ? middleOut(available, preferForward)
+            : available
+          for (const candidate of candidates) {
+            if (ids.length >= count) break
+            ids.push(candidate)
+          }
         }
       }
-      const boundedSearch = bounds.lowerExclusive !== undefined && bounds.upperExclusive !== undefined
-        ? Math.ceil((bounds.upperExclusive - bounds.lowerExclusive) / TIMESTAMP_MESSAGE_ID_SLOTS) + 2
-        : TELEGRAM_MESSAGE_ID_MAX / TIMESTAMP_MESSAGE_ID_SLOTS
-      if (distance > boundedSearch) {
-        throw new RangeError(`message ID scope exhausted: ${scope}`)
-      }
     }
+
+    await collect(bounds)
+    // Immutable legacy IDs can leave no integer between adjacent native sequences.
+    // Preserve ingestion progress by relaxing ordering while retaining scope uniqueness.
+    if (ids.length < count && (bounds.lowerExclusive !== undefined || bounds.upperExclusive !== undefined)) {
+      await collect({})
+    }
+    if (ids.length < count) throw new RangeError(`message ID scope exhausted: ${scope}`)
     return ids.sort((left, right) => left - right)
   }
 
@@ -966,6 +989,34 @@ function hydrateMessageMetadata(metadata: JsonObject): {
 
 function clampDatabaseLimit(limit: number): number {
   return Math.max(1, Math.min(Math.trunc(limit), 500))
+}
+
+function slottedMessageIdBucketRange(
+  bounds: { lowerExclusive?: number, upperExclusive?: number },
+): { first: number, last: number } | undefined {
+  const firstCandidate = (bounds.lowerExclusive ?? 0) + 1
+  const lastCandidate = (bounds.upperExclusive ?? TELEGRAM_MESSAGE_ID_MAX + 1) - 1
+  const first = Math.max(TIMESTAMP_MESSAGE_ID_SLOTS, messageIdBucketStart(firstCandidate))
+  const last = Math.min(
+    messageIdBucketStart(TELEGRAM_MESSAGE_ID_MAX),
+    messageIdBucketStart(lastCandidate),
+  )
+  return first <= last ? { first, last } : undefined
+}
+
+function middleOut(values: readonly number[], preferForward: boolean): number[] {
+  if (values.length < 2) return [...values]
+  const middle = Math.floor((values.length - 1) / 2)
+  const output = [values[middle]]
+  for (let distance = 1; output.length < values.length; distance++) {
+    const indices = preferForward
+      ? [middle + distance, middle - distance]
+      : [middle - distance, middle + distance]
+    for (const index of indices) {
+      if (index >= 0 && index < values.length) output.push(values[index])
+    }
+  }
+  return output
 }
 
 function reactionComparable(reaction: import('./models.js').IMMessageReactionRow) {
