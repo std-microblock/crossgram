@@ -115,6 +115,29 @@ describe('QQMediaCache', () => {
     expect(opens).toBe(1)
   }, 30_000)
 
+  it('detects APNG content disguised as an ordinary PNG', async () => {
+    const path = await temporaryDirectory()
+    const apng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAwAAAAICAYAAADN5B7xAAAACXBIWXMAAAABAAAAAQBPJcTWAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAAMAAAACAAAAAAAAAAAAAEACgAAGya3gAAAABRJREFUeJxj+MPA8J8UzDCqgRYaAJjXviFq8lROAAAAGmZjVEwAAAABAAAADAAAAAgAAAAAAAAAAAABAAoAAIBVXVQAAAAXZmRBVAAAAAJ4nGNgYPj7nzQ8qoEGGgAlJ76BvcErGQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    let opens = 0
+    const cache = new QQMediaCache({ path, mediaDownloadMode: 'auto', previewMaxDimension: 6 })
+    const prepared = await cache.prepareMedia({
+      id: 'disguised-apng', kind: 'image', name: 'ordinary.png', mimeType: 'image/png',
+      size: apng.length, width: 12, height: 8, locator: mediaLocator({ md5: 'disguised-apng' }),
+    }, countedSource(apng, () => opens++))
+    const video = await collect(cache.download(prepared, countedSource(apng, () => opens++)))
+
+    expect(prepared).toMatchObject({
+      kind: 'file', name: 'ordinary.webm', mimeType: 'video/webm',
+      size: expect.any(Number), width: 12, height: 8,
+      preview: { mimeType: 'image/webp' },
+    })
+    expect([...video.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
+    expect(opens).toBe(1)
+  }, 30_000)
+
   it('persists generated reaction WebM files across adapter instances', async () => {
     const path = await temporaryDirectory()
     const gif = await sharp({
