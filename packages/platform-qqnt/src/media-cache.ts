@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs'
-import { rename, rm } from 'node:fs/promises'
+import { open, rename, rm } from 'node:fs/promises'
 import { extname, isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -68,6 +68,11 @@ export class QQMediaCache {
   readonly previewMaxDimension: number
   private readonly ffmpegPath: string
   private readonly active = new Map<string, Promise<CachedAsset>>()
+  private readonly preparedImages = new Map<string, {
+    animated: boolean
+    asset: CachedAsset
+    sourceDimensions?: { width: number, height: number }
+  }>()
 
   constructor(private readonly options: QQMediaCacheOptions) {
     this.path = resolve(options.path)
@@ -154,17 +159,68 @@ export class QQMediaCache {
         locator: { ...media.locator!, cachedPath: asset.path },
       }
     }
-    const animated = isAnimatedMedia(media)
+    const declaredAnimated = isAnimatedMedia(media)
+    if (!declaredAnimated && mayBeAnimatedPng(media)) {
+      const cached = this.preparedImages.get(identity)
+      if (cached) {
+        return this.finishPreparedImage(
+          media, identity, cached.animated, cached.asset, cached.sourceDimensions,
+        )
+      }
+      const input = join(this.path, `${randomUUID()}.png-input`)
+      try {
+        await pipeline(Readable.from(original.stream()), createWriteStream(input, { flags: 'wx' }))
+        const sourceDimensions = await imageDimensions(input, media.width, media.height)
+        return await this.prepareImage(
+          media, identity, await isAnimatedPng(input), fileSource(input, statSync(input).size), input,
+          sourceDimensions, true,
+        )
+      } finally {
+        await rm(input, { force: true }).catch(() => undefined)
+      }
+    }
+    return this.prepareImage(media, identity, declaredAnimated, original)
+  }
+
+  private async prepareImage(
+    media: IMMedia<QQMediaLocator>,
+    identity: string,
+    animated: boolean,
+    original: IMMediaSource,
+    originalPath?: string,
+    sourceDimensions?: { width: number, height: number },
+    remember = false,
+  ): Promise<IMMedia<QQMediaLocator>> {
     const asset = await this.ensure(
-      cacheKey(animated ? 'image-webm-v1' : 'image-webp-v2', identity),
+      cacheKey(animated ? 'image-webm-v2' : 'image-webp-v3', identity),
       animated ? 'webm' : 'webp', animated ? 'video/webm' : 'image/webp', media.width, media.height,
-      (temporary) => animated ? this.convertAnimated(original, temporary) : this.convertStatic(original, temporary),
+      (temporary) => originalPath
+        ? (animated
+            ? this.convertAnimatedFile(originalPath, temporary)
+            : this.convertStaticFile(originalPath, temporary))
+        : (animated ? this.convertAnimated(original, temporary) : this.convertStatic(original, temporary)),
     )
+    if (remember) {
+      this.preparedImages.set(identity, { animated, asset, sourceDimensions })
+      if (this.preparedImages.size > PREPARED_IMAGE_CACHE_LIMIT) {
+        this.preparedImages.delete(this.preparedImages.keys().next().value!)
+      }
+    }
+    return this.finishPreparedImage(media, identity, animated, asset, sourceDimensions)
+  }
+
+  private async finishPreparedImage(
+    media: IMMedia<QQMediaLocator>,
+    identity: string,
+    animated: boolean,
+    asset: CachedAsset,
+    sourceDimensions?: { width: number, height: number },
+  ): Promise<IMMedia<QQMediaLocator>> {
     const dimensions = animated
-      ? { width: media.width ?? 1, height: media.height ?? 1 }
+      ? fitWithin(sourceDimensions ?? { width: media.width ?? 1, height: media.height ?? 1 }, 512)
       : await imageDimensions(asset.path, media.width, media.height)
     const preview = await this.ensure(
-      cacheKey('image-preview-webp-v1', identity, this.previewMaxDimension),
+      cacheKey('image-preview-webp-v2', identity, this.previewMaxDimension),
       'webp', 'image/webp', undefined, undefined,
       (temporary) => animated
         ? this.extractVideoPreview(asset.path, temporary)
@@ -272,6 +328,10 @@ export class QQMediaCache {
     )
   }
 
+  private async convertStaticFile(source: string, output: string): Promise<void> {
+    await sharp(source).rotate().webp({ quality: 90, effort: 4 }).toFile(output)
+  }
+
   private async extractPreview(source: string, output: string): Promise<void> {
     await sharp(source).rotate().resize({
       width: this.previewMaxDimension,
@@ -296,19 +356,25 @@ export class QQMediaCache {
     const input = join(this.path, `${randomUUID()}.animated-input`)
     try {
       await pipeline(Readable.from(source.stream()), createWriteStream(input, { flags: 'wx' }))
-      const scale = `scale=${maxDimension}:${maxDimension}:force_original_aspect_ratio=decrease`
-      const videoFilter = maxDimension === 512
-        ? `fps=30,${scale}`
-        : `fps=30,${scale},pad=${maxDimension}:${maxDimension}:(ow-iw)/2:(oh-ih)/2:color=black@0`
-      await runProcess(this.ffmpegPath, [
-        '-hide_banner', '-loglevel', 'error', '-y', '-i', input,
-        '-an', '-vf', videoFilter,
-        '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-auto-alt-ref', '0',
-        '-b:v', '0', '-crf', '32', '-f', 'webm', output,
-      ])
+      await this.convertAnimatedFile(input, output, maxDimension)
     } finally {
       await rm(input, { force: true }).catch(() => undefined)
     }
+  }
+
+  private async convertAnimatedFile(source: string, output: string, maxDimension = 512): Promise<void> {
+    if (isAbsolute(this.ffmpegPath) && !existsSync(this.ffmpegPath)) {
+      throw new Error(`FFmpeg executable is unavailable: ${this.ffmpegPath}`)
+    }
+    const videoFilter = maxDimension === 512
+      ? `fps=30,scale='min(${maxDimension},iw)':'min(${maxDimension},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2`
+      : `fps=30,scale=${maxDimension}:${maxDimension}:force_original_aspect_ratio=decrease,pad=${maxDimension}:${maxDimension}:(ow-iw)/2:(oh-ih)/2:color=black@0`
+    await runProcess(this.ffmpegPath, [
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', source,
+      '-an', '-vf', videoFilter,
+      '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-auto-alt-ref', '0',
+      '-b:v', '0', '-crf', '32', '-f', 'webm', output,
+    ])
   }
 }
 
@@ -330,6 +396,46 @@ function isAnimatedImage(mimeType: string): boolean {
 
 function isAnimatedMedia(media: IMMedia): boolean {
   return isAnimatedImage(media.mimeType ?? '') || /\.(?:gif|apng)$/i.test(media.name ?? '')
+}
+
+function mayBeAnimatedPng(media: IMMedia): boolean {
+  return media.mimeType === 'image/png' || /\.png$/i.test(media.name ?? '')
+}
+
+async function isAnimatedPng(path: string): Promise<boolean> {
+  const handle = await open(path, 'r')
+  const signature = Buffer.allocUnsafe(8)
+  const header = Buffer.allocUnsafe(12)
+  try {
+    if ((await handle.read(signature, 0, signature.length, 0)).bytesRead !== signature.length
+      || !signature.equals(PNG_SIGNATURE)) return false
+    const size = (await handle.stat()).size
+    let offset = signature.length
+    while (offset + header.length <= size) {
+      if ((await handle.read(header, 0, header.length, offset)).bytesRead !== header.length) return false
+      const length = header.readUInt32BE(0)
+      const type = header.toString('ascii', 4, 8)
+      if (type === 'acTL') return true
+      if (type === 'IDAT' || type === 'IEND') return false
+      const next = offset + header.length + length
+      if (!Number.isSafeInteger(next) || next <= offset || next > size) return false
+      offset = next
+    }
+    return false
+  } finally {
+    await handle.close()
+  }
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const PREPARED_IMAGE_CACHE_LIMIT = 1024
+
+function fitWithin(dimensions: { width: number, height: number }, maximum: number) {
+  const ratio = Math.min(1, maximum / dimensions.width, maximum / dimensions.height)
+  return {
+    width: Math.max(2, Math.floor(dimensions.width * ratio / 2) * 2),
+    height: Math.max(2, Math.floor(dimensions.height * ratio / 2) * 2),
+  }
 }
 
 function contentIdentity(media: IMMedia<QQMediaLocator>): string {
