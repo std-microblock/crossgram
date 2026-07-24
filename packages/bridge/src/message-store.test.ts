@@ -213,7 +213,7 @@ describe('MessageStore', () => {
     expect((await store.ingest(session, channel, make('channel-2', 'channel'))).projection[0].tlMessageId).toBe(0x40000001)
   })
 
-  it('uses a platform-provided Telegram message ID', async () => {
+  it('uses the timestamp mapping instead of a platform-provided raw Telegram message ID', async () => {
     const { store } = await createStore()
     const group = { id: 'group', kind: 'group' as const, title: 'Group' }
     const source: IMMessage = {
@@ -224,9 +224,137 @@ describe('MessageStore', () => {
       ...source, metadata: { telegramMessageId: 5_850_634 },
     })
     expect(projected.projection[0]).toMatchObject({
-      tlMessageId: 5_850_634,
+      tlMessageId: 0x40000000,
       scope: `channel:${session.platformSessionId}:group`,
     })
+  })
+
+  it('persists independent timestamp epochs for account and channel scopes', async () => {
+    const { ctx, store } = await createStore()
+    const group = { id: 'group-slots', kind: 'group' as const, title: 'Group slots' }
+    const direct = { id: 'direct-slots', kind: 'direct' as const, title: 'Direct slots' }
+    const make = (id: string, conversationId: string): IMMessage => ({
+      id, conversationId, senderId: 'sender', timestamp: 1,
+      metadata: { qqMsgSeq: '1000000', telegramMessageId: 1_000_000 },
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+
+    const groupResult = await store.ingest(session, group, make('group-message', group.id))
+    const directResult = await store.ingest(session, direct, make('direct-message', direct.id))
+
+    expect(groupResult.projection[0]).toMatchObject({
+      tlMessageId: 0x40000000,
+      nativeSequence: 1_000_000,
+      allocationVersion: 1,
+      scope: `channel:${session.platformSessionId}:${group.id}`,
+    })
+    expect(directResult.projection[0]).toMatchObject({
+      tlMessageId: 0x40000000,
+      nativeSequence: 1_000_000,
+      scope: `account:${session.platformSessionId}`,
+    })
+    expect(await ctx.database.get('mtproto_message_id_epoch', {})).toHaveLength(2)
+  })
+
+  it('fills all sixteen slots in a second and probes nearby seconds in both directions', async () => {
+    const { store } = await createStore()
+    const live = { id: 'slot-live', kind: 'group' as const, title: 'Live slots' }
+    const history = { id: 'slot-history', kind: 'group' as const, title: 'History slots' }
+    const make = (conversationId: string, index: number): IMMessage => ({
+      id: `${conversationId}:${index}`, conversationId, senderId: 'sender', timestamp: 100,
+      metadata: { qqMsgSeq: '100' },
+      content: { parts: [{ type: 'text', text: String(index) }] },
+    })
+
+    const liveIds: number[] = []
+    const historyIds: number[] = []
+    for (let index = 0; index < 17; index++) {
+      liveIds.push((await store.ingest(session, live, make(live.id, index))).projection[0].tlMessageId)
+      historyIds.push((await store.ingest(
+        session, history, make(history.id, index), { allocation: 'history' },
+      )).projection[0].tlMessageId)
+    }
+    expect(liveIds).toEqual(Array.from({ length: 17 }, (_, index) => 0x40000000 + index))
+    expect(historyIds).toEqual([
+      ...Array.from({ length: 16 }, (_, index) => 0x40000000 + index),
+      0x3ffffff0,
+    ])
+  })
+
+  it('keeps private-chat IDs unique across the whole account when preferred buckets collide', async () => {
+    const { store } = await createStore()
+    const first = { id: 'direct-one', kind: 'direct' as const, title: 'Direct one' }
+    const second = { id: 'direct-two', kind: 'direct' as const, title: 'Direct two' }
+    const make = (conversationId: string): IMMessage => ({
+      id: `${conversationId}:message`, conversationId, senderId: 'sender', timestamp: 100,
+      content: { parts: [{ type: 'text', text: conversationId }] },
+    })
+    const firstResult = await store.ingest(session, first, make(first.id))
+    const secondResult = await store.ingest(session, second, make(second.id))
+    const ids = [firstResult, secondResult].map((item) => item.projection[0].tlMessageId)
+
+    expect(new Set(ids).size).toBe(2)
+    expect(ids).toEqual([0x40000000, 0x40000001])
+    expect(firstResult.projection[0].scope).toBe(`account:${session.platformSessionId}`)
+    expect(secondResult.projection[0].scope).toBe(`account:${session.platformSessionId}`)
+  })
+
+  it('keeps historical and live QQ messages ordered regardless of ingestion order', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'ordered-qq', kind: 'group' as const, title: 'Ordered QQ' }
+    const make = (sequence: number): IMMessage => ({
+      id: `message-${sequence}`, conversationId: conversation.id, senderId: 'sender', timestamp: sequence,
+      metadata: { qqMsgSeq: String(sequence) },
+      content: { parts: [{ type: 'text', text: String(sequence) }] },
+    })
+    const newest = await store.ingest(session, conversation, make(102))
+    const oldest = await store.ingest(session, conversation, make(100), { allocation: 'history' })
+    const middle = await store.ingest(session, conversation, make(101), { allocation: 'history' })
+    expect([oldest, middle, newest].map((item) => item.projection[0].tlMessageId))
+      .toEqual([0x3fffffe0, 0x3ffffff0, 0x40000000])
+  })
+
+  it('uses free slots beside a sequenced message for gray service rows without msgSeq', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'gray-slots', kind: 'group' as const, title: 'Gray slots' }
+    const sequenced: IMMessage = {
+      id: 'content', conversationId: conversation.id, senderId: 'sender', timestamp: 100,
+      metadata: { qqMsgSeq: '100' },
+      content: { parts: [{ type: 'text', text: 'content' }] },
+    }
+    expect((await store.ingest(session, conversation, sequenced)).projection[0].tlMessageId).toBe(0x40000000)
+    const grayIds: number[] = []
+    for (let index = 0; index < 16; index++) {
+      grayIds.push((await store.ingest(session, conversation, {
+        id: `gray-${index}`, conversationId: conversation.id, senderId: 'system', timestamp: 100,
+        content: { serviceAction: { type: 'custom', text: `gray ${index}` }, parts: [] },
+      })).projection[0].tlMessageId)
+    }
+    expect(grayIds).toEqual(Array.from({ length: 16 }, (_, index) => 0x40000001 + index))
+  })
+
+  it('migrates a legacy projection into the timestamp allocation version', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'migration', kind: 'group' as const, title: 'Migration' }
+    const source: IMMessage = {
+      id: 'message', conversationId: conversation.id, senderId: 'sender', timestamp: 1,
+      metadata: { telegramMessageId: 100 },
+      content: { parts: [{ type: 'text', text: 'message' }] },
+    }
+    const initial = await store.ingest(session, conversation, source)
+    await ctx.database.set('mtproto_tl_message_part', { id: initial.projection[0].id }, {
+      tlMessageId: 100,
+      allocationVersion: null,
+    })
+    const migrated = await store.ingest(session, conversation, {
+      ...source, metadata: { telegramMessageId: 100, qqMsgSeq: '100' },
+    })
+    expect(migrated.projection[0]).toMatchObject({
+      tlMessageId: 0x40000000, nativeSequence: 100, allocationVersion: 1,
+    })
+    await expect(store.findProjectedByTlId(session.platformSessionId, 100, conversation.id)).resolves.toBeUndefined()
+    await expect(store.findProjectedByNativeSequence(session.platformSessionId, conversation.id, 100))
+      .resolves.toMatchObject({ source: { id: source.id } })
   })
 
   it('keeps duplicate platform-provided group IDs addressable with a synthetic fallback', async () => {
@@ -240,8 +368,8 @@ describe('MessageStore', () => {
 
     const first = await store.ingest(session, group, make('content-message'), { allocation: 'history' })
     const duplicate = await store.ingest(session, group, make('duplicate-event'), { allocation: 'history' })
-    expect(first.projection[0].tlMessageId).toBe(5_850_634)
-    expect(duplicate.projection[0].tlMessageId).not.toBe(5_850_634)
+    expect(first.projection[0].tlMessageId).toBe(0x40000000)
+    expect(duplicate.projection[0].tlMessageId).toBe(0x40000001)
     await expect(store.readProjectedHistory(session.platformSessionId, 'group', { limit: 10 }))
       .resolves.toHaveLength(2)
   })
@@ -278,7 +406,7 @@ describe('MessageStore', () => {
     const older = await store.ingest(session, conversation, make('older', 90), { allocation: 'history' })
     const oldest = await store.ingest(session, conversation, make('oldest', 80), { allocation: 'history' })
     expect([live, older, oldest].map((item) => item.projection[0].tlMessageId))
-      .toEqual([0x40000000, 0x3fffffff, 0x3ffffffe])
+      .toEqual([0x40000000, 0x3fffff60, 0x3ffffec0])
     expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, { limit: 2 }))
       .map((item) => item.source.id)).toEqual(['latest', 'older'])
     expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, {

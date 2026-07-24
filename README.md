@@ -224,6 +224,11 @@ node binary_patch/patch-tdesktop.cjs --host 192.168.1.10 --port 4430 --no-resign
 3. 输入当前显示的 6 位登录码。
 4. 进入主界面后，就能看到桥接过来的会话和消息了。
 
+## 设计文档
+
+- [Telegram 消息 ID 分配](docs/MESSAGE_ID_ALLOCATION.zh.md)
+- [跨平台 IM 接口](docs/IM_PLATFORM.zh.md)
+
 ## License
 
 MIT

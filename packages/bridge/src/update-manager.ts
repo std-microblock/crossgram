@@ -7,6 +7,7 @@ import { RpcError } from '@mtproto-relay/mtproto'
 import { makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import type { MessageStore } from './message-store.js'
 import { telegramReplyToMessageId, type IMConversation, type IMMessage, type PlatformSession } from './platform.js'
+import { qqReplySequenceFromMetadata } from './message-id.js'
 import type { IMSticker } from './sticker-provider.js'
 import type { CommittedPlatformEvent, PlatformRegistry } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
@@ -149,12 +150,20 @@ export class UpdateManager {
         continue
       }
       const media = projected.media.find((item) => item.id === part.mediaId)
-      const nativeReplyTo = telegramReplyToMessageId(projected.source)
-      let replied = !nativeReplyTo && projected.source.replyToId
-        ? await this._store.findProjectedByPlatformId(
-            session.platformSessionId, event.conversation.id, projected.source.replyToId,
-          )
+      const qqReplySequence = qqReplySequenceFromMetadata(projected.source.metadata)
+      const nativeReplyTo = qqReplySequence === undefined
+        ? telegramReplyToMessageId(projected.source)
         : undefined
+      let replied = qqReplySequence === undefined
+        ? undefined
+        : await this._store.findProjectedByNativeSequence(
+            session.platformSessionId, event.conversation.id, qqReplySequence,
+          )
+      if (!nativeReplyTo && !replied && projected.source.replyToId) {
+        replied = await this._store.findProjectedByPlatformId(
+          session.platformSessionId, event.conversation.id, projected.source.replyToId,
+        )
+      }
       if (!nativeReplyTo && !replied && projected.source.replyToId && platform.getMessage) {
         try {
           const target = await platform.getMessage(

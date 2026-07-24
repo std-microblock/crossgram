@@ -113,6 +113,8 @@ export interface TlMessagePartRow {
   mediaId: number | null
   scope: string
   tlMessageId: number
+  nativeSequence: number | null
+  allocationVersion: number | null
   groupedId: string | null
   ordinal: number
 }
@@ -120,6 +122,11 @@ export interface TlMessagePartRow {
 export interface IdCounterRow {
   scope: string
   nextId: number
+}
+
+export interface MessageIdEpochRow {
+  scope: string
+  epoch: number
 }
 
 export interface UpdateStateRow {
@@ -203,6 +210,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_im_media: IMMediaRow
     mtproto_tl_message_part: TlMessagePartRow
     mtproto_id_counter: IdCounterRow
+    mtproto_message_id_epoch: MessageIdEpochRow
     mtproto_update_state: UpdateStateRow
     mtproto_channel_update_state: ChannelUpdateStateRow
     mtproto_update_delivery: UpdateDeliveryRow
@@ -288,15 +296,25 @@ export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_tl_message_part', {
     id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
     messageId: 'unsigned', mediaId: { type: 'unsigned', nullable: true }, scope: 'string',
-    tlMessageId: 'unsigned', groupedId: { type: 'string', nullable: true }, ordinal: 'unsigned',
+    tlMessageId: 'unsigned', nativeSequence: { type: 'unsigned', nullable: true },
+    allocationVersion: { type: 'unsigned', nullable: true },
+    groupedId: { type: 'string', nullable: true }, ordinal: 'unsigned',
   }, {
     primary: 'id', autoInc: true,
     unique: [['scope', 'tlMessageId'], ['messageId', 'ordinal']],
-    indexes: ['messageId', ['platformSessionId', 'conversationId', 'tlMessageId']],
+    indexes: [
+      'messageId',
+      ['platformSessionId', 'conversationId', 'tlMessageId'],
+      ['platformSessionId', 'conversationId', 'nativeSequence'],
+    ],
   })
 
   ctx.model.extend('mtproto_id_counter', {
     scope: 'string', nextId: 'unsigned',
+  }, { primary: 'scope' })
+
+  ctx.model.extend('mtproto_message_id_epoch', {
+    scope: 'string', epoch: 'integer',
   }, { primary: 'scope' })
 
   ctx.model.extend('mtproto_update_state', {

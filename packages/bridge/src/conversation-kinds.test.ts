@@ -231,15 +231,18 @@ describe('conversation kinds', () => {
     expect(() => roundTrip(result)).not.toThrow()
   })
 
-  it('uses native group sequence IDs for messages and reply headers', async () => {
+  it('uses timestamp IDs for group messages and resolves native-sequence reply headers', async () => {
     const group = conversations.find((item) => item.id === 'group')!
     const target: IMMessage = {
       ...source(group), id: 'opaque-target', timestamp: 1,
-      metadata: { telegramMessageId: 5_850_632 },
+      metadata: { qqMsgSeq: '5850632', telegramMessageId: 5_850_632 },
     }
     const reply: IMMessage = {
-      ...source(group), id: 'opaque-reply', timestamp: 2,
-      metadata: { telegramMessageId: 5_850_634, telegramReplyToMessageId: 5_850_632 },
+      ...source(group), id: 'opaque-reply', timestamp: 2, replyToId: target.id,
+      metadata: {
+        qqMsgSeq: '5850634', telegramMessageId: 5_850_634,
+        qqReplyToMsgSeq: '5850632', telegramReplyToMessageId: 5_850_632,
+      },
     }
     const getMessage = vi.fn(async () => { throw new Error('reply target must not be loaded') })
     const nativeIdsPlatform: IMPlatform = {
@@ -254,8 +257,8 @@ describe('conversation kinds', () => {
     })) as tl.messages.RawMessages
 
     expect(result.messages).toMatchObject([
-      { _: 'message', id: 5_850_634, replyTo: { _: 'messageReplyHeader', replyToMsgId: 5_850_632 } },
-      { _: 'message', id: 5_850_632 },
+      { _: 'message', id: 0x40000000, replyTo: { _: 'messageReplyHeader', replyToMsgId: 0x3ffffff0 } },
+      { _: 'message', id: 0x3ffffff0 },
     ])
     expect(getMessage).not.toHaveBeenCalled()
   })
