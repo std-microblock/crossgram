@@ -88,6 +88,7 @@ export class ServerSession {
   private _apiLayer: number | null = null
   private _responseWriterMap: TlWriterMap
   private _pendingUpdates: tl.TypeUpdates[] = []
+  private _acceptsUpdates = false
   private _queuedAcks: Long[] = []
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
@@ -162,6 +163,10 @@ export class ServerSession {
 
   get apiLayer(): number | null {
     return this._apiLayer
+  }
+
+  get acceptsUpdates(): boolean {
+    return this._acceptsUpdates
   }
 
   /** Apply an API layer learned by another connection using the same auth key. */
@@ -759,6 +764,13 @@ export class ServerSession {
     // Capture it on the MTProto session before constructing the handler context
     // or serializing this request's response. Later unwrapped requests reuse it.
     const unwrapped = unwrapRpcRequest(request)
+    if (
+      unwrapped.request._ === 'updates.getState'
+      || unwrapped.request._ === 'updates.getDifference'
+      || unwrapped.request._ === 'updates.getChannelDifference'
+    ) {
+      this._acceptsUpdates = true
+    }
     if (unwrapped.apiLayer !== null) {
       this._setApiLayer(unwrapped.apiLayer)
     } else if (this._apiLayer === null && this._permAuthKey.ready) {
