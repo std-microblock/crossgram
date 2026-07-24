@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  messageText, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMMedia, type IMMediaInput,
+  messageText, type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMMedia, type IMMediaInput,
   type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
@@ -1484,28 +1484,32 @@ export class DialogRpc {
   private _makeMessage(item: MaterializedMessage): tl.RawMessage {
     const { source, tlId } = item
     const conversation = this._conversation(source.conversationId)
-    return {
-      _: 'message',
-      out: source.outgoing || undefined,
-      id: tlId,
-      fromId: { _: 'peerUser', userId: source.outgoing ? this._selfId : this._peerId(source.senderId) },
+    const sticker = source.content.parts.find((part) => part.type === 'sticker')
+    const reply = this._messageReplyHeader(source)
+    return projectTlMessage({
+      platformSessionId: this._session.platformSessionId,
+      conversation,
+      source,
+      tlId,
+      ordinal: item.ordinal,
+      fromId: {
+        _: 'peerUser',
+        userId: source.outgoing ? this._selfId : this._peerId(source.senderId),
+      },
       peerId: this._conversationPeer(conversation),
-      replyTo: this._messageReplyHeader(source) ?? this._topicReplyHeader(conversation, tlId),
-      date: source.timestamp,
-      message: item.ordinal === 0 ? messageText(source) : '',
-      entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
+      groupedId: item.groupedId ?? undefined,
       media: item.media
         ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
-        : source.content.parts.find((part) => part.type === 'sticker')
-          ? this._stickers?.makeMessageMedia(
-              source.content.parts.find((part) => part.type === 'sticker')!.sticker,
-            )
+        : sticker?.type === 'sticker'
+          ? this._stickers?.makeMessageMedia(sticker.sticker)
           : this._conversationPreviewMedia(source),
-      groupedId: item.groupedId ? Long.fromString(item.groupedId) : undefined,
+      entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
       reactions: source.reactionContext?.reactions.length
         ? this._reactions?.messageReactions(source.conversationId, source)
         : undefined,
-    } as tl.RawMessage
+      replyToTlId: reply?.replyToMsgId,
+      topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
+    })
   }
 
   private _rememberMessage(item: MaterializedMessage): void {
@@ -2074,6 +2078,51 @@ export function stableId(value: string): number {
     hash = Math.imul(hash, 0x01000193)
   }
   return (hash >>> 0) % 0x7ffffffe + 1
+}
+
+export function projectTlMessage(options: {
+  platformSessionId: string
+  conversation: IMConversation
+  source: IMMessage
+  tlId: number
+  ordinal: number
+  groupedId?: string
+  fromId?: tl.TypePeer
+  peerId?: tl.TypePeer
+  media?: tl.TypeMessageMedia
+  entities?: tl.TypeMessageEntity[]
+  reactions?: tl.RawMessageReactions
+  replyToTlId?: number
+  topicId?: number
+}): tl.RawMessage {
+  const {
+    platformSessionId, conversation, source, tlId, ordinal,
+    groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
+  } = options
+  const conversationId = stableId(`peer:${conversation.id}`)
+  return {
+    _: 'message', out: source.outgoing || undefined, id: tlId,
+    fromId: fromId ?? {
+      _: 'peerUser',
+      userId: source.outgoing
+        ? stableId(`self:${platformSessionId}`)
+        : stableId(`peer:${source.senderId}`),
+    },
+    peerId: peerId ?? (conversation.kind === 'direct'
+      ? { _: 'peerUser', userId: conversationId }
+      : { _: 'peerChannel', channelId: conversationId }),
+    replyTo: replyToTlId ? {
+      _: 'messageReplyHeader', replyToMsgId: replyToTlId,
+    } : topicId && topicId !== tlId ? {
+      _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
+    } : undefined,
+    date: source.timestamp,
+    message: ordinal === 0 ? messageText(source) : '',
+    entities: ordinal === 0 ? entities : undefined,
+    media,
+    groupedId: groupedId ? Long.fromString(groupedId) : undefined,
+    reactions,
+  } as tl.RawMessage
 }
 
 function uniqueUsers(users: tl.RawUser[]): tl.RawUser[] {

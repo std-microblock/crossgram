@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
 import Long from 'long'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
-import type { PlatformSession } from './platform.js'
+import type { IMPlatform, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import { DialogRpc, stableId } from './dialogs.js'
@@ -84,11 +84,22 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   defineModels(ctx)
   const store = new MessageStore(ctx.database)
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
+  const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
+  const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
+    const key = `${session.platformId}\u0000${session.platformSessionId}`
+    const cached = stickerRpcs.get(key)
+    if (cached?.platform === platform) return cached.rpc
+    const rpc = new StickerRpc(ctx.database, stickerProviders.registry, platform, session, dcId)
+    stickerRpcs.set(key, { platform, rpc })
+    return rpc
+  }
   const updates = new UpdateManager(
     ctx.database, registry, store,
     (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
     dcId,
     (format, ...args) => bridgeLogger.info(format, ...args),
+    (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
+      .makeMessageMedia(sticker),
   )
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
@@ -103,8 +114,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (format, ...args) => bridgeLogger.info(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, stickerProviders.registry,
-    resources, store, subscriptions, uploads, generation, config.onTransferProgress, dcId,
+    ctx, registry, stickerRpcFor, resources, store, subscriptions, uploads, generation,
+    config.onTransferProgress, dcId,
   )
 
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
@@ -290,7 +301,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx.mtproto.bindRoute(rpc.authKeyId, routeId)
     const state: BridgeSessionState = {
       generation, session,
-      stickers: new StickerRpc(ctx.database, stickerProviders.registry, platform, session, dcId),
+      stickers: stickerRpcFor(platform, session),
       dialogs: undefined as never,
     }
     state.dialogs = new DialogRpc(
@@ -522,7 +533,7 @@ function normPhone(p: string): string {
 function createSessionResolver(
   ctx: Context,
   registry: PlatformRegistry,
-  stickerProviders: import('./sticker-provider.js').StickerProviderRegistry,
+  stickerRpcFor: (platform: IMPlatform, session: PlatformSession) => StickerRpc,
   resources: TelegramResourceService,
   store: MessageStore,
   subscriptions: PlatformSubscriptionManager,
@@ -555,7 +566,7 @@ function createSessionResolver(
         await subscriptions.ensure(session)
         const state: BridgeSessionState = {
           generation, session,
-          stickers: new StickerRpc(ctx.database, stickerProviders, platform, session, dcId),
+          stickers: stickerRpcFor(platform, session),
           dialogs: undefined as never,
         }
         state.dialogs = new DialogRpc(

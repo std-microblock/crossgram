@@ -3,10 +3,10 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { makeTlMessageMedia, stableId } from './dialogs.js'
+import { makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import type { MessageStore } from './message-store.js'
 import type { IMConversation, IMMessage, PlatformSession } from './platform.js'
-import { messageText } from './platform.js'
+import type { IMSticker } from './sticker-provider.js'
 import type { CommittedPlatformEvent, PlatformRegistry } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
 
@@ -19,6 +19,10 @@ export class UpdateManager {
     private readonly _sendUpdate: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number,
     private readonly _dcId = 1,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
+    private readonly _projectSticker?: (
+      session: PlatformSession,
+      sticker: IMSticker,
+    ) => tl.TypeMessageMedia | undefined,
   ) {}
 
   async publish(
@@ -123,6 +127,7 @@ export class UpdateManager {
     const topicId = event.conversation.kind === 'channel' && event.conversation.parentId
       ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
       : undefined
+    const platform = this._registry.require(session.platformId)
     let pts = delivery.pts - delivery.ptsCount
     const updates: tl.TypeUpdate[] = []
     for (const part of result.projection) {
@@ -137,16 +142,49 @@ export class UpdateManager {
         continue
       }
       const media = projected.media.find((item) => item.id === part.mediaId)
-      const replied = projected.source.replyToId
+      let replied = projected.source.replyToId
         ? await this._store.findProjectedByPlatformId(
             session.platformSessionId, event.conversation.id, projected.source.replyToId,
           )
         : undefined
-      const message = makeUpdateMessage(
-        session.platformSessionId, displayConversation, projected.source, part.tlMessageId, part.ordinal,
-        part.groupedId ?? undefined, media, this._dcId, topicId,
-        replied?.parts[0]?.tlMessageId,
-      )
+      if (!replied && projected.source.replyToId && platform.getMessage) {
+        try {
+          const target = await platform.getMessage(
+            session, { id: event.conversation.id }, projected.source.replyToId,
+          )
+          if (target) {
+            await this._store.ingest(session, event.conversation, target, { allocation: 'history' })
+            replied = await this._store.findProjectedByPlatformId(
+              session.platformSessionId, event.conversation.id, projected.source.replyToId,
+            )
+          }
+        } catch (error) {
+          this._onTrace?.(
+            'reply target backfill failed conversation=%s message=%s target=%s error=%s',
+            event.conversation.id, projected.source.id, projected.source.replyToId, String(error),
+          )
+        }
+      }
+      const sticker = projected.source.content.parts.find((item) => item.type === 'sticker')
+      const message = projectTlMessage({
+        platformSessionId: session.platformSessionId,
+        conversation: displayConversation,
+        source: projected.source,
+        tlId: part.tlMessageId,
+        ordinal: part.ordinal,
+        groupedId: part.groupedId ?? undefined,
+        media: media
+          ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
+          : sticker?.type === 'sticker'
+            ? this._projectSticker?.(session, sticker.sticker)
+            : undefined,
+        entities: makeMessageEntities(projected.source, session.platformSessionId),
+        reactions: projected.source.reactionContext?.reactions.length
+          ? makeMessageReactions(projected.source, session.platformSessionId)
+          : undefined,
+        topicId,
+        replyToTlId: replied?.parts[0]?.tlMessageId,
+      })
       updates.push({
         _: isEdit
           ? event.conversation.kind !== 'direct' ? 'updateEditChannelMessage' : 'updateEditMessage'
@@ -161,7 +199,6 @@ export class UpdateManager {
       return
     }
 
-    const platform = this._registry.require(session.platformId)
     const sender = event.message.sender
       ?? await platform.getUser?.(session, event.message.senderId)
     const users = [
@@ -366,45 +403,6 @@ function encodeUpdate(update: tl.RawUpdates): string {
 
 function decodeUpdate(payload: string): tl.RawUpdates {
   return new TlBinaryReader(__tlReaderMap, Buffer.from(payload, 'base64')).object() as tl.RawUpdates
-}
-
-function makeUpdateMessage(
-  platformSessionId: string,
-  conversation: IMConversation,
-  source: IMMessage,
-  id: number,
-  ordinal: number,
-  groupedId?: string,
-  media?: import('./models.js').IMMediaRow,
-  dcId = 1,
-  topicId?: number,
-  replyToTlId?: number,
-): tl.RawMessage {
-  const peerId = stableId(`peer:${conversation.id}`)
-  const peer: tl.TypePeer = conversation.kind === 'direct'
-    ? { _: 'peerUser', userId: peerId }
-    : { _: 'peerChannel', channelId: peerId }
-  return {
-    _: 'message', out: source.outgoing || undefined, id,
-    fromId: {
-      _: 'peerUser',
-      userId: source.outgoing ? stableId(`self:${platformSessionId}`) : stableId(`peer:${source.senderId}`),
-    },
-    peerId: peer,
-    replyTo: replyToTlId ? {
-      _: 'messageReplyHeader', replyToMsgId: replyToTlId,
-    } : topicId && topicId !== id ? {
-      _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
-    } : undefined,
-    date: source.timestamp,
-    message: ordinal === 0 ? messageText(source) : '',
-    entities: ordinal === 0 ? makeMessageEntities(source, platformSessionId) : undefined,
-    media: media ? makeTlMessageMedia(media, source.timestamp, dcId) : undefined,
-    groupedId: groupedId ? Long.fromString(groupedId) : undefined,
-    reactions: source.reactionContext?.reactions.length
-      ? makeMessageReactions(source, platformSessionId)
-      : undefined,
-  } as tl.RawMessage
 }
 
 function makeMessageEntities(message: IMMessage, platformSessionId: string): tl.TypeMessageEntity[] | undefined {

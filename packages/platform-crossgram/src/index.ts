@@ -1,13 +1,11 @@
 import type { Context } from 'cordis'
-import sharp from 'sharp'
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
   IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMTransferOptions,
-  IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
+  IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
@@ -265,6 +263,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       avatar: user.avatar ? mapMedia(user.avatar) : undefined,
       metadata: user.numericId ? { qq: user.numericId } : undefined,
     }
+  }
+
+  async getMessage(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    messageId: string,
+  ): Promise<IMMessage<QQMediaLocator> | null> {
+    const message = await this.client.getMessage(conversation.id, messageId)
+    return message ? this.mapMessage(message) : null
   }
 
   async getConversationMembers(
@@ -561,58 +568,46 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const available = await mapConcurrent(source.available, 8, async (definition) => {
       if (definition.presentation.type !== 'custom') return definition
       const { resource } = definition.presentation
-      if (resource.format === 'video') {
-        const assetKey = resource.locator.assetKey
-        if (!assetKey || !/^sysface\/s\d+\.webm$/.test(assetKey)) {
-          throw new Error(`invalid QQ animated reaction asset: ${String(assetKey)}`)
-        }
-        const bytes = await readFile(new URL(`../assets/reactions/${assetKey}`, import.meta.url))
-        const cacheKey = `${definition.key}:${resource.version}:webm-v1`
-        this.reactionResources.set(cacheKey, bytes)
-        return {
-          ...definition,
-          presentation: {
-            ...definition.presentation,
-            resource: {
-              ...resource,
-              version: resource.version * 100 + 2,
-              format: 'video' as const,
-              mimeType: 'video/webm' as const,
-              width: 100,
-              height: 100,
-              size: bytes.length,
-              locator: { cacheKey },
-            },
-          },
-        }
-      }
+      // Directly constructed test/lightweight instances may omit the cache;
+      // the production plugin always supplies it from apply().
+      if (!this.mediaCache) return definition
       const filePath = resource.locator.filePath
+      const input: IMStickerAsset = {
+        source: {
+          size: resource.size,
+          stream: ({ signal } = {}) => this.client.downloadMedia({
+            messageId: `reaction:${filePath}`,
+            elementId: `reaction:${filePath}`,
+            chatType: 1,
+            peerUid: '',
+            kind: 'image',
+            fileName: filePath.split('/').at(-1) ?? 'reaction.png',
+            filePath,
+            fileSize: resource.size === undefined ? undefined : String(resource.size),
+          }, { signal }),
+        },
+        mimeType: resource.format === 'video' ? 'image/apng' : 'image/png',
+        size: resource.size,
+        width: resource.width,
+        height: resource.height,
+      }
+      const asset = await this.mediaCache.openReaction(
+        definition.key, resource.version, resource.format, input,
+      )
       const chunks: Uint8Array[] = []
       let size = 0
-      for await (const chunk of this.client.downloadMedia({
-        messageId: `reaction:${filePath}`,
-        elementId: `reaction:${filePath}`,
-        chatType: 1,
-        peerUid: '',
-        kind: 'image',
-        fileName: filePath.split('/').at(-1) ?? 'reaction.png',
-        filePath,
-        fileSize: resource.size === undefined ? undefined : String(resource.size),
-      })) {
+      for await (const chunk of asset.source.stream()) {
         chunks.push(chunk)
         size += chunk.length
       }
-      const sourceBytes = new Uint8Array(size)
+      const bytes = new Uint8Array(size)
       let offset = 0
       for (const chunk of chunks) {
-        sourceBytes.set(chunk, offset)
+        bytes.set(chunk, offset)
         offset += chunk.length
       }
-      const bytes = await sharp(sourceBytes)
-        .resize(100, 100, { fit: 'contain' })
-        .webp({ lossless: true })
-        .toBuffer()
-      const cacheKey = `${definition.key}:${resource.version}:webp-v1`
+      const video = resource.format === 'video'
+      const cacheKey = `${definition.key}:${resource.version}:${video ? 'webm' : 'webp'}-v1`
       this.reactionResources.set(cacheKey, bytes)
       return {
         ...definition,
@@ -620,8 +615,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           ...definition.presentation,
           resource: {
             ...resource,
-            version: resource.version * 100 + 1,
-            mimeType: 'image/webp' as const,
+            version: resource.version * 100 + (video ? 2 : 1),
+            format: video ? 'video' as const : 'static' as const,
+            mimeType: video ? 'video/webm' as const : 'image/webp' as const,
             width: 100,
             height: 100,
             size: bytes.length,

@@ -1,13 +1,23 @@
-import { describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import type { PlatformSession } from '@mtproto-relay/bridge'
 import { PlatformMessageActions } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
+import { QQMediaCache } from './media-cache.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
   platformSessionId: 'qq-session', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
 }
+
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+})
 
 describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
@@ -505,7 +515,9 @@ describe('QQNTPlatform mapping', () => {
   })
 
   it('maps QQ cloud-controlled reaction definitions and delegates reaction writes', async () => {
-    const platform = new QQNTPlatform()
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-cache-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
     const context = {
       available: [{
         key: '2:128522', title: '嘿嘿',
@@ -525,7 +537,7 @@ describe('QQNTPlatform mapping', () => {
           type: 'custom' as const, alt: '[微笑]',
           resource: {
             version: 2, format: 'video' as const, mimeType: 'video/webm' as const,
-            width: 128, height: 128, locator: { filePath: '/tmp/s14.png', assetKey: 'sysface/s14.webm' },
+            width: 128, height: 128, locator: { filePath: '/tmp/s14.png' },
           },
         },
       }],

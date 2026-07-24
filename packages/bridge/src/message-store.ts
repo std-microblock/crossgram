@@ -53,6 +53,7 @@ export interface StoredHistoryQuery {
 const MESSAGE_ID_MIDPOINT = 0x40000000
 export const UPDATE_DELIVERY_RETENTION = 1_000
 const STORED_SENDER_KEY = '__mtprotoRelaySender'
+const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
@@ -653,7 +654,7 @@ export class MessageStore {
       .orderBy('ordinal').execute()
     const reactions = await this._database.select('mtproto_im_message_reaction', { messageId: row.id })
       .orderBy('id').execute()
-    const { sender, metadata } = hydrateMessageMetadata(row.metadata)
+    const { sender, replyToId, metadata } = hydrateMessageMetadata(row.metadata)
     return {
       id: row.primaryPlatformMessageId,
       sourceIds: aliases.map((alias) => alias.platformMessageId),
@@ -664,6 +665,7 @@ export class MessageStore {
       timestamp: row.timestamp,
       outgoing: row.outgoing,
       groupId: row.platformGroupId ?? undefined,
+      replyToId,
       metadata,
       reactionContext: reactions.length ? {
         available: reactions.map((reaction) => reaction.definition as unknown as IMReactionDefinition),
@@ -748,23 +750,29 @@ function messageMetadata(message: IMMessage): JsonObject {
     ...(message.sender
       ? { [STORED_SENDER_KEY]: message.sender as unknown as JsonValue }
       : {}),
+    ...(message.replyToId !== undefined ? { [STORED_REPLY_TO_KEY]: message.replyToId } : {}),
   }
 }
 
 function hydrateMessageMetadata(metadata: JsonObject): {
   sender?: IMUser
+  replyToId?: string
   metadata: JsonObject
 } {
   const publicMetadata = { ...metadata }
   delete publicMetadata[STORED_SENDER_KEY]
+  delete publicMetadata[STORED_REPLY_TO_KEY]
+  const replyToId = typeof metadata[STORED_REPLY_TO_KEY] === 'string'
+    ? metadata[STORED_REPLY_TO_KEY]
+    : undefined
   const candidate = metadata[STORED_SENDER_KEY]
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-    return { metadata: publicMetadata }
+    return { replyToId, metadata: publicMetadata }
   }
   const sender = candidate as unknown as IMUser
   return typeof sender.id === 'string' && typeof sender.firstName === 'string'
-    ? { sender, metadata: publicMetadata }
-    : { metadata: publicMetadata }
+    ? { sender, replyToId, metadata: publicMetadata }
+    : { replyToId, metadata: publicMetadata }
 }
 
 function clampDatabaseLimit(limit: number): number {

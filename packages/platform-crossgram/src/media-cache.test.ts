@@ -57,6 +57,27 @@ describe('QQMediaCache', () => {
     expect(range).toEqual(complete.subarray(4, 12))
     expect(opens).toBe(1)
   })
+
+  it('persists generated reaction WebM files across adapter instances', async () => {
+    const path = await temporaryDirectory()
+    const gif = await sharp({
+      create: { width: 24, height: 16, channels: 4, background: { r: 40, g: 200, b: 80, alpha: 1 } },
+    }).gif().toBuffer()
+    let opens = 0
+    const original = {
+      source: countedSource(gif, () => opens++), mimeType: 'image/apng', width: 24, height: 16,
+    }
+
+    const first = await new QQMediaCache({ path }).openReaction('1:14', 123, 'video', original)
+    const second = await new QQMediaCache({ path }).openReaction('1:14', 123, 'video', original)
+    const firstBytes = await collect(first.source.stream())
+    const secondBytes = await collect(second.source.stream())
+
+    expect(first).toMatchObject({ mimeType: 'video/webm', width: 100, height: 100 })
+    expect([...firstBytes.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
+    expect(secondBytes).toEqual(firstBytes)
+    expect(opens).toBe(1)
+  }, 30_000)
 })
 
 async function temporaryDirectory(): Promise<string> {
