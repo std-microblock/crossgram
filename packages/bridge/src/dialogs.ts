@@ -110,6 +110,7 @@ export class DialogRpc {
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
   private readonly _memberCursors = new Map<string, Map<number, string | null>>()
+  private readonly _searchCursors = new Map<string, string>()
   private readonly _conversationPreviews = new Map<string, ConversationPreview>()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
@@ -281,6 +282,7 @@ export class DialogRpc {
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
     if (req.filter._ === 'inputMessagesFilterPinned') return this._emptyMessages(conversation)
+    if (this._platform.searchMessages) return this._searchPlatform(req, peerId, conversation)
     const all = await this._loadHistory(peerId, {
       offsetId: req.offsetId, offsetDate: req.maxDate, addOffset: req.addOffset,
       limit: req.limit, maxId: req.maxId, minId: req.minId,
@@ -309,6 +311,125 @@ export class DialogRpc {
       ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
+  }
+
+  private async _searchPlatform(
+    req: tl.messages.RawSearchRequest,
+    peerId: string,
+    conversation: IMConversation,
+  ): Promise<tl.messages.TypeMessages> {
+    const fromUserId = req.fromId?._ === 'inputPeerSelf'
+      ? this._session.userId
+      : req.fromId?._ === 'inputPeerUser'
+        ? this._tlToPeer.get(req.fromId.userId)
+        : undefined
+    const fingerprint = JSON.stringify([
+      peerId, req.q, req.filter._, fromUserId ?? '', req.minDate, req.maxDate,
+    ])
+    const cursor = req.offsetId > 0
+      ? this._searchCursors.get(`${fingerprint}:${req.offsetId}`)
+      : undefined
+    let maxTimestamp = req.maxDate > 0 ? req.maxDate : undefined
+    if (req.offsetId > 0 && !cursor) {
+      const cached = this._historyCache.get(peerId)?.find((item) => item.tlId === req.offsetId)?.source
+      const stored = !cached && this._store
+        ? await this._store.findProjectedByTlId(this._session.platformSessionId, req.offsetId, peerId)
+        : undefined
+      const anchorTimestamp = cached?.timestamp ?? stored?.source.timestamp
+      if (anchorTimestamp !== undefined) {
+        maxTimestamp = Math.min(maxTimestamp ?? anchorTimestamp, anchorTimestamp)
+      }
+    }
+    const fetchLimit = Math.max(1, Math.min(
+      clampLimit(req.limit) + Math.max(0, req.addOffset),
+      200,
+    ))
+    const query = {
+      query: req.q,
+      cursor,
+      limit: fetchLimit,
+      fromUserId,
+      minTimestamp: req.minDate > 0 ? req.minDate : undefined,
+      maxTimestamp,
+      mediaKind: searchMediaKind(req.filter),
+    } as const
+    const upstream = this._data
+      ? await this._data.searchMessages(peerId, query)
+      : await this._platform.searchMessages!(this._session, { id: peerId }, query)
+    const materialized = await this._materializeSearchMessages(peerId, upstream.messages)
+    const normalizedQuery = req.q.toLocaleLowerCase()
+    const filtered = materialized.filter((item) => {
+      if (req.offsetId > 0 && !cursor && item.tlId >= req.offsetId) return false
+      if (req.minDate > 0 && item.source.timestamp <= req.minDate) return false
+      if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
+      if (req.maxId > 0 && item.tlId >= req.maxId) return false
+      if (req.minId > 0 && item.tlId <= req.minId) return false
+      if (normalizedQuery && !messageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
+      return matchesMessageFilter(item, req.filter)
+    })
+    const start = Math.max(0, req.addOffset)
+    const page = filtered.slice(start, start + clampLimit(req.limit))
+    if (upstream.nextCursor && page.length) {
+      this._searchCursors.set(`${fingerprint}:${page.at(-1)!.tlId}`, upstream.nextCursor)
+      while (this._searchCursors.size > 1024) {
+        const oldest = this._searchCursors.keys().next().value as string | undefined
+        if (!oldest) break
+        this._searchCursors.delete(oldest)
+      }
+    }
+    await this._prepareConversationPreviews(page.map((item) => item.source))
+    const users = await this._messageSenders(page.map((item) => item.source))
+    const sliced = Boolean(upstream.nextCursor || cursor || req.offsetId > 0 || start > 0)
+    return {
+      _: sliced ? 'messages.messagesSlice' : 'messages.messages',
+      ...(sliced ? { count: upstream.total ?? page.length + (upstream.nextCursor ? 1 : 0) } : {}),
+      messages: page.map((item) => this._makeMessage(item)), topics: [],
+      chats: uniqueChats([
+        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
+        ...this._linkedChats(page.map((item) => item.source)),
+      ]),
+      users: uniqueUsers([...users, this._makeSelfUser()]),
+    } as unknown as tl.messages.TypeMessages
+  }
+
+  private async _materializeSearchMessages(
+    peerId: string,
+    messages: readonly IMMessage[],
+  ): Promise<MaterializedMessage[]> {
+    if (this._store) {
+      const output: MaterializedMessage[] = []
+      for (const source of messages) {
+        const projected = await this._store.findProjectedByPlatformId(
+          this._session.platformSessionId, peerId, source.id,
+        )
+        if (!projected) continue
+        for (const part of projected.parts) {
+          const item: MaterializedMessage = {
+            source: projected.source,
+            tlId: part.tlMessageId,
+            ordinal: part.ordinal,
+            groupedId: part.groupedId ?? undefined,
+            media: projected.media.find((entry) => entry.id === part.mediaId),
+          }
+          this._rememberMessage(item)
+          output.push(item)
+        }
+      }
+      await this._rememberReplyTargets(output.map((item) => item.source))
+      return output
+    }
+    for (const source of messages.slice().sort((left, right) => left.timestamp - right.timestamp)) {
+      this._messageId(peerId, source.id)
+    }
+    return messages.map((source) => {
+      const item: MaterializedMessage = {
+        source,
+        tlId: telegramMessageId(source) ?? this._messageId(peerId, source.id),
+        ordinal: 0,
+      }
+      this._rememberMessage(item)
+      return item
+    })
   }
 
   async readHistory(req: tl.messages.RawReadHistoryRequest): Promise<tl.messages.RawAffectedMessages> {
@@ -2313,6 +2434,12 @@ function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessages
   }
   if (filter._ === 'inputMessagesFilterDocument') return item.media?.kind === 'file'
   return false
+}
+
+function searchMediaKind(filter: tl.TypeMessagesFilter): 'image' | 'file' | undefined {
+  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterPhotoVideo') return 'image'
+  if (filter._ === 'inputMessagesFilterDocument') return 'file'
+  return undefined
 }
 
 /** Stable positive signed-int ID used for synthetic Telegram entities. */

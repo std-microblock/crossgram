@@ -12,6 +12,26 @@ describe('QQNTClient streaming transport', () => {
     await once(server, 'close')
   })
 
+  it('forwards message search filters and opaque cursors', async () => {
+    let requestUrl = ''
+    server = createServer((request, response) => {
+      requestUrl = request.url ?? ''
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ messages: [], nextCursor: 'next' }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+
+    await expect(client.searchMessages('group/1', {
+      q: '测试 key', cursor: 'opaque', limit: 25, fromUserId: 'sender',
+      minTimestamp: 10, maxTimestamp: 20, mediaKind: 'image',
+    })).resolves.toEqual({ messages: [], nextCursor: 'next' })
+    expect(requestUrl).toBe('/conversations/group%2F1/search?q=%E6%B5%8B%E8%AF%95+key&cursor=opaque&limit=25&fromUserId=sender&minTimestamp=10&maxTimestamp=20&mediaKind=image')
+  })
+
   it('streams upload chunks and reports monotonic progress', async () => {
     const received: Buffer[] = []
     let manifest: Record<string, any> | undefined
