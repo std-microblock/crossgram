@@ -68,9 +68,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       files: true,
       mixed: true,
       maxTextLength: 20_000,
-      // QQ's path-based native API can accept several images, but the local
-      // streaming endpoint intentionally keeps one request == one media stream.
-      maxMedia: 1,
+      maxMedia: 9,
     },
     conversations: { groups: true, channels: false, subchannels: false },
     members: { list: true, administrators: true, permissions: false },
@@ -451,7 +449,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const mediaParts = content.parts.filter((part) => part.type === 'media')
     const stickerParts = content.parts.filter((part) => part.type === 'sticker')
     if (stickerParts.length > 1 || stickerParts.length && mediaParts.length) {
-      throw new Error('QQNT supports one sticker or one streamed media item per message')
+      throw new Error('QQNT supports either one sticker or up to nine media items per message')
     }
     const stickerPart = stickerParts[0]
     let sticker: QQStickerReference | undefined
@@ -461,22 +459,22 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
       sticker = stickerPart.sticker.reference as unknown as QQStickerReference
     }
-    if (mediaParts.length > 1) throw new Error('QQNT streaming transport supports at most one media per logical message')
-    const part = mediaParts[0]
-    const media = part?.type === 'media' ? {
+    if (mediaParts.length > 9) throw new Error('QQNT supports at most nine media items per message')
+    const media = mediaParts.map((part, index) => ({
       kind: part.media.kind,
-      name: part.media.name ?? `upload-${Date.now()}`,
+      name: part.media.name ?? `upload-${Date.now()}-${index}`,
       mimeType: part.media.mimeType,
       width: part.media.width,
       height: part.media.height,
       source: part.media.source,
-    } : undefined
+    }))
     const originRequestId = randomUUID()
     this.originSessions.set(originRequestId, session.platformSessionId)
     try {
       return this.mapMessage(
         await this.client.sendMessage(
-          conversation.id, text, media, options, originRequestId, sticker, textParts, content.replyToId,
+          conversation.id, text, media.length ? media : undefined,
+          options, originRequestId, sticker, textParts, content.replyToId,
         ),
       )
     } finally {
