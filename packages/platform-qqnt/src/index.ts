@@ -960,6 +960,7 @@ function mapMessage(
       maxSelected: input.reactionContext.maxSelected,
     } : undefined,
     content: {
+      serviceAction: input.serviceAction,
       parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward),
     },
   }

@@ -98,6 +98,7 @@ export interface WireMessage {
   /** Correlates a local HTTP send with its QQ listener echo. */
   originRequestId?: string
   replyToId?: string
+  serviceAction?: { type: 'custom', text: string }
   parts: Array<
     | WireTextPart
     | { type: 'media', media: WireMedia }

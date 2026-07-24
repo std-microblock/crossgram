@@ -162,6 +162,10 @@ sendMessage(session, conversation, {
 
 `parts` 有序，允许纯文字、单图、图文、多图和文件混合。adapter 返回的 `IMMessage` 必须包含平台最终确认的 message/media ID，不应复用客户端临时 ID。
 
+平台系统提示使用 `content.serviceAction`，不得伪装成普通 text part。当前通用表达为
+`{ type: 'custom', text }`，bridge 将其投影为 Telegram `messageService` / `messageActionCustomAction`，
+因此历史和实时 update 都由客户端按灰字系统消息渲染。系统消息的 `parts` 可以为空。
+
 一条逻辑消息有多个媒体时，bridge 为每个媒体生成一条连续 Telegram message，共享持久化 `groupedId`；第一条携带文本 caption，其余文本为空。
 
 ## 5. History 分页

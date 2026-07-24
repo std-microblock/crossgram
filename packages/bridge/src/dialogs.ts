@@ -1498,7 +1498,7 @@ export class DialogRpc {
     return this._getPeerUser(peerId)
   }
 
-  private _makeMessage(item: MaterializedMessage): tl.RawMessage {
+  private _makeMessage(item: MaterializedMessage): tl.TypeMessage {
     const { source, tlId } = item
     const conversation = this._conversation(source.conversationId)
     const sticker = source.content.parts.find((part) => part.type === 'sticker')
@@ -2111,12 +2111,33 @@ export function projectTlMessage(options: {
   reactions?: tl.RawMessageReactions
   replyToTlId?: number
   topicId?: number
-}): tl.RawMessage {
+}): tl.TypeMessage {
   const {
     platformSessionId, conversation, source, tlId, ordinal,
     groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
   } = options
   const conversationId = stableId(`peer:${conversation.id}`)
+  if (ordinal === 0 && source.content.serviceAction) {
+    return {
+      _: 'messageService', out: source.outgoing || undefined, id: tlId,
+      fromId: fromId ?? {
+        _: 'peerUser',
+        userId: source.outgoing
+          ? stableId(`self:${platformSessionId}`)
+          : stableId(`peer:${source.senderId}`),
+      },
+      peerId: peerId ?? (conversation.kind === 'direct'
+        ? { _: 'peerUser', userId: conversationId }
+        : { _: 'peerChannel', channelId: conversationId }),
+      replyTo: replyToTlId ? {
+        _: 'messageReplyHeader', replyToMsgId: replyToTlId,
+      } : topicId && topicId !== tlId ? {
+        _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
+      } : undefined,
+      date: source.timestamp,
+      action: { _: 'messageActionCustomAction', message: source.content.serviceAction.text },
+    } as tl.RawMessageService
+  }
   return {
     _: 'message', out: source.outgoing || undefined, id: tlId,
     fromId: fromId ?? {

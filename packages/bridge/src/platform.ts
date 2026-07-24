@@ -210,6 +210,8 @@ export type IMMessageInputPart =
 
 export interface IMMessageContent<TMediaLocator = unknown> {
   parts: IMMessagePart<TMediaLocator>[]
+  /** Platform service/system message rendered by Telegram as a MessageService. */
+  serviceAction?: { type: 'custom', text: string }
 }
 
 export interface IMMessageInput {
