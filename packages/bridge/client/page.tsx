@@ -181,7 +181,7 @@ export default function apply(ctx: Context): void {
   ctx.client.router.page({
     path: '/platform-accounts',
     name: '平台账号',
-    icon: 'key:default',
+    icon: 'activity:default',
     order: 110,
     component: PlatformAccountsPage,
   })
