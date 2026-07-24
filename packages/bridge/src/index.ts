@@ -10,7 +10,10 @@ import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtpr
 import type { IMPlatform, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
-import { DialogRpc, stableId } from './dialogs.js'
+import {
+  DialogRpc, stableId,
+  type LegacyGetForumTopicsByIdRequest, type LegacyGetForumTopicsRequest,
+} from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
 import { MessageStore } from './message-store.js'
 import {
@@ -405,6 +408,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
   rpc.register('messages.getMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
+  rpc.register('channels.getMessages', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getChannelMessages(req as tl.channels.RawGetMessagesRequest))
   rpc.register('messages.search', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
   rpc.register('messages.readHistory', async (rpc, req) =>
@@ -530,6 +535,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getFullChat(req as tl.messages.RawGetFullChatRequest))
   rpc.register('channels.getFullChannel', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullChannel(req as tl.channels.RawGetFullChannelRequest))
+  rpc.register('channels.getChannels', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getChannels(req as tl.channels.RawGetChannelsRequest))
+  rpc.register('channels.readHistory', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.readChannelHistory(req as tl.channels.RawReadHistoryRequest))
+  rpc.register('channels.readMessageContents', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.readChannelMessageContents(
+      req as tl.channels.RawReadMessageContentsRequest,
+    ))
   rpc.register('channels.getParticipant', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipant(req as tl.channels.RawGetParticipantRequest))
   rpc.register('channels.getParticipants', async (rpc, req) =>
@@ -540,6 +553,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsRequest))
   rpc.register('messages.getForumTopicsByID', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsByIDRequest))
+  rpc.register('channels.getForumTopics', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getLegacyForumTopics(req as LegacyGetForumTopicsRequest))
+  rpc.register('channels.getForumTopicsByID', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getLegacyForumTopics(req as LegacyGetForumTopicsByIdRequest))
   rpc.register('messages.getReplies', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getReplies(req as tl.messages.RawGetRepliesRequest))
   rpc.register('channels.toggleViewForumAsMessages', async () => ({

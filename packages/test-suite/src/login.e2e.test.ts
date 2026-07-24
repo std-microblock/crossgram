@@ -814,12 +814,32 @@ describe('bridge login e2e', () => {
       expect(peerSettings).toMatchObject({
         _: 'messages.peerSettings', chats: [{ _: 'channel', id: generalChannel.id }],
       })
+      const channelHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 64)
+      expect(channelHistory.messages).toMatchObject([{
+        _: 'message', message: 'General channel message',
+        peerId: { _: 'peerChannel', channelId: generalChannel.id },
+      }])
       const fullChannel = await callRpc(resumed, key, resumedSid, {
         _: 'channels.getFullChannel',
         channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
       }, 65)
       expect(fullChannel).toMatchObject({
         _: 'messages.chatFull', fullChat: { _: 'channelFull', id: generalChannel.id },
+      })
+      const channelMessages = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getMessages',
+        channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        id: [{ _: 'inputMessageID', id: channelHistory.messages[0].id }],
+      }, 66)
+      expect(channelMessages).toMatchObject({
+        _: 'messages.channelMessages',
+        messages: [{ _: 'message', message: 'General channel message' }],
+        chats: [{ _: 'channel', id: generalChannel.id }],
       })
       const participant = await callRpc(resumed, key, resumedSid, {
         _: 'channels.getParticipant',
@@ -848,6 +868,20 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
       }, 69)
       expect(sendAs).toMatchObject({ _: 'channels.sendAsPeers', peers: [{ peer: { _: 'peerUser' } }] })
+      const channels = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getChannels',
+        id: [
+          { _: 'inputChannel', channelId: group.id, accessHash: Long.ZERO },
+          { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        ],
+      }, 70)
+      expect(channels).toMatchObject({
+        _: 'messages.chats',
+        chats: [
+          { _: 'channel', id: group.id },
+          { _: 'channel', id: generalChannel.id },
+        ],
+      })
 
       const forum = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getForumTopics',
@@ -859,6 +893,11 @@ describe('bridge login e2e', () => {
         topics: [{ _: 'forumTopic', title: 'support thread' }],
         messages: [{ _: 'message', peerId: { _: 'peerChannel', channelId: generalChannel.id } }],
       })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'channels.readHistory',
+        channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
+        maxId: channelHistory.messages[0].id,
+      }, 72)).toEqual({ _: 'boolTrue' })
       const topic = forum.topics[0]
       const topicHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getReplies',

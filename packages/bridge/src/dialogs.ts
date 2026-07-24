@@ -24,6 +24,7 @@ type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
 type GetMessagesRequest = tl.messages.RawGetMessagesRequest
+type GetChannelMessagesRequest = tl.channels.RawGetMessagesRequest
 type SendMessageRequest = tl.messages.RawSendMessageRequest
 type SendMediaRequest = tl.messages.RawSendMediaRequest
 type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
@@ -57,6 +58,22 @@ interface ResolvedStickerInput {
 
 interface ConversationPreview {
   description: string
+}
+
+export interface LegacyGetForumTopicsRequest {
+  _: 'channels.getForumTopics'
+  channel: tl.TypeInputChannel
+  q?: string
+  offsetDate: number
+  offsetId: number
+  offsetTopic: number
+  limit: number
+}
+
+export interface LegacyGetForumTopicsByIdRequest {
+  _: 'channels.getForumTopicsByID'
+  channel: tl.TypeInputChannel
+  topics: number[]
 }
 
 /**
@@ -303,17 +320,36 @@ export class DialogRpc {
 
   async getMessages(req: GetMessagesRequest): Promise<tl.messages.TypeMessages> {
     await this._hydrateAllMessages()
+    return this._getMessages(req.id)
+  }
+
+  async getChannelMessages(req: GetChannelMessagesRequest): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    const conversation = this._resolveChannel(req.channel)
+    await this._loadHistory(conversation.id, { limit: Math.max(1, req.id.length) })
+    return this._getMessages(req.id, conversation.id)
+  }
+
+  private async _getMessages(
+    ids: readonly tl.TypeInputMessage[],
+    expectedPeerId?: string,
+  ): Promise<tl.messages.TypeMessages> {
     const users = new Map<number, tl.RawUser>()
     const messages: tl.TypeMessage[] = []
     const linkedSources: IMMessage[] = []
 
-    for (const input of req.id) {
+    for (const input of ids) {
       const requestedId = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
       let ref = this._tlToMessage.get(requestedId)
-      if (ref && this._conversations.get(ref.peerId)?.kind !== 'direct') ref = undefined
+      if (ref && (expectedPeerId ? ref.peerId !== expectedPeerId : this._conversations.get(ref.peerId)?.kind !== 'direct')) {
+        ref = undefined
+      }
       if (!ref && this._store) {
         const projected = await this._store.findProjectedByTlId(
-          this._session.platformSessionId, requestedId, undefined, 'direct',
+          this._session.platformSessionId,
+          requestedId,
+          expectedPeerId,
+          expectedPeerId ? undefined : 'direct',
         )
         if (projected) {
           for (const part of projected.parts) {
@@ -357,9 +393,16 @@ export class DialogRpc {
 
     const self = this._makeSelfUser()
     users.set(self.id, self)
+    const expectedConversation = expectedPeerId ? this._conversation(expectedPeerId) : undefined
     return {
-      _: 'messages.messages', messages, topics: [],
-      chats: this._linkedChats(linkedSources), users: [...users.values()],
+      _: expectedConversation ? 'messages.channelMessages' : 'messages.messages',
+      ...(expectedConversation ? { pts: this._pts, count: messages.length } : {}),
+      messages, topics: [],
+      chats: uniqueChats([
+        ...(expectedConversation ? [this._makeChat(expectedConversation)] : []),
+        ...this._linkedChats(linkedSources),
+      ]),
+      users: [...users.values()],
     } as unknown as tl.messages.TypeMessages
   }
 
@@ -493,6 +536,26 @@ export class DialogRpc {
     }
   }
 
+  async getChannels(req: tl.channels.RawGetChannelsRequest): Promise<tl.messages.RawChats> {
+    await this._hydratePeers()
+    return {
+      _: 'messages.chats',
+      chats: uniqueChats(req.id.map((channel) => this._makeChat(this._resolveChannel(channel)))),
+    }
+  }
+
+  async readChannelHistory(req: tl.channels.RawReadHistoryRequest): Promise<tl.TlObject> {
+    await this._hydratePeers()
+    this._resolveChannel(req.channel)
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  }
+
+  async readChannelMessageContents(req: tl.channels.RawReadMessageContentsRequest): Promise<tl.TlObject> {
+    await this._hydratePeers()
+    this._resolveChannel(req.channel)
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  }
+
   async getForumTopics(
     req: tl.messages.RawGetForumTopicsRequest | tl.messages.RawGetForumTopicsByIDRequest,
   ): Promise<tl.messages.RawForumTopics> {
@@ -518,6 +581,22 @@ export class DialogRpc {
       messages: page.map((item) => this._makeMessage(item.top)),
       chats: [this._makeChat(parent)], users: uniqueUsers([...users, this._makeSelfUser()]), pts: this._pts,
     }
+  }
+
+  async getLegacyForumTopics(
+    req: LegacyGetForumTopicsRequest | LegacyGetForumTopicsByIdRequest,
+  ): Promise<tl.messages.RawForumTopics> {
+    if (req.channel._ !== 'inputChannel') throw new RpcError(400, 'CHANNEL_INVALID')
+    const peer: tl.RawInputPeerChannel = {
+      _: 'inputPeerChannel', channelId: req.channel.channelId, accessHash: req.channel.accessHash,
+    }
+    return this.getForumTopics(req._ === 'channels.getForumTopics'
+      ? {
+          _: 'messages.getForumTopics', peer, q: req.q,
+          offsetDate: req.offsetDate, offsetId: req.offsetId,
+          offsetTopic: req.offsetTopic, limit: req.limit,
+        }
+      : { _: 'messages.getForumTopicsByID', peer, topics: req.topics })
   }
 
   async getReplies(req: tl.messages.RawGetRepliesRequest): Promise<tl.messages.TypeMessages> {
