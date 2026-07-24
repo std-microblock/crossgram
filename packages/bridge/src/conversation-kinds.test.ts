@@ -466,6 +466,58 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('serves channel-scoped message, chat-list, and read RPCs', async () => {
+    const { rpc } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const groupId = stableId('peer:group')
+    const channelId = stableId('peer:parent-channel')
+    const group = { _: 'inputChannel' as const, channelId: groupId, accessHash: Long.ZERO }
+    const channel = { _: 'inputChannel' as const, channelId, accessHash: Long.ZERO }
+    const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
+    const channelPeer = { _: 'inputPeerChannel' as const, channelId, accessHash: Long.ZERO }
+    const groupHistory = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+    const channelHistory = await rpc.getHistory(historyRequest(channelPeer)) as tl.messages.RawMessages
+    const groupMessage = groupHistory.messages[0] as tl.RawMessage
+    const channelMessage = channelHistory.messages[0] as tl.RawMessage
+
+    const groupMessages = await rpc.getChannelMessages({
+      _: 'channels.getMessages', channel: group,
+      id: [{ _: 'inputMessageID', id: groupMessage.id }],
+    })
+    const channelMessages = await rpc.getChannelMessages({
+      _: 'channels.getMessages', channel,
+      id: [{ _: 'inputMessageID', id: channelMessage.id }],
+    })
+    const chats = await rpc.getChannels({ _: 'channels.getChannels', id: [group, channel, group] })
+
+    expect(groupMessages).toMatchObject({
+      _: 'messages.channelMessages',
+      messages: [{ _: 'message', message: 'QQ Group' }],
+      chats: [{ _: 'channel', id: groupId, title: 'QQ Group' }],
+    })
+    expect(channelMessages).toMatchObject({
+      _: 'messages.channelMessages',
+      messages: [{ _: 'message', message: 'Discord / general' }],
+      chats: [{ _: 'channel', id: channelId, title: 'Discord / general' }],
+    })
+    expect(chats).toMatchObject({
+      _: 'messages.chats',
+      chats: [
+        { _: 'channel', id: groupId, title: 'QQ Group' },
+        { _: 'channel', id: channelId, title: 'Discord / general' },
+      ],
+    })
+    await expect(rpc.readChannelHistory({
+      _: 'channels.readHistory', channel, maxId: channelMessage.id,
+    })).resolves.toEqual({ _: 'boolTrue' })
+    await expect(rpc.readChannelMessageContents({
+      _: 'channels.readMessageContents', channel, id: [channelMessage.id],
+    })).resolves.toEqual({ _: 'boolTrue' })
+    for (const result of [groupMessages, channelMessages, chats]) {
+      expect(() => roundTrip(result)).not.toThrow()
+    }
+  })
+
   it('projects every group as a megagroup and only requests the Telegram member window', async () => {
     const calls: Array<{ cursor?: string, limit?: number }> = []
     const allMembers = ['self', 'alice', 'bob', 'carol', 'dave'].map((id, index) => ({
@@ -547,6 +599,18 @@ describe('conversation kinds', () => {
     const topic = topics.topics[0] as tl.RawForumTopic
     const byId = await rpc.getForumTopics({ _: 'messages.getForumTopicsByID', peer, topics: [topic.id] })
     expect(byId.topics).toMatchObject([{ id: topic.id, title: 'Discord / support' }])
+    const legacyTopics = await rpc.getLegacyForumTopics({
+      _: 'channels.getForumTopics',
+      channel: { _: 'inputChannel', channelId: parent.id, accessHash: Long.ZERO },
+      offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+    })
+    const legacyById = await rpc.getLegacyForumTopics({
+      _: 'channels.getForumTopicsByID',
+      channel: { _: 'inputChannel', channelId: parent.id, accessHash: Long.ZERO },
+      topics: [topic.id],
+    })
+    expect(legacyTopics).toEqual(topics)
+    expect(legacyById).toEqual(byId)
     const replies = await rpc.getReplies({
       _: 'messages.getReplies', peer, msgId: topic.id,
       offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
@@ -561,6 +625,8 @@ describe('conversation kinds', () => {
       replyTo: { _: 'inputReplyToMessage', replyToMsgId: topic.id, topMsgId: topic.id },
     })
     expect(sentTargets.at(-1)).toBe('subchannel')
-    for (const result of [topics, byId, replies]) expect(() => roundTrip(result)).not.toThrow()
+    for (const result of [topics, byId, legacyTopics, legacyById, replies]) {
+      expect(() => roundTrip(result)).not.toThrow()
+    }
   })
 })
