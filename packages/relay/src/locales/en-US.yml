@@ -1,0 +1,5 @@
+apiId: Telegram application API ID from my.telegram.org.
+apiHash: Telegram application API hash from my.telegram.org.
+storagePath: Directory containing one upstream session per downstream auth key.
+disableUpdates: Disable mtcute's difference loop while still forwarding raw server updates.
+routeId: Account route exposed to the MTProto service.

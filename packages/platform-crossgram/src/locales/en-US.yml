@@ -1,0 +1,8 @@
+endpoint: Base URL of the QQNT bridge HTTP API.
+token: Bearer token used to authenticate with the QQNT bridge.
+memberName: Name shown for group members.
+mediaCachePath: Directory used for cached media, previews, stickers, and reactions.
+mediaDownloadMode: Download original media on demand or cache eligible media automatically.
+autoDownloadFileSizeLimit: Maximum file size in bytes eligible for automatic caching.
+previewMaxDimension: Maximum width or height of generated image previews.
+ffmpegPath: FFmpeg executable used to convert GIF and APNG media to WebM.

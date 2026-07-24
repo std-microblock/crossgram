@@ -1,0 +1,2 @@
+maxEvents: Maximum number of decoded MTProto events retained in memory.
+initiallyPaused: Wait for the user to start capture after startup.

@@ -1,0 +1,4 @@
+port: TCP port to listen on. Use 0 to select an ephemeral port.
+host: Host or IP address to bind the MTProto server to.
+rsaKeyPath: Path used to load or create the RSA key-pair JSON file.
+authKeyStorePath: Path used to persist authorized MTProto keys.

@@ -1,0 +1,2 @@
+assetsPath: 包含 index.json 和 Telegram 资源文件的目录。
+providerId: 同时挂载多套 Telegram 资源时使用的注册标识。

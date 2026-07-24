@@ -1,0 +1,6 @@
+routeId: Account route exposed to the MTProto service.
+dcId: Telegram data-center ID advertised by the bridge.
+serverHost: Public MTProto host advertised to Telegram clients.
+serverPort: Public MTProto port advertised to Telegram clients.
+apiPrefix: HTTP prefix used for platform account assets.
+uploadPath: Directory used to store uploads received from Telegram clients.

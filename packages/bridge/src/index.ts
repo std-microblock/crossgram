@@ -4,6 +4,8 @@ import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
 import Long from 'long'
 import z from 'schemastery'
+import enUS from './locales/en-US.yml'
+import zhCN from './locales/zh-CN.yml'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import type { IMPlatform, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
@@ -59,18 +61,15 @@ export interface BridgeConfig {
 }
 
 export const Config = z.object({
-  routeId: z.string().default('bridge:default')
-    .description('Account route exposed to the MTProto service.'),
-  dcId: z.natural().min(1).max(6).default(1)
-    .description('Telegram data-center ID advertised by the bridge.'),
-  serverHost: z.string().default('127.0.0.1')
-    .description('Public MTProto host advertised to Telegram clients.'),
-  serverPort: z.natural().min(1).max(65_535).default(4430)
-    .description('Public MTProto port advertised to Telegram clients.'),
-  apiPrefix: z.string().default('/api')
-    .description('HTTP prefix used for platform account assets.'),
-  uploadPath: z.string().default('data/bridge-uploads')
-    .description('Directory used to store uploads received from Telegram clients.'),
+  routeId: z.string().default('bridge:default'),
+  dcId: z.natural().min(1).max(6).default(1),
+  serverHost: z.string().default('127.0.0.1'),
+  serverPort: z.natural().min(1).max(65_535).default(4430),
+  apiPrefix: z.string().default('/api'),
+  uploadPath: z.string().default('data/bridge-uploads'),
+}).i18n({
+  'en-US': enUS,
+  'zh-CN': zhCN,
 })
 
 interface BridgeSessionState {
