@@ -171,7 +171,7 @@
 
 .debug-virtual-content {
   position: relative;
-  min-width: 1340px;
+  min-width: 1420px;
   width: 100%;
 }
 
@@ -191,13 +191,37 @@
   border-left-color: var(--debug-green);
 }
 
+.debug-event.rpc-slow {
+  border-left-color: var(--debug-amber);
+}
+
+.debug-event.rpc-error {
+  border-left-color: var(--debug-red);
+}
+
+.debug-event.rpc-slow .event-header {
+  background: color-mix(in srgb, var(--debug-amber) 8%, transparent);
+}
+
+.debug-event.rpc-error .event-header {
+  background: color-mix(in srgb, var(--debug-red) 9%, transparent);
+}
+
+.debug-event.rpc-slow .event-header:hover {
+  background: color-mix(in srgb, var(--debug-amber) 14%, var(--bg-hover));
+}
+
+.debug-event.rpc-error .event-header:hover {
+  background: color-mix(in srgb, var(--debug-red) 15%, var(--bg-hover));
+}
+
 .event-header {
   display: grid;
   align-items: center;
   gap: 8px;
   box-sizing: border-box;
   width: 100%;
-  grid-template-columns: 18px minmax(220px, 1fr) 104px 58px 80px 116px 56px 164px 134px 210px 64px;
+  grid-template-columns: 18px minmax(220px, 1fr) 104px 58px 80px 116px 56px 164px 134px 72px 210px 64px;
   height: 43px;
   padding: 4px 12px 4px 8px;
   border: 0;
@@ -301,10 +325,40 @@
   text-align: center;
 }
 
+.rpc-duration,
+.rpc-duration-empty {
+  text-align: right;
+}
+
+.rpc-duration-ok {
+  color: var(--fg2);
+}
+
+.event-header .rpc-duration-slow {
+  color: var(--debug-amber);
+  font-weight: 700;
+}
+
+.event-header .rpc-duration-error {
+  color: var(--debug-red);
+  font-weight: 700;
+}
+
+.rpc-duration-empty {
+  color: var(--fg3);
+}
+
 .rpc-result-summary {
   color: var(--fg1);
   opacity: 0.48;
   filter: grayscale(1);
+}
+
+.rpc-result-summary.rpc-result-error {
+  color: var(--debug-red);
+  font-weight: 700;
+  opacity: 1;
+  filter: none;
 }
 
 .rpc-result-detail {

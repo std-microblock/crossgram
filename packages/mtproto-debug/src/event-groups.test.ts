@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { countGroupedEvents, filterEventGroups, groupRpcEvents } from './event-groups.js'
+import {
+  countGroupedEvents,
+  filterEventGroups,
+  getRpcResultMetrics,
+  groupRpcEvents,
+  isRpcError,
+  SLOW_RPC_THRESHOLD_MS,
+} from './event-groups.js'
 import type { CapturedMtprotoEvent } from './types.js'
 
 describe('MTProto RPC event grouping', () => {
@@ -66,6 +73,45 @@ describe('MTProto RPC event grouping', () => {
     expect(filterEventGroups(groups, '', { mode: 'include', value: 'messages.getHistory' })).toEqual([groups[0]])
     expect(filterEventGroups(groups, '', { mode: 'include', value: 'rpc_result -> messages.messages' })).toEqual([groups[0]])
     expect(filterEventGroups(groups, '', { mode: 'exclude', value: 'messages.getHistory' })).toEqual([groups[1]])
+  })
+
+  it('calculates elapsed time and marks results at the slow threshold', () => {
+    const call = event(1, { timestamp: 10_000 })
+    const fastResult = event(2, { timestamp: 10_999 })
+    const slowResult = event(3, { timestamp: 10_000 + SLOW_RPC_THRESHOLD_MS })
+
+    expect(getRpcResultMetrics(call)).toBeUndefined()
+    expect(getRpcResultMetrics(call, fastResult)).toEqual({ durationMs: 999, state: 'ok' })
+    expect(getRpcResultMetrics(call, slowResult)).toEqual({ durationMs: 1_000, state: 'slow' })
+  })
+
+  it('gives RPC errors precedence over slow timing and ignores unrelated errors', () => {
+    const call = event(1, { timestamp: 20_000 })
+    const rpcError = event(2, {
+      timestamp: 25_000,
+      name: 'rpc_result -> mt_rpc_error',
+      payload: {
+        _: 'rpc_result',
+        result: { _: 'mt_rpc_error', errorCode: 400, errorMessage: 'BAD_REQUEST' },
+      },
+    })
+    const transportError = event(3, {
+      timestamp: 25_000,
+      error: 'socket closed',
+      payload: { _: 'rpc_result', result: { _: 'boolTrue' } },
+    })
+
+    expect(isRpcError(rpcError)).toBe(true)
+    expect(getRpcResultMetrics(call, rpcError)).toEqual({ durationMs: 5_000, state: 'error' })
+    expect(isRpcError(transportError)).toBe(false)
+    expect(getRpcResultMetrics(call, transportError)).toEqual({ durationMs: 5_000, state: 'slow' })
+  })
+
+  it('clamps negative elapsed time to zero when capture timestamps arrive out of order', () => {
+    const call = event(1, { timestamp: 50 })
+    const result = event(2, { timestamp: 49 })
+
+    expect(getRpcResultMetrics(call, result)).toEqual({ durationMs: 0, state: 'ok' })
   })
 })
 
