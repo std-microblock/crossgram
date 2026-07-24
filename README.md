@@ -1,6 +1,11 @@
-# mtproto-relay-cordis
+<div align=center>
+<h1>CrossGram</h1>
+<div>Bring any chat platform to Telegram clients.</div>
+<div>使用 Telegram 客户端在任何平台上聊天</div><br/>
+<img width="1070" height="601" alt="PixPin_2026-07-24_16-50-00" src="https://github.com/user-attachments/assets/be1e04db-c621-4d37-9585-43c1fb6bd452" />
+</div><br/>
 
-- [IMPlatform 适配器实现规范](docs/IM_PLATFORM.zh.md)
-- [架构设计与开发计划](docs/设计与待办.zh.md)
+CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mtcute](https://github.com/mtcute/mtcute) 的 Telegram 服务器端实现。它将 Telegram 桥接到其它平台，以让你在 Telegram 客户端下获得远超原生客户端的聊天体验。
 
-参考 adapter 位于 `packages/platform-static`，通过 Cordis 配置项 ID 注册并支持多例。它内置实时 mutation、关联群组和万级历史场景；跨包契约和真实 socket e2e 位于独立的 `packages/test-suite`。
+
+
