@@ -1669,30 +1669,34 @@ describe('bridge login e2e', () => {
       })
       const [deletedStored] = await ctx.database.get('mtproto_im_message', { id: stored.id })
       expect(deletedStored.deleted).toBe(true)
-      expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ pts: 4, seq: 3 })
-      const difference = await callRpc(client, key, sid, {
+      expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ pts: 1, seq: 3 })
+      expect(await callRpc(client, key, sid, {
         _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
-      }, 11)
-      expect(difference).toMatchObject({
-        _: 'updates.difference',
+      }, 11)).toMatchObject({ _: 'updates.differenceEmpty', seq: 3 })
+      const chatId = pushed.chats[0].id
+      const channelDifference = await callRpc(client, key, sid, {
+        _: 'updates.getChannelDifference', force: true,
+        channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
+        filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+      }, 12)
+      expect(channelDifference).toMatchObject({
+        _: 'updates.channelDifference', final: true, pts: 4,
         newMessages: [{ _: 'message', message: 'arrived by subscribe' }],
         otherUpdates: [
           { _: 'updateEditChannelMessage', message: { message: 'edited by subscribe' } },
           { _: 'updateDeleteChannelMessages', messages: [pushed.updates[0].message.id] },
         ],
-        state: { pts: 4, seq: 3 },
       })
       expect(await ctx.database.get('mtproto_update_delivery', {})).toEqual([])
 
-      const chatId = pushed.chats[0].id
       expect(await callRpc(client, key, sid, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(700), filePart: 0,
         bytes: new TextEncoder().encode('stream-'),
-      }, 12)).toEqual({ _: 'boolTrue' })
+      }, 14)).toEqual({ _: 'boolTrue' })
       expect(await callRpc(client, key, sid, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(700), filePart: 1,
         bytes: new TextEncoder().encode('through'),
-      }, 14)).toEqual({ _: 'boolTrue' })
+      }, 16)).toEqual({ _: 'boolTrue' })
       const sentMedia = await callRpc(client, key, sid, {
         _: 'messages.sendMedia',
         peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
@@ -1703,7 +1707,7 @@ describe('bridge login e2e', () => {
           file: { _: 'inputFile', id: Long.fromNumber(700), parts: 2, name: 'stream.txt', md5Checksum: '' },
           mimeType: 'text/plain', attributes: [{ _: 'documentAttributeFilename', fileName: 'stream.txt' }],
         },
-      }, 16)
+      }, 18)
       expect(sentMedia).toMatchObject({
         _: 'updates',
         updates: [
@@ -1722,7 +1726,7 @@ describe('bridge login e2e', () => {
           _: 'inputDocumentFileLocation', id: sentDocument.id, accessHash: sentDocument.accessHash,
           fileReference: sentDocument.fileReference, thumbSize: '',
         },
-      }, 18)
+      }, 20)
       expect(new TextDecoder().decode(downloaded.bytes)).toBe('through')
       expect(transferProgress).toMatchObject([
         { phase: 'upload', transferredBytes: 7, totalBytes: 14 },
