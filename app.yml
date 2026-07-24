@@ -25,12 +25,14 @@
     apiHash: ''
 - id: static
   name: '@mtproto-relay/platform-static'
+  disabled: true
   config:
     eventIntervalMs: 20000
 - id: qqnt
   name: '@mtproto-relay/platform-qqnt'
   config:
     endpoint: http://127.0.0.1:18767/v1
+    mediaDownloadMode: auto
 - id: mtproto-debug
   name: '@mtproto-relay/mtproto-debug'
   config:
