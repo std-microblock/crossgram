@@ -5,7 +5,7 @@ import type { Context } from 'cordis'
 import { computed, defineComponent, nextTick, onBeforeUnmount, onMounted, ref, resolveComponent, Teleport, watch } from 'vue'
 import { useRpc } from '@cordisjs/client'
 import { useVirtualizer } from '@tanstack/vue-virtual'
-import { countGroupedEvents, filterEventGroups, groupRpcEvents } from '../src/event-groups.js'
+import { countGroupedEvents, filterEventGroups, getRpcResultMetrics, groupRpcEvents } from '../src/event-groups.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
 import './style.css'
 
@@ -78,7 +78,12 @@ export const EventRow = defineComponent({
     return () => {
       const event = props.event
       const direction = event.direction === 'client->server' ? 'C -> S' : 'S -> C'
-      return <article class={['debug-event', `direction-${event.direction.replace('->', '-')}`]}>
+      const rpcMetrics = getRpcResultMetrics(event, props.result)
+      return <article class={[
+        'debug-event',
+        `direction-${event.direction.replace('->', '-')}`,
+        rpcMetrics && `rpc-${rpcMetrics.state}`,
+      ]}>
         <button
           type="button"
           class="event-header"
@@ -95,9 +100,15 @@ export const EventRow = defineComponent({
           <code class="event-seq" title="sequence number">{event.seqNo === undefined ? '\u2014' : `seq:${event.seqNo}`}</code>
           <code class="event-auth" title="auth key id">{event.authKeyId ? `key:${event.authKeyId}` : '\u2014'}</code>
           <code class="event-session" title="session id">{event.sessionId ? `sid:${event.sessionId}` : '\u2014'}</code>
+          {rpcMetrics
+            ? <code
+              class={['rpc-duration', `rpc-duration-${rpcMetrics.state}`]}
+              title={`RPC returned in ${rpcMetrics.durationMs} ms`}
+            >{formatDuration(rpcMetrics.durationMs)}</code>
+            : <span class="rpc-duration-empty" aria-hidden="true">{`\u2014`}</span>}
           {props.result
             ? <code
-              class="rpc-result-summary"
+              class={['rpc-result-summary', `rpc-result-${rpcMetrics?.state ?? 'ok'}`]}
               title={props.result.name}
               onContextmenu={mouseEvent => showContextMenu(mouseEvent, props.result!)}
             >result:{props.result.name}</code>
@@ -325,4 +336,9 @@ export default function apply(ctx: Context): void {
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp)
   return `${date.toLocaleTimeString(undefined, { hour12: false })}.${String(date.getMilliseconds()).padStart(3, '0')}`
+}
+
+export function formatDuration(durationMs: number): string {
+  if (durationMs < 1_000) return `${durationMs} ms`
+  return `${(durationMs / 1_000).toFixed(2)} s`
 }

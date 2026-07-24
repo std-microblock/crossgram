@@ -1,1 +1,1 @@
-export { default, DebugPage, EventRow } from './page.js'
+export { default, DebugPage, EventRow, formatDuration } from './page.js'

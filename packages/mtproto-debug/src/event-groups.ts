@@ -1,8 +1,38 @@
 import type { CapturedMtprotoEvent } from './types.js'
 
+export const SLOW_RPC_THRESHOLD_MS = 1_000
+
+export type RpcResultState = 'ok' | 'slow' | 'error'
+
 export interface EventGroup {
   event: CapturedMtprotoEvent
   result?: CapturedMtprotoEvent
+}
+
+export interface RpcResultMetrics {
+  durationMs: number
+  state: RpcResultState
+}
+
+export function getRpcResultMetrics(
+  call: CapturedMtprotoEvent,
+  result?: CapturedMtprotoEvent,
+): RpcResultMetrics | undefined {
+  if (!result) return undefined
+  const durationMs = Math.max(0, result.timestamp - call.timestamp)
+  return {
+    durationMs,
+    state: isRpcError(result)
+      ? 'error'
+      : durationMs >= SLOW_RPC_THRESHOLD_MS ? 'slow' : 'ok',
+  }
+}
+
+export function isRpcError(event: CapturedMtprotoEvent): boolean {
+  if (!event.payload || typeof event.payload !== 'object') return false
+  const payload = event.payload as Record<string, unknown>
+  if (payload._ !== 'rpc_result' || !payload.result || typeof payload.result !== 'object') return false
+  return (payload.result as Record<string, unknown>)._ === 'mt_rpc_error'
 }
 
 export function groupRpcEvents(events: CapturedMtprotoEvent[]): EventGroup[] {

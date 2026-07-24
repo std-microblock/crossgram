@@ -19,7 +19,7 @@ vi.mock('@cordisjs/client', async () => {
   }
 })
 
-import { DebugPage, EventRow } from './index.js'
+import { DebugPage, EventRow, formatDuration } from './index.js'
 
 describe('MTProto debug client', () => {
   beforeAll(() => {
@@ -80,7 +80,9 @@ describe('MTProto debug client', () => {
     expect(header.get('.event-auth').text()).toBe('key:deadbeef')
     expect(header.get('.event-session').text()).toBe('sid:0x200')
     expect(header.get('.rpc-result-summary').text()).toContain('messages.messages')
-    expect(header.element.children).toHaveLength(11)
+    expect(header.get('.rpc-duration').text()).toBe('1 ms')
+    expect(header.get('.rpc-duration').attributes('title')).toBe('RPC returned in 1 ms')
+    expect(header.element.children).toHaveLength(12)
     expect(wrapper.find('.event-detail').exists()).toBe(false)
 
     await header.trigger('click')
@@ -89,6 +91,58 @@ describe('MTProto debug client', () => {
     expect(wrapper.get('.rpc-result-detail').text()).toContain('rpc_result')
     expect(wrapper.get('.rpc-result-detail').classes()).toContain('rpc-result-detail')
     expect(getComputedStyle(wrapper.get('.rpc-result-detail').element).filter).not.toContain('grayscale')
+  })
+
+  it('uses distinct row markers for slow results and returned RPC errors', () => {
+    const call = event(1, { timestamp: 10_000, messageId: '0x1' })
+    const fast = event(2, {
+      timestamp: 10_025,
+      direction: 'server->client',
+      name: 'rpc_result -> boolTrue',
+      requestMessageId: '0x1',
+      payload: { _: 'rpc_result', result: { _: 'boolTrue' } },
+    })
+    const slowCall = event(3, { timestamp: 20_000, messageId: '0x2' })
+    const slow = event(4, {
+      timestamp: 22_345,
+      direction: 'server->client',
+      name: 'rpc_result -> messages.messages',
+      requestMessageId: '0x2',
+      payload: { _: 'rpc_result', result: { _: 'messages.messages' } },
+    })
+    const errorCall = event(5, { timestamp: 30_000, messageId: '0x3' })
+    const error = event(6, {
+      timestamp: 34_500,
+      direction: 'server->client',
+      name: 'rpc_result -> mt_rpc_error',
+      requestMessageId: '0x3',
+      payload: {
+        _: 'rpc_result',
+        result: { _: 'mt_rpc_error', errorCode: 400, errorMessage: 'BAD_REQUEST' },
+      },
+    })
+
+    const fastRow = mount(EventRow, { props: { event: call, result: fast } })
+    const slowRow = mount(EventRow, { props: { event: slowCall, result: slow } })
+    const errorRow = mount(EventRow, { props: { event: errorCall, result: error } })
+
+    expect(fastRow.get('.debug-event').classes()).toContain('rpc-ok')
+    expect(fastRow.get('.rpc-duration').text()).toBe('25 ms')
+    expect(slowRow.get('.debug-event').classes()).toContain('rpc-slow')
+    expect(slowRow.get('.rpc-duration').classes()).toContain('rpc-duration-slow')
+    expect(slowRow.get('.rpc-duration').text()).toBe('2.35 s')
+    expect(errorRow.get('.debug-event').classes()).toContain('rpc-error')
+    expect(errorRow.get('.debug-event').classes()).not.toContain('rpc-slow')
+    expect(errorRow.get('.rpc-duration').classes()).toContain('rpc-duration-error')
+    expect(errorRow.get('.rpc-result-summary').classes()).toContain('rpc-result-error')
+    expect(errorRow.get('.rpc-result-summary').text()).toContain('mt_rpc_error')
+  })
+
+  it('formats sub-second and multi-second return times consistently', () => {
+    expect(formatDuration(0)).toBe('0 ms')
+    expect(formatDuration(999)).toBe('999 ms')
+    expect(formatDuration(1_000)).toBe('1.00 s')
+    expect(formatDuration(12_345)).toBe('12.35 s')
   })
 
   it('virtualizes a large stream and keeps a correlated result at the call row', async () => {
