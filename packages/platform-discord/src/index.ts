@@ -398,7 +398,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
           parts.push({ ...part })
           continue
         }
-        if (part.type === 'sticker' || !part.media.locator) continue
+        if (part.type === 'sticker' || part.type === 'card' || !part.media.locator) continue
         parts.push({
           type: 'media' as const,
           media: {
