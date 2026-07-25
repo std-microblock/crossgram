@@ -1965,6 +1965,58 @@ describe('bridge login e2e', () => {
       await rm(directory, { recursive: true, force: true })
     }
   }, 15000)
+
+  it('returns not-modified for unchanged sticker background refreshes', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x56789abc, 0x5abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 4)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 6)
+
+      const all = await callRpc(client, key, sid, {
+        _: 'messages.getAllStickers', hash: Long.ZERO,
+      }, 8)
+      expect(all).toMatchObject({ _: 'messages.allStickers', sets: { length: 2 } })
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.getAllStickers', hash: all.hash,
+      }, 10)).toEqual({ _: 'messages.allStickersNotModified' })
+
+      const set = all.sets[0]
+      const pack = await callRpc(client, key, sid, {
+        _: 'messages.getStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },
+        hash: 0,
+      }, 12)
+      expect(pack).toMatchObject({ _: 'messages.stickerSet', documents: { length: 2 } })
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.getStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },
+        hash: pack.set.hash,
+      }, 14)).toEqual({ _: 'messages.stickerSetNotModified' })
+
+      const saved = await callRpc(client, key, sid, {
+        _: 'messages.getFavedStickers', hash: Long.ZERO,
+      }, 16)
+      expect(saved).toMatchObject({ _: 'messages.favedStickers', stickers: { length: 1 } })
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.getFavedStickers', hash: saved.hash,
+      }, 18)).toEqual({ _: 'messages.favedStickersNotModified' })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 15000)
 })
 
 describe('relay e2e', () => {
