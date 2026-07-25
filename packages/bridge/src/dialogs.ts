@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  messageText, telegramMessageId, telegramReplyToMessageId,
+  messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
@@ -1977,6 +1977,7 @@ export class DialogRpc {
     const { source, tlId } = item
     const conversation = this._conversation(source.conversationId)
     const sticker = source.content.parts.find((part) => part.type === 'sticker')
+    const card = source.content.parts.find((part) => part.type === 'card')
     const reply = this._messageReplyHeader(source)
     return projectTlMessage({
       conversation,
@@ -1993,7 +1994,9 @@ export class DialogRpc {
         ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
         : sticker?.type === 'sticker'
           ? this._stickers?.makeMessageMedia(sticker.sticker)
-          : this._conversationPreviewMedia(source),
+          : card?.type === 'card'
+            ? makeTlCardPreview(card.card)
+            : this._conversationPreviewMedia(source),
       entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
       reactions: source.reactionContext?.reactions.length
         ? this._reactions?.messageReactions(source.conversationId, source, (id) => this._userId(id))
@@ -2089,10 +2092,13 @@ export class DialogRpc {
   private _messageEntities(source: IMMessage): tl.TypeMessageEntity[] | undefined {
     const output: tl.TypeMessageEntity[] = []
     let base = 0
-    const textParts = source.content.parts.filter((part) => part.type === 'text')
-    for (const [index, part] of textParts.entries()) {
-      for (const entity of part.entities ?? []) {
-        if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > part.text.length) continue
+    const rendered = source.content.parts.flatMap((part) => {
+      const text = messagePartText(part)
+      return text ? [{ part, text }] : []
+    })
+    for (const [index, { part, text }] of rendered.entries()) {
+      for (const entity of part.type === 'text' ? part.entities ?? [] : []) {
+        if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > text.length) continue
         if (entity.type === 'mention') {
           output.push({
             _: 'messageEntityMentionName',
@@ -2113,7 +2119,7 @@ export class DialogRpc {
           })
         }
       }
-      base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
+      base += text.length + (index + 1 < rendered.length ? 1 : 0)
     }
     return output.length ? output : undefined
   }
@@ -2713,6 +2719,32 @@ export function stableId(value: string): number {
     hash = Math.imul(hash, 0x01000193)
   }
   return (hash >>> 0) % 0x7ffffffe + 1
+}
+
+/** Builds a self-contained Telegram preview without asking Telegram to scrape QQ URLs. */
+export function makeTlCardPreview(
+  card: import('./platform.js').IMMessageCard,
+): tl.RawMessageMediaWebPage {
+  const url = /^https?:\/\/\S+$/i.test(card.url ?? '') ? card.url! : 'https://im.qq.com/'
+  let displayUrl = card.source || card.title
+  try {
+    displayUrl = new URL(url).hostname || displayUrl
+  } catch {
+    // The fallback above is always valid; keep a useful display label if a
+    // future adapter supplies a non-standard URL.
+  }
+  return {
+    _: 'messageMediaWebPage', manual: true, safe: true,
+    webpage: {
+      _: 'webPage',
+      id: Long.fromNumber(stableId(`card-preview:${JSON.stringify(card)}`)),
+      url, displayUrl, hash: 0,
+      type: card.kind === 'mini-app' ? 'app' : card.kind === 'music' ? 'audio' : 'article',
+      siteName: card.source || (card.kind === 'mini-app' ? 'QQ 小程序' : 'QQ'),
+      title: card.title,
+      description: card.description,
+    },
+  }
 }
 
 export function projectTlMessage(options: {
