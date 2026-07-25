@@ -1304,7 +1304,13 @@ describe('bridge login e2e', () => {
         msgId: reactionMessage.id,
         reaction: [{ _: 'reactionEmoji', emoticon: '❤️' }],
       }, 1_188)
-      expect(heartReacted).toMatchObject({ _: 'updates' })
+      expect(heartReacted).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageReactions' },
+          { _: 'updateRecentReactions' },
+        ],
+      })
       const recentReactions = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getRecentReactions', limit: 100, hash: Long.ZERO,
       }, 1_189)
