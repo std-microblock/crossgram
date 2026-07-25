@@ -109,7 +109,7 @@ describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 16, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 17, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
@@ -145,7 +145,7 @@ describe('QQNTPlatform mapping', () => {
     }))
     platform.client.getUser = vi.fn()
 
-    await expect(platform.getAccount()).rejects.toThrow('direct media URLs require 16')
+    await expect(platform.getAccount()).rejects.toThrow('platform features require 17')
     expect(platform.client.getUser).not.toHaveBeenCalled()
   })
 
@@ -165,6 +165,27 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.deleteMessages).toHaveBeenCalledWith('2:group', ['opaque-native-old'], true)
     expect(platform.client.sendMessage).toHaveBeenCalledOnce()
     expect(edited).toMatchObject({ message: { id: 'replacement' }, replacedMessageId: 'logical-old' })
+  })
+
+  it('forwards opaque read targets and clears the cached unread history anchor', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: '2:group', kind: 'group' as const, title: 'Group',
+      peerUid: 'group', peerUin: 'group', chatType: 2 as const,
+      unreadCount: 3, firstUnread: { msgSeq: 'unread-seq', msgTime: '10' },
+    }] }))
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [] }))
+    platform.client.markRead = vi.fn(async () => {})
+    await platform.getDialogs(session)
+
+    await platform.markRead(session, { conversationId: '2:group', messageId: 'opaque/message' })
+    await platform.getHistory(session, { id: '2:group' })
+
+    expect(platform.client.markRead).toHaveBeenCalledWith('2:group', 'opaque/message')
+    expect(platform.client.getHistory).toHaveBeenCalledWith('2:group', expect.objectContaining({
+      aroundUnreadSeq: undefined,
+    }))
   })
 
   it('uses QQ merged forward only for multiple preserved-source messages', async () => {

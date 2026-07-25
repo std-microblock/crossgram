@@ -19,6 +19,31 @@ describe('QQNTClient streaming transport', () => {
     await once(server, 'close')
   })
 
+  it('posts opaque read boundaries to the QQNT bridge', async () => {
+    const requests: Array<{ url: string, method?: string, body: unknown, authorization?: string }> = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      token: 'secret',
+      fetch: vi.fn(async (input, init) => {
+        const headers = new Headers(init?.headers)
+        requests.push({
+          url: String(input), method: init?.method,
+          body: JSON.parse(String(init?.body)),
+          authorization: headers.get('authorization') ?? undefined,
+        })
+        return Response.json({ ok: true })
+      }),
+    })
+
+    await client.markRead('2:group/opaque', 'msg/opaque:42')
+
+    expect(requests).toEqual([{
+      url: 'http://bridge.invalid/v1/messages/read', method: 'POST',
+      body: { conversationId: '2:group/opaque', messageId: 'msg/opaque:42' },
+      authorization: 'Bearer secret',
+    }])
+  })
+
   it('forwards message search filters and opaque cursors', async () => {
     let requestUrl = ''
     server = createServer((request, response) => {

@@ -223,6 +223,14 @@ export class QQNTClient {
     })
   }
 
+  async markRead(conversationId: string, messageId: string): Promise<void> {
+    await this.json('/messages/read', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ conversationId, messageId }),
+    })
+  }
+
   async getMessage(conversationId: string, messageId: string): Promise<WireMessage | null> {
     const response = await this.fetchImpl(`${this.endpoint}/messages/get`, {
       method: 'POST',
