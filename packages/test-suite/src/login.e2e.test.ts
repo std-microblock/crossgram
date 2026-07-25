@@ -1276,15 +1276,18 @@ describe('bridge login e2e', () => {
       }, 188)
       expect(reacted).toMatchObject({
         _: 'updates',
-        updates: [{
-          _: 'updateMessageReactions',
-          msgId: reactionMessage.id,
-          reactions: {
-            results: expect.arrayContaining([
-              expect.objectContaining({ reaction: { _: 'reactionEmoji', emoticon: '👍' }, count: 3 }),
-            ]),
+        updates: [
+          {
+            _: 'updateMessageReactions',
+            msgId: reactionMessage.id,
+            reactions: {
+              results: expect.arrayContaining([
+                expect.objectContaining({ reaction: { _: 'reactionEmoji', emoticon: '👍' }, count: 3 }),
+              ]),
+            },
           },
-        }],
+          { _: 'updateRecentReactions' },
+        ],
       })
       const reactionList = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessageReactionsList',
@@ -1502,15 +1505,18 @@ describe('bridge login e2e', () => {
       }, 209)
       expect(customReacted).toMatchObject({
         _: 'updates',
-        updates: [{
-          _: 'updateMessageReactions',
-          msgId: labHistory.messages[1].id,
-          reactions: {
-            results: expect.arrayContaining([
-              expect.objectContaining({ reaction: customLabReaction, chosenOrder: 0 }),
-            ]),
+        updates: [
+          {
+            _: 'updateMessageReactions',
+            msgId: labHistory.messages[1].id,
+            reactions: {
+              results: expect.arrayContaining([
+                expect.objectContaining({ reaction: customLabReaction, chosenOrder: 0 }),
+              ]),
+            },
           },
-        }],
+          { _: 'updateRecentReactions' },
+        ],
       })
       const labStickerDocuments = labHistory.messages.slice(3).map((item: any) => item.media.document)
       expect(labStickerDocuments.map((document: any) => document.mimeType)).toEqual([
@@ -1893,7 +1899,10 @@ describe('bridge login e2e', () => {
       const message: bridge.IMMessage = {
         id: `opaque:${'x'.repeat(8_192)}`, conversationId: conversation.id, senderId: 'sender',
         timestamp: 1_800_000_100, metadata: { qqMsgSeq: '250000', telegramMessageId: 250_000 },
-        content: { parts: [{ type: 'text', text: 'arrived by subscribe' }] },
+        content: { parts: [{
+          type: 'text', text: '@Push User arrived by subscribe',
+          entities: [{ type: 'mention', offset: 0, length: 10, userId: 'self' }],
+        }] },
       }
       await handler!({ type: 'message', conversation, message })
 
@@ -1902,12 +1911,17 @@ describe('bridge login e2e', () => {
         _: 'updates', seq: 1,
         updates: [{
           _: 'updateNewChannelMessage', pts: 2, ptsCount: 1,
-          message: { id: 0x40000007, peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
+          message: {
+            id: 0x40000007, peerId: { _: 'peerChannel' }, mentioned: true,
+            message: '@Push User arrived by subscribe',
+          },
         }],
         chats: [{ _: 'channel', megagroup: true, title: 'Push Group' }],
       })
       const [stored] = await ctx.database.get('mtproto_im_message', {})
-      expect(stored).toMatchObject({ primaryPlatformMessageId: message.id, text: 'arrived by subscribe' })
+      expect(stored).toMatchObject({
+        primaryPlatformMessageId: message.id, text: '@Push User arrived by subscribe',
+      })
 
       const editedMessage: bridge.IMMessage = {
         ...message,
@@ -1954,7 +1968,7 @@ describe('bridge login e2e', () => {
       }, 12)
       expect(channelDifference).toMatchObject({
         _: 'updates.channelDifference', final: true, pts: 4,
-        newMessages: [{ _: 'message', message: 'arrived by subscribe' }],
+        newMessages: [{ _: 'message', mentioned: true, message: '@Push User arrived by subscribe' }],
         otherUpdates: [
           { _: 'updateEditChannelMessage', message: { message: 'edited by subscribe' } },
           { _: 'updateDeleteChannelMessages', messages: [pushed.updates[0].message.id] },
@@ -2054,6 +2068,24 @@ describe('bridge login e2e', () => {
         expect.objectContaining({ id: replacementPush.updates[0].message.id, message: 'replacement after recall' }),
       ]))
       expect(replacementHistory.messages.some((item: any) => item.id === sentMedia.updates[1].message.id)).toBe(false)
+
+      const reply: bridge.IMMessage = {
+        id: 'reply-notification', conversationId: conversation.id, senderId: 'sender',
+        timestamp: 1_800_000_103, replyToId: 'sent-2',
+        content: { parts: [{ type: 'text', text: 'reply notification' }] },
+      }
+      await handler!({ type: 'message', conversation, message: reply })
+      const replyPush = await readPush(observer, observerKey)
+      expect(replyPush).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewChannelMessage',
+          message: {
+            message: 'reply notification', mentioned: true,
+            replyTo: { _: 'messageReplyHeader', replyToMsgId: replacementPush.updates[0].message.id },
+          },
+        }],
+      })
     } finally {
       observer?.close()
       client?.close()
