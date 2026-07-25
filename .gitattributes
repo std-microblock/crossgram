@@ -6,4 +6,5 @@
 *.gif -text
 *.webp -text
 *.webm -text
+*.tgs -text
 yarn-*.cjs linguist-vendored
