@@ -32,8 +32,12 @@ URL from `/files/direct-url`. Native videos use the same endpoint backed by
 QQNT's `getVideoPlayUrl`. The platform requests either URL directly with standard
 HTTP `Range` semantics; video documents keep `supports_streaming`, so seeking
 transfers only the requested byte range. The bridge token is never forwarded to
-the CDN. Resolver, RKey, and CDN errors are returned to the caller without a
-fallback. The legacy non-native `/files/download` path is not used. Protocol v13's native `/files/play-url` and
+the CDN. User and group avatar URLs are constructed in the platform from their
+numeric QQ IDs and fetched directly from qlogo without involving the bridge.
+Bridge-local resources such as cloud-control emoji files use the authenticated
+`/files/download` route; this route is never used as a fallback for native QQ
+message media. Resolver, RKey, and CDN errors for native media are returned to
+the caller without a fallback. Protocol v13's native `/files/play-url` and
 whole-file `200` responses remain supported during rolling upgrades.
 
 Untouched media keeps its original format and streams from the native URL; it
