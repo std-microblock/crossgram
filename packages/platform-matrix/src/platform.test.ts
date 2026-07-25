@@ -188,7 +188,7 @@ describe('MatrixPlatform', () => {
       })
       throw new Error(`unexpected request: ${url}`)
     })
-    const platform = createPlatform(fetch)
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
     await platform.getDialogs(session)
     const members = await platform.getConversationMembers(session, { id: '!room:example.org' })
 
