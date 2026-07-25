@@ -338,6 +338,63 @@ export class QQNTClient {
     }
   }
 
+  async *downloadReactionResource(
+    reactionKey: string,
+    options: {
+      signal?: AbortSignal
+      offset?: number
+      limit?: number
+      onChunk?(size: number): Promise<void> | void
+    } = {},
+  ): AsyncIterable<Uint8Array> {
+    if (!reactionKey) throw new Error('QQ reaction resource has no catalog key')
+    const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+    const limit = options.limit === undefined ? undefined : Math.max(0, Math.trunc(options.limit))
+    if (limit === 0) return
+    const ranged = offset > 0 || limit !== undefined
+    const end = limit === undefined ? '' : String(offset + limit - 1)
+    const response = await this.fetchImpl(`${this.endpoint}/reactions/asset`, {
+      method: 'POST',
+      headers: this.headers({
+        'content-type': 'application/json',
+        ...(ranged ? { range: `bytes=${offset}-${end}` } : {}),
+      }),
+      body: JSON.stringify({ reactionKey }),
+      signal: options.signal,
+    })
+    if (!response.ok) throw new Error(await responseError(response))
+    if (!response.body) throw new Error('QQ reaction asset response has no body')
+    const reader = response.body.getReader()
+    let skipped = response.status === 206 ? offset : 0
+    let remaining = limit ?? Number.POSITIVE_INFINITY
+    let completed = false
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          completed = true
+          break
+        }
+        if (!value?.length) continue
+        if (skipped + value.length <= offset) {
+          skipped += value.length
+          continue
+        }
+        const start = Math.max(0, offset - skipped)
+        const accepted = value.subarray(start, start + remaining)
+        skipped += value.length
+        if (!accepted.length) continue
+        remaining -= accepted.length
+        await options.onChunk?.(accepted.length)
+        yield accepted
+        if (remaining <= 0) return
+      }
+    } finally {
+      if (!completed) await reader.cancel().catch(() => undefined)
+      reader.releaseLock()
+    }
+  }
+
   private async resolveDirectUrl(locator: QQMediaLocator, signal?: AbortSignal): Promise<string> {
     if (signal?.aborted) throw signal.reason ?? new Error('download aborted')
     const key = directUrlIdentity(locator)

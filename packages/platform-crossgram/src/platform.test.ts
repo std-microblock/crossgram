@@ -109,7 +109,7 @@ describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 15, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 16, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
@@ -141,11 +141,11 @@ describe('QQNTPlatform mapping', () => {
   it('rejects bridge protocols that can still fall back to local media downloads', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 14, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 15, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn()
 
-    await expect(platform.getAccount()).rejects.toThrow('direct media URLs require 15')
+    await expect(platform.getAccount()).rejects.toThrow('direct media URLs require 16')
     expect(platform.client.getUser).not.toHaveBeenCalled()
   })
 
@@ -769,10 +769,17 @@ describe('QQNTPlatform mapping', () => {
     }])
   })
 
-  it('preserves unsupported local reaction definitions without reading disk and delegates reaction writes', async () => {
+  it('caches catalog-keyed static and animated reactions without exposing bridge paths', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-cache-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+    const png = await sharp({
+      create: { width: 20, height: 20, channels: 4, background: { r: 80, g: 140, b: 220, alpha: 1 } },
+    }).png().toBuffer()
+    const apng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAwAAAAICAYAAADN5B7xAAAACXBIWXMAAAABAAAAAQBPJcTWAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAAMAAAACAAAAAAAAAAAAAEACgAAGya3gAAAABRJREFUeJxj+MPA8J8UzDCqgRYaAJjXviFq8lROAAAAGmZjVEwAAAABAAAADAAAAAgAAAAAAAAAAAABAAoAAIBVXVQAAAAXZmRBVAAAAAJ4nGNgYPj7nzQ8qoEGGgAlJ76BvcErGQAAAABJRU5ErkJggg==',
+      'base64',
+    )
     const context = {
       available: [{
         key: '2:128522', title: '嘿嘿',
@@ -783,7 +790,7 @@ describe('QQNTPlatform mapping', () => {
           type: 'custom' as const, alt: '[辣眼睛]',
           resource: {
             version: 1, format: 'static' as const, mimeType: 'image/png' as const,
-            width: 200, height: 200, size: 10, locator: { filePath: '/tmp/s265.png' },
+            width: 200, height: 200, size: png.length, locator: { reactionKey: '1:265' },
           },
         },
       }, {
@@ -792,7 +799,7 @@ describe('QQNTPlatform mapping', () => {
           type: 'custom' as const, alt: '[微笑]',
           resource: {
             version: 2, format: 'video' as const, mimeType: 'video/webm' as const,
-            width: 128, height: 128, locator: { filePath: '/tmp/s14.png' },
+            width: 128, height: 128, size: apng.length, locator: { reactionKey: '1:14' },
           },
         },
       }],
@@ -801,6 +808,10 @@ describe('QQNTPlatform mapping', () => {
     }
     platform.client.getReactionCatalog = vi.fn(async () => context)
     platform.client.downloadFile = vi.fn()
+    platform.client.downloadReactionResource = vi.fn(async function* (reactionKey) {
+      expect(reactionKey === '1:265' || reactionKey === '1:14').toBe(true)
+      yield reactionKey === '1:265' ? png : apng
+    })
     platform.client.getMessageReactions = vi.fn(async () => ({
       reactions: [{
         ...context.reactions[0],
@@ -818,25 +829,25 @@ describe('QQNTPlatform mapping', () => {
       }, {
         key: '1:265',
         presentation: {
-          resource: { mimeType: 'image/png', width: 200, height: 200 },
+          resource: { format: 'static', mimeType: 'image/webp', width: 100, height: 100 },
         },
       }, {
         key: '1:14',
         presentation: {
-          resource: { format: 'video', mimeType: 'video/webm', width: 128, height: 128 },
+          resource: { format: 'video', mimeType: 'video/webm', width: 100, height: 100 },
         },
       }],
     })
     const custom = catalog.available[1]!
     if (custom.presentation.type !== 'custom') throw new Error('expected custom reaction')
     const customResource = custom.presentation.resource
-    const downloadLocal = async () => {
-      for await (const _chunk of platform.downloadReactionResource(
-        session, customResource, { offset: 8, limit: 4 },
-      )) { /* drain */ }
-    }
-    await expect(downloadLocal()).rejects.toThrow('no cached remote asset')
+    const cachedChunks: Uint8Array[] = []
+    for await (const chunk of platform.downloadReactionResource(
+      session, customResource, { offset: 8, limit: 4 },
+    )) cachedChunks.push(chunk)
+    expect(Buffer.concat(cachedChunks)).toHaveLength(4)
     expect(platform.client.downloadFile).not.toHaveBeenCalled()
+    expect(platform.client.downloadReactionResource).toHaveBeenCalledTimes(2)
     await expect(platform.getMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm',
     })).resolves.toMatchObject({ reactions: [{
@@ -849,6 +860,45 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAvailableReactions(session, { conversationId: '1:u' }))
       .resolves.toEqual({ available: [], reactions: [], maxSelected: 0 })
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(1)
+  }, 30_000)
+
+  it('streams catalog-keyed reaction resources when no media cache is configured', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [{
+        key: '1:14',
+        presentation: {
+          type: 'custom' as const, alt: '[微笑]',
+          resource: {
+            version: 2, format: 'video' as const, mimeType: 'video/webm' as const,
+            width: 128, height: 128, size: 12, locator: { reactionKey: '1:14' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    }))
+    const onProgress = vi.fn()
+    platform.client.downloadReactionResource = vi.fn(async function* (reactionKey, options) {
+      expect(reactionKey).toBe('1:14')
+      expect(options).toMatchObject({ offset: 4, limit: 3 })
+      await options.onChunk?.(2)
+      yield Uint8Array.of(1, 2)
+      await options.onChunk?.(1)
+      yield Uint8Array.of(3)
+    })
+
+    const catalog = await platform.getAvailableReactions(session, { conversationId: '2:g' })
+    const definition = catalog.available[0]!
+    if (definition.presentation.type !== 'custom') throw new Error('expected custom reaction')
+    const chunks: Uint8Array[] = []
+    for await (const chunk of platform.downloadReactionResource(
+      session, definition.presentation.resource, { offset: 4, limit: 3, onProgress },
+    )) chunks.push(chunk)
+
+    expect(Buffer.concat(chunks)).toEqual(Buffer.from([1, 2, 3]))
+    expect(onProgress).toHaveBeenLastCalledWith({
+      phase: 'download', mediaIndex: 0, transferredBytes: 3, totalBytes: 12,
+    })
   })
 
   it('streams remote reaction resources when no media cache is configured', async () => {
