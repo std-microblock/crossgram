@@ -151,13 +151,13 @@ describe('QQNTClient streaming transport', () => {
     expect(Buffer.concat(chunks).toString()).toBe('complete-file')
   })
 
-  it('requests only the byte range needed for video playback', async () => {
+  it('requests only the byte range needed from a bridge-resolved video URL', async () => {
     let range = ''
     let bridgeDownloads = 0
     let resolverAuthorization = ''
     let cdnAuthorization = ''
     server = createServer(async (request, response) => {
-      if (request.url === '/files/play-url') {
+      if (request.url === '/files/direct-url') {
         resolverAuthorization = request.headers.authorization ?? ''
         for await (const _chunk of request) { /* drain locator */ }
         const address = server!.address()
@@ -195,11 +195,88 @@ describe('QQNTClient streaming transport', () => {
     expect(Buffer.concat(chunks).toString()).toBe('efgh')
   })
 
+  it('downloads an image from its packet-refreshed direct URL without leaking bridge authorization', async () => {
+    const requests: Array<{ url: string, range?: string, authorization?: string }> = []
+    server = createServer(async (request, response) => {
+      requests.push({
+        url: request.url ?? '', range: request.headers.range, authorization: request.headers.authorization,
+      })
+      if (request.url === '/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/qq-cdn/image` }))
+        return
+      }
+      if (request.url === '/qq-cdn/image') {
+        response.writeHead(206, { 'content-range': 'bytes 1-3/5', 'content-length': '3' })
+        response.end('bcd')
+        return
+      }
+      response.writeHead(500).end()
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token' })
+    const chunks: Uint8Array[] = []
+    for await (const chunk of client.downloadFile({
+      messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'image', fileName: 'photo.jpg',
+      originImageUrl: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image&rkey=expired',
+    }, { offset: 1, limit: 3 })) chunks.push(chunk)
+
+    expect(requests).toEqual([
+      { url: '/files/direct-url', range: undefined, authorization: 'Bearer bridge-token' },
+      { url: '/qq-cdn/image', range: 'bytes=1-3', authorization: undefined },
+    ])
+    expect(Buffer.concat(chunks).toString()).toBe('bcd')
+  })
+
+  it('uses the legacy video resolver during a rolling bridge upgrade', async () => {
+    const requestUrls: string[] = []
+    server = createServer(async (request, response) => {
+      requestUrls.push(request.url ?? '')
+      if (request.url === '/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        response.writeHead(404, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: 'not found' }))
+      } else if (request.url === '/files/play-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/legacy-video` }))
+      } else if (request.url === '/legacy-video') {
+        response.end('legacy')
+      } else {
+        response.writeHead(500).end()
+      }
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const chunks: Uint8Array[] = []
+    for await (const chunk of client.downloadFile({
+      messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'file', fileName: 'clip.mp4', videoCodecFormat: 0,
+    })) chunks.push(chunk)
+
+    expect(requestUrls).toEqual(['/files/direct-url', '/files/play-url', '/legacy-video'])
+    expect(Buffer.concat(chunks).toString()).toBe('legacy')
+  })
+
   it('falls back to the bridge when a native video play URL is unavailable', async () => {
     let range = ''
+    const resolverUrls: string[] = []
     server = createServer(async (request, response) => {
       for await (const _chunk of request) { /* drain locator */ }
-      if (request.url === '/files/play-url') {
+      if (request.url === '/files/direct-url' || request.url === '/files/play-url') {
+        resolverUrls.push(request.url)
         response.writeHead(500, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ error: 'expired' }))
         return
@@ -220,6 +297,43 @@ describe('QQNTClient streaming transport', () => {
     }, { offset: 2, limit: 3 })) chunks.push(chunk)
 
     expect(range).toBe('bytes=2-4')
+    expect(resolverUrls).toEqual(['/files/direct-url', '/files/play-url'])
+    expect(Buffer.concat(chunks).toString()).toBe('cde')
+  })
+
+  it('falls back to bridge streaming when an image CDN rejects the refreshed URL', async () => {
+    const requestUrls: string[] = []
+    server = createServer(async (request, response) => {
+      requestUrls.push(request.url ?? '')
+      if (request.url === '/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/expired-image` }))
+      } else if (request.url === '/expired-image') {
+        response.writeHead(403).end('expired')
+      } else if (request.url === '/files/download') {
+        for await (const _chunk of request) { /* drain locator */ }
+        response.writeHead(206, { 'content-range': 'bytes 2-4/8', 'content-length': '3' })
+        response.end('cde')
+      } else {
+        response.writeHead(500).end()
+      }
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const chunks: Uint8Array[] = []
+    for await (const chunk of client.downloadFile({
+      messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'image', fileName: 'photo.jpg',
+      originImageUrl: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image&rkey=expired',
+    }, { offset: 2, limit: 3 })) chunks.push(chunk)
+
+    expect(requestUrls).toEqual(['/files/direct-url', '/expired-image', '/files/download'])
     expect(Buffer.concat(chunks).toString()).toBe('cde')
   })
 

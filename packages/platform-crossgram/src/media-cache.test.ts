@@ -13,8 +13,11 @@ const temporaryDirectories: string[] = []
 const disposals: Array<() => Promise<void>> = []
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
+  sharp.cache(false)
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, {
+    recursive: true, force: true, maxRetries: 20, retryDelay: 25,
+  })))
 })
 
 describe('QQMediaCache', () => {

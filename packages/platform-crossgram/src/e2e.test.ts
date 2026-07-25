@@ -191,6 +191,33 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     expect(downloaded).toBe(Math.min(4096, info.size))
   }, 240_000)
 
+  it.runIf(Boolean(process.env.QQNT_BRIDGE_E2E_IMAGE_CONVERSATION))(
+    'downloads a native QQ image through a packet-refreshed direct URL',
+    async () => {
+      const conversationId = process.env.QQNT_BRIDGE_E2E_IMAGE_CONVERSATION!
+      const history = await platform.getHistory(session, { id: conversationId }, { limit: 100 })
+      const requestedMessage = process.env.QQNT_BRIDGE_E2E_IMAGE_MESSAGE
+      const image = history.messages
+        .filter((message) => !requestedMessage || message.id === requestedMessage)
+        .flatMap((message) => message.content.parts)
+        .find((part) => part.type === 'media'
+          && part.media.kind === 'image'
+          && Boolean(part.media.locator?.originImageUrl))
+      if (!image || image.type !== 'media') throw new Error('native QQ image with originImageUrl not found')
+      expect(image.media.locator).toMatchObject({
+        kind: 'image', originImageUrl: expect.stringMatching(/^https?:\/\//),
+      })
+
+      const limit = Math.min(4096, image.media.size ?? 4096)
+      let bytes = 0
+      for await (const chunk of platform.downloadMedia(session, image.media, { offset: 0, limit })) {
+        bytes += chunk.length
+      }
+      expect(bytes).toBe(limit)
+    },
+    180_000,
+  )
+
   it.runIf(Boolean(process.env.QQNT_BRIDGE_E2E_VIDEO_CONVERSATION))(
     'projects a native QQ video and seeks through two independent byte ranges',
     async () => {

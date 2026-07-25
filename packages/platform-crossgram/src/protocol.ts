@@ -13,6 +13,8 @@ export interface QQMediaLocator {
   md5?: string
   sha?: string
   sha3?: string
+  /** QQ's original CDN URL; bridge protocol v14 can replace its expired RKey. */
+  originImageUrl?: string
   /** Present only for native QQ video elements. 0 h264, 1 h265. */
   videoCodecFormat?: number
   avatarUin?: string

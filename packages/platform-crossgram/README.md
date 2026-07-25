@@ -28,15 +28,16 @@ The adapter reads `IMMediaSource.stream()` directly and never constructs a
 complete media `Buffer`. `webSocketEndpoint` can point the event connection at a
 different host or path without changing the HTTP API `endpoint`.
 
-For native videos, the platform asks the injected bridge to call QQNT's
-`getVideoPlayUrl`, then requests the signed QQ CDN URL directly with standard
-HTTP `Range` semantics. Native QQ video metadata is projected as a Telegram
-video document with `supports_streaming`, so seeking transfers only the requested
-byte range. The bridge token is never forwarded to the CDN. If the bridge is old,
-the play URL is expired, or the CDN rejects the request, the platform falls back
-to `/files/download`; that path uses `downloadRichMedia` once and serves ranges
-from QQ's local file. A whole-file `200` response from an older bridge is sliced
-locally during rolling upgrades.
+For native images, bridge protocol v14 sends `OidbSvcTrpcTcp.0x9067_202` through
+QQNT, refreshes the private/group RKey in `originImageUrl`, and returns the QQ CDN
+URL from `/files/direct-url`. Native videos use the same endpoint backed by
+QQNT's `getVideoPlayUrl`. The platform requests either URL directly with standard
+HTTP `Range` semantics; video documents keep `supports_streaming`, so seeking
+transfers only the requested byte range. The bridge token is never forwarded to
+the CDN. If the bridge is old, the URL is expired, or the CDN rejects the request,
+the platform falls back to `/files/download`; that path uses `downloadRichMedia`
+once and serves ranges from QQ's local file. Protocol v13's `/files/play-url` and
+whole-file `200` responses remain supported during rolling upgrades.
 
 In `auto` mode the adapter downloads
 eligible media when a message event arrives, uses `sha3`/`sha`/`md5` as the
@@ -92,6 +93,8 @@ QQNT_BRIDGE_E2E=1 pnpm --filter @mtproto-relay/platform-qqnt test:e2e
 They hard-code the requested safety allowlist: direct messages only target
 `MicroBlock (1715311957)`, while group messages only target `1058754719` or
 `1084013940`. Set `QQNT_BRIDGE_E2E_FILE` to additionally test a streamed file
-upload and platform-side range download. To verify an existing native QQ video,
+upload and platform-side range download. To verify an existing native QQ image,
+set `QQNT_BRIDGE_E2E_IMAGE_CONVERSATION` and optionally the exact message in
+`QQNT_BRIDGE_E2E_IMAGE_MESSAGE`. To verify an existing native QQ video,
 set `QQNT_BRIDGE_E2E_VIDEO_CONVERSATION` to its bridge conversation ID and,
 optionally, `QQNT_BRIDGE_E2E_VIDEO_MESSAGE` to the exact message ID.

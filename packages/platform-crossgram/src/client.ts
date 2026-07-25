@@ -285,15 +285,10 @@ export class QQNTClient {
     const end = limit === undefined ? '' : String(offset + limit - 1)
     const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
     let response: Response | undefined
-    if (locator.videoCodecFormat !== undefined) {
+    if (locator.originImageUrl || locator.videoCodecFormat !== undefined) {
       try {
-        const play = await this.json<{ url: string }>('/files/play-url', false, {
-          method: 'POST',
-          headers: this.headers({ 'content-type': 'application/json' }),
-          body: JSON.stringify(locator),
-          signal: options.signal,
-        })
-        const direct = await this.fetchImpl(play.url, {
+        const directUrl = await this.resolveDirectUrl(locator, options.signal)
+        const direct = await this.fetchImpl(directUrl, {
           headers: rangeHeaders,
           signal: options.signal,
           redirect: 'follow',
@@ -302,7 +297,7 @@ export class QQNTClient {
         else await direct.body?.cancel().catch(() => undefined)
       } catch (error) {
         if (options.signal?.aborted) throw error
-        // Old bridges, expired URLs, and CDN failures all retain the native
+        // Old bridges, expired RKeys, and CDN failures all retain the native
         // downloadRichMedia path below as a compatibility fallback.
       }
     }
@@ -315,7 +310,7 @@ export class QQNTClient {
     if (!response.ok) throw new Error(await responseError(response))
     if (!response.body) throw new Error('QQNT media response has no body')
     const reader = response.body.getReader()
-    // Protocol v12 applies Range at the bridge. A v11 bridge ignores it and
+    // Protocol v13 applies Range at the bridge. An older bridge ignores it and
     // returns 200, so retain a local slicing fallback during rolling upgrades.
     let skipped = response.status === 206 ? offset : 0
     let remaining = limit ?? Number.POSITIVE_INFINITY
@@ -344,6 +339,23 @@ export class QQNTClient {
     } finally {
       if (!completed) await reader.cancel().catch(() => undefined)
       reader.releaseLock()
+    }
+  }
+
+  private async resolveDirectUrl(locator: QQMediaLocator, signal?: AbortSignal): Promise<string> {
+    const init = {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(locator),
+      signal,
+    }
+    try {
+      return (await this.json<{ url: string }>('/files/direct-url', false, init)).url
+    } catch (error) {
+      if (signal?.aborted || locator.videoCodecFormat === undefined) throw error
+      // Protocol v13 exposed only the video resolver. Keep rolling upgrades
+      // seekable while v14 adds the generic image/video endpoint.
+      return (await this.json<{ url: string }>('/files/play-url', false, init)).url
     }
   }
 
