@@ -117,6 +117,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     string,
     (event: IMEvent<QQMediaLocator>) => void | Promise<void>
   >()
+  private readonly mediaPreparationJobs = new Map<string, Promise<void>>()
   private readonly mediaUpgradeJobs = new Map<string, Promise<void>>()
 
   constructor(
@@ -643,6 +644,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: IMDownloadOptions = {},
   ): AsyncIterable<Uint8Array> {
     if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
+    if (media.locator.deferred) return
     const original = {
       size: media.size,
       stream: ({ signal }: { signal?: AbortSignal } = {}) => this.client.downloadFile(media.locator!, { signal }),
@@ -856,12 +858,35 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversation<QQMediaLocator>,
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
-    const prepared = await this.prepareInitialMessage(message)
     const handler = this.eventHandlers.get(session.platformSessionId)
-    if (handler) {
-      const timer = setTimeout(() => this.scheduleMediaUpgrade(handler, conversation, prepared), 0)
-      timer.unref()
-    }
+    if (!handler || !this.mediaCache) return this.prepareInitialMessage(message)
+    let deferred = false
+    const parts = await Promise.all(message.content.parts.map(async (part) => {
+      if (part.type === 'sticker') {
+        try {
+          return { ...part, sticker: await this.mediaCache!.restoreStickerThumbnail(part.sticker) }
+        } catch {
+          return part
+        }
+      }
+      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) return part
+      const restored = await this.mediaCache!.restoreInitialMedia(part.media)
+      if (restored) return { type: 'media' as const, media: restored }
+      deferred = true
+      return {
+        type: 'media' as const,
+        media: {
+          ...part.media,
+          locator: { ...part.media.locator, deferred: true as const },
+        },
+      }
+    }))
+    const prepared = { ...message, content: { ...message.content, parts } }
+    const timer = setTimeout(() => {
+      if (deferred) this.scheduleMediaPreparation(handler, conversation, message)
+      else this.scheduleMediaUpgrade(handler, conversation, prepared)
+    }, 0)
+    timer.unref()
     return prepared
   }
 
@@ -962,6 +987,32 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
     }))
     return { ...message, content: { ...message.content, parts } }
+  }
+
+  private scheduleMediaPreparation(
+    handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+    conversation: IMConversation<QQMediaLocator>,
+    message: IMMessage<QQMediaLocator>,
+  ): void {
+    const key = `${conversation.id}\0${message.id}`
+    if (this.mediaPreparationJobs.has(key)) return
+    const pending = this.prepareInitialMessage(message).then(async (prepared) => {
+      await handler({
+        type: 'message-edit',
+        eventId: `qqnt-media-ready-v1:${conversation.id}:${message.id}`,
+        conversation,
+        message: prepared,
+      })
+      this.scheduleMediaUpgrade(handler, conversation, prepared)
+    }).catch((error) => {
+      this.logger?.warn(
+        'deferred media preparation failed conversation=%s message=%s error=%s',
+        conversation.id, message.id, formatError(error),
+      )
+    }).finally(() => {
+      if (this.mediaPreparationJobs.get(key) === pending) this.mediaPreparationJobs.delete(key)
+    })
+    this.mediaPreparationJobs.set(key, pending)
   }
 
   private scheduleMediaUpgrade(

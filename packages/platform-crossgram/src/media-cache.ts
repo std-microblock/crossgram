@@ -218,6 +218,20 @@ export class QQMediaCache {
     return this.attachPreview(media, contentIdentity(media), original)
   }
 
+  /** Restore already prepared media without opening the upstream source. */
+  async restoreInitialMedia(
+    media: IMMedia<QQMediaLocator>,
+  ): Promise<IMMedia<QQMediaLocator> | undefined> {
+    if (media.kind !== 'image') return media
+    const ready = await this.readyAnimatedMedia(media, false)
+    if (ready) return ready
+    if (!this.generatePreviews) return media
+    const preview = await this.getPreview(createHash('sha256').update(cacheKey(
+      'image-preview-db-v1', contentIdentity(media), this.previewMaxDimension,
+    )).digest('hex'))
+    return preview ? attachMediaPreview(media, preview) : undefined
+  }
+
   async prepareAnimatedUpgrade(
     media: IMMedia<QQMediaLocator>,
     original: IMMediaSource,
@@ -247,13 +261,14 @@ export class QQMediaCache {
 
   private async readyAnimatedMedia(
     media: IMMedia<QQMediaLocator>,
+    includePreview = true,
   ): Promise<IMMedia<QQMediaLocator> | undefined> {
     const identity = contentIdentity(media)
     const asset = cachedAsset(
       this.path, cacheKey('image-webm-v4', identity), 'webm', 'video/webm', media.width, media.height,
     )
     if (!asset) return
-    return this.finishAnimatedMedia(media, identity, asset)
+    return this.finishAnimatedMedia(media, identity, asset, undefined, includePreview)
   }
 
   private async prepareAnimatedImage(
@@ -278,6 +293,7 @@ export class QQMediaCache {
     identity: string,
     asset: CachedAsset,
     sourceDimensions?: { width: number, height: number },
+    includePreview = true,
   ): Promise<IMMedia<QQMediaLocator>> {
     const dimensions = fitWithin(sourceDimensions ?? { width: media.width ?? 1, height: media.height ?? 1 }, 512)
     const converted: IMMedia<QQMediaLocator> = {
@@ -289,11 +305,11 @@ export class QQMediaCache {
       size: asset.size,
       width: dimensions.width,
       height: dimensions.height,
-      locator: { ...media.locator!, cachedPath: asset.path },
+      locator: { ...readyLocator(media.locator!), cachedPath: asset.path },
     }
-    return this.attachPreview(
-      converted, `${identity}:webm-v1`, fileSource(asset.path, asset.size), asset.path, true,
-    )
+    return includePreview
+      ? this.attachPreview(converted, `${identity}:webm-v1`, fileSource(asset.path, asset.size), asset.path, true)
+      : converted
   }
 
   private async isAnimatedPng(
@@ -332,14 +348,7 @@ export class QQMediaCache {
         : sourcePath ? this.previewFromFile(sourcePath) : this.previewFromSource(source),
     )
     if (!preview) return media
-    return {
-      ...media,
-      strippedThumbnail: preview.strippedThumbnail,
-      preview: {
-        mimeType: preview.mimeType, size: preview.size, width: preview.width, height: preview.height,
-        locator: { ...media.locator!, cachedPath: undefined, previewKey: preview.key },
-      },
-    }
+    return attachMediaPreview(media, preview)
   }
 
   async *download(
@@ -602,6 +611,26 @@ function attachStickerThumbnail(sticker: IMSticker, preview: CachedPreview): IMS
       locator: { cacheKey: preview.key },
     },
   }
+}
+
+function attachMediaPreview(
+  media: IMMedia<QQMediaLocator>,
+  preview: CachedPreview,
+): IMMedia<QQMediaLocator> {
+  return {
+    ...media,
+    locator: readyLocator(media.locator!),
+    strippedThumbnail: preview.strippedThumbnail,
+    preview: {
+      mimeType: preview.mimeType, size: preview.size, width: preview.width, height: preview.height,
+      locator: { ...readyLocator(media.locator!), cachedPath: undefined, previewKey: preview.key },
+    },
+  }
+}
+
+function readyLocator(locator: QQMediaLocator): QQMediaLocator {
+  const { deferred: _deferred, ...ready } = locator
+  return ready
 }
 
 function memorySource(bytes: Uint8Array): IMMediaSource {

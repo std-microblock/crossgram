@@ -26,6 +26,11 @@ export interface QQMediaLocator {
   previewKey?: string
   /** Platform-local transformed asset. Never used for untouched originals. */
   cachedPath?: string
+  /**
+   * History placeholder whose bytes are intentionally unavailable until the
+   * adapter publishes the prepared media through a message-edit event.
+   */
+  deferred?: true
 }
 
 export interface WireMedia {

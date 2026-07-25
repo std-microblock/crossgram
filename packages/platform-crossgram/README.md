@@ -50,8 +50,12 @@ reused by later history requests. When `generatePreviews` is enabled, compact
 WebP preview bytes are stored in the database while transformed WebM, sticker,
 and reaction assets remain on disk. A quality-20 stripped JPEG is stored beside
 each preview and included inline as Telegram `photoStrippedSize`, so clients can
-render a blurred placeholder before issuing a media request. Telegram range reads for original media go
-directly to the QQ CDN.
+render a blurred placeholder before issuing a media request. An uncached image
+in requested history is returned immediately as an empty-download placeholder
+with the original byte size and dimensions. Preview generation runs in the
+background and publishes a message edit that enables the original and preview
+downloads without changing the logical message or media ID. Telegram range
+reads for ready original media go directly to the QQ CDN.
 
 QQ picture elements other than native normal/QZone photos are exposed as
 stickers. Animated expression pictures and animated sticker assets are
