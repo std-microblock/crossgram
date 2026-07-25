@@ -242,6 +242,58 @@ describe('QQNTPlatform mapping', () => {
     }))
   })
 
+  it('downloads merged-forward files through the physical outer QQ conversation', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: 'outer-group', kind: 'group' as const, title: 'Outer group',
+      peerUid: 'physical-group-uid', peerUin: '10001', chatType: 2 as const,
+      lastMessage: {
+        id: 'merged-root', conversationId: 'outer-group', senderId: 'alice', timestamp: 10, outgoing: false,
+        parts: [{
+          type: 'multi-forward' as const, title: '聊天记录',
+          locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
+        }],
+      },
+    }] }))
+    const [dialog] = (await platform.getDialogs(session)).dialogs
+    const link = dialog.lastMessage?.content.parts[0]
+    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+
+    const archivedLocator = {
+      messageId: 'archived-file-message', elementId: 'file-element', chatType: 2 as const,
+      peerUid: 'archived-source-group', kind: 'file' as const, fileName: 'guide.xlsx',
+      fileUuid: '/file-uuid', fileBizId: 104,
+    }
+    platform.client.getMultiForwardMessages = vi.fn(async () => [{
+      id: 'archived-file-message', conversationId: 'archived-source-group',
+      senderId: 'bob', timestamp: 9, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: { id: 'file-element', kind: 'file' as const, name: 'guide.xlsx', size: 8, locator: archivedLocator },
+      }],
+    }])
+    platform.client.downloadFile = vi.fn(async function* () { yield new TextEncoder().encode('contents') })
+
+    const history = await platform.getHistory(session, link.entities[0].conversation)
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'media') throw new Error('merged forward file was not mapped')
+    const chunks: Uint8Array[] = []
+    for await (const chunk of platform.downloadMedia(session, part.media)) chunks.push(chunk)
+
+    expect(part.media.locator).toEqual({
+      ...archivedLocator, chatType: 2, peerUid: 'physical-group-uid',
+    })
+    expect(platform.client.downloadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ chatType: 2, peerUid: 'physical-group-uid', fileUuid: '/file-uuid' }),
+      { signal: undefined, offset: undefined, limit: undefined },
+    )
+    expect(chunks).toEqual([new TextEncoder().encode('contents')])
+    expect(archivedLocator.peerUid).toBe('archived-source-group')
+  })
+
   it('uses QQ merged forward only for multiple preserved-source messages', async () => {
     const platform = new QQNTPlatform()
     platform.client.forwardMessages = vi.fn(async (_from, ids, to, merged) => [{
