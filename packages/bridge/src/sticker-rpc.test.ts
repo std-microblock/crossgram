@@ -107,6 +107,7 @@ describe('StickerRpc', () => {
     expect(all._).toBe('messages.allStickers')
     if (all._ !== 'messages.allStickers') throw new Error('expected full sticker catalog')
     const set = all.sets[0]!
+    expect(set.count).toBe(1)
     const pack = await rpc.getStickerSet({
       _: 'messages.getStickerSet',
       stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },
@@ -135,7 +136,7 @@ describe('StickerRpc', () => {
     expect(provider.listSavedStickers).toHaveBeenCalledTimes(1)
   })
 
-  it('coalesces concurrent catalog loads and refreshes both list and pack after the TTL', async () => {
+  it('coalesces summary catalogs without materializing every pack before it is opened', async () => {
     let release!: () => void
     const blocked = new Promise<void>((resolve) => { release = resolve })
     const { rpc, provider } = stickerHarness(10)
@@ -149,12 +150,12 @@ describe('StickerRpc', () => {
     await vi.waitFor(() => expect(provider.listPacks).toHaveBeenCalledTimes(1))
     release()
     await Promise.all([first, concurrent])
-    expect(provider.getPack).toHaveBeenCalledTimes(1)
+    expect(provider.getPack).not.toHaveBeenCalled()
 
     await new Promise((resolve) => setTimeout(resolve, 15))
     await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
     expect(provider.listPacks).toHaveBeenCalledTimes(2)
-    expect(provider.getPack).toHaveBeenCalledTimes(2)
+    expect(provider.getPack).not.toHaveBeenCalled()
   })
 
   it('invalidates saved stickers immediately after a favorite mutation', async () => {
@@ -274,7 +275,7 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
   const provider: IMStickerProvider = {
     capabilities: { platformKinds: ['qq'], sessionScoped: true },
     listPacks: vi.fn(async () => ({
-      packs: [{ providerId: 'ignored', packId: '11690', title: 'QQ Pack', version: 7 }],
+      packs: [{ providerId: 'ignored', packId: '11690', title: 'QQ Pack', count: 1, version: 7 }],
     })),
     getPack: vi.fn(async () => ({
       providerId: 'ignored', packId: '11690', title: 'QQ Pack', version: 7, stickers: [sticker],

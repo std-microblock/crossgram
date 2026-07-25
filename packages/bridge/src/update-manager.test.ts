@@ -113,6 +113,28 @@ describe('UpdateManager', () => {
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
   })
 
+  it('keeps the self and premium flags on outgoing live-update users', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'outgoing-group', kind: 'group', title: 'Outgoing Group' }
+    const message: IMMessage = {
+      id: 'outgoing', conversationId: conversation.id, senderId: session.userId,
+      timestamp: 1_800_000_001, outgoing: true,
+      content: { parts: [{ type: 'text', text: 'sent by current user' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = roundTrip(sent[0].update) as tl.RawUpdates
+    expect(payload.users).toHaveLength(1)
+    expect(payload.users[0]).toMatchObject({
+      _: 'user', self: true, premium: true, firstName: 'User self',
+    })
+    expect((payload.updates[0] as tl.RawUpdateNewChannelMessage).message).toMatchObject({
+      fromId: { _: 'peerUser', userId: (payload.users[0] as tl.RawUser).id },
+    })
+  })
+
   it('includes clickable URL entities in live updates', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'links', kind: 'group', title: 'Links' }
@@ -138,6 +160,30 @@ describe('UpdateManager', () => {
           length: 'example.org/docs'.length,
         },
       ],
+    })
+  })
+
+  it('includes native WebPage previews in live structured-card updates', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'cards', kind: 'group', title: 'Cards' }
+    const message: IMMessage = {
+      id: 'card-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_002,
+      content: { parts: [{ type: 'card', card: {
+        kind: 'link', source: '示例资讯', title: '实时卡片', description: '实时卡片摘要',
+        url: 'https://example.com/live',
+      } }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = roundTrip(sent[0].update) as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
+    expect(update.message).toMatchObject({
+      _: 'message', message: '[卡片] 示例资讯\n实时卡片\n实时卡片摘要\nhttps://example.com/live',
+      media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
+        _: 'webPage', url: 'https://example.com/live', displayUrl: 'example.com',
+        siteName: '示例资讯', title: '实时卡片', description: '实时卡片摘要',
+      } },
     })
   })
 

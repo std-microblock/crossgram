@@ -4,9 +4,12 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
-import { makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
+import { makeTlCardPreview, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
-import { telegramReplyToMessageId, type IMConversation, type IMMessage, type PlatformSession } from './platform.js'
+import {
+  messagePartText, telegramReplyToMessageId,
+  type IMConversation, type IMMessage, type PlatformSession,
+} from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
 import type { IMSticker } from './sticker-provider.js'
 import type { CommittedPlatformEvent, PlatformRegistry } from './platform-manager.js'
@@ -267,6 +270,7 @@ export class UpdateManager {
         }
       }
       const sticker = projected.source.content.parts.find((item) => item.type === 'sticker')
+      const card = projected.source.content.parts.find((item) => item.type === 'card')
       const message = projectTlMessage({
         conversation: displayConversation,
         source: projected.source,
@@ -279,7 +283,7 @@ export class UpdateManager {
           ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
           : sticker?.type === 'sticker'
             ? this._projectSticker?.(session, sticker.sticker)
-            : undefined,
+            : card?.type === 'card' ? makeTlCardPreview(card.card) : undefined,
         entities: makeMessageEntities(projected.source, session.platformSessionId, userIds),
         reactions: projected.source.reactionContext?.reactions.length
           ? makeMessageReactions(projected.source, session.platformSessionId)
@@ -303,20 +307,20 @@ export class UpdateManager {
 
     const sender = toUser(senderRow)
     const self = toUser(selfRow)
-    const users = [...new Map([
-      makeUser({
-        id: selfRow.id, self: true, premium: true,
-        firstName: self.firstName, lastName: self.lastName, username: self.username,
-        photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
-      }),
-      makeUser({
+    const selfUser = makeUser({
+      id: selfRow.id, self: true, premium: true,
+      firstName: self.firstName, lastName: self.lastName, username: self.username,
+      photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
+    })
+    const users = senderRow.id === selfRow.id
+      ? [selfUser]
+      : [selfUser, makeUser({
         id: senderRow.id,
         firstName: sender.firstName,
         lastName: sender.lastName,
         username: sender.username,
         photo: sender.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
-      }),
-    ].map((user) => [user.id, user])).values()]
+      })]
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []
@@ -545,11 +549,14 @@ function makeMessageEntities(
   userIds: ReadonlyMap<string, number>,
 ): tl.TypeMessageEntity[] | undefined {
   const entities: tl.TypeMessageEntity[] = []
-  const textParts = message.content.parts.filter((part) => part.type === 'text')
+  const rendered = message.content.parts.flatMap((part) => {
+    const text = messagePartText(part)
+    return text ? [{ part, text }] : []
+  })
   let base = 0
-  for (const [index, part] of textParts.entries()) {
-    for (const entity of part.entities ?? []) {
-      if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > part.text.length) continue
+  for (const [index, { part, text }] of rendered.entries()) {
+    for (const entity of part.type === 'text' ? part.entities ?? [] : []) {
+      if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > text.length) continue
       if (entity.type === 'mention') {
         entities.push({
           _: 'messageEntityMentionName', offset: base + entity.offset, length: entity.length,
@@ -570,7 +577,7 @@ function makeMessageEntities(
         })
       }
     }
-    base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
+    base += text.length + (index + 1 < rendered.length ? 1 : 0)
   }
   return entities.length ? entities : undefined
 }
