@@ -106,6 +106,60 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('filters reaction gray tips from history, search, direct lookup, and dialog previews by default', async () => {
+    const platform = new QQNTPlatform()
+    const reactionTip = {
+      id: 'reaction-tip', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice回应了你的消息：hello' }, parts: [],
+    }
+    const memberTip = {
+      id: 'member-tip', conversationId: '2:group', senderId: 'system', timestamp: 1, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice加入了群聊' }, parts: [],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [reactionTip, memberTip] }))
+    platform.client.searchMessages = vi.fn(async () => ({ messages: [reactionTip] }))
+    platform.client.getMessage = vi.fn(async () => reactionTip)
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: '2:group', kind: 'group' as const, title: 'Group', peerUid: 'group', peerUin: 'group',
+      chatType: 2 as const, lastMessage: reactionTip, readInboxMaxMessage: memberTip,
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ id: 'member-tip' }],
+    })
+    await expect(platform.searchMessages(session, { id: '2:group' }, { query: '回应' }))
+      .resolves.toMatchObject({ messages: [] })
+    await expect(platform.getMessage(session, { id: '2:group' }, 'reaction-tip')).resolves.toBeNull()
+    await expect(platform.getDialogs(session)).resolves.toMatchObject({
+      dialogs: [{ lastMessage: undefined, readInboxMaxMessage: { id: 'member-tip' } }],
+    })
+  })
+
+  it('lets an empty or replaced gray-tip filter list override the reaction default', async () => {
+    const reactionTip = {
+      id: 'reaction-tip', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice回应了你的消息：hello' }, parts: [],
+    }
+    const memberTip = {
+      id: 'member-tip', conversationId: '2:group', senderId: 'system', timestamp: 1, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice加入了群聊' }, parts: [],
+    }
+    const visible = new QQNTPlatform({ grayTipFilters: [] })
+    visible.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    visible.client.getHistory = vi.fn(async () => ({ messages: [reactionTip] }))
+    await expect(visible.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ id: 'reaction-tip' }],
+    })
+
+    const replaced = new QQNTPlatform({ grayTipFilters: ['加入了群聊'] })
+    replaced.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    replaced.client.getHistory = vi.fn(async () => ({ messages: [reactionTip, memberTip] }))
+    await expect(replaced.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ id: 'reaction-tip' }],
+    })
+  })
+
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
@@ -456,6 +510,43 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribeOwn()
     await unsubscribeOther()
     expect(wireHandler).toBeTypeOf('function')
+  })
+
+  it('suppresses live reaction gray tips while still forwarding the following reaction update', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    let wireHandler: ((event: any) => void | Promise<void>) | undefined
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      wireHandler = handler
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(wireHandler).toBeTypeOf('function'))
+    const conversation = {
+      id: '2:group', kind: 'group' as const, title: 'Group', peerUid: 'group', peerUin: 'group',
+      chatType: 2 as const,
+    }
+
+    await wireHandler!({
+      type: 'message', conversation,
+      message: {
+        id: 'reaction-tip', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
+        serviceAction: { type: 'custom', text: 'Alice回应了你的消息：hello' }, parts: [],
+      },
+    })
+    await wireHandler!({
+      type: 'message-reactions', eventId: 'reaction-now', conversation,
+      target: { conversationId: '2:group', messageId: 'target', targetId: 'target' },
+      context: { reactions: [{ key: '1:14', count: 1 }], maxSelected: 20 }, timestamp: 3,
+    })
+
+    expect(received).toMatchObject([{
+      type: 'message-reactions', target: { messageId: 'target' },
+      context: { reactions: [{ key: '1:14', count: 1 }] },
+    }])
+    await unsubscribe()
   })
 
   it('maps opaque QQ IDs and member roles without numeric coercion', async () => {
