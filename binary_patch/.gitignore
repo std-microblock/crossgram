@@ -1,1 +1,4 @@
 materialgram.app/
+materialgram/*
+!materialgram/clean-materialgram.cjs
+!materialgram/clean-materialgram.cmd
