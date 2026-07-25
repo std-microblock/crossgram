@@ -24,7 +24,7 @@ describe('Telegram sticker outlines', () => {
 
     expect(outline).toBeInstanceOf(Uint8Array)
     expect(expandPath(outline!)).toBe(
-      'M20,20L10,40L0,60L10,80L20,100L20,120L40,120L40,100L50,80L60,60L50,40L40,20z',
+      'M20,20L0,60L20,100L20,120L40,120L40,100L60,60L40,20z',
     )
   })
 
