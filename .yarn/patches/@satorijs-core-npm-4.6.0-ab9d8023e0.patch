@@ -1,0 +1,292 @@
+diff --git a/lib/index.cjs b/lib/index.cjs
+index fe20fd0fd52db46c878f025f66e39f63c3b376a6..8bc1e1f803e7d3c2b1e71acaa623655da6209e94 100644
+--- a/lib/index.cjs
++++ b/lib/index.cjs
+@@ -53,6 +53,7 @@ __export(index_exports, {
+ });
+ module.exports = __toCommonJS(index_exports);
+ var import_cordis5 = require("cordis");
++var import_schemastery = __toESM(require("schemastery"));
+ var import_cosmokit5 = require("cosmokit");
+ 
+ // src/internal.ts
+@@ -599,10 +600,10 @@ var Adapter = class {
+   }
+ };
+ ((Adapter2) => {
+-  Adapter2.WsClientConfig = import_cordis4.z.object({
+-    retryTimes: import_cordis4.z.natural().description("初次连接时的最大重试次数。").default(6),
+-    retryInterval: import_cordis4.z.natural().role("ms").description("初次连接时的重试时间间隔。").default(5 * import_cosmokit4.Time.second),
+-    retryLazy: import_cordis4.z.natural().role("ms").description("连接关闭后的重试时间间隔。").default(import_cosmokit4.Time.minute)
++  Adapter2.WsClientConfig = import_schemastery.default.object({
++    retryTimes: import_schemastery.default.natural().description("初次连接时的最大重试次数。").default(6),
++    retryInterval: import_schemastery.default.natural().role("ms").description("初次连接时的重试时间间隔。").default(5 * import_cosmokit4.Time.second),
++    retryLazy: import_schemastery.default.natural().role("ms").description("连接关闭后的重试时间间隔。").default(import_cosmokit4.Time.minute)
+   }).description("连接设置");
+   class WsClientBase extends Adapter2 {
+     constructor(ctx, config) {
+@@ -763,9 +764,9 @@ var MessageEncoder = class {
+ // src/index.ts
+ import_element3.default.warn = new import_cordis5.Logger("element").warn;
+ import_plugin_http.HTTP.createConfig = /* @__PURE__ */ __name(function createConfig(endpoint) {
+-  return import_cordis5.z.object({
+-    endpoint: import_cordis5.z.string().role("link").description("要连接的服务器地址。").default(typeof endpoint === "string" ? endpoint : void 0).required(typeof endpoint === "boolean" ? endpoint : false),
+-    headers: import_cordis5.z.dict(String).role("table").description("要附加的额外请求头。"),
++  return import_schemastery.default.object({
++    endpoint: import_schemastery.default.string().role("link").description("要连接的服务器地址。").default(typeof endpoint === "string" ? endpoint : void 0).required(typeof endpoint === "boolean" ? endpoint : false),
++    headers: import_schemastery.default.dict(String).role("table").description("要附加的额外请求头。"),
+     ...this.Config.dict
+   }).description("请求设置");
+ }, "createConfig");
+@@ -827,8 +828,7 @@ var Satori = class extends import_cordis5.Service {
+   static {
+     __name(this, "Satori");
+   }
+-  static [import_cordis5.Service.provide] = "satori";
+-  static [import_cordis5.Service.immediate] = true;
++  static provide = "satori";
+   uid = Math.random().toString(36).slice(2);
+   proxyUrls = new DisposableSet(this.ctx);
+   _internalRouter;
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 642da258fa68572deaf0a4e8a1443471f1a336c0..02c2e033dde38f706d22dd5bfebb8f94bd033bc6 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -1,4 +1,5 @@
+-import { Context, Service, z, Logger } from 'cordis';
++import { Context, Service, Logger } from 'cordis';
++import z from 'schemastery';
+ import { Message, SendOptions, Event, GuildMember, User, Meta, Response, Login, Methods, Status, Upload, WebSocket } from '@satorijs/protocol';
+ import h from '@satorijs/element';
+ import { Awaitable, Dict } from 'cosmokit';
+@@ -137,7 +138,6 @@ declare class DisposableSet<T> {
+ }
+ export class Satori<C extends Context = Context> extends Service<unknown, C> {
+-    static [Service.provide]: string;
+-    static [Service.immediate]: boolean;
++    static provide: string;
+     uid: string;
+     proxyUrls: DisposableSet<string>;
+     _internalRouter: InternalRouter<C>;
+diff --git a/lib/index.mjs b/lib/index.mjs
+index c1c4e02d65460993cfcdf344f384c901286835b2..b2cec12bbf4f21229b5767e2526f78eebbcf2a8f 100644
+--- a/lib/index.mjs
++++ b/lib/index.mjs
+@@ -2,7 +2,8 @@ var __defProp = Object.defineProperty;
+ var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+ 
+ // src/index.ts
+-import { Context as Context4, Logger as Logger2, Service as Service4, z as z2 } from "cordis";
++import { Context as Context4, Logger as Logger2, Service as Service4 } from "cordis";
++import z2 from "schemastery";
+ import { defineProperty as defineProperty2 } from "cosmokit";
+ 
+ // src/internal.ts
+@@ -526,7 +527,7 @@ defineAccessor(Bot.prototype, "userId", ["user", "id"]);
+ // src/adapter.ts
+ import { remove as remove2, Time } from "cosmokit";
+ import { Status as Status2 } from "@satorijs/protocol";
+-import { z } from "cordis";
++import z from "schemastery";
+ var Adapter = class {
+   constructor(ctx) {
+     this.ctx = ctx;
+@@ -782,8 +783,7 @@ var Satori = class extends Service4 {
+   static {
+     __name(this, "Satori");
+   }
+-  static [Service4.provide] = "satori";
+-  static [Service4.immediate] = true;
++  static provide = "satori";
+   uid = Math.random().toString(36).slice(2);
+   proxyUrls = new DisposableSet(this.ctx);
+   _internalRouter;
+diff --git a/package.json b/package.json
+index da2974b2b9233478076d2f18d8673a449fb13923..87ef60a0925b0b7bd576adb60e825af8f1a25308 100644
+--- a/package.json
++++ b/package.json
+@@ -54,14 +54,15 @@
+     }
+   },
+   "peerDependencies": {
+-    "cordis": "^3.18.1"
++    "cordis": "^4.0.0-rc.5"
+   },
+   "dependencies": {
+-    "@cordisjs/plugin-http": "^0.6.3",
++    "@cordisjs/plugin-http": "^1.5.1",
+     "@satorijs/element": "^3.2.0",
+     "@satorijs/protocol": "^1.7.0",
+-    "cordis": "^3.18.1",
++    "cordis": "^4.0.0-rc.5",
+     "cosmokit": "^1.8.1",
+-    "path-to-regexp": "^8.2.0"
++    "path-to-regexp": "^8.2.0",
++    "schemastery": "^3.18.0"
+   }
+ }
+diff --git a/src/adapter.ts b/src/adapter.ts
+index 4104daa238fbd8acc16946b7fa5a1c20389e5f36..1fbefde4440f321883df3e17f58b7b38332d69f1 100644
+--- a/src/adapter.ts
++++ b/src/adapter.ts
+@@ -1,6 +1,7 @@
+ import { Awaitable, remove, Time } from 'cosmokit'
+ import { Status, WebSocket } from '@satorijs/protocol'
+-import { Context, z } from 'cordis'
++import { Context } from 'cordis'
++import z from 'schemastery'
+ import { Bot } from './bot'
+ 
+ export abstract class Adapter<C extends Context = Context, B extends Bot<C> = Bot<C>> {
+diff --git a/src/index.ts b/src/index.ts
+index eeea40533c4e0bd8048b4315b1dca09fcee8df1d..8bcfecc498df61db4268632504a348a877d18ad0 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,4 +1,5 @@
+-import { Context, Logger, Service, z } from 'cordis'
++import { Context, Logger, Service } from 'cordis'
++import z from 'schemastery'
+ import { Awaitable, defineProperty, Dict } from 'cosmokit'
+ import { Bot } from './bot'
+ import { ExtractParams, InternalRequest, InternalRouter, JsonForm } from './internal'
+@@ -161,8 +162,7 @@ class DisposableSet<T> {
+ }
+ 
+ export class Satori<C extends Context = Context> extends Service<unknown, C> {
+-  static [Service.provide] = 'satori'
+-  static [Service.immediate] = true
++  static provide = 'satori'
+ 
+   public uid = Math.random().toString(36).slice(2)
+   public proxyUrls: DisposableSet<string> = new DisposableSet(this.ctx)
+diff --git a/lib/index.cjs b/lib/index.cjs
+index fe20fd0fd52db46c878f025f66e39f63c3b376a6..f2a9c5f 100644
+--- a/lib/index.cjs
++++ b/lib/index.cjs
+@@ -208,8 +208,7 @@ var Session = class {
+     this.sn = this.id = ++bot.ctx.satori._sessionSeq;
+     (0, import_cosmokit2.defineProperty)(this, "bot", bot);
+     (0, import_cosmokit2.defineProperty)(this, "app", bot.ctx.root);
+-    (0, import_cosmokit2.defineProperty)(this, import_cordis2.Context.current, bot.ctx);
+-    return import_cordis2.Context.associate(this, "session");
++    return (0, import_cordis2.getTraceable)(bot.ctx, this);
+   }
+   /** @deprecated */
+   get data() {
+diff --git a/lib/index.cjs b/lib/index.cjs
+index fe20fd0fd52db46c878f025f66e39f63c3b376a6..329c32f 100644
+--- a/lib/index.cjs
++++ b/lib/index.cjs
+@@ -460,7 +460,7 @@ var Bot = class {
+     return new Session(this, event);
+   }
+   dispatch(session) {
+-    if (!this.ctx.lifecycle.isActive) return;
++    if (this.ctx.fiber.state !== import_cordis3.FiberState.ACTIVE) return;
+     let events = [session.type];
+     for (const aliases of eventAliases) {
+       if (aliases.includes(session.type)) {
+diff --git a/lib/index.mjs b/lib/index.mjs
+index c1c4e02d65460993cfcdf344f384c901286835b2..9af6c87 100644
+--- a/lib/index.mjs
++++ b/lib/index.mjs
+@@ -130 +130 @@ import { clone as clone2, isNonNullable, pick } from "cosmokit";
+-import { Service as Service3 } from "cordis";
++import { FiberState, Service as Service3 } from "cordis";
+@@ -410,7 +410,7 @@ var Bot = class {
+     return new Session(this, event);
+   }
+   dispatch(session) {
+-    if (!this.ctx.lifecycle.isActive) return;
++    if (this.ctx.fiber.state !== FiberState.ACTIVE) return;
+     let events = [session.type];
+     for (const aliases of eventAliases) {
+       if (aliases.includes(session.type)) {
+diff --git a/src/bot.ts b/src/bot.ts
+index 50856c6..11368f0 100644
+--- a/src/bot.ts
++++ b/src/bot.ts
+@@ -1,5 +1,5 @@
+ import { clone, Dict, isNonNullable, pick } from 'cosmokit'
+-import { Context, Logger, Service } from 'cordis'
++import { Context, FiberState, Logger, Service } from 'cordis'
+ import h from '@satorijs/element'
+ import { Adapter } from './adapter'
+ import { MessageEncoder } from './message'
+@@ -171,7 +171,7 @@ export abstract class Bot<C extends Context = Context, T = any> {
+   dispatch(session: C[typeof Context.session]) {
+-    if (!this.ctx.lifecycle.isActive) return
++    if (this.ctx.fiber.state !== FiberState.ACTIVE) return
+     let events = [session.type]
+     for (const aliases of eventAliases) {
+       if (aliases.includes(session.type)) {
+         events = aliases
+         session.type = aliases[0]
+diff --git a/lib/index.mjs b/lib/index.mjs
+index c1c4e02d65460993cfcdf344f384c901286835b2..b786981 100644
+--- a/lib/index.mjs
++++ b/lib/index.mjs
+@@ -133,7 +133,7 @@ import { Service as Service3 } from "cordis";
+ // src/session.ts
+ import { Channel, Resource } from "@satorijs/protocol";
+ import { clone, defineProperty, isNullable } from "cosmokit";
+-import { Context, Service as Service2 } from "cordis";
++import { Context, getTraceable, Service as Service2 } from "cordis";
+ import h from "@satorijs/element";
+ var Session = class {
+   static {
+@@ -158,8 +158,7 @@ var Session = class {
+     this.sn = this.id = ++bot.ctx.satori._sessionSeq;
+     defineProperty(this, "bot", bot);
+     defineProperty(this, "app", bot.ctx.root);
+-    defineProperty(this, Context.current, bot.ctx);
+-    return Context.associate(this, "session");
++    return getTraceable(bot.ctx, this);
+   }
+   /** @deprecated */
+   get data() {
+diff --git a/src/session.ts b/src/session.ts
+index 6f11c2e..1fb875f 100644
+--- a/src/session.ts
++++ b/src/session.ts
+@@ -1,5 +1,5 @@
+ import { Channel, Event, GuildMember, Message, Resource, User } from '@satorijs/protocol'
+ import { clone, defineProperty, isNullable } from 'cosmokit'
+-import { Context, Service } from 'cordis'
++import { Context, getTraceable, Service } from 'cordis'
+ import { Bot } from './bot'
+ import h from '@satorijs/element'
+@@ -49,6 +49,5 @@ export class Session<C extends Context = Context> {
+     this.sn = this.id = ++bot.ctx.satori._sessionSeq
+     defineProperty(this, 'bot', bot)
+     defineProperty(this, 'app', bot.ctx.root)
+-    defineProperty(this, Context.current, bot.ctx)
+-    return Context.associate(this, 'session')
++    return getTraceable(bot.ctx, this)
+   }
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 642da258fa68572deaf0a4e8a1443471f1a336c0..a39880d 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -77,3 +77,4 @@ export { h, h as Element, h as segment, HTTP, HTTP as Quester };
+ export * from 'cordis';
+ export * from 'cosmokit';
+ export * as Universal from '@satorijs/protocol';
++type C = Context;
+@@ -90 +91 @@ declare module 'cordis' {
+-    interface Events<C> {
++    interface Events {
+diff --git a/src/index.ts b/src/index.ts
+index eeea40533c4e0bd8048b4315b1dca09fcee8df1d..9246cf9 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -25,3 +25,6 @@ export * from './adapter'
+ export * from './message'
+ export * from './internal'
+ export * from './session'
++
++// Cordis 4 event maps are no longer generic; bind Satori events to the active base Context.
++type C = Context
+@@ -41 +44 @@ declare module 'cordis' {
+-  interface Events<C> {
++  interface Events {
