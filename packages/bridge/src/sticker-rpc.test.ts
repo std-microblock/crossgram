@@ -25,9 +25,10 @@ describe('StickerRpc', () => {
 
     const media = rpc.makeMessageMedia(sticker)
     if (!media.document || media.document._ !== 'document') throw new Error('expected document')
-    expect(media.document.thumbs).toEqual([{
-      _: 'photoSize', type: 'm', w: 96, h: 64, size: thumbnail.length,
-    }])
+    expect(media.document.thumbs).toEqual([
+      { _: 'photoPathSize', type: 'j', bytes: expect.any(Uint8Array) },
+      { _: 'photoSize', type: 'm', w: 96, h: 64, size: thumbnail.length },
+    ])
     const attribute = media.document.attributes.find((item) => item._ === 'documentAttributeSticker')
     if (!attribute || attribute._ !== 'documentAttributeSticker') throw new Error('expected sticker attribute')
     expect(attribute.mask).toBeUndefined()
@@ -37,6 +38,21 @@ describe('StickerRpc', () => {
     )).resolves.toEqual(thumbnail.subarray(2, 6))
     expect(provider.openThumbnail).toHaveBeenCalledWith(expect.anything(), sticker)
     expect(provider.openAsset).not.toHaveBeenCalled()
+  })
+
+  it('always projects an inline loading silhouette before any sticker download', () => {
+    const { rpc, sticker, provider } = stickerHarness()
+
+    const media = rpc.makeMessageMedia(sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+
+    expect(media.document.thumbs).toEqual([{
+      _: 'photoPathSize', type: 'j', bytes: expect.any(Uint8Array),
+    }])
+    expect(media.document.thumbs![0]!._ === 'photoPathSize'
+      && media.document.thumbs![0]!.bytes.byteLength).toBeGreaterThan(0)
+    expect(provider.openAsset).not.toHaveBeenCalled()
+    expect(provider.openThumbnail).not.toHaveBeenCalled()
   })
 
   it('resolves the set attached to a message sticker even when the pack is not listed', async () => {

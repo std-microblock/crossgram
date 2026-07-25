@@ -9,7 +9,7 @@ import { pipeline } from 'node:stream/promises'
 import type { Context } from 'cordis'
 import type { Database } from '@cordisjs/plugin-database'
 import {
-  stripTelegramJpegThumbnail,
+  stripTelegramJpegThumbnail, traceTelegramStickerOutline,
   type IMDownloadOptions, type IMMedia, type IMMediaSource, type IMSticker, type IMStickerAsset,
 } from '@mtproto-relay/bridge'
 import ffmpegStatic from 'ffmpeg-static'
@@ -30,6 +30,7 @@ export interface QQMediaPreviewRow {
   key: string
   bytes: ArrayBuffer
   strippedBytes: ArrayBuffer | null
+  outlineBytes: ArrayBuffer | null
   mimeType: string
   size: number
   width: number
@@ -69,7 +70,9 @@ export function defineQQMediaCacheModel(ctx: Context): void {
     updatedAt: 'timestamp',
   }, { primary: 'key', indexes: ['updatedAt'] })
   ctx.model.extend('mtproto_qqnt_media_preview', {
-    key: 'string', bytes: 'binary', strippedBytes: { type: 'binary', nullable: true },
+    key: 'string', bytes: 'binary',
+    strippedBytes: { type: 'binary', nullable: true },
+    outlineBytes: { type: 'binary', nullable: true },
     mimeType: 'string', size: 'unsigned',
     width: 'unsigned', height: 'unsigned', updatedAt: 'timestamp',
   }, { primary: 'key', indexes: ['updatedAt'] })
@@ -99,6 +102,7 @@ interface CachedPreview {
   width: number
   height: number
   strippedThumbnail?: Uint8Array
+  stickerOutline?: Uint8Array
 }
 
 /** Disk-backed, single-flight transformer shared by QQ media and sticker providers. */
@@ -162,7 +166,7 @@ export class QQMediaCache {
 
   async restoreStickerThumbnail(sticker: IMSticker): Promise<IMSticker> {
     const preview = await this.getPreview(stickerPreviewKey(sticker))
-    return preview ? attachStickerThumbnail(sticker, preview) : sticker
+    return preview ? attachStickerThumbnail(sticker, await this.ensureStickerOutline(sticker, preview)) : sticker
   }
 
   async prepareStickerThumbnail(sticker: IMSticker, source: IMMediaSource): Promise<IMSticker> {
@@ -170,7 +174,7 @@ export class QQMediaCache {
       stickerPreviewLogicalKey(sticker),
       () => this.previewFromSource(source),
     )
-    return preview ? attachStickerThumbnail(sticker, preview) : sticker
+    return preview ? attachStickerThumbnail(sticker, await this.ensureStickerOutline(sticker, preview)) : sticker
   }
 
   private async prepareStickerThumbnailFromFile(
@@ -435,7 +439,9 @@ export class QQMediaCache {
         })
       }
       return rememberPreview(this.memoryPreviews, {
-        key, bytes, strippedThumbnail, mimeType: stored.mimeType,
+        key, bytes, strippedThumbnail,
+        stickerOutline: stored.outlineBytes ? new Uint8Array(stored.outlineBytes) : undefined,
+        mimeType: stored.mimeType,
         size: stored.size, width: stored.width, height: stored.height,
       })
     }
@@ -448,10 +454,27 @@ export class QQMediaCache {
     }
     await this.options.database?.upsert('mtproto_qqnt_media_preview', [{
       key, bytes: exactArrayBuffer(created.bytes), strippedBytes: exactArrayBuffer(strippedThumbnail),
+      outlineBytes: null,
       mimeType: preview.mimeType, size: preview.size,
       width: preview.width, height: preview.height, updatedAt: new Date(),
     }], ['key'])
     return rememberPreview(this.memoryPreviews, preview)
+  }
+
+  private async ensureStickerOutline(sticker: IMSticker, preview: CachedPreview): Promise<CachedPreview> {
+    if (preview.stickerOutline?.byteLength) return preview
+    const stickerOutline = await createStickerOutline(
+      preview.bytes,
+      sticker.width ?? preview.width,
+      sticker.height ?? preview.height,
+    )
+    if (!stickerOutline?.byteLength) return preview
+    const updated = { ...preview, stickerOutline }
+    rememberPreview(this.memoryPreviews, updated)
+    await this.options.database?.set('mtproto_qqnt_media_preview', { key: preview.key }, {
+      outlineBytes: exactArrayBuffer(stickerOutline),
+    })
+    return updated
   }
 
   private async getPreview(key: string): Promise<CachedPreview | undefined> {
@@ -460,7 +483,9 @@ export class QQMediaCache {
     const [stored] = await this.options.database?.get('mtproto_qqnt_media_preview', { key }) ?? []
     if (!stored) return
     return rememberPreview(this.memoryPreviews, {
-      key, bytes: new Uint8Array(stored.bytes), mimeType: stored.mimeType,
+      key, bytes: new Uint8Array(stored.bytes),
+      stickerOutline: stored.outlineBytes ? new Uint8Array(stored.outlineBytes) : undefined,
+      mimeType: stored.mimeType,
       size: stored.size, width: stored.width, height: stored.height,
     })
   }
@@ -625,6 +650,7 @@ function stickerPreviewKey(sticker: IMSticker): string {
 function attachStickerThumbnail(sticker: IMSticker, preview: CachedPreview): IMSticker {
   return {
     ...sticker,
+    outline: preview.stickerOutline,
     thumbnail: {
       mimeType: preview.mimeType, size: preview.size, width: preview.width, height: preview.height,
       locator: { cacheKey: preview.key },
@@ -767,6 +793,21 @@ async function createStrippedThumbnail(input: Uint8Array): Promise<Uint8Array> {
     quality: 20, chromaSubsampling: '4:2:0', progressive: false, optimizeCoding: false,
   }).toBuffer()
   return stripTelegramJpegThumbnail(jpeg)
+}
+
+async function createStickerOutline(
+  input: Uint8Array,
+  targetWidth: number,
+  targetHeight: number,
+): Promise<Uint8Array | undefined> {
+  const { data, info } = await sharp(input).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  const alpha = new Uint8Array(info.width * info.height)
+  for (let inputOffset = 3, outputOffset = 0; outputOffset < alpha.length; inputOffset += 4) {
+    alpha[outputOffset++] = data[inputOffset]!
+  }
+  return traceTelegramStickerOutline(
+    alpha, info.width, info.height, targetWidth, targetHeight,
+  )
 }
 
 function rememberPreview(cache: Map<string, CachedPreview>, preview: CachedPreview): CachedPreview {

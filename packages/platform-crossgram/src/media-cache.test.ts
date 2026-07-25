@@ -58,11 +58,13 @@ describe('QQMediaCache', () => {
     const thumbnailBytes = await collect(thumbnail.source.stream())
 
     expect(projected).toMatchObject({
+      outline: expect.any(Uint8Array),
       thumbnail: {
         mimeType: 'image/webp', width: 16, height: 12,
         locator: { cacheKey: expect.any(String) },
       },
     })
+    expect(projected.outline!.byteLength).toBeGreaterThan(0)
     expect(thumbnailBytes.subarray(8, 12).toString()).toBe('WEBP')
     expect(opens).toBe(1)
   }, 30_000)
