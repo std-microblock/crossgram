@@ -159,6 +159,61 @@ describe('StickerRpc', () => {
     })).resolves.toEqual({ _: 'boolTrue' })
     expect(resumed.provider.setSavedSticker).toHaveBeenCalledWith(expect.anything(), loose, true)
   })
+
+  it('recovers a historical message sticker from its file reference after the document cache is lost', async () => {
+    const historical: IMSticker = {
+      providerId: 'qq:stickers', stickerId: 'favorite:historical:ebcb350f',
+      title: 'Historical favorite', format: 'static', mimeType: 'image/webp', version: 1,
+    }
+    const projected = stickerHarness()
+    const media = projected.rpc.makeMessageMedia(historical)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+
+    const resumed = stickerHarness()
+    vi.mocked(resumed.provider.listPacks).mockResolvedValue({ packs: [] })
+    vi.mocked(resumed.provider.listSavedStickers!).mockResolvedValue({ stickers: [] })
+    vi.mocked(resumed.provider.getSticker).mockImplementation(async (_context, stickerId) =>
+      stickerId === historical.stickerId ? historical : null)
+    const asset = new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4])
+    vi.mocked(resumed.provider.openAsset).mockResolvedValue({
+      mimeType: historical.mimeType, size: asset.length,
+      source: {
+        size: asset.length,
+        async *stream() {
+          yield asset.subarray(0, 3)
+          yield asset.subarray(3)
+        },
+      },
+    })
+
+    await expect(resumed.rpc.getFile(
+      media.document.id.toNumber(), 2, 4, media.document.fileReference,
+    )).resolves.toEqual(asset.subarray(2, 6))
+    expect(resumed.provider.getSticker).toHaveBeenCalledWith(
+      expect.anything(), historical.stickerId,
+    )
+    expect(resumed.provider.listPacks).not.toHaveBeenCalled()
+    expect(resumed.provider.listSavedStickers).not.toHaveBeenCalled()
+  })
+
+  it('rejects a sticker file reference whose document id does not match', async () => {
+    const historical: IMSticker = {
+      providerId: 'qq:stickers', stickerId: 'favorite:historical:ebcb350f',
+      title: 'Historical favorite', format: 'static', mimeType: 'image/webp', version: 1,
+    }
+    const projected = stickerHarness()
+    const media = projected.rpc.makeMessageMedia(historical)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+
+    const resumed = stickerHarness()
+    vi.mocked(resumed.provider.listPacks).mockResolvedValue({ packs: [] })
+    vi.mocked(resumed.provider.listSavedStickers!).mockResolvedValue({ stickers: [] })
+
+    await expect(resumed.rpc.getFile(
+      media.document.id.toNumber() + 1, 0, 16, media.document.fileReference,
+    )).resolves.toBeUndefined()
+    expect(resumed.provider.getSticker).not.toHaveBeenCalled()
+  })
 })
 
 function stickerHarness(cacheTtlMs = 5 * 60_000) {

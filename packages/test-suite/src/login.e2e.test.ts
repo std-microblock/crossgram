@@ -1990,6 +1990,16 @@ describe('bridge login e2e', () => {
         },
         archived: false,
       }, 15)).toEqual({ _: 'messages.stickerSetInstallResultSuccess' })
+      const historicalFavorites = await callRpc(client, key, sid, {
+        _: 'messages.getFavedStickers', hash: Long.ZERO,
+      }, 17)
+      const historicalLooseDocument = historicalFavorites.stickers.find((document: any) =>
+        document.attributes.some((attribute: any) =>
+          attribute._ === 'documentAttributeSticker'
+          && attribute.stickerset._ === 'inputStickerSetEmpty'))
+      expect(historicalLooseDocument).toMatchObject({
+        _: 'document', mimeType: 'image/webp', fileReference: expect.any(Uint8Array),
+      })
       client.close()
       client = undefined
       await first.stop()
@@ -2005,6 +2015,31 @@ describe('bridge login e2e', () => {
         _: 'user', id: persistedAliceId, firstName: 'Alice',
         photo: { _: 'userProfilePhoto', photoId: persistedAlicePhotoId },
       }])
+      // Simulate a historical QQ favorite that is no longer returned by the
+      // current pack/favorite listings. A fresh service must recover the exact
+      // sticker through the cached Telegram document's file_reference.
+      const pluginProvider = second.ctx.imSticker.require('static:plugin') as
+        staticPlatformPlugin.StaticStickerProvider
+      const listPacks = vi.spyOn(pluginProvider, 'listPacks').mockResolvedValue({ packs: [] })
+      const listSaved = vi.spyOn(pluginProvider, 'listSavedStickers').mockResolvedValue({ stickers: [] })
+      const getSticker = vi.spyOn(pluginProvider, 'getSticker')
+      const historicalSticker = await callRpc(client, key, resumedSid, {
+        _: 'upload.getFile', offset: 4, limit: 12,
+        location: {
+          _: 'inputDocumentFileLocation',
+          id: historicalLooseDocument.id,
+          accessHash: historicalLooseDocument.accessHash,
+          fileReference: historicalLooseDocument.fileReference,
+          thumbSize: '',
+        },
+      }, 7)
+      expect(historicalSticker).toMatchObject({ _: 'upload.file', bytes: { length: 12 } })
+      expect(getSticker).toHaveBeenCalledWith(expect.anything(), 'loose-saved')
+      expect(listPacks).not.toHaveBeenCalled()
+      expect(listSaved).not.toHaveBeenCalled()
+      listPacks.mockRestore()
+      listSaved.mockRestore()
+      getSticker.mockRestore()
       const persistedAvatar = await callRpc(client, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 1024,
         location: {
@@ -2012,25 +2047,25 @@ describe('bridge login e2e', () => {
           peer: { _: 'inputPeerUser', userId: persistedAliceId, accessHash: Long.ZERO },
           photoId: persistedAlicePhotoId,
         },
-      }, 7)
+      }, 9)
       expect([...persistedAvatar.bytes.subarray(0, 8)])
         .toEqual([137, 80, 78, 71, 13, 10, 26, 10])
       const dialogs = await callRpc(client, key, resumedSid, {
         _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
-      }, 8)
+      }, 10)
       expect(dialogs._).toBe('messages.dialogs')
       expect(new Set(dialogs.users.map((user: any) => user.firstName)))
         .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
       expect(await callRpc(client, key, resumedSid, {
         _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO,
-      }, 10)).toMatchObject({
+      }, 12)).toMatchObject({
         _: 'messages.recentStickers',
         stickers: [expect.objectContaining({ id: persistedDocument.id })],
       })
       expect(await callRpc(client, key, resumedSid, {
         _: 'messages.getFavedStickers', hash: Long.ZERO,
-      }, 12)).toMatchObject({
+      }, 14)).toMatchObject({
         _: 'messages.favedStickers',
         stickers: expect.arrayContaining([
           expect.objectContaining({ id: persistedDocument.id }),
@@ -2047,7 +2082,7 @@ describe('bridge login e2e', () => {
           _: 'inputStickerSetID', id: persistedSet.id, accessHash: persistedSet.accessHash,
         },
         hash: 0,
-      }, 14)).toMatchObject({
+      }, 16)).toMatchObject({
         _: 'messages.stickerSet',
         set: { installedDate: expect.any(Number) },
       })
