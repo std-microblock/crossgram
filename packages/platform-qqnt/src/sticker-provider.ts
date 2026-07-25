@@ -37,7 +37,7 @@ export class QQStickerProvider implements IMStickerProvider {
   async listSavedStickers(_context: StickerProviderContext, query: StickerPageQuery = {}) {
     const page = await this.client.getSavedStickers(query)
     return {
-      stickers: await Promise.all(page.stickers.map((sticker) => this.mapSticker(sticker))),
+      stickers: await mapConcurrent(page.stickers, 4, (sticker) => this.mapSticker(sticker)),
       nextCursor: page.nextCursor,
     }
   }
@@ -45,13 +45,7 @@ export class QQStickerProvider implements IMStickerProvider {
   async openAsset(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset> {
     const reference = sticker.locator as unknown as QQStickerReference | undefined
     if (!reference) throw new Error(`QQ sticker ${sticker.stickerId} has no native reference`)
-    const original: IMStickerAsset = {
-      source: this.client.stickerSource(reference, sticker.size),
-      mimeType: reference.animated ? 'image/gif' : 'image/png',
-      size: sticker.size,
-      width: sticker.width,
-      height: sticker.height,
-    }
+    const original = this.originalAsset(sticker, reference)
     return this.mediaCache
       ? this.mediaCache.openSticker({ ...sticker, format: reference.animated ? 'animated' : 'static' }, original)
       : { ...original, mimeType: sticker.mimeType }
@@ -80,13 +74,15 @@ export class QQStickerProvider implements IMStickerProvider {
   }
 
   private async mapPack(pack: WireStickerPack): Promise<IMStickerPack> {
+    const stickers = await mapConcurrent(pack.stickers, 4, (sticker) => this.mapSticker(sticker))
     return {
       providerId: this.providerId,
       packId: pack.packId,
       title: pack.title,
       count: pack.count,
+      cover: stickers[0] && { providerId: this.providerId, stickerId: stickers[0].stickerId },
       version: pack.version,
-      stickers: await Promise.all(pack.stickers.map((sticker) => this.mapSticker(sticker))),
+      stickers,
     }
   }
 
@@ -105,6 +101,33 @@ export class QQStickerProvider implements IMStickerProvider {
       locator: sticker.reference as unknown as JsonValue,
     }
     if (!this.mediaCache) return mapped
-    return this.mediaCache.restoreStickerThumbnail(this.mediaCache.projectSticker(mapped))
+    return this.mediaCache.prepareSticker(mapped, this.originalAsset(mapped, sticker.reference))
   }
+
+  private originalAsset(sticker: IMSticker, reference: QQStickerReference): IMStickerAsset {
+    return {
+      source: this.client.stickerSource(reference, sticker.size),
+      mimeType: reference.animated ? 'image/gif' : 'image/png',
+      size: sticker.size,
+      width: sticker.width,
+      height: sticker.height,
+    }
+  }
+}
+
+async function mapConcurrent<T, U>(
+  input: readonly T[],
+  concurrency: number,
+  transform: (item: T) => Promise<U>,
+): Promise<U[]> {
+  const output = new Array<U>(input.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(concurrency, input.length) }, async () => {
+    while (cursor < input.length) {
+      const index = cursor++
+      output[index] = await transform(input[index]!)
+    }
+  })
+  await Promise.all(workers)
+  return output
 }

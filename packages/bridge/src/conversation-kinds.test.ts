@@ -214,13 +214,28 @@ describe('conversation kinds', () => {
       _: 'messages.sendReaction', peer, msgId: message.id, reaction,
     })
 
-    await send([{ _: 'reactionEmoji', emoticon: '👍' }])
-    await send([])
+    await expect(send([{ _: 'reactionEmoji', emoticon: '👍' }])).resolves.toMatchObject({
+      _: 'updates',
+      updates: [
+        { _: 'updateMessageReactions' },
+        { _: 'updateRecentReactions' },
+      ],
+    })
+    await expect(send([])).resolves.toMatchObject({
+      _: 'updates',
+      updates: [{ _: 'updateMessageReactions' }],
+    })
     await expect(rpc.getRecentReactions(100)).resolves.toMatchObject({ reactions: [
       { _: 'reactionEmoji', emoticon: '👍' },
     ] })
 
-    await send([{ _: 'reactionEmoji', emoticon: '🔥' }])
+    await expect(send([{ _: 'reactionEmoji', emoticon: '🔥' }])).resolves.toMatchObject({
+      _: 'updates',
+      updates: [
+        { _: 'updateMessageReactions' },
+        { _: 'updateRecentReactions' },
+      ],
+    })
     await expect(rpc.getRecentReactions(100)).resolves.toMatchObject({ reactions: [
       { _: 'reactionEmoji', emoticon: '🔥' },
       { _: 'reactionEmoji', emoticon: '👍' },
