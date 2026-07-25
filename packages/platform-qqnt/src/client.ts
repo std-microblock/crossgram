@@ -1,4 +1,5 @@
 import { Readable } from 'node:stream'
+import { createHash } from 'node:crypto'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
@@ -180,6 +181,10 @@ export class QQNTClient {
     textParts?: WireTextPart[],
     replyToId?: string,
   ): Promise<WireMessage> {
+    const preparedMedia = media && await Promise.all(media.map(async (item) => ({
+      item,
+      hashes: await hashMediaSource(item.source, options.signal),
+    })))
     const manifest = {
       conversationId,
       text,
@@ -187,16 +192,17 @@ export class QQNTClient {
       replyToId,
       originRequestId,
       sticker,
-      media: media?.map((item) => ({
-        kind: item.kind, name: item.name, mimeType: item.mimeType, size: item.source.size,
+      media: preparedMedia?.map(({ item, hashes }) => ({
+        kind: item.kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
+        md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
         width: item.width, height: item.height, duration: item.duration,
       })),
       mediaFraming: media && media.length > 1 ? 'length-prefixed-v1' : undefined,
     }
     const headers = this.headers({
       'x-qqnt-manifest': Buffer.from(JSON.stringify(manifest)).toString('base64url'),
-      ...(media?.length === 1 && media[0].source.size !== undefined
-        ? { 'content-length': String(media[0].source.size) }
+      ...(preparedMedia?.length === 1
+        ? { 'content-length': String(preparedMedia[0].hashes.size) }
         : {}),
     })
     let body: BodyInit | undefined
@@ -566,6 +572,35 @@ function rawDataText(data: RawData): string {
   if (Array.isArray(data)) return Buffer.concat(data).toString()
   if (data instanceof ArrayBuffer) return Buffer.from(new Uint8Array(data)).toString()
   return data.toString()
+}
+
+async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Promise<{
+  size: number
+  md5: string
+  sha1: string
+  file10MMd5: string
+}> {
+  const md5 = createHash('md5')
+  const sha1 = createHash('sha1')
+  const first10M = createHash('md5')
+  const first10MLimit = 10 * 1024 * 1024
+  let size = 0
+  let first10MSize = 0
+  for await (const chunk of source.stream({ signal })) {
+    if (signal?.aborted) throw signal.reason ?? new Error('upload aborted')
+    size += chunk.length
+    md5.update(chunk)
+    sha1.update(chunk)
+    if (first10MSize < first10MLimit) {
+      const accepted = chunk.subarray(0, Math.min(chunk.length, first10MLimit - first10MSize))
+      first10M.update(accepted)
+      first10MSize += accepted.length
+    }
+  }
+  if (source.size !== undefined && size !== source.size) {
+    throw new Error(`incomplete media source: expected ${source.size} bytes, streamed ${size}`)
+  }
+  return { size, md5: md5.digest('hex'), sha1: sha1.digest('hex'), file10MMd5: first10M.digest('hex') }
 }
 
 async function* uploadStream(

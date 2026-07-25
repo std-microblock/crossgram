@@ -65,10 +65,13 @@ stickers. Animated expression pictures and animated sticker assets are
 projected as Telegram video stickers (`video/webm`) rather than image/GIF
 documents.
 
-QQNT's native API accepts local paths rather than byte streams. The injected QQ
-process therefore writes the incoming request incrementally to a private
-staging file, invokes the native API, and removes the staging file after QQ
-confirms or rejects the message. Memory use remains bounded.
+Bridge protocol v18 hashes each reopenable `IMMediaSource` in the relay, then
+reopens it for the HTTP request. The injected process uses the supplied MD5,
+SHA-1, and first-10-MiB MD5 to negotiate QQ image/file upload and sends the
+request body directly as bounded 1 MiB Highway blocks. It does not create a
+second full local file. A server-side fast-upload hit still drains and validates
+the complete request body. The injected bridge retains a local-path fallback
+only for older manifests without hashes during rolling upgrades.
 
 `dialogs` and `contacts` deliberately use different QQ data sources:
 
