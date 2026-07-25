@@ -181,6 +181,50 @@ describe('QQNTClient streaming transport', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('downloads catalog-keyed reaction ranges through the dedicated authenticated route', async () => {
+    const requests: Array<{ url: string, body: unknown, range?: string, authorization?: string }> = []
+    const progress: number[] = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      token: 'bridge-token',
+      fetch: vi.fn(async (input, init) => {
+        const headers = new Headers(init?.headers)
+        requests.push({
+          url: String(input), body: JSON.parse(String(init?.body)),
+          range: headers.get('range') ?? undefined,
+          authorization: headers.get('authorization') ?? undefined,
+        })
+        return new Response('bcd', { status: 206 })
+      }),
+    })
+
+    const bytes = await collect(client.downloadReactionResource('1:14', {
+      offset: 1, limit: 3, onChunk: (size) => { progress.push(size) },
+    }))
+
+    expect(bytes.toString()).toBe('bcd')
+    expect(progress).toEqual([3])
+    expect(requests).toEqual([{
+      url: 'http://bridge.invalid/v1/reactions/asset',
+      body: { reactionKey: '1:14' },
+      range: 'bytes=1-3', authorization: 'Bearer bridge-token',
+    }])
+  })
+
+  it('slices a full reaction response locally and propagates bridge errors', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response('abcdefghij'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'reaction resource not found' }), {
+        status: 404, headers: { 'content-type': 'application/json' },
+      }))
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(collect(client.downloadReactionResource('1:265', { offset: 4, limit: 3 })))
+      .resolves.toEqual(Buffer.from('efg'))
+    await expect(collect(client.downloadReactionResource('missing')))
+      .rejects.toThrow('reaction resource not found')
+  })
+
   it('rejects an ambiguous locator instead of silently falling back for native media', async () => {
     const fetch = vi.fn()
     const client = new QQNTClient({ fetch })

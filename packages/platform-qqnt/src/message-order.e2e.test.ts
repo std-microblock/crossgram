@@ -198,6 +198,76 @@ describe('QQNT remote media routing E2E', () => {
     expect(first.toString()).toBe('abcd')
     expect(second.toString()).toBe('efgh')
   })
+
+  it('loads opaque reaction assets over HTTP and serves the transformed cache without local file routes', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-http-e2e-'))
+    temporaryDirectories.push(cachePath)
+    const png = await sharp({
+      create: { width: 24, height: 18, channels: 4, background: { r: 220, g: 100, b: 40, alpha: 1 } },
+    }).png().toBuffer()
+    let assetBody: Record<string, unknown> | undefined
+    let removedRouteRequests = 0
+    let server: Server | undefined
+    server = createServer(async (request, response) => {
+      if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          available: [{
+            key: '1:265', title: '辣眼睛',
+            presentation: {
+              type: 'custom', alt: '[辣眼睛]',
+              resource: {
+                version: 1, format: 'static', mimeType: 'image/png',
+                width: 24, height: 18, size: png.length,
+                locator: { reactionKey: '1:265' },
+              },
+            },
+          }],
+          reactions: [], maxSelected: 20,
+        }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/reactions/asset') {
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        assetBody = JSON.parse(Buffer.concat(chunks).toString())
+        response.writeHead(200, { 'content-type': 'image/png', 'content-length': String(png.length) })
+        response.end(png)
+        return
+      }
+      if (request.url === '/v1/files/download') removedRouteRequests++
+      response.writeHead(404).end('not found')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({
+      endpoint: `http://127.0.0.1:${address.port}/v1`, token: 'bridge-token',
+    }, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+    const catalog = await platform.getAvailableReactions(session, { conversationId: '2:group' })
+    const definition = catalog.available[0]!
+    if (definition.presentation.type !== 'custom') throw new Error('expected custom reaction')
+    const resource = definition.presentation.resource
+    const bytes = await collect(platform.downloadReactionResource(session, resource, { offset: 3, limit: 7 }))
+
+    expect(resource).toMatchObject({
+      format: 'static', mimeType: 'image/webp', width: 100, height: 100,
+      locator: { cacheKey: expect.any(String) },
+    })
+    expect(bytes).toHaveLength(7)
+    expect(assetBody).toEqual({ reactionKey: '1:265' })
+    expect(removedRouteRequests).toBe(0)
+  })
 })
 
 describe('QQNT animated media upgrade E2E', () => {

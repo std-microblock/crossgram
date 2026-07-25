@@ -21,7 +21,7 @@ import type {
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
 
-const MIN_DIRECT_URL_PROTOCOL_VERSION = 15
+const MIN_DIRECT_URL_PROTOCOL_VERSION = 16
 
 export interface Config extends QQNTClientOptions {
   /**
@@ -721,6 +721,21 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       yield output
       return
     }
+    if (isReactionResourceLocator(locator)) {
+      let transferredBytes = 0
+      for await (const chunk of this.client.downloadReactionResource(locator.reactionKey, {
+        signal: options.signal,
+        offset: options.offset,
+        limit: options.limit,
+        onChunk: async (size) => {
+          transferredBytes += size
+          await options.onProgress?.({
+            phase: 'download', mediaIndex: 0, transferredBytes, totalBytes: resource.size,
+          })
+        },
+      })) yield chunk
+      return
+    }
     if (!isRemoteQQMediaLocator(locator)) throw new Error('QQ reaction resource has no cached remote asset')
     let transferredBytes = 0
     for await (const chunk of sliceStream(
@@ -754,13 +769,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       // the production plugin always supplies it from apply().
       if (!this.mediaCache) return definition
       const locator = resource.locator
-      if (!isRemoteQQMediaLocator(locator)) return definition
+      if (!isReactionResourceLocator(locator) && !isRemoteQQMediaLocator(locator)) return definition
       const input: IMStickerAsset = {
         source: {
           size: resource.size,
-          stream: ({ signal } = {}) => this.client.downloadFile(
-            locator, { signal },
-          ),
+          stream: ({ signal } = {}) => isReactionResourceLocator(locator)
+            ? this.client.downloadReactionResource(locator.reactionKey, { signal })
+            : this.client.downloadFile(locator, { signal }),
         },
         mimeType: resource.format === 'video' ? 'image/apng' : 'image/png',
         size: resource.size,
@@ -1195,6 +1210,11 @@ function isRemoteQQMediaLocator(value: unknown): value is QQMediaLocator {
     && (locator.kind === 'image' || locator.kind === 'file')
     && typeof locator.fileName === 'string'
     && Boolean(locator.originImageUrl || locator.fileUuid || locator.avatarUin)
+}
+
+function isReactionResourceLocator(value: unknown): value is { reactionKey: string } {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && typeof (value as { reactionKey?: unknown }).reactionKey === 'string')
 }
 
 function multiForwardConversationId(locator: WireMultiForwardLocator): string {
