@@ -61,7 +61,9 @@ describe('plugin config schemas', () => {
     expect(() => bridgeConfig({ serverPort: 65_536 })).toThrow(/serverPort/)
     expect(() => qqntConfig({ previewMaxDimension: 0 })).toThrow(/previewMaxDimension/)
     expect(() => discordConfig({ token: 'user-token', downloadChunkSize: 0 })).toThrow(/downloadChunkSize/)
-    expect(() => matrixConfig({ homeserver: '', accessToken: '' })).toThrow(/homeserver|accessToken/)
+    expect(() => matrixConfig({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', syncTimeoutMs: 0,
+    })).toThrow(/syncTimeoutMs/)
     expect(() => staticConfig({ transferChunkSize: 0 })).toThrow(/transferChunkSize/)
     expect(() => relayConfig({ apiId: 0, apiHash: '' })).toThrow(/apiId/)
   })
