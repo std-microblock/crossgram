@@ -106,6 +106,25 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('preserves structured mini-app and share-card metadata instead of flattening it to text', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'mini-app-card', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{ type: 'card' as const, card: {
+        kind: 'mini-app' as const, source: '腾讯文档', title: '项目排期', description: '本周项目安排',
+        url: 'https://docs.qq.com/sheet/example', thumbnailUrl: 'https://cdn.example.com/cover.jpg',
+      } }],
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ content: { parts: [{ type: 'card', card: {
+        kind: 'mini-app', source: '腾讯文档', title: '项目排期', description: '本周项目安排',
+        url: 'https://docs.qq.com/sheet/example', thumbnailUrl: 'https://cdn.example.com/cover.jpg',
+      } }] } }],
+    })
+  })
+
   it('filters reaction gray tips from history, search, direct lookup, and dialog previews by default', async () => {
     const platform = new QQNTPlatform()
     const reactionTip = {

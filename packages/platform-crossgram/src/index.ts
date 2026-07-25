@@ -10,7 +10,7 @@ import type {
   IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
   IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
+import { messagePartText, resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
@@ -623,6 +623,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         const source = this.mapMessage(wire)
         const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
           if (part.type === 'text') return { ...part }
+          if (part.type === 'card') return { type: 'text' as const, text: messagePartText(part) }
           if (part.type === 'sticker') return {
             type: 'sticker' as const,
             sticker: {
@@ -1303,6 +1304,8 @@ function mapParts(
                 locator: part.sticker.reference as never,
               },
       })
+    } else if (part.type === 'card') {
+      parts.push({ type: 'card', card: { ...part.card } })
     } else {
       parts.push({ type: 'media', media: mapMedia(part.media) })
     }

@@ -122,8 +122,18 @@ export interface WireMessage {
     | { type: 'media', media: WireMedia }
     | { type: 'sticker', sticker: WireSticker }
     | { type: 'multi-forward', title: string, locator: WireMultiForwardLocator }
+    | { type: 'card', card: WireCard }
   >
   reactionContext?: WireReactionState
+}
+
+export interface WireCard {
+  kind: 'mini-app' | 'link' | 'music' | 'contact' | 'location' | 'application'
+  title: string
+  description?: string
+  source?: string
+  url?: string
+  thumbnailUrl?: string
 }
 
 export interface WireMultiForwardLocator {
