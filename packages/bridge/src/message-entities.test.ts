@@ -65,6 +65,35 @@ describe('withAutoLinkEntities', () => {
       },
     ])
   })
+
+  it('ends a URL before an adjacent platform mention instead of dropping the whole link', () => {
+    const text = 'http://aaa.com@某个群友'
+    const mention: tl.TypeMessageEntity = {
+      _: 'messageEntityMentionName', offset: text.indexOf('@'), length: '@某个群友'.length, userId: 42,
+    }
+
+    expect(withAutoLinkEntities(text, [mention])).toEqual([
+      { _: 'messageEntityUrl', offset: 0, length: 'http://aaa.com'.length },
+      mention,
+    ])
+  })
+
+  it('does not mistake common bare filenames for domains', () => {
+    const text = [
+      '这不是一个链接啊.zip',
+      'archive.tar.gz',
+      '报告.pdf',
+      'https://downloads.example/file.zip',
+      'www.example.zip',
+      'example.zip/download',
+    ].join(' | ')
+
+    expect(linkTexts(text)).toEqual([
+      'https://downloads.example/file.zip',
+      'www.example.zip',
+      'example.zip/download',
+    ])
+  })
 })
 
 function linkTexts(text: string): string[] {
