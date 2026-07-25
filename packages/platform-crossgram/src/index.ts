@@ -8,9 +8,9 @@ import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
   IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
-  IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
+  IMSticker, IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
+import { messagePartText, resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
@@ -393,10 +393,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
       return {
         messages: await Promise.all(messages.filter((message) => !this.isFilteredGrayTip(message))
-          .slice(0, query.limit ?? messages.length).map((message) =>
-          this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
-            ...this.mapMessage(message), conversationId: conversation.id,
-          }))),
+          .slice(0, query.limit ?? messages.length).map((message) => {
+            const mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), multiForward)
+            return this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
+              ...mapped, conversationId: conversation.id,
+            })
+          })),
       }
     }
     const response = await this.client.getHistory(conversation.id, {
@@ -584,12 +586,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const originRequestId = randomUUID()
     this.originSessions.set(originRequestId, session.platformSessionId)
     try {
-      return this.mapMessage(
+      return this.prepareInitialMessage(this.mapMessage(
         await this.client.sendMessage(
           conversation.id, text, media.length ? media : undefined,
           options, originRequestId, sticker, textParts, content.replyToId,
         ),
-      )
+      ))
     } finally {
       const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
       timer.unref()
@@ -621,6 +623,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         const source = this.mapMessage(wire)
         const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
           if (part.type === 'text') return { ...part }
+          if (part.type === 'card') return { type: 'text' as const, text: messagePartText(part) }
           if (part.type === 'sticker') return {
             type: 'sticker' as const,
             sticker: {
@@ -882,7 +885,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const parts = await Promise.all(message.content.parts.map(async (part) => {
       if (part.type === 'sticker') {
         try {
-          return { ...part, sticker: await this.mediaCache!.restoreStickerThumbnail(part.sticker) }
+          return { ...part, sticker: await this.prepareSticker(part.sticker) }
         } catch {
           return part
         }
@@ -975,6 +978,31 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
+  private rebaseMultiForwardMedia(
+    message: IMMessage<QQMediaLocator>,
+    locator: WireMultiForwardLocator,
+  ): IMMessage<QQMediaLocator> {
+    const outer = this.conversations.get(locator.conversationId)
+    const chatType = outer?.metadata?.chatType
+    const peerUid = outer?.metadata?.qqPeerUid
+    if ((chatType !== 1 && chatType !== 2) || typeof peerUid !== 'string' || !peerUid) return message
+    const physicalChatType: 1 | 2 = chatType === 1 ? 1 : 2
+
+    let changed = false
+    const parts = message.content.parts.map((part) => {
+      if (part.type !== 'media' || !part.media.locator) return part
+      changed ||= part.media.locator.chatType !== physicalChatType || part.media.locator.peerUid !== peerUid
+      return {
+        ...part,
+        media: {
+          ...part.media,
+          locator: { ...part.media.locator, chatType: physicalChatType, peerUid },
+        },
+      }
+    })
+    return changed ? { ...message, content: { ...message.content, parts } } : message
+  }
+
   private async prepareInitialMessage(
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
@@ -984,7 +1012,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         try {
           return {
             ...part,
-            sticker: await this.mediaCache!.restoreStickerThumbnail(part.sticker),
+            sticker: await this.prepareSticker(part.sticker),
           }
         } catch (error) {
           this.logger?.warn(
@@ -1097,6 +1125,22 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       return { type: 'media' as const, media: upgraded }
     }))
     return changed ? { ...message, content: { ...message.content, parts } } : undefined
+  }
+
+  private prepareSticker(sticker: IMSticker): Promise<IMSticker> {
+    const reference = sticker.locator as unknown as QQStickerReference | undefined
+    if (!this.mediaCache || !reference) return Promise.resolve(sticker)
+    return this.mediaCache.prepareSticker({
+      ...sticker,
+      format: reference.animated ? 'animated' : 'static',
+      mimeType: reference.animated ? 'image/gif' : 'image/png',
+    }, {
+      source: this.client.stickerSource(reference, sticker.size),
+      mimeType: reference.animated ? 'image/gif' : 'image/png',
+      size: sticker.size,
+      width: sticker.width,
+      height: sticker.height,
+    })
   }
 
   private readonly registerMultiForward = (
@@ -1276,6 +1320,8 @@ function mapParts(
                 locator: part.sticker.reference as never,
               },
       })
+    } else if (part.type === 'card') {
+      parts.push({ type: 'card', card: { ...part.card } })
     } else {
       parts.push({ type: 'media', media: mapMedia(part.media) })
     }

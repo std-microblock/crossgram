@@ -133,6 +133,34 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('rich-media projection', () => {
+  it('projects structured platform cards as serializable Telegram WebPage previews', async () => {
+    const { store, peerId } = await createStore()
+    const card: IMMessage = {
+      id: 'mini-app-card', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_010,
+      content: { parts: [{ type: 'card', card: {
+        kind: 'mini-app', source: '腾讯文档', title: '项目排期', description: '本周项目安排',
+        url: 'https://docs.qq.com/sheet/example', thumbnailUrl: 'https://cdn.example.com/card.jpg',
+      } }] },
+    }
+    const result = await new DialogRpc({
+      ...platform, async getHistory() { return { messages: [card] } },
+    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const message = result.messages[0] as tl.RawMessage
+
+    expect(message).toMatchObject({
+      _: 'message',
+      message: '[小程序] 腾讯文档\n项目排期\n本周项目安排\nhttps://docs.qq.com/sheet/example',
+      media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
+        _: 'webPage', url: 'https://docs.qq.com/sheet/example', displayUrl: 'docs.qq.com',
+        type: 'app', siteName: '腾讯文档', title: '项目排期', description: '本周项目安排',
+      } },
+    })
+    expect(message.entities).toEqual(expect.arrayContaining([expect.objectContaining({
+      _: 'messageEntityUrl',
+    })]))
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('keeps reply headers when the target is outside the requested history window', async () => {
     const { store, peerId } = await createStore()
     const target: IMMessage = {

@@ -106,6 +106,25 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('preserves structured mini-app and share-card metadata instead of flattening it to text', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'mini-app-card', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{ type: 'card' as const, card: {
+        kind: 'mini-app' as const, source: '腾讯文档', title: '项目排期', description: '本周项目安排',
+        url: 'https://docs.qq.com/sheet/example', thumbnailUrl: 'https://cdn.example.com/cover.jpg',
+      } }],
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ content: { parts: [{ type: 'card', card: {
+        kind: 'mini-app', source: '腾讯文档', title: '项目排期', description: '本周项目安排',
+        url: 'https://docs.qq.com/sheet/example', thumbnailUrl: 'https://cdn.example.com/cover.jpg',
+      } }] } }],
+    })
+  })
+
   it('filters reaction gray tips from history, search, direct lookup, and dialog previews by default', async () => {
     const platform = new QQNTPlatform()
     const reactionTip = {
@@ -240,6 +259,58 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getHistory).toHaveBeenCalledWith('2:group', expect.objectContaining({
       aroundUnreadSeq: undefined,
     }))
+  })
+
+  it('downloads merged-forward files through the physical outer QQ conversation', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: 'outer-group', kind: 'group' as const, title: 'Outer group',
+      peerUid: 'physical-group-uid', peerUin: '10001', chatType: 2 as const,
+      lastMessage: {
+        id: 'merged-root', conversationId: 'outer-group', senderId: 'alice', timestamp: 10, outgoing: false,
+        parts: [{
+          type: 'multi-forward' as const, title: '聊天记录',
+          locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
+        }],
+      },
+    }] }))
+    const [dialog] = (await platform.getDialogs(session)).dialogs
+    const link = dialog.lastMessage?.content.parts[0]
+    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+
+    const archivedLocator = {
+      messageId: 'archived-file-message', elementId: 'file-element', chatType: 2 as const,
+      peerUid: 'archived-source-group', kind: 'file' as const, fileName: 'guide.xlsx',
+      fileUuid: '/file-uuid', fileBizId: 104,
+    }
+    platform.client.getMultiForwardMessages = vi.fn(async () => [{
+      id: 'archived-file-message', conversationId: 'archived-source-group',
+      senderId: 'bob', timestamp: 9, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: { id: 'file-element', kind: 'file' as const, name: 'guide.xlsx', size: 8, locator: archivedLocator },
+      }],
+    }])
+    platform.client.downloadFile = vi.fn(async function* () { yield new TextEncoder().encode('contents') })
+
+    const history = await platform.getHistory(session, link.entities[0].conversation)
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'media') throw new Error('merged forward file was not mapped')
+    const chunks: Uint8Array[] = []
+    for await (const chunk of platform.downloadMedia(session, part.media)) chunks.push(chunk)
+
+    expect(part.media.locator).toEqual({
+      ...archivedLocator, chatType: 2, peerUid: 'physical-group-uid',
+    })
+    expect(platform.client.downloadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ chatType: 2, peerUid: 'physical-group-uid', fileUuid: '/file-uuid' }),
+      { signal: undefined, offset: undefined, limit: undefined },
+    )
+    expect(chunks).toEqual([new TextEncoder().encode('contents')])
+    expect(archivedLocator.peerUid).toBe('archived-source-group')
   })
 
   it('uses QQ merged forward only for multiple preserved-source messages', async () => {
@@ -443,6 +514,54 @@ describe('QQNTPlatform mapping', () => {
       },
     }])
   })
+
+  it('materializes a sent animated sticker before returning the local echo', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-sent-sticker-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({}, 'qq-provider', new QQMediaCache({ path: cachePath }))
+    const gif = await sharp({
+      create: { width: 16, height: 12, channels: 4, background: { r: 20, g: 80, b: 220, alpha: 1 } },
+    }).gif().toBuffer()
+    const reference = {
+      kind: 'market' as const, packageId: '42', stickerId: 'wave', name: 'Wave', key: 'secret',
+      width: 16, height: 12, animated: true,
+    }
+    let assetRequests = 0
+    platform.client.stickerSource = vi.fn(() => ({
+      size: gif.length,
+      async *stream() {
+        assetRequests++
+        yield gif
+      },
+    }))
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent-sticker', conversationId: 'u', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{ type: 'sticker' as const, sticker: {
+        stickerId: 'market:42:wave', packId: '42', title: 'Wave',
+        format: 'animated' as const, mimeType: 'image/gif', width: 16, height: 12,
+        reference,
+      } }],
+    }))
+
+    const sent = await platform.sendMessage(session, { id: 'u' }, { parts: [{
+      type: 'sticker',
+      sticker: {
+        type: 'native', providerId: 'qq-provider', stickerId: 'market:42:wave', packId: '42',
+        reference,
+      },
+    }] })
+
+    expect(sent.content.parts).toMatchObject([{
+      type: 'sticker', sticker: {
+        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
+        thumbnail: { mimeType: 'image/webp' },
+      },
+    }])
+    const sticker = sent.content.parts[0]
+    if (sticker.type !== 'sticker') throw new Error('missing sent sticker')
+    expect(sticker.sticker.size).toBeGreaterThan(0)
+    expect(assetRequests).toBe(1)
+  }, 30_000)
 
   it('exposes QQ packs, assets, and native favorite mutation through the sticker provider', async () => {
     const platform = new QQNTPlatform()
@@ -947,21 +1066,27 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.downloadFile).toHaveBeenCalledTimes(2)
   }, 30_000)
 
-  it('projects animated QQ expression messages as WebM video stickers', async () => {
+  it('projects QQ animated system faces as WebM video stickers without leaking fallback text', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-message-sticker-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+    const gif = await sharp({
+      create: { width: 16, height: 12, channels: 4, background: { r: 120, g: 40, b: 210, alpha: 1 } },
+    }).gif().toBuffer()
+    platform.client.stickerSource = vi.fn(() => ({
+      size: gif.length, async *stream() { yield gif },
+    }))
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getHistory = vi.fn(async () => ({ messages: [{
       id: 'sticker-message', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
       parts: [{
         type: 'sticker' as const,
         sticker: {
-          stickerId: 'favorite:animated', format: 'animated' as const, mimeType: 'image/gif',
-          width: 128, height: 96,
+          stickerId: 'sysface:476', title: '/不是吧',
+          format: 'animated' as const, mimeType: 'image/apng', width: 240, height: 240,
           reference: {
-            kind: 'favorite' as const, resId: 'animated', path: '/tmp/animated.gif',
-            name: 'animated.gif', animated: true,
+            kind: 'sysface' as const, faceId: '476', faceType: 3, name: '/不是吧',
+            packId: '3', stickerId: '476', stickerType: 2, resultId: 'result-476', animated: true as const,
           },
         },
       }],
@@ -969,8 +1094,19 @@ describe('QQNTPlatform mapping', () => {
 
     const history = await platform.getHistory(session, { id: '2:group' })
     expect(history.messages[0].content.parts).toMatchObject([{
-      type: 'sticker', sticker: { format: 'video', mimeType: 'video/webm' },
+      type: 'sticker', sticker: {
+        stickerId: 'sysface:476', title: '/不是吧',
+        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
+        thumbnail: { mimeType: 'image/webp' },
+        locator: {
+          kind: 'sysface', faceId: '476', faceType: 3, packId: '3',
+          stickerId: '476', stickerType: 2, resultId: 'result-476',
+        },
+      },
     }])
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'sticker') throw new Error('missing history sticker')
+    expect(part.sticker.size).toBeGreaterThan(0)
   })
 
   it('caches catalog-keyed static and animated reactions without exposing bridge paths', async () => {
