@@ -596,7 +596,7 @@ export class QQMediaCache {
   }
 
   private async extractVideoPreview(source: string, output: string): Promise<void> {
-    const scale = `scale=${this.previewMaxDimension}:${this.previewMaxDimension}:force_original_aspect_ratio=decrease`
+    const scale = `scale='min(${this.previewMaxDimension},iw)':'min(${this.previewMaxDimension},ih)':force_original_aspect_ratio=decrease`
     await runProcess(this.ffmpegPath, [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', source,
       '-frames:v', '1', '-vf', scale, '-c:v', 'libwebp', '-f', 'webp', output,
