@@ -2292,6 +2292,7 @@ export class DialogRpc {
   }
 
   private async _getPeerUser(peerId: string, fallbackName?: string): Promise<tl.RawUser> {
+    if (peerId === this._session.userId) return this._makeSelfUser()
     const cached = this._peerUsers.get(peerId)
     if (cached) return cached
     const pending = this._pendingPeerUsers.get(peerId)
