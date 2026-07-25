@@ -131,9 +131,20 @@ describe('MessageStore', () => {
         { ordinal: 0, partIndex: 1, platformMediaId: physicalIds[0], kind: 'image' },
         { ordinal: 1, partIndex: 2, platformMediaId: physicalIds[1], kind: 'file' },
       ])
+    const [storedSender] = await ctx.database.get('mtproto_im_user', {
+      platformId: session.platformId,
+      platformUserId: message.senderId,
+    })
+    expect(storedSender).toMatchObject({
+      id: first.message.senderUserId,
+      firstName: 'Conversation Alias',
+      username: '1715311957',
+      avatar: { id: 'avatar:user:sender', locator: { avatarUin: '1715311957' } },
+    })
     expect((await store.findByExternalId(session.platformSessionId, conversationId, physicalIds[1]))?.id)
       .toBe(first.message.id)
-    await expect(store.readHistory(session.platformSessionId, conversationId)).resolves.toMatchObject([{
+    const hydrated = await store.readHistory(session.platformSessionId, conversationId)
+    expect(hydrated).toMatchObject([{
       sender: {
         id: message.senderId,
         firstName: 'Conversation Alias',
@@ -142,6 +153,38 @@ describe('MessageStore', () => {
       },
       metadata: {},
     }])
+    await store.ingest(session, conversation, hydrated[0])
+    await expect(store.getUser(session.platformId, message.senderId)).resolves.toMatchObject({
+      firstName: 'Conversation Alias', username: '1715311957',
+    })
+  })
+
+  it('uses one auto-increment Telegram user ID across sessions of the same platform entry', async () => {
+    const { ctx, store } = await createStore()
+    const first = await store.upsertUser(session, { id: 'opaque-alice', firstName: 'opaque-alice' })
+    const refreshed = await store.upsertUser({
+      ...session, platformSessionId: 'replacement-session',
+    }, {
+      id: 'opaque-alice', firstName: 'Alice', username: '1715311957',
+      avatar: { id: 'avatar:alice', kind: 'image', locator: { avatarUin: '1715311957' } },
+      metadata: { qq: '1715311957' },
+    })
+    const otherPlatform = await store.upsertUser({
+      ...session, platformId: 'other-platform', platformSessionId: 'other-session',
+    }, { id: 'opaque-alice', firstName: 'Other Alice' })
+
+    expect(first.id).toBe(refreshed.id)
+    expect(otherPlatform.id).not.toBe(first.id)
+    expect(await store.getUserByTlId(session.platformId, first.id)).toMatchObject({
+      platformId: session.platformId,
+      platformUserId: 'opaque-alice',
+      firstName: 'Alice',
+      username: '1715311957',
+      avatar: { id: 'avatar:alice', locator: { avatarUin: '1715311957' } },
+      metadata: { qq: '1715311957' },
+    })
+    expect(await ctx.database.get('mtproto_im_user', { platformUserId: 'opaque-alice' }))
+      .toHaveLength(2)
   })
 
   it('merges repeated history and event deliveries through any physical alias', async () => {

@@ -246,14 +246,15 @@ describe('conversation kinds', () => {
     const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
     const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
 
-    await expect(rpc.getMessageReactionsList({
+    const result = await rpc.getMessageReactionsList({
       _: 'messages.getMessageReactionsList', peer, id: message.id, offset: '', limit: 100,
-    })).resolves.toMatchObject({
+    })
+    expect(result).toMatchObject({
       _: 'messages.messageReactionsList',
       count: 3,
       reactions: [
-        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: rpc.peerTlId('alice') } },
-        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: rpc.peerTlId('bob') } },
+        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: await rpc.userTlId('alice') } },
+        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: await rpc.userTlId('bob') } },
       ],
       users: expect.arrayContaining([
         expect.objectContaining({ _: 'user', firstName: 'alice' }),
@@ -268,13 +269,13 @@ describe('conversation kinds', () => {
   it('materializes direct, group, and hierarchical channel dialogs with the correct peer types', async () => {
     const { ctx, rpc } = await createRpc()
     const result = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
-    expect(result.dialogs.map((dialog) => dialog.peer._)).toEqual(['peerChannel', 'peerChannel', 'peerUser'])
+    expect(result.dialogs.map((dialog) => dialog.peer._)).toEqual(['peerUser', 'peerChannel', 'peerChannel'])
     expect(result.chats).toMatchObject([
-      { _: 'channel', title: 'Discord / general', megagroup: true, forum: true, participantsCount: 42 },
       { _: 'channel', title: 'QQ Group', megagroup: true, participantsCount: 23 },
+      { _: 'channel', title: 'Discord / general', megagroup: true, forum: true, participantsCount: 42 },
     ])
     expect(result.users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual([
-      'sender-parent-channel', 'sender-group', 'Direct',
+      'Direct', 'sender-group', 'sender-parent-channel',
     ])
     const [stored] = await ctx.database.get('mtproto_im_conversation', { platformConversationId: 'subchannel' })
     expect(stored).toMatchObject({
@@ -373,7 +374,7 @@ describe('conversation kinds', () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())
     const groupId = stableId('peer:group')
-    const directId = stableId('peer:direct')
+    const directId = await rpc.userTlId('direct')
     const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
     const directPeer = { _: 'inputPeerUser' as const, userId: directId, accessHash: Long.ZERO }
     const groupHistory = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
@@ -631,7 +632,7 @@ describe('conversation kinds', () => {
     ])
     expect(first).toMatchObject({
       _: 'channels.channelParticipants', count: 5,
-      users: [{ firstName: 'Bridge' }, { firstName: 'alice' }],
+      users: [{ firstName: 'self' }, { firstName: 'alice' }],
     })
     expect(second).toMatchObject({
       _: 'channels.channelParticipants', count: 5,
@@ -639,7 +640,7 @@ describe('conversation kinds', () => {
     })
     expect(admins).toMatchObject({
       _: 'channels.channelParticipants', count: 1,
-      users: [{ firstName: 'Bridge' }],
+      users: [{ firstName: 'self' }],
     })
     expect(() => roundTrip(first)).not.toThrow()
     expect(() => roundTrip(second)).not.toThrow()

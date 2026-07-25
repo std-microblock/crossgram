@@ -73,6 +73,11 @@ describe('platform-owned account provisioning', () => {
     })
     expect(await database.get('mtproto_platform_session', { platformId: 'qqnt' })).toHaveLength(1)
     expect(await database.get('mtproto_auth_session', { platformId: 'qqnt' })).toHaveLength(1)
+    expect(await database.get('mtproto_im_user', { platformId: 'qqnt' })).toMatchObject([{
+      id: expect.any(Number), platformUserId: 'qq-uid', firstName: 'Alice Renamed', username: '10001',
+      avatar: { id: 'avatar:qq-uid', locator: { uin: '10001' } },
+      metadata: { nativeId: '10001' },
+    }])
   })
 
   it('does nothing for legacy adapters without a current-account provider', async () => {

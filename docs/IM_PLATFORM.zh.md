@@ -70,6 +70,12 @@ interface IMPlatform<L> {
 
 - user、conversation、message、media 和 group ID 都是 opaque string。
 - 不得把 ID 转成 `number`、`bigint`、hash 或固定长度数据库字段。
+- adapter 提供的 opaque user ID 会原样保存为 `mtproto_im_user.platformUserId`；bridge 以
+  `(platformId, platformUserId)` 唯一确定用户，并使用该表的自增主键 `id` 作为 Telegram
+  `user_id`。因此同一 platform 下跨 session 的同一用户会得到同一个 Telegram ID，进程
+  重启后也不会变化。
+- 用户姓名、username、头像 locator 和 metadata 都保存在 `mtproto_im_user`；消息通过
+  `mtproto_im_message.senderUserId` 关联该用户行，不在消息 metadata 中复制用户资料。
 - `IMMessage.id` 表示逻辑消息 ID；`sourceIds` 保存被该逻辑消息覆盖的所有平台物理消息 ID。
 - bridge 按 `(platformSessionId, conversationId, sourceId)` 幂等入库。
 - 外部 ID 到 Telegram message ID 的映射持久化在数据库，重连和重启后保持不变。

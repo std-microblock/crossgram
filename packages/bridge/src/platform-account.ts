@@ -2,6 +2,7 @@ import type { Database } from '@cordisjs/plugin-database'
 import { randomBytes, randomInt } from 'node:crypto'
 import type { AuthSessionRow, PlatformSessionRow } from './models.js'
 import type { IMPlatform, IMPlatformAccount, IMUser, PlatformSession } from './platform.js'
+import type { JsonValue } from './platform.js'
 import { generateLoginSecret } from './login-code.js'
 import { sessionFromRow } from './platform-manager.js'
 
@@ -83,6 +84,17 @@ export async function provisionPlatformAccount(
   for (const duplicate of existingSessions.slice(1)) {
     if (duplicate.active) await database.set('mtproto_platform_session', { id: duplicate.id }, { active: false })
   }
+
+  await database.upsert('mtproto_im_user', [{
+    platformId,
+    platformUserId: resolved.user.id,
+    firstName: resolved.user.firstName,
+    lastName: resolved.user.lastName ?? null,
+    username: resolved.user.username ?? null,
+    avatar: (resolved.user.avatar ?? null) as unknown as JsonValue | null,
+    metadata: resolved.user.metadata ?? {},
+    updatedAt: new Date(),
+  }], ['platformId', 'platformUserId'])
 
   const existingAuth = await database.get('mtproto_auth_session', { platformId })
   let auth = existingAuth.find(item => item.platformSessionId === row.id) ?? existingAuth[0]

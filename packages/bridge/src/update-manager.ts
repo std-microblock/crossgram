@@ -5,7 +5,7 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
-import type { MessageStore } from './message-store.js'
+import { toUser, type MessageStore } from './message-store.js'
 import { telegramReplyToMessageId, type IMConversation, type IMMessage, type PlatformSession } from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
 import type { IMSticker } from './sticker-provider.js'
@@ -65,6 +65,7 @@ export class UpdateManager {
     const eventKey = `${session.platformSessionId}:reaction:${event.eventId}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
     if (!delivery && !result.changed) return
+    const platform = this._registry.require(session.platformId)
     const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId
       ? await this._store.getConversation(session.platformSessionId, event.conversation.parentId)
         ?? { id: event.conversation.parentId, kind: 'channel' as const, title: event.conversation.parentId }
@@ -77,10 +78,16 @@ export class UpdateManager {
     )
     if (delivery.published) return
     const reactions = makeMessageReactions(result.message, session.platformSessionId)
+    const directPeerId = displayConversation.kind === 'direct'
+      ? (await this._store.getUser(session.platformId, displayConversation.id)
+        ?? await this._store.upsertUser(session,
+          await platform.getUser?.(session, displayConversation.id)
+            ?? { id: displayConversation.id, firstName: displayConversation.title })).id
+      : undefined
     let pts = delivery.pts - delivery.ptsCount
     const updates = result.tlMessageIds.map((msgId): tl.RawUpdateMessageReactions => ({
       _: 'updateMessageReactions',
-      peer: conversationPeer(displayConversation),
+      peer: conversationPeer(displayConversation, directPeerId),
       msgId,
       reactions,
     }))
@@ -136,6 +143,29 @@ export class UpdateManager {
       ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
       : undefined
     const platform = this._registry.require(session.platformId)
+    const selfProfile = await platform.getUser?.(session, session.userId)
+      ?? {
+        id: session.userId,
+        firstName: String(session.metadata.firstName ?? 'Bridge'),
+        lastName: session.metadata.lastName as string | undefined,
+        username: session.metadata.username as string | undefined,
+        metadata: session.metadata,
+      }
+    const senderProfile = event.message.sender
+      ?? await platform.getUser?.(session, event.message.senderId)
+      ?? { id: event.message.senderId, firstName: event.message.senderId }
+    const selfRow = await this._store.upsertUser(session, selfProfile)
+    const senderRow = event.message.senderId === session.userId
+      ? selfRow
+      : await this._store.upsertUser(session, senderProfile)
+    const directPeerRow = displayConversation.kind === 'direct'
+      ? await this._store.getUser(session.platformId, displayConversation.id)
+        ?? await this._store.upsertUser(session,
+          await platform.getUser?.(session, displayConversation.id)
+            ?? { id: displayConversation.id, firstName: displayConversation.title })
+      : undefined
+    const userIds = new Map((await this._store.listUsers(session.platformId))
+      .map((row) => [row.platformUserId, row.id]))
     let pts = delivery.pts - delivery.ptsCount
     const updates: tl.TypeUpdate[] = []
     for (const part of result.projection) {
@@ -184,18 +214,19 @@ export class UpdateManager {
       }
       const sticker = projected.source.content.parts.find((item) => item.type === 'sticker')
       const message = projectTlMessage({
-        platformSessionId: session.platformSessionId,
         conversation: displayConversation,
         source: projected.source,
         tlId: part.tlMessageId,
         ordinal: part.ordinal,
         groupedId: part.groupedId ?? undefined,
+        fromId: { _: 'peerUser', userId: event.message.outgoing ? selfRow.id : senderRow.id },
+        peerId: directPeerRow ? { _: 'peerUser', userId: directPeerRow.id } : undefined,
         media: media
           ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
           : sticker?.type === 'sticker'
             ? this._projectSticker?.(session, sticker.sticker)
             : undefined,
-        entities: makeMessageEntities(projected.source, session.platformSessionId),
+        entities: makeMessageEntities(projected.source, session.platformSessionId, userIds),
         reactions: projected.source.reactionContext?.reactions.length
           ? makeMessageReactions(projected.source, session.platformSessionId)
           : undefined,
@@ -216,21 +247,22 @@ export class UpdateManager {
       return
     }
 
-    const sender = event.message.sender
-      ?? await platform.getUser?.(session, event.message.senderId)
-    const users = [
+    const sender = toUser(senderRow)
+    const self = toUser(selfRow)
+    const users = [...new Map([
       makeUser({
-        id: stableId(`self:${session.platformSessionId}`), self: true, premium: true,
-        firstName: String(session.metadata.firstName ?? 'Bridge'),
+        id: selfRow.id, self: true, premium: true,
+        firstName: self.firstName, lastName: self.lastName, username: self.username,
+        photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
       }),
       makeUser({
-        id: stableId(`peer:${event.message.senderId}`),
-        firstName: sender?.firstName ?? event.message.senderId,
-        lastName: sender?.lastName,
-        username: sender?.username,
-        photo: sender?.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
+        id: senderRow.id,
+        firstName: sender.firstName,
+        lastName: sender.lastName,
+        username: sender.username,
+        photo: sender.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
       }),
-    ]
+    ].map((user) => [user.id, user])).values()]
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []
@@ -449,7 +481,11 @@ function decodeUpdate(payload: string): tl.RawUpdates {
   return new TlBinaryReader(__tlReaderMap, Buffer.from(payload, 'base64')).object() as tl.RawUpdates
 }
 
-function makeMessageEntities(message: IMMessage, platformSessionId: string): tl.TypeMessageEntity[] | undefined {
+function makeMessageEntities(
+  message: IMMessage,
+  platformSessionId: string,
+  userIds: ReadonlyMap<string, number>,
+): tl.TypeMessageEntity[] | undefined {
   const entities: tl.TypeMessageEntity[] = []
   const textParts = message.content.parts.filter((part) => part.type === 'text')
   let base = 0
@@ -459,7 +495,7 @@ function makeMessageEntities(message: IMMessage, platformSessionId: string): tl.
       if (entity.type === 'mention') {
         entities.push({
           _: 'messageEntityMentionName', offset: base + entity.offset, length: entity.length,
-          userId: stableId(`peer:${entity.userId}`),
+          userId: requiredUserId(userIds, entity.userId),
         })
       } else if (entity.type === 'conversation-link') {
         entities.push({
@@ -479,6 +515,12 @@ function makeMessageEntities(message: IMMessage, platformSessionId: string): tl.
     base += part.text.length + (index + 1 < textParts.length ? 1 : 0)
   }
   return entities.length ? entities : undefined
+}
+
+function requiredUserId(userIds: ReadonlyMap<string, number>, platformUserId: string): number {
+  const id = userIds.get(platformUserId)
+  if (id === undefined) throw new Error(`missing persisted platform user ${platformUserId}`)
+  return id
 }
 
 function linkedConversations(message: IMMessage): import('./platform.js').IMConversation[] {
@@ -528,8 +570,10 @@ function hexBytes(value: string): Uint8Array {
   return bytes
 }
 
-function conversationPeer(conversation: IMConversation): tl.TypePeer {
-  const id = stableId(`peer:${conversation.id}`)
+function conversationPeer(conversation: IMConversation, directUserId?: number): tl.TypePeer {
+  const id = conversation.kind === 'direct'
+    ? directUserId ?? (() => { throw new Error(`missing direct user ID for ${conversation.id}`) })()
+    : stableId(`peer:${conversation.id}`)
   return conversation.kind === 'direct'
     ? { _: 'peerUser', userId: id }
     : { _: 'peerChannel', channelId: id }
