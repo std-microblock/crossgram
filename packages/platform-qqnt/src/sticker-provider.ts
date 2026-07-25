@@ -37,7 +37,7 @@ export class QQStickerProvider implements IMStickerProvider {
   async listSavedStickers(_context: StickerProviderContext, query: StickerPageQuery = {}) {
     const page = await this.client.getSavedStickers(query)
     return {
-      stickers: page.stickers.map((sticker) => this.mapSticker(sticker)),
+      stickers: await Promise.all(page.stickers.map((sticker) => this.mapSticker(sticker))),
       nextCursor: page.nextCursor,
     }
   }
@@ -55,6 +55,10 @@ export class QQStickerProvider implements IMStickerProvider {
     return this.mediaCache
       ? this.mediaCache.openSticker({ ...sticker, format: reference.animated ? 'animated' : 'static' }, original)
       : { ...original, mimeType: sticker.mimeType }
+  }
+
+  async openThumbnail(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset | null> {
+    return this.mediaCache?.openStickerThumbnail(sticker) ?? null
   }
 
   async prepareSend(_context: StickerProviderContext, sticker: IMSticker) {
@@ -75,18 +79,18 @@ export class QQStickerProvider implements IMStickerProvider {
     await this.client.setSavedSticker(reference, saved)
   }
 
-  private mapPack(pack: WireStickerPack): IMStickerPack {
+  private async mapPack(pack: WireStickerPack): Promise<IMStickerPack> {
     return {
       providerId: this.providerId,
       packId: pack.packId,
       title: pack.title,
       count: pack.count,
       version: pack.version,
-      stickers: pack.stickers.map((sticker) => this.mapSticker(sticker)),
+      stickers: await Promise.all(pack.stickers.map((sticker) => this.mapSticker(sticker))),
     }
   }
 
-  private mapSticker(sticker: WireSticker): IMSticker {
+  private async mapSticker(sticker: WireSticker): Promise<IMSticker> {
     const mapped: IMSticker = {
       providerId: this.providerId,
       stickerId: sticker.stickerId,
@@ -100,6 +104,7 @@ export class QQStickerProvider implements IMStickerProvider {
       version: sticker.version,
       locator: sticker.reference as unknown as JsonValue,
     }
-    return this.mediaCache?.projectSticker(mapped) ?? mapped
+    if (!this.mediaCache) return mapped
+    return this.mediaCache.restoreStickerThumbnail(this.mediaCache.projectSticker(mapped))
   }
 }

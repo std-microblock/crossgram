@@ -1148,11 +1148,11 @@ export class DialogRpc {
         }
       }
       const sticker = await this._stickers?.getFile(
-        req.location.id.toNumber(), offset, req.limit, req.location.fileReference,
+        req.location.id.toNumber(), offset, req.limit, req.location.fileReference, req.location.thumbSize,
       )
       if (sticker) {
         return {
-          _: 'upload.file', type: { _: 'storage.fileUnknown' },
+          _: 'upload.file', type: { _: req.location.thumbSize ? 'storage.fileWebp' : 'storage.fileUnknown' },
           mtime: Math.floor(Date.now() / 1000), bytes: sticker,
         }
       }

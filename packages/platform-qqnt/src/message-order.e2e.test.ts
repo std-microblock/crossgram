@@ -352,6 +352,138 @@ describe('QQNT animated media upgrade E2E', () => {
   }, 30_000)
 })
 
+describe('QQNT animated sticker thumbnail E2E', () => {
+  it('stores the APNG first frame and edits the existing message to advertise it', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQMediaCacheModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const apng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAwAAAAICAYAAADN5B7xAAAACXBIWXMAAAABAAAAAQBPJcTWAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAAMAAAACAAAAAAAAAAAAAEACgAAGya3gAAAABRJREFUeJxj+MPA8J8UzDCqgRYaAJjXviFq8lROAAAAGmZjVEwAAAABAAAADAAAAAgAAAAAAAAAAAABAAoAAIBVXVQAAAAXZmRBVAAAAAJ4nGNgYPj7nzQ8qoEGGgAlJ76BvcErGQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    let assetRequests = 0
+    let server: Server | undefined
+    server = createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/stickers/asset') {
+        assetRequests++
+        request.resume()
+        response.setHeader('content-type', 'image/apng')
+        response.setHeader('content-length', apng.length)
+        response.end(apng)
+        return
+      }
+      response.statusCode = 404
+      response.end('not found')
+    })
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    webSocketServer.on('connection', (webSocket) => {
+      webSocket.send(JSON.stringify({
+        id: 'animated-sticker-event',
+        event: {
+          type: 'message',
+          conversation: {
+            id: 'sticker-group', kind: 'group', title: 'Sticker group',
+            peerUid: 'sticker-group', peerUin: '10000', chatType: 2,
+          },
+          message: {
+            id: 'animated-sticker-message', conversationId: 'sticker-group', senderId: 'sender',
+            timestamp: 1_800_000_300, outgoing: false,
+            parts: [{
+              type: 'sticker',
+              sticker: {
+                stickerId: 'favorite:animated-apng', title: 'Animated APNG',
+                format: 'animated', mimeType: 'image/apng', width: 12, height: 8, size: apng.length,
+                version: 1,
+                reference: {
+                  kind: 'favorite', resId: 'animated-apng', path: '/qq/animated.png',
+                  name: 'animated.png', size: apng.length, width: 12, height: 8, animated: true,
+                },
+              },
+            }],
+          },
+        },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (server?.listening) {
+        const closed = new Promise<void>((resolve, reject) => {
+          server!.close((error) => error ? reject(error) : resolve())
+        })
+        server.closeAllConnections()
+        await closed
+      }
+    })
+
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-sticker-thumbnail-e2e-'))
+    temporaryDirectories.push(cachePath)
+    const cache = new QQMediaCache({ path: cachePath, database: ctx.database, previewMaxDimension: 64 })
+    const platform = new QQNTPlatform({
+      endpoint: `http://127.0.0.1:${address.port}/v1`,
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    }, 'qqnt:stickers', cache)
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const store = new MessageStore(ctx.database)
+    const events: Array<{ type: 'message' | 'message-edit', result: IngestResult }> = []
+    const complete = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (event.type !== 'message' && event.type !== 'message-edit') return
+      events.push({ type: event.type, result: await store.ingest(session, event.conversation, event.message) })
+      if (event.type === 'message-edit') complete.resolve()
+    })
+    try {
+      await Promise.race([
+        complete.promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('QQNT sticker E2E timed out')), 10_000)),
+      ])
+    } finally {
+      await unsubscribe()
+    }
+
+    expect(events.map((entry) => entry.type)).toEqual(['message', 'message-edit'])
+    expect(events[0].result.projection[0].tlMessageId).toBe(events[1].result.projection[0].tlMessageId)
+    expect(events[0].result.changed).toBe(true)
+    expect(events[1].result.changed).toBe(true)
+    const initialSticker = events[0].result.message.content as any
+    const editedSticker = events[1].result.message.content as any
+    expect(initialSticker.parts[0].sticker.thumbnail).toBeUndefined()
+    expect(editedSticker.parts[0].sticker).toMatchObject({
+      format: 'video', mimeType: 'video/webm',
+      thumbnail: {
+        mimeType: 'image/webp', width: 12, height: 8,
+        locator: { cacheKey: expect.any(String) },
+      },
+    })
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
+    expect(assetRequests).toBe(1)
+    const thumbnail = await cache.openStickerThumbnail(editedSticker.parts[0].sticker)
+    if (!thumbnail) throw new Error('stored sticker thumbnail is unavailable')
+    expect((await collect(thumbnail.source.stream())).subarray(8, 12).toString()).toBe('WEBP')
+  }, 30_000)
+})
+
 async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of source) chunks.push(Buffer.from(chunk))

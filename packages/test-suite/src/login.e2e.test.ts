@@ -1108,7 +1108,7 @@ describe('bridge login e2e', () => {
           title: 'Static Plugin Stickers', installedDate: undefined,
           thumbs: [expect.objectContaining({ _: 'photoSize' })],
           thumbDcId: 1,
-          thumbVersion: 3,
+          thumbVersion: 4,
           thumbDocumentId: expect.any(Long),
         },
         documents: expect.arrayContaining([expect.objectContaining({ _: 'document', mimeType: 'image/webp' })]),

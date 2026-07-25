@@ -15,7 +15,7 @@ interface ResolvedSticker {
   sticker: IMSticker
 }
 
-const STICKER_PROJECTION_VERSION = 3
+const STICKER_PROJECTION_VERSION = 4
 const STICKER_PROVIDER_CACHE_TTL_MS = 5 * 60_000
 // Telegram Desktop ignores every document field when date is zero, leaving a
 // zero-byte generic file. Keep synthetic sticker documents on a stable,
@@ -284,10 +284,14 @@ export class StickerRpc {
     offset: number,
     limit: number,
     fileReference?: Uint8Array,
+    thumbSize?: string,
   ): Promise<Uint8Array | undefined> {
     const resolved = await this._resolveDocument(documentId, fileReference)
     if (!resolved) return
-    const asset = await resolved.provider.openAsset(this._context(), resolved.sticker)
+    const asset = thumbSize
+      ? await resolved.provider.openThumbnail?.(this._context(), resolved.sticker)
+      : await resolved.provider.openAsset(this._context(), resolved.sticker)
+    if (!asset) return
     const chunks: Uint8Array[] = []
     let skipped = 0
     let size = 0
@@ -544,7 +548,13 @@ export class StickerRpc {
       _: 'document', id: Long.fromNumber(id), accessHash: Long.fromNumber(id),
       fileReference: new TextEncoder().encode(`bridge-sticker:${item.providerId}:${sticker.stickerId}:${sticker.version ?? 0}`),
       date: STICKER_DOCUMENT_DATE, mimeType: sticker.mimeType, size: sticker.size ?? 0,
-      thumbs: [], dcId: this._dcId, attributes,
+      // maskCoords positions a mask on a face and is unrelated to loading
+      // placeholders. Telegram clients read the static first frame from thumbs.
+      thumbs: sticker.thumbnail ? [{
+        _: 'photoSize', type: 'm', w: sticker.thumbnail.width, h: sticker.thumbnail.height,
+        size: Math.min(sticker.thumbnail.size, 0x7fffffff),
+      }] : undefined,
+      dcId: this._dcId, attributes,
     }
   }
 
