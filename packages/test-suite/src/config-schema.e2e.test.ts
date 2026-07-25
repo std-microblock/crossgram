@@ -5,11 +5,12 @@ import * as debug from '../../mtproto-debug/src/index.js'
 import * as mtproto from '../../mtproto/src/index.js'
 import * as qqnt from '../../platform-qqnt/src/index.js'
 import * as discord from '../../platform-discord/src/index.js'
+import * as matrix from '../../platform-matrix/src/index.js'
 import * as staticPlatform from '../../platform-static/src/index.js'
 import * as relay from '../../relay/src/index.js'
 import * as resources from '../../telegram-resources/src/index.js'
 
-const modules = { bridge, debug, mtproto, qqnt, discord, staticPlatform, relay, resources }
+const modules = { bridge, debug, mtproto, qqnt, discord, matrix, staticPlatform, relay, resources }
 
 describe('loader WebUI config discovery', () => {
   it.each(Object.entries(modules))('%s survives the loader export-unwrapping path', (_name, exports) => {
