@@ -65,6 +65,10 @@ interface ConversationPreview {
   firstMessageId?: number
 }
 
+export interface DialogRpcOptions {
+  sendImageDocumentsAsImages?: boolean
+}
+
 interface VirtualMessageTarget {
   conversationId: string
   platformMessageId: string
@@ -142,6 +146,7 @@ export class DialogRpc {
     private readonly _reactions?: ReactionRpc,
     private readonly _resources?: TelegramResourceService,
     private readonly _onLocalEvent?: (session: PlatformSession, event: IMEvent) => Promise<void>,
+    private readonly _options: DialogRpcOptions = {},
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -1501,7 +1506,12 @@ export class DialogRpc {
     ).catch((error) => {
       throw new RpcError(400, `FILE_PARTS_INVALID: ${String(error)}`)
     })
-    const kind = media._ === 'inputMediaUploadedPhoto' ? 'image' : 'file'
+    const sendDocumentAsImage = media._ === 'inputMediaUploadedDocument'
+      && /^image\//i.test(media.mimeType)
+      && (this._options.sendImageDocumentsAsImages ?? true)
+    const kind = media._ === 'inputMediaUploadedPhoto' || sendDocumentAsImage
+      ? 'image'
+      : 'file'
     const attribute = media._ === 'inputMediaUploadedDocument'
       ? media.attributes.find((item) => item._ === 'documentAttributeFilename')
       : undefined

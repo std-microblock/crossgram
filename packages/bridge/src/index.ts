@@ -64,6 +64,8 @@ export interface BridgeConfig {
   /** HTTP prefix for platform account assets (default: /api). */
   apiPrefix?: string
   uploadPath?: string
+  /** Send image documents as original images instead of generic files. */
+  sendImageDocumentsAsImages?: boolean
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
@@ -74,6 +76,7 @@ export const Config = z.object({
   serverPort: z.natural().min(1).max(65_535).default(4430),
   apiPrefix: z.string().default('/api'),
   uploadPath: z.string().default('data/bridge-uploads'),
+  sendImageDocumentsAsImages: z.boolean().default(true),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -138,7 +141,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, stickerRpcFor, resources, store, subscriptions, uploads, generation,
-    config.onTransferProgress, dcId,
+    config.onTransferProgress, dcId, config.sendImageDocumentsAsImages ?? true,
   )
 
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
@@ -336,6 +339,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       new ReactionRpc(platform, session, dcId, ctx.database),
       resources,
       (localSession, event) => subscriptions.ingestLocalEvent(localSession, event),
+      { sendImageDocumentsAsImages: config.sendImageDocumentsAsImages ?? true },
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -650,6 +654,7 @@ function createSessionResolver(
   generation: object,
   onTransferProgress?: BridgeConfig['onTransferProgress'],
   dcId = 1,
+  sendImageDocumentsAsImages = true,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
@@ -683,6 +688,7 @@ function createSessionResolver(
           new ReactionRpc(platform, session, dcId, ctx.database),
           resources,
           (localSession, event) => subscriptions.ingestLocalEvent(localSession, event),
+          { sendImageDocumentsAsImages },
         )
         return state
       })()

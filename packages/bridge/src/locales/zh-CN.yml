@@ -4,3 +4,4 @@ serverHost: 向 Telegram 客户端公布的 MTProto 主机地址。
 serverPort: 向 Telegram 客户端公布的 MTProto 端口。
 apiPrefix: 平台账户资源使用的 HTTP 路径前缀。
 uploadPath: 用于存储 Telegram 客户端上传文件的目录。
+sendImageDocumentsAsImages: 将图片 document 作为原图而不是普通文件发送。

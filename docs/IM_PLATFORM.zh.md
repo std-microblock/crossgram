@@ -289,6 +289,8 @@ upload.saveFilePart / upload.saveBigFilePart
 
 bridge 会在 `messages.uploadMedia` 后暂存媒体引用，并允许客户端通过 `upload.getFile` 读取预览。暂存状态属于整个 bridge 服务及 platform session，不属于单个 MTProto 连接，因此上传连接与发送连接可以不同。只有 adapter 已确认发送且消息完成入库后才删除暂存引用和磁盘分片；平台失败时同一引用和 random ID 都可重试。`upload.getFile` 的 layer 224 long offset 会先做安全整数校验，媒体对象中的 `dcId` 始终与 bridge 配置一致。
 
+bridge 配置 `sendImageDocumentsAsImages` 默认开启。开启时，`mimeType` 为 `image/*` 的 `inputMediaUploadedDocument` 会作为 `kind: 'image'` 交给 adapter，原始字节不会被压缩或转码；关闭时仍作为 `kind: 'file'`。非图片 document 不受该配置影响。
+
 进度是传输过程的观测值，不是第二套上传协议。每个媒体独立使用 `mediaIndex`，`transferredBytes` 必须单调递增；未知总长度时可以不传 `totalBytes`。取消通过 `AbortSignal` 传播。
 
 下载实现 `downloadMedia(session, media, { offset, limit, signal, onProgress })`，range 语义由 adapter

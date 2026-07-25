@@ -737,6 +737,10 @@ describe('bridge login e2e', () => {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(801), filePart: 0,
         bytes: new TextEncoder().encode('static socket file'),
       }, 43)).toEqual({ _: 'boolTrue' })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(1800), filePart: 0,
+        bytes: socketPng,
+      }, 44)).toEqual({ _: 'boolTrue' })
       const sentAlbum = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMultiMedia',
         peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
@@ -756,20 +760,29 @@ describe('bridge login e2e', () => {
               mimeType: 'text/plain', attributes: [{ _: 'documentAttributeFilename', fileName: 'socket.txt' }],
             },
           },
+          {
+            _: 'inputSingleMedia', randomId: Long.fromNumber(1800), message: '',
+            media: {
+              _: 'inputMediaUploadedDocument',
+              file: { _: 'inputFile', id: Long.fromNumber(1800), parts: 1, name: 'original.png', md5Checksum: '' },
+              mimeType: 'image/png', attributes: [{ _: 'documentAttributeFilename', fileName: 'original.png' }],
+            },
+          },
         ],
       }, 45)
       expect(sentAlbum.updates.filter((update: any) => update._ === 'updateMessageID')).toMatchObject([
         { randomId: Long.fromNumber(800) },
         { randomId: Long.fromNumber(801) },
+        { randomId: Long.fromNumber(1800) },
       ])
       const sentAlbumMessages = sentAlbum.updates
         .filter((update: any) => update._ === 'updateNewChannelMessage')
         .map((update: any) => update.message)
-      expect(sentAlbumMessages.map((item: any) => item.message)).toEqual(['socket album', ''])
+      expect(sentAlbumMessages.map((item: any) => item.message)).toEqual(['socket album', '', ''])
       expect(sentAlbumMessages.map((item: any) => item.media?._)).toEqual([
-        'messageMediaPhoto', 'messageMediaDocument',
+        'messageMediaPhoto', 'messageMediaDocument', 'messageMediaPhoto',
       ])
-      expect(sentAlbumMessages.map((item: any) => item.groupedId)).toEqual([undefined, undefined])
+      expect(sentAlbumMessages.map((item: any) => item.groupedId)).toEqual([undefined, undefined, undefined])
       const sentPhoto = sentAlbumMessages[0].media.photo
       expect(sentPhoto.sizes).toMatchObject([
         { _: 'photoStrippedSize', type: 'i', bytes: expect.any(Uint8Array) },
@@ -794,6 +807,18 @@ describe('bridge login e2e', () => {
         },
       }, 46)
       expect(downloadedPhoto.bytes).toEqual(socketPng)
+      const sentOriginal = sentAlbumMessages[2].media.photo
+      expect(sentOriginal.sizes).toContainEqual(expect.objectContaining({
+        _: 'photoSize', type: 'x', w: 20, h: 10, size: socketPng.length,
+      }))
+      const downloadedOriginal = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPhotoFileLocation', id: sentOriginal.id, accessHash: sentOriginal.accessHash,
+          fileReference: sentOriginal.fileReference, thumbSize: 'x',
+        },
+      }, 48)
+      expect(downloadedOriginal.bytes).toEqual(socketPng)
 
       const sentToMirrorSource = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMessage',
@@ -1793,6 +1818,7 @@ describe('bridge login e2e', () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let remoteBytes = new Uint8Array()
     let sentSequence = 0
+    const sentMediaKinds: Array<'image' | 'file'> = []
     const deletedMessageIds: string[] = []
     const transferProgress: bridge.IMTransferProgress[] = []
     const platformId = 'push-e2e'
@@ -1819,6 +1845,7 @@ describe('bridge login e2e', () => {
             continue
           }
           if (part.type !== 'media') throw new Error('sticker input is not supported by this harness')
+          sentMediaKinds.push(part.media.kind)
           const chunks: Uint8Array[] = []
           let size = 0
           for await (const chunk of part.media.source.stream({ signal: options?.signal })) {
@@ -1864,6 +1891,7 @@ describe('bridge login e2e', () => {
     const { ctx, port, pubKey, stop } = await startApp({
       bridgeConfig: {
         uploadPath,
+        sendImageDocumentsAsImages: false,
         onTransferProgress: (_session, progress) => { transferProgress.push(progress) },
       },
       platform: { id: platformId, adapter: platform },
@@ -2058,6 +2086,34 @@ describe('bridge login e2e', () => {
         expect.objectContaining({ id: replacementPush.updates[0].message.id, message: 'replacement after recall' }),
       ]))
       expect(replacementHistory.messages.some((item: any) => item.id === sentMedia.updates[1].message.id)).toBe(false)
+
+      const imageDocumentBytes = new Uint8Array(24)
+      imageDocumentBytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      new DataView(imageDocumentBytes.buffer).setUint32(16, 20)
+      new DataView(imageDocumentBytes.buffer).setUint32(20, 10)
+      expect(await callRpc(client, key, sid, {
+        _: 'upload.saveFilePart', fileId: Long.fromNumber(701), filePart: 0,
+        bytes: imageDocumentBytes,
+      }, 30)).toEqual({ _: 'boolTrue' })
+      const fileImage = await callRpc(client, key, sid, {
+        _: 'messages.sendMedia',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        randomId: Long.fromNumber(701), message: '',
+        media: {
+          _: 'inputMediaUploadedDocument',
+          file: { _: 'inputFile', id: Long.fromNumber(701), parts: 1, name: 'disabled.png', md5Checksum: '' },
+          mimeType: 'image/png', attributes: [{ _: 'documentAttributeFilename', fileName: 'disabled.png' }],
+        },
+      }, 32)
+      expect(sentMediaKinds).toEqual(['file', 'file'])
+      expect(fileImage).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(701) },
+          { _: 'updateNewChannelMessage', message: { media: { _: 'messageMediaDocument' } } },
+        ],
+      })
+      expect([...remoteBytes]).toEqual([...imageDocumentBytes])
     } finally {
       observer?.close()
       client?.close()

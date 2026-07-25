@@ -21,13 +21,17 @@ const session: PlatformSession = {
   platformSessionId: 'send-media-session', platformId: 'streaming', userId: 'self', credentials: {}, metadata: {},
 }
 const conversation: IMConversation = { id: 'peer', kind: 'direct', title: 'Peer' }
+const originalPng = new Uint8Array(Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGklEQVR4nGNQTrn0n5qYYdTA/6Nh+H/4JRsAlX7U0I1qB6QAAAAASUVORK5CYII=',
+  'base64',
+))
 const disposals: Array<() => Promise<void>> = []
 
 afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createHarness(failSends = 0) {
+async function createHarness(failSends = 0, sendImageDocumentsAsImages = true) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -115,7 +119,7 @@ async function createHarness(failSends = 0) {
   const peerId = (await store.upsertUser(session, { id: conversation.id, firstName: conversation.title })).id
   const rpc = new DialogRpc(platform, session, store, uploads, (_session, event) => {
     progress.push({ mediaIndex: event.mediaIndex, transferredBytes: event.transferredBytes })
-  })
+  }, 1, undefined, undefined, undefined, undefined, { sendImageDocumentsAsImages })
   disposals.push(async () => {
     await rm(directory, { recursive: true, force: true })
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -137,6 +141,56 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('media send streaming', () => {
+  it('sends image documents as byte-identical original images by default', async () => {
+    const { rpc, uploads, inputs, consumed, peerId } = await createHarness()
+    await uploads.savePart(session.platformSessionId, '40', 0, originalPng)
+
+    const result = await rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(40), message: '',
+      media: {
+        _: 'inputMediaUploadedDocument', file: inputFile(40, 1, 'original.png'), mimeType: 'image/png',
+        attributes: [{ _: 'documentAttributeFilename', fileName: 'original.png' }],
+      },
+    }) as tl.RawUpdates
+
+    expect(inputs[0].parts).toMatchObject([{
+      type: 'media',
+      media: {
+        kind: 'image', name: 'original.png', mimeType: 'image/png',
+        size: originalPng.length, width: 20, height: 10,
+      },
+    }])
+    expect(consumed[0]).toHaveLength(1)
+    expect([...consumed[0][0]]).toEqual([...originalPng])
+    const update = result.updates.find((item) => item._ === 'updateNewMessage') as tl.RawUpdateNewMessage
+    expect((update.message as tl.RawMessage).media).toMatchObject({
+      _: 'messageMediaPhoto',
+      photo: {
+        _: 'photo',
+        sizes: [expect.objectContaining({ _: 'photoSize', w: 20, h: 10, size: originalPng.length })],
+      },
+    })
+  })
+
+  it('keeps image documents as files when the bridge option is disabled', async () => {
+    const { rpc, uploads, inputs, peerId } = await createHarness(0, false)
+    await uploads.savePart(session.platformSessionId, '41', 0, originalPng)
+
+    const result = await rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(41), message: '',
+      media: {
+        _: 'inputMediaUploadedDocument', file: inputFile(41, 1, 'original.png'), mimeType: 'image/png',
+        attributes: [{ _: 'documentAttributeFilename', fileName: 'original.png' }],
+      },
+    }) as tl.RawUpdates
+
+    expect(inputs[0].parts).toMatchObject([{
+      type: 'media', media: { kind: 'file', name: 'original.png', mimeType: 'image/png' },
+    }])
+    const update = result.updates.find((item) => item._ === 'updateNewMessage') as tl.RawUpdateNewMessage
+    expect((update.message as tl.RawMessage).media?._).toBe('messageMediaDocument')
+  })
+
   it('streams file parts into the adapter, reports progressive bytes, persists, and cleans up', async () => {
     const { rpc, uploads, store, consumed, progress, peerId } = await createHarness()
     const priorPush = await store.prepareUpdateDelivery(
