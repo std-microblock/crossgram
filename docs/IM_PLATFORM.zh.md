@@ -196,6 +196,31 @@ bridge 会把 Telegram `offsetId/offsetDate/limit` 解析成平台 anchor，并�
 
 如果未实现 `getHistory`，`capabilities.history` 必须是 `false`。此时 Telegram history 完全读取 subscribe 已落库的数据。如果实现了 history，bridge 先拉当前平台页、幂等入库，再从数据库返回。
 
+### 5.1 已读边界
+
+平台用 opaque message ID 表达当前账号的 incoming read boundary：
+
+```ts
+interface IMReadTarget {
+  conversationId: string
+  messageId: string
+}
+
+interface IMPlatform {
+  markRead?(session: PlatformSession, target: IMReadTarget): Promise<void>
+}
+```
+
+实现下行已读时声明 `capabilities.readState.markRead = true`；bridge 会把
+`messages.readHistory` / `channels.readHistory` 的 Telegram `max_id` 反查成逻辑平台消息，
+再调用 `markRead()`。反查不到、目标不属于该 conversation 或平台没有声明能力时不会猜测边界。
+
+当平台上的另一个客户端推进已读位置时，adapter 发送
+`{ type: 'read', conversationId, upToMessageId }`，并声明
+`capabilities.readState.events = true`。bridge 会持久化新的未读计数并投影为
+`updateReadHistoryInbox` 或 `updateReadChannelInbox`。`upToMessageId` 必须是已经通过 history、
+dialog preview 或 message event 暴露过的逻辑 ID；未知 ID 的事件会被安全忽略。
+
 ## 6. Subscribe 事件
 
 ```ts
@@ -220,7 +245,7 @@ type IMEvent =
 
 `message-edit` 必须携带编辑后的完整 `IMMessage`，并保持原 message ID；`message-delete.messageIds` 可以使用主 ID 或任意 `sourceIds` alias。mutation 的 `eventId` 是平台侧 opaque 操作 ID，同一 edit/delete 重投时必须保持不变。
 
-message 和 mutation 事件先事务入库并生成/复用投影，再通过进程内有界 delivery journal 保留 `pts/seq`，最后只向绑定该 platform session 的 auth key 推送 `updateNew*`、`updateEdit*` 或 `updateDelete*`。`pts/seq` 状态仍持久化；进程重启会丢失增量 journal，客户端下次同步时收到 `updates.differenceTooLong` 并走全量同步。发送失败时平台重投会复用原 `pts/seq`；已成功发布的 event ID 不会重复推送。
+message、mutation 和 read 事件先事务入库并生成/复用投影，再通过进程内有界 delivery journal 保留 `pts/seq`，最后只向绑定该 platform session 的 auth key 推送 `updateNew*`、`updateEdit*`、`updateDelete*` 或 `updateRead*`。`pts/seq` 状态仍持久化；进程重启会丢失增量 journal，客户端下次同步时收到 `updates.differenceTooLong` 并走全量同步。发送失败时平台重投会复用原 `pts/seq`；已成功发布的事件不会重复推送。
 
 撤回采用 tombstone：消息不会再出现在 dialogs/history/getMessages，但外部 ID、alias 和 Telegram message ID 映射继续保留，确保撤回 update、重试和重启后的 ID 都稳定。
 

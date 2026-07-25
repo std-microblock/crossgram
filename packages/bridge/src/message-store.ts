@@ -33,6 +33,13 @@ export interface ReactionResult {
   tlMessageIds: number[]
 }
 
+export interface ReadResult {
+  conversation: IMConversation
+  message: IMMessage
+  tlMessageId: number
+  unreadCount: number
+}
+
 export interface ProjectedMessage {
   source: IMMessage
   parts: TlMessagePartRow[]
@@ -395,6 +402,47 @@ export class MessageStore {
         changed: JSON.stringify(before.map(reactionComparable)) !== JSON.stringify(after.map(reactionComparable)),
         message: await this._hydrateMessage(row),
         tlMessageIds: parts.map((part) => part.tlMessageId),
+      }
+    }))
+  }
+
+  async markRead(
+    session: PlatformSession,
+    conversationId: string,
+    upToMessageId: string,
+  ): Promise<ReadResult | undefined> {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const [conversation] = await database.get('mtproto_im_conversation', {
+        platformSessionId: session.platformSessionId,
+        platformConversationId: conversationId,
+      })
+      if (!conversation) return
+      const [alias] = await database.get('mtproto_im_message_alias', {
+        platformSessionId: session.platformSessionId,
+        conversationId: conversation.id,
+        platformMessageId: upToMessageId,
+      })
+      if (!alias) return
+      const [message] = await database.get('mtproto_im_message', { id: alias.messageId })
+      if (!message || message.deleted) return
+      const parts = await database.select('mtproto_tl_message_part', { messageId: message.id })
+        .orderBy('ordinal').execute()
+      if (!parts.length) return
+      const laterIncoming = await database.get('mtproto_im_message', {
+        conversationId: conversation.id,
+        deleted: false,
+        outgoing: false,
+        timestamp: { $gt: message.timestamp },
+      })
+      await database.set('mtproto_im_conversation', { id: conversation.id }, {
+        unreadCount: laterIncoming.length,
+        updatedAt: new Date(),
+      })
+      return {
+        conversation: toConversation(conversation),
+        message: await this._hydrateMessage(message),
+        tlMessageId: Math.max(...parts.map((part) => part.tlMessageId)),
+        unreadCount: laterIncoming.length,
       }
     }))
   }

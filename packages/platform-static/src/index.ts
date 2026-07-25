@@ -9,7 +9,7 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMForwardMessagesOptions, IMHistoryPage, IMHistoryQuery,
-  IMMedia, IMMessage, IMMessageContent, IMMessageInput, IMMessageTarget, IMPageQuery, IMPlatform,
+  IMMedia, IMMessage, IMMessageContent, IMMessageInput, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMReactionContext, IMReactionDefinition, IMReactionResource,
   IMSticker, IMStickerAsset, IMStickerPack, IMStickerProvider,
   IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession,
@@ -90,6 +90,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
   readonly platformKind = 'static'
   readonly capabilities: PlatformCapabilities = {
     history: true,
+    readState: { markRead: true, events: true },
     send: {
       text: true,
       images: true,
@@ -124,6 +125,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
   private readonly _users = new Map<string, IMUser<StaticMediaLocator>>()
   private readonly _conversations = new Map<string, IMConversation<StaticMediaLocator>>()
   private readonly _messages = new Map<string, IMMessage<StaticMediaLocator>[]>()
+  private readonly _readUpTo = new Map<string, string>()
   private readonly _media = new Map<string, Uint8Array>()
   private readonly _subscribers = new Map<string, Set<(event: IMEvent<StaticMediaLocator>) => void | Promise<void>>>()
   private readonly _timers = new Map<string, ReturnType<typeof setInterval>>()
@@ -141,6 +143,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
     this._providerIdPrefix = options.providerIdPrefix ?? 'static'
     if (this._mediaPath) mkdirSync(this._mediaPath, { recursive: true })
     this._seed()
+    this._readUpTo.set('alice', 'direct:alice:1')
   }
 
   async getAccount() {
@@ -170,15 +173,16 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<StaticMediaLocator>> {
     const dialogs = [...this._conversations.values()].map((conversation): IMDialog<StaticMediaLocator> => {
       const messages = this._messages.get(conversation.id) ?? []
-      // Keep one deterministic unread dialog in the reference adapter. This
-      // exercises the same read_inbox_max_id + negative add_offset flow used by
-      // Telegram Desktop against real adapters such as QQNT.
-      const unread = conversation.id === 'alice' && messages.length >= 2
+      const boundaryId = this._readUpTo.get(conversation.id)
+      const boundary = boundaryId ? messages.findIndex((message) => message.id === boundaryId) : messages.length - 1
+      const unread = boundaryId
+        ? messages.slice(boundary + 1).filter((message) => !message.outgoing).length
+        : 0
       return {
         conversation: clone(conversation),
-        unreadCount: unread ? 1 : 0,
+        unreadCount: unread,
         lastMessage: clone(messages.at(-1)),
-        readInboxMaxMessage: unread ? clone(messages.at(-2)) : undefined,
+        readInboxMaxMessage: unread && boundary >= 0 ? clone(messages[boundary]) : undefined,
       }
     }).sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0))
     const start = pageStart(dialogs.map((dialog) => dialog.conversation.id), query.cursor, query.afterId)
@@ -212,6 +216,16 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
 
   async getUser(_session: PlatformSession, userId: string): Promise<IMUser<StaticMediaLocator> | null> {
     return clone(this._users.get(userId) ?? null)
+  }
+
+  async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
+    this._requireConversation(target.conversationId)
+    const messages = this._messages.get(target.conversationId) ?? []
+    const next = messages.findIndex((message) => message.id === target.messageId)
+    if (next < 0) throw new Error(`static read target not found: ${target.messageId}`)
+    const currentId = this._readUpTo.get(target.conversationId)
+    const current = currentId ? messages.findIndex((message) => message.id === currentId) : -1
+    if (next >= current) this._readUpTo.set(target.conversationId, target.messageId)
   }
 
   async sendMessage(
@@ -542,6 +556,16 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
     await this._dispatch(session, {
       type: 'message', conversation: clone(conversation), message: clone(message),
     })
+  }
+
+  /** Simulate another platform client advancing the current account's read boundary. */
+  async emitRead(
+    session: PlatformSession,
+    conversationId: string,
+    upToMessageId: string,
+  ): Promise<void> {
+    await this.markRead(session, { conversationId, messageId: upToMessageId })
+    await this._dispatch(session, { type: 'read', conversationId, upToMessageId })
   }
 
   /** Run one deterministic Group A new/edit/delete cycle. */

@@ -49,10 +49,17 @@ export class UpdateManager {
       )
       return
     }
+    if (committed.event.type === 'read') {
+      await this._publishRead(
+        session,
+        committed as Extract<CommittedPlatformEvent, { event: { type: 'read' } }>,
+      )
+      return
+    }
     await this._publishMessage(
       session,
       committed as Exclude<CommittedPlatformEvent, {
-        event: { type: 'message-delete' | 'message-reactions' }
+        event: { type: 'message-delete' | 'message-reactions' | 'read' }
       }>,
     )
   }
@@ -104,10 +111,57 @@ export class UpdateManager {
     if (await this._send(session.platformSessionId, payload)) await this._store.markUpdatePublished(eventKey)
   }
 
+  private async _publishRead(
+    session: PlatformSession,
+    committed: Extract<CommittedPlatformEvent, { event: { type: 'read' } }>,
+  ): Promise<void> {
+    const { event, result } = committed
+    const displayConversation = result.conversation.kind === 'channel' && result.conversation.parentId
+      ? await this._store.getConversation(session.platformSessionId, result.conversation.parentId)
+        ?? { id: result.conversation.parentId, kind: 'channel' as const, title: result.conversation.parentId }
+      : result.conversation
+    const channelId = displayConversation.kind === 'direct'
+      ? undefined
+      : stableId(`peer:${displayConversation.id}`)
+    const eventKey = `${session.platformSessionId}:read:${event.conversationId}:${event.upToMessageId}`
+    let delivery = await this._store.getUpdateDelivery(eventKey)
+    delivery ??= await this._store.prepareUpdateDelivery(
+      eventKey, session.platformSessionId, 1, result.message.timestamp, channelId,
+    )
+    if (delivery.published) return
+
+    let update: tl.TypeUpdate
+    if (channelId !== undefined) {
+      update = {
+        _: 'updateReadChannelInbox', channelId,
+        maxId: result.tlMessageId, stillUnreadCount: result.unreadCount,
+        pts: delivery.pts,
+      }
+    } else {
+      const platform = this._registry.require(session.platformId)
+      const user = await this._store.getUser(session.platformId, displayConversation.id)
+        ?? await this._store.upsertUser(session,
+          await platform.getUser?.(session, displayConversation.id)
+            ?? { id: displayConversation.id, firstName: displayConversation.title })
+      update = {
+        _: 'updateReadHistoryInbox', peer: { _: 'peerUser', userId: user.id },
+        maxId: result.tlMessageId, stillUnreadCount: result.unreadCount,
+        pts: delivery.pts, ptsCount: delivery.ptsCount,
+      }
+    }
+    const payload: tl.RawUpdates = {
+      _: 'updates', updates: [update], users: [],
+      chats: channelId === undefined ? [] : [makeUpdateChat(displayConversation, false, this._dcId)],
+      date: delivery.date, seq: delivery.seq,
+    }
+    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    if (await this._send(session.platformSessionId, payload)) await this._store.markUpdatePublished(eventKey)
+  }
+
   private async _publishMessage(
     session: PlatformSession,
     committed: Exclude<CommittedPlatformEvent, {
-      event: { type: 'message-delete' | 'message-reactions' }
+      event: { type: 'message-delete' | 'message-reactions' | 'read' }
     }>,
   ): Promise<void> {
     const { event, result } = committed
@@ -468,6 +522,10 @@ function committedEventSummary(committed: CommittedPlatformEvent): string {
   if (event.type === 'message-delete') {
     const deletion = result as import('./message-store.js').DeleteResult
     return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} changed=${deletion.changed} tlMessages=${deletion.tlMessageIds.length}`
+  }
+  if (event.type === 'read') {
+    const read = result as import('./message-store.js').ReadResult
+    return `type=read conversation=${event.conversationId} message=${event.upToMessageId} unread=${read.unreadCount}`
   }
   const reactions = result as import('./message-store.js').ReactionResult
   return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} changed=${reactions.changed} tlMessages=${reactions.tlMessageIds.length}`

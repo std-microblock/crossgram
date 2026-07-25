@@ -606,6 +606,20 @@ describe('bridge login e2e', () => {
       expect(message.messages[0]).toMatchObject({
         _: 'message', id: history.messages[0].id, message: 'How are you?',
       })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.readHistory',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        maxId: history.messages[0].id,
+      }, 29)).toMatchObject({ _: 'messages.affectedMessages', ptsCount: 0 })
+      const readStateAdapter = ctx.imPlatform.require('static') as staticPlatformPlugin.StaticPlatform
+      await expect(readStateAdapter.getDialogs(bridge.sessionFromRow(platformLogin.session)))
+        .resolves.toMatchObject({
+          dialogs: expect.arrayContaining([
+            expect.objectContaining({
+              conversation: expect.objectContaining({ id: 'alice' }), unreadCount: 0,
+            }),
+          ]),
+        })
 
       const groupHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
