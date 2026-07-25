@@ -34,6 +34,11 @@
     webSocketEndpoint: ws://127.0.0.1:18767/v1/events/ws
     endpoint: http://127.0.0.1:18768/v1
     generatePreviews: true
+- id: discord
+  name: '@mtproto-relay/platform-discord'
+  disabled: true
+  config:
+    token: ''
 - id: mtproto-debug
   name: '@mtproto-relay/mtproto-debug'
   config:
