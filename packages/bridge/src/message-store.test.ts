@@ -190,6 +190,55 @@ describe('MessageStore', () => {
     }])
   })
 
+  it('switches a projection to upgraded media without invalidating the original media ID', async () => {
+    const { ctx, store } = await createStore()
+    const conversation: IMConversation = { id: 'animated-room', kind: 'group', title: 'Animated room' }
+    const original: IMMessage = {
+      id: 'animated-message', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      content: { parts: [{
+        type: 'media',
+        media: {
+          id: 'qq-image:original-v1', kind: 'image', name: 'animation.gif', mimeType: 'image/gif',
+          size: 120, width: 64, height: 48, locator: { nativeUrl: 'https://example.test/original' },
+        },
+      }] },
+    }
+
+    const first = await store.ingest(session, conversation, original)
+    const originalMediaId = first.projection[0].mediaId!
+    const edited = await store.ingest(session, conversation, {
+      ...original,
+      content: { parts: [{
+        type: 'media',
+        media: {
+          id: 'qq-image:original-v1:webm-v1', kind: 'file', name: 'animation.webm', mimeType: 'video/webm',
+          size: 80, width: 64, height: 48, locator: { cachedPath: 'cache/animation.webm' },
+        },
+      }] },
+    })
+    const upgradedMediaId = edited.projection[0].mediaId!
+
+    expect(edited.created).toBe(false)
+    expect(edited.projection[0].tlMessageId).toBe(first.projection[0].tlMessageId)
+    expect(upgradedMediaId).not.toBe(originalMediaId)
+    expect(await ctx.database.get('mtproto_im_media', { messageId: first.message.id })).toMatchObject([
+      { id: originalMediaId, platformMediaId: 'qq-image:original-v1', mimeType: 'image/gif' },
+      { id: upgradedMediaId, platformMediaId: 'qq-image:original-v1:webm-v1', mimeType: 'video/webm' },
+    ])
+    await expect(store.getMedia(session.platformSessionId, originalMediaId)).resolves.toMatchObject({
+      media: { id: 'qq-image:original-v1', mimeType: 'image/gif', locator: { nativeUrl: expect.any(String) } },
+    })
+    await expect(store.getMedia(session.platformSessionId, upgradedMediaId)).resolves.toMatchObject({
+      media: { id: 'qq-image:original-v1:webm-v1', mimeType: 'video/webm', locator: { cachedPath: expect.any(String) } },
+    })
+    await expect(store.findProjectedByTlId(
+      session.platformSessionId, first.projection[0].tlMessageId, conversation.id,
+    )).resolves.toMatchObject({
+      parts: [{ mediaId: upgradedMediaId }],
+      source: { content: { parts: [{ media: { id: 'qq-image:original-v1:webm-v1' } }] } },
+    })
+  })
+
   it('allocates consecutive signed-int IDs independently per durable scope', async () => {
     const { store } = await createStore()
     expect(await store.allocateIds('account:one', 3)).toEqual([1, 2, 3])

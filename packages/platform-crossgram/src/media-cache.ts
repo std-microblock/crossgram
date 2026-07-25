@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs'
-import { open, readFile, rename, rm } from 'node:fs/promises'
+import { readFile, rename, rm } from 'node:fs/promises'
 import { extname, isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -33,10 +33,17 @@ export interface QQMediaPreviewRow {
   updatedAt: Date
 }
 
+export interface QQMediaAnimationRow {
+  key: string
+  animated: boolean
+  updatedAt: Date
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_qqnt_media_cache: QQMediaCacheRow
     mtproto_qqnt_media_preview: QQMediaPreviewRow
+    mtproto_qqnt_media_animation: QQMediaAnimationRow
   }
 }
 
@@ -61,6 +68,13 @@ export function defineQQMediaCacheModel(ctx: Context): void {
     key: 'string', bytes: 'binary', mimeType: 'string', size: 'unsigned',
     width: 'unsigned', height: 'unsigned', updatedAt: 'timestamp',
   }, { primary: 'key', indexes: ['updatedAt'] })
+  ctx.model.extend('mtproto_qqnt_media_animation', {
+    key: 'string', animated: 'boolean', updatedAt: 'timestamp',
+  }, { primary: 'key', indexes: ['updatedAt'] })
+}
+
+export interface QQMediaRangeSource {
+  read(options: { offset: number, limit: number, signal?: AbortSignal }): AsyncIterable<Uint8Array>
 }
 
 interface CachedAsset {
@@ -90,6 +104,7 @@ export class QQMediaCache {
   private readonly active = new Map<string, Promise<CachedAsset>>()
   private readonly activePreviews = new Map<string, Promise<CachedPreview | undefined>>()
   private readonly memoryPreviews = new Map<string, CachedPreview>()
+  private readonly animationDecisions = new Map<string, boolean>()
 
   constructor(private readonly options: QQMediaCacheOptions) {
     this.path = resolve(options.path)
@@ -157,29 +172,52 @@ export class QQMediaCache {
     )
   }
 
+  async prepareInitialMedia(
+    media: IMMedia<QQMediaLocator>,
+    original: IMMediaSource,
+  ): Promise<IMMedia<QQMediaLocator>> {
+    if (media.kind !== 'image') return media
+    const ready = await this.readyAnimatedMedia(media)
+    if (ready) return ready
+    return this.attachPreview(media, contentIdentity(media), original)
+  }
+
+  async prepareAnimatedUpgrade(
+    media: IMMedia<QQMediaLocator>,
+    original: IMMediaSource,
+    ranges: QQMediaRangeSource,
+    signal?: AbortSignal,
+  ): Promise<IMMedia<QQMediaLocator> | undefined> {
+    if (media.kind !== 'image') return
+    const identity = contentIdentity(media)
+    let animated = isAnimatedMedia(media)
+    if (!animated && mayBeAnimatedPng(media)) {
+      animated = await this.isAnimatedPng(identity, ranges, signal)
+    }
+    if (!animated) return
+    return this.prepareAnimatedImage(media, identity, original)
+  }
+
+  /** Synchronous compatibility helper used by focused transformer tests. */
   async prepareMedia(
     media: IMMedia<QQMediaLocator>,
     original: IMMediaSource,
   ): Promise<IMMedia<QQMediaLocator>> {
+    const upgraded = await this.prepareAnimatedUpgrade(media, original, {
+      read: ({ offset, limit, signal }) => rangedSource(original.stream({ signal }), offset, limit),
+    })
+    return upgraded ?? this.prepareInitialMedia(media, original)
+  }
+
+  private async readyAnimatedMedia(
+    media: IMMedia<QQMediaLocator>,
+  ): Promise<IMMedia<QQMediaLocator> | undefined> {
     const identity = contentIdentity(media)
-    if (media.kind !== 'image') return media
-    const declaredAnimated = isAnimatedMedia(media)
-    if (!declaredAnimated && mayBeAnimatedPng(media)) {
-      const input = join(this.path, `${randomUUID()}.png-input`)
-      try {
-        await pipeline(Readable.from(original.stream()), createWriteStream(input, { flags: 'wx' }))
-        const sourceDimensions = await imageDimensions(input, media.width, media.height)
-        const animated = await isAnimatedPng(input)
-        const prepared = animated
-          ? await this.prepareAnimatedImage(media, identity, fileSource(input, statSync(input).size), input, sourceDimensions)
-          : await this.attachPreview(media, identity, fileSource(input, statSync(input).size), input)
-        return prepared
-      } finally {
-        await rm(input, { force: true }).catch(() => undefined)
-      }
-    }
-    if (declaredAnimated) return this.prepareAnimatedImage(media, identity, original)
-    return this.attachPreview(media, identity, original)
+    const asset = cachedAsset(
+      this.path, cacheKey('image-webm-v4', identity), 'webm', 'video/webm', media.width, media.height,
+    )
+    if (!asset) return
+    return this.finishAnimatedMedia(media, identity, asset)
   }
 
   private async prepareAnimatedImage(
@@ -190,16 +228,25 @@ export class QQMediaCache {
     sourceDimensions?: { width: number, height: number },
   ): Promise<IMMedia<QQMediaLocator>> {
     const asset = await this.ensure(
-      cacheKey('image-webm-v3', identity),
+      cacheKey('image-webm-v4', identity),
       'webm', 'video/webm', media.width, media.height,
       (temporary) => originalPath
         ? this.convertAnimatedFile(originalPath, temporary)
         : this.convertAnimated(original, temporary),
     )
+    return this.finishAnimatedMedia(media, identity, asset, sourceDimensions)
+  }
+
+  private async finishAnimatedMedia(
+    media: IMMedia<QQMediaLocator>,
+    identity: string,
+    asset: CachedAsset,
+    sourceDimensions?: { width: number, height: number },
+  ): Promise<IMMedia<QQMediaLocator>> {
     const dimensions = fitWithin(sourceDimensions ?? { width: media.width ?? 1, height: media.height ?? 1 }, 512)
     const converted: IMMedia<QQMediaLocator> = {
       ...media,
-      id: `${media.id}:webm-v3`,
+      id: `${media.id}:webm-v1`,
       kind: 'file',
       name: replaceExtension(media.name, '.webm'),
       mimeType: 'video/webm',
@@ -209,8 +256,29 @@ export class QQMediaCache {
       locator: { ...media.locator!, cachedPath: asset.path },
     }
     return this.attachPreview(
-      converted, `${identity}:webm-v3`, fileSource(asset.path, asset.size), asset.path, true,
+      converted, `${identity}:webm-v1`, fileSource(asset.path, asset.size), asset.path, true,
     )
+  }
+
+  private async isAnimatedPng(
+    identity: string,
+    ranges: QQMediaRangeSource,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const key = createHash('sha256').update(cacheKey('png-animation-v1', identity)).digest('hex')
+    const memory = this.animationDecisions.get(key)
+    if (memory !== undefined) return memory
+    const [stored] = await this.options.database?.get('mtproto_qqnt_media_animation', { key }) ?? []
+    if (stored) {
+      this.animationDecisions.set(key, stored.animated)
+      return stored.animated
+    }
+    const animated = await sniffAnimatedPng(ranges, signal)
+    this.animationDecisions.set(key, animated)
+    await this.options.database?.upsert('mtproto_qqnt_media_animation', [{
+      key, animated, updatedAt: new Date(),
+    }], ['key'])
+    return animated
   }
 
   private async attachPreview(
@@ -485,32 +553,9 @@ function mayBeAnimatedPng(media: IMMedia): boolean {
   return media.mimeType === 'image/png' || /\.png$/i.test(media.name ?? '')
 }
 
-async function isAnimatedPng(path: string): Promise<boolean> {
-  const handle = await open(path, 'r')
-  const signature = Buffer.allocUnsafe(8)
-  const header = Buffer.allocUnsafe(12)
-  try {
-    if ((await handle.read(signature, 0, signature.length, 0)).bytesRead !== signature.length
-      || !signature.equals(PNG_SIGNATURE)) return false
-    const size = (await handle.stat()).size
-    let offset = signature.length
-    while (offset + header.length <= size) {
-      if ((await handle.read(header, 0, header.length, offset)).bytesRead !== header.length) return false
-      const length = header.readUInt32BE(0)
-      const type = header.toString('ascii', 4, 8)
-      if (type === 'acTL') return true
-      if (type === 'IDAT' || type === 'IEND') return false
-      const next = offset + header.length + length
-      if (!Number.isSafeInteger(next) || next <= offset || next > size) return false
-      offset = next
-    }
-    return false
-  } finally {
-    await handle.close()
-  }
-}
-
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const PNG_SNIFF_CHUNK_BYTES = 64 * 1024
+const MAX_PNG_SNIFF_BYTES = 1024 * 1024
 const MAX_DATABASE_PREVIEW_BYTES = 256 * 1024
 const MEMORY_PREVIEW_CACHE_LIMIT = 1024
 
@@ -528,6 +573,53 @@ function contentIdentity(media: IMMedia<QQMediaLocator>): string {
   if (locator?.sha) return `sha:${locator.sha.toLowerCase()}`
   if (locator?.md5) return `md5:${locator.md5.toLowerCase()}`
   return `locator:${stableJson(locator ?? media.id)}`
+}
+
+function cachedAsset(
+  directory: string,
+  logicalKey: string,
+  extension: string,
+  mimeType: string,
+  width?: number,
+  height?: number,
+): CachedAsset | undefined {
+  const key = createHash('sha256').update(logicalKey).digest('hex')
+  const path = join(directory, `${key}.${extension}`)
+  if (!existsSync(path)) return
+  return { key, path, mimeType, size: statSync(path).size, width, height }
+}
+
+async function sniffAnimatedPng(ranges: QQMediaRangeSource, signal?: AbortSignal): Promise<boolean> {
+  let bytes = Buffer.alloc(0)
+  for (let offset = 0; offset < MAX_PNG_SNIFF_BYTES; offset += PNG_SNIFF_CHUNK_BYTES) {
+    const chunks: Buffer[] = []
+    for await (const chunk of ranges.read({ offset, limit: PNG_SNIFF_CHUNK_BYTES, signal })) {
+      chunks.push(Buffer.from(chunk))
+    }
+    const next = Buffer.concat(chunks)
+    if (!next.length) throw new Error('PNG animation probe ended before IDAT')
+    bytes = Buffer.concat([bytes, next])
+    const decision = pngAnimationDecision(bytes)
+    if (decision !== undefined) return decision
+    if (next.length < PNG_SNIFF_CHUNK_BYTES) break
+  }
+  throw new Error(`PNG animation probe exceeded ${MAX_PNG_SNIFF_BYTES} bytes before IDAT`)
+}
+
+function pngAnimationDecision(bytes: Buffer): boolean | undefined {
+  if (bytes.length < PNG_SIGNATURE.length) return
+  if (!bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return false
+  let position = PNG_SIGNATURE.length
+  while (position + 8 <= bytes.length) {
+    const length = bytes.readUInt32BE(position)
+    if (length > MAX_PNG_SNIFF_BYTES) throw new Error(`PNG chunk is too large to probe: ${length}`)
+    const end = position + 12 + length
+    if (end > bytes.length) return
+    const type = bytes.toString('ascii', position + 4, position + 8)
+    if (type === 'acTL') return true
+    if (type === 'IDAT' || type === 'IEND') return false
+    position = end
+  }
 }
 
 function replaceExtension(name: string | undefined, extension: string): string | undefined {

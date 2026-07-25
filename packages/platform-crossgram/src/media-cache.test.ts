@@ -110,7 +110,7 @@ describe('QQMediaCache', () => {
     }, countedSource(gif, () => opens++)))
 
     expect(prepared).toMatchObject({
-      id: 'animated-image:webm-v3', kind: 'file', name: 'animated.webm', mimeType: 'video/webm',
+      id: 'animated-image:webm-v1', kind: 'file', name: 'animated.webm', mimeType: 'video/webm',
       locator: { cachedPath: expect.stringMatching(/\.webm$/) },
       preview: { mimeType: 'image/webp', width: 9, height: 6, locator: { previewKey: expect.any(String) } },
     })
@@ -139,7 +139,7 @@ describe('QQMediaCache', () => {
       preview: { mimeType: 'image/webp' },
     })
     expect([...video.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
-    expect(opens).toBe(1)
+    expect(opens).toBe(2)
   }, 30_000)
 
   it('persists generated reaction WebM files across adapter instances', async () => {
@@ -162,6 +162,58 @@ describe('QQMediaCache', () => {
     expect(secondBytes).toEqual(firstBytes)
     expect(opens).toBe(1)
   }, 30_000)
+
+  it('range-probes static PNG once and reuses the persisted non-animated decision', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineQQMediaCacheModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+    const png = await sharp({
+      create: { width: 10, height: 6, channels: 4, background: { r: 20, g: 40, b: 60, alpha: 1 } },
+    }).png().toBuffer()
+    const media = {
+      id: 'static-png', kind: 'image' as const, name: 'static.png', mimeType: 'image/png',
+      size: png.length, width: 10, height: 6, locator: mediaLocator({ md5: 'STATIC-PNG' }),
+    }
+    let fullDownloads = 0
+    let probes = 0
+    const cache = new QQMediaCache({
+      path: await temporaryDirectory(), database: ctx.database, generatePreviews: false,
+    })
+
+    const initial = await cache.prepareInitialMedia(media, countedSource(png, () => fullDownloads++))
+    const upgraded = await cache.prepareAnimatedUpgrade(
+      media,
+      countedSource(png, () => fullDownloads++),
+      { read: async function* ({ offset, limit }) {
+        probes++
+        yield png.subarray(offset, offset + limit)
+      } },
+    )
+    const restarted = new QQMediaCache({
+      path: await temporaryDirectory(), database: ctx.database, generatePreviews: false,
+    })
+    const cachedDecision = await restarted.prepareAnimatedUpgrade(
+      media,
+      countedSource(png, () => fullDownloads++),
+      { read() { throw new Error('persisted animation decision should avoid another range request') } },
+    )
+
+    expect(initial).toEqual(media)
+    expect(upgraded).toBeUndefined()
+    expect(cachedDecision).toBeUndefined()
+    expect(probes).toBe(1)
+    expect(fullDownloads).toBe(0)
+    expect(await ctx.database.get('mtproto_qqnt_media_animation', {})).toMatchObject([{ animated: false }])
+  })
 
   it('indexes logical cache keys containing NUL separators in SQLite', async () => {
     const path = await temporaryDirectory()
