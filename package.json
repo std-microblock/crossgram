@@ -19,6 +19,7 @@
     "start": "cordis run",
     "schema:sync": "node scripts/sync-telegram-schemas.mjs",
     "schema:test": "node --test scripts/sync-telegram-schemas.test.mjs",
+    "binary-clean:test": "node --test binary_patch/clean-materialgram.unit.test.cjs binary_patch/clean-materialgram.e2e.test.cjs",
     "typecheck": "tsc --project tsconfig.test.json --pretty false"
   },
   "devDependencies": {
