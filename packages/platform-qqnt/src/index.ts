@@ -41,6 +41,7 @@ export interface Config extends QQNTClientOptions {
 
 export const Config = z.object({
   endpoint: z.string().default('http://127.0.0.1:18767/v1'),
+  webSocketEndpoint: z.string(),
   token: z.string().role('secret'),
   memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
   mediaCachePath: z.string(),
@@ -175,7 +176,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       attempt++
       this.logger?.info(
         'WebSocket subscribe start session=%s attempt=%d endpoint=%s lastEventId=%s',
-        platformSessionId, attempt, this.client.endpoint, lastEventId ?? '<none>',
+        platformSessionId, attempt, this.client.webSocketEndpoint, lastEventId ?? '<none>',
       )
       try {
         await this.client.subscribe(async (event, eventId) => {

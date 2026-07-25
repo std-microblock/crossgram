@@ -242,7 +242,7 @@ describe('QQNTClient streaming transport', () => {
     expect(Buffer.concat(chunks).toString()).toBe('def')
   })
 
-  it('parses WebSocket frames sequentially and resumes from the acknowledged event', async () => {
+  it('uses the independent WebSocket endpoint, parses frames sequentially, and resumes from the acknowledged event', async () => {
     let requestUrl = ''
     server = createServer()
     const webSocketServer = new WebSocketServer({ server })
@@ -255,7 +255,10 @@ describe('QQNTClient streaming transport', () => {
     await once(server, 'listening')
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const client = new QQNTClient({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/custom/events?stream=qqnt`,
+    })
     const order: string[] = []
     const acknowledged: string[] = []
     await client.subscribe(async (event, eventId) => {
@@ -266,8 +269,13 @@ describe('QQNTClient streaming transport', () => {
       lastEventId: '9',
       onEventId: (eventId) => acknowledged.push(eventId),
     })
-    expect(requestUrl).toBe('/events/ws?lastEventId=9')
+    expect(requestUrl).toBe('/custom/events?stream=qqnt&lastEventId=9')
     expect(order).toEqual(['a:10:start', 'a:10:end', 'b:11:start', 'b:11:end'])
     expect(acknowledged).toEqual(['10', '11'])
+  })
+
+  it('derives the WebSocket endpoint from the HTTP endpoint when no override is configured', () => {
+    expect(new QQNTClient({ endpoint: 'https://bridge.example/v1/' }).webSocketEndpoint)
+      .toBe('https://bridge.example/v1/events/ws')
   })
 })

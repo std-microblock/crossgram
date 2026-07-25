@@ -9,6 +9,7 @@ import type {
 
 export interface QQNTClientOptions {
   endpoint?: string
+  webSocketEndpoint?: string
   token?: string
   fetch?: typeof globalThis.fetch
 }
@@ -20,11 +21,13 @@ export interface QQNTSubscribeOptions {
 
 export class QQNTClient {
   readonly endpoint: string
+  readonly webSocketEndpoint: string
   private readonly token?: string
   private readonly fetchImpl: typeof globalThis.fetch
 
   constructor(options: QQNTClientOptions = {}) {
     this.endpoint = (options.endpoint ?? 'http://127.0.0.1:18767/v1').replace(/\/+$/, '')
+    this.webSocketEndpoint = options.webSocketEndpoint ?? `${this.endpoint}/events/ws`
     this.token = options.token
     this.fetchImpl = options.fetch ?? globalThis.fetch
   }
@@ -350,7 +353,7 @@ export class QQNTClient {
     options: QQNTSubscribeOptions = {},
   ): Promise<void> {
     if (signal.aborted) return
-    const url = new URL(`${this.endpoint}/events/ws`)
+    const url = new URL(this.webSocketEndpoint)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     if (options.lastEventId) url.searchParams.set('lastEventId', options.lastEventId)
     const webSocket = new WebSocket(url, { headers: this.headers() })

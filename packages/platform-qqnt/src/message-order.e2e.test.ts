@@ -19,7 +19,7 @@ afterEach(async () => {
 })
 
 describe('QQNT same-second message ordering E2E', () => {
-  it('persists 100, 102, 101 WebSocket events without reconnecting or exhausting the scope', async () => {
+  it('uses an independent WebSocket endpoint and persists 100, 102, 101 events', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -73,7 +73,10 @@ describe('QQNT same-second message ordering E2E', () => {
       })
     })
 
-    const platform = new QQNTPlatform({ endpoint: `http://127.0.0.1:${address.port}` })
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/qqnt/events`,
+    })
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     const store = new MessageStore(ctx.database)
@@ -97,7 +100,7 @@ describe('QQNT same-second message ordering E2E', () => {
       result.projection[0].nativeSequence,
       result.projection[0].tlMessageId,
     ]))
-    expect(connectionUrls).toEqual(['/events/ws'])
+    expect(connectionUrls).toEqual(['/qqnt/events'])
     expect([...bySequence.keys()]).toEqual([100, 102, 101])
     expect([bySequence.get(100), bySequence.get(101), bySequence.get(102)])
       .toEqual([0x40000007, 0x40000009, 0x4000000b])

@@ -12,7 +12,7 @@ const cases = [
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
-    'endpoint', 'token', 'memberName', 'mediaCachePath', 'mediaDownloadMode',
+    'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'mediaDownloadMode',
     'autoDownloadFileSizeLimit', 'previewMaxDimension', 'ffmpegPath',
   ]],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],

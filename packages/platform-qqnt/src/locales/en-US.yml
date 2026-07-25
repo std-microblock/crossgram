@@ -1,4 +1,5 @@
 endpoint: Base URL of the QQNT bridge HTTP API.
+webSocketEndpoint: Full URL of the QQNT bridge WebSocket event stream. Derived from the HTTP endpoint when omitted.
 token: Bearer token used to authenticate with the QQNT bridge.
 memberName: Name shown for group members.
 mediaCachePath: Directory used for cached media, previews, stickers, and reactions.
