@@ -1970,11 +1970,17 @@ describe('bridge login e2e', () => {
       }, 6)
       expect(authorization._).toBe('auth.authorization')
       expect(handler).toBeTypeOf('function')
+      expect(await callRpc(client, key, sid, {
+        _: 'users.getUsers',
+        id: [{ _: 'inputUser', userId: authorization.user.id, accessHash: Long.ZERO }],
+      }, 7)).toMatchObject([{
+        _: 'user', id: authorization.user.id, self: true, premium: true,
+      }])
       expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 8)).toMatchObject({ pts: 1, seq: 0 })
 
       const conversation: bridge.IMConversation = { id: 'push-group', kind: 'group', title: 'Push Group' }
       const message: bridge.IMMessage = {
-        id: `opaque:${'x'.repeat(8_192)}`, conversationId: conversation.id, senderId: 'sender',
+        id: `opaque:${'x'.repeat(8_192)}`, conversationId: conversation.id, senderId: 'self', outgoing: true,
         timestamp: 1_800_000_100, metadata: { qqMsgSeq: '250000', telegramMessageId: 250_000 },
         content: { parts: [{ type: 'text', text: 'arrived by subscribe' }] },
       }
@@ -1988,7 +1994,9 @@ describe('bridge login e2e', () => {
           message: { id: 0x40000007, peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
         }],
         chats: [{ _: 'channel', megagroup: true, title: 'Push Group' }],
+        users: [{ _: 'user', self: true, premium: true }],
       })
+      expect(pushed.users).toHaveLength(1)
       const [stored] = await ctx.database.get('mtproto_im_message', {})
       expect(stored).toMatchObject({ primaryPlatformMessageId: message.id, text: 'arrived by subscribe' })
 
