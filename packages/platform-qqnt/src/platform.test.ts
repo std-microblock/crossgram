@@ -515,6 +515,54 @@ describe('QQNTPlatform mapping', () => {
     }])
   })
 
+  it('materializes a sent animated sticker before returning the local echo', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-sent-sticker-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({}, 'qq-provider', new QQMediaCache({ path: cachePath }))
+    const gif = await sharp({
+      create: { width: 16, height: 12, channels: 4, background: { r: 20, g: 80, b: 220, alpha: 1 } },
+    }).gif().toBuffer()
+    const reference = {
+      kind: 'market' as const, packageId: '42', stickerId: 'wave', name: 'Wave', key: 'secret',
+      width: 16, height: 12, animated: true,
+    }
+    let assetRequests = 0
+    platform.client.stickerSource = vi.fn(() => ({
+      size: gif.length,
+      async *stream() {
+        assetRequests++
+        yield gif
+      },
+    }))
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent-sticker', conversationId: 'u', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{ type: 'sticker' as const, sticker: {
+        stickerId: 'market:42:wave', packId: '42', title: 'Wave',
+        format: 'animated' as const, mimeType: 'image/gif', width: 16, height: 12,
+        reference,
+      } }],
+    }))
+
+    const sent = await platform.sendMessage(session, { id: 'u' }, { parts: [{
+      type: 'sticker',
+      sticker: {
+        type: 'native', providerId: 'qq-provider', stickerId: 'market:42:wave', packId: '42',
+        reference,
+      },
+    }] })
+
+    expect(sent.content.parts).toMatchObject([{
+      type: 'sticker', sticker: {
+        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
+        thumbnail: { mimeType: 'image/webp' },
+      },
+    }])
+    const sticker = sent.content.parts[0]
+    if (sticker.type !== 'sticker') throw new Error('missing sent sticker')
+    expect(sticker.sticker.size).toBeGreaterThan(0)
+    expect(assetRequests).toBe(1)
+  }, 30_000)
+
   it('exposes QQ packs, assets, and native favorite mutation through the sticker provider', async () => {
     const platform = new QQNTPlatform()
     const provider = new QQStickerProvider(platform.client, 'qq-provider')
@@ -1022,6 +1070,12 @@ describe('QQNTPlatform mapping', () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-message-sticker-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+    const gif = await sharp({
+      create: { width: 16, height: 12, channels: 4, background: { r: 120, g: 40, b: 210, alpha: 1 } },
+    }).gif().toBuffer()
+    platform.client.stickerSource = vi.fn(() => ({
+      size: gif.length, async *stream() { yield gif },
+    }))
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getHistory = vi.fn(async () => ({ messages: [{
       id: 'sticker-message', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
@@ -1032,22 +1086,27 @@ describe('QQNTPlatform mapping', () => {
           format: 'animated' as const, mimeType: 'image/apng', width: 240, height: 240,
           reference: {
             kind: 'sysface' as const, faceId: '476', faceType: 3, name: '/不是吧',
-            packId: '3', stickerId: '476', stickerType: 2, resultId: 'result-476', animated: true,
+            packId: '3', stickerId: '476', stickerType: 2, resultId: 'result-476', animated: true as const,
           },
         },
       }],
     }] }))
 
     const history = await platform.getHistory(session, { id: '2:group' })
-    expect(history.messages[0].content.parts).toEqual([{
-      type: 'sticker', sticker: expect.objectContaining({
-        stickerId: 'sysface:476', title: '/不是吧', format: 'video', mimeType: 'video/webm',
-        locator: expect.objectContaining({
+    expect(history.messages[0].content.parts).toMatchObject([{
+      type: 'sticker', sticker: {
+        stickerId: 'sysface:476', title: '/不是吧',
+        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
+        thumbnail: { mimeType: 'image/webp' },
+        locator: {
           kind: 'sysface', faceId: '476', faceType: 3, packId: '3',
           stickerId: '476', stickerType: 2, resultId: 'result-476',
-        }),
-      }),
+        },
+      },
     }])
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'sticker') throw new Error('missing history sticker')
+    expect(part.sticker.size).toBeGreaterThan(0)
   })
 
   it('caches catalog-keyed static and animated reactions without exposing bridge paths', async () => {
