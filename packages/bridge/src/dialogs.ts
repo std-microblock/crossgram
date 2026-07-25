@@ -458,7 +458,8 @@ export class DialogRpc {
 
   async readHistory(req: tl.messages.RawReadHistoryRequest): Promise<tl.messages.RawAffectedMessages> {
     await this._hydratePeers()
-    this._resolvePeer(req.peer)
+    const conversationId = this._resolvePeer(req.peer)
+    await this._markRead(conversationId, req.maxId)
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
   }
@@ -700,7 +701,8 @@ export class DialogRpc {
 
   async readChannelHistory(req: tl.channels.RawReadHistoryRequest): Promise<tl.TlObject> {
     await this._hydratePeers()
-    this._resolveChannel(req.channel)
+    const conversation = this._resolveChannel(req.channel)
+    await this._markRead(conversation.id, req.maxId)
     return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
@@ -2571,6 +2573,33 @@ export class DialogRpc {
   private _requireHistory<T extends Function>(method: T | undefined): T {
     if (!this._platform.capabilities.history || !method) throw new RpcError(400, 'HISTORY_UNAVAILABLE')
     return method
+  }
+
+  private async _markRead(displayConversationId: string, tlMessageId: number): Promise<void> {
+    if (!this._platform.capabilities.readState?.markRead || !this._platform.markRead || tlMessageId <= 0) return
+    const projected = this._store
+      ? await this._store.findProjectedByTlId(this._session.platformSessionId, tlMessageId)
+      : undefined
+    const ref = projected?.source ?? (() => {
+      const known = this._tlToMessage.get(tlMessageId)
+      if (!known) return
+      return { id: known.platformMessageId, conversationId: known.peerId }
+    })()
+    if (!ref) return
+    const target = this._conversation(ref.conversationId)
+    if (target.id !== displayConversationId && target.parentId !== displayConversationId) return
+    await this._platform.markRead(this._session, {
+      conversationId: target.id,
+      messageId: ref.id,
+    })
+    const cached = this._dialogCache.get(target.id)
+    if (cached) {
+      this._dialogCache.set(target.id, {
+        ...cached,
+        unreadCount: 0,
+        readInboxMaxMessage: projected?.source,
+      })
+    }
   }
 }
 

@@ -21,6 +21,7 @@ const session: PlatformSession = {
 class DialogTestPlatform implements IMPlatform {
   readonly capabilities = {
     history: true,
+    readState: { markRead: true, events: true },
     send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
     conversations: { groups: false, channels: false, subchannels: false },
   }
@@ -37,6 +38,7 @@ class DialogTestPlatform implements IMPlatform {
   }
   private _sequence = 100
   lastInput?: IMMessageInput
+  readonly readTargets: Array<{ conversationId: string, messageId: string }> = []
 
   addMessage(conversationId: string, message: IMMessage): void {
     ;(this._messages[conversationId] ??= []).push(message)
@@ -74,6 +76,13 @@ class DialogTestPlatform implements IMPlatform {
 
   async getUser(_session: PlatformSession, id: string): Promise<IMUser | null> {
     return this._users[id] ?? null
+  }
+
+  async markRead(
+    _session: PlatformSession,
+    target: { conversationId: string, messageId: string },
+  ): Promise<void> {
+    this.readTargets.push(target)
   }
 
   private _message(
@@ -463,6 +472,21 @@ describe('DialogRpc', () => {
     await expect(rpc.getScheduledHistory({ _: 'messages.getScheduledHistory', peer, hash: Long.ZERO }))
       .resolves.toMatchObject({ _: 'messages.messages', messages: [] })
     for (const result of [search, pinned]) expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('maps Telegram read boundaries back to opaque platform messages', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    const peer = { _: 'inputPeerUser' as const, userId: stableId('peer:alice'), accessHash: Long.ZERO }
+    const history = await rpc.getHistory(getHistoryRequest(peer.userId)) as tl.messages.RawMessages
+    const newest = history.messages[0] as tl.RawMessage
+
+    await expect(rpc.readHistory({ _: 'messages.readHistory', peer, maxId: newest.id }))
+      .resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
+    expect(platform.readTargets).toEqual([{ conversationId: 'alice', messageId: '2' }])
+
+    await rpc.readHistory({ _: 'messages.readHistory', peer, maxId: 0x7fffffff })
+    expect(platform.readTargets).toHaveLength(1)
   })
 
   it('uses platform search filters and carries its opaque cursor across Telegram pages', async () => {

@@ -10,6 +10,13 @@ export type IMConversationKind = 'direct' | 'group' | 'channel'
 
 export interface PlatformCapabilities {
   history: boolean
+  /** Synchronization of the current account's incoming-message read boundary. */
+  readState?: {
+    /** Telegram read-history requests can be forwarded to the platform. */
+    markRead: boolean
+    /** The platform may emit `read` events when another client advances the boundary. */
+    events: boolean
+  }
   /** Server-side message search. When absent, the bridge falls back to loaded history. */
   search?: boolean
   send: {
@@ -305,6 +312,12 @@ export interface IMMessageTarget {
   targetId: string
 }
 
+export interface IMReadTarget {
+  conversationId: string
+  /** Opaque logical platform message ID through which incoming messages were read. */
+  messageId: string
+}
+
 export interface IMDeleteMessagesOptions {
   /** Request deletion for every participant instead of only the current user. */
   forEveryone: boolean
@@ -452,6 +465,10 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     messageId: string,
   ): Promise<IMMessage<TMediaLocator> | null>
+  markRead?(
+    session: PlatformSession,
+    target: IMReadTarget,
+  ): Promise<void>
   getUser?(session: PlatformSession, userId: string): Promise<IMUser<TMediaLocator> | null>
   getConversationMember?(
     session: PlatformSession,

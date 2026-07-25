@@ -192,6 +192,43 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('projects platform read events into direct and channel inbox updates', async () => {
+    const { store, manager, sent } = await createHarness()
+    const direct: IMConversation = { id: 'alice', kind: 'direct', title: 'Alice' }
+    const group: IMConversation = { id: 'group-read', kind: 'group', title: 'Group Read' }
+    const directMessage: IMMessage = {
+      id: 'direct-read', conversationId: direct.id, senderId: 'alice', timestamp: 40,
+      content: { parts: [{ type: 'text', text: 'direct' }] },
+    }
+    const groupMessage: IMMessage = {
+      id: 'group-read', conversationId: group.id, senderId: 'alice', timestamp: 41,
+      content: { parts: [{ type: 'text', text: 'group' }] },
+    }
+    await store.ingest(session, direct, directMessage)
+    await store.ingest(session, group, groupMessage)
+    const directResult = await store.markRead(session, direct.id, directMessage.id)
+    const groupResult = await store.markRead(session, group.id, groupMessage.id)
+    if (!directResult || !groupResult) throw new Error('missing read projections')
+
+    await manager.publish(session, {
+      event: { type: 'read', conversationId: direct.id, upToMessageId: directMessage.id },
+      result: directResult,
+    })
+    await manager.publish(session, {
+      event: { type: 'read', conversationId: group.id, upToMessageId: groupMessage.id },
+      result: groupResult,
+    })
+
+    expect(sent.map(({ update }) => (update as tl.RawUpdates).updates[0])).toMatchObject([{
+      _: 'updateReadHistoryInbox', peer: { _: 'peerUser' },
+      maxId: directResult.tlMessageId, stillUnreadCount: 0, pts: 2, ptsCount: 1,
+    }, {
+      _: 'updateReadChannelInbox', channelId: stableId('peer:group-read'),
+      maxId: groupResult.tlMessageId, stillUnreadCount: 0, pts: 3,
+    }])
+    for (const item of sent) expect(() => roundTrip(item.update)).not.toThrow()
+  })
+
   it('emits one update per mixed-media projection without an invalid Telegram album', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'channel', kind: 'channel', title: 'Channel' }

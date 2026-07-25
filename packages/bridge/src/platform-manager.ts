@@ -1,7 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
-import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult } from './message-store.js'
+import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
 import type {
   IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMMessageSearchPage,
   IMMessageSearchQuery, IMPlatform, PlatformSession,
@@ -225,6 +225,9 @@ export class PlatformSubscriptionManager {
     } else if (event.type === 'message-reactions') {
       const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
       await this._onEvent?.(session, { event, result })
+    } else if (event.type === 'read') {
+      const result = await this._store.markRead(session, event.conversationId, event.upToMessageId)
+      if (result) await this._onEvent?.(session, { event, result })
     }
   }
 }
@@ -255,6 +258,7 @@ export type CommittedPlatformEvent =
   | { event: Extract<IMEvent, { type: 'message-edit' }>, result: IngestResult }
   | { event: Extract<IMEvent, { type: 'message-delete' }>, result: DeleteResult }
   | { event: Extract<IMEvent, { type: 'message-reactions' }>, result: ReactionResult }
+  | { event: Extract<IMEvent, { type: 'read' }>, result: ReadResult }
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {

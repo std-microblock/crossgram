@@ -123,6 +123,36 @@ describe('PlatformSubscriptionManager', () => {
     await manager.stop()
   })
 
+  it('commits platform read events only after resolving their stored Telegram boundary', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: unknown[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, event) => { committed.push(event) },
+    )
+    const conversation: IMConversation = { id: 'room', kind: 'group', title: 'Room' }
+    await manager.ensure(session)
+    await platform.emit({ type: 'message', conversation, message: incoming('1') })
+    await platform.emit({ type: 'message', conversation, message: incoming('2') })
+    committed.length = 0
+
+    await platform.emit({ type: 'read', conversationId: 'room', upToMessageId: '1' })
+
+    expect(committed).toMatchObject([{
+      event: { type: 'read', conversationId: 'room', upToMessageId: '1' },
+      result: { conversation: { id: 'room' }, message: { id: '1' }, unreadCount: 1 },
+    }])
+    expect(await store.listDialogs(session.platformSessionId)).toMatchObject([{
+      conversation: { id: 'room' }, unreadCount: 1,
+    }])
+    committed.length = 0
+    await platform.emit({ type: 'read', conversationId: 'room', upToMessageId: 'missing' })
+    expect(committed).toEqual([])
+    await manager.stop()
+  })
+
   it('serializes one thousand concurrent pushed messages without dropping database projections', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
