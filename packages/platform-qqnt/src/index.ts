@@ -393,10 +393,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
       return {
         messages: await Promise.all(messages.filter((message) => !this.isFilteredGrayTip(message))
-          .slice(0, query.limit ?? messages.length).map((message) =>
-          this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
-            ...this.mapMessage(message), conversationId: conversation.id,
-          }))),
+          .slice(0, query.limit ?? messages.length).map((message) => {
+            const mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), multiForward)
+            return this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
+              ...mapped, conversationId: conversation.id,
+            })
+          })),
       }
     }
     const response = await this.client.getHistory(conversation.id, {
@@ -973,6 +975,31 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           : part),
       },
     }
+  }
+
+  private rebaseMultiForwardMedia(
+    message: IMMessage<QQMediaLocator>,
+    locator: WireMultiForwardLocator,
+  ): IMMessage<QQMediaLocator> {
+    const outer = this.conversations.get(locator.conversationId)
+    const chatType = outer?.metadata?.chatType
+    const peerUid = outer?.metadata?.qqPeerUid
+    if ((chatType !== 1 && chatType !== 2) || typeof peerUid !== 'string' || !peerUid) return message
+    const physicalChatType: 1 | 2 = chatType === 1 ? 1 : 2
+
+    let changed = false
+    const parts = message.content.parts.map((part) => {
+      if (part.type !== 'media' || !part.media.locator) return part
+      changed ||= part.media.locator.chatType !== physicalChatType || part.media.locator.peerUid !== peerUid
+      return {
+        ...part,
+        media: {
+          ...part.media,
+          locator: { ...part.media.locator, chatType: physicalChatType, peerUid },
+        },
+      }
+    })
+    return changed ? { ...message, content: { ...message.content, parts } } : message
   }
 
   private async prepareInitialMessage(
