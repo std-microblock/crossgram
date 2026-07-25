@@ -298,6 +298,20 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
+  it('reuses hydrated dialogs for peer-dialog requests', async () => {
+    const platform = new DialogTestPlatform()
+    const getDialogs = vi.spyOn(platform, 'getDialogs')
+    const rpc = new DialogRpc(platform, session)
+    const alice = { _: 'inputPeerUser' as const, userId: stableId('peer:alice'), accessHash: Long.ZERO }
+
+    await rpc.getPeerSettings({ _: 'messages.getPeerSettings', peer: alice })
+    await rpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeer', peer: alice }],
+    })
+
+    expect(getDialogs).toHaveBeenCalledTimes(1)
+  })
+
   it('expands folder zero, ignores unsupported archived folders, and rejects unknown peers', async () => {
     const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const all = await rpc.getPeerDialogs({

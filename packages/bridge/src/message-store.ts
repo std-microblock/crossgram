@@ -76,118 +76,209 @@ export class MessageStore {
     source: IMMessage,
     options: IngestOptions = {},
   ): Promise<IngestResult> {
-    if (source.conversationId !== conversation.id) {
-      throw new Error('message conversation does not match ingestion target')
-    }
+    return (await this.ingestMany(session, conversation, [source], options))[0]
+  }
 
+  async ingestMany(
+    session: PlatformSession,
+    conversation: IMConversation,
+    sources: readonly IMMessage[],
+    options: IngestOptions = {},
+  ): Promise<IngestResult[]> {
+    for (const source of sources) {
+      if (source.conversationId !== conversation.id) {
+        throw new Error('message conversation does not match ingestion target')
+      }
+    }
+    if (!sources.length) return []
     return this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
+      const epochCache = new Map<string, number>()
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
       if (!conversationRow) throw new Error('failed to persist conversation')
-
-      const sourceIds = [...new Set([source.id, ...(source.sourceIds ?? [])])]
-      let existingAlias: IMMessageAliasRow | undefined
-      for (const platformMessageId of sourceIds) {
-        ;[existingAlias] = await database.get('mtproto_im_message_alias', {
-          platformSessionId: session.platformSessionId,
-          conversationId: conversationRow.id,
-          platformMessageId,
-        })
-        if (existingAlias) break
+      const results: IngestResult[] = []
+      for (const source of sources) {
+        results.push(await this._ingestMessage(
+          database, session.platformSessionId, conversationRow, source, options, now, epochCache,
+        ))
       }
+      return results
+    }))
+  }
 
-      let message: IMMessageRow | undefined
-      if (existingAlias) {
-        ;[message] = await database.get('mtproto_im_message', { id: existingAlias.messageId })
-      } else {
-        ;[message] = await database.get('mtproto_im_message', {
-          platformSessionId: session.platformSessionId,
-          conversationId: conversationRow.id,
-          primaryPlatformMessageId: source.id,
-        })
+  async ingestDialogs(session: PlatformSession, dialogs: readonly IMDialog[]): Promise<void> {
+    for (const dialog of dialogs) {
+      for (const message of [dialog.lastMessage, dialog.readInboxMaxMessage]) {
+        if (message && message.conversationId !== dialog.conversation.id) {
+          throw new Error('message conversation does not match ingestion target')
+        }
       }
-
-      const created = !message
-      const storedMetadata = messageMetadata(source)
-      const changed = !message || (!message.deleted && (
-        message.senderPlatformUserId !== source.senderId
-        || message.text !== messageText(source)
-        || JSON.stringify(message.content) !== JSON.stringify(source.content)
-        || message.timestamp !== source.timestamp
-        || message.outgoing !== (source.outgoing ?? false)
-        || message.platformGroupId !== (source.groupId ?? null)
-        || JSON.stringify(message.metadata) !== JSON.stringify(storedMetadata)
-      ))
-      if (!message) {
-        message = await database.create('mtproto_im_message', {
-          platformSessionId: session.platformSessionId,
-          conversationId: conversationRow.id,
-          primaryPlatformMessageId: source.id,
-          senderPlatformUserId: source.senderId,
-          text: messageText(source),
-          content: source.content as unknown as JsonValue,
-          timestamp: source.timestamp,
-          outgoing: source.outgoing ?? false,
-          deleted: false,
-          platformGroupId: source.groupId ?? null,
-          metadata: storedMetadata,
-          createdAt: now,
-          updatedAt: now,
-        })
-      } else {
-        await database.set('mtproto_im_message', { id: message.id }, {
-          senderPlatformUserId: source.senderId,
-          text: messageText(source),
-          content: source.content as unknown as JsonValue,
-          timestamp: source.timestamp,
-          outgoing: source.outgoing ?? false,
-          platformGroupId: source.groupId ?? null,
-          metadata: storedMetadata,
-          updatedAt: now,
-        })
-        ;[message] = await database.get('mtproto_im_message', { id: message.id })
-        if (!message) throw new Error('message disappeared during ingestion')
-      }
-
-      await database.upsert('mtproto_im_message_alias', sourceIds.map((platformMessageId, ordinal) => ({
+    }
+    if (!dialogs.length) return
+    await this._write(() => this._database.withTransaction(async (database) => {
+      const now = new Date()
+      const epochCache = new Map<string, number>()
+      const existingConversations = new Map((await database.get('mtproto_im_conversation', {
         platformSessionId: session.platformSessionId,
+      })).map((row) => [row.platformConversationId, row]))
+      await database.upsert('mtproto_im_conversation', dialogs.map((dialog) => ({
+        platformSessionId: session.platformSessionId,
+        platformConversationId: dialog.conversation.id,
+        kind: dialog.conversation.kind,
+        title: dialog.conversation.title,
+        parentPlatformConversationId: dialog.conversation.parentId ?? null,
+        spacePlatformId: dialog.conversation.spaceId ?? null,
+        metadata: dialog.conversation.metadata ?? {},
+        unreadCount: dialog.unreadCount,
+        updatedAt: now,
+      })), ['platformSessionId', 'platformConversationId'])
+      const conversationRows = new Map((await database.get('mtproto_im_conversation', {
+        platformSessionId: session.platformSessionId,
+      })).map((row) => [row.platformConversationId, row]))
+      for (const dialog of dialogs) {
+        const conversationRow = conversationRows.get(dialog.conversation.id)
+          ?? existingConversations.get(dialog.conversation.id)
+        if (!conversationRow) throw new Error('failed to persist conversation')
+        if (dialog.lastMessage) {
+          await this._ingestMessage(
+            database, session.platformSessionId, conversationRow, dialog.lastMessage, {}, now, epochCache,
+          )
+        }
+        if (
+          dialog.readInboxMaxMessage
+          && dialog.readInboxMaxMessage.id !== dialog.lastMessage?.id
+        ) {
+          await this._ingestMessage(
+            database,
+            session.platformSessionId,
+            conversationRow,
+            dialog.readInboxMaxMessage,
+            { allocation: 'history' },
+            now,
+            epochCache,
+          )
+        }
+      }
+    }))
+  }
+
+  private async _ingestMessage(
+    database: Database,
+    platformSessionId: string,
+    conversationRow: IMConversationRow,
+    source: IMMessage,
+    options: IngestOptions,
+    now: Date,
+    epochCache: Map<string, number>,
+  ): Promise<IngestResult> {
+    const sourceIds = [...new Set([source.id, ...(source.sourceIds ?? [])])]
+    let existingAlias: IMMessageAliasRow | undefined
+    for (const platformMessageId of sourceIds) {
+      ;[existingAlias] = await database.get('mtproto_im_message_alias', {
+        platformSessionId,
         conversationId: conversationRow.id,
         platformMessageId,
-        messageId: message!.id,
-        ordinal,
-      })), ['platformSessionId', 'conversationId', 'platformMessageId'])
+      })
+      if (existingAlias) break
+    }
 
-      const media = messageMedia(source)
-      await database.upsert('mtproto_im_media', media.map((item, ordinal) => ({
-        messageId: message!.id,
-        ordinal,
-        partIndex: source.content.parts.findIndex((part) => part.type === 'media' && part.media === item),
-        platformMediaId: item.id,
-        kind: item.kind,
-        name: item.name ?? null,
-        mimeType: item.mimeType ?? null,
-        size: item.size ?? null,
-        width: item.width ?? null,
-        height: item.height ?? null,
-        duration: item.duration ?? null,
-        preview: item.preview ?? null,
-        locator: item.locator ?? null,
-      })), ['messageId', 'ordinal'])
+    let message: IMMessageRow | undefined
+    if (existingAlias) {
+      ;[message] = await database.get('mtproto_im_message', { id: existingAlias.messageId })
+    } else {
+      ;[message] = await database.get('mtproto_im_message', {
+        platformSessionId,
+        conversationId: conversationRow.id,
+        primaryPlatformMessageId: source.id,
+      })
+    }
 
-      let storedMedia = await database.select('mtproto_im_media', { messageId: message.id })
+    const created = !message
+    const storedMetadata = messageMetadata(source)
+    const changed = !message || (!message.deleted && (
+      message.senderPlatformUserId !== source.senderId
+      || message.text !== messageText(source)
+      || JSON.stringify(message.content) !== JSON.stringify(source.content)
+      || message.timestamp !== source.timestamp
+      || message.outgoing !== (source.outgoing ?? false)
+      || message.platformGroupId !== (source.groupId ?? null)
+      || JSON.stringify(message.metadata) !== JSON.stringify(storedMetadata)
+    ))
+    if (message && existingAlias && !message.deleted && !changed) {
+      const projection = await database.select('mtproto_tl_message_part', { messageId: message.id })
         .orderBy('ordinal').execute()
-      for (const stale of storedMedia.filter((item) => item.ordinal >= media.length)) {
-        await database.remove('mtproto_im_media', { id: stale.id })
-      }
-      storedMedia = storedMedia.filter((item) => item.ordinal < media.length)
-      const projection = await this._ensureProjection(
-        database, session.platformSessionId, conversationRow, message, storedMedia,
-        options.allocation ?? 'live',
-      )
-      await this._replaceReactions(database, message.id, source.reactionContext, now)
+      return { message, created: false, changed: false, projection }
+    }
+    if (!message) {
+      message = await database.create('mtproto_im_message', {
+        platformSessionId,
+        conversationId: conversationRow.id,
+        primaryPlatformMessageId: source.id,
+        senderPlatformUserId: source.senderId,
+        text: messageText(source),
+        content: source.content as unknown as JsonValue,
+        timestamp: source.timestamp,
+        outgoing: source.outgoing ?? false,
+        deleted: false,
+        platformGroupId: source.groupId ?? null,
+        metadata: storedMetadata,
+        createdAt: now,
+        updatedAt: now,
+      })
+    } else {
+      await database.set('mtproto_im_message', { id: message.id }, {
+        senderPlatformUserId: source.senderId,
+        text: messageText(source),
+        content: source.content as unknown as JsonValue,
+        timestamp: source.timestamp,
+        outgoing: source.outgoing ?? false,
+        platformGroupId: source.groupId ?? null,
+        metadata: storedMetadata,
+        updatedAt: now,
+      })
+      ;[message] = await database.get('mtproto_im_message', { id: message.id })
+      if (!message) throw new Error('message disappeared during ingestion')
+    }
 
-      return { message, created, changed, projection }
-    }))
+    await database.upsert('mtproto_im_message_alias', sourceIds.map((platformMessageId, ordinal) => ({
+      platformSessionId,
+      conversationId: conversationRow.id,
+      platformMessageId,
+      messageId: message!.id,
+      ordinal,
+    })), ['platformSessionId', 'conversationId', 'platformMessageId'])
+
+    const media = messageMedia(source)
+    await database.upsert('mtproto_im_media', media.map((item, ordinal) => ({
+      messageId: message!.id,
+      ordinal,
+      partIndex: source.content.parts.findIndex((part) => part.type === 'media' && part.media === item),
+      platformMediaId: item.id,
+      kind: item.kind,
+      name: item.name ?? null,
+      mimeType: item.mimeType ?? null,
+      size: item.size ?? null,
+      width: item.width ?? null,
+      height: item.height ?? null,
+      duration: item.duration ?? null,
+      preview: item.preview ?? null,
+      locator: item.locator ?? null,
+    })), ['messageId', 'ordinal'])
+
+    let storedMedia = await database.select('mtproto_im_media', { messageId: message.id })
+      .orderBy('ordinal').execute()
+    for (const stale of storedMedia.filter((item) => item.ordinal >= media.length)) {
+      await database.remove('mtproto_im_media', { id: stale.id })
+    }
+    storedMedia = storedMedia.filter((item) => item.ordinal < media.length)
+    const projection = await this._ensureProjection(
+      database, platformSessionId, conversationRow, message, storedMedia,
+      options.allocation ?? 'live',
+      epochCache,
+    )
+    await this._replaceReactions(database, message.id, source.reactionContext, now)
+
+    return { message, created, changed, projection }
   }
 
   async deleteMessages(
@@ -670,6 +761,7 @@ export class MessageStore {
     message: IMMessageRow,
     media: IMMediaRow[],
     allocation: 'live' | 'history',
+    epochCache: Map<string, number>,
   ): Promise<TlMessagePartRow[]> {
     const count = Math.max(1, media.length)
     const scope = conversation.kind !== 'direct'
@@ -704,7 +796,7 @@ export class MessageStore {
     }
     if (existing.length < count) {
       const missing = count - existing.length
-      const epoch = await this._messageIdEpoch(database, scope, message.timestamp)
+      const epoch = await this._messageIdEpoch(database, scope, message.timestamp, epochCache)
       const preferredId = timestampMessageIdBucket(epoch, message.timestamp)
       const bounds = nativeSequence === undefined
         ? {}
@@ -787,11 +879,14 @@ export class MessageStore {
             bucket + TIMESTAMP_MESSAGE_ID_SLOTS - 1,
             (activeBounds.upperExclusive ?? bucket + TIMESTAMP_MESSAGE_ID_SLOTS) - 1,
           )
+          const occupied = new Set((await database.get('mtproto_tl_message_part', {
+            scope,
+            tlMessageId: { $gte: first, $lte: last },
+          })).map((part) => part.tlMessageId))
           const available: number[] = []
           for (let candidate = first; candidate <= last; candidate++) {
             if (existingIds.includes(candidate) || ids.includes(candidate)) continue
-            const occupied = await database.get('mtproto_tl_message_part', { scope, tlMessageId: candidate })
-            if (!occupied.length) available.push(candidate)
+            if (!occupied.has(candidate)) available.push(candidate)
           }
           const candidates = centerSlots
             ? middleOut(available, preferForward)
@@ -814,11 +909,22 @@ export class MessageStore {
     return ids.sort((left, right) => left - right)
   }
 
-  private async _messageIdEpoch(database: Database, scope: string, timestamp: number): Promise<number> {
+  private async _messageIdEpoch(
+    database: Database,
+    scope: string,
+    timestamp: number,
+    cache: Map<string, number>,
+  ): Promise<number> {
+    const cached = cache.get(scope)
+    if (cached !== undefined) return cached
     const [existing] = await database.get('mtproto_message_id_epoch', { scope })
-    if (existing) return existing.epoch
+    if (existing) {
+      cache.set(scope, existing.epoch)
+      return existing.epoch
+    }
     const epoch = initialTimestampMessageIdEpoch(timestamp)
     await database.create('mtproto_message_id_epoch', { scope, epoch })
+    cache.set(scope, epoch)
     return epoch
   }
 

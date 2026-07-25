@@ -20,6 +20,27 @@ afterEach(async () => {
 })
 
 describe('QQNTPlatform mapping', () => {
+  it('does not wait indefinitely for reaction resources before returning history', async () => {
+    const platform = new QQNTPlatform()
+    let releaseCatalog!: () => void
+    platform.client.getReactionCatalog = vi.fn(() => new Promise<Awaited<
+      ReturnType<typeof platform.client.getReactionCatalog>
+    >>((resolve) => {
+      releaseCatalog = () => resolve({ available: [], reactions: [], maxSelected: 20 })
+    }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'fast-history', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{ type: 'text' as const, text: 'ready' }],
+    }] }))
+
+    const started = performance.now()
+    const history = await platform.getHistory(session, { id: '2:group' })
+    releaseCatalog()
+
+    expect(history.messages[0]).toMatchObject({ id: 'fast-history' })
+    expect(performance.now() - started).toBeLessThan(250)
+  })
+
   it('preserves QQ group msgSeq and replayMsgSeq as Telegram message IDs', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
