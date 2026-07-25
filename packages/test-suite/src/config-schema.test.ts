@@ -13,7 +13,7 @@ const cases = [
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
     'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'generatePreviews',
-    'previewMaxDimension', 'ffmpegPath',
+    'previewMaxDimension', 'ffmpegPath', 'grayTipFilters',
   ]],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['relay', relayConfig, ['apiId', 'apiHash', 'storagePath', 'disableUpdates', 'routeId']],
@@ -47,6 +47,7 @@ describe('plugin config schemas', () => {
       routeId: 'relay:official',
       clientFactory,
     })
+    expect(qqntConfig({})).toMatchObject({ grayTipFilters: ['回应了你的消息'] })
   })
 
   it('rejects invalid values at the field path', () => {
