@@ -9,7 +9,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
-import { MessageStore, type IngestResult, type PlatformSession } from '@mtproto-relay/bridge'
+import { MessageStore, StickerRpc, type IngestResult, type PlatformSession } from '@mtproto-relay/bridge'
 import { defineModels } from '../../bridge/src/models.js'
 import { QQNTPlatform } from './index.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
@@ -550,7 +550,7 @@ describe('QQNT animated media upgrade E2E', () => {
 })
 
 describe('QQNT animated sticker thumbnail E2E', () => {
-  it('stores the APNG first frame and edits the existing message to advertise it', async () => {
+  it('materializes the WebM size and first frame before publishing the message', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -648,7 +648,7 @@ describe('QQNT animated sticker thumbnail E2E', () => {
     const unsubscribe = await platform.subscribe(session, async (event) => {
       if (event.type !== 'message' && event.type !== 'message-edit') return
       events.push({ type: event.type, result: await store.ingest(session, event.conversation, event.message) })
-      if (event.type === 'message-edit') complete.resolve()
+      if (event.type === 'message') complete.resolve()
     })
     try {
       await Promise.race([
@@ -659,23 +659,41 @@ describe('QQNT animated sticker thumbnail E2E', () => {
       await unsubscribe()
     }
 
-    expect(events.map((entry) => entry.type)).toEqual(['message', 'message-edit'])
-    expect(events[0].result.projection[0].tlMessageId).toBe(events[1].result.projection[0].tlMessageId)
+    expect(events.map((entry) => entry.type)).toEqual(['message'])
     expect(events[0].result.changed).toBe(true)
-    expect(events[1].result.changed).toBe(true)
-    const initialSticker = events[0].result.message.content as any
-    const editedSticker = events[1].result.message.content as any
-    expect(initialSticker.parts[0].sticker.thumbnail).toBeUndefined()
-    expect(editedSticker.parts[0].sticker).toMatchObject({
-      format: 'video', mimeType: 'video/webm',
+    const storedSticker = events[0].result.message.content as any
+    expect(storedSticker.parts[0].sticker).toMatchObject({
+      format: 'video', mimeType: 'video/webm', size: expect.any(Number),
       thumbnail: {
         mimeType: 'image/webp', width: 12, height: 8,
         locator: { cacheKey: expect.any(String) },
       },
     })
+    expect(storedSticker.parts[0].sticker.size).toBeGreaterThan(0)
+    const provider = {
+      listPacks: vi.fn(async () => ({ packs: [] })),
+      getPack: vi.fn(async () => null),
+      getSticker: vi.fn(async () => storedSticker.parts[0].sticker),
+      openAsset: vi.fn(async () => { throw new Error('not needed for document projection') }),
+    }
+    const stickerRpc = new StickerRpc(ctx.database, {
+      entries: [['qqnt:stickers', provider]],
+      get: (id: string) => id === 'qqnt:stickers' ? provider : undefined,
+      require: (id: string) => {
+        if (id === 'qqnt:stickers') return provider
+        throw new Error(`unknown provider: ${id}`)
+      },
+    } as any, platform, session)
+    const media = stickerRpc.makeMessageMedia(storedSticker.parts[0].sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('missing Telegram sticker document')
+    expect(media.document.size).toBe(storedSticker.parts[0].sticker.size)
+    expect(media.document.size).toBeGreaterThan(0)
+    expect(media.document.attributes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'documentAttributeVideo', nosound: true }),
+    ]))
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
     expect(assetRequests).toBe(1)
-    const thumbnail = await cache.openStickerThumbnail(editedSticker.parts[0].sticker)
+    const thumbnail = await cache.openStickerThumbnail(storedSticker.parts[0].sticker)
     if (!thumbnail) throw new Error('stored sticker thumbnail is unavailable')
     expect((await collect(thumbnail.source.stream())).subarray(8, 12).toString()).toBe('WEBP')
   }, 30_000)
