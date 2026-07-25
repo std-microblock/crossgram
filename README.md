@@ -162,6 +162,7 @@ yarn build && yarn start  # 生产模式
   config:
     endpoint: http://127.0.0.1:18767/v1
     mediaDownloadMode: auto
+    useNativeMediaDownload: false
 ```
 </details>
 

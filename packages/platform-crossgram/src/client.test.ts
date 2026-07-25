@@ -4,6 +4,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocketServer } from 'ws'
 import { QQNTClient } from './client.js'
 
+async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
+  const chunks: Uint8Array[] = []
+  for await (const chunk of source) chunks.push(chunk)
+  return Buffer.concat(chunks)
+}
+
 describe('QQNTClient streaming transport', () => {
   let server: Server | undefined
   afterEach(async () => {
@@ -125,7 +131,7 @@ describe('QQNTClient streaming transport', () => {
     })
   })
 
-  it('downloads a complete file without sending range controls', async () => {
+  it('uses the non-native bridge path by default even when native image metadata is available', async () => {
     let requestUrl = ''
     let requestHeaders: import('node:http').IncomingHttpHeaders = {}
     server = createServer(async (request, response) => {
@@ -142,7 +148,7 @@ describe('QQNTClient streaming transport', () => {
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
       messageId: 'm', elementId: 'e', chatType: 1, peerUid: 'u',
-      kind: 'file', fileName: 'x.bin',
+      kind: 'image', fileName: 'x.jpg', originImageUrl: 'https://qq.example/expired',
     })) chunks.push(chunk)
 
     expect(requestUrl).toBe('/files/download')
@@ -181,7 +187,9 @@ describe('QQNTClient streaming transport', () => {
     await once(server, 'listening')
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token' })
+    const client = new QQNTClient({
+      endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token', useNativeMediaDownload: true,
+    })
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
       messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
@@ -220,7 +228,9 @@ describe('QQNTClient streaming transport', () => {
     await once(server, 'listening')
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token' })
+    const client = new QQNTClient({
+      endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token', useNativeMediaDownload: true,
+    })
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
       messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
@@ -259,7 +269,9 @@ describe('QQNTClient streaming transport', () => {
     await once(server, 'listening')
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const client = new QQNTClient({
+      endpoint: `http://127.0.0.1:${address.port}`, useNativeMediaDownload: true,
+    })
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
       messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
@@ -270,8 +282,7 @@ describe('QQNTClient streaming transport', () => {
     expect(Buffer.concat(chunks).toString()).toBe('legacy')
   })
 
-  it('falls back to the bridge when a native video play URL is unavailable', async () => {
-    let range = ''
+  it('reports a native video resolver failure without calling the non-native bridge path', async () => {
     const resolverUrls: string[] = []
     server = createServer(async (request, response) => {
       for await (const _chunk of request) { /* drain locator */ }
@@ -281,27 +292,25 @@ describe('QQNTClient streaming transport', () => {
         response.end(JSON.stringify({ error: 'expired' }))
         return
       }
-      range = request.headers.range ?? ''
-      response.writeHead(206, { 'content-range': 'bytes 2-4/8', 'content-length': '3' })
-      response.end('cde')
+      response.writeHead(500).end('non-native path must not be called')
     })
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
-    const chunks: Uint8Array[] = []
-    for await (const chunk of client.downloadFile({
+    const client = new QQNTClient({
+      endpoint: `http://127.0.0.1:${address.port}`, useNativeMediaDownload: true,
+    })
+    const download = collect(client.downloadFile({
       messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
       kind: 'file', fileName: 'clip.mp4', videoCodecFormat: 0,
-    }, { offset: 2, limit: 3 })) chunks.push(chunk)
+    }, { offset: 2, limit: 3 }))
 
-    expect(range).toBe('bytes=2-4')
+    await expect(download).rejects.toThrow('QQNT bridge 500: expired')
     expect(resolverUrls).toEqual(['/files/direct-url', '/files/play-url'])
-    expect(Buffer.concat(chunks).toString()).toBe('cde')
   })
 
-  it('falls back to bridge streaming when an image CDN rejects the refreshed URL', async () => {
+  it('reports an image CDN failure without calling the non-native bridge path', async () => {
     const requestUrls: string[] = []
     server = createServer(async (request, response) => {
       requestUrls.push(request.url ?? '')
@@ -313,28 +322,25 @@ describe('QQNTClient streaming transport', () => {
         response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/expired-image` }))
       } else if (request.url === '/expired-image') {
         response.writeHead(403).end('expired')
-      } else if (request.url === '/files/download') {
-        for await (const _chunk of request) { /* drain locator */ }
-        response.writeHead(206, { 'content-range': 'bytes 2-4/8', 'content-length': '3' })
-        response.end('cde')
       } else {
-        response.writeHead(500).end()
+        response.writeHead(500).end('non-native path must not be called')
       }
     })
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
-    const chunks: Uint8Array[] = []
-    for await (const chunk of client.downloadFile({
+    const client = new QQNTClient({
+      endpoint: `http://127.0.0.1:${address.port}`, useNativeMediaDownload: true,
+    })
+    const download = collect(client.downloadFile({
       messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
       kind: 'image', fileName: 'photo.jpg',
       originImageUrl: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image&rkey=expired',
-    }, { offset: 2, limit: 3 })) chunks.push(chunk)
+    }, { offset: 2, limit: 3 }))
 
-    expect(requestUrls).toEqual(['/files/direct-url', '/expired-image', '/files/download'])
-    expect(Buffer.concat(chunks).toString()).toBe('cde')
+    await expect(download).rejects.toThrow('QQNT native media 403: expired')
+    expect(requestUrls).toEqual(['/files/direct-url', '/expired-image'])
   })
 
   it('locally slices a whole-file response from an older bridge', async () => {

@@ -31,6 +31,8 @@ export interface Config extends QQNTClientOptions {
   mediaCachePath?: string
   /** Auto-cache/convert received media, or fetch the untouched original on demand. */
   mediaDownloadMode?: MediaDownloadMode
+  /** Use QQNT's native direct-URL download for eligible images/videos. Native failures are not retried. */
+  useNativeMediaDownload?: boolean
   /** Maximum byte size of files cached automatically. Images are always eligible. */
   autoDownloadFileSizeLimit?: number
   /** Maximum width/height of extracted image previews. */
@@ -46,6 +48,7 @@ export const Config = z.object({
   memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
   mediaCachePath: z.string(),
   mediaDownloadMode: z.union([z.const('on-demand'), z.const('auto')]).default('on-demand'),
+  useNativeMediaDownload: z.boolean().default(false),
   autoDownloadFileSizeLimit: z.natural().default(10 * 1024 * 1024),
   previewMaxDimension: z.natural().min(1).default(320),
   ffmpegPath: z.string(),

@@ -18,6 +18,10 @@
     # auto downloads received images and small files immediately, caches them
     # by QQ's content hash, converts images to WebP, and extracts previews.
     mediaDownloadMode: auto
+    # false uses the bridge-managed non-native download path (default).
+    # true uses QQNT native direct URLs for eligible images/videos. Native
+    # failures are reported and never fall back to the non-native path.
+    useNativeMediaDownload: false
     autoDownloadFileSizeLimit: 10485760
     previewMaxDimension: 320
 ```
@@ -28,15 +32,16 @@ The adapter reads `IMMediaSource.stream()` directly and never constructs a
 complete media `Buffer`. `webSocketEndpoint` can point the event connection at a
 different host or path without changing the HTTP API `endpoint`.
 
-For native images, bridge protocol v14 sends `OidbSvcTrpcTcp.0x9067_202` through
+When `useNativeMediaDownload` is enabled, bridge protocol v14 sends
+`OidbSvcTrpcTcp.0x9067_202` through
 QQNT, refreshes the private/group RKey in `originImageUrl`, and returns the QQ CDN
 URL from `/files/direct-url`. Native videos use the same endpoint backed by
 QQNT's `getVideoPlayUrl`. The platform requests either URL directly with standard
 HTTP `Range` semantics; video documents keep `supports_streaming`, so seeking
 transfers only the requested byte range. The bridge token is never forwarded to
-the CDN. If the bridge is old, the URL is expired, or the CDN rejects the request,
-the platform falls back to `/files/download`; that path uses `downloadRichMedia`
-once and serves ranges from QQ's local file. Protocol v13's `/files/play-url` and
+the CDN. Resolver, RKey, and CDN errors are returned to the caller without a
+fallback. When the option is disabled, the platform uses `/files/download` and
+`downloadRichMedia` instead. Protocol v13's native `/files/play-url` and
 whole-file `200` responses remain supported during rolling upgrades.
 
 In `auto` mode the adapter downloads
@@ -98,3 +103,6 @@ set `QQNT_BRIDGE_E2E_IMAGE_CONVERSATION` and optionally the exact message in
 `QQNT_BRIDGE_E2E_IMAGE_MESSAGE`. To verify an existing native QQ video,
 set `QQNT_BRIDGE_E2E_VIDEO_CONVERSATION` to its bridge conversation ID and,
 optionally, `QQNT_BRIDGE_E2E_VIDEO_MESSAGE` to the exact message ID.
+The file-upload case exercises the default non-native media download path;
+the image/video cases use a separate native-enabled platform, so both choices
+are covered by the live suite.
