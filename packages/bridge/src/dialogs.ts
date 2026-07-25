@@ -1353,8 +1353,11 @@ export class DialogRpc {
       msgId: req.msgId,
       reactions: this._reactions!.messageReactions(peerId, result.message, (id) => this._userId(id)),
     }
+    const recentUpdate: tl.TypeUpdate[] = newlySelected.length
+      ? [{ _: 'updateRecentReactions' }]
+      : []
     return {
-      _: 'updates', updates: [update],
+      _: 'updates', updates: [update, ...recentUpdate],
       users: [this._makeSelfUser()],
       chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
       date: Math.floor(Date.now() / 1000), seq: 0,
