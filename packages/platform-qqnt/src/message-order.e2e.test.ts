@@ -124,6 +124,86 @@ describe('QQNT same-second message ordering E2E', () => {
   })
 })
 
+describe('QQNT local resource routing E2E', () => {
+  it('loads and caches a reaction through files/download without asking for a direct URL', async () => {
+    const png = await sharp({
+      create: { width: 8, height: 8, channels: 4, background: { r: 40, g: 120, b: 200, alpha: 1 } },
+    }).png().toBuffer()
+    const locatorBodies: unknown[] = []
+    let directUrlRequests = 0
+    let authorization = ''
+    let server: Server | undefined
+    server = createServer(async (request, response) => {
+      if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          available: [{
+            key: '1:14', title: 'smile',
+            presentation: {
+              type: 'custom', alt: '[smile]',
+              resource: {
+                version: 1, format: 'static', mimeType: 'image/png',
+                width: 8, height: 8, size: png.length,
+                locator: { filePath: 'C:\\qqnt\\emoji\\s14.png' },
+              },
+            },
+          }],
+          reactions: [], maxSelected: 20,
+        }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/files/download') {
+        authorization = request.headers.authorization ?? ''
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        locatorBodies.push(JSON.parse(Buffer.concat(chunks).toString()))
+        response.setHeader('content-type', 'image/png')
+        response.setHeader('content-length', png.length)
+        response.end(png)
+        return
+      }
+      if (request.url === '/v1/files/direct-url') directUrlRequests++
+      response.writeHead(404).end('not found')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-routing-e2e-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({
+      endpoint: `http://127.0.0.1:${address.port}/v1`, token: 'bridge-token',
+    }, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+
+    const catalog = await platform.getAvailableReactions(session, { conversationId: '123456' })
+    const definition = catalog.available[0]
+    if (!definition || definition.presentation.type !== 'custom') throw new Error('missing custom reaction')
+    const bytes = await collect(platform.downloadReactionResource(
+      session, definition.presentation.resource, { offset: 0, limit: 4 },
+    ))
+
+    expect(directUrlRequests).toBe(0)
+    expect(authorization).toBe('Bearer bridge-token')
+    expect(locatorBodies).toEqual([expect.objectContaining({
+      messageId: 'reaction:C:\\qqnt\\emoji\\s14.png',
+      filePath: 'C:\\qqnt\\emoji\\s14.png',
+    })])
+    expect(definition.presentation.resource).toMatchObject({
+      format: 'static', mimeType: 'image/webp', width: 100, height: 100,
+      locator: { cacheKey: expect.any(String) },
+    })
+    expect(bytes.toString()).toBe('RIFF')
+  })
+})
+
 describe('QQNT animated media upgrade E2E', () => {
   it('streams APNG detection over HTTP, edits to WebM, and preserves both downloadable media IDs', async () => {
     const ctx = new Context()
@@ -197,6 +277,7 @@ describe('QQNT animated media upgrade E2E', () => {
                 locator: {
                   messageId: 'animated-message', elementId: 'animated-media', chatType: 2,
                   peerUid: 'animated-group', kind: 'image', fileName: 'animation.png', md5: 'APNG-E2E',
+                  originImageUrl: 'https://multimedia.nt.qq.com.cn/download?fileid=animated',
                 },
               },
             }],

@@ -284,17 +284,33 @@ export class QQNTClient {
     const ranged = offset > 0 || limit !== undefined
     const end = limit === undefined ? '' : String(offset + limit - 1)
     const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
-    const directUrl = await this.resolveDirectUrl(locator, options.signal)
-    const response = await this.fetchImpl(directUrl, {
-      headers: rangeHeaders,
-      signal: options.signal,
-      redirect: 'follow',
-    })
-    if (!response.ok) throw new Error(await nativeResponseError(response))
-    if (!response.body) throw new Error('QQNT native media response has no body')
+    const native = Boolean(locator.originImageUrl) || locator.videoCodecFormat !== undefined
+    const avatarUrl = qqAvatarUrl(locator)
+    let response: Response
+    if (native || avatarUrl) {
+      const directUrl = avatarUrl ?? await this.resolveDirectUrl(locator, options.signal)
+      response = await this.fetchImpl(directUrl, {
+        headers: rangeHeaders,
+        signal: options.signal,
+        redirect: 'follow',
+      })
+      if (!response.ok) throw new Error(await nativeResponseError(response))
+      if (!response.body) throw new Error('QQNT native media response has no body')
+    } else if (locator.filePath) {
+      response = await this.fetchImpl(`${this.endpoint}/files/download`, {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
+        body: JSON.stringify(locator),
+        signal: options.signal,
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      if (!response.body) throw new Error('QQNT media response has no body')
+    } else {
+      throw new Error('QQNT media locator has no native URL or bridge-local path')
+    }
     const reader = response.body.getReader()
-    // Protocol v13 applies Range at the bridge. An older bridge ignores it and
-    // returns 200, so retain a local slicing fallback during rolling upgrades.
+    // Direct targets and protocol v13 bridges apply Range. Retain local slicing
+    // for whole-file 200 responses during rolling upgrades and from qlogo.
     let skipped = response.status === 206 ? offset : 0
     let remaining = limit ?? Number.POSITIVE_INFINITY
     let completed = false
@@ -540,4 +556,17 @@ async function responseError(response: Response): Promise<string> {
 async function nativeResponseError(response: Response): Promise<string> {
   const text = await response.text()
   return `QQNT native media ${response.status}: ${text || response.statusText}`
+}
+
+function qqAvatarUrl(locator: QQMediaLocator): string | undefined {
+  const userUin = locator.avatarUin?.trim()
+  if (userUin && /^\d+$/.test(userUin)) {
+    return `https://q1.qlogo.cn/g?b=qq&nk=${userUin}&s=640`
+  }
+  const groupUin = locator.peerUid.trim()
+  if (locator.chatType === 2
+    && locator.messageId.startsWith('avatar:group:')
+    && /^\d+$/.test(groupUin)) {
+    return `https://p.qlogo.cn/gh/${groupUin}/${groupUin}/640/`
+  }
 }
