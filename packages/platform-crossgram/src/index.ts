@@ -592,7 +592,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           options, originRequestId, sticker, textParts, content.replyToId,
         ),
       ))
-      )
     } finally {
       const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
       timer.unref()
