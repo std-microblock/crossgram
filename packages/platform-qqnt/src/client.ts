@@ -11,6 +11,8 @@ export interface QQNTClientOptions {
   endpoint?: string
   webSocketEndpoint?: string
   token?: string
+  /** Resolve and download eligible image/video media through QQNT's native URL APIs. */
+  useNativeMediaDownload?: boolean
   fetch?: typeof globalThis.fetch
 }
 
@@ -23,12 +25,14 @@ export class QQNTClient {
   readonly endpoint: string
   readonly webSocketEndpoint: string
   private readonly token?: string
+  private readonly useNativeMediaDownload: boolean
   private readonly fetchImpl: typeof globalThis.fetch
 
   constructor(options: QQNTClientOptions = {}) {
     this.endpoint = (options.endpoint ?? 'http://127.0.0.1:18767/v1').replace(/\/+$/, '')
     this.webSocketEndpoint = options.webSocketEndpoint ?? `${this.endpoint}/events/ws`
     this.token = options.token
+    this.useNativeMediaDownload = options.useNativeMediaDownload ?? false
     this.fetchImpl = options.fetch ?? globalThis.fetch
   }
 
@@ -284,31 +288,27 @@ export class QQNTClient {
     const ranged = offset > 0 || limit !== undefined
     const end = limit === undefined ? '' : String(offset + limit - 1)
     const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
-    let response: Response | undefined
-    if (locator.originImageUrl || locator.videoCodecFormat !== undefined) {
-      try {
-        const directUrl = await this.resolveDirectUrl(locator, options.signal)
-        const direct = await this.fetchImpl(directUrl, {
-          headers: rangeHeaders,
-          signal: options.signal,
-          redirect: 'follow',
-        })
-        if (direct.ok && direct.body) response = direct
-        else await direct.body?.cancel().catch(() => undefined)
-      } catch (error) {
-        if (options.signal?.aborted) throw error
-        // Old bridges, expired RKeys, and CDN failures all retain the native
-        // downloadRichMedia path below as a compatibility fallback.
-      }
+    let response: Response
+    const supportsNativeDownload = Boolean(locator.originImageUrl) || locator.videoCodecFormat !== undefined
+    if (this.useNativeMediaDownload && supportsNativeDownload) {
+      const directUrl = await this.resolveDirectUrl(locator, options.signal)
+      response = await this.fetchImpl(directUrl, {
+        headers: rangeHeaders,
+        signal: options.signal,
+        redirect: 'follow',
+      })
+      if (!response.ok) throw new Error(await nativeResponseError(response))
+      if (!response.body) throw new Error('QQNT native media response has no body')
+    } else {
+      response = await this.fetchImpl(`${this.endpoint}/files/download`, {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
+        body: JSON.stringify(locator),
+        signal: options.signal,
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      if (!response.body) throw new Error('QQNT media response has no body')
     }
-    response ??= await this.fetchImpl(`${this.endpoint}/files/download`, {
-      method: 'POST',
-      headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
-      body: JSON.stringify(locator),
-      signal: options.signal,
-    })
-    if (!response.ok) throw new Error(await responseError(response))
-    if (!response.body) throw new Error('QQNT media response has no body')
     const reader = response.body.getReader()
     // Protocol v13 applies Range at the bridge. An older bridge ignores it and
     // returns 200, so retain a local slicing fallback during rolling upgrades.
@@ -552,4 +552,9 @@ async function responseError(response: Response): Promise<string> {
   } catch {
     return `QQNT bridge ${response.status}: ${text || response.statusText}`
   }
+}
+
+async function nativeResponseError(response: Response): Promise<string> {
+  const text = await response.text()
+  return `QQNT native media ${response.status}: ${text || response.statusText}`
 }

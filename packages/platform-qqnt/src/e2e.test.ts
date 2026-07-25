@@ -8,11 +8,13 @@ import { QQNTPlatform } from './index.js'
 const enabled = process.env.QQNT_BRIDGE_E2E === '1'
 const directTarget = '1715311957'
 const groupTargets = ['1058754719', '1084013940'] as const
-const platform = new QQNTPlatform({
+const platformOptions = {
   endpoint: process.env.QQNT_BRIDGE_URL ?? 'http://127.0.0.1:18767/v1',
   webSocketEndpoint: process.env.QQNT_BRIDGE_WEBSOCKET_URL,
   token: process.env.QQNT_BRIDGE_TOKEN,
-})
+}
+const platform = new QQNTPlatform(platformOptions)
+const nativeMediaPlatform = new QQNTPlatform({ ...platformOptions, useNativeMediaDownload: true })
 const session: PlatformSession = {
   platformSessionId: 'live-qqnt', platformId: 'qqnt', userId: 'qq-self', credentials: {}, metadata: {},
 }
@@ -195,7 +197,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     'downloads a native QQ image through a packet-refreshed direct URL',
     async () => {
       const conversationId = process.env.QQNT_BRIDGE_E2E_IMAGE_CONVERSATION!
-      const history = await platform.getHistory(session, { id: conversationId }, { limit: 100 })
+      const history = await nativeMediaPlatform.getHistory(session, { id: conversationId }, { limit: 100 })
       const requestedMessage = process.env.QQNT_BRIDGE_E2E_IMAGE_MESSAGE
       const image = history.messages
         .filter((message) => !requestedMessage || message.id === requestedMessage)
@@ -210,7 +212,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
 
       const limit = Math.min(4096, image.media.size ?? 4096)
       let bytes = 0
-      for await (const chunk of platform.downloadMedia(session, image.media, { offset: 0, limit })) {
+      for await (const chunk of nativeMediaPlatform.downloadMedia(session, image.media, { offset: 0, limit })) {
         bytes += chunk.length
       }
       expect(bytes).toBe(limit)
@@ -222,7 +224,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     'projects a native QQ video and seeks through two independent byte ranges',
     async () => {
       const conversationId = process.env.QQNT_BRIDGE_E2E_VIDEO_CONVERSATION!
-      const history = await platform.getHistory(session, { id: conversationId }, { limit: 100 })
+      const history = await nativeMediaPlatform.getHistory(session, { id: conversationId }, { limit: 100 })
       const requestedMessage = process.env.QQNT_BRIDGE_E2E_VIDEO_MESSAGE
       const video = history.messages
         .filter((message) => !requestedMessage || message.id === requestedMessage)
@@ -240,7 +242,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
       const chunkSize = Math.min(4096, size)
       const read = async (offset: number) => {
         let bytes = 0
-        for await (const chunk of platform.downloadMedia(
+        for await (const chunk of nativeMediaPlatform.downloadMedia(
           session, video.media, { offset, limit: chunkSize },
         )) bytes += chunk.length
         return bytes
