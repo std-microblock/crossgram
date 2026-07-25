@@ -647,8 +647,8 @@ describe('QQNT animated media upgrade E2E', () => {
   }, 30_000)
 })
 
-describe('QQNT animated sticker thumbnail E2E', () => {
-  it('stores the APNG first frame and edits the existing message to advertise it', async () => {
+describe('QQNT animated system-face E2E', () => {
+  it('ingests a large QQ face as a WebM sticker and advertises its APNG thumbnail', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -668,14 +668,19 @@ describe('QQNT animated sticker thumbnail E2E', () => {
       'base64',
     )
     let assetRequests = 0
+    let assetReference: unknown
     let server: Server | undefined
     server = createServer((request, response) => {
       if (request.method === 'POST' && request.url === '/v1/stickers/asset') {
         assetRequests++
-        request.resume()
-        response.setHeader('content-type', 'image/apng')
-        response.setHeader('content-length', apng.length)
-        response.end(apng)
+        const chunks: Buffer[] = []
+        request.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+        request.on('end', () => {
+          assetReference = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          response.setHeader('content-type', 'image/apng')
+          response.setHeader('content-length', apng.length)
+          response.end(apng)
+        })
         return
       }
       response.statusCode = 404
@@ -702,12 +707,13 @@ describe('QQNT animated sticker thumbnail E2E', () => {
             parts: [{
               type: 'sticker',
               sticker: {
-                stickerId: 'favorite:animated-apng', title: 'Animated APNG',
+                stickerId: 'sysface:476', title: '/不是吧',
                 format: 'animated', mimeType: 'image/apng', width: 12, height: 8, size: apng.length,
                 version: 1,
                 reference: {
-                  kind: 'favorite', resId: 'animated-apng', path: '/qq/animated.png',
-                  name: 'animated.png', size: apng.length, width: 12, height: 8, animated: true,
+                  kind: 'sysface', faceId: '476', faceType: 3, name: '/不是吧',
+                  packId: '3', stickerId: '476', stickerType: 2, resultId: 'result-476',
+                  width: 12, height: 8, animated: true,
                 },
               },
             }],
@@ -763,6 +769,13 @@ describe('QQNT animated sticker thumbnail E2E', () => {
     expect(events[1].result.changed).toBe(true)
     const initialSticker = events[0].result.message.content as any
     const editedSticker = events[1].result.message.content as any
+    expect(initialSticker.parts).toHaveLength(1)
+    expect(initialSticker.parts[0]).toMatchObject({
+      type: 'sticker', sticker: {
+        stickerId: 'sysface:476', title: '/不是吧',
+        locator: { kind: 'sysface', faceId: '476', faceType: 3, resultId: 'result-476' },
+      },
+    })
     expect(initialSticker.parts[0].sticker.thumbnail).toBeUndefined()
     expect(editedSticker.parts[0].sticker).toMatchObject({
       format: 'video', mimeType: 'video/webm',
@@ -773,6 +786,9 @@ describe('QQNT animated sticker thumbnail E2E', () => {
     })
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
     expect(assetRequests).toBe(1)
+    expect(assetReference).toMatchObject({
+      kind: 'sysface', faceId: '476', faceType: 3, resultId: 'result-476',
+    })
     const thumbnail = await cache.openStickerThumbnail(editedSticker.parts[0].sticker)
     if (!thumbnail) throw new Error('stored sticker thumbnail is unavailable')
     expect((await collect(thumbnail.source.stream())).subarray(8, 12).toString()).toBe('WEBP')

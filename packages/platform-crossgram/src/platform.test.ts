@@ -1018,7 +1018,7 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.downloadFile).toHaveBeenCalledTimes(2)
   }, 30_000)
 
-  it('projects animated QQ expression messages as WebM video stickers', async () => {
+  it('projects QQ animated system faces as WebM video stickers without leaking fallback text', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-message-sticker-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
@@ -1028,19 +1028,25 @@ describe('QQNTPlatform mapping', () => {
       parts: [{
         type: 'sticker' as const,
         sticker: {
-          stickerId: 'favorite:animated', format: 'animated' as const, mimeType: 'image/gif',
-          width: 128, height: 96,
+          stickerId: 'sysface:476', title: '/不是吧',
+          format: 'animated' as const, mimeType: 'image/apng', width: 240, height: 240,
           reference: {
-            kind: 'favorite' as const, resId: 'animated', path: '/tmp/animated.gif',
-            name: 'animated.gif', animated: true,
+            kind: 'sysface' as const, faceId: '476', faceType: 3, name: '/不是吧',
+            packId: '3', stickerId: '476', stickerType: 2, resultId: 'result-476', animated: true,
           },
         },
       }],
     }] }))
 
     const history = await platform.getHistory(session, { id: '2:group' })
-    expect(history.messages[0].content.parts).toMatchObject([{
-      type: 'sticker', sticker: { format: 'video', mimeType: 'video/webm' },
+    expect(history.messages[0].content.parts).toEqual([{
+      type: 'sticker', sticker: expect.objectContaining({
+        stickerId: 'sysface:476', title: '/不是吧', format: 'video', mimeType: 'video/webm',
+        locator: expect.objectContaining({
+          kind: 'sysface', faceId: '476', faceType: 3, packId: '3',
+          stickerId: '476', stickerType: 2, resultId: 'result-476',
+        }),
+      }),
     }])
   })
 
