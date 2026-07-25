@@ -120,6 +120,8 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
+  private readonly _usernameByPeer = new Map<string, string>()
+  private readonly _peersByUsername = new Map<string, Set<string>>()
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
@@ -1874,7 +1876,10 @@ export class DialogRpc {
   private async _persistUsers(users: readonly IMUser[]): Promise<void> {
     if (!users.length) return
     if (!this._store) {
-      for (const user of users) this._peerId(user.id)
+      for (const user of users) {
+        this._peerId(user.id)
+        this._rememberUsername(user.id, user.username)
+      }
       return
     }
     for (const row of await this._store.upsertUsers(this._session, users)) this._registerUser(row)
@@ -1888,6 +1893,7 @@ export class DialogRpc {
     this._peerToTl.set(row.platformUserId, row.id)
     this._tlToPeer.set(row.id, row.platformUserId)
     const user = toUser(row)
+    this._rememberUsername(user.id, user.username)
     if (row.platformUserId === this._session.userId) {
       this._selfId = row.id
       this._selfUser = user
@@ -2244,6 +2250,11 @@ export class DialogRpc {
         }
         continue
       }
+      if (entity._ === 'messageEntityMention') {
+        const userId = this._mentionedUserId(text, input.offset, input.length)
+        if (userId) mapped.push({ type: 'mention', offset: input.offset, length: input.length, userId })
+        continue
+      }
       if (entity._ !== 'inputMessageEntityMentionName' && entity._ !== 'messageEntityMentionName') continue
       let userId: string | undefined
       if (input.userId?._ === 'inputUserSelf') userId = this._session.userId
@@ -2253,6 +2264,34 @@ export class DialogRpc {
       mapped.push({ type: 'mention', offset: input.offset, length: input.length, userId })
     }
     return { type: 'text', text, entities: mapped.length ? mapped : undefined }
+  }
+
+  private _mentionedUserId(text: string, offset: number, length: number): string | undefined {
+    if (offset < 0 || length <= 1 || offset + length > text.length || text[offset] !== '@') return
+    const peers = this._peersByUsername.get(normalizeUsername(text.slice(offset + 1, offset + length)))
+    return peers?.size === 1 ? peers.values().next().value : undefined
+  }
+
+  private _rememberUsername(peerId: string, username: string | undefined): void {
+    // Partial user projections (for example a direct-dialog title) omit the
+    // username. Match MessageStore's merge semantics and retain the last
+    // authoritative username instead of erasing the reverse lookup.
+    if (!username) return
+    const previous = this._usernameByPeer.get(peerId)
+    if (previous) {
+      const peers = this._peersByUsername.get(previous)
+      peers?.delete(peerId)
+      if (!peers?.size) this._peersByUsername.delete(previous)
+    }
+    const normalized = normalizeUsername(username)
+    if (!normalized) {
+      this._usernameByPeer.delete(peerId)
+      return
+    }
+    this._usernameByPeer.set(peerId, normalized)
+    let peers = this._peersByUsername.get(normalized)
+    if (!peers) this._peersByUsername.set(normalized, peers = new Set())
+    peers.add(peerId)
   }
 
   private _multiMediaCaption(items: SendMultiMediaRequest['multiMedia']): IMMessageInput['parts'][number] {
@@ -2687,6 +2726,10 @@ function makeAdminRights(permissions?: IMConversationPermissions): tl.RawChatAdm
 
 function clampLimit(limit: number): number {
   return Math.max(0, Math.min(Math.trunc(limit), 100))
+}
+
+function normalizeUsername(username: string): string {
+  return username.normalize('NFKC').toLocaleLowerCase('en-US')
 }
 
 function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessagesFilter): boolean {

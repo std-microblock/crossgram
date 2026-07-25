@@ -631,6 +631,32 @@ describe('DialogRpc', () => {
     })
   })
 
+  it('maps Telegram username mentions back to opaque platform users', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getContacts()
+    const aliceId = rpc.peerTlId('alice')
+    const bobId = rpc.peerTlId('bob')
+    const sent = await rpc.sendMessage(sendMessageRequest(aliceId, {
+      message: 'hello @BoB and @missing', randomId: Long.fromNumber(999),
+      entities: [
+        { _: 'messageEntityMention', offset: 6, length: 4 },
+        { _: 'messageEntityMention', offset: 15, length: 8 },
+      ],
+    }))
+
+    expect(platform.lastInput).toEqual({ parts: [{
+      type: 'text', text: 'hello @BoB and @missing',
+      entities: [{ type: 'mention', offset: 6, length: 4, userId: 'bob' }],
+    }], replyToId: undefined })
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const message = history.messages.find((item) => item._ === 'message' && item.id === sent.id)
+    expect(message).toMatchObject({
+      _: 'message',
+      entities: [{ _: 'messageEntityMentionName', offset: 6, length: 4, userId: bobId }],
+    })
+  })
+
   it('exposes plain platform links as clickable Telegram entities through serialized history', async () => {
     const platform = new DialogTestPlatform()
     const first = '😀 docs: https://example.com/a_(b).'

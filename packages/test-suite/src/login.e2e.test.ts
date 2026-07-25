@@ -467,6 +467,7 @@ describe('bridge login e2e', () => {
       expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
       expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
       const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      const bob = contacts.users.find((user: any) => user.firstName === 'Bob')
       const platformUsers = await ctx.database.get('mtproto_im_user', { platformId: 'static' })
       const selfRow = platformUsers.find(user => user.platformUserId === 'self')
       const aliceRow = platformUsers.find(user => user.platformUserId === 'alice')
@@ -714,6 +715,27 @@ describe('bridge login e2e', () => {
         message: 'Sent through MTProto', randomId: Long.fromNumber(987654321),
       }, 37)
       expect(sentMessage).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
+
+      const mentionText = 'hello @BoB'
+      const sentMention = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        message: mentionText, randomId: Long.fromNumber(987654322),
+        entities: [{ _: 'messageEntityMention', offset: mentionText.indexOf('@'), length: '@BoB'.length }],
+      }, 38)
+      const mentionHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 20,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 38)
+      expect(mentionHistory.messages).toContainEqual(expect.objectContaining({
+        _: 'message', id: sentMention.id, message: mentionText,
+        entities: [{
+          _: 'messageEntityMentionName', offset: mentionText.indexOf('@'), length: '@BoB'.length,
+          userId: bob.id,
+        }],
+      }))
 
       const updatedHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
