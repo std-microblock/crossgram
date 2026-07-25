@@ -48,7 +48,9 @@ media ID remains downloadable from QQ after the edit. PNG animation detection
 uses bounded native URL range reads, and completed decisions and WebM assets are
 reused by later history requests. When `generatePreviews` is enabled, compact
 WebP preview bytes are stored in the database while transformed WebM, sticker,
-and reaction assets remain on disk. Telegram range reads for original media go
+and reaction assets remain on disk. A quality-20 stripped JPEG is stored beside
+each preview and included inline as Telegram `photoStrippedSize`, so clients can
+render a blurred placeholder before issuing a media request. Telegram range reads for original media go
 directly to the QQ CDN.
 
 QQ picture elements other than native normal/QZone photos are exposed as

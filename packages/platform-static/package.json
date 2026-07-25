@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@mtproto-relay/bridge": "workspace:*",
-    "schemastery": "^3.18.0"
+    "schemastery": "^3.18.0",
+    "sharp": "^0.34.4"
   }
 }

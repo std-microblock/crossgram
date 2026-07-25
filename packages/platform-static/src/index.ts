@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import z from 'schemastery'
+import sharp from 'sharp'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import type {
@@ -14,7 +15,9 @@ import type {
   IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession,
   StickerProviderContext, Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
+import {
+  expandTelegramStrippedThumbnail, resolvePlatformPluginId, stripTelegramJpegThumbnail,
+} from '@mtproto-relay/bridge'
 
 export interface StaticPlatformOptions {
   now?: () => number
@@ -53,6 +56,11 @@ export interface StaticMediaLocator {
 }
 
 const seededImage = new Uint8Array(readFileSync(new URL('./test-image.png', import.meta.url)))
+const seededStrippedThumbnail = new Uint8Array(Buffer.from(
+  'ASgcyhzwBzRjFTxoNoOKXaGHSrsK5BgYo2/WpjFx7VF0pAWo5YhGAykN7VKgUj5dv4tn+VV9o+UZAyad5WD94ZpXHYfMDs5Kgf7tU+hOCaslSwx5gP15qs3DEUXAdJIXfJ7cUpnYhQTwtFFKwXATssm9eCOmKjYksSe9FFAXPw==',
+  'base64',
+))
+const seededImagePreview = expandTelegramStrippedThumbnail(seededStrippedThumbnail)
 const staticStickerAsset = new Uint8Array(readFileSync(new URL('./assets/static.webp', import.meta.url)))
 const videoStickerAsset = new Uint8Array(readFileSync(new URL('./assets/video.webm', import.meta.url)))
 
@@ -232,6 +240,9 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
       const mediaId = `${messageId}:media:${mediaIndex}:${'m'.repeat(128)}`
       this._storeMedia(mediaId, bytes)
       const dimensions = part.media.kind === 'image' ? imageDimensions(bytes) : undefined
+      const thumbnail = part.media.kind === 'image' ? await createThumbnail(bytes) : undefined
+      const previewId = thumbnail ? `${mediaId}:preview` : undefined
+      if (thumbnail && previewId) this._storeMedia(previewId, thumbnail.jpeg)
       const media: IMMedia<StaticMediaLocator> = {
         id: mediaId,
         kind: part.media.kind,
@@ -240,6 +251,11 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
         size: bytes.length,
         width: part.media.width ?? dimensions?.width,
         height: part.media.height ?? dimensions?.height,
+        strippedThumbnail: thumbnail?.stripped,
+        preview: thumbnail && previewId ? {
+          mimeType: 'image/jpeg', size: thumbnail.jpeg.length,
+          width: thumbnail.width, height: thumbnail.height, locator: { mediaId: previewId },
+        } : undefined,
         locator: { mediaId },
       }
       output.push({ type: 'media', media })
@@ -732,8 +748,10 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
       1_600_000_000 + index,
     )))
     const imageId = 'seed:image'
+    const imagePreviewId = `${imageId}:preview`
     const fileId = 'seed:file'
     this._storeMedia(imageId, seededImage)
+    this._storeMedia(imagePreviewId, seededImagePreview)
     this._storeMedia(fileId, new TextEncoder().encode('static seeded file'))
     this._append({
       id: 'group:album', sourceIds: ['group:album:photo', 'group:album:file'],
@@ -746,7 +764,13 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
             type: 'media',
             media: {
               id: imageId, kind: 'image', name: 'seed.png', mimeType: 'image/png',
-              size: seededImage.length, width: 1240, height: 1754, locator: { mediaId: imageId },
+              size: seededImage.length, width: 1240, height: 1754,
+              strippedThumbnail: seededStrippedThumbnail,
+              preview: {
+                mimeType: 'image/jpeg', size: seededImagePreview.length,
+                width: 28, height: 40, locator: { mediaId: imagePreviewId },
+              },
+              locator: { mediaId: imageId },
             },
           },
           {
@@ -1115,6 +1139,24 @@ function imageDimensions(bytes: Uint8Array): { width: number, height: number } |
     offset += segmentLength
   }
   return undefined
+}
+
+async function createThumbnail(
+  bytes: Uint8Array,
+): Promise<{ jpeg: Uint8Array, stripped: Uint8Array, width: number, height: number } | undefined> {
+  try {
+    const { data, info } = await sharp(bytes).rotate().resize({
+      width: 40, height: 40, fit: 'inside', withoutEnlargement: true,
+    }).jpeg({
+      quality: 20, chromaSubsampling: '4:2:0', progressive: false, optimizeCoding: false,
+    }).toBuffer({ resolveWithObject: true })
+    const jpeg = new Uint8Array(data)
+    return {
+      jpeg, stripped: stripTelegramJpegThumbnail(jpeg), width: info.width, height: info.height,
+    }
+  } catch {
+    return undefined
+  }
 }
 
 function isJpegStartOfFrame(marker: number): boolean {

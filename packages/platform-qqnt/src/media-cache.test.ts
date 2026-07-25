@@ -6,7 +6,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
-import type { IMMediaSource, IMSticker } from '@mtproto-relay/bridge'
+import { expandTelegramStrippedThumbnail, type IMMediaSource, type IMSticker } from '@mtproto-relay/bridge'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 
 const temporaryDirectories: string[] = []
@@ -74,8 +74,11 @@ describe('QQMediaCache', () => {
     expect(prepared).toMatchObject({
       mimeType: 'image/png', width: 20, height: 10,
       locator: expect.not.objectContaining({ cachedPath: expect.anything() }),
+      strippedThumbnail: expect.any(Uint8Array),
       preview: { mimeType: 'image/webp', width: 8, height: 4, locator: { previewKey: expect.any(String) } },
     })
+    expect(await sharp(expandTelegramStrippedThumbnail(prepared.strippedThumbnail!)).metadata())
+      .toMatchObject({ format: 'jpeg', width: 8, height: 4 })
     expect(complete).toEqual(png)
     expect(range).toEqual(png.subarray(4, 12))
     expect(previewBytes.subarray(8, 12).toString()).toBe('WEBP')
@@ -249,7 +252,16 @@ describe('QQMediaCache', () => {
     const [preview] = await ctx.database.get('mtproto_qqnt_media_preview', {})
     expect(preview).toMatchObject({ mimeType: 'image/webp', width: 8, height: 8, size: expect.any(Number) })
     expect(new Uint8Array(preview!.bytes).subarray(8, 12).toString()).toBe('87,69,66,80')
+    expect(new Uint8Array(preview!.strippedBytes!)).toEqual(media.strippedThumbnail)
     expect(media.preview?.locator).toMatchObject({ previewKey: preview!.key })
+
+    await ctx.database.set('mtproto_qqnt_media_preview', { key: preview!.key }, { strippedBytes: null })
+    const restored = await new QQMediaCache({ path, database: ctx.database }).prepareMedia({
+      id: 'db-preview-restored', kind: 'image', name: 'preview.jpg', mimeType: 'image/jpeg',
+      size: png.length, width: 8, height: 8, locator: mediaLocator({ md5: 'db-preview' }),
+    }, countedSource(png, () => undefined))
+    const [backfilled] = await ctx.database.get('mtproto_qqnt_media_preview', { key: preview!.key })
+    expect(restored.strippedThumbnail).toEqual(new Uint8Array(backfilled!.strippedBytes!))
   })
 })
 

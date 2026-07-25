@@ -1725,6 +1725,7 @@ __metadata:
   dependencies:
     "@mtproto-relay/bridge": "workspace:*"
     schemastery: "npm:^3.18.0"
+    sharp: "npm:^0.34.4"
   peerDependencies:
     cordis: ^4.0.0-rc.5
   languageName: unknown

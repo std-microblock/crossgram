@@ -21,6 +21,11 @@ const session: PlatformSession = {
 
 const conversation: IMConversation = { id: 'album-room', kind: 'direct', title: 'Album room' }
 
+const strippedThumbnail = new Uint8Array(Buffer.from(
+  'ASgcyhzwBzRjFTxoNoOKXaGHSrsK5BgYo2/WpjFx7VF0pAWo5YhGAykN7VKgUj5dv4tn+VV9o+UZAyad5WD94ZpXHYfMDs5Kgf7tU+hOCaslSwx5gP15qs3DEUXAdJIXfJ7cUpnYhQTwtFFKwXATssm9eCOmKjYksSe9FFAXPw==',
+  'base64',
+))
+
 const album: IMMessage = {
   id: 'logical-album',
   sourceIds: ['platform-photo-message', 'platform-file-message'],
@@ -35,6 +40,7 @@ const album: IMMessage = {
         media: {
           id: 'photo', kind: 'image', name: 'photo.png', mimeType: 'image/png',
           size: 1234, width: 800, height: 600, locator: { remote: 'photo' },
+          strippedThumbnail,
           preview: {
             mimeType: 'image/webp', size: 7, width: 320, height: 240,
             locator: { remote: 'photo-preview' },
@@ -203,6 +209,7 @@ describe('rich-media projection', () => {
     })
     expect((messages[1].media as tl.RawMessageMediaPhoto).photo).toMatchObject({
       _: 'photo', accessHash: Long.fromNumber(1), sizes: [
+        { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
         { _: 'photoSize', type: 'm', w: 320, h: 240, size: 7 },
         { _: 'photoSize', type: 'x', w: 800, h: 600, size: 1234 },
       ],
@@ -266,7 +273,7 @@ describe('rich-media projection', () => {
     expect(await freshRpc.userTlId('alice')).toBe(alice.id)
   })
 
-  it('restores persisted sender and self IDs when getMessages is the first RPC', async () => {
+  it('restores persisted identities and inline thumbnails when getMessages is the first RPC', async () => {
     const { store } = await createStore()
     const self = await store.upsertUser(session, { id: session.userId, firstName: 'Current' })
     const ingested = await store.ingest(session, conversation, album)
@@ -279,6 +286,11 @@ describe('rich-media projection', () => {
 
     expect(result.messages[0]).toMatchObject({
       _: 'message', fromId: { _: 'peerUser', userId: sender!.id },
+      media: { _: 'messageMediaPhoto', photo: { _: 'photo', sizes: [
+        { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
+        { _: 'photoSize', type: 'm' },
+        { _: 'photoSize', type: 'x' },
+      ] } },
     })
     expect(result.users).toEqual(expect.arrayContaining([
       expect.objectContaining({ _: 'user', id: self.id, self: true }),
@@ -296,6 +308,7 @@ describe('rich-media projection', () => {
         media: {
           id: 'animated', kind: 'file', name: 'animated.webm', mimeType: 'video/webm',
           size: 123, width: 320, height: 180, locator: { remote: 'animated' },
+          strippedThumbnail,
           preview: {
             mimeType: 'image/webp', size: 12, width: 160, height: 90,
             locator: { remote: 'animated-preview' },
@@ -315,7 +328,10 @@ describe('rich-media projection', () => {
         _: 'messageMediaDocument',
         document: {
           _: 'document', mimeType: 'video/webm',
-          thumbs: [{ _: 'photoSize', type: 'm', w: 160, h: 90, size: 12 }],
+          thumbs: [
+            { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
+            { _: 'photoSize', type: 'm', w: 160, h: 90, size: 12 },
+          ],
           attributes: expect.arrayContaining([expect.objectContaining({
             _: 'documentAttributeVideo', nosound: true, supportsStreaming: true, w: 320, h: 180,
           })]),

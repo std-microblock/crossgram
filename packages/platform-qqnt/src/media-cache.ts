@@ -8,7 +8,10 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { Context } from 'cordis'
 import type { Database } from '@cordisjs/plugin-database'
-import type { IMDownloadOptions, IMMedia, IMMediaSource, IMSticker, IMStickerAsset } from '@mtproto-relay/bridge'
+import {
+  stripTelegramJpegThumbnail,
+  type IMDownloadOptions, type IMMedia, type IMMediaSource, type IMSticker, type IMStickerAsset,
+} from '@mtproto-relay/bridge'
 import ffmpegStatic from 'ffmpeg-static'
 import sharp from 'sharp'
 import type { QQMediaLocator } from './protocol.js'
@@ -26,6 +29,7 @@ export interface QQMediaCacheRow {
 export interface QQMediaPreviewRow {
   key: string
   bytes: ArrayBuffer
+  strippedBytes: ArrayBuffer | null
   mimeType: string
   size: number
   width: number
@@ -65,7 +69,8 @@ export function defineQQMediaCacheModel(ctx: Context): void {
     updatedAt: 'timestamp',
   }, { primary: 'key', indexes: ['updatedAt'] })
   ctx.model.extend('mtproto_qqnt_media_preview', {
-    key: 'string', bytes: 'binary', mimeType: 'string', size: 'unsigned',
+    key: 'string', bytes: 'binary', strippedBytes: { type: 'binary', nullable: true },
+    mimeType: 'string', size: 'unsigned',
     width: 'unsigned', height: 'unsigned', updatedAt: 'timestamp',
   }, { primary: 'key', indexes: ['updatedAt'] })
   ctx.model.extend('mtproto_qqnt_media_animation', {
@@ -93,6 +98,7 @@ interface CachedPreview {
   size: number
   width: number
   height: number
+  strippedThumbnail?: Uint8Array
 }
 
 /** Disk-backed, single-flight transformer shared by QQ media and sticker providers. */
@@ -298,6 +304,7 @@ export class QQMediaCache {
     if (!preview) return media
     return {
       ...media,
+      strippedThumbnail: preview.strippedThumbnail,
       preview: {
         mimeType: preview.mimeType, size: preview.size, width: preview.width, height: preview.height,
         locator: { ...media.locator!, cachedPath: undefined, previewKey: preview.key },
@@ -359,18 +366,31 @@ export class QQMediaCache {
     const memory = this.memoryPreviews.get(key)
     if (memory) return memory
     const [stored] = await this.options.database?.get('mtproto_qqnt_media_preview', { key }) ?? []
-    if (stored) return rememberPreview(this.memoryPreviews, {
-      key, bytes: new Uint8Array(stored.bytes), mimeType: stored.mimeType,
-      size: stored.size, width: stored.width, height: stored.height,
-    })
+    if (stored) {
+      const bytes = new Uint8Array(stored.bytes)
+      const strippedThumbnail = stored.strippedBytes
+        ? new Uint8Array(stored.strippedBytes)
+        : await createStrippedThumbnail(bytes)
+      if (!stored.strippedBytes) {
+        await this.options.database?.set('mtproto_qqnt_media_preview', { key }, {
+          strippedBytes: exactArrayBuffer(strippedThumbnail),
+        })
+      }
+      return rememberPreview(this.memoryPreviews, {
+        key, bytes, strippedThumbnail, mimeType: stored.mimeType,
+        size: stored.size, width: stored.width, height: stored.height,
+      })
+    }
     const created = await create()
     if (created.bytes.byteLength > MAX_DATABASE_PREVIEW_BYTES) return
+    const strippedThumbnail = await createStrippedThumbnail(created.bytes)
     const preview: CachedPreview = {
       key, bytes: created.bytes, mimeType: 'image/webp', size: created.bytes.byteLength,
-      width: created.width, height: created.height,
+      width: created.width, height: created.height, strippedThumbnail,
     }
     await this.options.database?.upsert('mtproto_qqnt_media_preview', [{
-      key, bytes: exactArrayBuffer(created.bytes), mimeType: preview.mimeType, size: preview.size,
+      key, bytes: exactArrayBuffer(created.bytes), strippedBytes: exactArrayBuffer(strippedThumbnail),
+      mimeType: preview.mimeType, size: preview.size,
       width: preview.width, height: preview.height, updatedAt: new Date(),
     }], ['key'])
     return rememberPreview(this.memoryPreviews, preview)
@@ -630,6 +650,15 @@ function replaceExtension(name: string | undefined, extension: string): string |
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+}
+
+async function createStrippedThumbnail(input: Uint8Array): Promise<Uint8Array> {
+  const jpeg = await sharp(input).resize({
+    width: 40, height: 40, fit: 'inside', withoutEnlargement: true,
+  }).jpeg({
+    quality: 20, chromaSubsampling: '4:2:0', progressive: false, optimizeCoding: false,
+  }).toBuffer()
+  return stripTelegramJpegThumbnail(jpeg)
 }
 
 function rememberPreview(cache: Map<string, CachedPreview>, preview: CachedPreview): CachedPreview {
