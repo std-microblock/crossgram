@@ -331,7 +331,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     state.dialogs = new DialogRpc(
       platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
-      new ReactionRpc(platform, session, dcId),
+      new ReactionRpc(platform, session, dcId, ctx.database),
       resources,
     )
     rpc.setPlatformData(state)
@@ -496,15 +496,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       (req as tl.messages.RawGetTopReactionsRequest).limit,
     ))
   rpc.register('messages.getRecentReactions', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.getTopReactions(
+    (await requireBridgeSession(rpc)).dialogs.getRecentReactions(
       (req as tl.messages.RawGetRecentReactionsRequest).limit,
     ))
   rpc.register('messages.getDefaultTagReactions', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getTopReactions(100))
-  rpc.register('messages.clearRecentReactions', async (rpc) => {
-    await requireBridgeSession(rpc)
-    return { _: 'boolTrue' } as unknown as tl.TlObject
-  })
+  rpc.register('messages.clearRecentReactions', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.clearRecentReactions())
   rpc.register('messages.getEmojiStickers', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getEmojiStickers())
   rpc.register('messages.getCustomEmojiDocuments', async (rpc, req) =>
@@ -663,7 +661,7 @@ function createSessionResolver(
         }
         state.dialogs = new DialogRpc(
           platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
-          new ReactionRpc(platform, session, dcId),
+          new ReactionRpc(platform, session, dcId, ctx.database),
           resources,
         )
         return state

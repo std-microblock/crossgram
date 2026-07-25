@@ -1201,9 +1201,19 @@ export class DialogRpc {
       ?? { _: 'messages.availableEffects', hash: 0, effects: [], documents: [] }
   }
 
-  getTopReactions(limit: number): tl.messages.RawReactions {
-    return this._reactions?.topReactions(limit)
+  async getTopReactions(limit: number): Promise<tl.messages.RawReactions> {
+    return await this._reactions?.topReactions(limit)
       ?? { _: 'messages.reactions', hash: Long.ZERO, reactions: [] }
+  }
+
+  async getRecentReactions(limit: number): Promise<tl.messages.RawReactions> {
+    return await this._reactions?.recentReactions(limit)
+      ?? { _: 'messages.reactions', hash: Long.ZERO, reactions: [] }
+  }
+
+  async clearRecentReactions(): Promise<tl.TlObject> {
+    await this._reactions?.clearRecentReactions()
+    return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
   async getEmojiStickers(): Promise<tl.messages.RawAllStickers> {
@@ -1250,11 +1260,16 @@ export class DialogRpc {
     const selected = (req.reaction ?? []).map((reaction) =>
       this._reactions!.resolveInput(peerId, reaction, context))
     if (selected.length > context.maxSelected) throw new RpcError(400, 'REACTIONS_TOO_MANY')
+    const previouslySelected = new Set(context.reactions
+      .filter((reaction) => reaction.selected)
+      .map((reaction) => reaction.key))
+    const newlySelected = selected.filter((definition) => !previouslySelected.has(definition.key))
     const updated = await this._platform.setMessageReactions(
       this._session, target, selected.map((item) => item.key),
     )
     const conversation = this._conversation(peerId)
     const result = await this._store!.setReactions(this._session, conversation, target, updated)
+    await this._reactions!.markUsed(peerId, newlySelected)
     const update: tl.RawUpdateMessageReactions = {
       _: 'updateMessageReactions',
       peer: this._conversationPeer(conversation),

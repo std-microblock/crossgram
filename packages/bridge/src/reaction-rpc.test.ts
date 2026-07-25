@@ -1,5 +1,9 @@
+import { Context } from 'cordis'
+import Database from '@cordisjs/plugin-database'
+import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Long from 'long'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { defineModels } from './models.js'
 import type {
   IMPlatform, IMReactionContext, IMReactionResource, PlatformSession,
 } from './platform.js'
@@ -7,6 +11,25 @@ import { ReactionRpc } from './reaction-rpc.js'
 
 const session: PlatformSession = {
   platformSessionId: 'reaction-session', platformId: 'test', userId: 'self', credentials: {}, metadata: {},
+}
+
+const disposals: Array<() => Promise<void>> = []
+
+afterEach(async () => {
+  await Promise.all(disposals.splice(0).map((dispose) => dispose()))
+})
+
+async function createDatabase() {
+  const ctx = new Context()
+  const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+  await Promise.all(fibers)
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  defineModels(ctx)
+  await ctx.database.prepared()
+  disposals.push(async () => {
+    for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+  })
+  return ctx.database
 }
 
 function fixture(format: 'static' | 'video') {
@@ -40,6 +63,70 @@ function fixture(format: 'static' | 'video') {
 }
 
 describe('ReactionRpc', () => {
+  it('orders top and recent reactions by the latest successful selection and persists the order', async () => {
+    const database = await createDatabase()
+    const platform = { capabilities: {} } as IMPlatform
+    const fire = {
+      key: 'fire', presentation: { type: 'emoji' as const, emoticon: '🔥' },
+    }
+    const laugh = {
+      key: 'laugh', presentation: { type: 'emoji' as const, emoticon: '😂' },
+    }
+    const rpc = new ReactionRpc(platform, session, 1, database)
+
+    await rpc.markUsed('group', [fire])
+    await rpc.markUsed('group', [laugh])
+
+    await expect(rpc.recentReactions(100)).resolves.toMatchObject({
+      _: 'messages.reactions',
+      reactions: [
+        { _: 'reactionEmoji', emoticon: '😂' },
+        { _: 'reactionEmoji', emoticon: '🔥' },
+      ],
+    })
+    await expect(rpc.topReactions(4)).resolves.toMatchObject({
+      reactions: [
+        { _: 'reactionEmoji', emoticon: '😂' },
+        { _: 'reactionEmoji', emoticon: '🔥' },
+        { _: 'reactionEmoji', emoticon: '👍' },
+        { _: 'reactionEmoji', emoticon: '❤️' },
+      ],
+    })
+
+    const resumed = new ReactionRpc(platform, session, 1, database)
+    await expect(resumed.recentReactions(1)).resolves.toMatchObject({
+      reactions: [{ _: 'reactionEmoji', emoticon: '😂' }],
+    })
+    await resumed.markUsed('group', [fire])
+    await expect(resumed.recentReactions(100)).resolves.toMatchObject({
+      reactions: [
+        { _: 'reactionEmoji', emoticon: '🔥' },
+        { _: 'reactionEmoji', emoticon: '😂' },
+      ],
+    })
+  })
+
+  it('isolates recent reactions per platform session and clears only the active account', async () => {
+    const database = await createDatabase()
+    const platform = { capabilities: {} } as IMPlatform
+    const fire = {
+      key: 'fire', presentation: { type: 'emoji' as const, emoticon: '🔥' },
+    }
+    const first = new ReactionRpc(platform, session, 1, database)
+    const second = new ReactionRpc(platform, {
+      ...session, platformSessionId: 'other-reaction-session',
+    }, 1, database)
+
+    await first.markUsed('group', [fire])
+    await expect(second.recentReactions(100)).resolves.toMatchObject({ reactions: [] })
+    await first.clearRecentReactions()
+    await expect(first.recentReactions(100)).resolves.toMatchObject({ reactions: [] })
+    await expect(first.topReactions(2)).resolves.toMatchObject({ reactions: [
+      { _: 'reactionEmoji', emoticon: '👍' },
+      { _: 'reactionEmoji', emoticon: '❤️' },
+    ] })
+  })
+
   it.each(['static', 'video'] as const)('describes and serves %s custom reaction resources', async (format) => {
     const { rpc, documentId, resource, bytes } = fixture(format)
     const [document] = rpc.getCustomEmojiDocuments([documentId])
