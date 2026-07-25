@@ -159,6 +159,14 @@ export class PlatformSubscriptionManager {
     }
   }
 
+  /**
+   * Commits an event produced by a local RPC action through the same ordered
+   * persistence and update-delivery pipeline as adapter subscription events.
+   */
+  ingestLocalEvent(session: PlatformSession, event: IMEvent): Promise<void> {
+    return this._enqueue(session, event)
+  }
+
   async stopPlatform(platformId: string): Promise<void> {
     const selected = [...this._subscriptions.entries()]
       .filter(([, subscription]) => subscription.platformId === platformId)

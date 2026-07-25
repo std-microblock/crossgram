@@ -123,6 +123,39 @@ describe('PlatformSubscriptionManager', () => {
     await manager.stop()
   })
 
+  it('serializes locally produced replacement events with subscribed platform events', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: IMEvent[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, value) => { committed.push(value.event) },
+    )
+    const conversation: IMConversation = { id: 'room', kind: 'group', title: 'Room' }
+    await manager.ensure(session)
+    await platform.emit({ type: 'message', conversation, message: incoming('original') })
+    committed.length = 0
+
+    const replacement = {
+      ...incoming('replacement'), outgoing: true, senderId: 'self',
+      content: { parts: [{ type: 'text' as const, text: 'replacement body' }] },
+    }
+    await Promise.all([
+      manager.ingestLocalEvent(session, {
+        type: 'message-delete', eventId: 'local-edit:original:replacement', conversation,
+        messageIds: ['original'], timestamp: 2,
+      }),
+      manager.ingestLocalEvent(session, { type: 'message', conversation, message: replacement }),
+    ])
+
+    expect(committed.map((event) => event.type)).toEqual(['message-delete', 'message'])
+    expect(await store.readHistory(session.platformSessionId, conversation.id)).toMatchObject([
+      { id: 'replacement', content: { parts: [{ type: 'text', text: 'replacement body' }] } },
+    ])
+    await manager.stop()
+  })
+
   it('commits platform read events only after resolving their stored Telegram boundary', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

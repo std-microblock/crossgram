@@ -334,6 +334,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
       new ReactionRpc(platform, session, dcId, ctx.database),
       resources,
+      (localSession, event) => subscriptions.ingestLocalEvent(localSession, event),
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -680,6 +681,7 @@ function createSessionResolver(
           platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
           new ReactionRpc(platform, session, dcId, ctx.database),
           resources,
+          (localSession, event) => subscriptions.ingestLocalEvent(localSession, event),
         )
         return state
       })()

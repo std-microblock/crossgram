@@ -1724,6 +1724,8 @@ describe('bridge login e2e', () => {
   it('persists a push-only platform event and delivers it only after commit', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let remoteBytes = new Uint8Array()
+    let sentSequence = 0
+    const deletedMessageIds: string[] = []
     const transferProgress: bridge.IMTransferProgress[] = []
     const platformId = 'push-e2e'
     const platform: bridge.IMPlatform = {
@@ -1731,6 +1733,11 @@ describe('bridge login e2e', () => {
         history: false,
         send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
         conversations: { groups: true, channels: true, subchannels: true },
+        messageActions: {
+          delete: { own: { supported: true }, others: { supported: false } },
+          edit: { mode: 'delete-and-resend' },
+          forward: { mode: 'unsupported', preservesAuthor: false },
+        },
       },
       async subscribe(_session, next) {
         handler = next
@@ -1768,9 +1775,12 @@ describe('bridge login e2e', () => {
           })
         }
         return {
-          id: 'sent-media', conversationId: target.id, senderId: 'self', outgoing: true,
+          id: `sent-${++sentSequence}`, conversationId: target.id, senderId: 'self', outgoing: true,
           timestamp: 1_800_000_101, content: { parts: output },
         }
+      },
+      async deleteMessages(_session, _target, ids) {
+        deletedMessageIds.push(...ids)
       },
       async *downloadMedia(_session, _media, options) {
         const offset = options?.offset ?? 0
@@ -1791,6 +1801,7 @@ describe('bridge login e2e', () => {
       platform: { id: platformId, adapter: platform },
     })
     let client: TestClient | undefined
+    let observer: TestClient | undefined
     try {
       await ctx.database.create('mtproto_platform_session', {
         id: 'push-ps', platformId, userId: 'self', credentials: {},
@@ -1931,7 +1942,56 @@ describe('bridge login e2e', () => {
         { phase: 'upload', transferredBytes: 14, totalBytes: 14 },
         { phase: 'download', transferredBytes: 7, totalBytes: 7 },
       ])
+
+      observer = await TestClient.connect(port)
+      const observerKey = await doClientHandshake(observer, pubKey)
+      const observerSid = new Long(0x6789abcd, 0x6abc, false)
+      const observerCode = await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.sendCode', phoneNumber: '+99900777', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 22)
+      await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.signIn', phoneNumber: '99900777', phoneCodeHash: observerCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode('22'.repeat(20)),
+      }, 24)
+
+      const editResult = await callRpc(client, key, sid, {
+        _: 'messages.editMessage',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        id: sentMedia.updates[1].message.id, message: 'replacement after recall',
+      }, 26)
+      expect(editResult).toMatchObject({ _: 'updates', updates: [] })
+      expect(deletedMessageIds).toEqual(['sent-1'])
+
+      const recalledPush = await readPush(observer, observerKey)
+      const replacementPush = await readPush(observer, observerKey)
+      expect(recalledPush).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateDeleteChannelMessages', messages: [sentMedia.updates[1].message.id], ptsCount: 1,
+        }],
+      })
+      expect(replacementPush).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewChannelMessage', ptsCount: 1,
+          message: { message: 'replacement after recall', out: true },
+        }],
+      })
+      expect(replacementPush.updates[0].message.id).not.toBe(sentMedia.updates[1].message.id)
+      expect(replacementPush.updates[0].pts).toBe(recalledPush.updates[0].pts + 1)
+
+      const replacementHistory = await callRpc(observer, observerKey, observerSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 28)
+      expect(replacementHistory.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: replacementPush.updates[0].message.id, message: 'replacement after recall' }),
+      ]))
+      expect(replacementHistory.messages.some((item: any) => item.id === sentMedia.updates[1].message.id)).toBe(false)
     } finally {
+      observer?.close()
       client?.close()
       await stop()
       await rm(uploadPath, { recursive: true, force: true })

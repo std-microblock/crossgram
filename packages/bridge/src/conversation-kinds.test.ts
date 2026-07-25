@@ -10,7 +10,7 @@ import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
-import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
+import type { IMConversation, IMEvent, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
   platformSessionId: 'kinds-session', platformId: 'kinds', userId: 'self', credentials: {}, metadata: {},
@@ -115,7 +115,10 @@ afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createRpc(selectedPlatform: IMPlatform = platform) {
+async function createRpc(
+  selectedPlatform: IMPlatform = platform,
+  options: { publishLocalEvents?: boolean } = {},
+) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -128,11 +131,26 @@ async function createRpc(selectedPlatform: IMPlatform = platform) {
   const reactions = selectedPlatform.capabilities.reactions
     ? new ReactionRpc(selectedPlatform, session, 1, ctx.database)
     : undefined
+  const store = new MessageStore(ctx.database)
+  const localEvents: IMEvent[] = []
+  const onLocalEvent = options.publishLocalEvents
+    ? async (localSession: PlatformSession, event: IMEvent) => {
+        localEvents.push(event)
+        if (event.type === 'message') {
+          await store.ingest(localSession, event.conversation, event.message)
+        } else if (event.type === 'message-delete') {
+          await store.deleteMessages(localSession, event.conversation, event.messageIds)
+        }
+      }
+    : undefined
   return {
     ctx,
+    store,
+    localEvents,
     rpc: new DialogRpc(
-      selectedPlatform, session, new MessageStore(ctx.database),
+      selectedPlatform, session, store,
       undefined, undefined, 1, undefined, reactions,
+      undefined, onLocalEvent,
     ),
   }
 }
@@ -413,7 +431,7 @@ describe('conversation kinds', () => {
     const originalMode = actions.edit.mode
     actions.edit.mode = 'delete-and-resend'
     try {
-      const { rpc } = await createRpc()
+      const { rpc, store, localEvents } = await createRpc(platform, { publishLocalEvents: true })
       await rpc.getDialogs(dialogsRequest())
       const groupId = stableId('peer:group')
       const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
@@ -423,11 +441,20 @@ describe('conversation kinds', () => {
       const result = await rpc.editMessage({
         _: 'messages.editMessage', peer: groupPeer, id: originalId, message: 'replacement body',
       }) as tl.RawUpdates
-      expect(result.updates).toMatchObject([
-        { _: 'updateDeleteChannelMessages', messages: [originalId], ptsCount: 1 },
-        { _: 'updateNewChannelMessage', message: { message: 'replacement body' }, ptsCount: 1 },
+      expect(result.updates).toEqual([])
+      expect(localEvents).toMatchObject([
+        {
+          type: 'message-delete', conversation: { id: 'group' },
+          messageIds: ['message-group'],
+        },
+        {
+          type: 'message', conversation: { id: 'group' },
+          message: { id: 'sent-1', content: { parts: [{ type: 'text', text: 'replacement body' }] } },
+        },
       ])
-      expect((result.updates[1] as tl.RawUpdateNewMessage).message).not.toMatchObject({ id: originalId })
+      expect(await store.readHistory(session.platformSessionId, 'group')).toMatchObject([
+        { id: 'sent-1', content: { parts: [{ type: 'text', text: 'replacement body' }] } },
+      ])
       expect(actionCalls).toEqual(['delete:group:message-group:true'])
       expect(sentTargets).toEqual(['group'])
     } finally {
