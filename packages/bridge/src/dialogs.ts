@@ -5,7 +5,8 @@ import {
   messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
-  type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress, type IMUser,
+  type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
+  type IMUser,
   type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
@@ -129,6 +130,7 @@ export class DialogRpc {
     private readonly _stickers?: StickerRpc,
     private readonly _reactions?: ReactionRpc,
     private readonly _resources?: TelegramResourceService,
+    private readonly _onLocalEvent?: (session: PlatformSession, event: IMEvent) => Promise<void>,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -1008,6 +1010,21 @@ export class DialogRpc {
     const conversation = this._conversation(conversationId)
     const source: IMMessage<any> = { ...edited!.message, conversationId, outgoing: true }
     const now = source.timestamp || Math.floor(Date.now() / 1000)
+    if (edited!.replacedMessageId && this._onLocalEvent) {
+      const replacementKey = `${edited!.replacedMessageId}:${source.id}`
+      await this._onLocalEvent(this._session, {
+        type: 'message-delete',
+        eventId: `local-edit-replace:${replacementKey}`,
+        conversation,
+        messageIds: [edited!.replacedMessageId],
+        timestamp: now,
+      })
+      await this._onLocalEvent(this._session, { type: 'message', conversation, message: source })
+      this._historyCache.delete(conversationId)
+      // The committed events above are broadcast to every bound connection,
+      // including the requester. Returning them again would consume PTS twice.
+      return this._updates(conversation, [], now)
+    }
     const updates: tl.TypeUpdate[] = []
     let ptsCount = 0
     if (edited!.replacedMessageId) {
