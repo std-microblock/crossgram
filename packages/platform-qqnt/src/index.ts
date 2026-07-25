@@ -7,7 +7,7 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
   IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
-  IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMTransferOptions,
+  IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
   IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
@@ -21,7 +21,7 @@ import type {
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
 
-const MIN_DIRECT_URL_PROTOCOL_VERSION = 16
+const MIN_PROTOCOL_VERSION = 17
 
 export interface Config extends QQNTClientOptions {
   /**
@@ -79,6 +79,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   readonly platformKind = 'qq'
   readonly capabilities: PlatformCapabilities = {
     history: true,
+    readState: { markRead: true, events: false },
     search: true,
     send: {
       text: true,
@@ -132,8 +133,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const status = await this.client.status()
     const userId = status.selfUid ?? status.selfUin
     if (!status.ready || !userId) throw new Error('QQNT account is not ready')
-    if (status.protocolVersion < MIN_DIRECT_URL_PROTOCOL_VERSION) {
-      throw new Error(`QQNT bridge protocol ${status.protocolVersion} is unsupported; direct media URLs require ${MIN_DIRECT_URL_PROTOCOL_VERSION}`)
+    if (status.protocolVersion < MIN_PROTOCOL_VERSION) {
+      throw new Error(`QQNT bridge protocol ${status.protocolVersion} is unsupported; platform features require ${MIN_PROTOCOL_VERSION}`)
     }
     const user = await this.client.getUser(userId)
     if (!user) throw new Error(`QQNT current user is unavailable: ${userId}`)
@@ -440,6 +441,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return message
       ? this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message))
       : null
+  }
+
+  async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
+    await this.client.markRead(target.conversationId, target.messageId)
+    this.firstUnreadSeq.delete(target.conversationId)
   }
 
   async getConversationMembers(
