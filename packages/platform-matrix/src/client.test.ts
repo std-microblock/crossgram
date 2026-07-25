@@ -58,7 +58,8 @@ describe('MatrixClient', () => {
       yield new Uint8Array([1, 2])
       yield new Uint8Array([3])
     })(), {
-      filename: 'a b.bin', contentType: 'application/octet-stream', onChunk: (size) => progress.push(size),
+      filename: 'a b.bin', contentType: 'application/octet-stream',
+      onChunk: (size) => { progress.push(size) },
     })
     const download = await client.download(mxc)
 
