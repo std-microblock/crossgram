@@ -141,6 +141,30 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('includes native WebPage previews in live structured-card updates', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'cards', kind: 'group', title: 'Cards' }
+    const message: IMMessage = {
+      id: 'card-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_002,
+      content: { parts: [{ type: 'card', card: {
+        kind: 'link', source: '示例资讯', title: '实时卡片', description: '实时卡片摘要',
+        url: 'https://example.com/live',
+      } }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = roundTrip(sent[0].update) as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
+    expect(update.message).toMatchObject({
+      _: 'message', message: '[卡片] 示例资讯\n实时卡片\n实时卡片摘要\nhttps://example.com/live',
+      media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
+        _: 'webPage', url: 'https://example.com/live', displayUrl: 'example.com',
+        siteName: '示例资讯', title: '实时卡片', description: '实时卡片摘要',
+      } },
+    })
+  })
+
   it('keeps account and per-channel pts domains independent and replays each channel separately', async () => {
     const { store, manager, sent } = await createHarness()
     const alpha: IMConversation = { id: 'alpha', kind: 'group', title: 'Alpha' }

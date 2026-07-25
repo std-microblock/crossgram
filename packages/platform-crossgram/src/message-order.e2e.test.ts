@@ -199,6 +199,104 @@ describe('QQNT remote media routing E2E', () => {
     expect(second.toString()).toBe('efgh')
   })
 
+  it('rebases an archived merged-forward file before resolving and streaming it over HTTP', async () => {
+    const file = Buffer.from('merged-forward-file')
+    const resolverLocators: Array<Record<string, unknown>> = []
+    let server: Server | undefined
+    server = createServer(async (request, response) => {
+      if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ available: [], reactions: [], maxSelected: 20 }))
+        return
+      }
+      if (request.method === 'GET' && request.url === '/v1/dialogs') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ conversations: [{
+          id: 'outer-group', kind: 'group', title: 'Outer group',
+          peerUid: 'physical-group-uid', peerUin: '10001', chatType: 2,
+          lastMessage: {
+            id: 'merged-root', conversationId: 'outer-group', senderId: 'alice', timestamp: 10, outgoing: false,
+            parts: [{
+              type: 'multi-forward', title: '聊天记录',
+              locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
+            }],
+          },
+        }] }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/messages/multi-forward') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ messages: [{
+          id: 'archived-file-message', conversationId: 'archived-source-group',
+          senderId: 'bob', timestamp: 9, outgoing: false,
+          parts: [{
+            type: 'media',
+            media: {
+              id: 'file-element', kind: 'file', name: 'guide.xlsx', size: file.length,
+              locator: {
+                messageId: 'archived-file-message', elementId: 'file-element', chatType: 2,
+                peerUid: 'archived-source-group', kind: 'file', fileName: 'guide.xlsx',
+                fileUuid: '/file-uuid', fileBizId: 104,
+              },
+            },
+          }],
+        }] }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        const locator = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
+        resolverLocators.push(locator)
+        if (locator.peerUid !== 'physical-group-uid' || locator.chatType !== 2) {
+          response.writeHead(404, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: 'direct URL is unavailable for archived peer' }))
+          return
+        }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing test server address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/cdn/merged-file`, expiresAt: Date.now() + 60_000,
+        }))
+        return
+      }
+      if (request.method === 'GET' && request.url === '/cdn/merged-file') {
+        response.writeHead(200, { 'content-length': String(file.length) })
+        response.end(file)
+        return
+      }
+      response.writeHead(404).end('not found')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({ endpoint: `http://127.0.0.1:${address.port}/v1` })
+    const [dialog] = (await platform.getDialogs(session)).dialogs
+    const link = dialog.lastMessage?.content.parts[0]
+    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+    const history = await platform.getHistory(session, link.entities[0].conversation)
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'media') throw new Error('merged forward file was not mapped')
+
+    expect(await collect(platform.downloadMedia(session, part.media))).toEqual(file)
+    expect(resolverLocators).toEqual([expect.objectContaining({
+      chatType: 2, peerUid: 'physical-group-uid', fileUuid: '/file-uuid',
+    })])
+  })
+
   it('loads opaque reaction assets over HTTP and serves the transformed cache without local file routes', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-http-e2e-'))
     temporaryDirectories.push(cachePath)
