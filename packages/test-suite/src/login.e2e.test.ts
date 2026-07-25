@@ -1279,15 +1279,18 @@ describe('bridge login e2e', () => {
       }, 188)
       expect(reacted).toMatchObject({
         _: 'updates',
-        updates: [{
-          _: 'updateMessageReactions',
-          msgId: reactionMessage.id,
-          reactions: {
-            results: expect.arrayContaining([
-              expect.objectContaining({ reaction: { _: 'reactionEmoji', emoticon: '👍' }, count: 3 }),
-            ]),
+        updates: [
+          {
+            _: 'updateMessageReactions',
+            msgId: reactionMessage.id,
+            reactions: {
+              results: expect.arrayContaining([
+                expect.objectContaining({ reaction: { _: 'reactionEmoji', emoticon: '👍' }, count: 3 }),
+              ]),
+            },
           },
-        }],
+          { _: 'updateRecentReactions' },
+        ],
       })
       const reactionList = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessageReactionsList',
@@ -1307,7 +1310,13 @@ describe('bridge login e2e', () => {
         msgId: reactionMessage.id,
         reaction: [{ _: 'reactionEmoji', emoticon: '❤️' }],
       }, 1_188)
-      expect(heartReacted).toMatchObject({ _: 'updates' })
+      expect(heartReacted).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageReactions' },
+          { _: 'updateRecentReactions' },
+        ],
+      })
       const recentReactions = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getRecentReactions', limit: 100, hash: Long.ZERO,
       }, 1_189)
@@ -1499,15 +1508,18 @@ describe('bridge login e2e', () => {
       }, 209)
       expect(customReacted).toMatchObject({
         _: 'updates',
-        updates: [{
-          _: 'updateMessageReactions',
-          msgId: labHistory.messages[1].id,
-          reactions: {
-            results: expect.arrayContaining([
-              expect.objectContaining({ reaction: customLabReaction, chosenOrder: 0 }),
-            ]),
+        updates: [
+          {
+            _: 'updateMessageReactions',
+            msgId: labHistory.messages[1].id,
+            reactions: {
+              results: expect.arrayContaining([
+                expect.objectContaining({ reaction: customLabReaction, chosenOrder: 0 }),
+              ]),
+            },
           },
-        }],
+          { _: 'updateRecentReactions' },
+        ],
       })
       const labStickerDocuments = labHistory.messages.slice(3).map((item: any) => item.media.document)
       expect(labStickerDocuments.map((document: any) => document.mimeType)).toEqual([
