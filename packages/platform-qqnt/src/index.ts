@@ -37,7 +37,11 @@ export interface Config extends QQNTClientOptions {
   previewMaxDimension?: number
   /** Override the bundled FFmpeg executable used for GIF/APNG to WebM conversion. */
   ffmpegPath?: string
+  /** Hide QQ gray-tip service messages whose text contains any configured entry. */
+  grayTipFilters?: string[]
 }
+
+const DEFAULT_GRAY_TIP_FILTERS = ['回应了你的消息']
 
 export const Config = z.object({
   endpoint: z.string().default('http://127.0.0.1:18767/v1'),
@@ -48,6 +52,7 @@ export const Config = z.object({
   generatePreviews: z.boolean().default(true),
   previewMaxDimension: z.natural().min(1).default(320),
   ffmpegPath: z.string(),
+  grayTipFilters: z.array(z.string()).default(DEFAULT_GRAY_TIP_FILTERS),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -111,6 +116,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalog?: IMReactionContext
   private reactionCatalogPromise?: Promise<IMReactionContext>
   private readonly memberName: MemberNameMode
+  private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
   private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
   private readonly eventHandlers = new Map<
@@ -128,6 +134,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ) {
     this.client = new QQNTClient(options)
     this.memberName = options.memberName ?? 'groupAlias'
+    this.grayTipFilters = options.grayTipFilters ?? DEFAULT_GRAY_TIP_FILTERS
   }
 
   async getAccount() {
@@ -196,6 +203,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             'WebSocket event received session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', wireEventSummary(event),
           )
+          if (event.type === 'message' && this.isFilteredGrayTip(event.message)) {
+            knownConversationIds.add(event.conversation.id)
+            this.logger?.info(
+              'WebSocket event filtered session=%s reason=gray-tip streamEventId=%s message=%s text=%s',
+              platformSessionId, eventId ?? '<none>', event.message.id,
+              event.message.serviceAction?.text ?? '',
+            )
+            return
+          }
           if (event.type === 'message' && event.message.originRequestId
             && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
             knownConversationIds.add(event.conversation.id)
@@ -339,6 +355,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         conversation: this.mapConversation(conversation),
         unreadCount: conversation.unreadCount ?? 0,
         lastMessage: conversation.lastMessage
+          && !this.isFilteredGrayTip(conversation.lastMessage)
           ? this.mapMessage(conversation.lastMessage)
           : undefined,
         readInboxMaxMessage: conversation.readInboxMaxMessage
@@ -375,7 +392,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       const messages = await this.client.getMultiForwardMessages(multiForward)
       await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
       return {
-        messages: await Promise.all(messages.slice(0, query.limit ?? messages.length).map((message) =>
+        messages: await Promise.all(messages.filter((message) => !this.isFilteredGrayTip(message))
+          .slice(0, query.limit ?? messages.length).map((message) =>
           this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
             ...this.mapMessage(message), conversationId: conversation.id,
           }))),
@@ -392,7 +410,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     })
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
-      messages: await Promise.all(response.messages.map((message) =>
+      messages: await Promise.all(response.messages.filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
         this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message)))),
       nextCursor: response.nextCursor,
     }
@@ -415,7 +433,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     })
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
-      messages: await Promise.all(response.messages.map((message) =>
+      messages: await Promise.all(response.messages.filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
         this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message)))),
       nextCursor: response.nextCursor,
     }
@@ -439,7 +457,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     messageId: string,
   ): Promise<IMMessage<QQMediaLocator> | null> {
     const message = await this.client.getMessage(conversation.id, messageId)
-    return message
+    return message && !this.isFilteredGrayTip(message)
       ? this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message))
       : null
   }
@@ -934,6 +952,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       },
       timestamp: input.timestamp,
     }
+  }
+
+  private isFilteredGrayTip(message: WireMessage): boolean {
+    const text = message.serviceAction?.text
+    return Boolean(text && this.grayTipFilters.some((filter) => filter && text.includes(filter)))
   }
 
   private mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
