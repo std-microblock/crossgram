@@ -16,6 +16,7 @@ interface ResolvedSticker {
 }
 
 const STICKER_PROJECTION_VERSION = 3
+const STICKER_PROVIDER_CACHE_TTL_MS = 5 * 60_000
 // Telegram Desktop ignores every document field when date is zero, leaving a
 // zero-byte generic file. Keep synthetic sticker documents on a stable,
 // non-zero epoch so they are parsed as stickers and remain cacheable.
@@ -24,6 +25,10 @@ const STICKER_DOCUMENT_DATE = 1_700_000_000
 export class StickerRpc {
   private readonly _documents = new Map<number, ResolvedSticker>()
   private readonly _sets = new Map<number, { providerId: string, packId: string }>()
+  private readonly _providerCache = new Map<string, {
+    expiresAt: number
+    value: Promise<unknown>
+  }>()
 
   constructor(
     private readonly _database: Database,
@@ -31,9 +36,10 @@ export class StickerRpc {
     private readonly _platform: IMPlatform,
     private readonly _session: PlatformSession,
     private readonly _dcId = 1,
+    private readonly _providerCacheTtlMs = STICKER_PROVIDER_CACHE_TTL_MS,
   ) {}
 
-  async getAllStickers(_req: tl.messages.RawGetAllStickersRequest): Promise<tl.messages.TypeAllStickers> {
+  async getAllStickers(req: tl.messages.RawGetAllStickersRequest): Promise<tl.messages.TypeAllStickers> {
     const packs = await this._listPacks()
     const installed = await this._installedPacks()
     packs.sort((left, right) => {
@@ -43,9 +49,13 @@ export class StickerRpc {
       if (a && b) return a.sortOrder - b.sortOrder
       return 0
     })
+    const hash = Long.fromNumber(catalogHash(
+      packs.map(({ pack }) => `${pack.providerId}:${pack.packId}:${pack.version ?? 0}`),
+    ))
+    if (hashMatches(req.hash, hash)) return { _: 'messages.allStickersNotModified' }
     return {
       _: 'messages.allStickers',
-      hash: Long.fromNumber(catalogHash(packs.map(({ pack }) => `${pack.providerId}:${pack.packId}:${pack.version ?? 0}`))),
+      hash,
       sets: packs.map(({ pack }) => this._makeSet(pack, installed.get(packKey(pack.providerId, pack.packId)))),
     }
   }
@@ -59,9 +69,11 @@ export class StickerRpc {
     }
     const ref = await this._resolveSet(req.stickerset)
     const provider = this._registry.require(ref.providerId)
-    const pack = await provider.getPack(this._context(), ref.packId)
+    const pack = await this._getPack(ref.providerId, provider, ref.packId)
     if (!pack) throw new RpcError(400, 'STICKERSET_INVALID')
-    const normalized = normalizePack(ref.providerId, pack)
+    const normalized = pack
+    const hash = catalogHash(normalized.stickers.map((sticker) => `${sticker.stickerId}:${sticker.version ?? 0}`))
+    if (hashMatches(req.hash, hash)) return { _: 'messages.stickerSetNotModified' }
     const installed = (await this._installedPacks()).get(packKey(ref.providerId, ref.packId))
     const documents = normalized.stickers.map((sticker) => this._makeDocument({
       providerId: ref.providerId, provider, sticker,
@@ -130,17 +142,22 @@ export class StickerRpc {
     return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
-  async getFavedStickers(_req: tl.messages.RawGetFavedStickersRequest): Promise<tl.messages.TypeFavedStickers> {
+  async getFavedStickers(req: tl.messages.RawGetFavedStickersRequest): Promise<tl.messages.TypeFavedStickers> {
     const rows = await this._database.select('mtproto_sticker_favorite', {
       platformSessionId: this._session.platformSessionId,
     }).orderBy('createdAt', 'desc').limit(200).execute()
     const local = await this._resolveRows(rows)
     const provided = await this._providerSavedStickers()
     const resolved = uniqueResolved([...local, ...provided])
+    for (const item of resolved) {
+      this._documents.set(this._documentId(item.providerId, item.sticker.stickerId), item)
+    }
+    const hash = Long.fromNumber(catalogHash(resolved.map((item) =>
+      `${item.providerId}:${item.sticker.stickerId}:${item.sticker.version ?? 0}`)))
+    if (hashMatches(req.hash, hash)) return { _: 'messages.favedStickersNotModified' }
     return {
       _: 'messages.favedStickers',
-      hash: Long.fromNumber(catalogHash(resolved.map((item) =>
-        `${item.providerId}:${item.sticker.stickerId}:${item.sticker.version ?? 0}`))),
+      hash,
       packs: stickerPacks(resolved),
       stickers: resolved.map((item) => this._makeDocument(item)),
     }
@@ -149,6 +166,7 @@ export class StickerRpc {
   async faveSticker(req: tl.messages.RawFaveStickerRequest): Promise<tl.TlObject> {
     const resolved = await this._resolveInputDocument(req.id)
     await resolved.provider.setSavedSticker?.(this._context(), resolved.sticker, !req.unfave)
+    this._providerCache.delete('saved')
     const query = {
       platformSessionId: this._session.platformSessionId,
       providerId: resolved.providerId,
@@ -298,7 +316,7 @@ export class StickerRpc {
     if (!ref) return
     const provider = this._registry.get(ref.providerId)
     if (!provider) return
-    const pack = await provider.getPack(this._context(), ref.packId)
+    const pack = await this._getPack(ref.providerId, provider, ref.packId)
     const sticker = pack?.stickers[0]
     if (!sticker) return
     const asset = await provider.openAsset(this._context(), { ...sticker, providerId: ref.providerId })
@@ -316,25 +334,53 @@ export class StickerRpc {
   }
 
   private async _listPacks(): Promise<Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }>> {
-    const result: Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }> = []
-    for (const [providerId, provider] of this._activeProviders()) {
-      const page = await provider.listPacks(this._context(), { limit: 200 })
-      for (const summary of page.packs) {
-        const pack = await provider.getPack(this._context(), summary.packId)
-        if (!pack) continue
-        const normalized = normalizePack(providerId, pack)
-        result.push({ providerId, provider, pack: normalized })
-        this._sets.set(this._setId(providerId, normalized.packId), {
-          providerId, packId: normalized.packId,
-        })
-        for (const sticker of normalized.stickers) {
-          this._documents.set(this._documentId(providerId, sticker.stickerId), {
-            providerId, provider, sticker,
-          })
+    return this._cached('catalog', async () => {
+      const result: Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }> = []
+      for (const [providerId, provider] of this._activeProviders()) {
+        const page = await provider.listPacks(this._context(), { limit: 200 })
+        for (const summary of page.packs) {
+          const pack = await this._getPack(providerId, provider, summary.packId)
+          if (pack) result.push({ providerId, provider, pack })
         }
       }
+      return result
+    })
+  }
+
+  private async _getPack(
+    providerId: string,
+    provider: IMStickerProvider,
+    packId: string,
+  ): Promise<IMStickerPack | null> {
+    const pack = await this._cached(`pack:${packKey(providerId, packId)}`, async () => {
+      const loaded = await provider.getPack(this._context(), packId)
+      return loaded ? normalizePack(providerId, loaded) : null
+    })
+    if (pack) this._rememberPack(providerId, provider, pack)
+    return pack
+  }
+
+  private _rememberPack(providerId: string, provider: IMStickerProvider, pack: IMStickerPack): void {
+    this._sets.set(this._setId(providerId, pack.packId), { providerId, packId: pack.packId })
+    for (const sticker of pack.stickers) {
+      this._documents.set(this._documentId(providerId, sticker.stickerId), {
+        providerId, provider, sticker,
+      })
     }
-    return result
+  }
+
+  private async _cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const cached = this._providerCache.get(key)
+    if (cached && cached.expiresAt > Date.now()) return cached.value as Promise<T>
+    const value = load()
+    const entry = { expiresAt: Date.now() + this._providerCacheTtlMs, value }
+    this._providerCache.set(key, entry)
+    try {
+      return await value
+    } catch (error) {
+      if (this._providerCache.get(key) === entry) this._providerCache.delete(key)
+      throw error
+    }
   }
 
   private async _search(emoji: string): Promise<ResolvedSticker[]> {
@@ -347,10 +393,10 @@ export class StickerRpc {
         })))
         continue
       }
-      const packs = await provider.listPacks(this._context(), { limit: 200 })
-      for (const summary of packs.packs) {
-        const pack = await provider.getPack(this._context(), summary.packId)
-        for (const sticker of pack?.stickers ?? []) {
+      const packs = await this._listPacks()
+      for (const item of packs) {
+        if (item.providerId !== providerId) continue
+        for (const sticker of item.pack.stickers) {
           if (!emoji || sticker.emoji?.includes(emoji)) {
             result.push({ providerId, provider, sticker: { ...sticker, providerId } })
           }
@@ -512,17 +558,19 @@ export class StickerRpc {
   }
 
   private async _providerSavedStickers(): Promise<ResolvedSticker[]> {
-    const result: ResolvedSticker[] = []
-    for (const [providerId, provider] of this._activeProviders()) {
-      if (!provider.listSavedStickers) continue
-      const page = await provider.listSavedStickers(this._context(), { limit: 200 })
-      for (const sticker of page.stickers) {
-        const resolved = { providerId, provider, sticker: { ...sticker, providerId } }
-        this._documents.set(this._documentId(providerId, sticker.stickerId), resolved)
-        result.push(resolved)
+    return this._cached('saved', async () => {
+      const result: ResolvedSticker[] = []
+      for (const [providerId, provider] of this._activeProviders()) {
+        if (!provider.listSavedStickers) continue
+        const page = await provider.listSavedStickers(this._context(), { limit: 200 })
+        for (const sticker of page.stickers) {
+          const resolved = { providerId, provider, sticker: { ...sticker, providerId } }
+          this._documents.set(this._documentId(providerId, sticker.stickerId), resolved)
+          result.push(resolved)
+        }
       }
-    }
-    return result
+      return result
+    })
   }
 }
 
@@ -560,6 +608,12 @@ function stickerPacks(items: ResolvedSticker[]): tl.RawStickerPack[] {
 
 function catalogHash(values: string[]): number {
   return stableId(values.join('\u0000'))
+}
+
+function hashMatches(input: number | Long, hash: number | Long): boolean {
+  const inputLong = Long.isLong(input) ? input : Long.fromNumber(input)
+  const hashLong = Long.isLong(hash) ? hash : Long.fromNumber(hash)
+  return !inputLong.isZero() && inputLong.equals(hashLong)
 }
 
 function packKey(providerId: string, packId: string): string {
