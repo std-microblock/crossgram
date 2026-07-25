@@ -102,6 +102,7 @@ export class DialogRpc {
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
   private readonly _historyCache = new Map<string, MaterializedMessage[]>()
+  private readonly _dialogCache = new Map<string, IMDialog>()
   private readonly _readInboxMaxMessageIds = new Map<string, string>()
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
@@ -185,7 +186,16 @@ export class DialogRpc {
   }
 
   async getPeerDialogs(req: GetPeerDialogsRequest): Promise<tl.messages.RawPeerDialogs> {
-    const loaded = await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
+    await this._hydratePeers()
+    let loaded = [...this._dialogCache.values()]
+    const missingRequestedPeer = req.peers.some((requested) => {
+      if (requested._ === 'inputDialogPeerFolder') return false
+      const peerId = this._tlToPeer.get(inputPeerId(requested.peer))
+      return peerId !== undefined && !this._dialogCache.has(peerId)
+    })
+    if (missingRequestedPeer) {
+      loaded = await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
+    }
     const byId = new Map(loaded.map((dialog) => {
       this._peerId(dialog.conversation.id)
       return [dialog.conversation.id, dialog]
@@ -1773,6 +1783,7 @@ export class DialogRpc {
       : await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)
     const dialogs = page.dialogs
     for (const dialog of dialogs) {
+      this._dialogCache.set(dialog.conversation.id, dialog)
       this._conversations.set(dialog.conversation.id, dialog.conversation)
       if (dialog.readInboxMaxMessage) {
         this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)

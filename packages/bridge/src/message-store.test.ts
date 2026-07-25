@@ -467,6 +467,26 @@ describe('MessageStore', () => {
     })).map((item) => item.source.id)).toEqual(['oldest'])
   })
 
+  it('ingests a history page as one ordered batch', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'batch', kind: 'direct' as const, title: 'Batch' }
+    const messages = Array.from({ length: 50 }, (_, index): IMMessage => ({
+      id: `message-${index}`,
+      conversationId: conversation.id,
+      senderId: 'sender',
+      timestamp: 100 - index,
+      content: { parts: [{ type: 'text', text: `message ${index}` }] },
+    }))
+
+    const results = await store.ingestMany(session, conversation, messages, { allocation: 'history' })
+
+    expect(results).toHaveLength(50)
+    expect(await ctx.database.get('mtproto_im_conversation', {})).toHaveLength(1)
+    expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(50)
+    expect((await store.readHistory(session.platformSessionId, conversation.id, { limit: 50 }))
+      .map((message) => message.id)).toEqual(messages.map((message) => message.id))
+  })
+
   it('serializes concurrent allocations without duplicate IDs', async () => {
     const { store } = await createStore()
     const pages = await Promise.all(Array.from({ length: 12 }, () => store.allocateIds('concurrent', 2)))

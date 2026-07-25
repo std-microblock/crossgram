@@ -57,6 +57,7 @@ export const name = 'im-platform-qqnt'
 export const inject = ['imPlatform', 'imSticker', 'database', 'model']
 
 const DIALOGS_POLL_INTERVAL_MS = 15_000
+const REACTION_CATALOG_GRACE_MS = 10
 
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'qqnt')
@@ -291,7 +292,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
-    await this.ensureReactionCatalog().catch(() => undefined)
+    await waitAtMost(this.ensureReactionCatalog().catch(() => undefined), REACTION_CATALOG_GRACE_MS)
     return this.getDialogsPage(query)
   }
 
@@ -341,10 +342,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<QQMediaLocator>> {
-    await this.ensureReactionCatalog()
+    const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
     const multiForward = this.multiForwardLocators.get(conversation.id)
     if (multiForward) {
       const messages = await this.client.getMultiForwardMessages(multiForward)
+      await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
       return {
         messages: messages.slice(0, query.limit ?? messages.length).map((message) => ({
           ...this.mapMessage(message),
@@ -361,6 +363,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         ? this.firstUnreadSeq.get(conversation.id)
         : undefined,
     })
+    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
       messages: response.messages.map((message) => this.mapMessage(message)),
       nextCursor: response.nextCursor,
@@ -372,7 +375,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     query: IMMessageSearchQuery,
   ): Promise<IMMessageSearchPage<QQMediaLocator>> {
-    await this.ensureReactionCatalog()
+    const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
     const response = await this.client.searchMessages(conversation.id, {
       q: query.query,
       cursor: query.cursor,
@@ -382,6 +385,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       maxTimestamp: query.maxTimestamp,
       mediaKind: query.mediaKind,
     })
+    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
       messages: response.messages.map((message) => this.mapMessage(message)),
       nextCursor: response.nextCursor,
@@ -1163,6 +1167,18 @@ async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
       resolve()
     }
   })
+}
+
+async function waitAtMost(promise: Promise<unknown>, milliseconds: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+  await Promise.race([
+    promise,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, milliseconds)
+      timer.unref()
+    }),
+  ])
+  if (timer) clearTimeout(timer)
 }
 
 async function mapConcurrent<T, R>(

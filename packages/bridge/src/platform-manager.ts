@@ -275,7 +275,6 @@ export class PlatformDataService {
     if (hasUpstream) {
       upstreamPage = await this._platform.getDialogs(this._session, query)
       upstream = upstreamPage.dialogs
-      await this._ingestDialogs(upstreamPage.dialogs)
     }
     const stored = await this._store.listDialogs(this._session.platformSessionId, {
       limit: query.limit,
@@ -286,6 +285,9 @@ export class PlatformDataService {
     // previously stored rows leaks removed dialogs and legacy conversation IDs
     // forever (for example after an adapter fixes its opaque-ID mapping).
     const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
+    await this._ingestDialogs(upstream.filter((dialog) => dialogNeedsPersistence(
+      dialog, persisted.get(dialog.conversation.id),
+    )))
     const dialogs = upstream.map((dialog) => {
       const cached = persisted.get(dialog.conversation.id)
       return {
@@ -308,9 +310,12 @@ export class PlatformDataService {
 
     if (this._platform.capabilities.history && this._platform.getHistory) {
       const page = await this._platform.getHistory(this._session, { id: conversationId }, query)
-      for (const message of page.messages.slice().sort((left, right) => right.timestamp - left.timestamp)) {
-        await this._store.ingest(this._session, conversation, message, { allocation: 'history' })
-      }
+      await this._store.ingestMany(
+        this._session,
+        conversation,
+        page.messages.slice().sort((left, right) => right.timestamp - left.timestamp),
+        { allocation: 'history' },
+      )
     }
     return {
       messages: await this._store.readHistory(
@@ -331,9 +336,12 @@ export class PlatformDataService {
     }
     conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
     const page = await this._platform.searchMessages(this._session, { id: conversationId }, query)
-    for (const message of page.messages.slice().sort((left, right) => right.timestamp - left.timestamp)) {
-      await this._store.ingest(this._session, conversation, message, { allocation: 'history' })
-    }
+    await this._store.ingestMany(
+      this._session,
+      conversation,
+      page.messages.slice().sort((left, right) => right.timestamp - left.timestamp),
+      { allocation: 'history' },
+    )
     return page
   }
 
@@ -352,19 +360,28 @@ export class PlatformDataService {
   }
 
   private async _ingestDialogs(dialogs: readonly IMDialog[]): Promise<void> {
-    for (const dialog of dialogs) {
-      await this._store.upsertConversation(this._session, dialog.conversation, dialog.unreadCount)
-      if (dialog.lastMessage) await this._store.ingest(this._session, dialog.conversation, dialog.lastMessage)
-      if (dialog.readInboxMaxMessage) {
-        await this._store.ingest(
-          this._session,
-          dialog.conversation,
-          dialog.readInboxMaxMessage,
-          { allocation: 'history' },
-        )
-      }
-    }
+    await this._store.ingestDialogs(this._session, dialogs)
   }
+}
+
+function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined): boolean {
+  if (!stored) return true
+  if (upstream.unreadCount !== stored.unreadCount) return true
+  if (
+    upstream.conversation.kind !== stored.conversation.kind
+    || upstream.conversation.title !== stored.conversation.title
+    || upstream.conversation.parentId !== stored.conversation.parentId
+    || upstream.conversation.spaceId !== stored.conversation.spaceId
+    || JSON.stringify(upstream.conversation.metadata ?? {}) !== JSON.stringify(stored.conversation.metadata ?? {})
+  ) return true
+  const upstreamMessage = upstream.lastMessage
+  const storedMessage = stored.lastMessage
+  if (!upstreamMessage || !storedMessage) return upstreamMessage !== storedMessage
+  return upstreamMessage.id !== storedMessage.id
+    || upstreamMessage.timestamp !== storedMessage.timestamp
+    || upstreamMessage.senderId !== storedMessage.senderId
+    || JSON.stringify(upstreamMessage.content) !== JSON.stringify(storedMessage.content)
+    || JSON.stringify(upstreamMessage.metadata ?? {}) !== JSON.stringify(storedMessage.metadata ?? {})
 }
 
 export function sessionFromRow(row: PlatformSessionRow): PlatformSession {

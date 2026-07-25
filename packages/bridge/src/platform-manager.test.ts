@@ -193,6 +193,15 @@ describe('PlatformDataService', () => {
     expect(dialogCalls).toBe(1)
     expect(dialogPage).toMatchObject({ total: 347, nextCursor: 'dialogs-2' })
     expect(dialogs).toMatchObject([{ conversation: { id: 'history-room' }, unreadCount: 4 }])
+    const [persistedDialog] = await database.get('mtproto_im_conversation', {
+      platformConversationId: conversation.id,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await data.getDialogsPage()
+    const [unchangedDialog] = await database.get('mtproto_im_conversation', {
+      platformConversationId: conversation.id,
+    })
+    expect(unchangedDialog.updatedAt).toEqual(persistedDialog.updatedAt)
     const history = await data.getHistory(conversation.id)
     expect(historyCalls).toBe(1)
     expect(history.messages.map((message) => message.id)).toEqual(['2'])
