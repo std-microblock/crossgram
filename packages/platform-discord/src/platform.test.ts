@@ -1,8 +1,7 @@
 import { EventEmitter } from 'node:events'
-import { Collection } from 'discord.js-selfbot-v13'
+import { Collection, type Client } from 'discord.js-selfbot-v13'
 import { describe, expect, it, vi } from 'vitest'
-import type { Client, Message, PlatformSession } from './test-types.js'
-import type { IMEvent, IMMedia } from '@mtproto-relay/bridge'
+import type { IMEvent, IMMedia, PlatformSession } from '@mtproto-relay/bridge'
 import { DiscordPlatform, type DiscordMediaLocator } from './index.js'
 
 const session: PlatformSession = {

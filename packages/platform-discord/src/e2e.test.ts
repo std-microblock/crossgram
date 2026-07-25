@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import type { PlatformSession } from '@mtproto-relay/bridge'
 import { DiscordPlatform } from './index.js'
 
@@ -11,6 +11,8 @@ const session: PlatformSession = {
   platformSessionId: 'live-discord-userbot', platformId: 'discord', userId: 'pending',
   credentials: {}, metadata: {},
 }
+
+afterAll(() => platform.stop())
 
 describe.skipIf(!enabled)('DiscordPlatform live userbot E2E', () => {
   it('logs in as a normal user and discovers the configured channel in paginated dialogs', async () => {
@@ -66,7 +68,6 @@ describe.skipIf(!enabled)('DiscordPlatform live userbot E2E', () => {
       await platform.markRead(session, { conversationId: channelId, messageId: sent.id })
     } finally {
       await platform.deleteMessages(session, { id: channelId }, [sent.id])
-      platform.stop()
     }
   }, 120_000)
 })
