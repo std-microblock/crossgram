@@ -131,6 +131,9 @@ export class QQMediaCache {
 
   async openSticker(sticker: IMSticker, original: IMStickerAsset): Promise<IMStickerAsset> {
     const animated = sticker.format === 'animated' || isAnimatedImage(original.mimeType)
+    const thumbnail = animated
+      ? this.prepareStickerThumbnail(sticker, original.source).catch(() => undefined)
+      : undefined
     const kind = animated ? 'sticker-webm-v1' : 'sticker-webp-v1'
     const asset = await this.ensure(
       cacheKey(kind, sticker.providerId, sticker.stickerId, sticker.version ?? 0, sticker.locator),
@@ -142,9 +145,36 @@ export class QQMediaCache {
         else await this.convertStatic(original.source, temporary)
       },
     )
+    await thumbnail
     return {
       source: fileSource(asset.path, asset.size), mimeType: asset.mimeType, size: asset.size,
       width: asset.width, height: asset.height,
+    }
+  }
+
+  async restoreStickerThumbnail(sticker: IMSticker): Promise<IMSticker> {
+    const preview = await this.getPreview(stickerPreviewKey(sticker))
+    return preview ? attachStickerThumbnail(sticker, preview) : sticker
+  }
+
+  async prepareStickerThumbnail(sticker: IMSticker, source: IMMediaSource): Promise<IMSticker> {
+    const preview = await this.ensurePreview(
+      stickerPreviewLogicalKey(sticker),
+      () => this.previewFromSource(source),
+    )
+    return preview ? attachStickerThumbnail(sticker, preview) : sticker
+  }
+
+  async openStickerThumbnail(sticker: IMSticker): Promise<IMStickerAsset | null> {
+    const locator = sticker.thumbnail?.locator
+    const key = locator && typeof locator === 'object' && !Array.isArray(locator)
+      && typeof locator.cacheKey === 'string' ? locator.cacheKey : undefined
+    if (!key) return null
+    const preview = await this.getPreview(key)
+    if (!preview) return null
+    return {
+      source: memorySource(preview.bytes), mimeType: preview.mimeType, size: preview.size,
+      width: preview.width, height: preview.height,
     }
   }
 
@@ -551,6 +581,36 @@ export class QQMediaCache {
 
 function cacheKey(...values: unknown[]): string {
   return values.map((value) => stableJson(value)).join('\u0000')
+}
+
+function stickerPreviewLogicalKey(sticker: IMSticker): string {
+  return cacheKey(
+    'sticker-preview-db-v1', sticker.providerId, sticker.stickerId,
+    sticker.version ?? 0, sticker.locator,
+  )
+}
+
+function stickerPreviewKey(sticker: IMSticker): string {
+  return createHash('sha256').update(stickerPreviewLogicalKey(sticker)).digest('hex')
+}
+
+function attachStickerThumbnail(sticker: IMSticker, preview: CachedPreview): IMSticker {
+  return {
+    ...sticker,
+    thumbnail: {
+      mimeType: preview.mimeType, size: preview.size, width: preview.width, height: preview.height,
+      locator: { cacheKey: preview.key },
+    },
+  }
+}
+
+function memorySource(bytes: Uint8Array): IMMediaSource {
+  return {
+    size: bytes.byteLength,
+    async *stream() {
+      yield bytes
+    },
+  }
 }
 
 function stableJson(value: unknown): string {

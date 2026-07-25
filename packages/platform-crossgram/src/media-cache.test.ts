@@ -42,7 +42,19 @@ describe('QQMediaCache', () => {
 
     expect(first).toMatchObject({ mimeType: 'video/webm', width: 16, height: 12 })
     expect([...bytes.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
-    expect(opens).toBe(1)
+    const projected = await cache.restoreStickerThumbnail(cache.projectSticker(sticker))
+    const thumbnail = await cache.openStickerThumbnail(projected)
+    if (!thumbnail) throw new Error('missing animated sticker thumbnail')
+    const thumbnailBytes = await collect(thumbnail.source.stream())
+
+    expect(projected).toMatchObject({
+      thumbnail: {
+        mimeType: 'image/webp', width: 16, height: 12,
+        locator: { cacheKey: expect.any(String) },
+      },
+    })
+    expect(thumbnailBytes.subarray(8, 12).toString()).toBe('WEBP')
+    expect(opens).toBe(2)
   }, 30_000)
 
   it('keeps original image bytes and stores compact previews separately', async () => {

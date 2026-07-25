@@ -907,9 +907,21 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMMessage<QQMediaLocator>> {
     if (!this.mediaCache) return message
     const parts = await Promise.all(message.content.parts.map(async (part) => {
-      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) {
-        return part
+      if (part.type === 'sticker') {
+        try {
+          return {
+            ...part,
+            sticker: await this.mediaCache!.restoreStickerThumbnail(part.sticker),
+          }
+        } catch (error) {
+          this.logger?.warn(
+            'cached sticker thumbnail lookup failed message=%s sticker=%s error=%s',
+            message.id, part.sticker.stickerId, formatError(error),
+          )
+          return part
+        }
       }
+      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) return part
       try {
         const media = await this.mediaCache!.prepareInitialMedia(part.media, {
           size: part.media.size,
@@ -933,7 +945,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     message: IMMessage<QQMediaLocator>,
   ): void {
     if (!this.mediaCache || !message.content.parts.some((part) =>
-      part.type === 'media' && part.media.kind === 'image' && part.media.locator)) return
+      part.type === 'media' && part.media.kind === 'image' && part.media.locator
+      || part.type === 'sticker' && part.sticker.format === 'video'
+        && part.sticker.locator && !part.sticker.thumbnail)) return
     const key = `${conversation.id}\0${message.id}`
     if (this.mediaUpgradeJobs.has(key)) return
     const pending = this.upgradeAnimatedMessage(message).then(async (upgraded) => {
@@ -961,6 +975,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (!this.mediaCache) return
     let changed = false
     const parts = await Promise.all(message.content.parts.map(async (part) => {
+      if (part.type === 'sticker') {
+        if (part.sticker.format !== 'video' || !part.sticker.locator || part.sticker.thumbnail) return part
+        const reference = part.sticker.locator as unknown as QQStickerReference
+        const sticker = await this.mediaCache!.prepareStickerThumbnail(
+          part.sticker, this.client.stickerSource(reference, part.sticker.size),
+        )
+        if (!sticker.thumbnail) return part
+        changed = true
+        return { type: 'sticker' as const, sticker }
+      }
       if (part.type !== 'media' || part.media.kind !== 'image' || !part.media.locator) return part
       const locator = part.media.locator
       const upgraded = await this.mediaCache!.prepareAnimatedUpgrade(part.media, {

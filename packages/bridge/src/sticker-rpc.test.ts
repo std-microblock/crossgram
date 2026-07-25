@@ -5,6 +5,40 @@ import type { IMSticker, IMStickerProvider, StickerProviderRegistry } from './st
 import type { IMPlatform, PlatformSession } from './platform.js'
 
 describe('StickerRpc', () => {
+  it('projects and serves a cached first-frame thumbnail without marking the sticker as a mask', async () => {
+    const thumbnail = new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4])
+    const { rpc, provider, sticker } = stickerHarness()
+    sticker.thumbnail = {
+      mimeType: 'image/webp', size: thumbnail.length, width: 96, height: 64,
+      locator: { cacheKey: 'first-frame' },
+    }
+    vi.mocked(provider.openThumbnail!).mockResolvedValue({
+      mimeType: 'image/webp', size: thumbnail.length, width: 96, height: 64,
+      source: {
+        size: thumbnail.length,
+        async *stream() {
+          yield thumbnail.subarray(0, 3)
+          yield thumbnail.subarray(3)
+        },
+      },
+    })
+
+    const media = rpc.makeMessageMedia(sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+    expect(media.document.thumbs).toEqual([{
+      _: 'photoSize', type: 'm', w: 96, h: 64, size: thumbnail.length,
+    }])
+    const attribute = media.document.attributes.find((item) => item._ === 'documentAttributeSticker')
+    if (!attribute || attribute._ !== 'documentAttributeSticker') throw new Error('expected sticker attribute')
+    expect(attribute.mask).toBeUndefined()
+    expect(attribute.maskCoords).toBeUndefined()
+    await expect(rpc.getFile(
+      media.document.id.toNumber(), 2, 4, media.document.fileReference, 'm',
+    )).resolves.toEqual(thumbnail.subarray(2, 6))
+    expect(provider.openThumbnail).toHaveBeenCalledWith(expect.anything(), sticker)
+    expect(provider.openAsset).not.toHaveBeenCalled()
+  })
+
   it('resolves the set attached to a message sticker even when the pack is not listed', async () => {
     const sticker: IMSticker = {
       providerId: 'qq:stickers', stickerId: 'market:42:wave', packId: '42',
@@ -233,6 +267,7 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     listSavedStickers: vi.fn(async () => ({ stickers: [sticker] })),
     setSavedSticker: vi.fn(async () => undefined),
     openAsset: vi.fn(async () => { throw new Error('not used') }),
+    openThumbnail: vi.fn(async () => null),
   }
   const registry = {
     entries: [['qq:stickers', provider]],

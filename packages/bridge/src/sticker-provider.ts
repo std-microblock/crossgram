@@ -22,6 +22,17 @@ export interface IMSticker extends IMStickerRef {
   height?: number
   size?: number
   version?: number
+  /** Optional static frame shown while an animated/video sticker is loading. */
+  thumbnail?: IMStickerThumbnail
+  locator?: JsonValue
+}
+
+export interface IMStickerThumbnail {
+  mimeType: string
+  size: number
+  width: number
+  height: number
+  /** Provider-owned reference used by openThumbnail(). */
   locator?: JsonValue
 }
 
@@ -114,6 +125,8 @@ export interface IMStickerProvider {
     query?: StickerPageQuery,
   ): Promise<IMStickerPage>
   openAsset(context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset>
+  /** Open the static thumbnail advertised by IMSticker.thumbnail. */
+  openThumbnail?(context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset | null>
   prepareSend?(
     context: StickerProviderContext,
     sticker: IMSticker,
