@@ -3,6 +3,7 @@ import { Config as bridgeConfig } from '../../bridge/src/index.js'
 import { Config as debugConfig } from '../../mtproto-debug/src/index.js'
 import { Config as mtprotoConfig } from '../../mtproto/src/index.js'
 import { Config as qqntConfig } from '../../platform-crossgram/src/index.js'
+import { Config as discordConfig } from '../../platform-discord/src/index.js'
 import { Config as staticConfig } from '../../platform-static/src/index.js'
 import { Config as relayConfig } from '../../relay/src/index.js'
 import { Config as resourcesConfig } from '../../telegram-resources/src/index.js'
@@ -15,6 +16,7 @@ const cases = [
     'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'generatePreviews',
     'previewMaxDimension', 'ffmpegPath', 'grayTipFilters',
   ]],
+  ['discord', discordConfig, ['token', 'includeBots', 'downloadChunkSize']],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['relay', relayConfig, ['apiId', 'apiHash', 'storagePath', 'disableUpdates', 'routeId']],
   ['resources', resourcesConfig, ['assetsPath', 'providerId']],
@@ -48,11 +50,15 @@ describe('plugin config schemas', () => {
       clientFactory,
     })
     expect(qqntConfig({})).toMatchObject({ grayTipFilters: ['回应了你的消息'] })
+    expect(discordConfig({ token: 'user-token' })).toMatchObject({
+      token: 'user-token', includeBots: true, downloadChunkSize: 256 * 1024,
+    })
   })
 
   it('rejects invalid values at the field path', () => {
     expect(() => bridgeConfig({ serverPort: 65_536 })).toThrow(/serverPort/)
     expect(() => qqntConfig({ previewMaxDimension: 0 })).toThrow(/previewMaxDimension/)
+    expect(() => discordConfig({ token: 'user-token', downloadChunkSize: 0 })).toThrow(/downloadChunkSize/)
     expect(() => staticConfig({ transferChunkSize: 0 })).toThrow(/transferChunkSize/)
     expect(() => relayConfig({ apiId: 0, apiHash: '' })).toThrow(/apiId/)
   })
@@ -66,5 +72,14 @@ describe('plugin config schemas', () => {
     expect(apiId.meta.required).toBe(true)
     expect(apiHash.meta.required).toBe(true)
     expect(apiHash.meta.role).toBe('secret')
+  })
+
+  it('requires and masks the Discord user token', () => {
+    expect(() => discordConfig({})).toThrow(/token/)
+    const json = discordConfig.toJSON()
+    const root = json.refs[json.uid]
+    const token = json.refs[root.dict!.token as unknown as number]
+    expect(token.meta.required).toBe(true)
+    expect(token.meta.role).toBe('secret')
   })
 })

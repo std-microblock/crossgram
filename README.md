@@ -16,9 +16,13 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 | 平台 | 包名 | 状态 |
 |---|---|---|
 | **QQ（QQNT）** | `@mtproto-relay/platform-qqnt` | ✅ |
+| **Discord（userbot）** | `@mtproto-relay/platform-discord` | ✅ |
 | **参考实现（static）** | `@mtproto-relay/platform-static` | ✅ |
 | **官方 Telegram 透传（relay）** | `@mtproto-relay/relay` | ✅ |
-| 微信 / Discord / 其它 | — | 🚧 |
+| 微信 / 其它 | — | 🚧 |
+
+> [!CAUTION]
+> Discord 适配器自动化普通用户账号（userbot/selfbot），违反 Discord 服务条款，可能导致账号受限或封禁。建议仅使用可承受风险的独立账号。
 
 <details>
 <summary>能力矩阵</summary>
@@ -28,108 +32,108 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 <details open>
 <summary>历史记录 <code>history</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 历史消息拉取 | ✅ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 历史消息拉取 | ✅ | ✅ | ✅ | ✅ |
 
 </details>
 
 <details open>
 <summary>发送 <code>send</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 文字 | ✅ | ✅ | ✅ |
-| 图片 | ✅ | ✅ | ✅ |
-| 文件 | ✅ | ✅ | ✅ |
-| 图文混排 | ✅ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 文字 | ✅ | ✅ | ✅ | ✅ |
+| 图片 | ✅ | ✅ | ✅ | ✅ |
+| 文件 | ✅ | ✅ | ✅ | ✅ |
+| 图文混排 | ✅ | ✅ | ✅ | ✅ |
 
 </details>
 
 <details open>
 <summary>会话类型 <code>conversations</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 私聊 (direct) | ✅ | ✅ | ✅ |
-| 群聊 (group) | ✅ | ✅ | ✅ |
-| 频道 (channel) | ❌ | ✅ | ✅ |
-| 子频道 / 话题 (subchannel) | ❌ | ✅ | ✅ |
-| 群公告（接收） | 🗓️ | 🗓️ | ✅ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 私聊 (direct) | ✅ | ✅ | ✅ | ✅ |
+| 群聊 (group) | ✅ | ✅ | ✅ | ✅ |
+| 频道 (channel) | ❌ | ✅ | ✅ | ✅ |
+| 子频道 / 话题 (subchannel) | ❌ | ✅ | ✅ | ✅ |
+| 群公告（接收） | 🗓️ | ✅ | 🗓️ | ✅ |
 
 </details>
 
 <details open>
 <summary>成员与权限 <code>members</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 成员列表 | ✅ | ✅ | ✅ |
-| 管理员信息 | ✅ | ✅ | ✅ |
-| 成员权限 | ❌ | ✅ | ✅ |
-| 移除群成员 | 🗓️ | ❌ | ✅ |
-| 入群申请管理 | 🗓️ | ❌ | ✅ |
-| 管理群公告 | 🗓️ | ❌ | ✅ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 成员列表 | ✅ | ✅ | ✅ | ✅ |
+| 管理员信息 | ✅ | ✅ | ✅ | ✅ |
+| 成员权限 | ❌ | ✅ | ✅ | ✅ |
+| 移除群成员 | 🗓️ | ❌ | ❌ | ✅ |
+| 入群申请管理 | 🗓️ | ❌ | ❌ | ✅ |
+| 管理群公告 | 🗓️ | ❌ | ❌ | ✅ |
 
 </details>
 
 <details open>
 <summary>消息操作 <code>messageActions</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 撤回自己的消息 | ✅ | ✅ | ✅ |
-| 撤回他人消息（管理员） | ✅ | ✅ | ✅ |
-| 编辑消息 | 撤回重发 | ✅ | ✅ |
-| 转发 | ✅ | ✅ | ✅ |
-| 合并转发 | ✅ | ❌ | ❌ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 撤回自己的消息 | ✅ | ✅ | ✅ | ✅ |
+| 撤回他人消息（管理员） | ✅ | ✅ | ✅ | ✅ |
+| 编辑消息 | 撤回重发 | ✅ | ✅ | ✅ |
+| 转发 | ✅ | ✅ | ✅ | ✅ |
+| 合并转发 | ✅ | ❌ | ❌ | ❌ |
 
 </details>
 
 <details open>
 <summary>消息响应 <code>reactions</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 读取 | ✅ | ✅ | ✅ |
-| 发送 | ✅ | ✅ | ✅ |
-| 实时事件 | ✅ | ✅ | ✅ |
-| 显示点赞者 | ✅ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 读取 | ✅ | ✅ | ✅ | ✅ |
+| 发送 | ✅ | ✅ | ✅ | ✅ |
+| 实时事件 | ✅ | ✅ | ✅ | ✅ |
+| 显示点赞者 | ✅ | ✅ | ✅ | ✅ |
 
 </details>
 
 <details open>
 <summary>头像 <code>avatars</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 用户头像 | ✅ | ✅ | ✅ |
-| 会话头像 | ✅ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 用户头像 | ✅ | ✅ | ✅ | ✅ |
+| 会话头像 | ✅ | ✅ | ✅ | ✅ |
 
 </details>
 
 <details open>
 <summary>表情包 <code>stickers</code></summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 查看 | ✅ | ✅ | ✅ |
-| 收藏管理 | ✅ | ✅ | ✅ |
-| 上传/下载 | ❌ | ❌ | ✅ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 查看 | ✅ | ⚠️ | ✅ | ✅ |
+| 收藏管理 | ✅ | ❌ | ✅ | ✅ |
+| 上传/下载 | ❌ | ❌ | ❌ | ✅ |
 
 </details>
 
 <details open>
 <summary>其它</summary>
 
-| 能力 | QQ（QQNT） | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|
-| 系统消息（灰字） | 🗓️ | 🗓️ | ✅ |
-| 小程序（Web App） | ❌ | ❌ | ✅ |
-| Stories / Premium 等 | ❌ | ❌ | ✅ |
-| 语音 / 视频通话 | ❌ | ❌ | ❌ |
-| Secret Chat | ❌ | ❌ | ❌ |
-| 红包 / 转账 | ❌ | ❌ | ❌ |
+| 能力 | QQ（QQNT） | Discord | 参考实现（static） | 官方 Telegram（relay） |
+|---|:---:|:---:|:---:|:---:|
+| 系统消息（灰字） | 🗓️ | ✅ | 🗓️ | ✅ |
+| 小程序（Web App） | ❌ | ❌ | ❌ | ✅ |
+| Stories / Premium 等 | ❌ | ❌ | ❌ | ✅ |
+| 语音 / 视频通话 | ❌ | ❌ | ❌ | ❌ |
+| Secret Chat | ❌ | ❌ | ❌ | ❌ |
+| 红包 / 转账 | ❌ | ❌ | ❌ | ❌ |
 
 </details>
 </details>
@@ -165,6 +169,11 @@ yarn build && yarn start  # 生产模式
     # 默认隐藏“XXX回应了你的消息：XX”灰条；设为 [] 可全部显示
     grayTipFilters:
       - 回应了你的消息
+
+- id: discord   # Discord 普通用户账号（userbot，有封号风险）
+  name: '@mtproto-relay/platform-discord'
+  config:
+    token: YOUR_DISCORD_USER_TOKEN
 ```
 </details>
 
