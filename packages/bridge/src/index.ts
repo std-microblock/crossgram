@@ -118,7 +118,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx.database, registry, store,
     (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
     dcId,
-    (format, ...args) => bridgeLogger.info(format, ...args),
+    (format, ...args) => bridgeLogger.debug(format, ...args),
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
       .makeMessageMedia(sticker),
   )
@@ -132,7 +132,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error),
     ),
     (session, event) => updates.publish(session, event),
-    (format, ...args) => bridgeLogger.info(format, ...args),
+    (format, ...args) => bridgeLogger.debug(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, stickerRpcFor, resources, store, subscriptions, uploads, generation,
