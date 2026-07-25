@@ -13,6 +13,7 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
 describe('QQNTClient streaming transport', () => {
   let server: Server | undefined
   afterEach(async () => {
+    vi.restoreAllMocks()
     if (!server) return
     server.close()
     await once(server, 'close')
@@ -167,41 +168,17 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
-  it('streams local QQNT resources through the authenticated bridge download route', async () => {
-    let requestBody: unknown
-    let range = ''
-    let authorization = ''
-    server = createServer(async (request, response) => {
-      if (request.url !== '/files/download' || request.method !== 'POST') {
-        response.writeHead(500).end('unexpected direct URL resolution')
-        return
-      }
-      range = request.headers.range ?? ''
-      authorization = request.headers.authorization ?? ''
-      const chunks: Buffer[] = []
-      for await (const chunk of request) chunks.push(Buffer.from(chunk))
-      requestBody = JSON.parse(Buffer.concat(chunks).toString())
-      response.writeHead(206, { 'content-range': 'bytes 1-3/5', 'content-length': '3' })
-      response.end('bcd')
-    })
-    server.listen(0, '127.0.0.1')
-    await once(server, 'listening')
-    const address = server.address()
-    if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({
-      endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token',
-    })
+  it('rejects bridge-local file paths without issuing a download request', async () => {
+    const fetch = vi.fn()
+    const client = new QQNTClient({ fetch })
     const locator = {
       messageId: 'reaction:C:\\qq\\s14.png', elementId: 'reaction:C:\\qq\\s14.png',
       chatType: 1 as const, peerUid: '', kind: 'image' as const,
       fileName: 's14.png', filePath: 'C:\\qq\\s14.png', fileSize: '5',
     }
-    const bytes = await collect(client.downloadFile(locator, { offset: 1, limit: 3 }))
-
-    expect(bytes.toString()).toBe('bcd')
-    expect(range).toBe('bytes=1-3')
-    expect(authorization).toBe('Bearer bridge-token')
-    expect(requestBody).toEqual(locator)
+    await expect(collect(client.downloadFile(locator, { offset: 1, limit: 3 })))
+      .rejects.toThrow('no remote direct-link identity')
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('rejects an ambiguous locator instead of silently falling back for native media', async () => {
@@ -212,7 +189,7 @@ describe('QQNTClient streaming transport', () => {
       peerUid: 'group', kind: 'image', fileName: 'photo.jpg',
     }))
 
-    await expect(download).rejects.toThrow('no native URL or bridge-local path')
+    await expect(download).rejects.toThrow('no remote direct-link identity')
     expect(fetch).not.toHaveBeenCalled()
   })
 
@@ -247,27 +224,36 @@ describe('QQNTClient streaming transport', () => {
     expect(Buffer.concat(chunks).toString()).toBe('complete-file')
   })
 
-  it('requests only the byte range needed from a bridge-resolved video URL', async () => {
-    let range = ''
+  it('single-flights concurrent private-file URL resolution and sends only requested CDN ranges', async () => {
+    const ranges: string[] = []
     let bridgeDownloads = 0
+    let resolverRequests = 0
+    let resolverBody: Record<string, unknown> | undefined
     let resolverAuthorization = ''
-    let cdnAuthorization = ''
+    const cdnAuthorizations: string[] = []
     server = createServer(async (request, response) => {
       if (request.url === '/files/direct-url') {
+        resolverRequests++
         resolverAuthorization = request.headers.authorization ?? ''
-        for await (const _chunk of request) { /* drain locator */ }
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        resolverBody = JSON.parse(Buffer.concat(chunks).toString())
         const address = server!.address()
         if (!address || typeof address === 'string') throw new Error('missing address')
         response.setHeader('content-type', 'application/json')
-        response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/qq-cdn/video` }))
-      } else if (request.url === '/qq-cdn/video') {
-        range = request.headers.range ?? ''
-        cdnAuthorization = request.headers.authorization ?? ''
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/qq-cdn/file`, expiresAt: Date.now() + 60_000,
+        }))
+      } else if (request.url === '/qq-cdn/file') {
+        const range = request.headers.range ?? ''
+        ranges.push(range)
+        cdnAuthorizations.push(request.headers.authorization ?? '')
+        const start = range === 'bytes=0-3' ? 0 : 4
         response.writeHead(206, {
-          'content-range': 'bytes 4-7/10',
+          'content-range': `bytes ${start}-${start + 3}/10`,
           'content-length': '4',
         })
-        response.end('efgh')
+        response.end(start === 0 ? 'abcd' : 'efgh')
       } else {
         bridgeDownloads++
         response.writeHead(500).end()
@@ -280,17 +266,56 @@ describe('QQNTClient streaming transport', () => {
     const client = new QQNTClient({
       endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token',
     })
-    const chunks: Uint8Array[] = []
-    for await (const chunk of client.downloadFile({
-      messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
-      kind: 'file', fileName: 'clip.mp4', videoCodecFormat: 0,
-    }, { offset: 4, limit: 4 })) chunks.push(chunk)
+    const locator = {
+      messageId: 'private-file', elementId: 'element', chatType: 1 as const, peerUid: 'friend-uid',
+      kind: 'file' as const, fileName: 'document.bin', fileUuid: 'private-file-uuid',
+      file10MMd5: 'first-10m-md5',
+    }
+    const [first, second] = await Promise.all([
+      collect(client.downloadFile(locator, { offset: 0, limit: 4 })),
+      collect(client.downloadFile(locator, { offset: 4, limit: 4 })),
+    ])
 
-    expect(range).toBe('bytes=4-7')
+    expect(resolverRequests).toBe(1)
+    expect(resolverBody).toMatchObject({
+      fileUuid: 'private-file-uuid', file10MMd5: 'first-10m-md5',
+    })
+    expect(resolverBody).not.toHaveProperty('filePath')
+    expect(ranges.sort()).toEqual(['bytes=0-3', 'bytes=4-7'])
     expect(resolverAuthorization).toBe('Bearer bridge-token')
-    expect(cdnAuthorization).toBe('')
+    expect(cdnAuthorizations).toEqual(['', ''])
     expect(bridgeDownloads).toBe(0)
-    expect(Buffer.concat(chunks).toString()).toBe('efgh')
+    expect(first.toString()).toBe('abcd')
+    expect(second.toString()).toBe('efgh')
+  })
+
+  it('reuses a file direct URL until the bridge-provided expiry and then refreshes it', async () => {
+    let now = 1_800_000_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let resolutions = 0
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      if (String(input) === 'http://bridge.invalid/v1/files/direct-url') {
+        resolutions++
+        return new Response(JSON.stringify({
+          url: 'https://cdn.qq.example/group-file', expiresAt: now + 100,
+        }), { headers: { 'content-type': 'application/json' } })
+      }
+      if (String(input) === 'https://cdn.qq.example/group-file') return new Response('x')
+      return new Response('unexpected', { status: 500 })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+    const locator = {
+      messageId: 'group-file', elementId: 'element', chatType: 2 as const, peerUid: '1002974327',
+      kind: 'file' as const, fileName: 'document.bin', fileUuid: 'group-file-uuid',
+    }
+
+    await collect(client.downloadFile(locator))
+    now += 99
+    await collect(client.downloadFile(locator))
+    expect(resolutions).toBe(1)
+    now += 2
+    await collect(client.downloadFile(locator))
+    expect(resolutions).toBe(2)
   })
 
   it('downloads an image from its packet-refreshed direct URL without leaking bridge authorization', async () => {
@@ -335,48 +360,11 @@ describe('QQNTClient streaming transport', () => {
     expect(Buffer.concat(chunks).toString()).toBe('bcd')
   })
 
-  it('uses the legacy video resolver during a rolling bridge upgrade', async () => {
-    const requestUrls: string[] = []
-    server = createServer(async (request, response) => {
-      requestUrls.push(request.url ?? '')
-      if (request.url === '/files/direct-url') {
-        for await (const _chunk of request) { /* drain locator */ }
-        response.writeHead(404, { 'content-type': 'application/json' })
-        response.end(JSON.stringify({ error: 'not found' }))
-      } else if (request.url === '/files/play-url') {
-        for await (const _chunk of request) { /* drain locator */ }
-        const address = server!.address()
-        if (!address || typeof address === 'string') throw new Error('missing address')
-        response.setHeader('content-type', 'application/json')
-        response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/legacy-video` }))
-      } else if (request.url === '/legacy-video') {
-        response.end('legacy')
-      } else {
-        response.writeHead(500).end()
-      }
-    })
-    server.listen(0, '127.0.0.1')
-    await once(server, 'listening')
-    const address = server.address()
-    if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({
-      endpoint: `http://127.0.0.1:${address.port}`,
-    })
-    const chunks: Uint8Array[] = []
-    for await (const chunk of client.downloadFile({
-      messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
-      kind: 'file', fileName: 'clip.mp4', videoCodecFormat: 0,
-    })) chunks.push(chunk)
-
-    expect(requestUrls).toEqual(['/files/direct-url', '/files/play-url', '/legacy-video'])
-    expect(Buffer.concat(chunks).toString()).toBe('legacy')
-  })
-
   it('reports a native video resolver failure without calling the non-native bridge path', async () => {
     const resolverUrls: string[] = []
     server = createServer(async (request, response) => {
       for await (const _chunk of request) { /* drain locator */ }
-      if (request.url === '/files/direct-url' || request.url === '/files/play-url') {
+      if (request.url === '/files/direct-url') {
         resolverUrls.push(request.url)
         response.writeHead(500, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ error: 'expired' }))
@@ -393,11 +381,11 @@ describe('QQNTClient streaming transport', () => {
     })
     const download = collect(client.downloadFile({
       messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
-      kind: 'file', fileName: 'clip.mp4', videoCodecFormat: 0,
+      kind: 'file', fileName: 'clip.mp4', fileUuid: 'video-uuid', videoCodecFormat: 0,
     }, { offset: 2, limit: 3 }))
 
     await expect(download).rejects.toThrow('QQNT bridge 500: expired')
-    expect(resolverUrls).toEqual(['/files/direct-url', '/files/play-url'])
+    expect(resolverUrls).toEqual(['/files/direct-url'])
   })
 
   it('reports an image CDN failure without calling the non-native bridge path', async () => {
@@ -433,10 +421,17 @@ describe('QQNTClient streaming transport', () => {
     expect(requestUrls).toEqual(['/files/direct-url', '/expired-image'])
   })
 
-  it('locally slices a whole-file response from the bridge resource route', async () => {
+  it('locally slices a whole-file response when the QQ CDN ignores Range', async () => {
     server = createServer(async (request, response) => {
-      if (request.url === '/files/download') {
+      if (request.url === '/files/direct-url') {
         for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/qq-cdn/file`, expiresAt: Date.now() + 60_000,
+        }))
+      } else if (request.url === '/qq-cdn/file') {
         response.end('abcdefghij')
       } else {
         response.writeHead(500).end()
@@ -449,8 +444,8 @@ describe('QQNTClient streaming transport', () => {
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
-      messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
-      kind: 'file', fileName: 'clip.mp4', filePath: 'C:\\qq\\clip.mp4',
+      messageId: 'file', elementId: 'element', chatType: 2, peerUid: '1002974327',
+      kind: 'file', fileName: 'document.bin', fileUuid: 'group-file-uuid',
     }, { offset: 3, limit: 3 })) chunks.push(chunk)
 
     expect(Buffer.concat(chunks).toString()).toBe('def')

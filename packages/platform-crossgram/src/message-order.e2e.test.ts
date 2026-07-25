@@ -124,45 +124,41 @@ describe('QQNT same-second message ordering E2E', () => {
   })
 })
 
-describe('QQNT local resource routing E2E', () => {
-  it('loads and caches a reaction through files/download without asking for a direct URL', async () => {
-    const png = await sharp({
-      create: { width: 8, height: 8, channels: 4, background: { r: 40, g: 120, b: 200, alpha: 1 } },
-    }).png().toBuffer()
-    const locatorBodies: unknown[] = []
-    let directUrlRequests = 0
-    let authorization = ''
+describe('QQNT remote media routing E2E', () => {
+  it('single-flights concurrent private-file ranges and never calls removed local routes', async () => {
+    let resolverRequests = 0
+    let removedRouteRequests = 0
+    let locatorBody: Record<string, unknown> | undefined
+    const ranges: string[] = []
     let server: Server | undefined
     server = createServer(async (request, response) => {
-      if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+      if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
+        resolverRequests++
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        locatorBody = JSON.parse(Buffer.concat(chunks).toString())
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing test server address')
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({
-          available: [{
-            key: '1:14', title: 'smile',
-            presentation: {
-              type: 'custom', alt: '[smile]',
-              resource: {
-                version: 1, format: 'static', mimeType: 'image/png',
-                width: 8, height: 8, size: png.length,
-                locator: { filePath: 'C:\\qqnt\\emoji\\s14.png' },
-              },
-            },
-          }],
-          reactions: [], maxSelected: 20,
+          url: `http://127.0.0.1:${address.port}/cdn/private-file`,
+          expiresAt: Date.now() + 60_000,
         }))
         return
       }
-      if (request.method === 'POST' && request.url === '/v1/files/download') {
-        authorization = request.headers.authorization ?? ''
-        const chunks: Buffer[] = []
-        for await (const chunk of request) chunks.push(Buffer.from(chunk))
-        locatorBodies.push(JSON.parse(Buffer.concat(chunks).toString()))
-        response.setHeader('content-type', 'image/png')
-        response.setHeader('content-length', png.length)
-        response.end(png)
+      if (request.method === 'GET' && request.url === '/cdn/private-file') {
+        const range = request.headers.range ?? ''
+        ranges.push(range)
+        const start = range === 'bytes=0-3' ? 0 : 4
+        response.writeHead(206, {
+          'content-range': `bytes ${start}-${start + 3}/8`, 'content-length': '4',
+        })
+        response.end(start === 0 ? 'abcd' : 'efgh')
         return
       }
-      if (request.url === '/v1/files/direct-url') directUrlRequests++
+      if (request.url === '/v1/files/download' || request.url === '/v1/files/play-url') {
+        removedRouteRequests++
+      }
       response.writeHead(404).end('not found')
     })
     server.listen(0, '127.0.0.1')
@@ -177,30 +173,30 @@ describe('QQNT local resource routing E2E', () => {
       server.closeAllConnections()
       await closed
     })
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-routing-e2e-'))
-    temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`, token: 'bridge-token',
-    }, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
-
-    const catalog = await platform.getAvailableReactions(session, { conversationId: '123456' })
-    const definition = catalog.available[0]
-    if (!definition || definition.presentation.type !== 'custom') throw new Error('missing custom reaction')
-    const bytes = await collect(platform.downloadReactionResource(
-      session, definition.presentation.resource, { offset: 0, limit: 4 },
-    ))
-
-    expect(directUrlRequests).toBe(0)
-    expect(authorization).toBe('Bearer bridge-token')
-    expect(locatorBodies).toEqual([expect.objectContaining({
-      messageId: 'reaction:C:\\qqnt\\emoji\\s14.png',
-      filePath: 'C:\\qqnt\\emoji\\s14.png',
-    })])
-    expect(definition.presentation.resource).toMatchObject({
-      format: 'static', mimeType: 'image/webp', width: 100, height: 100,
-      locator: { cacheKey: expect.any(String) },
     })
-    expect(bytes.toString()).toBe('RIFF')
+    const media = {
+      id: 'private-file', kind: 'file' as const, name: 'private.bin', size: 8,
+      locator: {
+        messageId: 'private-file', elementId: 'file-element', chatType: 1 as const,
+        peerUid: 'friend-uid', kind: 'file' as const, fileName: 'private.bin',
+        fileUuid: 'private-file-uuid', file10MMd5: 'first-10m-md5',
+      },
+    }
+    const [first, second] = await Promise.all([
+      collect(platform.downloadMedia(session, media, { offset: 0, limit: 4 })),
+      collect(platform.downloadMedia(session, media, { offset: 4, limit: 4 })),
+    ])
+
+    expect(resolverRequests).toBe(1)
+    expect(removedRouteRequests).toBe(0)
+    expect(locatorBody).toMatchObject({
+      fileUuid: 'private-file-uuid', file10MMd5: 'first-10m-md5',
+    })
+    expect(ranges.sort()).toEqual(['bytes=0-3', 'bytes=4-7'])
+    expect(first.toString()).toBe('abcd')
+    expect(second.toString()).toBe('efgh')
   })
 })
 

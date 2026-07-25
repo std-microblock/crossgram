@@ -19,11 +19,18 @@ export interface QQNTSubscribeOptions {
   onEventId?(eventId: string): void
 }
 
+interface DirectUrl {
+  url: string
+  expiresAt: number
+}
+
 export class QQNTClient {
   readonly endpoint: string
   readonly webSocketEndpoint: string
   private readonly token?: string
   private readonly fetchImpl: typeof globalThis.fetch
+  private readonly directUrls = new Map<string, DirectUrl>()
+  private readonly directUrlRefreshes = new Map<string, Promise<DirectUrl>>()
 
   constructor(options: QQNTClientOptions = {}) {
     this.endpoint = (options.endpoint ?? 'http://127.0.0.1:18767/v1').replace(/\/+$/, '')
@@ -284,10 +291,9 @@ export class QQNTClient {
     const ranged = offset > 0 || limit !== undefined
     const end = limit === undefined ? '' : String(offset + limit - 1)
     const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
-    const native = Boolean(locator.originImageUrl) || locator.videoCodecFormat !== undefined
     const avatarUrl = qqAvatarUrl(locator)
     let response: Response
-    if (native || avatarUrl) {
+    if (avatarUrl || hasDirectUrlIdentity(locator)) {
       const directUrl = avatarUrl ?? await this.resolveDirectUrl(locator, options.signal)
       response = await this.fetchImpl(directUrl, {
         headers: rangeHeaders,
@@ -296,21 +302,12 @@ export class QQNTClient {
       })
       if (!response.ok) throw new Error(await nativeResponseError(response))
       if (!response.body) throw new Error('QQNT native media response has no body')
-    } else if (locator.filePath) {
-      response = await this.fetchImpl(`${this.endpoint}/files/download`, {
-        method: 'POST',
-        headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
-        body: JSON.stringify(locator),
-        signal: options.signal,
-      })
-      if (!response.ok) throw new Error(await responseError(response))
-      if (!response.body) throw new Error('QQNT media response has no body')
     } else {
-      throw new Error('QQNT media locator has no native URL or bridge-local path')
+      throw new Error('QQNT media locator has no remote direct-link identity')
     }
     const reader = response.body.getReader()
-    // Direct targets and protocol v13 bridges apply Range. Retain local slicing
-    // for whole-file 200 responses during rolling upgrades and from qlogo.
+    // QQ CDN and qlogo normally apply Range. Retain local slicing for a whole-file
+    // 200 response so a CDN that ignores Range still satisfies upload.getFile.
     let skipped = response.status === 206 ? offset : 0
     let remaining = limit ?? Number.POSITIVE_INFINITY
     let completed = false
@@ -342,20 +339,36 @@ export class QQNTClient {
   }
 
   private async resolveDirectUrl(locator: QQMediaLocator, signal?: AbortSignal): Promise<string> {
-    const init = {
+    if (signal?.aborted) throw signal.reason ?? new Error('download aborted')
+    const key = directUrlIdentity(locator)
+    const cached = this.directUrls.get(key)
+    if (cached && Date.now() < cached.expiresAt) return cached.url
+    const active = this.directUrlRefreshes.get(key)
+    const refresh = active ?? this.fetchDirectUrl(locator).then((value) => {
+      this.rememberDirectUrl(key, value)
+      return value
+    }).finally(() => this.directUrlRefreshes.delete(key))
+    if (!active) this.directUrlRefreshes.set(key, refresh)
+    const resolved = await refresh
+    if (signal?.aborted) throw signal.reason ?? new Error('download aborted')
+    return resolved.url
+  }
+
+  private fetchDirectUrl(locator: QQMediaLocator): Promise<DirectUrl> {
+    return this.json<DirectUrl>('/files/direct-url', false, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify(locator),
-      signal,
+    })
+  }
+
+  private rememberDirectUrl(key: string, value: DirectUrl): void {
+    if (!value.url) throw new Error('QQNT bridge returned an empty direct URL')
+    this.directUrls.delete(key)
+    if (Number.isFinite(value.expiresAt) && value.expiresAt > Date.now()) {
+      this.directUrls.set(key, value)
     }
-    try {
-      return (await this.json<{ url: string }>('/files/direct-url', false, init)).url
-    } catch (error) {
-      if (signal?.aborted || locator.videoCodecFormat === undefined) throw error
-      // Protocol v13 exposed only the video resolver. Keep rolling upgrades
-      // seekable while v14 adds the generic image/video endpoint.
-      return (await this.json<{ url: string }>('/files/play-url', false, init)).url
-    }
+    while (this.directUrls.size > 1_024) this.directUrls.delete(this.directUrls.keys().next().value!)
   }
 
   async subscribe(
@@ -569,4 +582,15 @@ function qqAvatarUrl(locator: QQMediaLocator): string | undefined {
     && /^\d+$/.test(groupUin)) {
     return `https://p.qlogo.cn/gh/${groupUin}/${groupUin}/640/`
   }
+}
+
+function hasDirectUrlIdentity(locator: QQMediaLocator): boolean {
+  return Boolean(locator.originImageUrl || locator.fileUuid)
+}
+
+function directUrlIdentity(locator: QQMediaLocator): string {
+  return JSON.stringify([
+    locator.chatType, locator.peerUid, locator.fileUuid ?? '', locator.file10MMd5 ?? '',
+    locator.videoCodecFormat ?? null, locator.originImageUrl ?? '', locator.avatarUin ?? '',
+  ])
 }

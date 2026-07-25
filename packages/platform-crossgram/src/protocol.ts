@@ -1,3 +1,5 @@
+import type { JsonValue } from '@mtproto-relay/bridge'
+
 export interface QQMediaLocator {
   messageId: string
   elementId: string
@@ -13,7 +15,9 @@ export interface QQMediaLocator {
   md5?: string
   sha?: string
   sha3?: string
-  /** QQ's original CDN URL; bridge protocol v14 can replace its expired RKey. */
+  /** MD5 of the first 10 MiB, required to resolve private-file CDN URLs. */
+  file10MMd5?: string
+  /** QQ's original CDN URL; bridge protocol v15 can replace its expired RKey. */
   originImageUrl?: string
   /** Present only for native QQ video elements. 0 h264, 1 h265. */
   videoCodecFormat?: number
@@ -194,7 +198,7 @@ export interface WireReactionDefinition {
           width: number
           height: number
           size?: number
-          locator: { filePath: string }
+          locator: JsonValue
         }
       }
 }

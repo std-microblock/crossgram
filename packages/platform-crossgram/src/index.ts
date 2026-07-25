@@ -21,6 +21,8 @@ import type {
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
 
+const MIN_DIRECT_URL_PROTOCOL_VERSION = 15
+
 export interface Config extends QQNTClientOptions {
   /**
    * `nickname` always exposes the QQ profile nickname.
@@ -130,6 +132,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const status = await this.client.status()
     const userId = status.selfUid ?? status.selfUin
     if (!status.ready || !userId) throw new Error('QQNT account is not ready')
+    if (status.protocolVersion < MIN_DIRECT_URL_PROTOCOL_VERSION) {
+      throw new Error(`QQNT bridge protocol ${status.protocolVersion} is unsupported; direct media URLs require ${MIN_DIRECT_URL_PROTOCOL_VERSION}`)
+    }
     const user = await this.client.getUser(userId)
     if (!user) throw new Error(`QQNT current user is unavailable: ${userId}`)
     return {
@@ -716,12 +721,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       yield output
       return
     }
-    if (typeof locator.filePath !== 'string') {
-      throw new Error('QQ reaction resource has no cache key or file path')
-    }
+    if (!isRemoteQQMediaLocator(locator)) throw new Error('QQ reaction resource has no cached remote asset')
     let transferredBytes = 0
     for await (const chunk of sliceStream(
-      this.client.downloadFile(reactionMediaLocator(locator.filePath, resource.size), { signal: options.signal }),
+      this.client.downloadFile(locator, { signal: options.signal }),
       options.offset, options.limit,
     )) {
       transferredBytes += chunk.length
@@ -750,12 +753,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       // Directly constructed test/lightweight instances may omit the cache;
       // the production plugin always supplies it from apply().
       if (!this.mediaCache) return definition
-      const filePath = resource.locator.filePath
+      const locator = resource.locator
+      if (!isRemoteQQMediaLocator(locator)) return definition
       const input: IMStickerAsset = {
         source: {
           size: resource.size,
           stream: ({ signal } = {}) => this.client.downloadFile(
-            reactionMediaLocator(filePath, resource.size), { signal },
+            locator, { signal },
           ),
         },
         mimeType: resource.format === 'video' ? 'image/apng' : 'image/png',
@@ -1181,17 +1185,16 @@ function mapParts(
   return parts
 }
 
-function reactionMediaLocator(filePath: string, size?: number): QQMediaLocator {
-  return {
-    messageId: `reaction:${filePath}`,
-    elementId: `reaction:${filePath}`,
-    chatType: 1,
-    peerUid: '',
-    kind: 'image',
-    fileName: filePath.split('/').at(-1) ?? 'reaction.png',
-    filePath,
-    fileSize: size === undefined ? undefined : String(size),
-  }
+function isRemoteQQMediaLocator(value: unknown): value is QQMediaLocator {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const locator = value as Partial<QQMediaLocator>
+  return typeof locator.messageId === 'string'
+    && typeof locator.elementId === 'string'
+    && (locator.chatType === 1 || locator.chatType === 2)
+    && typeof locator.peerUid === 'string'
+    && (locator.kind === 'image' || locator.kind === 'file')
+    && typeof locator.fileName === 'string'
+    && Boolean(locator.originImageUrl || locator.fileUuid || locator.avatarUin)
 }
 
 function multiForwardConversationId(locator: WireMultiForwardLocator): string {
