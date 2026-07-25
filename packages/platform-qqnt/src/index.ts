@@ -1229,9 +1229,12 @@ function mapParts(
       }
     } else if (part.type === 'multi-forward') {
       const conversation = registerMultiForward?.(part.title, part.locator)
+      const text = '查看聊天记录'
       parts.push({
-        type: 'text', text: '\u200b',
-        entities: conversation ? [{ type: 'conversation-link', offset: 0, length: 1, conversation }] : undefined,
+        type: 'text', text,
+        entities: conversation ? [{
+          type: 'conversation-link', offset: 0, length: text.length, conversation,
+        }] : undefined,
       })
     } else if (part.type === 'sticker') {
       parts.push({

@@ -203,8 +203,8 @@ describe('QQNTPlatform mapping', () => {
       .resolves.toMatchObject([{ id: 'forwarded-a' }])
     const merged = await platform.forwardMessages(session, { id: 'from' }, ['a', 'b'], { id: 'to' })
     expect(merged).toMatchObject([{ id: 'merged', content: { parts: [{
-      type: 'text', text: '\u200b', entities: [{
-        type: 'conversation-link', offset: 0, length: 1,
+      type: 'text', text: '查看聊天记录', entities: [{
+        type: 'conversation-link', offset: 0, length: 6,
         conversation: { kind: 'group', title: 'Alice 和 Bob 的聊天记录' },
       }],
     }] } }])
@@ -216,18 +216,40 @@ describe('QQNTPlatform mapping', () => {
       throw new Error('merged forward link was not mapped')
     }
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
-    platform.client.getMultiForwardMessages = vi.fn(async () => [{
-      id: 'nested-message', conversationId: 'from', senderId: 'alice', timestamp: 9, outgoing: false,
-      parts: [{ type: 'text' as const, text: 'nested content' }],
-    }])
-    await expect(platform.getHistory(session, link.entities[0].conversation)).resolves.toMatchObject({
+    platform.client.getMultiForwardMessages = vi.fn()
+      .mockResolvedValueOnce([{
+        id: 'nested-card', conversationId: 'archived-peer', senderId: 'alice', timestamp: 9, outgoing: false,
+        parts: [{
+          type: 'multi-forward' as const, title: '嵌套聊天记录',
+          locator: { conversationId: 'from', rootMessageId: 'merged', parentMessageId: 'nested-card' },
+        }],
+      }])
+      .mockResolvedValueOnce([{
+        id: 'nested-message', conversationId: 'archived-peer', senderId: 'bob', timestamp: 8, outgoing: false,
+        parts: [{ type: 'text' as const, text: 'nested content' }],
+      }])
+    const outerHistory = await platform.getHistory(session, link.entities[0].conversation)
+    expect(outerHistory).toMatchObject({
       messages: [{
-        id: 'nested-message', conversationId: link.entities[0].conversation.id,
+        id: 'nested-card', conversationId: link.entities[0].conversation.id,
+        content: { parts: [{ type: 'text', text: '查看聊天记录' }] },
+      }],
+    })
+    const nestedLink = outerHistory.messages[0].content.parts[0]
+    if (nestedLink.type !== 'text' || nestedLink.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('nested merged forward link was not mapped')
+    }
+    await expect(platform.getHistory(session, nestedLink.entities[0].conversation)).resolves.toMatchObject({
+      messages: [{
+        id: 'nested-message', conversationId: nestedLink.entities[0].conversation.id,
         content: { parts: [{ type: 'text', text: 'nested content' }] },
       }],
     })
-    expect(platform.client.getMultiForwardMessages).toHaveBeenCalledWith({
+    expect(platform.client.getMultiForwardMessages).toHaveBeenNthCalledWith(1, {
       conversationId: 'from', rootMessageId: 'merged',
+    })
+    expect(platform.client.getMultiForwardMessages).toHaveBeenNthCalledWith(2, {
+      conversationId: 'from', rootMessageId: 'merged', parentMessageId: 'nested-card',
     })
   })
 

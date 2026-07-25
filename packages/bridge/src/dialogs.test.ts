@@ -681,8 +681,8 @@ describe('DialogRpc', () => {
     platform.addMessage('alice', {
       id: 'merged', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
       content: { parts: [{
-        type: 'text', text: '\u200b',
-        entities: [{ type: 'conversation-link', offset: 0, length: 1, conversation: temporary }],
+        type: 'text', text: '查看聊天记录',
+        entities: [{ type: 'conversation-link', offset: 0, length: 6, conversation: temporary }],
       }] },
     })
     platform.addMessage(temporary.id, {
@@ -701,15 +701,21 @@ describe('DialogRpc', () => {
     const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
     const merged = history.messages.find((item) => item._ === 'message' && item.id > 0) as tl.RawMessage
     const temporaryId = rpc.peerTlId(temporary.id)
+    if (merged.media?._ !== 'messageMediaWebPage' || merged.media.webpage._ !== 'webPage') {
+      throw new Error('merged forward preview was not projected as a full webpage')
+    }
+    const url = merged.media.webpage.url
+    const insideFirstId = Number(new URL(url).searchParams.get('post'))
+    expect(insideFirstId).toBeGreaterThan(0)
+    expect(merged.message).toBe('查看聊天记录')
     expect(merged.entities).toMatchObject([{
-      _: 'messageEntityTextUrl', offset: 0, length: 1,
-      url: `tg://resolve?domain=bridgechat_${temporaryId}`,
+      _: 'messageEntityTextUrl', offset: 0, length: 6, url,
     }])
     expect(merged.media).toMatchObject({
       _: 'messageMediaWebPage', manual: true, safe: true,
       webpage: {
         _: 'webPage',
-        url: `tg://resolve?domain=bridgechat_${temporaryId}`,
+        url: `tg://resolve?domain=bridgechat_${temporaryId}&post=${insideFirstId}`,
         displayUrl: '聊天记录', type: 'telegram_message',
         title: '聊天记录', description: 'Bob: forwarded content\nAlice: work',
       },
@@ -735,6 +741,11 @@ describe('DialogRpc', () => {
     })).toMatchObject({
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: temporaryId },
       chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
+    })
+    await expect(freshRpc.getMessages({
+      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: insideFirstId }],
+    })).resolves.toMatchObject({
+      messages: [{ _: 'message', id: insideFirstId, message: 'forwarded content' }],
     })
     await expect(freshRpc.getScheduledHistory({
       _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,

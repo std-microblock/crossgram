@@ -62,6 +62,13 @@ interface ResolvedStickerInput {
 
 interface ConversationPreview {
   description: string
+  firstMessageId?: number
+}
+
+interface VirtualMessageTarget {
+  conversationId: string
+  platformMessageId: string
+  tlMessageId: number
 }
 
 export interface LegacyGetForumTopicsRequest {
@@ -90,6 +97,10 @@ export class DialogRpc {
   private static readonly VIRTUAL_CONVERSATIONS = new Map<
     string,
     Map<number, import('./platform.js').IMConversation>
+  >()
+  private static readonly VIRTUAL_FIRST_MESSAGES = new Map<
+    string,
+    Map<number, VirtualMessageTarget>
   >()
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
@@ -496,7 +507,10 @@ export class DialogRpc {
     for (const input of ids) {
       const requestedId = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
       let ref = this._tlToMessage.get(requestedId)
-      if (ref && (expectedPeerId ? ref.peerId !== expectedPeerId : this._conversations.get(ref.peerId)?.kind !== 'direct')) {
+      const refConversation = ref ? this._conversations.get(ref.peerId) : undefined
+      if (ref && (expectedPeerId
+        ? ref.peerId !== expectedPeerId
+        : refConversation?.kind !== 'direct' && (!refConversation || !this._isVirtualConversation(refConversation)))) {
         ref = undefined
       }
       if (!ref && this._store) {
@@ -534,12 +548,15 @@ export class DialogRpc {
             groupedId: part.groupedId ?? undefined,
             media: projected.media.find((entry) => entry.id === part.mediaId),
           }))
-        : await this._loadHistory(ref.peerId, { limit: 1 })
+        : await this._loadHistory(ref.peerId, {
+            limit: this._isVirtualConversation(this._conversation(ref.peerId)) ? 200 : 1,
+          })
       const found = history.find((item) => item.tlId === requestedId)
       if (!found) {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
         continue
       }
+      await this._prepareConversationPreviews([found.source])
       messages.push(this._makeMessage(found))
       linkedSources.push(found.source)
       const sender = await this._getMessageSender(found.source)
@@ -614,6 +631,8 @@ export class DialogRpc {
     this._conversations.set(conversation.id, conversation)
     this._peerToTl.set(conversation.id, tlId)
     this._tlToPeer.set(tlId, conversation.id)
+    const first = DialogRpc.VIRTUAL_FIRST_MESSAGES.get(this._session.platformSessionId)?.get(tlId)
+    if (first) this._rememberVirtualMessageTarget(first)
     return {
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: tlId },
       chats: [this._makeChat(conversation)], users: [],
@@ -2138,10 +2157,27 @@ export class DialogRpc {
     }
     await Promise.all([...linked.values()].map(async (conversation) => {
       try {
-        const page = await this._platform.getHistory!(this._session, { id: conversation.id })
-        const lines = page.messages.slice(0, 3).map((message) => this._conversationPreviewLine(message))
+        const history = await this._loadHistory(conversation.id, { limit: 200 })
+        const messages = history
+          .filter((item) => item.ordinal === 0)
+          .sort((left, right) => left.source.timestamp - right.source.timestamp || left.tlId - right.tlId)
+        const first = messages[0]
+        if (first) {
+          const chatId = this._peerId(conversation.id)
+          const target = {
+            conversationId: conversation.id,
+            platformMessageId: first.source.id,
+            tlMessageId: first.tlId,
+          }
+          const shared = DialogRpc.VIRTUAL_FIRST_MESSAGES.get(this._session.platformSessionId) ?? new Map()
+          shared.set(chatId, target)
+          DialogRpc.VIRTUAL_FIRST_MESSAGES.set(this._session.platformSessionId, shared)
+          this._rememberVirtualMessageTarget(target)
+        }
+        const lines = messages.slice(0, 3).map((item) => this._conversationPreviewLine(item.source))
         this._conversationPreviews.set(conversation.id, {
-          description: lines.join('\n') || `${page.messages.length} 条转发消息`,
+          description: lines.join('\n') || `${messages.length} 条转发消息`,
+          firstMessageId: first?.tlId,
         })
       } catch {
         // A preview is optional; the virtual chat remains addressable even if
@@ -2165,7 +2201,18 @@ export class DialogRpc {
     const shared = DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId) ?? new Map()
     shared.set(chatId, conversation)
     DialogRpc.VIRTUAL_CONVERSATIONS.set(this._session.platformSessionId, shared)
-    return `tg://resolve?domain=bridgechat_${chatId}`
+    const post = this._conversationPreviews.get(conversation.id)?.firstMessageId
+    return `tg://resolve?domain=bridgechat_${chatId}${post ? `&post=${post}` : ''}`
+  }
+
+  private _rememberVirtualMessageTarget(target: VirtualMessageTarget): void {
+    this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}`, target.tlMessageId)
+    this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}\u00000`, target.tlMessageId)
+    this._tlToMessage.set(target.tlMessageId, {
+      peerId: target.conversationId,
+      platformMessageId: target.platformMessageId,
+      ordinal: 0,
+    })
   }
 
   private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
@@ -2572,6 +2619,7 @@ export class DialogRpc {
     const key = `${peerId}\u0000${messageId}`
     const existing = this._messageToTl.get(key)
     if (existing !== undefined) return existing
+    while (this._tlToMessage.has(this._nextMessageId)) this._nextMessageId++
     if (this._nextMessageId > 0x7fffffff) throw new RpcError(500, 'MESSAGE_ID_EXHAUSTED')
     const id = this._nextMessageId++
     this._messageToTl.set(key, id)

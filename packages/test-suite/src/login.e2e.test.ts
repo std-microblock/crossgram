@@ -1592,7 +1592,7 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
-  it('opens a merged-forward preview through a virtual basic chat on a fresh socket', async () => {
+  it('opens nested merged-forward previews at their first message on a fresh socket', async () => {
     const parent: bridge.IMConversation = {
       id: 'parent-room', kind: 'group', title: 'Parent room',
     }
@@ -1600,18 +1600,40 @@ describe('bridge login e2e', () => {
       id: 'virtual-forward', kind: 'group', title: 'Alice 和 Bob 的聊天记录',
       metadata: { virtual: true },
     }
+    const innerVirtual: bridge.IMConversation = {
+      id: 'inner-virtual-forward', kind: 'group', title: 'Bob 和 Carol 的聊天记录',
+      metadata: { virtual: true },
+    }
     const merged: bridge.IMMessage = {
       id: 'merged-root', conversationId: parent.id, senderId: 'alice', timestamp: 1_700_001_000,
       sender: { id: 'alice', firstName: 'Alice' },
       content: { parts: [{
-        type: 'text', text: '\u200b',
-        entities: [{ type: 'conversation-link', offset: 0, length: 1, conversation: virtual }],
+        type: 'text', text: '查看聊天记录',
+        entities: [{ type: 'conversation-link', offset: 0, length: 6, conversation: virtual }],
       }] },
     }
-    const nested: bridge.IMMessage = {
-      id: 'nested-1', conversationId: virtual.id, senderId: 'bob', timestamp: 1_700_000_999,
+    const outerFirst: bridge.IMMessage = {
+      id: 'outer-first', conversationId: virtual.id, senderId: 'bob', timestamp: 1_700_000_997,
       sender: { id: 'bob', firstName: 'Bob' },
-      content: { parts: [{ type: 'text', text: 'nested over a fresh socket' }] },
+      content: { parts: [{
+        type: 'text', text: '查看嵌套聊天记录',
+        entities: [{ type: 'conversation-link', offset: 0, length: 8, conversation: innerVirtual }],
+      }] },
+    }
+    const outerLast: bridge.IMMessage = {
+      id: 'outer-last', conversationId: virtual.id, senderId: 'alice', timestamp: 1_700_000_999,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: { parts: [{ type: 'text', text: 'outer last message' }] },
+    }
+    const innerFirst: bridge.IMMessage = {
+      id: 'inner-first', conversationId: innerVirtual.id, senderId: 'carol', timestamp: 1_700_000_995,
+      sender: { id: 'carol', firstName: 'Carol' },
+      content: { parts: [{ type: 'text', text: 'inner first message' }] },
+    }
+    const innerLast: bridge.IMMessage = {
+      id: 'inner-last', conversationId: innerVirtual.id, senderId: 'bob', timestamp: 1_700_000_996,
+      sender: { id: 'bob', firstName: 'Bob' },
+      content: { parts: [{ type: 'text', text: 'inner last message' }] },
     }
     let virtualMemberCalls = 0
     let virtualReactionCalls = 0
@@ -1631,11 +1653,16 @@ describe('bridge login e2e', () => {
         return { dialogs: [{ conversation: parent, unreadCount: 0, lastMessage: merged }] }
       },
       async getHistory(_session, conversation) {
-        return { messages: conversation.id === virtual.id ? [nested] : [merged] }
+        return { messages: conversation.id === virtual.id
+          ? [outerFirst, outerLast]
+          : conversation.id === innerVirtual.id
+            ? [innerFirst, innerLast]
+            : [merged] }
       },
       async getUser(_session, id) {
         return id === 'alice' ? { id, firstName: 'Alice' }
           : id === 'bob' ? { id, firstName: 'Bob' }
+            : id === 'carol' ? { id, firstName: 'Carol' }
             : null
       },
       async sendMessage() {
@@ -1678,13 +1705,16 @@ describe('bridge login e2e', () => {
       }, 8)
       const preview = parentHistory.messages[0]
       const virtualChat = parentHistory.chats.find((chat: any) => chat.title === virtual.title)
+      const outerUrl = preview.media.webpage.url as string
+      const outerFirstId = Number(new URL(outerUrl).searchParams.get('post'))
+      expect(outerFirstId).toBeGreaterThan(0)
       expect(preview).toMatchObject({
-        _: 'message',
+        _: 'message', message: '查看聊天记录',
         media: {
           _: 'messageMediaWebPage', safe: true,
           webpage: {
             _: 'webPage', type: 'telegram_message', title: virtual.title,
-            url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+            url: `tg://resolve?domain=bridgechat_${virtualChat.id}&post=${outerFirstId}`,
           },
         },
       })
@@ -1699,20 +1729,48 @@ describe('bridge login e2e', () => {
         _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualChat.id },
         chats: [{ _: 'chat', id: virtualChat.id }],
       })
+      const outerTarget = await callRpc(fresh, key, freshSid, {
+        _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: outerFirstId }],
+      }, 11)
+      const nestedPreview = outerTarget.messages[0]
+      const innerChat = outerTarget.chats.find((chat: any) => chat.title === innerVirtual.title)
+      const innerUrl = nestedPreview.media.webpage.url as string
+      const innerFirstId = Number(new URL(innerUrl).searchParams.get('post'))
+      expect(nestedPreview).toMatchObject({
+        _: 'message', id: outerFirstId, message: '查看嵌套聊天记录',
+        media: { webpage: {
+          _: 'webPage', title: innerVirtual.title,
+          url: `tg://resolve?domain=bridgechat_${innerChat.id}&post=${innerFirstId}`,
+        } },
+      })
+      expect(innerFirstId).toBeGreaterThan(0)
+      expect(await callRpc(fresh, key, freshSid, {
+        _: 'contacts.resolveUsername', username: `bridgechat_${innerChat.id}`,
+      }, 13)).toMatchObject({
+        _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: innerChat.id },
+      })
+      expect(await callRpc(fresh, key, freshSid, {
+        _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: innerFirstId }],
+      }, 15)).toMatchObject({
+        messages: [{ _: 'message', id: innerFirstId, message: 'inner first message' }],
+      })
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getFullChat', chatId: virtualChat.id,
-      }, 12)).toMatchObject({
+      }, 17)).toMatchObject({
         _: 'messages.chatFull',
         fullChat: { _: 'chatFull', id: virtualChat.id, participants: { _: 'chatParticipants' } },
         chats: [{ _: 'chat', id: virtualChat.id }],
       })
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,
-      }, 14)).toMatchObject({ _: 'messages.messages', messages: [] })
+      }, 19)).toMatchObject({ _: 'messages.messages', messages: [] })
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getHistory', peer,
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 16)).toMatchObject({ messages: [{ message: 'nested over a fresh socket' }] })
+      }, 21)).toMatchObject({ messages: [
+        { message: 'outer last message' },
+        { id: outerFirstId, message: '查看嵌套聊天记录' },
+      ] })
       expect(virtualMemberCalls).toBe(0)
       expect(virtualReactionCalls).toBe(0)
       fresh.close()
