@@ -133,11 +133,19 @@ export class QQMediaCache {
     return sticker
   }
 
+  /** Materialize transformed sticker metadata before Telegram sees the document. */
+  async prepareSticker(sticker: IMSticker, original: IMStickerAsset): Promise<IMSticker> {
+    const asset = await this.openSticker(sticker, original)
+    return this.restoreStickerThumbnail({
+      ...this.projectSticker(sticker),
+      size: asset.size,
+      width: asset.width ?? sticker.width,
+      height: asset.height ?? sticker.height,
+    })
+  }
+
   async openSticker(sticker: IMSticker, original: IMStickerAsset): Promise<IMStickerAsset> {
     const animated = sticker.format === 'animated' || isAnimatedImage(original.mimeType)
-    const thumbnail = animated
-      ? this.prepareStickerThumbnail(sticker, original.source).catch(() => undefined)
-      : undefined
     const kind = animated ? 'sticker-webm-v1' : 'sticker-webp-v1'
     const asset = await this.ensure(
       cacheKey(kind, sticker.providerId, sticker.stickerId, sticker.version ?? 0, sticker.locator),
@@ -149,7 +157,7 @@ export class QQMediaCache {
         else await this.convertStatic(original.source, temporary)
       },
     )
-    await thumbnail
+    await this.prepareStickerThumbnailFromFile(sticker, asset.path, animated).catch(() => undefined)
     return {
       source: fileSource(asset.path, asset.size), mimeType: asset.mimeType, size: asset.size,
       width: asset.width, height: asset.height,
@@ -167,6 +175,17 @@ export class QQMediaCache {
       () => this.previewFromSource(source),
     )
     return preview ? attachStickerThumbnail(sticker, await this.ensureStickerOutline(sticker, preview)) : sticker
+  }
+
+  private async prepareStickerThumbnailFromFile(
+    sticker: IMSticker,
+    path: string,
+    video: boolean,
+  ): Promise<void> {
+    await this.ensurePreview(
+      stickerPreviewLogicalKey(sticker),
+      () => video ? this.previewFromVideo(path) : this.previewFromFile(path),
+    )
   }
 
   async openStickerThumbnail(sticker: IMSticker): Promise<IMStickerAsset | null> {
@@ -577,7 +596,7 @@ export class QQMediaCache {
   }
 
   private async extractVideoPreview(source: string, output: string): Promise<void> {
-    const scale = `scale=${this.previewMaxDimension}:${this.previewMaxDimension}:force_original_aspect_ratio=decrease`
+    const scale = `scale='min(${this.previewMaxDimension},iw)':'min(${this.previewMaxDimension},ih)':force_original_aspect_ratio=decrease`
     await runProcess(this.ffmpegPath, [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', source,
       '-frames:v', '1', '-vf', scale, '-c:v', 'libwebp', '-f', 'webp', output,

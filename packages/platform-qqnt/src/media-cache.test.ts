@@ -34,13 +34,23 @@ describe('QQMediaCache', () => {
       mimeType: 'image/gif', width: 16, height: 12, locator: { id: 'opaque' },
     }
 
-    expect(cache.projectSticker(sticker)).toMatchObject({ format: 'video', mimeType: 'video/webm' })
+    expect(cache.projectSticker(sticker)).toMatchObject({
+      format: 'video', mimeType: 'video/webm', size: undefined,
+    })
+    const prepared = await cache.prepareSticker(sticker, {
+      source, mimeType: 'image/gif', width: 16, height: 12,
+    })
     const first = await cache.openSticker(sticker, { source, mimeType: 'image/gif', width: 16, height: 12 })
     const second = await cache.openSticker(sticker, { source, mimeType: 'image/gif', width: 16, height: 12 })
     const bytes = await collect(first.source.stream())
     await collect(second.source.stream())
 
     expect(first).toMatchObject({ mimeType: 'video/webm', width: 16, height: 12 })
+    expect(prepared).toMatchObject({
+      format: 'video', mimeType: 'video/webm', size: bytes.length,
+      thumbnail: { mimeType: 'image/webp' },
+    })
+    expect(prepared.size).toBeGreaterThan(0)
     expect([...bytes.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
     const projected = await cache.restoreStickerThumbnail(cache.projectSticker(sticker))
     const thumbnail = await cache.openStickerThumbnail(projected)
@@ -56,7 +66,7 @@ describe('QQMediaCache', () => {
     })
     expect(projected.outline!.byteLength).toBeGreaterThan(0)
     expect(thumbnailBytes.subarray(8, 12).toString()).toBe('WEBP')
-    expect(opens).toBe(2)
+    expect(opens).toBe(1)
   }, 30_000)
 
   it('keeps original image bytes and stores compact previews separately', async () => {

@@ -6,7 +6,7 @@ import { stableId } from './dialogs.js'
 import { telegramStickerPlaceholder } from './sticker-outline.js'
 import type { IMPlatform, PlatformSession } from './platform.js'
 import type {
-  IMSticker, IMStickerAsset, IMStickerPack, IMStickerProvider, IMStickerSendPlan,
+  IMSticker, IMStickerAsset, IMStickerPack, IMStickerPackSummary, IMStickerProvider, IMStickerSendPlan,
   StickerProviderContext, StickerProviderRegistry,
 } from './sticker-provider.js'
 
@@ -16,7 +16,9 @@ interface ResolvedSticker {
   sticker: IMSticker
 }
 
-const STICKER_PROJECTION_VERSION = 5
+// v6 invalidates zero-byte transformed sticker documents emitted before
+// providers materialized their final WebM/WebP metadata.
+const STICKER_PROJECTION_VERSION = 6
 const STICKER_PROVIDER_CACHE_TTL_MS = 5 * 60_000
 // Telegram Desktop ignores every document field when date is zero, leaving a
 // zero-byte generic file. Keep synthetic sticker documents on a stable,
@@ -41,7 +43,10 @@ export class StickerRpc {
   ) {}
 
   async getAllStickers(req: tl.messages.RawGetAllStickersRequest): Promise<tl.messages.TypeAllStickers> {
-    const packs = await this._listPacks()
+    const packs = await this._listPackSummaries()
+    for (const { providerId, pack } of packs) {
+      this._sets.set(this._setId(providerId, pack.packId), { providerId, packId: pack.packId })
+    }
     const installed = await this._installedPacks()
     packs.sort((left, right) => {
       const a = installed.get(packKey(left.pack.providerId, left.pack.packId))
@@ -327,9 +332,11 @@ export class StickerRpc {
     const provider = this._registry.get(ref.providerId)
     if (!provider) return
     const pack = await this._getPack(ref.providerId, provider, ref.packId)
-    const sticker = pack?.stickers[0]
+    const sticker = pack && packCover(pack)
     if (!sticker) return
-    const asset = await provider.openAsset(this._context(), { ...sticker, providerId: ref.providerId })
+    const normalized = { ...sticker, providerId: ref.providerId }
+    const asset = await provider.openThumbnail?.(this._context(), normalized)
+      ?? await provider.openAsset(this._context(), normalized)
     return readAssetRange(asset, offset, limit)
   }
 
@@ -341,6 +348,29 @@ export class StickerRpc {
     return { _: 'messageMediaDocument', document: this._makeDocument({
       providerId, provider: provider ?? missingProvider(), sticker: { ...sticker, providerId },
     }) }
+  }
+
+  private async _listPackSummaries(): Promise<Array<{
+    providerId: string
+    provider: IMStickerProvider
+    pack: IMStickerPackSummary
+  }>> {
+    return this._cached('catalog-summaries', async () => {
+      const result: Array<{
+        providerId: string
+        provider: IMStickerProvider
+        pack: IMStickerPackSummary
+      }> = []
+      for (const [providerId, provider] of this._activeProviders()) {
+        const page = await provider.listPacks(this._context(), { limit: 200 })
+        result.push(...page.packs.map((pack) => ({
+          providerId,
+          provider,
+          pack: { ...pack, providerId },
+        })))
+      }
+      return result
+    })
   }
 
   private async _listPacks(): Promise<Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }>> {
@@ -487,10 +517,13 @@ export class StickerRpc {
   }
 
   private _makeSet(
-    pack: IMStickerPack,
+    pack: IMStickerPackSummary | IMStickerPack,
     installed?: import('./models.js').StickerSetInstallRow,
   ): tl.RawStickerSet {
     const id = this._setId(pack.providerId, pack.packId)
+    const stickers = 'stickers' in pack ? pack.stickers : []
+    const cover = 'stickers' in pack ? packCover(pack) : undefined
+    const coverMetadata = cover?.thumbnail ?? cover
     this._sets.set(id, { providerId: pack.providerId, packId: pack.packId })
     return {
       _: 'stickerSet',
@@ -499,19 +532,21 @@ export class StickerRpc {
         : undefined,
       archived: installed?.archived || undefined,
       id: Long.fromNumber(id), accessHash: Long.fromNumber(id),
-      title: pack.title, shortName: this._shortName(pack), count: pack.stickers.length,
-      thumbs: pack.stickers[0] ? [{
+      title: pack.title, shortName: this._shortName(pack), count: pack.count ?? stickers.length,
+      thumbs: cover && coverMetadata ? [{
         _: 'photoSize', type: 'm',
-        w: pack.stickers[0].width ?? 100,
-        h: pack.stickers[0].height ?? 100,
-        size: Math.min(pack.stickers[0].size ?? 0, 0x7fffffff),
+        w: coverMetadata.width ?? 100,
+        h: coverMetadata.height ?? 100,
+        size: Math.min(coverMetadata.size ?? 0, 0x7fffffff),
       }] : undefined,
-      thumbDcId: pack.stickers[0] ? this._dcId : undefined,
-      thumbVersion: pack.stickers[0] ? STICKER_PROJECTION_VERSION : undefined,
-      thumbDocumentId: pack.stickers[0]
-        ? Long.fromNumber(this._documentId(pack.providerId, pack.stickers[0].stickerId))
+      thumbDcId: cover ? this._dcId : undefined,
+      thumbVersion: cover ? STICKER_PROJECTION_VERSION : undefined,
+      thumbDocumentId: cover
+        ? Long.fromNumber(this._documentId(pack.providerId, cover.stickerId))
         : undefined,
-      hash: catalogHash(pack.stickers.map((sticker) => `${sticker.stickerId}:${sticker.version ?? 0}`)),
+      hash: stickers.length
+        ? catalogHash(stickers.map((sticker) => `${sticker.stickerId}:${sticker.version ?? 0}`))
+        : catalogHash([`${pack.providerId}:${pack.packId}:${pack.version ?? 0}`]),
     }
   }
 
@@ -586,7 +621,7 @@ export class StickerRpc {
     return stableId(`sticker-document:v${STICKER_PROJECTION_VERSION}:${providerId}:${stickerId}`)
   }
 
-  private _shortName(pack: IMStickerPack): string {
+  private _shortName(pack: IMStickerPackSummary): string {
     return pack.shortName ?? `bridge_${this._setId(pack.providerId, pack.packId)}`
   }
 
@@ -634,8 +669,16 @@ function normalizePack(providerId: string, pack: IMStickerPack): IMStickerPack {
   return {
     ...pack,
     providerId,
+    cover: pack.cover && { ...pack.cover, providerId },
     stickers: pack.stickers.map((sticker) => ({ ...sticker, providerId, packId: pack.packId })),
   }
+}
+
+function packCover(pack: IMStickerPack): IMSticker | undefined {
+  if (!pack.cover) return pack.stickers[0]
+  return pack.stickers.find((sticker) =>
+    sticker.providerId === pack.cover!.providerId && sticker.stickerId === pack.cover!.stickerId)
+    ?? pack.stickers[0]
 }
 
 function uploadPlan(resolved: ResolvedSticker, asset: IMStickerAsset): IMStickerSendPlan {
