@@ -14,7 +14,7 @@ const platformOptions = {
   token: process.env.QQNT_BRIDGE_TOKEN,
 }
 const platform = new QQNTPlatform(platformOptions)
-const nativeMediaPlatform = new QQNTPlatform({ ...platformOptions, useNativeMediaDownload: true })
+const nativeMediaPlatform = new QQNTPlatform(platformOptions)
 const session: PlatformSession = {
   platformSessionId: 'live-qqnt', platformId: 'qqnt', userId: 'qq-self', credentials: {}, metadata: {},
 }

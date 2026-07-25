@@ -12,8 +12,8 @@ const cases = [
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
-    'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'mediaDownloadMode',
-    'autoDownloadFileSizeLimit', 'previewMaxDimension', 'ffmpegPath',
+    'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'generatePreviews',
+    'previewMaxDimension', 'ffmpegPath',
   ]],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['relay', relayConfig, ['apiId', 'apiHash', 'storagePath', 'disableUpdates', 'routeId']],
@@ -51,7 +51,7 @@ describe('plugin config schemas', () => {
 
   it('rejects invalid values at the field path', () => {
     expect(() => bridgeConfig({ serverPort: 65_536 })).toThrow(/serverPort/)
-    expect(() => qqntConfig({ mediaDownloadMode: 'eager' as 'auto' })).toThrow(/mediaDownloadMode/)
+    expect(() => qqntConfig({ previewMaxDimension: 0 })).toThrow(/previewMaxDimension/)
     expect(() => staticConfig({ transferChunkSize: 0 })).toThrow(/transferChunkSize/)
     expect(() => relayConfig({ apiId: 0, apiHash: '' })).toThrow(/apiId/)
   })

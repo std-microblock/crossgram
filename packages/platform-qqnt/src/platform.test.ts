@@ -602,11 +602,11 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
-  it('auto-downloads received images once per QQ hash and publishes cached WebP previews', async () => {
+  it('keeps received images in their original format and reuses database-style previews by QQ hash', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-auto-media-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
-      path: cachePath, mediaDownloadMode: 'auto', previewMaxDimension: 6,
+      path: cachePath, previewMaxDimension: 6,
     }))
     const png = await sharp({
       create: { width: 12, height: 8, channels: 4, background: { r: 30, g: 90, b: 180, alpha: 1 } },
@@ -648,15 +648,15 @@ describe('QQNTPlatform mapping', () => {
     await ready.promise
     await unsubscribe()
 
-    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(2)
     expect(received).toHaveLength(2)
     for (const event of received as any[]) expect(event.message.content.parts[0]).toMatchObject({
       media: {
-        name: 'photo.webp', mimeType: 'image/webp',
-        locator: { cachedPath: expect.any(String) },
+        name: 'photo.png', mimeType: 'image/png',
+        locator: expect.not.objectContaining({ cachedPath: expect.anything() }),
         preview: {
           mimeType: 'image/webp', width: 6, height: 4,
-          locator: { cachedPath: expect.any(String) },
+          locator: { previewKey: expect.any(String) },
         },
       },
     })

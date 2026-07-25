@@ -31,8 +31,9 @@
 - id: qqnt
   name: '@mtproto-relay/platform-qqnt'
   config:
-    mediaDownloadMode: auto
     webSocketEndpoint: ws://127.0.0.1:18767/v1/events/ws
+    endpoint: http://127.0.0.1:18768/v1
+    generatePreviews: true
 - id: mtproto-debug
   name: '@mtproto-relay/mtproto-debug'
   config:

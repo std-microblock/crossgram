@@ -13,7 +13,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
-import { defineQQMediaCacheModel, QQMediaCache, type MediaDownloadMode } from './media-cache.js'
+import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireMultiForwardLocator,
   WireReactionState, WireTextPart,
@@ -27,14 +27,10 @@ export interface Config extends QQNTClientOptions {
    * `groupAlias` prefers the conversation-scoped group card when available.
    */
   memberName?: MemberNameMode
-  /** Directory used for cached media, previews, stickers, and reactions. */
+  /** Directory used for transformed media, stickers, and reactions. */
   mediaCachePath?: string
-  /** Auto-cache/convert received media, or fetch the untouched original on demand. */
-  mediaDownloadMode?: MediaDownloadMode
-  /** Use QQNT's native direct-URL download for eligible images/videos. Native failures are not retried. */
-  useNativeMediaDownload?: boolean
-  /** Maximum byte size of files cached automatically. Images are always eligible. */
-  autoDownloadFileSizeLimit?: number
+  /** Generate compact WebP previews and store them in the database. */
+  generatePreviews?: boolean
   /** Maximum width/height of extracted image previews. */
   previewMaxDimension?: number
   /** Override the bundled FFmpeg executable used for GIF/APNG to WebM conversion. */
@@ -47,9 +43,7 @@ export const Config = z.object({
   token: z.string().role('secret'),
   memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
   mediaCachePath: z.string(),
-  mediaDownloadMode: z.union([z.const('on-demand'), z.const('auto')]).default('on-demand'),
-  useNativeMediaDownload: z.boolean().default(false),
-  autoDownloadFileSizeLimit: z.natural().default(10 * 1024 * 1024),
+  generatePreviews: z.boolean().default(true),
   previewMaxDimension: z.natural().min(1).default(320),
   ffmpegPath: z.string(),
 }).i18n({
@@ -69,8 +63,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   defineQQMediaCacheModel(ctx)
   const mediaCache = new QQMediaCache({
     path: config.mediaCachePath ?? resolve(process.cwd(), 'data', 'qqnt-media-cache', id),
-    mediaDownloadMode: config.mediaDownloadMode,
-    autoDownloadFileSizeLimit: config.autoDownloadFileSizeLimit,
+    generatePreviews: config.generatePreviews,
     previewMaxDimension: config.previewMaxDimension,
     ffmpegPath: config.ffmpegPath,
     database: ctx.database,
@@ -616,7 +609,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       size: media.size,
       stream: ({ signal }: { signal?: AbortSignal } = {}) => this.client.downloadFile(media.locator!, { signal }),
     }
-    if (this.mediaCache) {
+    if (this.mediaCache && (media.locator.previewKey || media.locator.cachedPath)) {
       yield* this.mediaCache.download(media, original, options)
       return
     }
@@ -865,7 +858,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMMessage<QQMediaLocator>> {
     if (!this.mediaCache) return message
     const parts = await Promise.all(message.content.parts.map(async (part) => {
-      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldAutoDownload(part.media)) {
+      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) {
         return part
       }
       try {
