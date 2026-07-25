@@ -266,13 +266,14 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       before: query.before?.id ?? (!query.after ? query.cursor : undefined),
       after: query.after?.id,
     })
-    const mapped = [...messages.values()]
-      .filter((message) => this.shouldExposeMessage(message))
+    const ordered = [...messages.values()]
       .sort((left, right) => compareSnowflakes(right.id, left.id))
+    const mapped = ordered
+      .filter((message) => this.shouldExposeMessage(message))
       .map((message) => this.mapMessage(message))
     return {
       messages: mapped,
-      nextCursor: messages.size >= limit ? mapped.at(-1)?.id : undefined,
+      nextCursor: messages.size >= limit ? ordered.at(-1)?.id : undefined,
     }
   }
 
