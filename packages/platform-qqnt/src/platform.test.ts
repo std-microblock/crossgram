@@ -109,7 +109,7 @@ describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 1, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 15, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
@@ -136,6 +136,17 @@ describe('QQNTPlatform mapping', () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({ protocolVersion: 1, ready: false }))
     await expect(platform.getAccount()).rejects.toThrow('not ready')
+  })
+
+  it('rejects bridge protocols that can still fall back to local media downloads', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 14, ready: true, selfUin: '10001', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn()
+
+    await expect(platform.getAccount()).rejects.toThrow('direct media URLs require 15')
+    expect(platform.client.getUser).not.toHaveBeenCalled()
   })
 
   it('edits QQ messages by recalling the old message and resending the replacement', async () => {
@@ -758,7 +769,7 @@ describe('QQNTPlatform mapping', () => {
     }])
   })
 
-  it('maps QQ cloud-controlled reaction definitions and delegates reaction writes', async () => {
+  it('preserves unsupported local reaction definitions without reading disk and delegates reaction writes', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-cache-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
@@ -789,10 +800,7 @@ describe('QQNTPlatform mapping', () => {
       maxSelected: 20,
     }
     platform.client.getReactionCatalog = vi.fn(async () => context)
-    const png = await sharp({
-      create: { width: 1, height: 1, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-    }).png().toBuffer()
-    platform.client.downloadFile = vi.fn(async function* () { yield png })
+    platform.client.downloadFile = vi.fn()
     platform.client.getMessageReactions = vi.fn(async () => ({
       reactions: [{
         ...context.reactions[0],
@@ -810,32 +818,25 @@ describe('QQNTPlatform mapping', () => {
       }, {
         key: '1:265',
         presentation: {
-          resource: { mimeType: 'image/webp', width: 100, height: 100 },
+          resource: { mimeType: 'image/png', width: 200, height: 200 },
         },
       }, {
         key: '1:14',
         presentation: {
-          resource: { format: 'video', mimeType: 'video/webm', width: 100, height: 100 },
+          resource: { format: 'video', mimeType: 'video/webm', width: 128, height: 128 },
         },
       }],
     })
     const custom = catalog.available[1]!
     if (custom.presentation.type !== 'custom') throw new Error('expected custom reaction')
-    const cached: Uint8Array[] = []
-    for await (const chunk of platform.downloadReactionResource(
-      session, custom.presentation.resource, { offset: 8, limit: 4 },
-    )) cached.push(chunk)
-    expect(Buffer.concat(cached).toString()).toBe('WEBP')
-    const animated = catalog.available[2]!
-    if (animated.presentation.type !== 'custom') throw new Error('expected animated custom reaction')
-    expect(animated.presentation.resource).toMatchObject({
-      format: 'video', mimeType: 'video/webm', width: 100, height: 100, size: expect.any(Number),
-    })
-    const webm: Uint8Array[] = []
-    for await (const chunk of platform.downloadReactionResource(
-      session, animated.presentation.resource, { offset: 0, limit: 4 },
-    )) webm.push(chunk)
-    expect(Buffer.concat(webm)).toEqual(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
+    const customResource = custom.presentation.resource
+    const downloadLocal = async () => {
+      for await (const _chunk of platform.downloadReactionResource(
+        session, customResource, { offset: 8, limit: 4 },
+      )) { /* drain */ }
+    }
+    await expect(downloadLocal()).rejects.toThrow('no cached remote asset')
+    expect(platform.client.downloadFile).not.toHaveBeenCalled()
     await expect(platform.getMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm',
     })).resolves.toMatchObject({ reactions: [{
@@ -850,7 +851,7 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(1)
   })
 
-  it('streams untransformed reaction resources when no media cache is configured', async () => {
+  it('streams remote reaction resources when no media cache is configured', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({
       available: [{
@@ -860,7 +861,12 @@ describe('QQNTPlatform mapping', () => {
           alt: '[微笑]',
           resource: {
             version: 2, format: 'static' as const, mimeType: 'image/png' as const,
-            width: 100, height: 100, size: 12, locator: { filePath: '/tmp/s14.png' },
+            width: 100, height: 100, size: 12,
+            locator: {
+              messageId: 'reaction-message', elementId: 'reaction-element', chatType: 2 as const,
+              peerUid: '1002974327', kind: 'image' as const, fileName: 's14.png',
+              originImageUrl: 'https://multimedia.nt.qq.com.cn/download?fileid=s14',
+            },
           },
         },
       }],
@@ -870,7 +876,8 @@ describe('QQNTPlatform mapping', () => {
     const onProgress = vi.fn()
     platform.client.downloadFile = vi.fn(async function* (locator, options) {
       expect(locator).toMatchObject({
-        messageId: 'reaction:/tmp/s14.png', fileName: 's14.png', filePath: '/tmp/s14.png', fileSize: '12',
+        messageId: 'reaction-message', fileName: 's14.png',
+        originImageUrl: 'https://multimedia.nt.qq.com.cn/download?fileid=s14',
       })
       expect(options).toMatchObject({ signal: undefined })
       yield Uint8Array.of(9, 9, 9, 9, 1, 2, 3, 8)

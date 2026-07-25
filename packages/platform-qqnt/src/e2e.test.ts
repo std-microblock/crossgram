@@ -166,7 +166,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     ]))
   }, 60_000)
 
-  it.runIf(Boolean(process.env.QQNT_BRIDGE_E2E_FILE))('streams upload and ranged download via IMPlatform', async () => {
+  it.runIf(Boolean(process.env.QQNT_BRIDGE_E2E_FILE))('uploads a private file and reads two CDN ranges through its direct URL', async () => {
     // The only private recipient permitted by this test suite.
     const target = await platform.client.resolveConversation('direct', directTarget)
     const path = process.env.QQNT_BRIDGE_E2E_FILE!
@@ -186,11 +186,19 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     expect(progress.at(-1)).toBe(info.size)
     const mediaPart = sent.content.parts.find((part) => part.type === 'media')
     if (!mediaPart || mediaPart.type !== 'media') throw new Error('QQ did not confirm media')
-    let downloaded = 0
-    for await (const chunk of platform.downloadMedia(session, mediaPart.media, { offset: 0, limit: 4096 })) {
-      downloaded += chunk.length
+    expect(mediaPart.media.locator).toMatchObject({
+      fileUuid: expect.any(String), file10MMd5: expect.any(String),
+    })
+    const chunkSize = Math.min(4096, info.size)
+    const read = async (offset: number) => {
+      let bytes = 0
+      for await (const chunk of platform.downloadMedia(
+        session, mediaPart.media, { offset, limit: chunkSize },
+      )) bytes += chunk.length
+      return bytes
     }
-    expect(downloaded).toBe(Math.min(4096, info.size))
+    await expect(Promise.all([read(0), read(Math.max(0, info.size - chunkSize))]))
+      .resolves.toEqual([chunkSize, chunkSize])
   }, 240_000)
 
   it.runIf(Boolean(process.env.QQNT_BRIDGE_E2E_IMAGE_CONVERSATION))(
@@ -247,8 +255,8 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
         )) bytes += chunk.length
         return bytes
       }
-      await expect(read(0)).resolves.toBe(chunkSize)
-      await expect(read(size - chunkSize)).resolves.toBe(chunkSize)
+      await expect(Promise.all([read(0), read(size - chunkSize)]))
+        .resolves.toEqual([chunkSize, chunkSize])
     },
     180_000,
   )
