@@ -1,0 +1,112 @@
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 7966b0bde4ad0c66a087dd764585cb2ca62f678d..ab9a64993687b8086b8caed1c1e24e84b9e3c930 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -10,6 +10,7 @@ declare module 'cordis' {
+         http: Http.Intercept;
+     }
+     interface Events {
++        'http/file'(this: Http, url: string, options: FileOptions): Awaitable<FileResponse | undefined>;
+         'http/fetch'(this: Http, url: URL, init: RequestInit, config: Http.Config, next: () => Promise<Response>): Promise<Response>;
+         'http/websocket'(this: Http, url: URL, init: WebSocketInit, config: Http.Config, next: () => WebSocket): WebSocket;
+     }
+@@ -52,6 +53,10 @@ export declare namespace Http {
+     }
+     interface Intercept {
+         baseUrl?: string;
++        /** Satori/Cordis 3 compatibility alias. */
++        baseURL?: string;
++        /** Satori/Cordis 3 compatibility alias. */
++        endpoint?: string;
+         headers?: Dict;
+         timeout?: number;
+         proxyAgent?: string;
+@@ -100,9 +105,19 @@ export interface Http {
+     post: Http.Request2;
+     put: Http.Request2;
+ }
++export interface FileOptions {
++    timeout?: number | string;
++}
++export interface FileResponse {
++    type: string;
++    mime?: string;
++    filename: string;
++    data: ArrayBuffer;
++}
+ export declare class Http extends Service<Http.Intercept> {
+     config: Http.Config;
+     static Error: typeof HttpError;
++    static isAxiosError: typeof HttpError.is;
+     static undici: typeof import('undici');
+     static Config: z<Http.Config>;
+     Config: z<Http.Config>;
+@@ -128,6 +143,10 @@ export declare class Http extends Service<Http.Intercept> {
+     [Service.invoke](...args: any[]): Promise<Response>;
+     private _decode;
+     head(url: string | URL, config?: Http.RequestConfig): Promise<any>;
++    axios<T = any>(config: { url: string } & Http.RequestConfig): Promise<Response>;
++    axios<T = any>(url: string | URL, config?: Http.RequestConfig): Promise<Response>;
++    file(url: string, options?: FileOptions): Promise<FileResponse>;
+     ws(url: string | URL, _config?: Http.Config): WebSocket;
+ }
++export { Http as HTTP };
+ export default Http;
+diff --git a/lib/index.js b/lib/index.js
+index 008fc8de4c6e2ae97296563d85f4bb73a12a0711..fb8010a4be65b558417d62cc11cdb5cfc641919e 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -86,6 +86,7 @@ var Http = class _Http extends Service {
+     __name(this, "Http");
+   }
+   static Error = HttpError;
++  static isAxiosError = HttpError.is;
+   static undici;
+   static {
+     const require2 = createRequire(import.meta.url);
+@@ -160,7 +161,9 @@ var Http = class _Http extends Service {
+     });
+   }
+   resolveConfig(init) {
+-    return this[Service.resolveConfig](this.config, init);
++    const result = this[Service.resolveConfig](this.config, init);
++    result.baseUrl ??= result.baseURL ?? result.endpoint;
++    return result;
+   }
+   resolveURL(url, config, isWebSocket = false) {
+     try {
+@@ -278,6 +281,27 @@ var Http = class _Http extends Service {
+     const response = await this(url, { method: "HEAD", responseType: "headers", ...config });
+     return this._decode(response);
+   }
++  axios(url, config) {
++    if (typeof url === "object") {
++      config = url;
++      url = config.url;
++    }
++    return this(url, config);
++  }
++  async file(url, options = {}) {
++    const task = await this.ctx.serial(this, "http/file", url, options);
++    if (task) return task;
++    const response = await this(url, {
++      method: "GET",
++      timeout: +options.timeout || void 0,
++      validateStatus
++    });
++    const data = await response.arrayBuffer();
++    const type = response.headers.get("content-type") || "application/octet-stream";
++    const pathname = new URL(response.url || url).pathname;
++    const filename = decodeURIComponent(pathname.split("/").pop() || "file");
++    return { type, mime: type, filename, data };
++  }
+   ws(url, _config) {
+     const config = this.resolveConfig(_config);
+     url = this.resolveURL(url, config, true);
+@@ -307,5 +331,6 @@ var Http = class _Http extends Service {
+ var index_default = Http;
+ export {
+   Http,
++  Http as HTTP,
+   index_default as default
+ };

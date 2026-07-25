@@ -17,6 +17,7 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 |---|---|---|
 | **QQ（QQNT）** | `@mtproto-relay/platform-qqnt` | ✅ |
 | **Discord（userbot）** | `@mtproto-relay/platform-discord` | ✅ |
+| **Satori adaptor** | `@mtproto-relay/platform-satori` | ⚠️ 通用核心能力 |
 | **Matrix** | `@mtproto-relay/platform-matrix` | ✅（未加密房间） |
 | **参考实现（static）** | `@mtproto-relay/platform-static` | ✅ |
 | **官方 Telegram 透传（relay）** | `@mtproto-relay/relay` | ✅ |
@@ -138,6 +139,36 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 
 </details>
 </details>
+
+### 引入 Satori adaptor
+
+CrossGram 可以直接复用 Satori 的 Cordis adaptor。先安装需要的 adaptor（以下以 Discord 为例）：
+
+```bash
+yarn add @satorijs/adapter-discord
+```
+
+然后按顺序加载 Satori core、adaptor 和通用桥接插件。`bot` 是 Satori 的 Bot SID，格式为
+`platform:selfId`；只有一个 Bot 时可省略：
+
+```yaml
+- id: satori-core
+  name: '@satorijs/core'
+
+- id: discord-adaptor
+  name: '@satorijs/adapter-discord'
+  config:
+    token: your-token
+
+- id: discord
+  name: '@mtproto-relay/platform-satori'
+  config:
+    bot: discord:your-bot-id
+```
+
+当前通用映射覆盖账号、消息事件、会话与历史、联系人、成员、文字/媒体收发、编辑、删除及媒体下载；
+具体能力仍取决于 adaptor 在 Satori `login.features` 中声明的 API。Satori 4.6 的 npm 包仍携带 Cordis 3
+依赖元数据，本仓库通过 Yarn patch 将它适配到 Cordis 4，并为旧 adaptor 保留 HTTP 兼容 API。
 
 ## 快速开始
 

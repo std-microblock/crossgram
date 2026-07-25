@@ -13,6 +13,10 @@
     "external/*/packages/*",
     "packages/*"
   ],
+  "resolutions": {
+    "@cordisjs/plugin-http@npm:^0.6.3": "patch:@cordisjs/plugin-http@npm%3A1.5.1#~/.yarn/patches/@cordisjs-plugin-http-npm-1.5.1-ce3c6bdf99.patch",
+    "@satorijs/core@npm:^4.6.0": "patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch"
+  },
   "scripts": {
     "build": "yakumo build",
     "dev": "cross-env NODE_ENV=development NODE_OPTIONS=\"--import tsx --import @cordisjs/unyaml\" cordis run",
@@ -44,7 +48,7 @@
     "@cordisjs/plugin-env": "^1.0.1",
     "@cordisjs/plugin-group": "^1.0.0",
     "@cordisjs/plugin-hmr": "^1.0.15",
-    "@cordisjs/plugin-http": "^1.5.1",
+    "@cordisjs/plugin-http": "patch:@cordisjs/plugin-http@npm%3A1.5.1#~/.yarn/patches/@cordisjs-plugin-http-npm-1.5.1-ce3c6bdf99.patch",
     "@cordisjs/plugin-http-socks": "^1.0.0",
     "@cordisjs/plugin-http-webui": "^0.5.0",
     "@cordisjs/plugin-include": "^1.0.4",
@@ -65,6 +69,7 @@
     "@cordisjs/plugin-timer": "^1.1.2",
     "@cordisjs/plugin-webui": "^0.8.1",
     "@cordisjs/plugin-webui-sso": "^0.2.6",
+    "@satorijs/core": "patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch",
     "cordis": "^4.0.0-rc.5"
   },
   "repository": {

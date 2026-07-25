@@ -6,6 +6,7 @@ import { Config as qqntConfig } from '../../platform-qqnt/src/index.js'
 import { Config as discordConfig } from '../../platform-discord/src/index.js'
 import { Config as matrixConfig } from '../../platform-matrix/src/index.js'
 import { Config as staticConfig } from '../../platform-static/src/index.js'
+import { Config as satoriConfig } from '../../platform-satori/src/index.js'
 import { Config as relayConfig } from '../../relay/src/index.js'
 import { Config as resourcesConfig } from '../../telegram-resources/src/index.js'
 
@@ -20,6 +21,7 @@ const cases = [
   ['discord', discordConfig, ['token', 'includeBots', 'downloadChunkSize']],
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'syncTimeoutMs', 'requestTimeoutMs']],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
+  ['satori', satoriConfig, ['bot']],
   ['relay', relayConfig, ['apiId', 'apiHash', 'storagePath', 'disableUpdates', 'routeId']],
   ['resources', resourcesConfig, ['assetsPath', 'providerId']],
 ] as const
