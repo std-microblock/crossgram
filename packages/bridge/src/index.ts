@@ -11,7 +11,7 @@ import type { IMPlatform, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
 import {
-  DialogRpc, stableId,
+  DialogRpc,
   type LegacyGetForumTopicsByIdRequest, type LegacyGetForumTopicsRequest,
 } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
@@ -337,8 +337,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
 
+    const selfRow = await store.getUser(session.platformId, session.userId)
+      ?? await store.upsertUser(session, {
+        id: session.userId,
+        firstName: (ps.metadata.firstName as string) ?? 'Bridge',
+        lastName: ps.metadata.lastName as string | undefined,
+        username: ps.metadata.username as string | undefined,
+        metadata: ps.metadata,
+      })
     const user = makeUser({
-      id: stableId(`self:${ps.id}`),
+      id: selfRow.id,
       self: true,
       premium: true,
       firstName: (ps.metadata.firstName as string) ?? 'Bridge',
@@ -384,11 +392,19 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     await ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }])
     await ctx.database.upsert('mtproto_route_binding', [{ authKeyId, routeId, createdAt: new Date() }])
     ctx.mtproto.bindRoute(rpc.authKeyId, routeId)
-    await requireBridgeSession(rpc)
+    const { session } = await requireBridgeSession(rpc)
 
     const metadata = platformSession.metadata
+    const selfRow = await store.getUser(session.platformId, session.userId)
+      ?? await store.upsertUser(session, {
+        id: session.userId,
+        firstName: (metadata.firstName as string) ?? 'Bridge',
+        lastName: metadata.lastName as string | undefined,
+        username: metadata.username as string | undefined,
+        metadata,
+      })
     const user = makeUser({
-      id: stableId(`self:${platformSession.id}`),
+      id: selfRow.id,
       self: true,
       premium: true,
       firstName: (metadata.firstName as string) ?? 'Bridge',

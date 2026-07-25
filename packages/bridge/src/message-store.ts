@@ -1,6 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type {
-  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageRow, TlMessagePartRow,
+  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageRow, IMUserRow, TlMessagePartRow,
 } from './models.js'
 import {
   messageMedia, messageText,
@@ -57,7 +57,6 @@ export interface StoredHistoryQuery {
 const TIMESTAMP_ALLOCATION_VERSION = 1
 export const UPDATE_DELIVERY_RETENTION = 1_000
 export const ACCOUNT_UPDATE_SCOPE = 'account'
-const STORED_SENDER_KEY = '__mtprotoRelaySender'
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
@@ -69,6 +68,37 @@ export class MessageStore {
     updateDeliveryRetention = UPDATE_DELIVERY_RETENTION,
     private readonly _updateJournal: UpdateDeliveryJournal = new MemoryUpdateDeliveryJournal(updateDeliveryRetention),
   ) {}
+
+  async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
+    return this._write(() => this._database.withTransaction(async (database) =>
+      this._upsertUser(database, session.platformId, user, new Date())))
+  }
+
+  async upsertUsers(session: PlatformSession, users: readonly IMUser[]): Promise<IMUserRow[]> {
+    if (!users.length) return []
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const now = new Date()
+      const rows: IMUserRow[] = []
+      for (const user of uniquePlatformUsers(users)) {
+        rows.push(await this._upsertUser(database, session.platformId, user, now))
+      }
+      return rows
+    }))
+  }
+
+  async getUser(platformId: string, platformUserId: string): Promise<IMUserRow | undefined> {
+    const [row] = await this._database.get('mtproto_im_user', { platformId, platformUserId })
+    return row
+  }
+
+  async getUserByTlId(platformId: string, id: number): Promise<IMUserRow | undefined> {
+    const [row] = await this._database.get('mtproto_im_user', { platformId, id })
+    return row
+  }
+
+  async listUsers(platformId: string): Promise<IMUserRow[]> {
+    return this._database.select('mtproto_im_user', { platformId }).orderBy('id').execute()
+  }
 
   async ingest(
     session: PlatformSession,
@@ -99,7 +129,7 @@ export class MessageStore {
       const results: IngestResult[] = []
       for (const source of sources) {
         results.push(await this._ingestMessage(
-          database, session.platformSessionId, conversationRow, source, options, now, epochCache,
+          database, session, conversationRow, source, options, now, epochCache,
         ))
       }
       return results
@@ -141,7 +171,7 @@ export class MessageStore {
         if (!conversationRow) throw new Error('failed to persist conversation')
         if (dialog.lastMessage) {
           await this._ingestMessage(
-            database, session.platformSessionId, conversationRow, dialog.lastMessage, {}, now, epochCache,
+            database, session, conversationRow, dialog.lastMessage, {}, now, epochCache,
           )
         }
         if (
@@ -150,7 +180,7 @@ export class MessageStore {
         ) {
           await this._ingestMessage(
             database,
-            session.platformSessionId,
+            session,
             conversationRow,
             dialog.readInboxMaxMessage,
             { allocation: 'history' },
@@ -164,13 +194,24 @@ export class MessageStore {
 
   private async _ingestMessage(
     database: Database,
-    platformSessionId: string,
+    session: PlatformSession,
     conversationRow: IMConversationRow,
     source: IMMessage,
     options: IngestOptions,
     now: Date,
     epochCache: Map<string, number>,
   ): Promise<IngestResult> {
+    const platformSessionId = session.platformSessionId
+    const sender = source.sender?.id === source.senderId
+      ? source.sender
+      : { id: source.senderId, firstName: source.senderId }
+    const senderRow = await this._upsertUser(database, session.platformId, sender, now)
+    for (const platformUserId of referencedUserIds(source)) {
+      if (platformUserId === sender.id) continue
+      await this._upsertUser(database, session.platformId, {
+        id: platformUserId, firstName: platformUserId,
+      }, now)
+    }
     const sourceIds = [...new Set([source.id, ...(source.sourceIds ?? [])])]
     let existingAlias: IMMessageAliasRow | undefined
     for (const platformMessageId of sourceIds) {
@@ -196,7 +237,7 @@ export class MessageStore {
     const created = !message
     const storedMetadata = messageMetadata(source)
     const changed = !message || (!message.deleted && (
-      message.senderPlatformUserId !== source.senderId
+      message.senderUserId !== senderRow.id
       || message.text !== messageText(source)
       || JSON.stringify(message.content) !== JSON.stringify(source.content)
       || message.timestamp !== source.timestamp
@@ -214,7 +255,7 @@ export class MessageStore {
         platformSessionId,
         conversationId: conversationRow.id,
         primaryPlatformMessageId: source.id,
-        senderPlatformUserId: source.senderId,
+        senderUserId: senderRow.id,
         text: messageText(source),
         content: source.content as unknown as JsonValue,
         timestamp: source.timestamp,
@@ -227,7 +268,7 @@ export class MessageStore {
       })
     } else {
       await database.set('mtproto_im_message', { id: message.id }, {
-        senderPlatformUserId: source.senderId,
+        senderUserId: senderRow.id,
         text: messageText(source),
         content: source.content as unknown as JsonValue,
         timestamp: source.timestamp,
@@ -731,6 +772,35 @@ export class MessageStore {
     }))
   }
 
+  private async _upsertUser(
+    database: Database,
+    platformId: string,
+    user: IMUser,
+    now: Date,
+  ): Promise<IMUserRow> {
+    const [existing] = await database.get('mtproto_im_user', {
+      platformId, platformUserId: user.id,
+    })
+    const placeholder = user.firstName === user.id
+      && !user.lastName && !user.username && !user.avatar
+      && Object.keys(user.metadata ?? {}).length === 0
+    await database.upsert('mtproto_im_user', [{
+      platformId,
+      platformUserId: user.id,
+      firstName: placeholder && existing ? existing.firstName : user.firstName,
+      lastName: user.lastName ?? existing?.lastName ?? null,
+      username: user.username ?? existing?.username ?? null,
+      avatar: (user.avatar ?? existing?.avatar ?? null) as JsonValue | null,
+      metadata: { ...existing?.metadata, ...user.metadata },
+      updatedAt: now,
+    }], ['platformId', 'platformUserId'])
+    const [row] = await database.get('mtproto_im_user', {
+      platformId, platformUserId: user.id,
+    })
+    if (!row) throw new Error(`failed to persist platform user ${platformId}:${user.id}`)
+    return row
+  }
+
   private async _upsertConversation(
     database: Database,
     session: PlatformSession,
@@ -981,12 +1051,15 @@ export class MessageStore {
       .orderBy('ordinal').execute()
     const reactions = await this._database.select('mtproto_im_message_reaction', { messageId: row.id })
       .orderBy('id').execute()
-    const { sender, replyToId, metadata } = hydrateMessageMetadata(row.metadata)
+    const [senderRow] = await this._database.get('mtproto_im_user', { id: row.senderUserId })
+    if (!senderRow) throw new Error(`message references missing user ${row.senderUserId}`)
+    const { replyToId, metadata } = hydrateMessageMetadata(row.metadata)
+    const sender = toUser(senderRow)
     return {
       id: row.primaryPlatformMessageId,
       sourceIds: aliases.map((alias) => alias.platformMessageId),
       conversationId: (await this._conversationId(row.conversationId)),
-      senderId: row.senderPlatformUserId,
+      senderId: sender.id,
       sender,
       content: row.content as unknown as IMMessageContent,
       timestamp: row.timestamp,
@@ -1082,32 +1155,49 @@ function toConversation(row: IMConversationRow): IMConversation {
 function messageMetadata(message: IMMessage): JsonObject {
   return {
     ...message.metadata,
-    ...(message.sender
-      ? { [STORED_SENDER_KEY]: message.sender as unknown as JsonValue }
-      : {}),
     ...(message.replyToId !== undefined ? { [STORED_REPLY_TO_KEY]: message.replyToId } : {}),
   }
 }
 
 function hydrateMessageMetadata(metadata: JsonObject): {
-  sender?: IMUser
   replyToId?: string
   metadata: JsonObject
 } {
   const publicMetadata = { ...metadata }
-  delete publicMetadata[STORED_SENDER_KEY]
   delete publicMetadata[STORED_REPLY_TO_KEY]
   const replyToId = typeof metadata[STORED_REPLY_TO_KEY] === 'string'
     ? metadata[STORED_REPLY_TO_KEY]
     : undefined
-  const candidate = metadata[STORED_SENDER_KEY]
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-    return { replyToId, metadata: publicMetadata }
+  return { replyToId, metadata: publicMetadata }
+}
+
+export function toUser(row: IMUserRow): IMUser {
+  return {
+    id: row.platformUserId,
+    firstName: row.firstName,
+    lastName: row.lastName ?? undefined,
+    username: row.username ?? undefined,
+    avatar: row.avatar === null ? undefined : row.avatar as unknown as IMUser['avatar'],
+    metadata: row.metadata,
   }
-  const sender = candidate as unknown as IMUser
-  return typeof sender.id === 'string' && typeof sender.firstName === 'string'
-    ? { sender, replyToId, metadata: publicMetadata }
-    : { replyToId, metadata: publicMetadata }
+}
+
+function uniquePlatformUsers(users: readonly IMUser[]): IMUser[] {
+  return [...new Map(users.map((user) => [user.id, user])).values()]
+}
+
+function referencedUserIds(message: IMMessage): Set<string> {
+  const ids = new Set<string>()
+  for (const part of message.content.parts) {
+    if (part.type !== 'text') continue
+    for (const entity of part.entities ?? []) {
+      if (entity.type === 'mention') ids.add(entity.userId)
+    }
+  }
+  for (const reaction of message.reactionContext?.reactions ?? []) {
+    for (const actor of reaction.recentActors ?? []) ids.add(actor.userId)
+  }
+  return ids
 }
 
 function clampDatabaseLimit(limit: number): number {

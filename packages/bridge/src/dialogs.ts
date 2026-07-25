@@ -13,9 +13,9 @@ import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
 } from './message-actions.js'
 import { makeUser } from './synthetic.js'
-import type { MessageStore } from './message-store.js'
+import { toUser, type MessageStore } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
-import type { IMMediaRow } from './models.js'
+import type { IMMediaRow, IMUserRow } from './models.js'
 import type { StagedMedia, UploadedFile, UploadManager } from './upload-manager.js'
 import type { StickerRpc } from './sticker-rpc.js'
 import type { ReactionRpc } from './reaction-rpc.js'
@@ -98,7 +98,8 @@ export class DialogRpc {
   private _pts = 1
   private readonly _sentByRandomId = new Map<string, Promise<tl.RawUpdateShortSentMessage>>()
   private readonly _sentMediaByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
-  private readonly _selfId: number
+  private _selfId = 0
+  private _selfUser?: IMUser
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
   private readonly _historyCache = new Map<string, MaterializedMessage[]>()
@@ -116,6 +117,7 @@ export class DialogRpc {
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peerHydration?: Promise<void>
+  private _userHydration?: Promise<void>
 
   constructor(
     private readonly _platform: IMPlatform<any>,
@@ -129,7 +131,6 @@ export class DialogRpc {
     private readonly _resources?: TelegramResourceService,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
-    this._selfId = this._allocate(`self:${_session.platformSessionId}`, new Map())
     if (store) {
       this._store = store
       this._data = new PlatformDataService(_platform, _session, store)
@@ -137,6 +138,7 @@ export class DialogRpc {
   }
 
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
+    await this._hydrateUsers()
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._tlToPeer.get(inputPeerId(req.offsetPeer))
@@ -148,6 +150,18 @@ export class DialogRpc {
     // Telegram's last offset peer point into the middle of the upstream page,
     // causing the next request to overlap or repeat the first page.
     const all = loaded.dialogs.slice()
+    await this._persistUsers(all
+      .filter((dialog) => dialog.conversation.kind === 'direct')
+      .map((dialog) => ({
+        id: dialog.conversation.id,
+        firstName: dialog.conversation.title,
+        avatar: dialog.conversation.avatar,
+      })))
+    await this._syncStoredUsers()
+    for (const dialog of all) {
+      this._conversations.set(dialog.conversation.id, dialog.conversation)
+      this._peerId(dialog.conversation.id)
+    }
 
     // PlatformDataService has already persisted any previews exposed by
     // getDialogs. Never fan a stored dialog-list request out into upstream
@@ -555,6 +569,7 @@ export class DialogRpc {
   }
 
   async getContacts(): Promise<tl.contacts.RawContacts> {
+    await this._hydrateUsers()
     const platformUsers: IMUser<any>[] = []
     if (this._platform.getContacts) {
       let cursor: string | undefined
@@ -564,6 +579,7 @@ export class DialogRpc {
         cursor = page.nextCursor
       } while (cursor && platformUsers.length < 100_000)
     }
+    await this._persistUsers(platformUsers)
     const users = platformUsers.length
       ? platformUsers
         .sort((left, right) => left.firstName.localeCompare(right.firstName))
@@ -1166,8 +1182,19 @@ export class DialogRpc {
     if (peer._ === 'inputPeerSelf') {
       media = (await this._platform.getUser?.(this._session, this._session.userId))?.avatar
     } else if (peer._ === 'inputPeerUser') {
-      const userId = this._tlToPeer.get(peer.userId)
-      if (userId) media = (await this._platform.getUser?.(this._session, userId))?.avatar
+      let userId = this._tlToPeer.get(peer.userId)
+      if (!userId && this._store) {
+        const row = await this._store.getUserByTlId(this._session.platformId, peer.userId)
+        if (row) {
+          this._registerUser(row)
+          userId = row.platformUserId
+        }
+      }
+      if (userId) {
+        const upstream = await this._platform.getUser?.(this._session, userId)
+        const stored = upstream ? undefined : await this._store?.getUser(this._session.platformId, userId)
+        media = upstream?.avatar ?? (stored ? toUser(stored).avatar : undefined)
+      }
     } else if (peer._ === 'inputPeerChat' || peer._ === 'inputPeerChannel') {
       const conversationId = this._tlToPeer.get(inputPeerId(peer))
       if (conversationId) media = this._conversation(conversationId).avatar
@@ -1284,7 +1311,7 @@ export class DialogRpc {
       _: 'updateMessageReactions',
       peer: this._conversationPeer(conversation),
       msgId: req.msgId,
-      reactions: this._reactions!.messageReactions(peerId, result.message),
+      reactions: this._reactions!.messageReactions(peerId, result.message, (id) => this._userId(id)),
     }
     return {
       _: 'updates', updates: [update],
@@ -1304,7 +1331,8 @@ export class DialogRpc {
       if (!projected) continue
       updates.push({
         _: 'updateMessageReactions', peer: this._conversationPeer(conversation),
-        msgId: id, reactions: this._reactions!.messageReactions(peerId, projected.source),
+        msgId: id,
+        reactions: this._reactions!.messageReactions(peerId, projected.source, (userId) => this._userId(userId)),
       } as tl.RawUpdateMessageReactions)
     }
     return {
@@ -1349,7 +1377,7 @@ export class DialogRpc {
         summary.key === filter || filter === undefined ? count + summary.count : count, 0),
       reactions: actors.map(({ summary, actor }) => ({
         _: 'messagePeerReaction',
-        peerId: { _: 'peerUser', userId: this._peerId(actor.userId) },
+        peerId: { _: 'peerUser', userId: this._userId(actor.userId) },
         date: actor.timestamp ?? projected.source.timestamp,
         reaction: this._reactions!.toTlReaction(peerId, definitions.get(summary.key)!),
         my: actor.userId === this._session.userId || undefined,
@@ -1361,6 +1389,18 @@ export class DialogRpc {
 
   peerTlId(peerId: string): number {
     return this._peerId(peerId)
+  }
+
+  async userTlId(platformUserId: string): Promise<number> {
+    await this._hydrateUsers()
+    const stored = await this._store?.getUser(this._session.platformId, platformUserId)
+    if (stored) {
+      this._registerUser(stored)
+      return stored.id
+    }
+    if (!this._store && this._peerToTl.has(platformUserId)) return this._userId(platformUserId)
+    await this._getPeerUser(platformUserId)
+    return this._userId(platformUserId)
   }
 
   private async _sendMessage(req: SendMessageRequest): Promise<tl.RawUpdateShortSentMessage> {
@@ -1712,6 +1752,7 @@ export class DialogRpc {
           before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
         })
       }
+      await this._syncStoredUsers()
       const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
         limit: fetchLimit,
         beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
@@ -1752,11 +1793,92 @@ export class DialogRpc {
     await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
   }
 
+  private async _hydrateUsers(): Promise<void> {
+    if (this._selfId) return
+    if (this._userHydration) return this._userHydration
+    const pending = (async () => {
+      if (!this._store) {
+        this._selfId = stableId(`self:${this._session.platformSessionId}`)
+        return
+      }
+      let rows = await this._store.listUsers(this._session.platformId)
+      let self = rows.find((row) => row.platformUserId === this._session.userId)
+      if (!self) {
+        const profile = await this._platform.getUser?.(this._session, this._session.userId)
+          ?? {
+            id: this._session.userId,
+            firstName: String(this._session.metadata.firstName ?? 'Bridge'),
+            lastName: this._session.metadata.lastName as string | undefined,
+            username: this._session.metadata.username as string | undefined,
+            metadata: this._session.metadata,
+          }
+        self = await this._store.upsertUser(this._session, profile)
+        rows = [...rows, self]
+      }
+      for (const row of rows) this._registerUser(row)
+      this._selfId = self.id
+    })()
+    this._userHydration = pending
+    try {
+      await pending
+    } finally {
+      if (this._userHydration === pending) this._userHydration = undefined
+    }
+  }
+
+  private async _syncStoredUsers(): Promise<void> {
+    if (!this._store) return
+    for (const row of await this._store.listUsers(this._session.platformId)) this._registerUser(row)
+  }
+
+  private async _persistUsers(users: readonly IMUser[]): Promise<void> {
+    if (!users.length) return
+    if (!this._store) {
+      for (const user of users) this._peerId(user.id)
+      return
+    }
+    for (const row of await this._store.upsertUsers(this._session, users)) this._registerUser(row)
+  }
+
+  private _registerUser(row: IMUserRow): void {
+    const existingPlatformId = this._tlToPeer.get(row.id)
+    if (existingPlatformId && existingPlatformId !== row.platformUserId) {
+      throw new Error(`Telegram user ID ${row.id} is already mapped to ${existingPlatformId}`)
+    }
+    this._peerToTl.set(row.platformUserId, row.id)
+    this._tlToPeer.set(row.id, row.platformUserId)
+    const user = toUser(row)
+    if (row.platformUserId === this._session.userId) {
+      this._selfId = row.id
+      this._selfUser = user
+    }
+    if (user.avatar) {
+      const photoId = Long.fromNumber(stableId(`avatar:${user.avatar.id}`))
+      this._avatarMedia.set(photoId.toString(), user.avatar)
+    }
+  }
+
+  private _userId(platformUserId: string): number {
+    const id = this._peerToTl.get(platformUserId)
+    if (id !== undefined) return id
+    if (!this._store) return this._peerId(platformUserId)
+    throw new Error(`platform user was not persisted before projection: ${platformUserId}`)
+  }
+
   private async _hydratePeers(force = false): Promise<void> {
+    await this._hydrateUsers()
     if (!force && Date.now() - this._peersHydratedAt < DialogRpc.PEER_HYDRATION_TTL_MS) return
     if (this._peerHydration) return this._peerHydration
 
-    const pending = this._loadDialogs().then((dialogs) => {
+    const pending = this._loadDialogs().then(async (dialogs) => {
+      const directUsers = dialogs
+        .filter((dialog) => dialog.conversation.kind === 'direct')
+        .map((dialog) => ({
+          id: dialog.conversation.id,
+          firstName: dialog.conversation.title,
+          avatar: dialog.conversation.avatar,
+        }))
+      await this._persistUsers(directUsers)
       for (const dialog of dialogs) {
         this._conversations.set(dialog.conversation.id, dialog.conversation)
         this._peerId(dialog.conversation.id)
@@ -1799,9 +1921,15 @@ export class DialogRpc {
     if (input._ !== 'inputUser' && input._ !== 'inputUserFromMessage') {
       throw new RpcError(400, 'USER_ID_INVALID')
     }
-    const peerId = this._tlToPeer.get(input.userId)
+    let peerId = this._tlToPeer.get(input.userId)
+    if (!peerId && this._store) {
+      const row = await this._store.getUserByTlId(this._session.platformId, input.userId)
+      if (row) {
+        this._registerUser(row)
+        peerId = row.platformUserId
+      }
+    }
     if (!peerId) throw new RpcError(400, 'USER_ID_INVALID')
-    if (this._conversations.get(peerId)?.kind !== 'direct') throw new RpcError(400, 'USER_ID_INVALID')
     return this._getPeerUser(peerId)
   }
 
@@ -1811,14 +1939,13 @@ export class DialogRpc {
     const sticker = source.content.parts.find((part) => part.type === 'sticker')
     const reply = this._messageReplyHeader(source)
     return projectTlMessage({
-      platformSessionId: this._session.platformSessionId,
       conversation,
       source,
       tlId,
       ordinal: item.ordinal,
       fromId: {
         _: 'peerUser',
-        userId: source.outgoing ? this._selfId : this._peerId(source.senderId),
+        userId: source.outgoing ? this._selfId : this._userId(source.senderId),
       },
       peerId: this._conversationPeer(conversation),
       groupedId: item.groupedId ?? undefined,
@@ -1829,7 +1956,7 @@ export class DialogRpc {
           : this._conversationPreviewMedia(source),
       entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
       reactions: source.reactionContext?.reactions.length
-        ? this._reactions?.messageReactions(source.conversationId, source)
+        ? this._reactions?.messageReactions(source.conversationId, source, (id) => this._userId(id))
         : undefined,
       replyToTlId: reply?.replyToMsgId,
       topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
@@ -1931,7 +2058,7 @@ export class DialogRpc {
             _: 'messageEntityMentionName',
             offset: base + entity.offset,
             length: entity.length,
-            userId: this._peerId(entity.userId),
+            userId: this._userId(entity.userId),
           })
         } else if (entity.type === 'conversation-link') {
           output.push({
@@ -2102,7 +2229,12 @@ export class DialogRpc {
     const pending = this._pendingPeerUsers.get(peerId)
     if (pending) return pending
     const lookup = Promise.resolve(this._platform.getUser?.(this._session, peerId))
-      .then((user) => this._makePeerUser(user ?? { id: peerId, firstName: fallbackName ?? peerId }))
+      .then(async (upstream) => {
+        const stored = upstream ? undefined : await this._store?.getUser(this._session.platformId, peerId)
+        const user = upstream ?? (stored ? toUser(stored) : { id: peerId, firstName: fallbackName ?? peerId })
+        await this._persistUsers([user])
+        return this._makePeerUser(user)
+      })
       .then((user) => {
         this._peerUsers.set(peerId, user)
         return user
@@ -2114,7 +2246,14 @@ export class DialogRpc {
 
   private async _getMessageSender(message: IMMessage<any>): Promise<tl.RawUser> {
     if (message.senderId === this._session.userId) return this._makeSelfUser(message.sender?.avatar)
-    if (!message.sender) return this._getPeerUser(message.senderId)
+    if (!message.sender || (
+      message.sender.firstName === message.sender.id
+      && !message.sender.lastName
+      && !message.sender.username
+      && !message.sender.avatar
+      && Object.keys(message.sender.metadata ?? {}).length === 0
+    )) return this._getPeerUser(message.senderId)
+    await this._persistUsers([message.sender])
     const user = this._makePeerUser(message.sender)
     this._peerUsers.set(message.senderId, user)
     return user
@@ -2140,9 +2279,7 @@ export class DialogRpc {
       if (cursor && seenCursors.has(cursor)) break
       if (cursor) seenCursors.add(cursor)
     } while (cursor && members.length < 10_000)
-    for (const member of members) {
-      if (member.user.id !== this._session.userId) this._peerId(member.user.id)
-    }
+    await this._persistUsers(members.map((member) => member.user))
     return members
   }
 
@@ -2175,6 +2312,7 @@ export class DialogRpc {
     const page = await this._platform.getConversationMembers(
       this._session, { id: conversationId }, { cursor, limit },
     )
+    await this._persistUsers(page.members.map((member) => member.user))
     const nextOffset = offset + page.members.length
     if (page.nextCursor) cursors.set(nextOffset, page.nextCursor)
     return page
@@ -2188,7 +2326,7 @@ export class DialogRpc {
 
   private _makeChannelParticipant(member: IMConversationMember<any>): tl.TypeChannelParticipant {
     const self = member.user.id === this._session.userId
-    const userId = self ? this._selfId : this._peerId(member.user.id)
+    const userId = self ? this._selfId : this._userId(member.user.id)
     if (member.role === 'owner') {
       return {
         _: 'channelParticipantCreator', userId,
@@ -2213,7 +2351,7 @@ export class DialogRpc {
 
   private _makePeerUser(user: IMUser): tl.RawUser {
     return makeUser({
-      id: this._peerId(user.id), firstName: user.firstName,
+      id: this._userId(user.id), firstName: user.firstName,
       lastName: user.lastName, username: user.username,
       contact: true, mutualContact: true,
       photo: user.avatar ? this._makeAvatarPhoto(user.avatar, 'user') : undefined,
@@ -2221,14 +2359,16 @@ export class DialogRpc {
   }
 
   private _makeSelfUser(avatar?: IMMedia<any>): tl.RawUser {
+    const profile = this._selfUser
+    const photo = avatar ?? profile?.avatar
     return makeUser({
       id: this._selfId,
       self: true,
       premium: true,
-      firstName: String(this._session.metadata.firstName ?? 'Bridge'),
-      lastName: this._session.metadata.lastName as string | undefined,
-      username: this._session.metadata.username as string | undefined,
-      photo: avatar ? this._makeAvatarPhoto(avatar, 'user') : undefined,
+      firstName: profile?.firstName ?? String(this._session.metadata.firstName ?? 'Bridge'),
+      lastName: profile?.lastName ?? this._session.metadata.lastName as string | undefined,
+      username: profile?.username ?? this._session.metadata.username as string | undefined,
+      photo: photo ? this._makeAvatarPhoto(photo, 'user') : undefined,
     })
   }
 
@@ -2379,7 +2519,7 @@ export class DialogRpc {
         title: child.title, iconColor: 0x6fb9f0, topMessage: top.tlId,
         readInboxMaxId: top.tlId, readOutboxMaxId: top.tlId,
         unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
-        fromId: { _: 'peerUser', userId: this._peerId(oldest.source.senderId) },
+        fromId: { _: 'peerUser', userId: this._userId(oldest.source.senderId) },
         notifySettings: { _: 'peerNotifySettings' },
       },
     }
@@ -2479,13 +2619,12 @@ export function stableId(value: string): number {
 }
 
 export function projectTlMessage(options: {
-  platformSessionId: string
   conversation: IMConversation
   source: IMMessage
   tlId: number
   ordinal: number
   groupedId?: string
-  fromId?: tl.TypePeer
+  fromId: tl.TypePeer
   peerId?: tl.TypePeer
   media?: tl.TypeMessageMedia
   entities?: tl.TypeMessageEntity[]
@@ -2494,19 +2633,14 @@ export function projectTlMessage(options: {
   topicId?: number
 }): tl.TypeMessage {
   const {
-    platformSessionId, conversation, source, tlId, ordinal,
+    conversation, source, tlId, ordinal,
     groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
   } = options
   const conversationId = stableId(`peer:${conversation.id}`)
   if (ordinal === 0 && source.content.serviceAction) {
     return {
       _: 'messageService', out: source.outgoing || undefined, id: tlId,
-      fromId: fromId ?? {
-        _: 'peerUser',
-        userId: source.outgoing
-          ? stableId(`self:${platformSessionId}`)
-          : stableId(`peer:${source.senderId}`),
-      },
+      fromId,
       peerId: peerId ?? (conversation.kind === 'direct'
         ? { _: 'peerUser', userId: conversationId }
         : { _: 'peerChannel', channelId: conversationId }),
@@ -2522,12 +2656,7 @@ export function projectTlMessage(options: {
   const text = ordinal === 0 ? messageText(source) : ''
   return {
     _: 'message', out: source.outgoing || undefined, id: tlId,
-    fromId: fromId ?? {
-      _: 'peerUser',
-      userId: source.outgoing
-        ? stableId(`self:${platformSessionId}`)
-        : stableId(`peer:${source.senderId}`),
-    },
+    fromId,
     peerId: peerId ?? (conversation.kind === 'direct'
       ? { _: 'peerUser', userId: conversationId }
       : { _: 'peerChannel', channelId: conversationId }),

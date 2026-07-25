@@ -120,7 +120,11 @@ export class ReactionRpc {
     }
   }
 
-  messageReactions(conversationId: string, message: IMMessage): tl.RawMessageReactions {
+  messageReactions(
+    conversationId: string,
+    message: IMMessage,
+    resolveUserId?: (platformUserId: string) => number,
+  ): tl.RawMessageReactions {
     const context = message.reactionContext
     this.registerContext(conversationId, context)
     const definitions = new Map((context?.available ?? []).map((item) => [item.key, item]))
@@ -141,7 +145,12 @@ export class ReactionRpc {
         return definition ? (summary.recentActors ?? []).map((actor): tl.RawMessagePeerReaction => ({
           _: 'messagePeerReaction',
           my: actor.userId === this._session.userId || undefined,
-          peerId: { _: 'peerUser', userId: stableId(`peer:${actor.userId}`) },
+          peerId: {
+            _: 'peerUser',
+            userId: resolveUserId
+              ? resolveUserId(actor.userId)
+              : (() => { throw new Error(`missing persisted user resolver for ${actor.userId}`) })(),
+          },
           date: actor.timestamp ?? message.timestamp,
           reaction: this.toTlReaction(conversationId, definition),
         })) : []

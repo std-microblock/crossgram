@@ -9,7 +9,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, stableId } from './dialogs.js'
+import { DialogRpc } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import type {
@@ -112,6 +112,7 @@ async function createHarness(failSends = 0) {
   }
   const progress: Array<{ mediaIndex: number, transferredBytes: number }> = []
   const store = new MessageStore(ctx.database)
+  const peerId = (await store.upsertUser(session, { id: conversation.id, firstName: conversation.title })).id
   const rpc = new DialogRpc(platform, session, store, uploads, (_session, event) => {
     progress.push({ mediaIndex: event.mediaIndex, transferredBytes: event.transferredBytes })
   })
@@ -119,15 +120,15 @@ async function createHarness(failSends = 0) {
     await rm(directory, { recursive: true, force: true })
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { rpc, platform, uploads, store, consumed, inputs, progress }
+  return { rpc, platform, uploads, store, consumed, inputs, progress, peerId }
 }
 
 function inputFile(id: number, parts: number, name: string): tl.RawInputFile {
   return { _: 'inputFile', id: Long.fromNumber(id), parts, name, md5Checksum: '' }
 }
 
-function peer(): tl.RawInputPeerUser {
-  return { _: 'inputPeerUser', userId: stableId(`peer:${conversation.id}`), accessHash: Long.ZERO }
+function peer(userId: number): tl.RawInputPeerUser {
+  return { _: 'inputPeerUser', userId, accessHash: Long.ZERO }
 }
 
 function wireRoundTrip<T>(object: T): T {
@@ -137,7 +138,7 @@ function wireRoundTrip<T>(object: T): T {
 
 describe('media send streaming', () => {
   it('streams file parts into the adapter, reports progressive bytes, persists, and cleans up', async () => {
-    const { rpc, uploads, store, consumed, progress } = await createHarness()
+    const { rpc, uploads, store, consumed, progress, peerId } = await createHarness()
     const priorPush = await store.prepareUpdateDelivery(
       'prior-push', session.platformSessionId, 1, 1_799_999_999,
     )
@@ -145,7 +146,7 @@ describe('media send streaming', () => {
     await uploads.savePart(session.platformSessionId, '42', 0, new TextEncoder().encode('first-'))
     await uploads.savePart(session.platformSessionId, '42', 1, new TextEncoder().encode('second'))
     const request: tl.messages.RawSendMediaRequest = {
-      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(42), message: 'report',
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(42), message: 'report',
       media: {
         _: 'inputMediaUploadedDocument', file: inputFile(42, 2, 'report.txt'), mimeType: 'text/plain',
         attributes: [{ _: 'documentAttributeFilename', fileName: 'report.txt' }],
@@ -189,11 +190,11 @@ describe('media send streaming', () => {
   })
 
   it('sends mixed image and file content through one platform call with independent streams', async () => {
-    const { rpc, uploads, inputs, consumed, progress } = await createHarness()
+    const { rpc, uploads, inputs, consumed, progress, peerId } = await createHarness()
     await uploads.savePart(session.platformSessionId, '1', 0, new Uint8Array([1, 2]))
     await uploads.savePart(session.platformSessionId, '2', 0, new Uint8Array([3, 4, 5]))
     const result = await rpc.sendMultiMedia({
-      _: 'messages.sendMultiMedia', peer: peer(),
+      _: 'messages.sendMultiMedia', peer: peer(peerId),
       multiMedia: [
         {
           _: 'inputSingleMedia', randomId: Long.ONE, message: 'mixed caption',
@@ -230,11 +231,11 @@ describe('media send streaming', () => {
   })
 
   it('stages uploadMedia across connections, serves previews, and sends referenced documents', async () => {
-    const { rpc, platform, uploads, store, consumed } = await createHarness()
+    const { rpc, platform, uploads, store, consumed, peerId } = await createHarness()
     await uploads.savePart(session.platformSessionId, '77', 0, new TextEncoder().encode('large-'))
     await uploads.savePart(session.platformSessionId, '77', 1, new TextEncoder().encode('document'))
     const uploaded = await rpc.uploadMedia({
-      _: 'messages.uploadMedia', peer: peer(),
+      _: 'messages.uploadMedia', peer: peer(peerId),
       media: {
         _: 'inputMediaUploadedDocument',
         file: { _: 'inputFileBig', id: Long.fromNumber(77), parts: 2, name: 'large.txt' },
@@ -257,7 +258,7 @@ describe('media send streaming', () => {
 
     const resumed = new DialogRpc(platform, session, store, uploads)
     const sent = await resumed.sendMedia({
-      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(77), message: 'two-stage',
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(77), message: 'two-stage',
       media: {
         _: 'inputMediaDocument',
         id: {
@@ -272,10 +273,10 @@ describe('media send streaming', () => {
   })
 
   it('keeps staged parts after a platform failure and retries the same random ID', async () => {
-    const { rpc, uploads, consumed } = await createHarness(1)
+    const { rpc, uploads, consumed, peerId } = await createHarness(1)
     await uploads.savePart(session.platformSessionId, '88', 0, new TextEncoder().encode('retry-me'))
     const uploaded = await rpc.uploadMedia({
-      _: 'messages.uploadMedia', peer: peer(),
+      _: 'messages.uploadMedia', peer: peer(peerId),
       media: {
         _: 'inputMediaUploadedDocument', file: inputFile(88, 1, 'retry.txt'),
         mimeType: 'text/plain', attributes: [],
@@ -283,7 +284,7 @@ describe('media send streaming', () => {
     }) as tl.RawMessageMediaDocument
     const document = uploaded.document as tl.RawDocument
     const request: tl.messages.RawSendMediaRequest = {
-      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(88), message: '',
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(88), message: '',
       media: {
         _: 'inputMediaDocument',
         id: {
@@ -303,7 +304,7 @@ describe('media send streaming', () => {
   })
 
   it('stages photos with the configured media DC and sends them by reference', async () => {
-    const { platform, uploads, store, consumed, inputs } = await createHarness()
+    const { platform, uploads, store, consumed, inputs, peerId } = await createHarness()
     const rpc = new DialogRpc(platform, session, store, uploads, undefined, 5)
     const png = new Uint8Array(24)
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -311,7 +312,7 @@ describe('media send streaming', () => {
     new DataView(png.buffer).setUint32(20, 892)
     await uploads.savePart(session.platformSessionId, '89', 0, png)
     const uploaded = await rpc.uploadMedia({
-      _: 'messages.uploadMedia', peer: peer(),
+      _: 'messages.uploadMedia', peer: peer(peerId),
       media: { _: 'inputMediaUploadedPhoto', file: inputFile(89, 1, 'photo.png') },
     }) as tl.RawMessageMediaPhoto
     const photo = uploaded.photo as tl.RawPhoto
@@ -319,7 +320,7 @@ describe('media send streaming', () => {
     expect(photo.sizes[0]).toMatchObject({ _: 'photoSize', w: 1096, h: 892 })
 
     const sent = await rpc.sendMedia({
-      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(89), message: 'photo',
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(89), message: 'photo',
       media: {
         _: 'inputMediaPhoto',
         id: {
@@ -344,10 +345,10 @@ describe('media send streaming', () => {
   })
 
   it('rejects missing parts before invoking the platform', async () => {
-    const { rpc, uploads, inputs } = await createHarness()
+    const { rpc, uploads, inputs, peerId } = await createHarness()
     await uploads.savePart(session.platformSessionId, '9', 0, new Uint8Array([1]))
     await expect(rpc.sendMedia({
-      _: 'messages.sendMedia', peer: peer(), randomId: Long.fromNumber(9), message: '',
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(9), message: '',
       media: { _: 'inputMediaUploadedPhoto', file: inputFile(9, 2, 'broken.jpg') },
     })).rejects.toMatchObject({ code: 400 })
     expect(inputs).toEqual([])

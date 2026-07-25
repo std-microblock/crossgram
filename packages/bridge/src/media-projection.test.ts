@@ -9,7 +9,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, projectTlMessage, stableId } from './dialogs.js'
+import { DialogRpc, projectTlMessage } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { UploadManager } from './upload-manager.js'
@@ -77,7 +77,8 @@ it('projects platform service actions as Telegram MessageService records', () =>
     content: { parts: [], serviceAction: { type: 'custom', text: 'Alice戳了戳你' } },
   }
   expect(projectTlMessage({
-    platformSessionId: session.platformSessionId, conversation, source, tlId: 7, ordinal: 0,
+    conversation, source, tlId: 7, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 },
   })).toMatchObject({
     _: 'messageService', id: 7,
     action: { _: 'messageActionCustomAction', message: 'Alice戳了戳你' },
@@ -98,13 +99,17 @@ async function createStore() {
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return new MessageStore(ctx.database)
+  const store = new MessageStore(ctx.database)
+  const peerId = (await store.upsertUser(session, {
+    id: conversation.id, firstName: conversation.title,
+  })).id
+  return { store, peerId }
 }
 
-function historyRequest(): tl.messages.RawGetHistoryRequest {
+function historyRequest(userId: number): tl.messages.RawGetHistoryRequest {
   return {
     _: 'messages.getHistory',
-    peer: { _: 'inputPeerUser', userId: stableId(`peer:${conversation.id}`), accessHash: Long.ZERO },
+    peer: { _: 'inputPeerUser', userId, accessHash: Long.ZERO },
     offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
   }
 }
@@ -123,7 +128,7 @@ function wireRoundTrip<T>(object: T): T {
 
 describe('rich-media projection', () => {
   it('keeps reply headers when the target is outside the requested history window', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const target: IMMessage = {
       id: 'old-target', conversationId: conversation.id, senderId: 'bob', timestamp: 100,
       content: { parts: [{ type: 'text', text: 'old target' }] },
@@ -142,7 +147,7 @@ describe('rich-media projection', () => {
       async getHistory() { return { messages: [reply, filler, target] } },
       async getMessage(_session, _conversation, id) { return id === target.id ? target : null },
     }
-    const request = { ...historyRequest(), limit: 1 }
+    const request = { ...historyRequest(peerId), limit: 1 }
     const result = await new DialogRpc(replyPlatform, session, store)
       .getHistory(request) as tl.messages.RawMessages
     const projectedTarget = await store.findProjectedByPlatformId(
@@ -156,7 +161,7 @@ describe('rich-media projection', () => {
   })
 
   it('materializes persisted dialog previews without fetching every conversation history', async () => {
-    const store = await createStore()
+    const { store } = await createStore()
     const getHistory = vi.fn(async () => ({ messages: [album] }))
     const result = await new DialogRpc({ ...platform, getHistory }, session, store)
       .getDialogs(dialogsRequest()) as tl.messages.RawDialogs
@@ -168,7 +173,7 @@ describe('rich-media projection', () => {
   })
 
   it('does not fetch history for a stored dialog whose cold-start preview is absent', async () => {
-    const store = await createStore()
+    const { store } = await createStore()
     const getHistory = vi.fn(async () => ({ messages: [album] }))
     const getDialogs = vi.fn(async () => ({ dialogs: [{ conversation, unreadCount: 0 }] }))
     const result = await new DialogRpc({ ...platform, getDialogs, getHistory }, session, store)
@@ -180,9 +185,9 @@ describe('rich-media projection', () => {
   })
 
   it('expands mixed media into consecutive ungrouped Telegram messages', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const rpc = new DialogRpc(platform, session, store)
-    const result = await rpc.getHistory(historyRequest()) as tl.messages.RawMessages
+    const result = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const messages = result.messages as tl.RawMessage[]
 
     expect(messages).toHaveLength(2)
@@ -206,11 +211,11 @@ describe('rich-media projection', () => {
   })
 
   it('serves an extracted photo preview through Telegram thumb_size m', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
     disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
     const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
-    const history = await rpc.getHistory(historyRequest()) as tl.messages.RawMessages
+    const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const media = (history.messages.at(-1) as tl.RawMessage).media as tl.RawMessageMediaPhoto
     if (media.photo?._ !== 'photo') throw new Error('expected photo')
     const file = await rpc.getFile({
@@ -225,8 +230,64 @@ describe('rich-media projection', () => {
     expect(new TextDecoder().decode(file.bytes)).toBe('photo-preview')
   })
 
+  it('restores a persisted user ID and avatar locator in a fresh DialogRpc instance', async () => {
+    const { store } = await createStore()
+    const avatar = {
+      id: 'avatar:user:alice', kind: 'image' as const, mimeType: 'image/jpeg',
+      locator: { remote: 'avatar-bytes' },
+    }
+    const avatarPlatform: IMPlatform = {
+      ...platform,
+      async getContacts() {
+        return { users: [{ id: 'alice', firstName: 'Alice', username: '1715311957', avatar }] }
+      },
+      async getUser(_session, id) {
+        return id === session.userId ? null : null
+      },
+    }
+    const firstRpc = new DialogRpc(avatarPlatform, session, store)
+    const contacts = await firstRpc.getContacts()
+    const alice = contacts.users[0] as tl.RawUser
+    if (alice.photo?._ !== 'userProfilePhoto') throw new Error('expected persisted avatar')
+
+    const freshRpc = new DialogRpc(avatarPlatform, session, store)
+    const file = await freshRpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPeerPhotoFileLocation',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        photoId: alice.photo.photoId,
+      },
+      offset: 0, limit: 1024,
+    })
+
+    expect(file._).toBe('upload.file')
+    if (file._ === 'upload.file') expect(new TextDecoder().decode(file.bytes)).toBe('avatar-bytes')
+    expect(await freshRpc.userTlId('alice')).toBe(alice.id)
+  })
+
+  it('restores persisted sender and self IDs when getMessages is the first RPC', async () => {
+    const { store } = await createStore()
+    const self = await store.upsertUser(session, { id: session.userId, firstName: 'Current' })
+    const ingested = await store.ingest(session, conversation, album)
+    const sender = await store.getUser(session.platformId, album.senderId)
+
+    const result = await new DialogRpc(platform, session, store).getMessages({
+      _: 'messages.getMessages',
+      id: [{ _: 'inputMessageID', id: ingested.projection[0].tlMessageId }],
+    }) as tl.messages.RawMessages
+
+    expect(result.messages[0]).toMatchObject({
+      _: 'message', fromId: { _: 'peerUser', userId: sender!.id },
+    })
+    expect(result.users).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'user', id: self.id, self: true }),
+      expect.objectContaining({ _: 'user', id: sender!.id, firstName: 'Alice' }),
+    ]))
+  })
+
   it('projects converted animated images as WebM documents with a preview', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const animated: IMMessage = {
       ...album,
       id: 'animated-image',
@@ -244,7 +305,7 @@ describe('rich-media projection', () => {
     }
     const result = await new DialogRpc({
       ...platform, async getHistory() { return { messages: [animated] } },
-    }, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
+    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const projected = result.messages.find((message) => message._ === 'message'
       && message.media?._ === 'messageMediaDocument'
       && message.media.document?._ === 'document'
@@ -265,7 +326,7 @@ describe('rich-media projection', () => {
   })
 
   it('projects native MP4 media as a seekable Telegram video with duration', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const video: IMMessage = {
       ...album,
       id: 'native-video',
@@ -280,7 +341,7 @@ describe('rich-media projection', () => {
     }
     const result = await new DialogRpc({
       ...platform, async getHistory() { return { messages: [video] } },
-    }, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
+    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const message = result.messages.find((item) => item._ === 'message') as tl.RawMessage
 
     expect(message.media).toMatchObject({
@@ -297,7 +358,7 @@ describe('rich-media projection', () => {
   })
 
   it('keeps same-kind media grouped as a Telegram album', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const imageAlbum: IMMessage = {
       ...album,
       id: 'image-album',
@@ -313,16 +374,19 @@ describe('rich-media projection', () => {
       async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: imageAlbum }] } },
       async getHistory() { return { messages: [imageAlbum] } },
     }
-    const result = await new DialogRpc(imagePlatform, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
+    const result = await new DialogRpc(imagePlatform, session, store)
+      .getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const messages = result.messages as tl.RawMessage[]
     expect(messages[0].groupedId?.toString()).toBe(messages[1].groupedId?.toString())
     expect(messages[0].groupedId).toBeDefined()
   })
 
   it('reuses message and grouped IDs in a fresh DialogRpc instance', async () => {
-    const store = await createStore()
-    const first = await new DialogRpc(platform, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
-    const second = await new DialogRpc(platform, session, store).getHistory(historyRequest()) as tl.messages.RawMessages
+    const { store, peerId } = await createStore()
+    const first = await new DialogRpc(platform, session, store)
+      .getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const second = await new DialogRpc(platform, session, store)
+      .getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const pick = (result: tl.messages.RawMessages) => (result.messages as tl.RawMessage[]).map((message) => ({
       id: message.id,
       groupedId: message.groupedId?.toString(),
@@ -332,7 +396,7 @@ describe('rich-media projection', () => {
   })
 
   it('requests and materializes bounded history windows instead of loading the full conversation', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const messages = Array.from({ length: 1_000 }, (_, index): IMMessage => ({
       id: String(1_000 - index),
       conversationId: conversation.id,
@@ -353,12 +417,12 @@ describe('rich-media projection', () => {
       },
     }
     const rpc = new DialogRpc(pagedPlatform, session, store)
-    const first = await rpc.getHistory({ ...historyRequest(), limit: 2 }) as tl.messages.RawMessages
+    const first = await rpc.getHistory({ ...historyRequest(peerId), limit: 2 }) as tl.messages.RawMessages
     expect(queries).toMatchObject([{ limit: 3, before: undefined }])
     expect(first.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual(['1000', '999'])
 
     const offsetId = (first.messages[1] as tl.RawMessage).id
-    const second = await rpc.getHistory({ ...historyRequest(), offsetId, limit: 2 }) as tl.messages.RawMessages
+    const second = await rpc.getHistory({ ...historyRequest(peerId), offsetId, limit: 2 }) as tl.messages.RawMessages
     expect(queries[1]).toMatchObject({ limit: 3, before: { id: '999' } })
     expect(second.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual(['998', '997'])
     expect((await store.readHistory(session.platformSessionId, conversation.id, { limit: 100 })).length)
@@ -366,7 +430,7 @@ describe('rich-media projection', () => {
   })
 
   it('lets an adapter fetch around unread state for a persisted negative-offset window', async () => {
-    const store = await createStore()
+    const { store, peerId } = await createStore()
     const messages = ['old', 'read', 'unread', 'latest'].map((id, index): IMMessage => ({
       id,
       conversationId: conversation.id,
@@ -394,7 +458,7 @@ describe('rich-media projection', () => {
     const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
     const dialog = dialogs.dialogs[0] as tl.RawDialog
     const history = await rpc.getHistory({
-      ...historyRequest(),
+      ...historyRequest(peerId),
       offsetId: dialog.readInboxMaxId,
       addOffset: -2,
       limit: 3,

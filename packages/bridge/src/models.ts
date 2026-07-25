@@ -48,11 +48,12 @@ export interface IMConversationRow {
 
 export interface IMUserRow {
   id: number
-  platformSessionId: string
+  platformId: string
   platformUserId: string
   firstName: string
   lastName: string | null
   username: string | null
+  avatar: JsonValue | null
   metadata: JsonObject
   updatedAt: Date
 }
@@ -62,7 +63,7 @@ export interface IMMessageRow {
   platformSessionId: string
   conversationId: number
   primaryPlatformMessageId: string
-  senderPlatformUserId: string
+  senderUserId: number
   text: string
   content: JsonValue
   timestamp: number
@@ -263,24 +264,24 @@ export function defineModels(ctx: Context): void {
   })
 
   ctx.model.extend('mtproto_im_user', {
-    id: 'unsigned', platformSessionId: 'string', platformUserId: 'text', firstName: 'text',
+    id: 'unsigned', platformId: 'string', platformUserId: 'text', firstName: 'text',
     lastName: { type: 'text', nullable: true }, username: { type: 'text', nullable: true },
-    metadata: 'json', updatedAt: 'timestamp',
+    avatar: { type: 'json', nullable: true }, metadata: 'json', updatedAt: 'timestamp',
   }, {
     primary: 'id', autoInc: true,
-    unique: [['platformSessionId', 'platformUserId']],
-    indexes: ['platformSessionId'],
+    unique: [['platformId', 'platformUserId']],
+    indexes: ['platformId'],
   })
 
   ctx.model.extend('mtproto_im_message', {
     id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
-    primaryPlatformMessageId: 'text', senderPlatformUserId: 'text', text: 'text', content: 'json', timestamp: 'integer',
+    primaryPlatformMessageId: 'text', senderUserId: 'unsigned', text: 'text', content: 'json', timestamp: 'integer',
     outgoing: 'boolean', deleted: 'boolean', platformGroupId: { type: 'text', nullable: true }, metadata: 'json',
     createdAt: 'timestamp', updatedAt: 'timestamp',
   }, {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'conversationId', 'primaryPlatformMessageId']],
-    indexes: [['conversationId', 'timestamp']],
+    indexes: [['conversationId', 'timestamp'], 'senderUserId'],
   })
 
   ctx.model.extend('mtproto_im_message_alias', {

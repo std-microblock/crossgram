@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { bigint, Emitter, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
@@ -300,7 +300,13 @@ async function startApp(options: {
     ...(options.relayConfig ? [ctx.plugin(relay, options.relayConfig)] : []),
     options.platform
       ? ctx.plugin(makePlatformPlugin(options.platform.id, options.platform.adapter))
-      : ctx.plugin(staticPlatformPlugin, { eventIntervalMs: 0, historySize: 10_000 }),
+      : ctx.plugin(staticPlatformPlugin, {
+          eventIntervalMs: 0,
+          historySize: 10_000,
+          // Keep live synthetic messages inside the same deterministic Telegram
+          // message-ID time window as the reference adapter's seeded history.
+          now: () => 1_700_001_000,
+        } as staticPlatformPlugin.Config & Pick<staticPlatformPlugin.StaticPlatformOptions, 'now'>),
   ]
   await Promise.all(fibers)
   await new Promise((r) => setTimeout(r, 100)) // let fibers settle
@@ -321,6 +327,16 @@ async function waitForPlatformLogin(ctx: Context, platformId: string) {
   throw new Error(`platform login was not provisioned: ${platformId}`)
 }
 
+async function waitForWebuiRoute(ctx: Context, route: string) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const entry = Object.values(ctx.webui.entries)
+      .find(candidate => candidate.files.routes?.includes(route))
+    if (entry) return entry
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`webui route was not registered: ${route}`)
+}
+
 function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
   const plugin = (ctx: Context) => { ctx.imPlatform.register(platform, id) }
   plugin.inject = ['imPlatform']
@@ -329,14 +345,14 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 
 describe('bridge login e2e', () => {
   it('logs in, resumes on a fresh connection, reads contacts/history, and sends a message', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_700_001_000_000)
     const { ctx, port, pubKey, stop } = await startApp()
     dbg('app started, mtproto port', port)
     try {
       const platformLogin = await waitForPlatformLogin(ctx, 'static')
       const phone = platformLogin.auth.virtualPhone
       dbg('platform supplied identity and bridge provisioned phone', phone)
-      const accountEntry = Object.values(ctx.webui.entries)
-        .find(entry => entry.files.routes?.includes('/platform-accounts'))
+      const accountEntry = await waitForWebuiRoute(ctx, '/platform-accounts')
       expect(accountEntry?.data).toMatchObject({
         accounts: [{
           platformId: 'static', platformKind: 'static', status: 'ready',
@@ -451,6 +467,18 @@ describe('bridge login e2e', () => {
       expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
       expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
       const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      const platformUsers = await ctx.database.get('mtproto_im_user', { platformId: 'static' })
+      const selfRow = platformUsers.find(user => user.platformUserId === 'self')
+      const aliceRow = platformUsers.find(user => user.platformUserId === 'alice')
+      expect(selfRow).toMatchObject({
+        id: (auth as any).user.id, firstName: 'Static User', username: 'static_user',
+      })
+      expect(aliceRow).toMatchObject({
+        id: alice.id, firstName: 'Alice',
+        avatar: expect.objectContaining({
+          id: 'avatar:user:alice', locator: { mediaId: 'avatar:user:alice' },
+        }),
+      })
       expect(alice.photo).toMatchObject({ _: 'userProfilePhoto', dcId: 1 })
       const avatar = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 1024,
@@ -560,6 +588,14 @@ describe('bridge login e2e', () => {
         'How are you?', 'Hey there!',
       ])
       expect(history.users.some((user: any) => user.self && user.firstName === 'Static User')).toBe(true)
+      const [aliceConversation] = await ctx.database.get('mtproto_im_conversation', {
+        platformSessionId: platformLogin.session.id, platformConversationId: 'alice',
+      })
+      const storedAliceMessages = await ctx.database.get('mtproto_im_message', {
+        conversationId: aliceConversation.id,
+      })
+      expect(storedAliceMessages).toHaveLength(2)
+      expect(storedAliceMessages.every(row => row.senderUserId === aliceRow!.id)).toBe(true)
 
       const message = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessages',
@@ -1220,19 +1256,20 @@ describe('bridge login e2e', () => {
           expect.objectContaining({ my: true, reaction: { _: 'reactionEmoji', emoticon: '👍' } }),
         ]),
       })
-      await callRpc(resumed, key, resumedSid, {
+      const heartReacted = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendReaction',
         peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         msgId: reactionMessage.id,
-        reaction: [{ _: 'reactionEmoji', emoticon: '🔥' }],
+        reaction: [{ _: 'reactionEmoji', emoticon: '❤️' }],
       }, 1_188)
+      expect(heartReacted).toMatchObject({ _: 'updates' })
       const recentReactions = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getRecentReactions', limit: 100, hash: Long.ZERO,
       }, 1_189)
       expect(recentReactions).toMatchObject({
         _: 'messages.reactions',
         reactions: [
-          { _: 'reactionEmoji', emoticon: '🔥' },
+          { _: 'reactionEmoji', emoticon: '❤️' },
           { _: 'reactionEmoji', emoticon: '👍' },
         ],
       })
@@ -1242,10 +1279,10 @@ describe('bridge login e2e', () => {
       expect(reorderedTopReactions).toMatchObject({
         _: 'messages.reactions',
         reactions: [
-          { _: 'reactionEmoji', emoticon: '🔥' },
-          { _: 'reactionEmoji', emoticon: '👍' },
           { _: 'reactionEmoji', emoticon: '❤️' },
+          { _: 'reactionEmoji', emoticon: '👍' },
           { _: 'reactionEmoji', emoticon: '😂' },
+          { _: 'reactionEmoji', emoticon: '😢' },
         ],
       })
       const staticAdapter = ctx.imPlatform.require('static') as staticPlatformPlugin.StaticPlatform
@@ -1509,6 +1546,7 @@ describe('bridge login e2e', () => {
       resumed.close()
     } finally {
       await stop()
+      clock.mockRestore()
     }
   }, 30000)
 
@@ -1884,9 +1922,19 @@ describe('bridge login e2e', () => {
         phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
       }, 6)
       expect(authorization._).toBe('auth.authorization')
+      const contacts = await callRpc(client, key, sid, {
+        _: 'contacts.getContacts', hash: Long.ZERO,
+      }, 7)
+      const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      expect(alice).toMatchObject({
+        _: 'user', id: expect.any(Number),
+        photo: { _: 'userProfilePhoto', photoId: expect.any(Long) },
+      })
+      const persistedAliceId = alice.id
+      const persistedAlicePhotoId = alice.photo.photoId
       const stickerSets = await callRpc(client, key, sid, {
         _: 'messages.getAllStickers', hash: Long.ZERO,
-      }, 7)
+      }, 8)
       const persistedSet = stickerSets.sets.find((set: any) => set.title === 'Static Plugin Stickers')
       const persistedPack = await callRpc(client, key, sid, {
         _: 'messages.getStickerSet',
@@ -1922,6 +1970,23 @@ describe('bridge login e2e', () => {
       second = await startApp({ rsaKey, databasePath, authKeyStorePath })
       client = await TestClient.connect(second.port)
       const resumedSid = new Long(0x456789ab, 0x4abc, false)
+      expect(await callRpc(client, key, resumedSid, {
+        _: 'users.getUsers',
+        id: [{ _: 'inputUser', userId: persistedAliceId, accessHash: Long.ZERO }],
+      }, 6)).toMatchObject([{
+        _: 'user', id: persistedAliceId, firstName: 'Alice',
+        photo: { _: 'userProfilePhoto', photoId: persistedAlicePhotoId },
+      }])
+      const persistedAvatar = await callRpc(client, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPeerPhotoFileLocation',
+          peer: { _: 'inputPeerUser', userId: persistedAliceId, accessHash: Long.ZERO },
+          photoId: persistedAlicePhotoId,
+        },
+      }, 7)
+      expect([...persistedAvatar.bytes.subarray(0, 8)])
+        .toEqual([137, 80, 78, 71, 13, 10, 26, 10])
       const dialogs = await callRpc(client, key, resumedSid, {
         _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
@@ -2082,7 +2147,7 @@ describe('relay e2e', () => {
       for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
     }
     expect(upstreams[0].destroyed).toBe(true)
-  })
+  }, 15000)
 
   it('routes bridge and relay accounts independently and restores both routes after restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mtproto-routes-e2e-'))
