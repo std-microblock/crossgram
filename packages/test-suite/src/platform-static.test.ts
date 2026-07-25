@@ -3,7 +3,9 @@ import { Context } from 'cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { IMPlatformService, IMStickerService } from '@mtproto-relay/bridge'
+import {
+  expandTelegramStrippedThumbnail, IMPlatformService, IMStickerService,
+} from '@mtproto-relay/bridge'
 import type {
   IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMTransferProgress, PlatformSession,
 } from '@mtproto-relay/bridge'
@@ -419,7 +421,18 @@ describe('StaticPlatform', () => {
     if (!image || image.type !== 'media') throw new Error('seeded image missing')
     expect(image.media).toMatchObject({
       name: 'seed.png', mimeType: 'image/png', size: 3_266_938, width: 1240, height: 1754,
+      strippedThumbnail: expect.any(Uint8Array),
+      preview: { mimeType: 'image/jpeg', width: 28, height: 40, locator: { mediaId: 'seed:image:preview' } },
     })
+    expect([...image.media.strippedThumbnail!.subarray(0, 3)]).toEqual([1, 40, 28])
+    const expanded = expandTelegramStrippedThumbnail(image.media.strippedThumbnail!)
+    expect([...expanded.subarray(0, 2), ...expanded.subarray(-2)]).toEqual([0xff, 0xd8, 0xff, 0xd9])
+    const preview = image.media.preview!
+    const previewBytes = await collect(platform.downloadMedia(session, {
+      id: `${image.media.id}:preview`, kind: 'image', mimeType: preview.mimeType,
+      size: preview.size, width: preview.width, height: preview.height, locator: preview.locator,
+    }))
+    expect(previewBytes).toEqual(expanded)
     const imageBytes = await collect(platform.downloadMedia(session, image.media))
     expect(imageBytes).toHaveLength(3_266_938)
     expect(imageBytes.subarray(0, 8)).toEqual(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]))
@@ -449,6 +462,31 @@ describe('StaticPlatform', () => {
       { type: 'media', media: { width: 1240, height: 1754 } },
       { type: 'media', media: { width: 904, height: 1280 } },
     ])
+  })
+
+  it('generates downloadable and stripped thumbnails for uploaded valid images', async () => {
+    const png = new Uint8Array(Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGklEQVR4nGNQTrn0n5qYYdTA/6Nh+H/4JRsAlX7U0I1qB6QAAAAASUVORK5CYII=',
+      'base64',
+    ))
+    const platform = new StaticPlatform()
+    const sent = await platform.sendMessage(session, { id: 'qq-group' }, {
+      parts: [{ type: 'media', media: mediaInput('image', [[...png]], 'valid.png') }],
+    })
+    const part = sent.content.parts[0]
+    if (part.type !== 'media') throw new Error('sent image missing')
+
+    expect(part.media).toMatchObject({
+      width: 20, height: 10, strippedThumbnail: expect.any(Uint8Array),
+      preview: { mimeType: 'image/jpeg', width: 20, height: 10 },
+    })
+    expect([...part.media.strippedThumbnail!.subarray(0, 3)]).toEqual([1, 10, 20])
+    const preview = part.media.preview!
+    const bytes = await collect(platform.downloadMedia(session, {
+      id: `${part.media.id}:preview`, kind: 'image', mimeType: preview.mimeType,
+      size: preview.size, width: preview.width, height: preview.height, locator: preview.locator,
+    }))
+    expect([...bytes.subarray(0, 2), ...bytes.subarray(-2)]).toEqual([0xff, 0xd8, 0xff, 0xd9])
   })
 
   it('waits for subscribe handlers, stores incoming group messages, deduplicates, and unsubscribes', async () => {

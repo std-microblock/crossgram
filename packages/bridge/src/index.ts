@@ -49,6 +49,7 @@ export * from './login-code.js'
 export * from './platform-account.js'
 export * from './account-dashboard.js'
 export * from './auth-transfer.js'
+export * from './stripped-thumbnail.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui']

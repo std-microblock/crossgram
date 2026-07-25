@@ -632,6 +632,12 @@ describe('bridge login e2e', () => {
       })
       const seededDocument = groupHistory.messages[0].media.document
       const seededPhoto = groupHistory.messages[1].media.photo
+      expect(seededPhoto.sizes).toMatchObject([
+        { _: 'photoStrippedSize', type: 'i', bytes: expect.any(Uint8Array) },
+        { _: 'photoSize', type: 'm', w: 28, h: 40 },
+        { _: 'photoSize', type: 'x', w: 1240, h: 1754 },
+      ])
+      expect([...seededPhoto.sizes[0].bytes.subarray(0, 3)]).toEqual([1, 40, 28])
       const seededFile = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 64,
         location: {
@@ -640,6 +646,15 @@ describe('bridge login e2e', () => {
         },
       }, 32)
       expect(new TextDecoder().decode(seededFile.bytes)).toBe('static seeded file')
+      const seededThumbnail = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPhotoFileLocation', id: seededPhoto.id, accessHash: seededPhoto.accessHash,
+          fileReference: seededPhoto.fileReference, thumbSize: 'm',
+        },
+      }, 35)
+      expect([...seededThumbnail.bytes.subarray(0, 2), ...seededThumbnail.bytes.subarray(-2)])
+        .toEqual([0xff, 0xd8, 0xff, 0xd9])
       const seededImage = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 1024,
         location: {
@@ -696,11 +711,10 @@ describe('bridge login e2e', () => {
         _: 'message', id: sentMessage.id, out: true, message: 'Sent through MTProto',
       })
 
-      const socketPng = new Uint8Array(24)
-      socketPng.set([0x89, 0x50, 0x4e, 0x47], 0)
-      socketPng.set([0x49, 0x48, 0x44, 0x52], 12)
-      new DataView(socketPng.buffer).setUint32(16, 640)
-      new DataView(socketPng.buffer).setUint32(20, 480)
+      const socketPng = new Uint8Array(Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGklEQVR4nGNQTrn0n5qYYdTA/6Nh+H/4JRsAlX7U0I1qB6QAAAAASUVORK5CYII=',
+        'base64',
+      ))
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(800), filePart: 0,
         bytes: socketPng,
@@ -743,9 +757,23 @@ describe('bridge login e2e', () => {
       ])
       expect(sentAlbumMessages.map((item: any) => item.groupedId)).toEqual([undefined, undefined])
       const sentPhoto = sentAlbumMessages[0].media.photo
-      expect(sentPhoto.sizes).toMatchObject([{ _: 'photoSize', w: 640, h: 480, size: socketPng.length }])
+      expect(sentPhoto.sizes).toMatchObject([
+        { _: 'photoStrippedSize', type: 'i', bytes: expect.any(Uint8Array) },
+        { _: 'photoSize', type: 'm', w: 20, h: 10 },
+        { _: 'photoSize', type: 'x', w: 20, h: 10, size: socketPng.length },
+      ])
+      expect([...sentPhoto.sizes[0].bytes.subarray(0, 3)]).toEqual([1, 10, 20])
+      const downloadedThumbnail = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPhotoFileLocation', id: sentPhoto.id, accessHash: sentPhoto.accessHash,
+          fileReference: sentPhoto.fileReference, thumbSize: 'm',
+        },
+      }, 44)
+      expect([...downloadedThumbnail.bytes.subarray(0, 2), ...downloadedThumbnail.bytes.subarray(-2)])
+        .toEqual([0xff, 0xd8, 0xff, 0xd9])
       const downloadedPhoto = await callRpc(resumed, key, resumedSid, {
-        _: 'upload.getFile', offset: 0, limit: 64,
+        _: 'upload.getFile', offset: 0, limit: 1024,
         location: {
           _: 'inputPhotoFileLocation', id: sentPhoto.id, accessHash: sentPhoto.accessHash,
           fileReference: sentPhoto.fileReference, thumbSize: 'x',

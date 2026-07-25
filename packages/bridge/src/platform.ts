@@ -163,6 +163,8 @@ export interface IMMedia<TLocator = unknown> {
   duration?: number
   /** Optional adapter-generated preview, downloaded through the same media method. */
   preview?: IMMediaPreview<TLocator>
+  /** Telegram-compatible inline stripped JPEG shown before any media download. */
+  strippedThumbnail?: Uint8Array
   /** Adapter-owned, typed data needed by downloadMedia(). */
   locator?: TLocator
 }

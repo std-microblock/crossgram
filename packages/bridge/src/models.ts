@@ -104,6 +104,7 @@ export interface IMMediaRow {
     height: number
     locator: JsonValue
   } | null
+  strippedThumbnail: ArrayBuffer | null
   locator: JsonValue
 }
 
@@ -298,7 +299,8 @@ export function defineModels(ctx: Context): void {
     kind: 'string', name: { type: 'text', nullable: true }, mimeType: { type: 'text', nullable: true },
     size: { type: 'unsigned', nullable: true }, width: { type: 'unsigned', nullable: true },
     height: { type: 'unsigned', nullable: true }, duration: { type: 'unsigned', nullable: true },
-    preview: { type: 'json', nullable: true }, locator: 'json',
+    preview: { type: 'json', nullable: true },
+    strippedThumbnail: { type: 'binary', nullable: true }, locator: 'json',
   }, {
     primary: 'id', autoInc: true,
     unique: [['messageId', 'ordinal', 'platformMediaId']],

@@ -1147,7 +1147,9 @@ export class DialogRpc {
           mtime: Math.floor(Date.now() / 1000), bytes: reaction.bytes,
         }
       }
-      const sticker = await this._stickers?.getFile(req.location.id.toNumber(), offset, req.limit)
+      const sticker = await this._stickers?.getFile(
+        req.location.id.toNumber(), offset, req.limit, req.location.fileReference,
+      )
       if (sticker) {
         return {
           _: 'upload.file', type: { _: 'storage.fileUnknown' },
@@ -2704,6 +2706,9 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
       photo: {
         _: 'photo', id, accessHash, fileReference, date: timestamp,
         sizes: [
+          ...(media.strippedThumbnail?.byteLength ? [{
+            _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
+          }] : []),
           ...(preview ? [{
             _: 'photoSize' as const, type: 'm', w: preview.width, h: preview.height,
             size: Math.min(preview.size, 0x7fffffff),
@@ -2731,10 +2736,15 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
     document: {
       _: 'document', id, accessHash, fileReference, date: timestamp,
       mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId,
-      thumbs: media.preview ? [{
-        _: 'photoSize', type: 'm', w: media.preview.width, h: media.preview.height,
-        size: Math.min(media.preview.size, 0x7fffffff),
-      }] : undefined,
+      thumbs: media.strippedThumbnail?.byteLength || media.preview ? [
+        ...(media.strippedThumbnail?.byteLength ? [{
+          _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
+        }] : []),
+        ...(media.preview ? [{
+          _: 'photoSize' as const, type: 'm', w: media.preview.width, h: media.preview.height,
+          size: Math.min(media.preview.size, 0x7fffffff),
+        }] : []),
+      ] : undefined,
       attributes,
     },
   }

@@ -305,6 +305,7 @@ export class MessageStore {
         height: item.height ?? null,
         duration: item.duration ?? null,
         preview: item.preview ? { ...item.preview, locator: item.preview.locator as JsonValue } : null,
+        strippedThumbnail: item.strippedThumbnail ? exactArrayBuffer(item.strippedThumbnail) : null,
         locator: (item.locator ?? null) as JsonValue,
       }
       let [stored] = await database.get('mtproto_im_media', {
@@ -607,6 +608,7 @@ export class MessageStore {
         height: row.height ?? undefined,
         duration: row.duration ?? undefined,
         preview: row.preview ?? undefined,
+        strippedThumbnail: row.strippedThumbnail ? new Uint8Array(row.strippedThumbnail) : undefined,
         locator: row.locator,
       },
       timestamp: message.timestamp,
@@ -1131,6 +1133,10 @@ export class MessageStore {
       release()
     }
   }
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
 }
 
 function channelStateId(platformSessionId: string, channelId: number): string {
