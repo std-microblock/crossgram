@@ -673,6 +673,38 @@ describe('DialogRpc', () => {
     ])
   })
 
+  it('separates adjacent links and mentions without linking bare filenames in serialized history', async () => {
+    const platform = new DialogTestPlatform()
+    const text = '地址 http://aaa.com@某个群友，附件 这不是一个链接啊.zip'
+    const mentionOffset = text.indexOf('@')
+    platform.addMessage('alice', {
+      id: 'link-boundaries', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_230,
+      content: { parts: [{
+        type: 'text', text,
+        entities: [{ type: 'mention', offset: mentionOffset, length: '@某个群友'.length, userId: 'bob' }],
+      }] },
+    })
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+
+    const history = wireRoundTrip(
+      await rpc.getHistory(getHistoryRequest(rpc.peerTlId('alice'))),
+    ) as tl.messages.RawMessages
+    const message = history.messages.find(
+      (item) => item._ === 'message' && item.message === text,
+    ) as tl.RawMessage
+
+    expect(message.entities).toEqual([
+      {
+        _: 'messageEntityUrl', offset: text.indexOf('http://'), length: 'http://aaa.com'.length,
+      },
+      {
+        _: 'messageEntityMentionName', offset: mentionOffset, length: '@某个群友'.length,
+        userId: rpc.peerTlId('bob'),
+      },
+    ])
+  })
+
   it('renders an addressable non-dialog conversation as a Telegram message preview card', async () => {
     const platform = new DialogTestPlatform()
     const temporary = {
