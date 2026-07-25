@@ -39,6 +39,14 @@
   disabled: true
   config:
     token: ''
+- id: matrix
+  name: '@mtproto-relay/platform-matrix'
+  disabled: true
+  config:
+    homeserver: https://matrix.example.com
+    accessToken: replace-with-matrix-access-token
+    syncTimeoutMs: 30000
+    requestTimeoutMs: 30000
 - id: mtproto-debug
   name: '@mtproto-relay/mtproto-debug'
   config:

@@ -1,0 +1,5 @@
+homeserver: Matrix 主服务器地址，例如 https://matrix.example.com。
+accessToken: 用于登录账号的 Matrix Access Token。
+userId: 可选的 Matrix 用户 ID；留空时通过 /account/whoami 自动获取。
+syncTimeoutMs: Matrix 增量同步长轮询的超时时间（毫秒）。
+requestTimeoutMs: Matrix 普通 HTTP 请求的最大等待时间（毫秒）。
