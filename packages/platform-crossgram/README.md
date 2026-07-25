@@ -14,15 +14,8 @@
     # groupAlias (default) uses the current group's card when present.
     # nickname always uses the user's QQ profile nickname.
     memberName: groupAlias
-    # on-demand downloads the untouched original only when Telegram asks.
-    # auto downloads received images and small files immediately, caches them
-    # by QQ's content hash, converts images to WebP, and extracts previews.
-    mediaDownloadMode: auto
-    # false uses the bridge-managed non-native download path (default).
-    # true uses QQNT native direct URLs for eligible images/videos. Native
-    # failures are reported and never fall back to the non-native path.
-    useNativeMediaDownload: false
-    autoDownloadFileSizeLimit: 10485760
+    # Compact WebP previews are kept as binary rows in the database.
+    generatePreviews: true
     previewMaxDimension: 320
 ```
 
@@ -32,7 +25,7 @@ The adapter reads `IMMediaSource.stream()` directly and never constructs a
 complete media `Buffer`. `webSocketEndpoint` can point the event connection at a
 different host or path without changing the HTTP API `endpoint`.
 
-When `useNativeMediaDownload` is enabled, bridge protocol v14 sends
+Bridge protocol v14 sends
 `OidbSvcTrpcTcp.0x9067_202` through
 QQNT, refreshes the private/group RKey in `originImageUrl`, and returns the QQ CDN
 URL from `/files/direct-url`. Native videos use the same endpoint backed by
@@ -40,18 +33,14 @@ QQNT's `getVideoPlayUrl`. The platform requests either URL directly with standar
 HTTP `Range` semantics; video documents keep `supports_streaming`, so seeking
 transfers only the requested byte range. The bridge token is never forwarded to
 the CDN. Resolver, RKey, and CDN errors are returned to the caller without a
-fallback. When the option is disabled, the platform uses `/files/download` and
-`downloadRichMedia` instead. Protocol v13's native `/files/play-url` and
+fallback. The legacy non-native `/files/download` path is not used. Protocol v13's native `/files/play-url` and
 whole-file `200` responses remain supported during rolling upgrades.
 
-In `auto` mode the adapter downloads
-eligible media when a message event arrives, uses `sha3`/`sha`/`md5` as the
-disk-cache identity, converts static images to WebP, converts GIF/APNG images
-to WebM, and creates a WebP preview. A
-cache hit is resolved before creating the QQNT request. Telegram range reads
-then come from the local cached file. In `on-demand` mode (the default), Telegram
-range requests stream directly from the bridge's QQ-managed local file; no
-platform-side conversion or duplicate cache is required.
+Untouched media keeps its original format and streams from the native URL; it
+is never duplicated in the platform cache. GIF/APNG images are converted to
+WebM. When `generatePreviews` is enabled, compact WebP preview bytes are stored
+in the database while transformed WebM, sticker, and reaction assets remain on
+disk. Telegram range reads for original media go directly to the QQ CDN.
 
 QQ picture elements other than native normal/QZone photos are exposed as
 stickers. Animated expression pictures and animated sticker assets are
@@ -103,6 +92,5 @@ set `QQNT_BRIDGE_E2E_IMAGE_CONVERSATION` and optionally the exact message in
 `QQNT_BRIDGE_E2E_IMAGE_MESSAGE`. To verify an existing native QQ video,
 set `QQNT_BRIDGE_E2E_VIDEO_CONVERSATION` to its bridge conversation ID and,
 optionally, `QQNT_BRIDGE_E2E_VIDEO_MESSAGE` to the exact message ID.
-The file-upload case exercises the default non-native media download path;
-the image/video cases use a separate native-enabled platform, so both choices
-are covered by the live suite.
+The file-upload and image/video cases all exercise the native direct-URL media
+path.

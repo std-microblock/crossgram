@@ -45,13 +45,13 @@ describe('QQMediaCache', () => {
     expect(opens).toBe(1)
   }, 30_000)
 
-  it('auto-caches images by QQ hash, converts to WebP, extracts previews, and honors ranges', async () => {
+  it('keeps original image bytes and stores compact previews separately', async () => {
     const path = await temporaryDirectory()
     const png = await sharp({
       create: { width: 20, height: 10, channels: 4, background: { r: 220, g: 50, b: 30, alpha: 1 } },
     }).png().toBuffer()
     let opens = 0
-    const cache = new QQMediaCache({ path, mediaDownloadMode: 'auto', previewMaxDimension: 8 })
+    const cache = new QQMediaCache({ path, previewMaxDimension: 8 })
     const media = {
       id: 'image-opaque', kind: 'image' as const, mimeType: 'image/png', size: png.length,
       width: 20, height: 10,
@@ -72,24 +72,24 @@ describe('QQMediaCache', () => {
     }, countedSource(png, () => opens++)))
 
     expect(prepared).toMatchObject({
-      name: undefined, mimeType: 'image/webp', width: 20, height: 10,
-      locator: { cachedPath: expect.stringMatching(/\.webp$/) },
-      preview: { mimeType: 'image/webp', width: 8, height: 4, locator: { cachedPath: expect.any(String) } },
+      mimeType: 'image/png', width: 20, height: 10,
+      locator: expect.not.objectContaining({ cachedPath: expect.anything() }),
+      preview: { mimeType: 'image/webp', width: 8, height: 4, locator: { previewKey: expect.any(String) } },
     })
-    expect(complete.subarray(0, 4).toString()).toBe('RIFF')
-    expect(complete.subarray(8, 12).toString()).toBe('WEBP')
-    expect(range).toEqual(complete.subarray(4, 12))
+    expect(complete).toEqual(png)
+    expect(range).toEqual(png.subarray(4, 12))
     expect(previewBytes.subarray(8, 12).toString()).toBe('WEBP')
-    expect(opens).toBe(1)
+    expect(opens).toBe(4)
   })
 
-  it('only auto-downloads files within the configured size limit', async () => {
+  it('can disable previews without disabling animated-image preparation', async () => {
     const cache = new QQMediaCache({
-      path: await temporaryDirectory(), mediaDownloadMode: 'auto', autoDownloadFileSizeLimit: 4,
+      path: await temporaryDirectory(), generatePreviews: false,
     })
-    expect(cache.shouldAutoDownload({ id: 'small', kind: 'file', size: 4 })).toBe(true)
-    expect(cache.shouldAutoDownload({ id: 'large', kind: 'file', size: 5 })).toBe(false)
-    expect(cache.shouldAutoDownload({ id: 'image', kind: 'image', size: 1_000_000_000 })).toBe(true)
+    expect(cache.shouldPrepare({ id: 'jpeg', kind: 'image', mimeType: 'image/jpeg' })).toBe(false)
+    expect(cache.shouldPrepare({ id: 'gif', kind: 'image', mimeType: 'image/gif' })).toBe(true)
+    expect(cache.shouldPrepare({ id: 'png', kind: 'image', mimeType: 'image/png' })).toBe(true)
+    expect(cache.shouldPrepare({ id: 'file', kind: 'file', mimeType: 'application/octet-stream' })).toBe(false)
   })
 
   it('converts received GIF/APNG images to WebM and keeps a static WebP preview', async () => {
@@ -98,7 +98,7 @@ describe('QQMediaCache', () => {
       create: { width: 18, height: 12, channels: 4, background: { r: 130, g: 40, b: 210, alpha: 1 } },
     }).gif().toBuffer()
     let opens = 0
-    const cache = new QQMediaCache({ path, mediaDownloadMode: 'auto', previewMaxDimension: 9 })
+    const cache = new QQMediaCache({ path, previewMaxDimension: 9 })
     const prepared = await cache.prepareMedia({
       id: 'animated-image', kind: 'image', name: 'animated.gif', mimeType: 'image/gif',
       size: gif.length, width: 18, height: 12, locator: mediaLocator({ md5: 'animated-hash' }),
@@ -110,8 +110,9 @@ describe('QQMediaCache', () => {
     }, countedSource(gif, () => opens++)))
 
     expect(prepared).toMatchObject({
-      kind: 'file', name: 'animated.webm', mimeType: 'video/webm',
-      preview: { mimeType: 'image/webp', width: 9, height: 6 },
+      id: 'animated-image:webm-v3', kind: 'file', name: 'animated.webm', mimeType: 'video/webm',
+      locator: { cachedPath: expect.stringMatching(/\.webm$/) },
+      preview: { mimeType: 'image/webp', width: 9, height: 6, locator: { previewKey: expect.any(String) } },
     })
     expect([...video.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
     expect(previewBytes.subarray(8, 12).toString()).toBe('WEBP')
@@ -125,7 +126,7 @@ describe('QQMediaCache', () => {
       'base64',
     )
     let opens = 0
-    const cache = new QQMediaCache({ path, mediaDownloadMode: 'auto', previewMaxDimension: 6 })
+    const cache = new QQMediaCache({ path, previewMaxDimension: 6 })
     const prepared = await cache.prepareMedia({
       id: 'disguised-apng', kind: 'image', name: 'ordinary.png', mimeType: 'image/png',
       size: apng.length, width: 12, height: 8, locator: mediaLocator({ md5: 'disguised-apng' }),
@@ -184,11 +185,19 @@ describe('QQMediaCache', () => {
     await cache.openReaction('1:14', 123, 'static', {
       source: countedSource(png, () => undefined), mimeType: 'image/png', width: 8, height: 8,
     })
+    const media = await cache.prepareMedia({
+      id: 'db-preview', kind: 'image', name: 'preview.jpg', mimeType: 'image/jpeg',
+      size: png.length, width: 8, height: 8, locator: mediaLocator({ md5: 'db-preview' }),
+    }, countedSource(png, () => undefined))
 
     const [row] = await ctx.database.get('mtproto_qqnt_media_cache', {})
     expect(row).toMatchObject({ mimeType: 'image/webp', width: 100, height: 100 })
     expect(row!.key).toMatch(/^[a-f0-9]{64}$/)
     expect(row!.key).not.toContain('\0')
+    const [preview] = await ctx.database.get('mtproto_qqnt_media_preview', {})
+    expect(preview).toMatchObject({ mimeType: 'image/webp', width: 8, height: 8, size: expect.any(Number) })
+    expect(new Uint8Array(preview!.bytes).subarray(8, 12).toString()).toBe('87,69,66,80')
+    expect(media.preview?.locator).toMatchObject({ previewKey: preview!.key })
   })
 })
 

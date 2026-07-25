@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs'
-import { open, rename, rm } from 'node:fs/promises'
+import { open, readFile, rename, rm } from 'node:fs/promises'
 import { extname, isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -12,8 +12,6 @@ import type { IMDownloadOptions, IMMedia, IMMediaSource, IMSticker, IMStickerAss
 import ffmpegStatic from 'ffmpeg-static'
 import sharp from 'sharp'
 import type { QQMediaLocator } from './protocol.js'
-
-export type MediaDownloadMode = 'auto' | 'on-demand'
 
 export interface QQMediaCacheRow {
   key: string
@@ -25,18 +23,27 @@ export interface QQMediaCacheRow {
   updatedAt: Date
 }
 
+export interface QQMediaPreviewRow {
+  key: string
+  bytes: ArrayBuffer
+  mimeType: string
+  size: number
+  width: number
+  height: number
+  updatedAt: Date
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_qqnt_media_cache: QQMediaCacheRow
+    mtproto_qqnt_media_preview: QQMediaPreviewRow
   }
 }
 
 export interface QQMediaCacheOptions {
   path: string
-  /** Eagerly cache received images/small files, or fetch the original only when requested. */
-  mediaDownloadMode?: MediaDownloadMode
-  /** Maximum file size eagerly cached in auto mode. Images are always eligible. */
-  autoDownloadFileSizeLimit?: number
+  /** Generate compact previews and keep their bytes in the database. */
+  generatePreviews?: boolean
   /** Maximum width/height of generated image previews. */
   previewMaxDimension?: number
   /** Override the bundled FFmpeg executable used for GIF/APNG sticker conversion. */
@@ -50,6 +57,10 @@ export function defineQQMediaCacheModel(ctx: Context): void {
     width: { type: 'unsigned', nullable: true }, height: { type: 'unsigned', nullable: true },
     updatedAt: 'timestamp',
   }, { primary: 'key', indexes: ['updatedAt'] })
+  ctx.model.extend('mtproto_qqnt_media_preview', {
+    key: 'string', bytes: 'binary', mimeType: 'string', size: 'unsigned',
+    width: 'unsigned', height: 'unsigned', updatedAt: 'timestamp',
+  }, { primary: 'key', indexes: ['updatedAt'] })
 }
 
 interface CachedAsset {
@@ -61,24 +72,28 @@ interface CachedAsset {
   height?: number
 }
 
+interface CachedPreview {
+  key: string
+  bytes: Uint8Array
+  mimeType: string
+  size: number
+  width: number
+  height: number
+}
+
 /** Disk-backed, single-flight transformer shared by QQ media and sticker providers. */
 export class QQMediaCache {
   readonly path: string
-  readonly mediaDownloadMode: MediaDownloadMode
-  readonly autoDownloadFileSizeLimit: number
+  readonly generatePreviews: boolean
   readonly previewMaxDimension: number
   private readonly ffmpegPath: string
   private readonly active = new Map<string, Promise<CachedAsset>>()
-  private readonly preparedImages = new Map<string, {
-    animated: boolean
-    asset: CachedAsset
-    sourceDimensions?: { width: number, height: number }
-  }>()
+  private readonly activePreviews = new Map<string, Promise<CachedPreview | undefined>>()
+  private readonly memoryPreviews = new Map<string, CachedPreview>()
 
   constructor(private readonly options: QQMediaCacheOptions) {
     this.path = resolve(options.path)
-    this.mediaDownloadMode = options.mediaDownloadMode ?? 'on-demand'
-    this.autoDownloadFileSizeLimit = options.autoDownloadFileSizeLimit ?? 10 * 1024 * 1024
+    this.generatePreviews = options.generatePreviews ?? true
     this.previewMaxDimension = options.previewMaxDimension ?? 320
     this.ffmpegPath = options.ffmpegPath
       || (ffmpegStatic && existsSync(ffmpegStatic) ? ffmpegStatic : 'ffmpeg')
@@ -136,10 +151,9 @@ export class QQMediaCache {
     }
   }
 
-  shouldAutoDownload(media: IMMedia): boolean {
-    return this.mediaDownloadMode === 'auto' && (
-      media.kind === 'image'
-      || (media.size !== undefined && media.size <= this.autoDownloadFileSizeLimit)
+  shouldPrepare(media: IMMedia): boolean {
+    return media.kind === 'image' && (
+      this.generatePreviews || isAnimatedMedia(media) || mayBeAnimatedPng(media)
     )
   }
 
@@ -148,100 +162,77 @@ export class QQMediaCache {
     original: IMMediaSource,
   ): Promise<IMMedia<QQMediaLocator>> {
     const identity = contentIdentity(media)
-    if (media.kind === 'file') {
-      const extension = safeExtension(media.name)
-      const asset = await this.ensure(
-        cacheKey('file-original-v1', identity), extension || 'bin',
-        media.mimeType ?? 'application/octet-stream', media.width, media.height,
-        (temporary) => pipeline(Readable.from(original.stream()), createWriteStream(temporary, { flags: 'wx' })),
-      )
-      return {
-        ...media, size: asset.size,
-        locator: { ...media.locator!, cachedPath: asset.path },
-      }
-    }
+    if (media.kind !== 'image') return media
     const declaredAnimated = isAnimatedMedia(media)
     if (!declaredAnimated && mayBeAnimatedPng(media)) {
-      const cached = this.preparedImages.get(identity)
-      if (cached) {
-        return this.finishPreparedImage(
-          media, identity, cached.animated, cached.asset, cached.sourceDimensions,
-        )
-      }
       const input = join(this.path, `${randomUUID()}.png-input`)
       try {
         await pipeline(Readable.from(original.stream()), createWriteStream(input, { flags: 'wx' }))
         const sourceDimensions = await imageDimensions(input, media.width, media.height)
-        return await this.prepareImage(
-          media, identity, await isAnimatedPng(input), fileSource(input, statSync(input).size), input,
-          sourceDimensions, true,
-        )
+        const animated = await isAnimatedPng(input)
+        const prepared = animated
+          ? await this.prepareAnimatedImage(media, identity, fileSource(input, statSync(input).size), input, sourceDimensions)
+          : await this.attachPreview(media, identity, fileSource(input, statSync(input).size), input)
+        return prepared
       } finally {
         await rm(input, { force: true }).catch(() => undefined)
       }
     }
-    return this.prepareImage(media, identity, declaredAnimated, original)
+    if (declaredAnimated) return this.prepareAnimatedImage(media, identity, original)
+    return this.attachPreview(media, identity, original)
   }
 
-  private async prepareImage(
+  private async prepareAnimatedImage(
     media: IMMedia<QQMediaLocator>,
     identity: string,
-    animated: boolean,
     original: IMMediaSource,
     originalPath?: string,
     sourceDimensions?: { width: number, height: number },
-    remember = false,
   ): Promise<IMMedia<QQMediaLocator>> {
     const asset = await this.ensure(
-      cacheKey(animated ? 'image-webm-v2' : 'image-webp-v3', identity),
-      animated ? 'webm' : 'webp', animated ? 'video/webm' : 'image/webp', media.width, media.height,
+      cacheKey('image-webm-v3', identity),
+      'webm', 'video/webm', media.width, media.height,
       (temporary) => originalPath
-        ? (animated
-            ? this.convertAnimatedFile(originalPath, temporary)
-            : this.convertStaticFile(originalPath, temporary))
-        : (animated ? this.convertAnimated(original, temporary) : this.convertStatic(original, temporary)),
+        ? this.convertAnimatedFile(originalPath, temporary)
+        : this.convertAnimated(original, temporary),
     )
-    if (remember) {
-      this.preparedImages.set(identity, { animated, asset, sourceDimensions })
-      if (this.preparedImages.size > PREPARED_IMAGE_CACHE_LIMIT) {
-        this.preparedImages.delete(this.preparedImages.keys().next().value!)
-      }
-    }
-    return this.finishPreparedImage(media, identity, animated, asset, sourceDimensions)
-  }
-
-  private async finishPreparedImage(
-    media: IMMedia<QQMediaLocator>,
-    identity: string,
-    animated: boolean,
-    asset: CachedAsset,
-    sourceDimensions?: { width: number, height: number },
-  ): Promise<IMMedia<QQMediaLocator>> {
-    const dimensions = animated
-      ? fitWithin(sourceDimensions ?? { width: media.width ?? 1, height: media.height ?? 1 }, 512)
-      : await imageDimensions(asset.path, media.width, media.height)
-    const preview = await this.ensure(
-      cacheKey('image-preview-webp-v2', identity, this.previewMaxDimension),
-      'webp', 'image/webp', undefined, undefined,
-      (temporary) => animated
-        ? this.extractVideoPreview(asset.path, temporary)
-        : this.extractPreview(asset.path, temporary),
-    )
-    const previewDimensions = await imageDimensions(preview.path, dimensions.width, dimensions.height)
-    const name = replaceExtension(media.name, animated ? '.webm' : '.webp')
-    return {
+    const dimensions = fitWithin(sourceDimensions ?? { width: media.width ?? 1, height: media.height ?? 1 }, 512)
+    const converted: IMMedia<QQMediaLocator> = {
       ...media,
-      kind: animated ? 'file' : 'image',
-      name,
-      mimeType: animated ? 'video/webm' : 'image/webp',
+      id: `${media.id}:webm-v3`,
+      kind: 'file',
+      name: replaceExtension(media.name, '.webm'),
+      mimeType: 'video/webm',
       size: asset.size,
       width: dimensions.width,
       height: dimensions.height,
       locator: { ...media.locator!, cachedPath: asset.path },
+    }
+    return this.attachPreview(
+      converted, `${identity}:webm-v3`, fileSource(asset.path, asset.size), asset.path, true,
+    )
+  }
+
+  private async attachPreview(
+    media: IMMedia<QQMediaLocator>,
+    identity: string,
+    source: IMMediaSource,
+    sourcePath?: string,
+    video = false,
+  ): Promise<IMMedia<QQMediaLocator>> {
+    if (!this.generatePreviews) return media
+    const preview = await this.ensurePreview(
+      cacheKey('image-preview-db-v1', identity, this.previewMaxDimension),
+      () => video
+        ? this.previewFromVideo(sourcePath!)
+        : sourcePath ? this.previewFromFile(sourcePath) : this.previewFromSource(source),
+    )
+    if (!preview) return media
+    return {
+      ...media,
       preview: {
-        mimeType: 'image/webp', size: preview.size,
-        width: previewDimensions.width, height: previewDimensions.height,
-        locator: { ...media.locator!, cachedPath: preview.path },
+        mimeType: preview.mimeType, size: preview.size, width: preview.width, height: preview.height,
+        locator: { ...media.locator!, cachedPath: undefined, previewKey: preview.key },
       },
     }
   }
@@ -251,6 +242,15 @@ export class QQMediaCache {
     original: IMMediaSource,
     options: IMDownloadOptions = {},
   ): AsyncIterable<Uint8Array> {
+    const previewKey = media.locator?.previewKey
+    if (previewKey) {
+      const preview = await this.getPreview(previewKey)
+      if (!preview) throw new Error(`QQ media preview is unavailable: ${previewKey}`)
+      const start = Math.min(preview.size, Math.max(0, Math.trunc(options.offset ?? 0)))
+      const length = rangedSize(preview.size, start, options.limit)
+      if (length) yield preview.bytes.subarray(start, start + length)
+      return
+    }
     const cachedPath = media.locator?.cachedPath
     const source = cachedPath && existsSync(cachedPath)
       ? rangedFile(cachedPath, options.offset, options.limit)
@@ -265,6 +265,88 @@ export class QQMediaCache {
         totalBytes,
       })
       yield chunk
+    }
+  }
+
+  private async ensurePreview(
+    logicalKey: string,
+    create: () => Promise<{ bytes: Uint8Array, width: number, height: number }>,
+  ): Promise<CachedPreview | undefined> {
+    const key = createHash('sha256').update(logicalKey).digest('hex')
+    const current = this.activePreviews.get(key)
+    if (current) return current
+    const pending = this.ensurePreviewOnce(key, create)
+    this.activePreviews.set(key, pending)
+    try {
+      return await pending
+    } finally {
+      if (this.activePreviews.get(key) === pending) this.activePreviews.delete(key)
+    }
+  }
+
+  private async ensurePreviewOnce(
+    key: string,
+    create: () => Promise<{ bytes: Uint8Array, width: number, height: number }>,
+  ): Promise<CachedPreview | undefined> {
+    const memory = this.memoryPreviews.get(key)
+    if (memory) return memory
+    const [stored] = await this.options.database?.get('mtproto_qqnt_media_preview', { key }) ?? []
+    if (stored) return rememberPreview(this.memoryPreviews, {
+      key, bytes: new Uint8Array(stored.bytes), mimeType: stored.mimeType,
+      size: stored.size, width: stored.width, height: stored.height,
+    })
+    const created = await create()
+    if (created.bytes.byteLength > MAX_DATABASE_PREVIEW_BYTES) return
+    const preview: CachedPreview = {
+      key, bytes: created.bytes, mimeType: 'image/webp', size: created.bytes.byteLength,
+      width: created.width, height: created.height,
+    }
+    await this.options.database?.upsert('mtproto_qqnt_media_preview', [{
+      key, bytes: exactArrayBuffer(created.bytes), mimeType: preview.mimeType, size: preview.size,
+      width: preview.width, height: preview.height, updatedAt: new Date(),
+    }], ['key'])
+    return rememberPreview(this.memoryPreviews, preview)
+  }
+
+  private async getPreview(key: string): Promise<CachedPreview | undefined> {
+    const memory = this.memoryPreviews.get(key)
+    if (memory) return memory
+    const [stored] = await this.options.database?.get('mtproto_qqnt_media_preview', { key }) ?? []
+    if (!stored) return
+    return rememberPreview(this.memoryPreviews, {
+      key, bytes: new Uint8Array(stored.bytes), mimeType: stored.mimeType,
+      size: stored.size, width: stored.width, height: stored.height,
+    })
+  }
+
+  private async previewFromSource(source: IMMediaSource) {
+    const transformer = sharp().rotate().resize({
+      width: this.previewMaxDimension, height: this.previewMaxDimension,
+      fit: 'inside', withoutEnlargement: true,
+    }).webp({ quality: 80, effort: 4 })
+    const output = transformer.toBuffer({ resolveWithObject: true })
+    await pipeline(Readable.from(source.stream()), transformer)
+    const { data, info } = await output
+    return { bytes: new Uint8Array(data), width: info.width, height: info.height }
+  }
+
+  private async previewFromFile(path: string) {
+    const { data, info } = await sharp(path).rotate().resize({
+      width: this.previewMaxDimension, height: this.previewMaxDimension,
+      fit: 'inside', withoutEnlargement: true,
+    }).webp({ quality: 80, effort: 4 }).toBuffer({ resolveWithObject: true })
+    return { bytes: new Uint8Array(data), width: info.width, height: info.height }
+  }
+
+  private async previewFromVideo(path: string) {
+    const output = join(this.path, `${randomUUID()}.preview.webp`)
+    try {
+      await this.extractVideoPreview(path, output)
+      const bytes = new Uint8Array(await readFile(output))
+      const dimensions = await imageDimensions(output)
+      return { bytes, width: dimensions.width, height: dimensions.height }
+    } finally {
+      await rm(output, { force: true }).catch(() => undefined)
     }
   }
 
@@ -429,7 +511,8 @@ async function isAnimatedPng(path: string): Promise<boolean> {
 }
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-const PREPARED_IMAGE_CACHE_LIMIT = 1024
+const MAX_DATABASE_PREVIEW_BYTES = 256 * 1024
+const MEMORY_PREVIEW_CACHE_LIMIT = 1024
 
 function fitWithin(dimensions: { width: number, height: number }, maximum: number) {
   const ratio = Math.min(1, maximum / dimensions.width, maximum / dimensions.height)
@@ -447,14 +530,20 @@ function contentIdentity(media: IMMedia<QQMediaLocator>): string {
   return `locator:${stableJson(locator ?? media.id)}`
 }
 
-function safeExtension(name?: string): string {
-  return extname(name ?? '').replace(/[^.a-zA-Z0-9]/g, '').slice(1, 17).toLowerCase()
-}
-
 function replaceExtension(name: string | undefined, extension: string): string | undefined {
   if (!name) return name
   const current = extname(name)
   return `${current ? name.slice(0, -current.length) : name}${extension}`
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+}
+
+function rememberPreview(cache: Map<string, CachedPreview>, preview: CachedPreview): CachedPreview {
+  cache.set(preview.key, preview)
+  if (cache.size > MEMORY_PREVIEW_CACHE_LIMIT) cache.delete(cache.keys().next().value!)
+  return preview
 }
 
 async function imageDimensions(

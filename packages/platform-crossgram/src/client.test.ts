@@ -131,14 +131,21 @@ describe('QQNTClient streaming transport', () => {
     })
   })
 
-  it('uses the non-native bridge path by default even when native image metadata is available', async () => {
-    let requestUrl = ''
-    let requestHeaders: import('node:http').IncomingHttpHeaders = {}
+  it('always resolves and downloads the native media URL', async () => {
+    const requestUrls: string[] = []
     server = createServer(async (request, response) => {
-      requestUrl = request.url ?? ''
-      requestHeaders = request.headers
-      for await (const _chunk of request) { /* drain locator */ }
-      response.end('complete-file')
+      requestUrls.push(request.url ?? '')
+      if (request.url === '/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/native-file` }))
+      } else if (request.url === '/native-file') {
+        response.end('complete-file')
+      } else {
+        response.writeHead(500).end('non-native path must not be called')
+      }
     })
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
@@ -151,9 +158,7 @@ describe('QQNTClient streaming transport', () => {
       kind: 'image', fileName: 'x.jpg', originImageUrl: 'https://qq.example/expired',
     })) chunks.push(chunk)
 
-    expect(requestUrl).toBe('/files/download')
-    expect(requestHeaders['x-qqnt-offset']).toBeUndefined()
-    expect(requestHeaders['x-qqnt-limit']).toBeUndefined()
+    expect(requestUrls).toEqual(['/files/direct-url', '/native-file'])
     expect(Buffer.concat(chunks).toString()).toBe('complete-file')
   })
 
@@ -188,7 +193,7 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({
-      endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token', useNativeMediaDownload: true,
+      endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token',
     })
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
@@ -229,7 +234,7 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({
-      endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token', useNativeMediaDownload: true,
+      endpoint: `http://127.0.0.1:${address.port}`, token: 'bridge-token',
     })
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
@@ -270,7 +275,7 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({
-      endpoint: `http://127.0.0.1:${address.port}`, useNativeMediaDownload: true,
+      endpoint: `http://127.0.0.1:${address.port}`,
     })
     const chunks: Uint8Array[] = []
     for await (const chunk of client.downloadFile({
@@ -299,7 +304,7 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({
-      endpoint: `http://127.0.0.1:${address.port}`, useNativeMediaDownload: true,
+      endpoint: `http://127.0.0.1:${address.port}`,
     })
     const download = collect(client.downloadFile({
       messageId: 'video', elementId: 'element', chatType: 2, peerUid: 'group',
@@ -331,7 +336,7 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({
-      endpoint: `http://127.0.0.1:${address.port}`, useNativeMediaDownload: true,
+      endpoint: `http://127.0.0.1:${address.port}`,
     })
     const download = collect(client.downloadFile({
       messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
@@ -345,8 +350,17 @@ describe('QQNTClient streaming transport', () => {
 
   it('locally slices a whole-file response from an older bridge', async () => {
     server = createServer(async (request, response) => {
-      for await (const _chunk of request) { /* drain locator */ }
-      response.end('abcdefghij')
+      if (request.url === '/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ url: `http://127.0.0.1:${address.port}/whole-file` }))
+      } else if (request.url === '/whole-file') {
+        response.end('abcdefghij')
+      } else {
+        response.writeHead(500).end()
+      }
     })
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
