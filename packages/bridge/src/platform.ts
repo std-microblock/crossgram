@@ -215,6 +215,17 @@ export type IMMessagePart<TMediaLocator = unknown> =
   | { type: 'text', text: string, entities?: IMTextEntity[] }
   | { type: 'media', media: IMMedia<TMediaLocator> }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMSticker }
+  | { type: 'card', card: IMMessageCard }
+
+/** Platform share metadata projected as Telegram's native WebPage preview. */
+export interface IMMessageCard {
+  kind: 'mini-app' | 'link' | 'music' | 'contact' | 'location' | 'application'
+  title: string
+  description?: string
+  source?: string
+  url?: string
+  thumbnailUrl?: string
+}
 
 export type IMMessageInputPart =
   | { type: 'text', text: string, entities?: IMTextEntity[] }
@@ -525,7 +536,19 @@ export interface IMPlatform<TMediaLocator = unknown> {
 }
 
 export function messageText(message: IMMessage<unknown>): string {
-  return message.content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
+  return message.content.parts.map(messagePartText).filter(Boolean).join('\n')
+}
+
+export function messagePartText(part: IMMessagePart<unknown>): string {
+  if (part.type === 'text') return part.text
+  if (part.type !== 'card') return ''
+  const label = part.card.kind === 'mini-app' ? '[小程序]' : '[卡片]'
+  return [
+    part.card.source ? `${label} ${part.card.source}` : label,
+    part.card.title,
+    part.card.description,
+    part.card.url,
+  ].filter((item, index, values) => item && values.indexOf(item) === index).join('\n')
 }
 
 export function messageMedia<TMediaLocator>(message: IMMessage<TMediaLocator>): IMMedia<TMediaLocator>[] {
