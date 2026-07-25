@@ -9,7 +9,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
-import { MessageStore, type IngestResult, type PlatformSession } from '@mtproto-relay/bridge'
+import { MessageStore, StickerRpc, type IngestResult, type PlatformSession } from '@mtproto-relay/bridge'
 import { defineModels } from '../../bridge/src/models.js'
 import { QQNTPlatform } from './index.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
@@ -197,6 +197,104 @@ describe('QQNT remote media routing E2E', () => {
     expect(ranges.sort()).toEqual(['bytes=0-3', 'bytes=4-7'])
     expect(first.toString()).toBe('abcd')
     expect(second.toString()).toBe('efgh')
+  })
+
+  it('rebases an archived merged-forward file before resolving and streaming it over HTTP', async () => {
+    const file = Buffer.from('merged-forward-file')
+    const resolverLocators: Array<Record<string, unknown>> = []
+    let server: Server | undefined
+    server = createServer(async (request, response) => {
+      if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ available: [], reactions: [], maxSelected: 20 }))
+        return
+      }
+      if (request.method === 'GET' && request.url === '/v1/dialogs') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ conversations: [{
+          id: 'outer-group', kind: 'group', title: 'Outer group',
+          peerUid: 'physical-group-uid', peerUin: '10001', chatType: 2,
+          lastMessage: {
+            id: 'merged-root', conversationId: 'outer-group', senderId: 'alice', timestamp: 10, outgoing: false,
+            parts: [{
+              type: 'multi-forward', title: '聊天记录',
+              locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
+            }],
+          },
+        }] }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/messages/multi-forward') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ messages: [{
+          id: 'archived-file-message', conversationId: 'archived-source-group',
+          senderId: 'bob', timestamp: 9, outgoing: false,
+          parts: [{
+            type: 'media',
+            media: {
+              id: 'file-element', kind: 'file', name: 'guide.xlsx', size: file.length,
+              locator: {
+                messageId: 'archived-file-message', elementId: 'file-element', chatType: 2,
+                peerUid: 'archived-source-group', kind: 'file', fileName: 'guide.xlsx',
+                fileUuid: '/file-uuid', fileBizId: 104,
+              },
+            },
+          }],
+        }] }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        const locator = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
+        resolverLocators.push(locator)
+        if (locator.peerUid !== 'physical-group-uid' || locator.chatType !== 2) {
+          response.writeHead(404, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: 'direct URL is unavailable for archived peer' }))
+          return
+        }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing test server address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/cdn/merged-file`, expiresAt: Date.now() + 60_000,
+        }))
+        return
+      }
+      if (request.method === 'GET' && request.url === '/cdn/merged-file') {
+        response.writeHead(200, { 'content-length': String(file.length) })
+        response.end(file)
+        return
+      }
+      response.writeHead(404).end('not found')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({ endpoint: `http://127.0.0.1:${address.port}/v1` })
+    const [dialog] = (await platform.getDialogs(session)).dialogs
+    const link = dialog.lastMessage?.content.parts[0]
+    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+    const history = await platform.getHistory(session, link.entities[0].conversation)
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'media') throw new Error('merged forward file was not mapped')
+
+    expect(await collect(platform.downloadMedia(session, part.media))).toEqual(file)
+    expect(resolverLocators).toEqual([expect.objectContaining({
+      chatType: 2, peerUid: 'physical-group-uid', fileUuid: '/file-uuid',
+    })])
   })
 
   it('loads opaque reaction assets over HTTP and serves the transformed cache without local file routes', async () => {
@@ -549,8 +647,8 @@ describe('QQNT animated media upgrade E2E', () => {
   }, 30_000)
 })
 
-describe('QQNT animated sticker thumbnail E2E', () => {
-  it('stores the APNG first frame and edits the existing message to advertise it', async () => {
+describe('QQNT animated system-face E2E', () => {
+  it('materializes a large QQ face as a WebM sticker before publishing the message', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -570,14 +668,19 @@ describe('QQNT animated sticker thumbnail E2E', () => {
       'base64',
     )
     let assetRequests = 0
+    let assetReference: unknown
     let server: Server | undefined
     server = createServer((request, response) => {
       if (request.method === 'POST' && request.url === '/v1/stickers/asset') {
         assetRequests++
-        request.resume()
-        response.setHeader('content-type', 'image/apng')
-        response.setHeader('content-length', apng.length)
-        response.end(apng)
+        const chunks: Buffer[] = []
+        request.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+        request.on('end', () => {
+          assetReference = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          response.setHeader('content-type', 'image/apng')
+          response.setHeader('content-length', apng.length)
+          response.end(apng)
+        })
         return
       }
       response.statusCode = 404
@@ -604,12 +707,13 @@ describe('QQNT animated sticker thumbnail E2E', () => {
             parts: [{
               type: 'sticker',
               sticker: {
-                stickerId: 'favorite:animated-apng', title: 'Animated APNG',
+                stickerId: 'sysface:476', title: '/不是吧',
                 format: 'animated', mimeType: 'image/apng', width: 12, height: 8, size: apng.length,
                 version: 1,
                 reference: {
-                  kind: 'favorite', resId: 'animated-apng', path: '/qq/animated.png',
-                  name: 'animated.png', size: apng.length, width: 12, height: 8, animated: true,
+                  kind: 'sysface', faceId: '476', faceType: 3, name: '/不是吧',
+                  packId: '3', stickerId: '476', stickerType: 2, resultId: 'result-476',
+                  width: 12, height: 8, animated: true,
                 },
               },
             }],
@@ -648,7 +752,7 @@ describe('QQNT animated sticker thumbnail E2E', () => {
     const unsubscribe = await platform.subscribe(session, async (event) => {
       if (event.type !== 'message' && event.type !== 'message-edit') return
       events.push({ type: event.type, result: await store.ingest(session, event.conversation, event.message) })
-      if (event.type === 'message-edit') complete.resolve()
+      if (event.type === 'message') complete.resolve()
     })
     try {
       await Promise.race([
@@ -659,23 +763,49 @@ describe('QQNT animated sticker thumbnail E2E', () => {
       await unsubscribe()
     }
 
-    expect(events.map((entry) => entry.type)).toEqual(['message', 'message-edit'])
-    expect(events[0].result.projection[0].tlMessageId).toBe(events[1].result.projection[0].tlMessageId)
+    expect(events.map((entry) => entry.type)).toEqual(['message'])
     expect(events[0].result.changed).toBe(true)
-    expect(events[1].result.changed).toBe(true)
-    const initialSticker = events[0].result.message.content as any
-    const editedSticker = events[1].result.message.content as any
-    expect(initialSticker.parts[0].sticker.thumbnail).toBeUndefined()
-    expect(editedSticker.parts[0].sticker).toMatchObject({
-      format: 'video', mimeType: 'video/webm',
-      thumbnail: {
-        mimeType: 'image/webp', width: 12, height: 8,
-        locator: { cacheKey: expect.any(String) },
+    const storedSticker = events[0].result.message.content as any
+    expect(storedSticker.parts).toHaveLength(1)
+    expect(storedSticker.parts[0]).toMatchObject({
+      type: 'sticker', sticker: {
+        stickerId: 'sysface:476', title: '/不是吧',
+        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
+        locator: { kind: 'sysface', faceId: '476', faceType: 3, resultId: 'result-476' },
+        thumbnail: {
+          mimeType: 'image/webp', width: 12, height: 8,
+          locator: { cacheKey: expect.any(String) },
+        },
       },
     })
+    expect(storedSticker.parts[0].sticker.size).toBeGreaterThan(0)
+    const provider = {
+      listPacks: vi.fn(async () => ({ packs: [] })),
+      getPack: vi.fn(async () => null),
+      getSticker: vi.fn(async () => storedSticker.parts[0].sticker),
+      openAsset: vi.fn(async () => { throw new Error('not needed for document projection') }),
+    }
+    const stickerRpc = new StickerRpc(ctx.database, {
+      entries: [['qqnt:stickers', provider]],
+      get: (id: string) => id === 'qqnt:stickers' ? provider : undefined,
+      require: (id: string) => {
+        if (id === 'qqnt:stickers') return provider
+        throw new Error(`unknown provider: ${id}`)
+      },
+    } as any, platform, session)
+    const media = stickerRpc.makeMessageMedia(storedSticker.parts[0].sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('missing Telegram sticker document')
+    expect(media.document.size).toBe(storedSticker.parts[0].sticker.size)
+    expect(media.document.size).toBeGreaterThan(0)
+    expect(media.document.attributes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'documentAttributeVideo', nosound: true }),
+    ]))
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
     expect(assetRequests).toBe(1)
-    const thumbnail = await cache.openStickerThumbnail(editedSticker.parts[0].sticker)
+    expect(assetReference).toMatchObject({
+      kind: 'sysface', faceId: '476', faceType: 3, resultId: 'result-476',
+    })
+    const thumbnail = await cache.openStickerThumbnail(storedSticker.parts[0].sticker)
     if (!thumbnail) throw new Error('stored sticker thumbnail is unavailable')
     expect((await collect(thumbnail.source.stream())).subarray(8, 12).toString()).toBe('WEBP')
   }, 30_000)
