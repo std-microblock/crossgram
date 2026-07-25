@@ -16,6 +16,7 @@
     "@mtcute/tl-runtime": "^0.30.3",
     "@mtproto-relay/bridge": "workspace:*",
     "@mtproto-relay/mtproto": "workspace:*",
+    "@mtproto-relay/platform-discord": "workspace:*",
     "@mtproto-relay/platform-static": "workspace:*",
     "@mtproto-relay/relay": "workspace:*",
     "@mtproto-relay/telegram-resources": "workspace:*",

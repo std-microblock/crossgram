@@ -1,0 +1,3 @@
+token: Discord user account token. Userbots violate the Discord Terms of Service and may lead to account restriction or termination.
+includeBots: Whether messages sent by bots are exposed.
+downloadChunkSize: Size in bytes of each streamed Discord CDN download chunk.
