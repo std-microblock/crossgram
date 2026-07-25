@@ -70,7 +70,13 @@ describe('QQMediaCache', () => {
       locator: mediaLocator({ messageId: 'first-message', md5: 'AABBCC' }),
     }
 
+    expect(await cache.restoreInitialMedia(media)).toBeUndefined()
+    expect(opens).toBe(0)
     const prepared = await cache.prepareMedia(media, countedSource(png, () => opens++))
+    const restored = await cache.restoreInitialMedia({
+      ...media, id: 'restored-without-source',
+      locator: mediaLocator({ messageId: 'restored-message', md5: 'aabbcc' }),
+    })
     const sameHash = await cache.prepareMedia({
       ...media, id: 'different-id',
       locator: mediaLocator({ messageId: 'different-message', md5: 'aabbcc' }),
@@ -87,6 +93,10 @@ describe('QQMediaCache', () => {
       mimeType: 'image/png', width: 20, height: 10,
       locator: expect.not.objectContaining({ cachedPath: expect.anything() }),
       strippedThumbnail: expect.any(Uint8Array),
+      preview: { mimeType: 'image/webp', width: 8, height: 4, locator: { previewKey: expect.any(String) } },
+    })
+    expect(restored).toMatchObject({
+      id: 'restored-without-source',
       preview: { mimeType: 'image/webp', width: 8, height: 4, locator: { previewKey: expect.any(String) } },
     })
     expect(await sharp(expandTelegramStrippedThumbnail(prepared.strippedThumbnail!)).metadata())

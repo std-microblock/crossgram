@@ -694,6 +694,76 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('returns uncached history images as same-size empty placeholders and edits them when ready', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-placeholder-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
+      path: cachePath, previewMaxDimension: 6,
+    }))
+    const jpeg = await sharp({
+      create: { width: 12, height: 8, channels: 3, background: { r: 30, g: 90, b: 180 } },
+    }).jpeg().toBuffer()
+    const releaseDownload = Promise.withResolvers<void>()
+    const downloadStarted = Promise.withResolvers<void>()
+    const edited = Promise.withResolvers<any>()
+    const wireMessage = {
+      id: 'history-image', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'history-media', kind: 'image' as const, name: 'photo.jpg', mimeType: 'image/jpeg',
+          size: jpeg.length, width: 12, height: 8,
+          locator: {
+            messageId: 'history-image', elementId: 'history-media', chatType: 2 as const,
+            peerUid: 'group', kind: 'image' as const, fileName: 'photo.jpg', md5: 'HISTORY-JPEG',
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.downloadFile = vi.fn(async function* () {
+      downloadStarted.resolve()
+      await releaseDownload.promise
+      yield jpeg
+    })
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      if (event.type === 'message-edit') edited.resolve(event)
+    })
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    const placeholder = (history.messages[0].content.parts[0] as any).media
+    expect(placeholder).toMatchObject({
+      kind: 'image', size: jpeg.length, width: 12, height: 8,
+      locator: { deferred: true },
+    })
+    const placeholderBytes: Uint8Array[] = []
+    for await (const chunk of platform.downloadMedia(session, placeholder)) placeholderBytes.push(chunk)
+    expect(placeholderBytes).toEqual([])
+
+    await downloadStarted.promise
+    releaseDownload.resolve()
+    const update = await edited.promise
+    expect(update).toMatchObject({
+      type: 'message-edit',
+      eventId: 'qqnt-media-ready-v1:2:group:history-image',
+      message: { content: { parts: [{ media: {
+        kind: 'image', size: jpeg.length, width: 12, height: 8,
+        locator: expect.not.objectContaining({ deferred: expect.anything() }),
+        preview: { mimeType: 'image/webp', width: 6, height: 4 },
+      } }] } },
+    })
+
+    const cached = await platform.getHistory(session, { id: '2:group' })
+    expect((cached.messages[0].content.parts[0] as any).media.locator).not.toHaveProperty('deferred')
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
+    await unsubscribe()
+  })
+
   it('publishes an animated image first, then edits it to immutable cached WebM', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-animated-upgrade-'))
     temporaryDirectories.push(cachePath)

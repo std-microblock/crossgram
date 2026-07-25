@@ -270,6 +270,137 @@ describe('QQNT remote media routing E2E', () => {
   })
 })
 
+describe('QQNT deferred history media E2E', () => {
+  it('persists an empty placeholder immediately and replaces it after the HTTP image is cached', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQMediaCacheModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const jpeg = await sharp({
+      create: { width: 40, height: 24, channels: 3, background: { r: 20, g: 80, b: 180 } },
+    }).jpeg().toBuffer()
+    const releaseImage = Promise.withResolvers<void>()
+    const imageRequested = Promise.withResolvers<void>()
+    let directUrlRequests = 0
+    let imageRequests = 0
+    let server: Server | undefined
+    server = createServer(async (request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
+        directUrlRequests++
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing test server address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/cdn/history.jpg`,
+          expiresAt: Date.now() + 60_000,
+        }))
+        return
+      }
+      if (request.method === 'GET' && request.url === '/cdn/history.jpg') {
+        imageRequests++
+        imageRequested.resolve()
+        await releaseImage.promise
+        response.setHeader('content-type', 'image/jpeg')
+        response.setHeader('content-length', String(jpeg.length))
+        response.end(jpeg)
+        return
+      }
+      response.writeHead(404).end('not found')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-media-e2e-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({
+      endpoint: `http://127.0.0.1:${address.port}/v1`,
+    }, 'qqnt:stickers', new QQMediaCache({
+      path: cachePath, database: ctx.database, previewMaxDimension: 10,
+    }))
+    const conversation = { id: '2:history', kind: 'group' as const, title: 'History' }
+    const wireMessage = {
+      id: 'history-image', conversationId: conversation.id, senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'history-media', kind: 'image' as const, name: 'history.jpg', mimeType: 'image/jpeg',
+          size: jpeg.length, width: 40, height: 24,
+          locator: {
+            messageId: 'history-image', elementId: 'history-media', chatType: 2 as const,
+            peerUid: 'history', kind: 'image' as const, fileName: 'history.jpg',
+            fileUuid: 'history-file-uuid', md5: 'HISTORY-E2E',
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const store = new MessageStore(ctx.database)
+    const editCompleted = Promise.withResolvers<IngestResult>()
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (event.type !== 'message-edit') return
+      editCompleted.resolve(await store.ingest(session, event.conversation, event.message))
+    })
+
+    const history = await platform.getHistory(session, conversation)
+    const initial = await store.ingest(session, conversation, history.messages[0], { allocation: 'history' })
+    const mediaId = initial.projection[0].mediaId!
+    const placeholder = await store.getMedia(session.platformSessionId, mediaId)
+    expect(placeholder?.media).toMatchObject({
+      kind: 'image', size: jpeg.length, width: 40, height: 24,
+      locator: { deferred: true },
+    })
+    expect(await collect(platform.downloadMedia(session, placeholder!.media as any))).toHaveLength(0)
+
+    await imageRequested.promise
+    expect(directUrlRequests).toBe(1)
+    expect(imageRequests).toBe(1)
+    releaseImage.resolve()
+    const edited = await Promise.race([
+      editCompleted.promise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('history media edit timed out')), 5_000)),
+    ])
+    expect(edited.projection[0]).toMatchObject({
+      tlMessageId: initial.projection[0].tlMessageId,
+      mediaId,
+    })
+    const ready = await store.getMedia(session.platformSessionId, mediaId)
+    expect(ready?.media).toMatchObject({
+      kind: 'image', size: jpeg.length, width: 40, height: 24,
+      locator: expect.not.objectContaining({ deferred: expect.anything() }),
+      preview: { mimeType: 'image/webp', width: 10, height: 6 },
+    })
+    expect(await collect(platform.downloadMedia(session, ready!.media as any))).toEqual(jpeg)
+    expect(await ctx.database.get('mtproto_im_media', {})).toHaveLength(1)
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
+    await unsubscribe()
+  })
+})
+
 describe('QQNT animated media upgrade E2E', () => {
   it('streams APNG detection over HTTP, edits to WebM, and preserves both downloadable media IDs', async () => {
     const ctx = new Context()
