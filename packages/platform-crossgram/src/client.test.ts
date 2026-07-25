@@ -88,16 +88,23 @@ describe('QQNTClient streaming transport', () => {
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
     const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4, 5])]
     const progress: number[] = []
+    let streamCalls = 0
     const message = await client.sendMessage('1:uid', 'caption', [{
       kind: 'file', name: 'x.mp4', mimeType: 'video/mp4', width: 320, height: 200, duration: 9,
-      source: { size: 5, async *stream() { yield* chunks } },
+      source: { size: 5, async *stream() { streamCalls++; yield* chunks } },
     }], { onProgress: (item) => { progress.push(item.transferredBytes) } }, 'origin-1')
     expect(message.id).toBe('sent')
     expect(Buffer.concat(received)).toEqual(Buffer.from([1, 2, 3, 4, 5]))
     expect(progress).toEqual([2, 5])
+    expect(streamCalls).toBe(2)
     expect(manifest).toMatchObject({
       conversationId: '1:uid', originRequestId: 'origin-1',
-      media: [{ mimeType: 'video/mp4', width: 320, height: 200, duration: 9 }],
+      media: [{
+        mimeType: 'video/mp4', width: 320, height: 200, duration: 9, size: 5,
+        md5: '7cfdd07889b3295d6a550914ab35e068',
+        sha1: '11966ab9c099f8fabefac54c08d5be2bd8c903af',
+        file10MMd5: '7cfdd07889b3295d6a550914ab35e068',
+      }],
     })
   })
 

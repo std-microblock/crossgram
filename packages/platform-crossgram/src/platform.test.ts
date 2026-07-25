@@ -182,7 +182,7 @@ describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 17, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 18, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
@@ -218,7 +218,7 @@ describe('QQNTPlatform mapping', () => {
     }))
     platform.client.getUser = vi.fn()
 
-    await expect(platform.getAccount()).rejects.toThrow('platform features require 17')
+    await expect(platform.getAccount()).rejects.toThrow('platform features require 18')
     expect(platform.client.getUser).not.toHaveBeenCalled()
   })
 
