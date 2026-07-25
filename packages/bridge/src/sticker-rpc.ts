@@ -327,9 +327,11 @@ export class StickerRpc {
     const provider = this._registry.get(ref.providerId)
     if (!provider) return
     const pack = await this._getPack(ref.providerId, provider, ref.packId)
-    const sticker = pack?.stickers[0]
+    const sticker = pack && packCover(pack)
     if (!sticker) return
-    const asset = await provider.openAsset(this._context(), { ...sticker, providerId: ref.providerId })
+    const normalized = { ...sticker, providerId: ref.providerId }
+    const asset = await provider.openThumbnail?.(this._context(), normalized)
+      ?? await provider.openAsset(this._context(), normalized)
     return readAssetRange(asset, offset, limit)
   }
 
@@ -491,6 +493,8 @@ export class StickerRpc {
     installed?: import('./models.js').StickerSetInstallRow,
   ): tl.RawStickerSet {
     const id = this._setId(pack.providerId, pack.packId)
+    const cover = packCover(pack)
+    const coverMetadata = cover?.thumbnail ?? cover
     this._sets.set(id, { providerId: pack.providerId, packId: pack.packId })
     return {
       _: 'stickerSet',
@@ -500,16 +504,16 @@ export class StickerRpc {
       archived: installed?.archived || undefined,
       id: Long.fromNumber(id), accessHash: Long.fromNumber(id),
       title: pack.title, shortName: this._shortName(pack), count: pack.stickers.length,
-      thumbs: pack.stickers[0] ? [{
+      thumbs: cover && coverMetadata ? [{
         _: 'photoSize', type: 'm',
-        w: pack.stickers[0].width ?? 100,
-        h: pack.stickers[0].height ?? 100,
-        size: Math.min(pack.stickers[0].size ?? 0, 0x7fffffff),
+        w: coverMetadata.width ?? 100,
+        h: coverMetadata.height ?? 100,
+        size: Math.min(coverMetadata.size ?? 0, 0x7fffffff),
       }] : undefined,
-      thumbDcId: pack.stickers[0] ? this._dcId : undefined,
-      thumbVersion: pack.stickers[0] ? STICKER_PROJECTION_VERSION : undefined,
-      thumbDocumentId: pack.stickers[0]
-        ? Long.fromNumber(this._documentId(pack.providerId, pack.stickers[0].stickerId))
+      thumbDcId: cover ? this._dcId : undefined,
+      thumbVersion: cover ? STICKER_PROJECTION_VERSION : undefined,
+      thumbDocumentId: cover
+        ? Long.fromNumber(this._documentId(pack.providerId, cover.stickerId))
         : undefined,
       hash: catalogHash(pack.stickers.map((sticker) => `${sticker.stickerId}:${sticker.version ?? 0}`)),
     }
@@ -634,8 +638,17 @@ function normalizePack(providerId: string, pack: IMStickerPack): IMStickerPack {
   return {
     ...pack,
     providerId,
+    cover: pack.cover && { ...pack.cover, providerId },
     stickers: pack.stickers.map((sticker) => ({ ...sticker, providerId, packId: pack.packId })),
   }
+}
+
+function packCover(pack: IMStickerPack): IMSticker | undefined {
+  const cover = pack.cover
+  if (!cover) return pack.stickers[0]
+  return pack.stickers.find((sticker) =>
+    sticker.providerId === cover.providerId && sticker.stickerId === cover.stickerId)
+    ?? pack.stickers[0]
 }
 
 function uploadPlan(resolved: ResolvedSticker, asset: IMStickerAsset): IMStickerSendPlan {

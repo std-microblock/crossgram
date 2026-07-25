@@ -13,6 +13,7 @@ import { MessageStore, type IngestResult, type PlatformSession } from '@mtproto-
 import { defineModels } from '../../bridge/src/models.js'
 import { QQNTPlatform } from './index.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
+import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
   platformSessionId: 'qqnt-order-e2e', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
@@ -679,6 +680,80 @@ describe('QQNT animated sticker thumbnail E2E', () => {
     if (!thumbnail) throw new Error('stored sticker thumbnail is unavailable')
     expect((await collect(thumbnail.source.stream())).subarray(8, 12).toString()).toBe('WEBP')
   }, 30_000)
+})
+
+describe('QQNT sticker pack cover E2E', () => {
+  it('loads a market pack over HTTP and exposes a cached WebP first-frame cover', async () => {
+    const animated = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAwAAAAICAYAAADN5B7xAAAACXBIWXMAAAABAAAAAQBPJcTWAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAAMAAAACAAAAAAAAAAAAAEACgAAGya3gAAAABRJREFUeJxj+MPA8J8UzDCqgRYaAJjXviFq8lROAAAAGmZjVEwAAAABAAAADAAAAAgAAAAAAAAAAAABAAoAAIBVXVQAAAAXZmRBVAAAAAJ4nGNgYPj7nzQ8qoEGGgAlJ76BvcErGQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    let assetRequests = 0
+    let server: Server | undefined
+    server = createServer((request, response) => {
+      if (request.method === 'GET' && request.url === '/v1/stickers/packs/42') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          packId: '42', title: 'QQ Market Pack', count: 1, version: 3,
+          stickers: [{
+            stickerId: 'market:42:animated-cover', packId: '42', title: 'Animated cover',
+            format: 'animated', mimeType: 'image/apng', width: 12, height: 8,
+            size: animated.length, version: 1,
+            reference: {
+              kind: 'market', packageId: '42', stickerId: 'animated-cover', name: 'Animated cover',
+              key: 'cover-key', width: 12, height: 8, animated: true,
+            },
+          }],
+        }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/stickers/asset') {
+        assetRequests++
+        request.resume()
+        response.setHeader('content-type', 'image/apng')
+        response.setHeader('content-length', animated.length)
+        response.end(animated)
+        return
+      }
+      response.statusCode = 404
+      response.end('not found')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-pack-cover-e2e-'))
+    temporaryDirectories.push(cachePath)
+    const cache = new QQMediaCache({ path: cachePath, previewMaxDimension: 64 })
+    const platform = new QQNTPlatform({ endpoint: `http://127.0.0.1:${address.port}/v1` })
+    const provider = new QQStickerProvider(platform.client, 'qqnt:stickers', cache)
+    const context = { session, platformKind: 'qq' }
+
+    const pack = await provider.getPack(context, '42')
+    expect(pack).toMatchObject({
+      providerId: 'qqnt:stickers', packId: '42', title: 'QQ Market Pack',
+      cover: { providerId: 'qqnt:stickers', stickerId: 'market:42:animated-cover' },
+      stickers: [{
+        format: 'video', mimeType: 'video/webm',
+        thumbnail: { mimeType: 'image/webp', width: 12, height: 8, size: expect.any(Number) },
+      }],
+    })
+    expect(pack!.stickers[0]!.thumbnail!.size).toBeGreaterThan(0)
+    const thumbnail = await provider.openThumbnail(context, pack!.stickers[0]!)
+    if (!thumbnail) throw new Error('pack cover thumbnail is unavailable')
+    const bytes = await collect(thumbnail.source.stream())
+    expect(bytes.subarray(8, 12).toString()).toBe('WEBP')
+    expect(assetRequests).toBe(1)
+  })
 })
 
 async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {

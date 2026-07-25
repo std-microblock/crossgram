@@ -58,7 +58,9 @@ export class QQStickerProvider implements IMStickerProvider {
   }
 
   async openThumbnail(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset | null> {
-    return this.mediaCache?.openStickerThumbnail(sticker) ?? null
+    if (!this.mediaCache) return null
+    const prepared = await this.prepareThumbnail(sticker)
+    return this.mediaCache.openStickerThumbnail(prepared)
   }
 
   async prepareSend(_context: StickerProviderContext, sticker: IMSticker) {
@@ -80,13 +82,23 @@ export class QQStickerProvider implements IMStickerProvider {
   }
 
   private async mapPack(pack: WireStickerPack): Promise<IMStickerPack> {
+    const stickers = await Promise.all(pack.stickers.map((sticker) => this.mapSticker(sticker)))
+    const first = stickers[0]
+    if (first && this.mediaCache && !first.thumbnail) {
+      try {
+        stickers[0] = await this.prepareThumbnail(first)
+      } catch {
+        // A transient cover failure must not hide the complete sticker pack.
+      }
+    }
     return {
       providerId: this.providerId,
       packId: pack.packId,
       title: pack.title,
       count: pack.count,
+      cover: stickers[0] && { providerId: this.providerId, stickerId: stickers[0].stickerId },
       version: pack.version,
-      stickers: await Promise.all(pack.stickers.map((sticker) => this.mapSticker(sticker))),
+      stickers,
     }
   }
 
@@ -106,5 +118,15 @@ export class QQStickerProvider implements IMStickerProvider {
     }
     if (!this.mediaCache) return mapped
     return this.mediaCache.restoreStickerThumbnail(this.mediaCache.projectSticker(mapped))
+  }
+
+  private async prepareThumbnail(sticker: IMSticker): Promise<IMSticker> {
+    if (!this.mediaCache || sticker.thumbnail) return sticker
+    const reference = sticker.locator as unknown as QQStickerReference | undefined
+    if (!reference) return sticker
+    return this.mediaCache.prepareStickerThumbnail(
+      sticker,
+      this.client.stickerSource(reference, sticker.size),
+    )
   }
 }

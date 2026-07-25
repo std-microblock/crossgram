@@ -40,6 +40,55 @@ describe('StickerRpc', () => {
     expect(provider.openAsset).not.toHaveBeenCalled()
   })
 
+  it('projects the declared pack cover metadata and serves its static thumbnail', async () => {
+    const { rpc, provider, sticker } = stickerHarness()
+    const coverBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 9, 8, 7, 6])
+    const cover: IMSticker = {
+      providerId: 'ignored', stickerId: 'market:11690:cover', packId: '11690',
+      title: 'Cover', format: 'video', mimeType: 'video/webm', width: 320, height: 180,
+      thumbnail: {
+        mimeType: 'image/webp', size: coverBytes.length, width: 96, height: 54,
+        locator: { cacheKey: 'pack-cover' },
+      },
+    }
+    vi.mocked(provider.getPack).mockResolvedValue({
+      providerId: 'ignored', packId: '11690', title: 'QQ Pack', version: 7,
+      cover: { providerId: 'ignored', stickerId: cover.stickerId },
+      stickers: [sticker, cover],
+    })
+    vi.mocked(provider.openThumbnail!).mockResolvedValue({
+      mimeType: 'image/webp', size: coverBytes.length, width: 96, height: 54,
+      source: {
+        size: coverBytes.length,
+        async *stream() {
+          yield coverBytes.subarray(0, 3)
+          yield coverBytes.subarray(3)
+        },
+      },
+    })
+
+    const all = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    if (all._ !== 'messages.allStickers') throw new Error('expected full sticker catalog')
+    const set = all.sets[0]!
+    expect(set.thumbs).toEqual([{
+      _: 'photoSize', type: 'm', w: 96, h: 54, size: coverBytes.length,
+    }])
+    const firstMedia = rpc.makeMessageMedia(sticker)
+    if (!firstMedia.document || firstMedia.document._ !== 'document') throw new Error('expected document')
+    expect(set.thumbDocumentId?.equals(firstMedia.document.id)).toBe(false)
+    const coverMedia = rpc.makeMessageMedia({ ...cover, providerId: 'qq:stickers' })
+    if (!coverMedia.document || coverMedia.document._ !== 'document') throw new Error('expected cover document')
+    expect(set.thumbDocumentId?.equals(coverMedia.document.id)).toBe(true)
+
+    await expect(rpc.getSetThumb({
+      _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash,
+    }, 2, 4)).resolves.toEqual(coverBytes.subarray(2, 6))
+    expect(provider.openThumbnail).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ stickerId: cover.stickerId, providerId: 'qq:stickers' }),
+    )
+    expect(provider.openAsset).not.toHaveBeenCalled()
+  })
+
   it('always projects an inline loading silhouette before any sticker download', () => {
     const { rpc, sticker, provider } = stickerHarness()
 
