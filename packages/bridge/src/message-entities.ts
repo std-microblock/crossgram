@@ -2,6 +2,11 @@ import type { tl } from '@mtcute/core'
 
 const LINK_CANDIDATE = /(?:\b(?:https?|ftp|tg):\/\/[^\s<>"'，。！？；：、（）【】《》“”‘’]+|\bwww\.[^\s<>"'，。！？；：、（）【】《》“”‘’]+|(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+[\p{L}]{2,63}(?::\d{1,5})?(?:[/?#][^\s<>"'，。！？；：、（）【】《》“”‘’]*)?)/giu
 const TRAILING_PUNCTUATION = /[.,!?;:，。！？；：、…]/u
+const AMBIGUOUS_FILE_EXTENSIONS = new Set([
+  'apk', 'avi', 'doc', 'docx', 'exe', 'gif', 'gz', 'jpeg', 'jpg', 'm4a', 'm4v',
+  'mkv', 'mov', 'mp3', 'mp4', 'pdf', 'png', 'ppt', 'pptx', 'rar', 'tar', 'txt',
+  'webm', 'webp', 'xls', 'xlsx', 'zip',
+])
 
 interface EntityRange {
   offset: number
@@ -23,7 +28,7 @@ export function withAutoLinkEntities(
   LINK_CANDIDATE.lastIndex = 0
   for (const match of text.matchAll(LINK_CANDIDATE)) {
     const offset = match.index
-    const candidate = trimLinkEnd(match[0])
+    const candidate = trimLinkEnd(trimAtEntityBoundary(match[0], offset, occupied))
     if (!candidate || !validLink(candidate)) continue
     if (isEmailDomainFragment(text, offset, candidate)) continue
 
@@ -35,6 +40,15 @@ export function withAutoLinkEntities(
 
   output.sort((left, right) => left.offset - right.offset || right.length - left.length)
   return output.length ? output : undefined
+}
+
+function trimAtEntityBoundary(candidate: string, offset: number, entities: readonly EntityRange[]): string {
+  let end = candidate.length
+  for (const entity of entities) {
+    const relativeOffset = entity.offset - offset
+    if (relativeOffset > 0 && relativeOffset < end) end = relativeOffset
+  }
+  return candidate.slice(0, end)
 }
 
 function trimLinkEnd(candidate: string): string {
@@ -65,7 +79,9 @@ function count(value: string, character: string, end: number): number {
 
 function validLink(candidate: string): boolean {
   try {
-    const value = /^(?:https?|ftp|tg):\/\//iu.test(candidate)
+    const hasProtocol = /^(?:https?|ftp|tg):\/\//iu.test(candidate)
+    if (!hasProtocol && isLikelyFileName(candidate)) return false
+    const value = hasProtocol
       ? new URL(candidate)
       : new URL(`http://${candidate}`)
     if (!value.hostname) return false
@@ -74,6 +90,13 @@ function validLink(candidate: string): boolean {
   } catch {
     return false
   }
+}
+
+function isLikelyFileName(candidate: string): boolean {
+  if (/^www\./iu.test(candidate) || /[/?#]/u.test(candidate) || /:\d{1,5}$/u.test(candidate)) {
+    return false
+  }
+  return AMBIGUOUS_FILE_EXTENSIONS.has(candidate.slice(candidate.lastIndexOf('.') + 1).toLowerCase())
 }
 
 function isEmailDomainFragment(text: string, offset: number, candidate: string): boolean {
