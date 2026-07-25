@@ -16,7 +16,10 @@ const session: PlatformSession = {
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+  sharp.cache(false)
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, {
+    recursive: true, force: true, maxRetries: 20, retryDelay: 25,
+  })))
 })
 
 describe('QQNTPlatform mapping', () => {

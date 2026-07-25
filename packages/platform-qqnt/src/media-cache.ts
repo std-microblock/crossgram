@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs'
 import { open, rename, rm } from 'node:fs/promises'
 import { extname, isAbsolute, join, resolve } from 'node:path'
@@ -477,7 +478,15 @@ async function* rangedFile(path: string, offset = 0, limit?: number): AsyncItera
   const start = Math.min(size, Math.max(0, Math.trunc(offset)))
   const length = rangedSize(size, start, limit)
   if (!length) return
-  yield* createReadStream(path, { start, end: start + length - 1 })
+  const stream = createReadStream(path, { start, end: start + length - 1 })
+  try {
+    for await (const chunk of stream) yield chunk
+  } finally {
+    if (!stream.closed) {
+      stream.destroy()
+      await once(stream, 'close').catch(() => undefined)
+    }
+  }
 }
 
 async function* rangedSource(
