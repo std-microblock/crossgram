@@ -1762,6 +1762,18 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/platform-matrix@workspace:*, @mtproto-relay/platform-matrix@workspace:packages/platform-matrix":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/platform-matrix@workspace:packages/platform-matrix"
+  dependencies:
+    "@mtproto-relay/bridge": "workspace:*"
+    schemastery: "npm:^3.18.0"
+    vitest: "npm:^2.1.9"
+  peerDependencies:
+    cordis: ^4.0.0-rc.5
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/platform-qqnt@workspace:packages/platform-crossgram":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/platform-qqnt@workspace:packages/platform-crossgram"
@@ -1836,6 +1848,7 @@ __metadata:
     "@mtproto-relay/bridge": "workspace:*"
     "@mtproto-relay/mtproto": "workspace:*"
     "@mtproto-relay/platform-discord": "workspace:*"
+    "@mtproto-relay/platform-matrix": "workspace:*"
     "@mtproto-relay/platform-static": "workspace:*"
     "@mtproto-relay/relay": "workspace:*"
     "@mtproto-relay/telegram-resources": "workspace:*"
