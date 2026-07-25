@@ -249,28 +249,35 @@ export class MessageStore {
     })), ['platformSessionId', 'conversationId', 'platformMessageId'])
 
     const media = messageMedia(source)
-    await database.upsert('mtproto_im_media', media.map((item, ordinal) => ({
-      messageId: message!.id,
-      ordinal,
-      partIndex: source.content.parts.findIndex((part) => part.type === 'media' && part.media === item),
-      platformMediaId: item.id,
-      kind: item.kind,
-      name: item.name ?? null,
-      mimeType: item.mimeType ?? null,
-      size: item.size ?? null,
-      width: item.width ?? null,
-      height: item.height ?? null,
-      duration: item.duration ?? null,
-      preview: item.preview ?? null,
-      locator: item.locator ?? null,
-    })), ['messageId', 'ordinal'])
-
-    let storedMedia = await database.select('mtproto_im_media', { messageId: message.id })
-      .orderBy('ordinal').execute()
-    for (const stale of storedMedia.filter((item) => item.ordinal >= media.length)) {
-      await database.remove('mtproto_im_media', { id: stale.id })
+    const storedMedia: IMMediaRow[] = []
+    for (const [ordinal, item] of media.entries()) {
+      const values = {
+        messageId: message.id,
+        ordinal,
+        partIndex: source.content.parts.findIndex((part) => part.type === 'media' && part.media === item),
+        platformMediaId: item.id,
+        kind: item.kind,
+        name: item.name ?? null,
+        mimeType: item.mimeType ?? null,
+        size: item.size ?? null,
+        width: item.width ?? null,
+        height: item.height ?? null,
+        duration: item.duration ?? null,
+        preview: item.preview ? { ...item.preview, locator: item.preview.locator as JsonValue } : null,
+        locator: (item.locator ?? null) as JsonValue,
+      }
+      let [stored] = await database.get('mtproto_im_media', {
+        messageId: message.id, ordinal, platformMediaId: item.id,
+      })
+      if (stored) {
+        await database.set('mtproto_im_media', { id: stored.id }, values)
+        ;[stored] = await database.get('mtproto_im_media', { id: stored.id })
+      } else {
+        stored = await database.create('mtproto_im_media', values)
+      }
+      if (!stored) throw new Error('media disappeared during ingestion')
+      storedMedia.push(stored)
     }
-    storedMedia = storedMedia.filter((item) => item.ordinal < media.length)
     const projection = await this._ensureProjection(
       database, platformSessionId, conversationRow, message, storedMedia,
       options.allocation ?? 'live',
@@ -826,6 +833,14 @@ export class MessageStore {
           ordinal,
         }
       }), ['messageId', 'ordinal'])
+    }
+    const projection = await database.select('mtproto_tl_message_part', { messageId: message.id })
+      .orderBy('ordinal').execute()
+    for (const part of projection) {
+      const mediaId = media[part.ordinal]?.id ?? null
+      if (part.mediaId !== mediaId || part.groupedId !== groupedId) {
+        await database.set('mtproto_tl_message_part', { id: part.id }, { mediaId, groupedId })
+      }
     }
     return database.select('mtproto_tl_message_part', { messageId: message.id }).orderBy('ordinal').execute()
   }

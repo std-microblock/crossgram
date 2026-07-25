@@ -38,9 +38,14 @@ whole-file `200` responses remain supported during rolling upgrades.
 
 Untouched media keeps its original format and streams from the native URL; it
 is never duplicated in the platform cache. GIF/APNG images are converted to
-WebM. When `generatePreviews` is enabled, compact WebP preview bytes are stored
-in the database while transformed WebM, sticker, and reaction assets remain on
-disk. Telegram range reads for original media go directly to the QQ CDN.
+WebM asynchronously: the original image is published first, then one message
+edit switches the projection to a new, immutable WebM media ID. The original
+media ID remains downloadable from QQ after the edit. PNG animation detection
+uses bounded native URL range reads, and completed decisions and WebM assets are
+reused by later history requests. When `generatePreviews` is enabled, compact
+WebP preview bytes are stored in the database while transformed WebM, sticker,
+and reaction assets remain on disk. Telegram range reads for original media go
+directly to the QQ CDN.
 
 QQ picture elements other than native normal/QZone photos are exposed as
 stickers. Animated expression pictures and animated sticker assets are

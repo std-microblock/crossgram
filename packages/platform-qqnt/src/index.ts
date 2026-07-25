@@ -110,6 +110,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly memberName: MemberNameMode
   private readonly originSessions = new Map<string, string>()
   private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
+  private readonly eventHandlers = new Map<
+    string,
+    (event: IMEvent<QQMediaLocator>) => void | Promise<void>
+  >()
+  private readonly mediaUpgradeJobs = new Map<string, Promise<void>>()
 
   constructor(
     options: Config = {},
@@ -147,6 +152,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const controller = new AbortController()
     const knownConversationIds = new Set<string>()
     const inFlightMessageKeys = new Set<string>()
+    this.eventHandlers.set(session.platformSessionId, handler)
     const running = Promise.all([
       this.subscribeLoop(session.platformSessionId, handler, knownConversationIds, inFlightMessageKeys, controller.signal),
       this.subscribeDialogsLoop(
@@ -156,6 +162,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return async () => {
       controller.abort()
       await running
+      if (this.eventHandlers.get(session.platformSessionId) === handler) {
+        this.eventHandlers.delete(session.platformSessionId)
+      }
     }
   }
 
@@ -281,16 +290,30 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (inFlightMessageKeys.has(key)) return false
     inFlightMessageKeys.add(key)
     try {
-      await handler({ ...event, message: await this.prepareReceivedMessage(event.message) })
+      const message = await this.prepareInitialMessage(event.message)
+      await handler({ ...event, message })
+      this.scheduleMediaUpgrade(handler, event.conversation, message)
       return true
     } finally {
       inFlightMessageKeys.delete(key)
     }
   }
 
-  async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
+  async getDialogs(session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
     await waitAtMost(this.ensureReactionCatalog().catch(() => undefined), REACTION_CATALOG_GRACE_MS)
-    return this.getDialogsPage(query)
+    const page = await this.getDialogsPage(query)
+    return {
+      ...page,
+      dialogs: await Promise.all(page.dialogs.map(async (dialog) => ({
+        ...dialog,
+        lastMessage: dialog.lastMessage
+          ? await this.prepareRequestedMessage(session, dialog.conversation, dialog.lastMessage)
+          : undefined,
+        readInboxMaxMessage: dialog.readInboxMaxMessage
+          ? await this.prepareRequestedMessage(session, dialog.conversation, dialog.readInboxMaxMessage)
+          : undefined,
+      }))),
+    }
   }
 
   private async getDialogsPage(
@@ -335,7 +358,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async getHistory(
-    _session: PlatformSession,
+    session: PlatformSession,
     conversation: IMConversationRef,
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<QQMediaLocator>> {
@@ -345,10 +368,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       const messages = await this.client.getMultiForwardMessages(multiForward)
       await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
       return {
-        messages: messages.slice(0, query.limit ?? messages.length).map((message) => ({
-          ...this.mapMessage(message),
-          conversationId: conversation.id,
-        })),
+        messages: await Promise.all(messages.slice(0, query.limit ?? messages.length).map((message) =>
+          this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
+            ...this.mapMessage(message), conversationId: conversation.id,
+          }))),
       }
     }
     const response = await this.client.getHistory(conversation.id, {
@@ -362,13 +385,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     })
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
-      messages: response.messages.map((message) => this.mapMessage(message)),
+      messages: await Promise.all(response.messages.map((message) =>
+        this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message)))),
       nextCursor: response.nextCursor,
     }
   }
 
   async searchMessages(
-    _session: PlatformSession,
+    session: PlatformSession,
     conversation: IMConversationRef,
     query: IMMessageSearchQuery,
   ): Promise<IMMessageSearchPage<QQMediaLocator>> {
@@ -384,7 +408,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     })
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
-      messages: response.messages.map((message) => this.mapMessage(message)),
+      messages: await Promise.all(response.messages.map((message) =>
+        this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message)))),
       nextCursor: response.nextCursor,
     }
   }
@@ -402,12 +427,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async getMessage(
-    _session: PlatformSession,
+    session: PlatformSession,
     conversation: IMConversationRef,
     messageId: string,
   ): Promise<IMMessage<QQMediaLocator> | null> {
     const message = await this.client.getMessage(conversation.id, messageId)
-    return message ? this.mapMessage(message) : null
+    return message
+      ? this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message))
+      : null
   }
 
   async getConversationMembers(
@@ -791,6 +818,28 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return conversationId.startsWith('2:') || /^\d+$/.test(conversationId)
   }
 
+  private conversationFor(conversationId: string): IMConversation<QQMediaLocator> {
+    return this.conversations.get(conversationId) ?? {
+      id: conversationId,
+      kind: this.isGroupConversation(conversationId) ? 'group' : 'direct',
+      title: conversationId,
+    }
+  }
+
+  private async prepareRequestedMessage(
+    session: PlatformSession,
+    conversation: IMConversation<QQMediaLocator>,
+    message: IMMessage<QQMediaLocator>,
+  ): Promise<IMMessage<QQMediaLocator>> {
+    const prepared = await this.prepareInitialMessage(message)
+    const handler = this.eventHandlers.get(session.platformSessionId)
+    if (handler) {
+      const timer = setTimeout(() => this.scheduleMediaUpgrade(handler, conversation, prepared), 0)
+      timer.unref()
+    }
+    return prepared
+  }
+
   private mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
     const current = this.conversations.get(input.id)
     const mapped = mapConversation(input)
@@ -853,7 +902,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
-  private async prepareReceivedMessage(
+  private async prepareInitialMessage(
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
     if (!this.mediaCache) return message
@@ -862,7 +911,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         return part
       }
       try {
-        const media = await this.mediaCache!.prepareMedia(part.media, {
+        const media = await this.mediaCache!.prepareInitialMedia(part.media, {
           size: part.media.size,
           stream: ({ signal } = {}) => this.client.downloadFile(part.media.locator!, { signal }),
         })
@@ -876,6 +925,55 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
     }))
     return { ...message, content: { ...message.content, parts } }
+  }
+
+  private scheduleMediaUpgrade(
+    handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+    conversation: IMConversation<QQMediaLocator>,
+    message: IMMessage<QQMediaLocator>,
+  ): void {
+    if (!this.mediaCache || !message.content.parts.some((part) =>
+      part.type === 'media' && part.media.kind === 'image' && part.media.locator)) return
+    const key = `${conversation.id}\0${message.id}`
+    if (this.mediaUpgradeJobs.has(key)) return
+    const pending = this.upgradeAnimatedMessage(message).then(async (upgraded) => {
+      if (!upgraded) return
+      await handler({
+        type: 'message-edit',
+        eventId: `qqnt-media-webm-v1:${conversation.id}:${message.id}`,
+        conversation,
+        message: upgraded,
+      })
+    }).catch((error) => {
+      this.logger?.warn(
+        'animated media upgrade failed conversation=%s message=%s error=%s',
+        conversation.id, message.id, formatError(error),
+      )
+    }).finally(() => {
+      if (this.mediaUpgradeJobs.get(key) === pending) this.mediaUpgradeJobs.delete(key)
+    })
+    this.mediaUpgradeJobs.set(key, pending)
+  }
+
+  private async upgradeAnimatedMessage(
+    message: IMMessage<QQMediaLocator>,
+  ): Promise<IMMessage<QQMediaLocator> | undefined> {
+    if (!this.mediaCache) return
+    let changed = false
+    const parts = await Promise.all(message.content.parts.map(async (part) => {
+      if (part.type !== 'media' || part.media.kind !== 'image' || !part.media.locator) return part
+      const locator = part.media.locator
+      const upgraded = await this.mediaCache!.prepareAnimatedUpgrade(part.media, {
+        size: part.media.size,
+        stream: ({ signal } = {}) => this.client.downloadFile(locator, { signal }),
+      }, {
+        read: ({ offset, limit, signal }) => this.client.downloadFile(locator, { offset, limit, signal }),
+      })
+      if (!upgraded) return part
+      changed = true
+      return { type: 'media' as const, media: upgraded }
+    }))
+    return changed ? { ...message, content: { ...message.content, parts } } : undefined
   }
 
   private readonly registerMultiForward = (
@@ -949,7 +1047,7 @@ function mapConversation(input: WireConversation): IMConversation<QQMediaLocator
 
 function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
   return {
-    id: input.id,
+    id: `${input.id}:original-v1`,
     kind: input.kind,
     name: input.name,
     mimeType: input.mimeType,

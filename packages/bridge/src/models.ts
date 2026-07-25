@@ -300,7 +300,7 @@ export function defineModels(ctx: Context): void {
     preview: { type: 'json', nullable: true }, locator: 'json',
   }, {
     primary: 'id', autoInc: true,
-    unique: [['messageId', 'ordinal']],
+    unique: [['messageId', 'ordinal', 'platformMediaId']],
     indexes: ['messageId'],
   })
 

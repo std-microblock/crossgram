@@ -126,7 +126,7 @@ describe('QQNTPlatform mapping', () => {
       credentials: {},
       user: {
         id: 'u_self', firstName: 'Platform Alice', username: '10001',
-        avatar: { id: 'avatar-self', kind: 'image' }, metadata: { qq: '10001' },
+        avatar: { id: 'avatar-self:original-v1', kind: 'image' }, metadata: { qq: '10001' },
       },
     })
     expect(platform.client.getUser).toHaveBeenCalledWith('u_self')
@@ -532,7 +532,7 @@ describe('QQNTPlatform mapping', () => {
     const contacts = await platform.getContacts(session, { limit: 500 })
     expect(contacts.users).toMatchObject([{
       id: 'u1', firstName: 'Friend', username: '10001',
-      avatar: { id: 'avatar:user:u1', locator: { filePath: '/tmp/avatar.png' } },
+      avatar: { id: 'avatar:user:u1:original-v1', locator: { filePath: '/tmp/avatar.png' } },
     }])
   })
 
@@ -588,7 +588,7 @@ describe('QQNTPlatform mapping', () => {
       type: 'message',
       conversation: {
         title: 'Bridge Test Group',
-        avatar: { id: 'avatar:group:1058754719', locator: { filePath: '/tmp/group.png' } },
+        avatar: { id: 'avatar:group:1058754719:original-v1', locator: { filePath: '/tmp/group.png' } },
       },
       message: {
         sender: {
@@ -661,6 +661,76 @@ describe('QQNTPlatform mapping', () => {
       },
     })
   })
+
+  it('publishes an animated image first, then edits it to immutable cached WebM', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-animated-upgrade-'))
+    temporaryDirectories.push(cachePath)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
+      path: cachePath, previewMaxDimension: 8,
+    }))
+    const gif = await sharp({
+      create: { width: 16, height: 12, channels: 4, background: { r: 120, g: 40, b: 210, alpha: 1 } },
+    }).gif().toBuffer()
+    const wireMessage = {
+      id: 'animated-message', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'animated-media', kind: 'image' as const, name: 'animation.gif', mimeType: 'image/gif',
+          size: gif.length, width: 16, height: 12,
+          locator: {
+            messageId: 'animated-message', elementId: 'animated-media', chatType: 2 as const,
+            peerUid: 'group', kind: 'image' as const, fileName: 'animation.gif', md5: 'ANIMATED123',
+          },
+        },
+      }],
+    }
+    const wireConversation = {
+      id: '2:group', kind: 'group' as const, title: 'Group',
+      peerUid: 'group', peerUin: '42', chatType: 2 as const,
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.downloadFile = vi.fn(async function* () { yield gif })
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      await handler({ type: 'message', conversation: wireConversation, message: wireMessage })
+      if (signal.aborted) return
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const events: any[] = []
+    const upgraded = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      events.push(event)
+      if (event.type === 'message-edit') upgraded.resolve()
+    })
+
+    await upgraded.promise
+    const history = await platform.getHistory(session, { id: '2:group' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await unsubscribe()
+
+    expect(events).toHaveLength(2)
+    expect(events[0]).toMatchObject({
+      type: 'message',
+      message: { content: { parts: [{ media: {
+        id: 'animated-media:original-v1', kind: 'image', mimeType: 'image/gif',
+        locator: expect.not.objectContaining({ cachedPath: expect.anything() }),
+      } }] } },
+    })
+    expect(events[1]).toMatchObject({
+      type: 'message-edit',
+      eventId: 'qqnt-media-webm-v1:2:group:animated-message',
+      message: { content: { parts: [{ media: {
+        id: 'animated-media:original-v1:webm-v1', kind: 'file', mimeType: 'video/webm',
+        locator: { cachedPath: expect.stringMatching(/\.webm$/) },
+      } }] } },
+    })
+    expect(history.messages[0]).toMatchObject({
+      content: { parts: [{ media: { id: 'animated-media:original-v1:webm-v1', mimeType: 'video/webm' } }] },
+    })
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(2)
+  }, 30_000)
 
   it('projects animated QQ expression messages as WebM video stickers', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-message-sticker-'))
