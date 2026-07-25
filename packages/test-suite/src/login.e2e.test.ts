@@ -1111,6 +1111,9 @@ describe('bridge login e2e', () => {
         documents: [
           expect.objectContaining({
             _: 'document', date: 1_700_000_000, mimeType: 'image/webp',
+            thumbs: [expect.objectContaining({
+              _: 'photoPathSize', type: 'j', bytes: expect.any(Uint8Array),
+            })],
             attributes: expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeSticker' })]),
           }),
           expect.anything(),
@@ -1122,7 +1125,7 @@ describe('bridge login e2e', () => {
           title: 'Static Plugin Stickers', installedDate: undefined,
           thumbs: [expect.objectContaining({ _: 'photoSize' })],
           thumbDcId: 1,
-          thumbVersion: 4,
+          thumbVersion: 5,
           thumbDocumentId: expect.any(Long),
         },
         documents: expect.arrayContaining([expect.objectContaining({ _: 'document', mimeType: 'image/webp' })]),
@@ -1510,6 +1513,13 @@ describe('bridge login e2e', () => {
       expect(labStickerDocuments.map((document: any) => document.mimeType)).toEqual([
         'video/webm', 'image/webp', 'image/webp',
       ])
+      for (const document of labStickerDocuments) {
+        expect(document.thumbs).toEqual(expect.arrayContaining([expect.objectContaining({
+          _: 'photoPathSize', type: 'j', bytes: expect.any(Uint8Array),
+        })]))
+        const outline = document.thumbs.find((thumb: any) => thumb._ === 'photoPathSize')
+        expect(outline.bytes.byteLength).toBeGreaterThan(0)
+      }
       expect(labStickerDocuments[0].attributes)
         .toEqual(expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeVideo' })]))
       expect(labStickerDocuments[1].attributes)
