@@ -120,6 +120,8 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
+  /** Platform user IDs from the latest authoritative contacts snapshot. */
+  private readonly _contactUserIds = new Set<string>()
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
@@ -599,18 +601,31 @@ export class DialogRpc {
         cursor = page.nextCursor
       } while (cursor && platformUsers.length < 100_000)
     }
-    await this._persistUsers(platformUsers)
-    const users = platformUsers.length
-      ? platformUsers
+    const contactUsers = platformUsers.filter((user) => user.id !== this._session.userId)
+    let users: tl.RawUser[]
+    if (this._platform.getContacts) {
+      const resolvedUsers = contactUsers
         .sort((left, right) => left.firstName.localeCompare(right.firstName))
-        .map((user) => {
-          this._conversations.set(user.id, { id: user.id, kind: 'direct', title: user.firstName })
-          return this._makePeerUser(user)
-        })
-      : await Promise.all((await this._loadDialogs({ limit: 500 }))
+      await this._persistUsers(resolvedUsers)
+      this._contactUserIds.clear()
+      for (const user of resolvedUsers) this._contactUserIds.add(user.id)
+      // A previous projection may have cached the same user as a non-contact,
+      // or a removed friend as a contact. Rebuild it from this snapshot.
+      this._peerUsers.clear()
+      users = resolvedUsers.map((user) => {
+        this._conversations.set(user.id, { id: user.id, kind: 'direct', title: user.firstName })
+        return this._makePeerUser(user)
+      })
+    } else {
+      const directDialogs = (await this._loadDialogs({ limit: 500 }))
         .filter((dialog) => dialog.conversation.kind === 'direct')
         .sort((left, right) => left.conversation.title.localeCompare(right.conversation.title))
-        .map((dialog) => this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
+      this._contactUserIds.clear()
+      for (const dialog of directDialogs) this._contactUserIds.add(dialog.conversation.id)
+      this._peerUsers.clear()
+      users = await Promise.all(directDialogs.map((dialog) =>
+        this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
+    }
     return {
       _: 'contacts.contacts',
       contacts: users.map((user) => ({ _: 'contact', userId: user.id, mutual: true })),
@@ -2428,10 +2443,11 @@ export class DialogRpc {
   }
 
   private _makePeerUser(user: IMUser): tl.RawUser {
+    const contact = this._contactUserIds.has(user.id)
     return makeUser({
       id: this._userId(user.id), firstName: user.firstName,
       lastName: user.lastName, username: user.username,
-      contact: true, mutualContact: true,
+      contact: contact || undefined, mutualContact: contact || undefined,
       photo: user.avatar ? this._makeAvatarPhoto(user.avatar, 'user') : undefined,
     })
   }

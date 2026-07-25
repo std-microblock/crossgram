@@ -29,6 +29,12 @@ class ImportedMockAdaptor extends Bot {
   }
 }
 
+function importedMockAdaptor(ctx: Context) {
+  new ImportedMockAdaptor(ctx)
+}
+
+importedMockAdaptor.inject = ['satori']
+
 const fibers: Array<{ dispose(): unknown }> = []
 
 afterEach(async () => {
@@ -42,7 +48,7 @@ describe('Satori adaptor import e2e', () => {
     const satori = ctx.plugin(Satori)
     const registry = ctx.plugin((serviceCtx) => { new IMPlatformService(serviceCtx) })
     const bridge = ctx.plugin(satoriPlatformPlugin, { bot: 'mock:self' })
-    const adaptor = ctx.plugin(ImportedMockAdaptor)
+    const adaptor = ctx.plugin(importedMockAdaptor)
     fibers.push(http, satori, registry, bridge, adaptor)
     await Promise.all(fibers)
     await new Promise((resolve) => setTimeout(resolve, 20))

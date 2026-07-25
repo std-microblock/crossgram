@@ -92,13 +92,19 @@ export class SatoriPlatform implements IMPlatform<SatoriMediaLocator> {
       deliver({
         type: 'message',
         conversation,
-        message: mapSatoriMessage(session.event.message, conversation, session.selfId),
+        message: mapSatoriMessage(session.event.message, conversation, session.selfId, {
+          user: session.event.user,
+          member: session.event.member,
+        }),
       })
     }
     const onUpdated = (session: Session) => {
       if (session.bot.sid !== sid || !session.event.message || !session.event.channel) return
       const conversation = this.remember(mapSatoriConversation(session.event.channel, session.event.guild))
-      const message = mapSatoriMessage(session.event.message, conversation, session.selfId)
+      const message = mapSatoriMessage(session.event.message, conversation, session.selfId, {
+        user: session.event.user,
+        member: session.event.member,
+      })
       deliver({ type: 'message-edit', eventId: `satori:update:${session.sn}`, conversation, message })
     }
     const onDeleted = (session: Session) => {
@@ -267,7 +273,10 @@ export class SatoriPlatform implements IMPlatform<SatoriMediaLocator> {
       senderId: bot.selfId,
       outgoing: true,
       timestamp: Math.trunc(Date.now() / 1000),
-      content: { parts: content.parts.filter((part) => part.type === 'text') as IMMessage['content']['parts'] },
+      content: {
+        parts: content.parts.filter((part) => part.type === 'text') as
+          IMMessage<SatoriMediaLocator>['content']['parts'],
+      },
     }
   }
 
