@@ -17,6 +17,9 @@
     # Compact WebP previews are kept as binary rows in the database.
     generatePreviews: true
     previewMaxDimension: 320
+    # Hide gray-tip service messages containing any entry. Set [] to keep all.
+    grayTipFilters:
+      - 回应了你的消息
 ```
 
 The transport uses JSON for metadata, WebSocket for ordered incoming events, a
@@ -86,6 +89,11 @@ reactions; QQ SysFace entries are exposed as custom emoji documents backed by
 the downloaded `static/s{QSid}.png` resources. Existing counts/selections come
 from `MsgRecord.emojiLikesList`, and writes use QQ `msgSeq` with
 `setMsgEmojiLikes`.
+
+Reaction gray tips are used as an immediate refresh signal by `qqnt-bridge`,
+but the redundant “回应了你的消息” service message is hidden by the adapter's
+default `grayTipFilters`. Replace the list to filter other gray-tip wording, or
+set it to `[]` to show every gray tip.
 
 ## Tests
 

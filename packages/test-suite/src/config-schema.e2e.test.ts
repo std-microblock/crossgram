@@ -19,4 +19,13 @@ describe('loader WebUI config discovery', () => {
     expect(root.type).toBe('object')
     expect(Object.keys(root.dict ?? {}).length).toBeGreaterThan(0)
   })
+
+  it('serializes the QQNT gray-tip filter list and its reaction-notice default through the loader', () => {
+    const plugin = Loader.prototype.unwrapExports(qqnt)
+    const serialized = JSON.parse(JSON.stringify({ schema: plugin.Config }))
+    const root = serialized.schema.refs[serialized.schema.uid]
+    expect(root.dict).toHaveProperty('grayTipFilters')
+    expect(plugin.Config({})).toMatchObject({ grayTipFilters: ['回应了你的消息'] })
+    expect(plugin.Config({ grayTipFilters: [] })).toMatchObject({ grayTipFilters: [] })
+  })
 })
