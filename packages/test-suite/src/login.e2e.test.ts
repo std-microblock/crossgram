@@ -344,6 +344,46 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 }
 
 describe('bridge login e2e', () => {
+  it('keeps users seen only in dialogs out of MTProto contacts', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x76543210, 0x4abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+
+      const contacts = await callRpc(client, key, sid, {
+        _: 'contacts.getContacts', hash: Long.ZERO,
+      }, 6)
+      expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
+      expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
+
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 8)
+      const users = new Map(dialogs.users.map((user: any) => [user.firstName, user]))
+      expect(users.get('Alice')).toMatchObject({ contact: true, mutualContact: true })
+      expect(users.get('Bob')).toMatchObject({ contact: true, mutualContact: true })
+      expect(users.get('Carol')).toMatchObject({ contact: false, mutualContact: false })
+      expect(users.get('Mirror User')).toMatchObject({ contact: false, mutualContact: false })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('logs in, resumes on a fresh connection, reads contacts/history, and sends a message', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(1_700_001_000_000)
     const { ctx, port, pubKey, stop } = await startApp()
@@ -520,6 +560,11 @@ describe('bridge login e2e', () => {
       ])
       expect(new Set(dialogs.users.map((user: any) => user.firstName)))
         .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
+      const dialogUsers = new Map(dialogs.users.map((user: any) => [user.firstName, user]))
+      expect(dialogUsers.get('Alice')).toMatchObject({ contact: true, mutualContact: true })
+      expect(dialogUsers.get('Bob')).toMatchObject({ contact: true, mutualContact: true })
+      expect(dialogUsers.get('Carol')).toMatchObject({ contact: false, mutualContact: false })
+      expect(dialogUsers.get('Mirror User')).toMatchObject({ contact: false, mutualContact: false })
       expect(dialogs.chats.map((chat: any) => chat.title)).toEqual([
         'Group A - Live Mutations', 'Static QQ Group', 'Group C - Mirror Target',
         'Group B - Mirror Source', 'general', 'Reaction & Sticker Lab', 'Group D - Long History',

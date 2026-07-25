@@ -37,6 +37,7 @@ class DialogTestPlatform implements IMPlatform {
     bob: [this._message('1', 'bob', 'Meeting at 3?', 1_700_000_200)],
   }
   private _sequence = 100
+  contactIds = ['alice', 'bob']
   lastInput?: IMMessageInput
   readonly readTargets: Array<{ conversationId: string, messageId: string }> = []
 
@@ -76,6 +77,10 @@ class DialogTestPlatform implements IMPlatform {
 
   async getUser(_session: PlatformSession, id: string): Promise<IMUser | null> {
     return this._users[id] ?? null
+  }
+
+  async getContacts() {
+    return { users: this.contactIds.map((id) => this._users[id]) }
   }
 
   async markRead(
@@ -583,6 +588,55 @@ describe('DialogRpc', () => {
     })
     expect(() => wireRoundTrip(contacts)).not.toThrow()
     expect(() => wireRoundTrip(full)).not.toThrow()
+  })
+
+  it('marks only authoritative address-book users as contacts and refreshes cached flags', async () => {
+    const platform = new DialogTestPlatform()
+    platform.contactIds = ['alice']
+    const rpc = new DialogRpc(platform, session)
+
+    const dialogsBeforeContacts = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
+    const beforeByName = new Map(dialogsBeforeContacts.users
+      .filter((user): user is tl.RawUser => user._ === 'user')
+      .map((user) => [user.firstName, user]))
+    expect(beforeByName.get('Alice')).toMatchObject({ contact: undefined, mutualContact: undefined })
+    expect(beforeByName.get('Bob')).toMatchObject({ contact: undefined, mutualContact: undefined })
+
+    const firstSnapshot = await rpc.getContacts()
+    expect(firstSnapshot.users).toMatchObject([
+      { _: 'user', firstName: 'Alice', contact: true, mutualContact: true },
+    ])
+
+    const afterFirstSnapshot = await rpc.getUsers({
+      _: 'users.getUsers',
+      id: [
+        { _: 'inputUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO },
+        { _: 'inputUser', userId: rpc.peerTlId('bob'), accessHash: Long.ZERO },
+      ],
+    }) as tl.RawUser[]
+    expect(afterFirstSnapshot[0]).toMatchObject({ firstName: 'Alice', contact: true, mutualContact: true })
+    expect(afterFirstSnapshot[1]).toMatchObject({ firstName: 'Bob', contact: undefined, mutualContact: undefined })
+
+    platform.contactIds = ['bob']
+    await rpc.getContacts()
+    const afterReplacement = await rpc.getUsers({
+      _: 'users.getUsers',
+      id: [
+        { _: 'inputUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO },
+        { _: 'inputUser', userId: rpc.peerTlId('bob'), accessHash: Long.ZERO },
+      ],
+    }) as tl.RawUser[]
+    expect(afterReplacement[0]).toMatchObject({ firstName: 'Alice', contact: undefined, mutualContact: undefined })
+    expect(afterReplacement[1]).toMatchObject({ firstName: 'Bob', contact: true, mutualContact: true })
+
+    platform.contactIds = []
+    const emptySnapshot = await rpc.getContacts()
+    expect(emptySnapshot).toMatchObject({ contacts: [], users: [], savedCount: 0 })
+    const afterEmptySnapshot = await rpc.getUsers({
+      _: 'users.getUsers',
+      id: [{ _: 'inputUser', userId: rpc.peerTlId('bob'), accessHash: Long.ZERO }],
+    }) as tl.RawUser[]
+    expect(afterEmptySnapshot[0]).toMatchObject({ firstName: 'Bob', contact: undefined, mutualContact: undefined })
   })
 
   it('sends exactly once per random ID and exposes the outgoing message in history', async () => {
