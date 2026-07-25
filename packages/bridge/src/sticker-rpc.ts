@@ -279,8 +279,13 @@ export class StickerRpc {
     await this.markUsedByRef(resolved.providerId, resolved.sticker.stickerId, attached)
   }
 
-  async getFile(documentId: number, offset: number, limit: number): Promise<Uint8Array | undefined> {
-    const resolved = await this._resolveDocument(documentId)
+  async getFile(
+    documentId: number,
+    offset: number,
+    limit: number,
+    fileReference?: Uint8Array,
+  ): Promise<Uint8Array | undefined> {
+    const resolved = await this._resolveDocument(documentId, fileReference)
     if (!resolved) return
     const asset = await resolved.provider.openAsset(this._context(), resolved.sticker)
     const chunks: Uint8Array[] = []
@@ -427,8 +432,13 @@ export class StickerRpc {
     return resolved
   }
 
-  private async _resolveDocument(id: number): Promise<ResolvedSticker | undefined> {
+  private async _resolveDocument(
+    id: number,
+    fileReference?: Uint8Array,
+  ): Promise<ResolvedSticker | undefined> {
     let resolved = this._documents.get(id)
+    if (resolved) return resolved
+    resolved = await this._resolveDocumentReference(id, fileReference)
     if (resolved) return resolved
     await this._listPacks()
     resolved = this._documents.get(id)
@@ -437,6 +447,38 @@ export class StickerRpc {
       resolved = saved.find((item) => this._documentId(item.providerId, item.sticker.stickerId) === id)
     }
     return resolved
+  }
+
+  private async _resolveDocumentReference(
+    id: number,
+    fileReference?: Uint8Array,
+  ): Promise<ResolvedSticker | undefined> {
+    if (!fileReference?.byteLength) return
+    let reference: string
+    try {
+      reference = new TextDecoder('utf-8', { fatal: true }).decode(fileReference)
+    } catch {
+      return
+    }
+    const prefix = 'bridge-sticker:'
+    if (!reference.startsWith(prefix)) return
+    const body = reference.slice(prefix.length)
+    for (const [providerId, provider] of [...this._activeProviders()]
+      .sort(([left], [right]) => right.length - left.length)) {
+      const providerPrefix = `${providerId}:`
+      if (!body.startsWith(providerPrefix)) continue
+      const versionSeparator = body.lastIndexOf(':')
+      if (versionSeparator < providerPrefix.length || !/^\d+$/.test(body.slice(versionSeparator + 1))) {
+        return
+      }
+      const stickerId = body.slice(providerPrefix.length, versionSeparator)
+      if (!stickerId || this._documentId(providerId, stickerId) !== id) return
+      const sticker = await provider.getSticker(this._context(), stickerId)
+      if (!sticker || sticker.stickerId !== stickerId) return
+      const resolved = { providerId, provider, sticker: { ...sticker, providerId } }
+      this._documents.set(id, resolved)
+      return resolved
+    }
   }
 
   private _makeSet(
