@@ -24,6 +24,8 @@ export interface IMSticker extends IMStickerRef {
   version?: number
   /** Optional static frame shown while an animated/video sticker is loading. */
   thumbnail?: IMStickerThumbnail
+  /** Telegram compact SVG path painted with a moving gradient while loading. */
+  outline?: Uint8Array
   locator?: JsonValue
 }
 
