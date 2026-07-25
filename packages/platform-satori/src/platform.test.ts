@@ -81,7 +81,7 @@ describe('SatoriPlatform', () => {
     await platform.editMessage(session, {
       conversationId: 'general', messageId: 'm1', targetId: 'm1',
     }, { parts: [{ type: 'text', text: 'edited' }] })
-    await platform.deleteMessages(session, { id: 'general' }, ['m1', 'm2'], { forEveryone: true })
+    await platform.deleteMessages(session, { id: 'general' }, ['m1', 'm2'])
     expect(bot.editMessage).toHaveBeenCalledOnce()
     expect(bot.deleteMessage).toHaveBeenCalledTimes(2)
   })

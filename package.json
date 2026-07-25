@@ -14,7 +14,8 @@
     "packages/*"
   ],
   "resolutions": {
-    "@cordisjs/plugin-http@npm:^0.6.3": "patch:@cordisjs/plugin-http@npm%3A1.5.1#~/.yarn/patches/@cordisjs-plugin-http-npm-1.5.1-ce3c6bdf99.patch"
+    "@cordisjs/plugin-http@npm:^0.6.3": "patch:@cordisjs/plugin-http@npm%3A1.5.1#~/.yarn/patches/@cordisjs-plugin-http-npm-1.5.1-ce3c6bdf99.patch",
+    "@satorijs/core@npm:^4.6.0": "patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch"
   },
   "scripts": {
     "build": "yakumo build",

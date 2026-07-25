@@ -18,6 +18,7 @@
     "@mtproto-relay/bridge": "workspace:*",
     "@mtproto-relay/mtproto": "workspace:*",
     "@mtproto-relay/platform-discord": "workspace:*",
+    "@mtproto-relay/platform-matrix": "workspace:*",
     "@mtproto-relay/platform-satori": "workspace:*",
     "@mtproto-relay/platform-static": "workspace:*",
     "@mtproto-relay/relay": "workspace:*",

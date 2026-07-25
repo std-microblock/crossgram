@@ -1836,6 +1836,18 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/platform-matrix@workspace:*, @mtproto-relay/platform-matrix@workspace:packages/platform-matrix":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/platform-matrix@workspace:packages/platform-matrix"
+  dependencies:
+    "@mtproto-relay/bridge": "workspace:*"
+    schemastery: "npm:^3.18.0"
+    vitest: "npm:^2.1.9"
+  peerDependencies:
+    cordis: ^4.0.0-rc.5
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/platform-qqnt@workspace:packages/platform-qqnt":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/platform-qqnt@workspace:packages/platform-qqnt"
@@ -1925,6 +1937,7 @@ __metadata:
     "@mtproto-relay/bridge": "workspace:*"
     "@mtproto-relay/mtproto": "workspace:*"
     "@mtproto-relay/platform-discord": "workspace:*"
+    "@mtproto-relay/platform-matrix": "workspace:*"
     "@mtproto-relay/platform-satori": "workspace:*"
     "@mtproto-relay/platform-static": "workspace:*"
     "@mtproto-relay/relay": "workspace:*"
@@ -2550,7 +2563,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@satorijs/core@npm:4.6.0, @satorijs/core@npm:^4.6.0":
+"@satorijs/core@npm:4.6.0":
   version: 4.6.0
   resolution: "@satorijs/core@npm:4.6.0"
   dependencies:
@@ -2568,7 +2581,7 @@ __metadata:
 
 "@satorijs/core@patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch":
   version: 4.6.0
-  resolution: "@satorijs/core@patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch::version=4.6.0&hash=f9e29a"
+  resolution: "@satorijs/core@patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch::version=4.6.0&hash=1f920e"
   dependencies:
     "@cordisjs/plugin-http": "npm:^0.6.3"
     "@satorijs/element": "npm:^3.2.0"
@@ -2578,7 +2591,7 @@ __metadata:
     path-to-regexp: "npm:^8.2.0"
   peerDependencies:
     cordis: ^3.18.1
-  checksum: 10c0/d617cc48797484369a65020859564824c1e7f2b31fbca0221e8867b774b088609ea88257c00c5b0f1138db64144ddb201a3efe1974baaba662150337fee9a740
+  checksum: 10c0/2c13316786cd7c29337a323e5ba6b0e8847e1c804aedfa3d3310e068e02ccf985951d9a524f8de122bc85b31fe86d1694cffd94365375dbfef7bea6725503ece
   languageName: node
   linkType: hard
 

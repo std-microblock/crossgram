@@ -84,4 +84,22 @@ describe('Satori conversion', () => {
       { phase: 'upload', mediaIndex: 0, transferredBytes: 4, totalBytes: 4 },
     ])
   })
+
+  it('uses the event-level author when the embedded Satori message omits identity fields', () => {
+    const message = mapSatoriMessage({
+      id: 'incoming',
+      content: 'hello',
+    }, {
+      id: 'room', kind: 'group', title: 'Room',
+    }, 'self', {
+      user: { id: 'alice', name: 'alice' },
+      member: { user: { id: 'alice', name: 'alice' }, nick: 'Alice in Room' },
+    })
+
+    expect(message).toMatchObject({
+      senderId: 'alice',
+      outgoing: false,
+      sender: { id: 'alice', firstName: 'Alice in Room', username: 'alice' },
+    })
+  })
 })

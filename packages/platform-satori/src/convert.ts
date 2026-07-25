@@ -52,20 +52,22 @@ export function mapSatoriMessage(
   message: Universal.Message,
   fallbackConversation: IMConversation<SatoriMediaLocator>,
   selfId: string,
+  fallbackAuthor?: Pick<Universal.Message, 'user' | 'member'>,
 ): IMMessage<SatoriMediaLocator> {
   const id = message.id ?? message.messageId
   if (!id) throw new Error('Satori message has no ID')
   const conversation = message.channel
     ? mapSatoriConversation(message.channel, message.guild)
     : fallbackConversation
-  const user = message.user ?? message.member?.user
+  const member = message.member ?? fallbackAuthor?.member
+  const user = message.user ?? member?.user ?? fallbackAuthor?.user
   const senderId = user?.id ?? (message as { userId?: string }).userId ?? selfId
   const elements = message.elements ?? h.parse(message.content ?? '')
   return {
     id,
     conversationId: conversation.id,
     senderId,
-    sender: user ? mapSatoriUser(user, message.member) : undefined,
+    sender: user ? mapSatoriUser(user, member) : undefined,
     content: { parts: mapSatoriElements(elements, id) },
     timestamp: unixSeconds(message.timestamp ?? message.createdAt ?? Date.now()),
     outgoing: senderId === selfId,
