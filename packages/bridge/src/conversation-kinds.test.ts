@@ -126,7 +126,7 @@ async function createRpc(selectedPlatform: IMPlatform = platform) {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
   const reactions = selectedPlatform.capabilities.reactions
-    ? new ReactionRpc(selectedPlatform, session)
+    ? new ReactionRpc(selectedPlatform, session, 1, ctx.database)
     : undefined
   return {
     ctx,
@@ -157,6 +157,58 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('conversation kinds', () => {
+  it('promotes newly selected reactions without treating removals as recent usage', async () => {
+    const group = conversations.find((item) => item.id === 'group')!
+    const available = [
+      { key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } },
+      { key: 'fire', presentation: { type: 'emoji' as const, emoticon: '🔥' } },
+    ]
+    let reactionContext = { available, reactions: [], maxSelected: 1 } as import('./platform.js').IMReactionContext
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: true, events: false, actorList: false, maxSelected: 1 },
+      },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation: group, unreadCount: 0,
+          lastMessage: { ...source(group), reactionContext },
+        }] }
+      },
+      async getAvailableReactions() {
+        return reactionContext
+      },
+      async setMessageReactions(_session, _target, keys) {
+        reactionContext = {
+          available,
+          reactions: keys.map((key) => ({ key, count: 1, selected: true })),
+          maxSelected: 1,
+        }
+        return reactionContext
+      },
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+    const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
+    const send = (reaction: tl.TypeReaction[]) => rpc.sendReaction({
+      _: 'messages.sendReaction', peer, msgId: message.id, reaction,
+    })
+
+    await send([{ _: 'reactionEmoji', emoticon: '👍' }])
+    await send([])
+    await expect(rpc.getRecentReactions(100)).resolves.toMatchObject({ reactions: [
+      { _: 'reactionEmoji', emoticon: '👍' },
+    ] })
+
+    await send([{ _: 'reactionEmoji', emoticon: '🔥' }])
+    await expect(rpc.getRecentReactions(100)).resolves.toMatchObject({ reactions: [
+      { _: 'reactionEmoji', emoticon: '🔥' },
+      { _: 'reactionEmoji', emoticon: '👍' },
+    ] })
+  })
+
   it('refreshes and returns the platform users behind message reactions', async () => {
     const reactionContext = {
       available: [{

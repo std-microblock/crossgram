@@ -177,6 +177,14 @@ export interface StickerFavoriteRow {
   createdAt: Date
 }
 
+export interface ReactionRecentRow {
+  id: number
+  platformSessionId: string
+  reactionType: 'emoji' | 'custom'
+  reactionValue: string
+  lastUsedAt: Date
+}
+
 export interface IMMessageReactionRow {
   id: number
   messageId: number
@@ -217,6 +225,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_update_delivery: UpdateDeliveryRow
     mtproto_sticker_recent: StickerRecentRow
     mtproto_sticker_favorite: StickerFavoriteRow
+    mtproto_reaction_recent: ReactionRecentRow
     mtproto_im_message_reaction: IMMessageReactionRow
     mtproto_sticker_set_install: StickerSetInstallRow
   }
@@ -358,6 +367,15 @@ export function defineModels(ctx: Context): void {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'providerId', 'providerStickerId']],
     indexes: [['platformSessionId', 'createdAt']],
+  })
+
+  ctx.model.extend('mtproto_reaction_recent', {
+    id: 'unsigned', platformSessionId: 'string', reactionType: 'string', reactionValue: 'text',
+    lastUsedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'reactionType', 'reactionValue']],
+    indexes: [['platformSessionId', 'lastUsedAt']],
   })
 
   ctx.model.extend('mtproto_im_message_reaction', {

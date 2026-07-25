@@ -1220,6 +1220,34 @@ describe('bridge login e2e', () => {
           expect.objectContaining({ my: true, reaction: { _: 'reactionEmoji', emoticon: '👍' } }),
         ]),
       })
+      await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendReaction',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        msgId: reactionMessage.id,
+        reaction: [{ _: 'reactionEmoji', emoticon: '🔥' }],
+      }, 1_188)
+      const recentReactions = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getRecentReactions', limit: 100, hash: Long.ZERO,
+      }, 1_189)
+      expect(recentReactions).toMatchObject({
+        _: 'messages.reactions',
+        reactions: [
+          { _: 'reactionEmoji', emoticon: '🔥' },
+          { _: 'reactionEmoji', emoticon: '👍' },
+        ],
+      })
+      const reorderedTopReactions = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getTopReactions', limit: 4, hash: Long.ZERO,
+      }, 1_190)
+      expect(reorderedTopReactions).toMatchObject({
+        _: 'messages.reactions',
+        reactions: [
+          { _: 'reactionEmoji', emoticon: '🔥' },
+          { _: 'reactionEmoji', emoticon: '👍' },
+          { _: 'reactionEmoji', emoticon: '❤️' },
+          { _: 'reactionEmoji', emoticon: '😂' },
+        ],
+      })
       const staticAdapter = ctx.imPlatform.require('static') as staticPlatformPlugin.StaticPlatform
       const adapterSession = bridge.sessionFromRow(platformLogin.session)
       const pushedContext = await staticAdapter.getAvailableReactions(
