@@ -106,6 +106,79 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('preserves structured mini-app and share-card metadata instead of flattening it to text', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'mini-app-card', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{ type: 'card' as const, card: {
+        kind: 'mini-app' as const, source: '腾讯文档', title: '项目排期', description: '本周项目安排',
+        url: 'https://docs.qq.com/sheet/example', thumbnailUrl: 'https://cdn.example.com/cover.jpg',
+      } }],
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ content: { parts: [{ type: 'card', card: {
+        kind: 'mini-app', source: '腾讯文档', title: '项目排期', description: '本周项目安排',
+        url: 'https://docs.qq.com/sheet/example', thumbnailUrl: 'https://cdn.example.com/cover.jpg',
+      } }] } }],
+    })
+  })
+
+  it('filters reaction gray tips from history, search, direct lookup, and dialog previews by default', async () => {
+    const platform = new QQNTPlatform()
+    const reactionTip = {
+      id: 'reaction-tip', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice回应了你的消息：hello' }, parts: [],
+    }
+    const memberTip = {
+      id: 'member-tip', conversationId: '2:group', senderId: 'system', timestamp: 1, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice加入了群聊' }, parts: [],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [reactionTip, memberTip] }))
+    platform.client.searchMessages = vi.fn(async () => ({ messages: [reactionTip] }))
+    platform.client.getMessage = vi.fn(async () => reactionTip)
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: '2:group', kind: 'group' as const, title: 'Group', peerUid: 'group', peerUin: 'group',
+      chatType: 2 as const, lastMessage: reactionTip, readInboxMaxMessage: memberTip,
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ id: 'member-tip' }],
+    })
+    await expect(platform.searchMessages(session, { id: '2:group' }, { query: '回应' }))
+      .resolves.toMatchObject({ messages: [] })
+    await expect(platform.getMessage(session, { id: '2:group' }, 'reaction-tip')).resolves.toBeNull()
+    await expect(platform.getDialogs(session)).resolves.toMatchObject({
+      dialogs: [{ lastMessage: undefined, readInboxMaxMessage: { id: 'member-tip' } }],
+    })
+  })
+
+  it('lets an empty or replaced gray-tip filter list override the reaction default', async () => {
+    const reactionTip = {
+      id: 'reaction-tip', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice回应了你的消息：hello' }, parts: [],
+    }
+    const memberTip = {
+      id: 'member-tip', conversationId: '2:group', senderId: 'system', timestamp: 1, outgoing: false,
+      serviceAction: { type: 'custom' as const, text: 'Alice加入了群聊' }, parts: [],
+    }
+    const visible = new QQNTPlatform({ grayTipFilters: [] })
+    visible.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    visible.client.getHistory = vi.fn(async () => ({ messages: [reactionTip] }))
+    await expect(visible.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ id: 'reaction-tip' }],
+    })
+
+    const replaced = new QQNTPlatform({ grayTipFilters: ['加入了群聊'] })
+    replaced.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    replaced.client.getHistory = vi.fn(async () => ({ messages: [reactionTip, memberTip] }))
+    await expect(replaced.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ id: 'reaction-tip' }],
+    })
+  })
+
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
@@ -186,6 +259,58 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getHistory).toHaveBeenCalledWith('2:group', expect.objectContaining({
       aroundUnreadSeq: undefined,
     }))
+  })
+
+  it('downloads merged-forward files through the physical outer QQ conversation', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: 'outer-group', kind: 'group' as const, title: 'Outer group',
+      peerUid: 'physical-group-uid', peerUin: '10001', chatType: 2 as const,
+      lastMessage: {
+        id: 'merged-root', conversationId: 'outer-group', senderId: 'alice', timestamp: 10, outgoing: false,
+        parts: [{
+          type: 'multi-forward' as const, title: '聊天记录',
+          locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
+        }],
+      },
+    }] }))
+    const [dialog] = (await platform.getDialogs(session)).dialogs
+    const link = dialog.lastMessage?.content.parts[0]
+    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+
+    const archivedLocator = {
+      messageId: 'archived-file-message', elementId: 'file-element', chatType: 2 as const,
+      peerUid: 'archived-source-group', kind: 'file' as const, fileName: 'guide.xlsx',
+      fileUuid: '/file-uuid', fileBizId: 104,
+    }
+    platform.client.getMultiForwardMessages = vi.fn(async () => [{
+      id: 'archived-file-message', conversationId: 'archived-source-group',
+      senderId: 'bob', timestamp: 9, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: { id: 'file-element', kind: 'file' as const, name: 'guide.xlsx', size: 8, locator: archivedLocator },
+      }],
+    }])
+    platform.client.downloadFile = vi.fn(async function* () { yield new TextEncoder().encode('contents') })
+
+    const history = await platform.getHistory(session, link.entities[0].conversation)
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'media') throw new Error('merged forward file was not mapped')
+    const chunks: Uint8Array[] = []
+    for await (const chunk of platform.downloadMedia(session, part.media)) chunks.push(chunk)
+
+    expect(part.media.locator).toEqual({
+      ...archivedLocator, chatType: 2, peerUid: 'physical-group-uid',
+    })
+    expect(platform.client.downloadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ chatType: 2, peerUid: 'physical-group-uid', fileUuid: '/file-uuid' }),
+      { signal: undefined, offset: undefined, limit: undefined },
+    )
+    expect(chunks).toEqual([new TextEncoder().encode('contents')])
+    expect(archivedLocator.peerUid).toBe('archived-source-group')
   })
 
   it('uses QQ merged forward only for multiple preserved-source messages', async () => {
@@ -504,6 +629,43 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribeOwn()
     await unsubscribeOther()
     expect(wireHandler).toBeTypeOf('function')
+  })
+
+  it('suppresses live reaction gray tips while still forwarding the following reaction update', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    let wireHandler: ((event: any) => void | Promise<void>) | undefined
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      wireHandler = handler
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(wireHandler).toBeTypeOf('function'))
+    const conversation = {
+      id: '2:group', kind: 'group' as const, title: 'Group', peerUid: 'group', peerUin: 'group',
+      chatType: 2 as const,
+    }
+
+    await wireHandler!({
+      type: 'message', conversation,
+      message: {
+        id: 'reaction-tip', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
+        serviceAction: { type: 'custom', text: 'Alice回应了你的消息：hello' }, parts: [],
+      },
+    })
+    await wireHandler!({
+      type: 'message-reactions', eventId: 'reaction-now', conversation,
+      target: { conversationId: '2:group', messageId: 'target', targetId: 'target' },
+      context: { reactions: [{ key: '1:14', count: 1 }], maxSelected: 20 }, timestamp: 3,
+    })
+
+    expect(received).toMatchObject([{
+      type: 'message-reactions', target: { messageId: 'target' },
+      context: { reactions: [{ key: '1:14', count: 1 }] },
+    }])
+    await unsubscribe()
   })
 
   it('maps opaque QQ IDs and member roles without numeric coercion', async () => {
