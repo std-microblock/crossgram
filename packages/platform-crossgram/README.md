@@ -7,6 +7,9 @@
   name: '@mtproto-relay/platform-qqnt'
   config:
     endpoint: http://127.0.0.1:18767/v1
+    # Optional full WebSocket event-stream URL. By default this is derived
+    # from endpoint as ws://127.0.0.1:18767/v1/events/ws.
+    # webSocketEndpoint: ws://127.0.0.1:18767/v1/events/ws
     # token: optional-shared-secret
     # groupAlias (default) uses the current group's card when present.
     # nickname always uses the user's QQ profile nickname.
@@ -22,7 +25,8 @@
 The transport uses JSON for metadata, WebSocket for ordered incoming events, a
 chunked request body for uploads, and HTTP byte-range responses for downloads.
 The adapter reads `IMMediaSource.stream()` directly and never constructs a
-complete media `Buffer`.
+complete media `Buffer`. `webSocketEndpoint` can point the event connection at a
+different host or path without changing the HTTP API `endpoint`.
 
 For native videos, the platform asks the injected bridge to call QQNT's
 `getVideoPlayUrl`, then requests the signed QQ CDN URL directly with standard

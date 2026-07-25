@@ -10,6 +10,7 @@ const directTarget = '1715311957'
 const groupTargets = ['1058754719', '1084013940'] as const
 const platform = new QQNTPlatform({
   endpoint: process.env.QQNT_BRIDGE_URL ?? 'http://127.0.0.1:18767/v1',
+  webSocketEndpoint: process.env.QQNT_BRIDGE_WEBSOCKET_URL,
   token: process.env.QQNT_BRIDGE_TOKEN,
 })
 const session: PlatformSession = {

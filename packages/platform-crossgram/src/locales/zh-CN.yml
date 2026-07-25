@@ -1,4 +1,5 @@
 endpoint: QQNT 网桥 HTTP API 的基础地址。
+webSocketEndpoint: QQNT 网桥 WebSocket 事件流的完整地址。留空时从 HTTP 地址自动推导。
 token: 用于认证 QQNT 网桥的 Bearer Token。
 memberName: 群成员显示名称的取值方式。
 mediaCachePath: 用于缓存媒体、预览图、贴纸和回应资源的目录。
