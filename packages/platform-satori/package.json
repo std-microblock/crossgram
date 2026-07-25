@@ -1,0 +1,32 @@
+{
+  "name": "@mtproto-relay/platform-satori",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {
+    "service": {
+      "required": [
+        "http",
+        "imPlatform",
+        "satori"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@cordisjs/plugin-http": "^1.5.0",
+    "@satorijs/core": "^4.6.0",
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@mtproto-relay/bridge": "workspace:*",
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:e2e": "vitest run src/e2e.test.ts"
+  }
+}

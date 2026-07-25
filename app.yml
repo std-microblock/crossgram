@@ -14,6 +14,14 @@
 - id: bridge01
   name: '@mtproto-relay/bridge'
   config: {}
+- id: satori-core
+  name: '@satorijs/core'
+  disabled: true
+- id: satori-platform
+  name: '@mtproto-relay/platform-satori'
+  disabled: true
+  config:
+    bot: ''
 - id: telegram-resources
   name: '@mtproto-relay/telegram-resources'
   config: {}

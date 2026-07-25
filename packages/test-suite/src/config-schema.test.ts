@@ -4,6 +4,7 @@ import { Config as debugConfig } from '../../mtproto-debug/src/index.js'
 import { Config as mtprotoConfig } from '../../mtproto/src/index.js'
 import { Config as qqntConfig } from '../../platform-qqnt/src/index.js'
 import { Config as staticConfig } from '../../platform-static/src/index.js'
+import { Config as satoriConfig } from '../../platform-satori/src/index.js'
 import { Config as relayConfig } from '../../relay/src/index.js'
 import { Config as resourcesConfig } from '../../telegram-resources/src/index.js'
 
@@ -16,6 +17,7 @@ const cases = [
     'previewMaxDimension', 'ffmpegPath', 'grayTipFilters',
   ]],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
+  ['satori', satoriConfig, ['bot']],
   ['relay', relayConfig, ['apiId', 'apiHash', 'storagePath', 'disableUpdates', 'routeId']],
   ['resources', resourcesConfig, ['assetsPath', 'providerId']],
 ] as const

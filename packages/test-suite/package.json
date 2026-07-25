@@ -17,9 +17,11 @@
     "@mtproto-relay/bridge": "workspace:*",
     "@mtproto-relay/mtproto": "workspace:*",
     "@mtproto-relay/platform-static": "workspace:*",
+    "@mtproto-relay/platform-satori": "workspace:*",
     "@mtproto-relay/relay": "workspace:*",
     "@mtproto-relay/telegram-resources": "workspace:*",
     "cordis": "^4.0.0-rc.5",
+    "@satorijs/core": "^4.6.0",
     "long": "^5.3.0"
   }
 }
