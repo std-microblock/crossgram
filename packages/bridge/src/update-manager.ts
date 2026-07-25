@@ -303,20 +303,20 @@ export class UpdateManager {
 
     const sender = toUser(senderRow)
     const self = toUser(selfRow)
-    const users = [...new Map([
-      makeUser({
-        id: selfRow.id, self: true, premium: true,
-        firstName: self.firstName, lastName: self.lastName, username: self.username,
-        photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
-      }),
-      makeUser({
+    const selfUser = makeUser({
+      id: selfRow.id, self: true, premium: true,
+      firstName: self.firstName, lastName: self.lastName, username: self.username,
+      photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
+    })
+    const users = senderRow.id === selfRow.id
+      ? [selfUser]
+      : [selfUser, makeUser({
         id: senderRow.id,
         firstName: sender.firstName,
         lastName: sender.lastName,
         username: sender.username,
         photo: sender.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
-      }),
-    ].map((user) => [user.id, user])).values()]
+      })]
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []
