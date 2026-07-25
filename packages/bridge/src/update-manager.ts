@@ -6,7 +6,10 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
-import { telegramReplyToMessageId, type IMConversation, type IMMessage, type PlatformSession } from './platform.js'
+import {
+  isMessageMentioned, telegramReplyToMessageId,
+  type IMConversation, type IMMessage, type PlatformSession,
+} from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
 import type { IMSticker } from './sticker-provider.js'
 import type { CommittedPlatformEvent, PlatformRegistry } from './platform-manager.js'
@@ -238,9 +241,13 @@ export class UpdateManager {
       const nativeReplyTo = qqReplySequence === undefined
         ? telegramReplyToMessageId(projected.source)
         : undefined
-      let replied = qqReplySequence === undefined
-        ? undefined
-        : await this._store.findProjectedByNativeSequence(
+      let replied = nativeReplyTo
+        ? await this._store.findProjectedByTlId(
+            session.platformSessionId, nativeReplyTo, event.conversation.id,
+          )
+        : qqReplySequence === undefined
+          ? undefined
+          : await this._store.findProjectedByNativeSequence(
             session.platformSessionId, event.conversation.id, qqReplySequence,
           )
       if (!nativeReplyTo && !replied && projected.source.replyToId) {
@@ -286,6 +293,8 @@ export class UpdateManager {
           : undefined,
         topicId,
         replyToTlId: nativeReplyTo ?? replied?.parts[0]?.tlMessageId,
+        mentioned: part.ordinal === 0
+          && isMessageMentioned(projected.source, session.userId, replied?.source),
       })
       updates.push({
         _: isEdit

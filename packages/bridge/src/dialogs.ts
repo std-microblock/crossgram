@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  messageText, telegramMessageId, telegramReplyToMessageId,
+  isMessageMentioned, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
@@ -106,6 +106,7 @@ export class DialogRpc {
   private readonly _tlToPeer = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
   private readonly _tlToMessage = new Map<number, MessageRef>()
+  private readonly _sourceByTlMessage = new Map<number, IMMessage>()
   private _nextMessageId = 1
   private _pts = 1
   private readonly _sentByRandomId = new Map<string, Promise<tl.RawUpdateShortSentMessage>>()
@@ -1981,6 +1982,7 @@ export class DialogRpc {
     const conversation = this._conversation(source.conversationId)
     const sticker = source.content.parts.find((part) => part.type === 'sticker')
     const reply = this._messageReplyHeader(source)
+    const replyTarget = reply ? this._sourceByTlMessage.get(reply.replyToMsgId) : undefined
     return projectTlMessage({
       conversation,
       source,
@@ -2003,6 +2005,7 @@ export class DialogRpc {
         : undefined,
       replyToTlId: reply?.replyToMsgId,
       topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
+      mentioned: item.ordinal === 0 && isMessageMentioned(source, this._session.userId, replyTarget),
     })
   }
 
@@ -2020,6 +2023,7 @@ export class DialogRpc {
       platformMessageId: item.source.id,
       ordinal: item.ordinal,
     })
+    this._sourceByTlMessage.set(item.tlId, item.source)
   }
 
   private async _rememberReplyTargets(messages: readonly IMMessage[]): Promise<void> {
@@ -2730,15 +2734,16 @@ export function projectTlMessage(options: {
   reactions?: tl.RawMessageReactions
   replyToTlId?: number
   topicId?: number
+  mentioned?: boolean
 }): tl.TypeMessage {
   const {
     conversation, source, tlId, ordinal,
-    groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
+    groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId, mentioned,
   } = options
   const conversationId = stableId(`peer:${conversation.id}`)
   if (ordinal === 0 && source.content.serviceAction) {
     return {
-      _: 'messageService', out: source.outgoing || undefined, id: tlId,
+      _: 'messageService', out: source.outgoing || undefined, mentioned: mentioned || undefined, id: tlId,
       fromId,
       peerId: peerId ?? (conversation.kind === 'direct'
         ? { _: 'peerUser', userId: conversationId }
@@ -2754,7 +2759,7 @@ export function projectTlMessage(options: {
   }
   const text = ordinal === 0 ? messageText(source) : ''
   return {
-    _: 'message', out: source.outgoing || undefined, id: tlId,
+    _: 'message', out: source.outgoing || undefined, mentioned: mentioned || undefined, id: tlId,
     fromId,
     peerId: peerId ?? (conversation.kind === 'direct'
       ? { _: 'peerUser', userId: conversationId }

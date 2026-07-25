@@ -141,6 +141,51 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('marks live mentions of self and replies to own messages without false positives', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'notifications', kind: 'group', title: 'Notifications' }
+    const ownTarget: IMMessage = {
+      id: 'own-target', conversationId: conversation.id, senderId: session.userId,
+      timestamp: 10, outgoing: true, content: { parts: [{ type: 'text', text: 'own target' }] },
+    }
+    await store.ingest(session, conversation, ownTarget)
+    const incoming: IMMessage[] = [
+      {
+        id: 'mention-self', conversationId: conversation.id, senderId: 'alice', timestamp: 11,
+        content: { parts: [{
+          type: 'text', text: '@Current',
+          entities: [{ type: 'mention', offset: 0, length: 8, userId: session.userId }],
+        }] },
+      },
+      {
+        id: 'reply-self', conversationId: conversation.id, senderId: 'alice', timestamp: 12,
+        replyToId: ownTarget.id, content: { parts: [{ type: 'text', text: 'reply to me' }] },
+      },
+      {
+        id: 'mention-other', conversationId: conversation.id, senderId: 'alice', timestamp: 13,
+        content: { parts: [{
+          type: 'text', text: '@Bob',
+          entities: [{ type: 'mention', offset: 0, length: 4, userId: 'bob' }],
+        }] },
+      },
+    ]
+    for (const message of incoming) {
+      const result = await store.ingest(session, conversation, message)
+      await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    }
+
+    const projected = sent.map(({ update }) => {
+      const decoded = roundTrip(update) as tl.RawUpdates
+      return (decoded.updates[0] as tl.RawUpdateNewChannelMessage).message as tl.RawMessage
+    })
+    expect(projected.map((message) => [message.message, message.mentioned])).toEqual([
+      ['@Current', true],
+      ['reply to me', true],
+      ['@Bob', false],
+    ])
+    expect(projected[1].replyTo).toMatchObject({ _: 'messageReplyHeader' })
+  })
+
   it('keeps account and per-channel pts domains independent and replays each channel separately', async () => {
     const { store, manager, sent } = await createHarness()
     const alpha: IMConversation = { id: 'alpha', kind: 'group', title: 'Alpha' }
@@ -307,6 +352,7 @@ describe('UpdateManager', () => {
     expect((update.message as tl.RawMessage).replyTo).toMatchObject({
       _: 'messageReplyHeader', replyToMsgId: storedTarget!.parts[0].tlMessageId,
     })
+    expect((update.message as tl.RawMessage).mentioned).toBeUndefined()
   })
 
   it('publishes subchannel events through the parent forum and topic root', async () => {

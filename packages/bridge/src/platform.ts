@@ -252,6 +252,25 @@ export interface IMMessage<TMediaLocator = unknown> {
   replyToId?: string
 }
 
+/**
+ * Telegram uses Message.mentioned for both explicit mentions and replies to
+ * the current user's messages. Merely projecting the entity/reply header does
+ * not make clients surface the special mention notification.
+ */
+export function isMessageMentioned(
+  message: IMMessage,
+  currentUserId: string,
+  replyTarget?: IMMessage,
+): boolean {
+  if (message.outgoing || message.senderId === currentUserId) return false
+  const explicitlyMentioned = message.content.parts.some((part) =>
+    part.type === 'text' && part.entities?.some((entity) =>
+      entity.type === 'mention' && entity.userId === currentUserId))
+  if (explicitlyMentioned) return true
+  return replyTarget !== undefined
+    && (replyTarget.outgoing === true || replyTarget.senderId === currentUserId)
+}
+
 export function telegramMessageId(message: IMMessage): number | undefined {
   return telegramMessageIdFromMetadata(message.metadata)
 }

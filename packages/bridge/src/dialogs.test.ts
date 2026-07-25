@@ -631,6 +631,64 @@ describe('DialogRpc', () => {
     })
   })
 
+  it('marks incoming mentions of self and replies to own messages in fetched history', async () => {
+    const conversation = { id: 'notification-group', kind: 'group' as const, title: 'Notifications' }
+    const messages: IMMessage[] = [
+      {
+        id: 'own-target', conversationId: conversation.id, senderId: session.userId,
+        timestamp: 1, outgoing: true, content: { parts: [{ type: 'text', text: 'own target' }] },
+      },
+      {
+        id: 'reply-self', conversationId: conversation.id, senderId: 'alice', timestamp: 2,
+        replyToId: 'own-target', content: { parts: [{ type: 'text', text: 'reply to me' }] },
+      },
+      {
+        id: 'mention-self', conversationId: conversation.id, senderId: 'alice', timestamp: 3,
+        content: { parts: [{
+          type: 'text', text: '@Current hello',
+          entities: [{ type: 'mention', offset: 0, length: 8, userId: session.userId }],
+        }] },
+      },
+      {
+        id: 'mention-other', conversationId: conversation.id, senderId: 'alice', timestamp: 4,
+        replyToId: 'reply-self', content: { parts: [{
+          type: 'text', text: '@Bob hello',
+          entities: [{ type: 'mention', offset: 0, length: 4, userId: 'bob' }],
+        }] },
+      },
+    ]
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() {
+        return { dialogs: [{ conversation, unreadCount: 3, lastMessage: messages.at(-1) }] }
+      },
+      async getHistory() { return { messages } },
+      async getUser(_session, id) {
+        return { id, firstName: id === session.userId ? 'Current' : id }
+      },
+    }
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+    const history = wireRoundTrip(await rpc.getHistory({
+      _: 'messages.getHistory',
+      peer: { _: 'inputPeerChannel', channelId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO },
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    })) as tl.messages.RawMessages
+    const byText = new Map(history.messages.flatMap((item) =>
+      item._ === 'message' ? [[item.message, item] as const] : []))
+
+    expect(byText.get('reply to me')).toMatchObject({ mentioned: true, replyTo: { _: 'messageReplyHeader' } })
+    expect(byText.get('@Current hello')).toMatchObject({ mentioned: true })
+    expect(byText.get('@Bob hello')?.mentioned).toBe(false)
+    expect(byText.get('own target')?.mentioned).toBe(false)
+  })
+
   it('exposes plain platform links as clickable Telegram entities through serialized history', async () => {
     const platform = new DialogTestPlatform()
     const first = '😀 docs: https://example.com/a_(b).'
