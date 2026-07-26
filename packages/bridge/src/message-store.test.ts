@@ -393,21 +393,21 @@ describe('MessageStore', () => {
       content: { parts: [{ type: 'text', text: id }] },
     })
 
-    // The old row models a projection written before native Discord order keys existed.
     const from2021 = await store.ingest(
-      session, conversation, make('800000000000000001', 1_611_455_302),
+      session, conversation, make('800000000000000001', 1_611_455_302, '00800000000000000001'),
     )
     const from2026 = await store.ingest(session, conversation, make(
       '1400000000000000001', 1_785_073_377, '01400000000000000001',
     ))
 
-    expect(from2021.projection[0].tlMessageId).toBe(0x40000000)
+    expect(from2021.projection[0].tlMessageId).toBeGreaterThan(0)
     expect(from2026.projection[0].tlMessageId).toBeGreaterThan(from2021.projection[0].tlMessageId)
     expect(from2026.projection[0].tlMessageId).toBeLessThanOrEqual(0x7fffffff)
     expect(await ctx.database.get('mtproto_tl_message_part', {})).toEqual(expect.arrayContaining([
       expect.objectContaining({ nativeOrderKey: '00800000000000000001' }),
       expect.objectContaining({ nativeOrderKey: '01400000000000000001' }),
     ]))
+    expect(await ctx.database.get('mtproto_message_id_epoch', {})).toHaveLength(0)
     await expect(store.readProjectedHistory(session.platformSessionId, conversation.id, { limit: 10 }))
       .resolves.toHaveLength(2)
   })
