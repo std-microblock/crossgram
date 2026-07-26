@@ -271,6 +271,7 @@ describe('QQNTPlatform mapping', () => {
         id: 'merged-root', conversationId: 'outer-group', senderId: 'alice', timestamp: 10, outgoing: false,
         parts: [{
           type: 'multi-forward' as const, title: '聊天记录',
+          preview: 'Alice: hello\nBob: [图片]',
           locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
         }],
       },
@@ -280,6 +281,10 @@ describe('QQNTPlatform mapping', () => {
     if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
       throw new Error('merged forward link was not mapped')
     }
+    expect(link.entities[0].conversation.metadata).toMatchObject({
+      virtual: true,
+      qqMultiForwardPreview: 'Alice: hello\nBob: [图片]',
+    })
 
     const archivedLocator = {
       messageId: 'archived-file-message', elementId: 'file-element', chatType: 2 as const,
@@ -320,6 +325,7 @@ describe('QQNTPlatform mapping', () => {
       senderId: 'self', timestamp: 10, outgoing: true,
       parts: merged ? [{
         type: 'multi-forward' as const, title: 'Alice 和 Bob 的聊天记录',
+        preview: 'Alice: first\nBob: second',
         locator: { conversationId: 'from', rootMessageId: 'merged' },
       }] : [{ type: 'text' as const, text: 'forwarded' }],
     }])
@@ -330,7 +336,10 @@ describe('QQNTPlatform mapping', () => {
     expect(merged).toMatchObject([{ id: 'merged', content: { parts: [{
       type: 'text', text: '查看聊天记录', entities: [{
         type: 'conversation-link', offset: 0, length: 6,
-        conversation: { kind: 'group', title: 'Alice 和 Bob 的聊天记录' },
+        conversation: {
+          kind: 'group', title: 'Alice 和 Bob 的聊天记录',
+          metadata: { qqMultiForwardPreview: 'Alice: first\nBob: second' },
+        },
       }],
     }] } }])
     expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(1, 'from', ['a'], 'to', false)
@@ -346,6 +355,7 @@ describe('QQNTPlatform mapping', () => {
         id: 'nested-card', conversationId: 'archived-peer', senderId: 'alice', timestamp: 9, outgoing: false,
         parts: [{
           type: 'multi-forward' as const, title: '嵌套聊天记录',
+          preview: 'Carol: nested',
           locator: { conversationId: 'from', rootMessageId: 'merged', parentMessageId: 'nested-card' },
         }],
       }])

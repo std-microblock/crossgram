@@ -1738,17 +1738,20 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
-  it('opens nested merged-forward previews at their first message on a fresh socket', async () => {
+  it('uses native merged-forward previews without expanding virtual history', async () => {
     const parent: bridge.IMConversation = {
       id: 'parent-room', kind: 'group', title: 'Parent room',
     }
     const virtual: bridge.IMConversation = {
       id: 'virtual-forward', kind: 'group', title: 'Alice 和 Bob 的聊天记录',
-      metadata: { virtual: true },
+      metadata: {
+        virtual: true,
+        qqMultiForwardPreview: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
+      },
     }
     const innerVirtual: bridge.IMConversation = {
       id: 'inner-virtual-forward', kind: 'group', title: 'Bob 和 Carol 的聊天记录',
-      metadata: { virtual: true },
+      metadata: { virtual: true, qqMultiForwardPreview: 'Carol: inner first message' },
     }
     const merged: bridge.IMMessage = {
       id: 'merged-root', conversationId: parent.id, senderId: 'alice', timestamp: 1_700_001_000,
@@ -1783,6 +1786,7 @@ describe('bridge login e2e', () => {
     }
     let virtualMemberCalls = 0
     let virtualReactionCalls = 0
+    const historyCalls: string[] = []
     const platform: bridge.IMPlatform = {
       capabilities: {
         history: true,
@@ -1799,6 +1803,7 @@ describe('bridge login e2e', () => {
         return { dialogs: [{ conversation: parent, unreadCount: 0, lastMessage: merged }] }
       },
       async getHistory(_session, conversation) {
+        historyCalls.push(conversation.id)
         return { messages: conversation.id === virtual.id
           ? [outerFirst, outerLast]
           : conversation.id === innerVirtual.id
@@ -1851,19 +1856,18 @@ describe('bridge login e2e', () => {
       }, 8)
       const preview = parentHistory.messages[0]
       const virtualChat = parentHistory.chats.find((chat: any) => chat.title === virtual.title)
-      const outerUrl = preview.media.webpage.url as string
-      const outerFirstId = Number(new URL(outerUrl).searchParams.get('post'))
-      expect(outerFirstId).toBeGreaterThan(0)
       expect(preview).toMatchObject({
         _: 'message', message: '查看聊天记录',
         media: {
           _: 'messageMediaWebPage', safe: true,
           webpage: {
             _: 'webPage', type: 'telegram_message', title: virtual.title,
-            url: `tg://resolve?domain=bridgechat_${virtualChat.id}&post=${outerFirstId}`,
+            description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
+            url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
           },
         },
       })
+      expect(historyCalls).toEqual([parent.id])
 
       client.close()
       const fresh = await TestClient.connect(port)
@@ -1875,31 +1879,33 @@ describe('bridge login e2e', () => {
         _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualChat.id },
         chats: [{ _: 'chat', id: virtualChat.id }],
       })
-      const outerTarget = await callRpc(fresh, key, freshSid, {
-        _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: outerFirstId }],
+      const outerHistory = await callRpc(fresh, key, freshSid, {
+        _: 'messages.getHistory', peer,
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 11)
-      const nestedPreview = outerTarget.messages[0]
-      const innerChat = outerTarget.chats.find((chat: any) => chat.title === innerVirtual.title)
-      const innerUrl = nestedPreview.media.webpage.url as string
-      const innerFirstId = Number(new URL(innerUrl).searchParams.get('post'))
+      const nestedPreview = outerHistory.messages.find((message: any) => message.message === '查看嵌套聊天记录')
+      const innerChat = outerHistory.chats.find((chat: any) => chat.title === innerVirtual.title)
       expect(nestedPreview).toMatchObject({
-        _: 'message', id: outerFirstId, message: '查看嵌套聊天记录',
+        _: 'message', message: '查看嵌套聊天记录',
         media: { webpage: {
           _: 'webPage', title: innerVirtual.title,
-          url: `tg://resolve?domain=bridgechat_${innerChat.id}&post=${innerFirstId}`,
+          description: 'Carol: inner first message',
+          url: `tg://resolve?domain=bridgechat_${innerChat.id}`,
         } },
       })
-      expect(innerFirstId).toBeGreaterThan(0)
+      expect(historyCalls).toEqual([parent.id, virtual.id])
       expect(await callRpc(fresh, key, freshSid, {
         _: 'contacts.resolveUsername', username: `bridgechat_${innerChat.id}`,
       }, 13)).toMatchObject({
         _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: innerChat.id },
       })
       expect(await callRpc(fresh, key, freshSid, {
-        _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: innerFirstId }],
+        _: 'messages.getHistory', peer: { _: 'inputPeerChat', chatId: innerChat.id },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 15)).toMatchObject({
-        messages: [{ _: 'message', id: innerFirstId, message: 'inner first message' }],
+        messages: [{ _: 'message', message: 'inner last message' }, { _: 'message', message: 'inner first message' }],
       })
+      expect(historyCalls).toEqual([parent.id, virtual.id, innerVirtual.id])
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getFullChat', chatId: virtualChat.id,
       }, 17)).toMatchObject({
@@ -1915,7 +1921,7 @@ describe('bridge login e2e', () => {
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 21)).toMatchObject({ messages: [
         { message: 'outer last message' },
-        { id: outerFirstId, message: '查看嵌套聊天记录' },
+        { message: '查看嵌套聊天记录' },
       ] })
       expect(virtualMemberCalls).toBe(0)
       expect(virtualReactionCalls).toBe(0)
