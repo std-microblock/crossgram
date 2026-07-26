@@ -344,6 +344,46 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 }
 
 describe('bridge login e2e', () => {
+  it('returns RPC errors for unsupported Android built-in sticker sets', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x7654320f, 0x4abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+
+      const requests = [
+        { _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetDice', emoticon: '🎲' }, hash: 0 },
+        { _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetEmojiDefaultStatuses' }, hash: 0 },
+        { _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetEmojiDefaultTopicIcons' }, hash: 0 },
+      ]
+      for (let index = 0; index < requests.length; index++) {
+        expect(await callRpc(client, key, sid, requests[index]!, 6 + index * 2)).toMatchObject({
+          _: 'mt_rpc_error', errorCode: 400, errorMessage: 'STICKERSET_INVALID',
+        })
+      }
+
+      // Resource-backed built-ins still return a complete set, proving the
+      // unsupported fallback does not shadow the supported animated emoji pack.
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetAnimatedEmoji' }, hash: 0,
+      }, 12)).toMatchObject({ _: 'messages.stickerSet', set: { _: 'stickerSet' } })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('keeps users seen only in dialogs out of MTProto contacts', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
@@ -1206,20 +1246,6 @@ describe('bridge login e2e', () => {
         expect(response._).toBe(expected)
         startupSub += 2
       }
-
-      // Android asks for built-in dice/status sets with hash=0 during startup.
-      // Unsupported packs must be an RPC error: stickerSetNotModified has no
-      // `set` payload and Android's TL subclass would dereference it and crash.
-      expect(await callRpc(resumed, key, resumedSid, {
-        _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetDice', emoticon: '🎲' }, hash: 0,
-      }, 160)).toMatchObject({
-        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'STICKERSET_INVALID',
-      })
-      expect(await callRpc(resumed, key, resumedSid, {
-        _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetEmojiDefaultStatuses' }, hash: 0,
-      }, 162)).toMatchObject({
-        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'STICKERSET_INVALID',
-      })
 
       // Sticker providers are aggregated by bridge: static exposes one native
       // provider and one standalone/plugin provider in the same account.
