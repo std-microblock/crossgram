@@ -56,11 +56,12 @@ describe('ServerSession msg_container isolation', () => {
     container.raw(valid)
 
     await (session as unknown as {
-      _processDecryptedMessage: (id: Long, seqNo: number, reader: TlBinaryReader) => Promise<void>
+      _processDecryptedMessage: (id: Long, seqNo: number, reader: TlBinaryReader, sessionId: Long) => Promise<void>
     })._processDecryptedMessage(
       Long.fromInt(96),
       1,
       new TlBinaryReader(getServerReaderMap(), container.result()),
+      Long.fromInt(1),
     )
 
     expect(dispatch).toHaveBeenCalledTimes(1)
@@ -71,6 +72,116 @@ describe('ServerSession msg_container isolation', () => {
     expect(logger.error).toHaveBeenCalledWith(
       'error handling container message %s (constructor=%s, seq=%d): %s',
       '64', '0xdeadbeef', 1, expect.stringContaining('Unknown object id'),
+    )
+  })
+})
+
+type QueuedSession = {
+  _enqueueRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+  _handleRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+  _processDecryptedMessage: (msgId: Long, seqNo: number, reader: TlBinaryReader, sessionId: Long) => Promise<void>
+  _sessionId: Long
+}
+
+describe('ServerSession decrypted RPC queue', () => {
+  it('commits asynchronous authorization state before a dependent RPC starts', async () => {
+    const { session } = createSession()
+    const internal = session as unknown as QueuedSession
+    const authImportMessage = Long.fromInt(1)
+    const dependentRpcMessage = Long.fromInt(2)
+    const authImportSession = Long.fromInt(0x11111111)
+    const dependentRpcSession = Long.fromInt(0x22222222)
+    const bindings = new Set<string>()
+    const observedSessions: string[] = []
+    let releaseAuthImport!: () => void
+    const authImportWrite = new Promise<void>(resolve => { releaseAuthImport = resolve })
+    let authImportStarted!: () => void
+    const startedAuthImport = new Promise<void>(resolve => { authImportStarted = resolve })
+    let dependentStarted = false
+    let completeDependent!: () => void
+    const dependentCompleted = new Promise<void>(resolve => { completeDependent = resolve })
+
+    internal._handleRpcCall = async (msgId, _request, clientSessionId) => {
+      observedSessions.push(clientSessionId.toString(16))
+      if (msgId.eq(authImportMessage)) {
+        authImportStarted()
+        await authImportWrite
+        bindings.add('imported-auth-key')
+        return
+      }
+      dependentStarted = true
+      completeDependent()
+    }
+
+    try {
+      const first = internal._enqueueRpcCall(authImportMessage, undefined as never, authImportSession)
+      await startedAuthImport
+      const second = internal._enqueueRpcCall(dependentRpcMessage, undefined as never, dependentRpcSession)
+
+      await Promise.resolve()
+      expect(dependentStarted).toBe(false)
+
+      releaseAuthImport()
+      await Promise.all([first, second])
+      expect(bindings.has('imported-auth-key')).toBe(true)
+      expect(observedSessions).toEqual([
+        authImportSession.toString(16),
+        dependentRpcSession.toString(16),
+      ])
+    } finally {
+      releaseAuthImport()
+    }
+  })
+
+  it('keeps raw MTProto service frames out of the RPC queue', async () => {
+    const { session } = createSession()
+    const internal = session as unknown as QueuedSession
+    let releaseRpc!: () => void
+    const rpcBlocked = new Promise<void>(resolve => { releaseRpc = resolve })
+    let rpcStarted!: () => void
+    const startedRpc = new Promise<void>(resolve => { rpcStarted = resolve })
+    internal._handleRpcCall = async () => {
+      rpcStarted()
+      await rpcBlocked
+    }
+
+    const queued = internal._enqueueRpcCall(Long.fromInt(1), undefined as never, Long.fromInt(1))
+    await startedRpc
+    const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'mt_ping', pingId: Long.ONE,
+    } as { _: string })
+    await internal._processDecryptedMessage(
+      Long.fromInt(2), 0, new TlBinaryReader(getServerReaderMap(), ping), Long.fromInt(2),
+    )
+    expect((session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage)
+      .toHaveBeenCalledWith(
+        expect.any(Uint8Array), true, expect.objectContaining({ _: 'mt_pong' }), Long.fromInt(2),
+      )
+
+    releaseRpc()
+    await queued
+  })
+
+  it('continues processing after an RPC handler throws', async () => {
+    const { session, logger } = createSession()
+    const internal = session as unknown as QueuedSession
+    const failedMessage = Long.fromInt(3)
+    let completeNext!: () => void
+    const nextCompleted = new Promise<void>(resolve => { completeNext = resolve })
+
+    internal._handleRpcCall = async (msgId) => {
+      if (msgId.eq(failedMessage)) throw new Error('state write failed')
+      completeNext()
+    }
+
+    const failed = internal._enqueueRpcCall(failedMessage, undefined as never, Long.fromInt(3))
+    const next = internal._enqueueRpcCall(Long.fromInt(4), undefined as never, Long.fromInt(4))
+
+    await expect(failed).rejects.toThrow('state write failed')
+    await nextCompleted
+    await next
+    expect(logger.error).toHaveBeenCalledWith(
+      'error handling RPC message %s: %s', failedMessage.toString(16), expect.any(Error),
     )
   })
 })

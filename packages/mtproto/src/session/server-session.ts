@@ -94,13 +94,19 @@ export class ServerSession {
   private _authorized = false
   private _apiLayer: number | null = null
   private _responseWriterMap: TlWriterMap
-  private _pendingUpdates: tl.TypeUpdates[] = []
+  private _pendingUpdates: Array<{ update: tl.TypeUpdates, clientSessionId?: Long }> = []
   private _acceptsUpdates = false
-  private _queuedAcks: Long[] = []
+  /** Session that last established an updates stream on this connection. */
+  private _updateSessionId: Long | null = null
+  private _queuedAcks = new Map<string, { sessionId: Long, msgIds: Long[] }>()
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
   private _processingMessages = new Map<string, Promise<void>>()
   private _completedMessageIds = new Map<string, true>()
+  // RPCs mutate authorization and platform state; process them in wire order.
+  // MTProto service frames remain unqueued so pings and acknowledgements cannot
+  // be delayed behind a slow RPC.
+  private _rpcMessageProcessing: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly _connection: ServerConnection,
@@ -147,10 +153,16 @@ export class ServerSession {
   }
 
   /**
-   * Push an update to the client (server-initiated).
+   * Push a server-initiated update. RPC-local updates supply their originating
+   * session explicitly; external pushes target the session that activated the
+   * updates stream. Before that activation, retain the legacy latest-session
+   * fallback so early post-login updates remain deliverable.
    */
-  sendUpdate(update: tl.TypeUpdates): void {
+  sendUpdate(update: tl.TypeUpdates, clientSessionId?: Long): void {
     if (!this._authorized) return
+    const targetSessionId = clientSessionId
+      ?? this._updateSessionId
+      ?? (this._sessionIdSet ? this._sessionId : undefined)
     if (this._apiLayer === null) {
       if (this._pendingUpdates.length >= MAX_PENDING_UPDATES) {
         this._log.warn('client API layer was not negotiated before update queue overflow; closing connection')
@@ -158,12 +170,16 @@ export class ServerSession {
         this._connection.close()
         return
       }
-      this._pendingUpdates.push(update)
+      this._pendingUpdates.push({ update, clientSessionId: targetSessionId })
       this._log.debug('queued server update until client API layer is negotiated (pending=%d)', this._pendingUpdates.length)
       return
     }
+    if (!targetSessionId) {
+      this._log.debug('dropping server update before the client establishes an MTProto session')
+      return
+    }
     const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
-    this._sendEncryptedMessage(serialized, true, update)
+    this._sendEncryptedMessage(serialized, true, update, targetSessionId)
   }
 
   get authKeyId(): Uint8Array | null {
@@ -237,9 +253,10 @@ export class ServerSession {
     // against a single pinned session — just track the latest.
     key.decryptMessage(data, null, (msgId, seqNo, reader, clientSessionId) => {
       if (!this._sessionIdSet) this._sessionIdSet = true
-      // Respond on the session this request came in on.
+      // Service frames must not wait behind slow RPC dispatches. The RPC path
+      // retains this value and restores it immediately before dispatching.
       this._sessionId = clientSessionId
-      this._handleDecryptedMessage(msgId, seqNo, reader).catch((err) => {
+      this._handleDecryptedMessage(msgId, seqNo, reader, clientSessionId).catch((err) => {
         this._log.error('error handling message %s: %s', msgId.toString(16), err)
       })
     })
@@ -474,7 +491,12 @@ export class ServerSession {
     this._connection.sendAndClose(error)
   }
 
-  private async _handleDecryptedMessage(msgId: Long, seqNo: number, reader: TlBinaryReader): Promise<void> {
+  private async _handleDecryptedMessage(
+    msgId: Long,
+    seqNo: number,
+    reader: TlBinaryReader,
+    clientSessionId: Long = this._sessionId,
+  ): Promise<void> {
     const key = msgId.toString()
     let resolveCompletion!: () => void
     const completion = new Promise<void>((resolve) => {
@@ -483,7 +505,7 @@ export class ServerSession {
     this._processingMessages.set(key, completion)
 
     try {
-      await this._processDecryptedMessage(msgId, seqNo, reader)
+      await this._processDecryptedMessage(msgId, seqNo, reader, clientSessionId)
     } finally {
       if (this._processingMessages.get(key) === completion) {
         this._processingMessages.delete(key)
@@ -493,7 +515,12 @@ export class ServerSession {
     }
   }
 
-  private async _processDecryptedMessage(msgId: Long, seqNo: number, reader: TlBinaryReader): Promise<void> {
+  private async _processDecryptedMessage(
+    msgId: Long,
+    seqNo: number,
+    reader: TlBinaryReader,
+    clientSessionId: Long,
+  ): Promise<void> {
     this._msgIdGen.observeClientMsgId(msgId)
 
     // Read the object — msg_container (0x73f1f8dc) is not in the reader map,
@@ -516,9 +543,9 @@ export class ServerSession {
         const innerBody = reader.raw(innerLength)
         const innerReader = new TlBinaryReader(this._readerMap, innerBody)
         try {
-          await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader)
+          await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader, clientSessionId)
         } catch (error) {
-          this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error)
+          this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error, clientSessionId)
         }
       }
       return
@@ -543,23 +570,23 @@ export class ServerSession {
     this._log.verbose('<<< %s (msg_id=%s, seq=%d)', objId, msgId.toString(16), seqNo)
 
     if (!this._isNoAckMessage(objId)) {
-      this._queueAck(msgId)
+      this._queueAck(msgId, clientSessionId)
     }
 
     switch (objId) {
       case 'mt_ping':
-        this._handlePing(obj as unknown as mtp.RawMt_ping)
+        this._handlePing(obj as unknown as mtp.RawMt_ping, clientSessionId)
         break
 
       case 'mt_ping_delay_disconnect':
-        this._handlePingDelayDisconnect(obj as unknown as mtp.RawMt_ping_delay_disconnect)
+        this._handlePingDelayDisconnect(obj as unknown as mtp.RawMt_ping_delay_disconnect, clientSessionId)
         break
 
       case 'mt_msgs_ack':
         break
 
       case 'mt_get_future_salts':
-        this._handleGetFutureSalts(msgId, obj as unknown as mtp.RawMt_get_future_salts)
+        this._handleGetFutureSalts(msgId, obj as unknown as mtp.RawMt_get_future_salts, clientSessionId)
         break
 
       case 'mt_rpc_drop_answer':
@@ -567,24 +594,26 @@ export class ServerSession {
         break
 
       case 'mt_msgs_state_req':
-        this._handleMsgsStateReq(msgId, obj as unknown as mtp.RawMt_msgs_state_req)
+        this._handleMsgsStateReq(msgId, obj as unknown as mtp.RawMt_msgs_state_req, clientSessionId)
         break
 
       case 'mt_destroy_session':
-        this._handleDestroySession(msgId, obj as unknown as mtp.RawMt_destroy_session)
+        this._handleDestroySession(msgId, obj as unknown as mtp.RawMt_destroy_session, clientSessionId)
         break
 
       case 'mt_destroy_auth_key':
-        this._handleDestroyAuthKey(msgId)
+        this._handleDestroyAuthKey(msgId, clientSessionId)
         break
 
       case 'auth.bindTempAuthKey':
-        await this._handleBindTempAuthKey(msgId, obj as unknown as tl.auth.RawBindTempAuthKeyRequest)
+        await this._handleBindTempAuthKey(
+          msgId, obj as unknown as tl.auth.RawBindTempAuthKeyRequest, clientSessionId,
+        )
         break
 
       default:
         if (isRpcRequestObject(objId)) {
-          await this._handleRpcCall(msgId, obj as unknown as tl.RpcMethod)
+          await this._enqueueRpcCall(msgId, obj as unknown as tl.RpcMethod, clientSessionId)
         } else if ((seqNo & 1) !== 0) {
           const errorMessage = `METHOD_NOT_IMPLEMENTED: ${objId}`
           this._log.error(
@@ -597,7 +626,7 @@ export class ServerSession {
             _: 'mt_rpc_error',
             errorCode: 500,
             errorMessage,
-          } as mtp.RawMt_rpc_error, objId)
+          } as mtp.RawMt_rpc_error, objId, clientSessionId)
         } else {
           this._log.warn(
             'unhandled non-content message type %s (msg_id=%s, seq=%d)',
@@ -608,7 +637,7 @@ export class ServerSession {
         }
     }
 
-    this._flushAcks()
+    this._flushAcks(clientSessionId)
   }
 
   /**
@@ -621,6 +650,7 @@ export class ServerSession {
     seqNo: number,
     body: Uint8Array,
     error: unknown,
+    clientSessionId: Long,
   ): void {
     const constructorId = body.length >= 4
       ? new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(0, true)
@@ -641,13 +671,13 @@ export class ServerSession {
     }, { messageId: msgId, seqNo, error: message })
 
     if ((seqNo & 1) === 0) return
-    this._queueAck(msgId)
+    this._queueAck(msgId, clientSessionId)
     try {
       this._sendRpcResult(msgId, {
         _: 'mt_rpc_error',
         errorCode: 400,
         errorMessage: 'METHOD_INVALID',
-      } as mtp.RawMt_rpc_error, constructor)
+      } as mtp.RawMt_rpc_error, constructor, clientSessionId)
     } catch (sendError) {
       this._log.error(
         'failed to return METHOD_INVALID for container message %s: %s',
@@ -659,27 +689,31 @@ export class ServerSession {
 
   // ── Service message handlers ──
 
-  private _handlePing(ping: mtp.RawMt_ping): void {
+  private _handlePing(ping: mtp.RawMt_ping, clientSessionId: Long): void {
     const pong: mtp.RawMt_pong = {
       _: 'mt_pong',
       msgId: Long.ZERO,
       pingId: ping.pingId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, pong)
-    this._sendEncryptedMessage(serialized, true, pong)
+    this._sendEncryptedMessage(serialized, true, pong, clientSessionId)
   }
 
-  private _handlePingDelayDisconnect(ping: mtp.RawMt_ping_delay_disconnect): void {
+  private _handlePingDelayDisconnect(ping: mtp.RawMt_ping_delay_disconnect, clientSessionId: Long): void {
     const pong: mtp.RawMt_pong = {
       _: 'mt_pong',
       msgId: Long.ZERO,
       pingId: ping.pingId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, pong)
-    this._sendEncryptedMessage(serialized, true, pong)
+    this._sendEncryptedMessage(serialized, true, pong, clientSessionId)
   }
 
-  private _handleGetFutureSalts(msgId: Long, req: mtp.RawMt_get_future_salts): void {
+  private _handleGetFutureSalts(
+    msgId: Long,
+    req: mtp.RawMt_get_future_salts,
+    clientSessionId: Long,
+  ): void {
     // Ensure future salts are generated
     if (this._futureSalts.length === 0) {
       this._generateFutureSalts()
@@ -724,13 +758,17 @@ export class ServerSession {
         writer.uint(s.validUntil)
         writer.long(s.salt)
       }
-      this._sendEncryptedMessage(writer.result(), false, response)
+      this._sendEncryptedMessage(writer.result(), false, response, clientSessionId)
     } catch (e) {
       this._log.error('failed to serialize future_salts: %s', e)
     }
   }
 
-  private _handleMsgsStateReq(msgId: Long, req: mtp.RawMt_msgs_state_req): void {
+  private _handleMsgsStateReq(
+    msgId: Long,
+    req: mtp.RawMt_msgs_state_req,
+    clientSessionId: Long,
+  ): void {
     const info = new Uint8Array(req.msgIds.length)
     info.fill(0x01)
 
@@ -741,24 +779,28 @@ export class ServerSession {
     }
 
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, response)
-    this._sendEncryptedMessage(serialized, false, response)
+    this._sendEncryptedMessage(serialized, false, response, clientSessionId)
   }
 
-  private _handleDestroySession(msgId: Long, req: mtp.RawMt_destroy_session): void {
+  private _handleDestroySession(
+    msgId: Long,
+    req: mtp.RawMt_destroy_session,
+    clientSessionId: Long,
+  ): void {
     const response: mtp.RawMt_destroy_session_ok = {
       _: 'mt_destroy_session_ok',
       sessionId: req.sessionId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, response)
-    this._sendEncryptedMessage(serialized, false, response)
+    this._sendEncryptedMessage(serialized, false, response, clientSessionId)
   }
 
-  private _handleDestroyAuthKey(_msgId: Long): void {
+  private _handleDestroyAuthKey(_msgId: Long, clientSessionId: Long): void {
     const response: mtp.RawMt_destroy_auth_key_ok = {
       _: 'mt_destroy_auth_key_ok',
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, response)
-    this._sendEncryptedMessage(serialized, false, response)
+    this._sendEncryptedMessage(serialized, false, response, clientSessionId)
   }
 
   /**
@@ -767,7 +809,11 @@ export class ServerSession {
    * is a `bind_auth_key_inner` sealed with the *permanent* key using the old
    * MTProto message encryption. We decrypt and verify it, then reply boolTrue.
    */
-  private async _handleBindTempAuthKey(msgId: Long, req: tl.auth.RawBindTempAuthKeyRequest): Promise<void> {
+  private async _handleBindTempAuthKey(
+    msgId: Long,
+    req: tl.auth.RawBindTempAuthKeyRequest,
+    clientSessionId: Long,
+  ): Promise<void> {
     const permanentId = longToBytesLE(req.permAuthKeyId)
     if (!this._permAuthKey.match(permanentId)) {
       const permanent = await this._keyStore?.get(permanentId)
@@ -804,7 +850,9 @@ export class ServerSession {
     writer.uint(RPC_RESULT_ID)
     writer.long(msgId)
     writer.uint(BOOL_TRUE_ID)
-    this._sendEncryptedMessage(writer.result(), true, { _: 'rpc_result', reqMsgId: msgId, result: { _: 'boolTrue' } })
+    this._sendEncryptedMessage(
+      writer.result(), true, { _: 'rpc_result', reqMsgId: msgId, result: { _: 'boolTrue' } }, clientSessionId,
+    )
     this._log.verbose('>>> rpc_result boolTrue for bindTempAuthKey %s', msgId.toString(16))
   }
 
@@ -878,7 +926,29 @@ export class ServerSession {
 
   // ── RPC call handling ──
 
-  private async _handleRpcCall(msgId: Long, request: tl.RpcMethod): Promise<void> {
+  /**
+   * Keep stateful RPC dispatch in wire order without holding service frames
+   * (pings, acks, and transport probes) behind an unrelated request.
+   */
+  private async _enqueueRpcCall(
+    msgId: Long,
+    request: tl.RpcMethod,
+    clientSessionId: Long,
+  ): Promise<void> {
+    const scheduled = this._rpcMessageProcessing.then(async () => {
+      await this._handleRpcCall(msgId, request, clientSessionId)
+    })
+    this._rpcMessageProcessing = scheduled.catch((err) => {
+      this._log.error('error handling RPC message %s: %s', msgId.toString(16), err)
+    })
+    await scheduled
+  }
+
+  private async _handleRpcCall(
+    msgId: Long,
+    request: tl.RpcMethod,
+    clientSessionId: Long,
+  ): Promise<void> {
     // invokeWithLayer is the one authoritative source of the client's API layer.
     // Capture it on the MTProto session before constructing the handler context
     // or serializing this request's response. Later unwrapped requests reuse it.
@@ -889,6 +959,7 @@ export class ServerSession {
       || unwrapped.request._ === 'updates.getChannelDifference'
     ) {
       this._acceptsUpdates = true
+      this._updateSessionId = clientSessionId
     }
     if (unwrapped.apiLayer !== null) {
       this._setApiLayer(unwrapped.apiLayer)
@@ -904,7 +975,7 @@ export class ServerSession {
         _: 'mt_rpc_error',
         errorCode: 400,
         errorMessage: 'CONNECTION_NOT_INITED',
-      } as mtp.RawMt_rpc_error, unwrapped.request._)
+      } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
       return
     }
 
@@ -913,7 +984,7 @@ export class ServerSession {
         _: 'mt_rpc_error',
         errorCode: 500,
         errorMessage: 'MSG_WAIT_FAILED',
-      } as mtp.RawMt_rpc_error, unwrapped.request._)
+      } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
       return
     }
 
@@ -921,23 +992,23 @@ export class ServerSession {
       connection: this._connection,
       apiLayer: this._apiLayer,
       authKeyId: this._permAuthKey.ready ? this._permAuthKey.id : null,
-      sessionId: this._sessionId,
+      sessionId: clientSessionId,
       isAuthorized: this._authorized,
-      sendUpdate: (update) => this.sendUpdate(update),
+      sendUpdate: (update) => this.sendUpdate(update, clientSessionId),
       getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
       setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),
     }
 
     try {
       const result = await this._dispatcher.dispatch(ctx, unwrapped.request)
-      this._sendRpcResult(msgId, result, unwrapped.request._)
+      this._sendRpcResult(msgId, result, unwrapped.request._, clientSessionId)
     } catch (err) {
       this._log.error('RPC dispatch error for %s: %s', unwrapped.request._, err instanceof Error ? err.stack : err)
       this._sendRpcResult(msgId, {
         _: 'mt_rpc_error',
         errorCode: 500,
         errorMessage: 'INTERNAL',
-      } as mtp.RawMt_rpc_error, unwrapped.request._)
+      } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
     }
   }
 
@@ -1014,7 +1085,7 @@ export class ServerSession {
     if (publish && layer !== null && this._permAuthKey.ready) this._onApiLayer?.(this._permAuthKey.id, layer)
     const pending = this._pendingUpdates
     this._pendingUpdates = []
-    for (const update of pending) this.sendUpdate(update)
+    for (const { update, clientSessionId } of pending) this.sendUpdate(update, clientSessionId)
   }
 
   private _sendNewSessionCreated(): void {
@@ -1029,7 +1100,12 @@ export class ServerSession {
     this._log.debug('sent new_session_created')
   }
 
-  private _sendRpcResult(reqMsgId: Long, result: RpcResult, method?: string): void {
+  private _sendRpcResult(
+    reqMsgId: Long,
+    result: RpcResult,
+    method?: string,
+    clientSessionId: Long = this._sessionId,
+  ): void {
     const kind = (result as { _: string })._
 
     let resultBytes: Uint8Array
@@ -1050,7 +1126,9 @@ export class ServerSession {
     writer.long(reqMsgId)
     writer.raw(resultBytes)
 
-    this._sendEncryptedMessage(writer.result(), true, { _: 'rpc_result', reqMsgId: reqMsgId, result })
+    this._sendEncryptedMessage(
+      writer.result(), true, { _: 'rpc_result', reqMsgId: reqMsgId, result }, clientSessionId,
+    )
     if (kind === 'mt_rpc_error') {
       const error = result as mtp.RawMt_rpc_error
       const args = [
@@ -1087,7 +1165,12 @@ export class ServerSession {
    * The message body should NOT include the msg_id/seq_no/length header —
    * we add it here.
    */
-  private _sendEncryptedMessage(body: Uint8Array, isContentRelated: boolean, payload?: unknown): void {
+  private _sendEncryptedMessage(
+    body: Uint8Array,
+    isContentRelated: boolean,
+    payload?: unknown,
+    clientSessionId: Long = this._sessionId,
+  ): void {
     const msgId = this._msgIdGen.getMessageId(isContentRelated)
     const seqNo = this._msgIdGen.getSeqNo(isContentRelated)
 
@@ -1097,11 +1180,11 @@ export class ServerSession {
     writer.uint(body.length)
     writer.raw(body)
 
-    const encrypted = this._sendKey.encryptMessage(writer.result(), this._serverSalt, this._sessionId)
+    const encrypted = this._sendKey.encryptMessage(writer.result(), this._serverSalt, clientSessionId)
     this._capture('server->client', 'message', payload ?? this._decodeDebugBody(body), {
       messageId: msgId,
       seqNo,
-    })
+    }, clientSessionId)
     this._connection.send(encrypted)
   }
 
@@ -1135,6 +1218,7 @@ export class ServerSession {
     phase: MtprotoDebugEvent['phase'],
     payload: unknown,
     extra: Pick<MtprotoDebugEvent, 'messageId' | 'seqNo' | 'error'> = {},
+    clientSessionId: Long = this._sessionId,
   ): void {
     if (!this._debug) return
     try {
@@ -1144,7 +1228,7 @@ export class ServerSession {
         connectionId: 'unknown',
         timestamp: Date.now(),
         authKeyId: this._sendKey.ready ? new Uint8Array(this._sendKey.id) : null,
-        sessionId: this._sessionId,
+        sessionId: clientSessionId,
         payload,
         ...extra,
       })
@@ -1155,25 +1239,29 @@ export class ServerSession {
 
   // ── Acks ──
 
-  private _queueAck(msgId: Long): void {
-    this._queuedAcks.push(msgId)
-    if (this._queuedAcks.length >= 10) {
-      this._flushAcks()
+  private _queueAck(msgId: Long, clientSessionId: Long): void {
+    const key = clientSessionId.toString()
+    let queued = this._queuedAcks.get(key)
+    if (!queued) {
+      queued = { sessionId: clientSessionId, msgIds: [] }
+      this._queuedAcks.set(key, queued)
     }
+    queued.msgIds.push(msgId)
+    if (queued.msgIds.length >= 10) this._flushAcks(clientSessionId)
   }
 
-  private _flushAcks(): void {
-    if (this._queuedAcks.length === 0) return
-
-    const msgIds = this._queuedAcks
-    this._queuedAcks = []
+  private _flushAcks(clientSessionId: Long): void {
+    const key = clientSessionId.toString()
+    const queued = this._queuedAcks.get(key)
+    if (!queued?.msgIds.length) return
+    this._queuedAcks.delete(key)
 
     const ack: mtp.RawMt_msgs_ack = {
       _: 'mt_msgs_ack',
-      msgIds,
+      msgIds: queued.msgIds,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, ack)
-    this._sendEncryptedMessage(serialized, false)
+    this._sendEncryptedMessage(serialized, false, undefined, queued.sessionId)
   }
 
   // ── Future salts ──
