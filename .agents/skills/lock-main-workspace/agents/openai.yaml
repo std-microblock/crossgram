@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lock Main Workspace"
+  short_description: "Queue agents for exclusive main workspace access"
+  default_prompt: "Use $lock-main-workspace to acquire the shared main workspace lease, complete the protected work, and release it."

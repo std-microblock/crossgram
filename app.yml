@@ -8,12 +8,13 @@
   name: '@mtproto-relay/mtproto'
   config:
     port: 4430
-    host: 127.0.0.1
+    host: 0.0.0.0
     rsaKeyPath: ./data/rsa-key.json
     authKeyStorePath: ./data/auth-keys.json
 - id: bridge01
   name: '@mtproto-relay/bridge'
-  config: {}
+  config:
+    serverHost: 0.0.0.0
 - id: satori-core
   name: '@satorijs/core'
   disabled: true
