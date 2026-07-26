@@ -28,6 +28,7 @@
     "test:unit": "yarn test:unit:vitest && yarn test:unit:node",
     "test:unit:vitest": "vitest run",
     "test:unit:node": "node --test scripts/sync-telegram-schemas.test.mjs binary_patch/patch-tdesktop.unit.test.cjs .agents/skills/inspect-relay/scripts/inspect-relay.unit.test.mjs",
+    "test:e2e:mtproto": "vitest run --config vitest.mtproto-e2e.config.mts",
     "profile:history": "tsx packages/test-suite/src/profile-history.ts",
     "typecheck": "tsc --project tsconfig.test.json --pretty false",
     "prepare": "husky"

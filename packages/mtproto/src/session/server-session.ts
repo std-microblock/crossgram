@@ -11,7 +11,7 @@ import type { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
 import { doServerAuthorization } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
-import { isBareVector, unwrapRpcRequest } from '../rpc/dispatcher.js'
+import { isBareVector, isRpcRequestObject, unwrapRpcRequest } from '../rpc/dispatcher.js'
 import type { RpcDispatch, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
 import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
@@ -42,6 +42,10 @@ class UnknownStoredAuthKey extends Error {
 // Keep this bounded because updates are only queued during that short handshake
 // window and must not become an unbounded memory sink if a client disappears.
 const MAX_PENDING_UPDATES = 256
+// invokeAfterMsg references very recent request ids (Telegram Android only
+// considers the previous five seconds). Keep a wider bounded history so a
+// dependency that completed just before its wrapper was decoded is recognized.
+const MAX_COMPLETED_MESSAGE_IDS = 4096
 
 /** Serialize a Long to 8 little-endian bytes (matches an 8-byte auth key id). */
 function longToBytesLE(v: Long): Uint8Array {
@@ -92,6 +96,8 @@ export class ServerSession {
   private _queuedAcks: Long[] = []
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
+  private _processingMessages = new Map<string, Promise<void>>()
+  private _completedMessageIds = new Map<string, true>()
 
   constructor(
     private readonly _connection: ServerConnection,
@@ -466,6 +472,25 @@ export class ServerSession {
   }
 
   private async _handleDecryptedMessage(msgId: Long, seqNo: number, reader: TlBinaryReader): Promise<void> {
+    const key = msgId.toString()
+    let resolveCompletion!: () => void
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve
+    })
+    this._processingMessages.set(key, completion)
+
+    try {
+      await this._processDecryptedMessage(msgId, seqNo, reader)
+    } finally {
+      if (this._processingMessages.get(key) === completion) {
+        this._processingMessages.delete(key)
+      }
+      this._rememberCompletedMessage(key)
+      resolveCompletion()
+    }
+  }
+
+  private async _processDecryptedMessage(msgId: Long, seqNo: number, reader: TlBinaryReader): Promise<void> {
     this._msgIdGen.observeClientMsgId(msgId)
 
     // Read the object — msg_container (0x73f1f8dc) is not in the reader map,
@@ -538,12 +563,28 @@ export class ServerSession {
         break
 
       default:
-        // Check if it's an RPC call (method names contain dots, e.g. "help.getConfig")
-        // or a known wrapper (invokeWithLayer, initConnection, etc.)
-        if (objId.includes('.') || objId.startsWith('invokeWith') || objId === 'initConnection') {
+        if (isRpcRequestObject(objId)) {
           await this._handleRpcCall(msgId, obj as unknown as tl.RpcMethod)
+        } else if ((seqNo & 1) !== 0) {
+          const errorMessage = `METHOD_NOT_IMPLEMENTED: ${objId}`
+          this._log.error(
+            'unhandled content-related message type %s (msg_id=%s, seq=%d); returning rpc_error',
+            objId,
+            msgId.toString(16),
+            seqNo,
+          )
+          this._sendRpcResult(msgId, {
+            _: 'mt_rpc_error',
+            errorCode: 500,
+            errorMessage,
+          } as mtp.RawMt_rpc_error, objId)
         } else {
-          this._log.warn('unhandled message type: %s', objId)
+          this._log.warn(
+            'unhandled non-content message type %s (msg_id=%s, seq=%d)',
+            objId,
+            msgId.toString(16),
+            seqNo,
+          )
         }
     }
 
@@ -801,6 +842,15 @@ export class ServerSession {
       return
     }
 
+    if (!await this._waitForRpcDependencies(msgId, unwrapped.afterMessageIds)) {
+      this._sendRpcResult(msgId, {
+        _: 'mt_rpc_error',
+        errorCode: 500,
+        errorMessage: 'MSG_WAIT_FAILED',
+      } as mtp.RawMt_rpc_error, unwrapped.request._)
+      return
+    }
+
     const ctx: ServerRpcContext = {
       connection: this._connection,
       apiLayer: this._apiLayer,
@@ -822,6 +872,57 @@ export class ServerSession {
         errorCode: 500,
         errorMessage: 'INTERNAL',
       } as mtp.RawMt_rpc_error, unwrapped.request._)
+    }
+  }
+
+  private async _waitForRpcDependencies(msgId: Long, dependencies: readonly Long[]): Promise<boolean> {
+    if (dependencies.length === 0) return true
+
+    const waits: Promise<void>[] = []
+    const missing: string[] = []
+    const currentKey = msgId.toString()
+    for (const dependency of dependencies) {
+      const key = dependency.toString()
+      if (key === currentKey) {
+        missing.push(`0x${dependency.toString(16)} (self)`)
+        continue
+      }
+      if (this._completedMessageIds.has(key)) continue
+      const processing = this._processingMessages.get(key)
+      if (processing) {
+        waits.push(processing)
+      } else {
+        missing.push(`0x${dependency.toString(16)}`)
+      }
+    }
+
+    if (missing.length > 0) {
+      this._log.error(
+        'invoke-after dependency unavailable for msg_id=%s: %s; returning MSG_WAIT_FAILED',
+        msgId.toString(16),
+        missing.join(', '),
+      )
+      return false
+    }
+
+    if (waits.length > 0) {
+      this._log.verbose(
+        'waiting for %d invoke-after dependency message(s) before msg_id=%s',
+        waits.length,
+        msgId.toString(16),
+      )
+      await Promise.all(waits)
+    }
+    return true
+  }
+
+  private _rememberCompletedMessage(key: string): void {
+    this._completedMessageIds.delete(key)
+    this._completedMessageIds.set(key, true)
+    while (this._completedMessageIds.size > MAX_COMPLETED_MESSAGE_IDS) {
+      const oldest = this._completedMessageIds.keys().next().value
+      if (oldest === undefined) break
+      this._completedMessageIds.delete(oldest)
     }
   }
 
