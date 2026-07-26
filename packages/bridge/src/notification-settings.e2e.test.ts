@@ -1,0 +1,229 @@
+import { afterEach, describe, expect, it } from 'vitest'
+import { Context } from 'cordis'
+import Database from '@cordisjs/plugin-database'
+import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
+import type { tl } from '@mtcute/core'
+import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
+import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
+import Long from 'long'
+import {
+  RpcDispatcher, isBareVector, type RpcResult, type ServerRpcContext,
+} from '@mtproto-relay/mtproto'
+import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
+import { DialogRpc, stableId } from './dialogs.js'
+import { defineModels } from './models.js'
+import { MUTE_FOREVER, NotificationSettingsStore } from './notification-settings.js'
+import type { IMConversation, IMPlatform, PlatformSession } from './platform.js'
+
+const RPC_RESULT_ID = 0xf35c6d01
+const VECTOR_ID = 0x1cb5c415
+const BOOL_TRUE_ID = 0x997275b5
+const BOOL_FALSE_ID = 0xbc799737
+
+const session: PlatformSession = {
+  platformSessionId: 'notification-session', platformId: 'test', userId: 'self',
+  credentials: {}, metadata: {},
+}
+const group: IMConversation = { id: 'group-1', kind: 'group', title: 'Noisy group' }
+const platform: IMPlatform = {
+  capabilities: {
+    history: true,
+    send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+    conversations: { groups: true, channels: true, subchannels: false },
+  },
+  async subscribe() { return () => {} },
+  async getDialogs() {
+    return {
+      dialogs: [{
+        conversation: group, unreadCount: 3,
+        lastMessage: {
+          id: 'message-1', conversationId: group.id, senderId: 'member-1', timestamp: 1,
+          content: { parts: [{ type: 'text', text: 'ping' }] },
+        },
+      }],
+    }
+  },
+  async getHistory() {
+    return {
+      messages: [{
+        id: 'message-1', conversationId: group.id, senderId: 'member-1', timestamp: 1,
+        content: { parts: [{ type: 'text', text: 'ping' }] },
+      }],
+    }
+  },
+  async getUser(_session, id) { return { id, firstName: id } },
+  async sendMessage() { throw new Error('send is disabled') },
+}
+
+const disposals: Array<() => Promise<void>> = []
+
+afterEach(async () => {
+  await Promise.all(disposals.splice(0).map(dispose => dispose()))
+})
+
+function makeContext(): ServerRpcContext {
+  return {
+    connection: {} as ServerRpcContext['connection'],
+    apiLayer: 228,
+    authKeyId: new Uint8Array(8),
+    sessionId: Long.ONE,
+    isAuthorized: true,
+    sendUpdate() {},
+    getPlatformData: <T>() => null as T,
+    setPlatformData() {},
+  }
+}
+
+function createDialog(settings: NotificationSettingsStore): DialogRpc {
+  return new DialogRpc(
+    platform, session, undefined, undefined, undefined, 1,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    settings,
+  )
+}
+
+function dispatcherFor(
+  dialogs: DialogRpc,
+  onReset?: (updates: tl.RawUpdateNotifySettings[]) => void,
+): RpcDispatcher {
+  const dispatcher = new RpcDispatcher()
+  dispatcher.register('account.getNotifySettings', async (_context, request) =>
+    dialogs.getNotifySettings(request as tl.account.RawGetNotifySettingsRequest))
+  dispatcher.register('account.updateNotifySettings', async (_context, request) => {
+    await dialogs.updateNotifySettings(request as tl.account.RawUpdateNotifySettingsRequest)
+    return { _: 'boolTrue' }
+  })
+  dispatcher.register('account.resetNotifySettings', async () => {
+    onReset?.(await dialogs.resetNotifySettings())
+    return { _: 'boolTrue' }
+  })
+  dispatcher.register('account.getNotifyExceptions', async (_context, request) =>
+    dialogs.getNotifyExceptions(request as tl.account.RawGetNotifyExceptionsRequest))
+  return dispatcher
+}
+
+async function roundTripRpc(dispatcher: RpcDispatcher, query: tl.RpcMethod): Promise<unknown> {
+  const requestBytes = TlBinaryWriter.serializeObject(__tlWriterMap, query)
+  const decodedRequest = new TlBinaryReader(getServerReaderMap(), requestBytes).object() as tl.RpcMethod
+  const result = await dispatcher.dispatch(makeContext(), decodedRequest)
+  return decodeRpcResult(encodeRpcResult(Long.fromNumber(0x228), result))
+}
+
+function encodeRpcResult(requestId: Long, result: RpcResult): Uint8Array {
+  let body: Uint8Array
+  if (result._ === 'boolTrue' || result._ === 'boolFalse') {
+    const writer = TlBinaryWriter.manual(4)
+    writer.uint(result._ === 'boolTrue' ? BOOL_TRUE_ID : BOOL_FALSE_ID)
+    body = writer.result()
+  } else if (isBareVector(result)) {
+    const items = result.items.map(item => TlBinaryWriter.serializeObject(__tlWriterMap, item))
+    const writer = TlBinaryWriter.manual(8 + items.reduce((size, item) => size + item.length, 0))
+    writer.uint(VECTOR_ID)
+    writer.uint(items.length)
+    for (const item of items) writer.raw(item)
+    body = writer.result()
+  } else {
+    body = TlBinaryWriter.serializeObject(__tlWriterMap, result)
+  }
+  const writer = TlBinaryWriter.manual(12 + body.length)
+  writer.uint(RPC_RESULT_ID)
+  writer.long(requestId)
+  writer.raw(body)
+  return writer.result()
+}
+
+function decodeRpcResult(bytes: Uint8Array): unknown {
+  const reader = new TlBinaryReader(__tlReaderMap, bytes)
+  expect(reader.uint()).toBe(RPC_RESULT_ID)
+  reader.long(true)
+  const constructor = reader.uint()
+  if (constructor === BOOL_TRUE_ID) return { _: 'boolTrue' }
+  if (constructor === BOOL_FALSE_ID) return { _: 'boolFalse' }
+  if (constructor === VECTOR_ID) return reader.vector(reader.object, true)
+  reader.pos -= 4
+  return reader.object()
+}
+
+describe('notification settings RPC e2e', () => {
+  it('round-trips group defaults and durable per-chat overrides through TL and SQLite', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise(resolve => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const settings = new NotificationSettingsStore(ctx.database, true)
+    const dialogs = createDialog(settings)
+    await dialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    const dispatcher = dispatcherFor(dialogs)
+
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+
+    const peer = {
+      _: 'inputNotifyPeer' as const,
+      peer: { _: 'inputPeerChannel' as const, channelId: stableId('peer:group-1'), accessHash: Long.ONE },
+    }
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer,
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+
+    const resumedSettings = new NotificationSettingsStore(ctx.database, true)
+    const resumedDialogs = createDialog(resumedSettings)
+    const resumedPage = await resumedDialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    if (resumedPage._ === 'messages.dialogsNotModified') throw new Error('expected materialized dialogs')
+    expect(resumedPage.dialogs[0]).toMatchObject({
+      _: 'dialog', notifySettings: { _: 'peerNotifySettings', muteUntil: 0 },
+    })
+
+    const resetUpdates: tl.RawUpdateNotifySettings[][] = []
+    const resumedDispatcher = dispatcherFor(resumedDialogs, updates => resetUpdates.push(updates))
+    await expect(roundTripRpc(resumedDispatcher, {
+      _: 'account.getNotifySettings', peer,
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
+    await expect(roundTripRpc(resumedDispatcher, {
+      _: 'account.getNotifyExceptions', peer: { _: 'inputNotifyChats' },
+    })).resolves.toMatchObject({
+      _: 'updates',
+      updates: [{
+        _: 'updateNotifySettings',
+        peer: { _: 'notifyPeer', peer: { _: 'peerChannel', channelId: stableId('peer:group-1') } },
+        notifySettings: { _: 'peerNotifySettings', muteUntil: 0 },
+      }],
+    })
+
+    await expect(roundTripRpc(resumedDispatcher, {
+      _: 'account.resetNotifySettings',
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(resetUpdates[0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _: 'updateNotifySettings',
+        peer: { _: 'notifyChats' },
+        notifySettings: expect.objectContaining({ muteUntil: MUTE_FOREVER }),
+      }),
+      {
+        _: 'updateNotifySettings',
+        peer: { _: 'notifyPeer', peer: { _: 'peerChannel', channelId: stableId('peer:group-1') } },
+        notifySettings: { _: 'peerNotifySettings' },
+      },
+    ]))
+    await expect(roundTripRpc(resumedDispatcher, {
+      _: 'account.getNotifySettings', peer,
+    })).resolves.toEqual({ _: 'peerNotifySettings' })
+    await expect(roundTripRpc(resumedDispatcher, {
+      _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+  })
+})

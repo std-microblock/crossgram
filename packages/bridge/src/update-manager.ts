@@ -47,6 +47,18 @@ export class UpdateManager {
     }, excludeAuthKeyId)
   }
 
+  async publishNotification(
+    session: PlatformSession,
+    notificationUpdates: tl.RawUpdateNotifySettings[],
+    excludeAuthKeyId?: string,
+  ): Promise<void> {
+    const state = await this._store.getUpdateState(session.platformSessionId)
+    await this._send(session.platformSessionId, {
+      _: 'updates', updates: notificationUpdates, users: [], chats: [],
+      date: Math.floor(Date.now() / 1000), seq: state.seq,
+    }, excludeAuthKeyId)
+  }
+
   async publish(
     session: PlatformSession,
     committed: CommittedPlatformEvent,
