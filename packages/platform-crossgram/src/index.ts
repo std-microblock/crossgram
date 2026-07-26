@@ -63,6 +63,35 @@ export const inject = ['imPlatform', 'imSticker', 'database', 'model']
 
 const DIALOGS_POLL_INTERVAL_MS = 15_000
 const REACTION_CATALOG_GRACE_MS = 10
+const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
+const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
+const GLOBAL_SUBSCRIPTION_LEASES_KEY = '__crossgramQQNTSubscriptionLeasesV1' as const
+
+interface QQNTSubscriptionLease {
+  stop(): Promise<void>
+}
+
+function globalSubscriptionLeases(): Map<string, QQNTSubscriptionLease> {
+  const globalState = globalThis as typeof globalThis & Partial<Record<
+    typeof GLOBAL_SUBSCRIPTION_LEASES_KEY,
+    Map<string, QQNTSubscriptionLease>
+  >>
+  return globalState[GLOBAL_SUBSCRIPTION_LEASES_KEY] ??= new Map()
+}
+
+class QQNTEventHandlingError extends Error {
+  constructor(
+    readonly eventId: string | undefined,
+    readonly eventSummary: string,
+    cause: unknown,
+  ) {
+    super(
+      `QQNT event handler failed streamEventId=${eventId ?? '<none>'} ${eventSummary}: ${formatError(cause)}`,
+      { cause },
+    )
+    this.name = 'QQNTEventHandlingError'
+  }
+}
 
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'qqnt')
@@ -168,16 +197,45 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const controller = new AbortController()
     const knownConversationIds = new Set<string>()
     const inFlightMessageKeys = new Set<string>()
+    const leases = globalSubscriptionLeases()
+    const leaseKey = session.platformSessionId
+    const predecessor = leases.get(leaseKey)
+    const started = Promise.withResolvers<void>()
+    let running = Promise.resolve<unknown>(undefined)
+    let stopping: Promise<void> | undefined
+    const lease: QQNTSubscriptionLease = {
+      stop: () => stopping ??= (async () => {
+        controller.abort()
+        await started.promise
+        await running
+      })(),
+    }
+    // Install the replacement before stopping its predecessor. A third
+    // concurrent subscribe then supersedes this lease instead of starting a
+    // second WebSocket after both callers observed the same predecessor.
+    leases.set(leaseKey, lease)
+    if (predecessor) {
+      await predecessor.stop().catch((error) => this.logger?.error(
+        'Failed to stop superseded QQNT subscription session=%s error=%s',
+        session.platformSessionId, formatError(error),
+      ))
+    }
+    if (leases.get(leaseKey) !== lease || controller.signal.aborted) {
+      started.resolve()
+      return async () => {}
+    }
+
     this.eventHandlers.set(session.platformSessionId, handler)
-    const running = Promise.all([
+    running = Promise.all([
       this.subscribeLoop(session.platformSessionId, handler, knownConversationIds, inFlightMessageKeys, controller.signal),
       this.subscribeDialogsLoop(
         session.platformSessionId, handler, knownConversationIds, inFlightMessageKeys, controller.signal,
       ),
     ])
+    started.resolve()
     return async () => {
-      controller.abort()
-      await running
+      await lease.stop()
+      if (leases.get(leaseKey) === lease) leases.delete(leaseKey)
       if (this.eventHandlers.get(session.platformSessionId) === handler) {
         this.eventHandlers.delete(session.platformSessionId)
       }
@@ -193,51 +251,60 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<void> {
     let lastEventId: string | undefined
     let attempt = 0
+    let failedEventId: string | undefined
+    let consecutiveEventFailures = 0
     while (!signal.aborted) {
       attempt++
+      let reconnectDelayMs = WEBSOCKET_RECONNECT_BASE_DELAY_MS
       this.logger?.info(
         'WebSocket subscribe start session=%s attempt=%d endpoint=%s lastEventId=%s',
         platformSessionId, attempt, this.client.webSocketEndpoint, lastEventId ?? '<none>',
       )
       try {
         await this.client.subscribe(async (event, eventId) => {
-          this.logger?.debug(
-            'WebSocket event received session=%s streamEventId=%s %s',
-            platformSessionId, eventId ?? '<none>', wireEventSummary(event),
-          )
-          if (event.type === 'message' && this.isFilteredGrayTip(event.message)) {
-            knownConversationIds.add(event.conversation.id)
+          try {
             this.logger?.debug(
-              'WebSocket event filtered session=%s reason=gray-tip streamEventId=%s message=%s text=%s',
-              platformSessionId, eventId ?? '<none>', event.message.id,
-              event.message.serviceAction?.text ?? '',
+              'WebSocket event received session=%s streamEventId=%s %s',
+              platformSessionId, eventId ?? '<none>', wireEventSummary(event),
             )
-            return
-          }
-          if (event.type === 'message' && event.message.originRequestId
-            && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
-            knownConversationIds.add(event.conversation.id)
+            if (event.type === 'message' && this.isFilteredGrayTip(event.message)) {
+              knownConversationIds.add(event.conversation.id)
+              this.logger?.debug(
+                'WebSocket event filtered session=%s reason=gray-tip streamEventId=%s message=%s text=%s',
+                platformSessionId, eventId ?? '<none>', event.message.id,
+                event.message.serviceAction?.text ?? '',
+              )
+              return
+            }
+            if (event.type === 'message' && event.message.originRequestId
+              && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
+              knownConversationIds.add(event.conversation.id)
+              this.logger?.debug(
+                'WebSocket event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
+                platformSessionId, eventId ?? '<none>', event.message.id, event.message.originRequestId,
+              )
+              return
+            }
+            const mapped = this.mapEvent(event)
             this.logger?.debug(
-              'WebSocket event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
-              platformSessionId, eventId ?? '<none>', event.message.id, event.message.originRequestId,
+              'WebSocket event mapped session=%s streamEventId=%s %s',
+              platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
             )
-            return
+            if (mapped.type === 'message') {
+              const delivered = await this.dispatchMessage(handler, mapped, inFlightMessageKeys)
+              if (delivered) knownConversationIds.add(event.conversation.id)
+            } else {
+              await handler(mapped)
+            }
+            this.logger?.debug(
+              'WebSocket event handled session=%s streamEventId=%s %s',
+              platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
+            )
+            failedEventId = undefined
+            consecutiveEventFailures = 0
+          } catch (error) {
+            throw new QQNTEventHandlingError(eventId, wireEventSummary(event), error)
           }
-          const mapped = this.mapEvent(event)
-          this.logger?.debug(
-            'WebSocket event mapped session=%s streamEventId=%s %s',
-            platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
-          )
-          if (mapped.type === 'message') {
-            const delivered = await this.dispatchMessage(handler, mapped, inFlightMessageKeys)
-            if (delivered) knownConversationIds.add(event.conversation.id)
-          } else {
-            await handler(mapped)
-          }
-          this.logger?.debug(
-            'WebSocket event handled session=%s streamEventId=%s %s',
-            platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
-          )
         }, signal, {
           lastEventId,
           onEventId: (eventId) => { lastEventId = eventId },
@@ -248,12 +315,31 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         )
       } catch (error) {
         if (signal.aborted) return
-        this.logger?.warn(
-          'WebSocket stream failed session=%s attempt=%d lastEventId=%s error=%s; reconnecting',
-          platformSessionId, attempt, lastEventId ?? '<none>', formatError(error),
-        )
+        if (error instanceof QQNTEventHandlingError) {
+          if (failedEventId === error.eventId) consecutiveEventFailures++
+          else {
+            failedEventId = error.eventId
+            consecutiveEventFailures = 1
+          }
+          reconnectDelayMs = Math.min(
+            WEBSOCKET_RECONNECT_MAX_DELAY_MS,
+            WEBSOCKET_RECONNECT_BASE_DELAY_MS * 2 ** Math.min(consecutiveEventFailures - 1, 16),
+          )
+          this.logger?.error(
+            'WebSocket event handling failed session=%s attempt=%d streamEventId=%s lastEventId=%s failures=%d retryDelayMs=%d error=%s',
+            platformSessionId, attempt, error.eventId ?? '<none>', lastEventId ?? '<none>',
+            consecutiveEventFailures, reconnectDelayMs, formatError(error),
+          )
+        } else {
+          failedEventId = undefined
+          consecutiveEventFailures = 0
+          this.logger?.warn(
+            'WebSocket stream failed session=%s attempt=%d lastEventId=%s error=%s; reconnecting',
+            platformSessionId, attempt, lastEventId ?? '<none>', formatError(error),
+          )
+        }
       }
-      await abortableDelay(1_000, signal)
+      await abortableDelay(reconnectDelayMs, signal)
     }
   }
 

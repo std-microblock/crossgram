@@ -341,34 +341,85 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 }
 
 describe('bridge login e2e', () => {
-  it('advertises one configured DC and has no cross-DC authorization route', async () => {
-    const { port, pubKey, stop } = await startApp({
-      bridgeConfig: { dcId: 4, serverHost: '10.20.30.40', serverPort: 8443 },
+  it('authorizes an Android media DC connection and downloads a peer avatar', async () => {
+    const { ctx, port, pubKey, stop } = await startApp({
+      bridgeConfig: { dcId: 1, serverHost: '10.20.30.40', serverPort: 8443 },
     })
-    let client: TestClient | undefined
+    let mainClient: TestClient | undefined
+    let mediaClient: TestClient | undefined
     try {
-      client = await TestClient.connect(port)
-      const key = await doClientHandshake(client, pubKey)
-      const sid = new Long(0x76543200, 0x4abc, false)
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      mainClient = await TestClient.connect(port)
+      const mainKey = await doClientHandshake(mainClient, pubKey)
+      const mainSid = new Long(0x76543200, 0x4abc, false)
 
-      expect(await callRpc(client, key, sid, { _: 'help.getConfig' }, 2)).toMatchObject({
+      expect(await callRpc(mainClient, mainKey, mainSid, { _: 'help.getConfig' }, 2)).toMatchObject({
         _: 'config',
-        thisDc: 4,
-        webfileDcId: 4,
+        thisDc: 1,
+        webfileDcId: 1,
         dcOptions: [{
-          _: 'dcOption', id: 4, ipAddress: '10.20.30.40', port: 8443,
+          _: 'dcOption', id: 1, ipAddress: '10.20.30.40', port: 8443,
           tcpoOnly: true, static: true,
         }],
       })
-      expect(await callRpc(client, key, sid, {
-        _: 'auth.exportAuthorization', dcId: 2,
-      }, 4)).toEqual({
-        _: 'mt_rpc_error',
-        errorCode: 500,
-        errorMessage: 'METHOD_NOT_IMPLEMENTED: auth.exportAuthorization',
+
+      const sent = await callRpc(mainClient, mainKey, mainSid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 4)
+      expect(await callRpc(mainClient, mainKey, mainSid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 6)).toMatchObject({ _: 'auth.authorization' })
+
+      const exported = await callRpc(mainClient, mainKey, mainSid, {
+        _: 'auth.exportAuthorization', dcId: 1,
+      }, 8)
+      expect(exported).toMatchObject({
+        _: 'auth.exportedAuthorization', id: expect.anything(), bytes: expect.any(Uint8Array),
+      })
+
+      mediaClient = await TestClient.connect(port)
+      const mediaKey = await doClientHandshake(mediaClient, pubKey)
+      const mediaSid = new Long(0x76543201, 0x4abc, false)
+      expect(await callRpc(mediaClient, mediaKey, mediaSid, {
+        _: 'auth.importAuthorization', id: exported.id, bytes: exported.bytes,
+      }, 2)).toMatchObject({ _: 'auth.authorization', user: { self: true } })
+
+      const [binding] = await ctx.database.get('mtproto_auth_binding', {
+        authKeyId: Buffer.from(mediaKey.authKeyId).toString('hex'),
+      })
+      expect(binding).toMatchObject({
+        platformId: 'static', platformSessionId: platformLogin.session.id,
+      })
+
+      const contacts = await callRpc(mediaClient, mediaKey, mediaSid, {
+        _: 'contacts.getContacts', hash: Long.ZERO,
+      }, 4)
+      const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      expect(alice).toMatchObject({
+        _: 'user', accessHash: Long.ONE,
+        photo: { _: 'userProfilePhoto', dcId: 1 },
+      })
+      const avatar = await callRpc(mediaClient, mediaKey, mediaSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPeerPhotoFileLocation',
+          peer: { _: 'inputPeerUser', userId: alice.id, accessHash: alice.accessHash },
+          photoId: alice.photo.photoId,
+        },
+      }, 6)
+      expect([...avatar.bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+
+      expect(await callRpc(mediaClient, mediaKey, mediaSid, {
+        _: 'auth.importAuthorization', id: exported.id, bytes: exported.bytes,
+      }, 8)).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'AUTH_BYTES_INVALID',
       })
     } finally {
-      client?.close()
+      mainClient?.close()
+      mediaClient?.close()
       await stop()
     }
   }, 15_000)
@@ -2199,7 +2250,7 @@ describe('bridge login e2e', () => {
           webpage: {
             _: 'webPage', type: 'telegram_message', title: virtual.title,
             description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-            url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+            url: `https://t.me/bridgechat_${virtualChat.id}`,
           },
         },
       })
@@ -2219,12 +2270,12 @@ describe('bridge login e2e', () => {
             _: 'message', message: '查看聊天记录',
             entities: [{
               _: 'messageEntityTextUrl',
-              url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+              url: `https://t.me/bridgechat_${virtualChat.id}`,
             }],
             media: { webpage: {
               _: 'webPage', title: virtual.title,
               description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-              url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+              url: `https://t.me/bridgechat_${virtualChat.id}`,
             } },
           },
         }],
@@ -2256,7 +2307,7 @@ describe('bridge login e2e', () => {
         media: { webpage: {
           _: 'webPage', title: innerVirtual.title,
           description: 'Carol: inner first message',
-          url: `tg://resolve?domain=bridgechat_${innerChat.id}`,
+          url: `https://t.me/bridgechat_${innerChat.id}`,
         } },
       })
       expect(historyCalls).toEqual([parent.id, virtual.id])

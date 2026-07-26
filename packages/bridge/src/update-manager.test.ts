@@ -301,7 +301,7 @@ describe('UpdateManager', () => {
     const payload = roundTrip(sent[0].update) as tl.RawUpdates
     const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
     const virtualId = stableId(`peer:${virtual.id}`)
-    const url = `tg://resolve?domain=bridgechat_${virtualId}`
+    const url = `https://t.me/bridgechat_${virtualId}`
     expect(update.message).toMatchObject({
       _: 'message', message: text,
       entities: [{ _: 'messageEntityTextUrl', offset: 0, length: text.length, url }],

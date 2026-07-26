@@ -16,6 +16,7 @@ const session: PlatformSession = {
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   sharp.cache(false)
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, {
     recursive: true, force: true, maxRetries: 20, retryDelay: 25,
@@ -640,6 +641,92 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribeOwn()
     await unsubscribeOther()
     expect(wireHandler).toBeTypeOf('function')
+  })
+
+  it('replaces a stale same-session subscription before opening the new WebSocket', async () => {
+    const leaseSession = { ...session, platformSessionId: 'qq-session-exclusive-lease' }
+    const first = new QQNTPlatform()
+    const second = new QQNTPlatform()
+    for (const platform of [first, second]) {
+      platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+      platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    }
+    const lifecycle: string[] = []
+    const firstStarted = Promise.withResolvers<void>()
+    const firstStopped = Promise.withResolvers<void>()
+    let secondSignal: AbortSignal | undefined
+    first.client.subscribe = vi.fn(async (_handler, signal) => {
+      lifecycle.push('first-start')
+      firstStarted.resolve()
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      }
+      lifecycle.push('first-stop')
+      firstStopped.resolve()
+    })
+    second.client.subscribe = vi.fn(async (_handler, signal) => {
+      lifecycle.push('second-start')
+      secondSignal = signal
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      }
+      lifecycle.push('second-stop')
+    })
+
+    const unsubscribeFirst = await first.subscribe(leaseSession, () => {})
+    await firstStarted.promise
+    const unsubscribeSecond = await second.subscribe(leaseSession, () => {})
+    await firstStopped.promise
+
+    expect(lifecycle.slice(0, 3)).toEqual(['first-start', 'first-stop', 'second-start'])
+    expect(first.client.subscribe).toHaveBeenCalledTimes(1)
+    expect(second.client.subscribe).toHaveBeenCalledTimes(1)
+    await unsubscribeFirst()
+    expect(secondSignal?.aborted).toBe(false)
+    await unsubscribeSecond()
+    expect(secondSignal?.aborted).toBe(true)
+  })
+
+  it('exponentially backs off when the same stream event repeatedly fails', async () => {
+    vi.useFakeTimers()
+    const retrySession = { ...session, platformSessionId: 'qq-session-poison-event' }
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const wireEvent = {
+      type: 'message' as const,
+      conversation: {
+        id: 'group', kind: 'group' as const, title: 'Group',
+        peerUid: 'group', peerUin: '42', chatType: 2 as const,
+      },
+      message: {
+        id: 'poison', conversationId: 'group', senderId: 'alice', timestamp: 1,
+        outgoing: false, parts: [{ type: 'text' as const, text: 'poison' }],
+      },
+    }
+    platform.client.subscribe = vi.fn(async (handler, _signal, options) => {
+      await handler(wireEvent, '329')
+      options.onEventId?.('329')
+    })
+
+    const unsubscribe = await platform.subscribe(retrySession, () => {
+      throw new Error('database generation disposed')
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(3)
+    expect(platform.client.subscribe.mock.calls[1]?.[2]?.lastEventId).toBeUndefined()
+
+    await unsubscribe()
   })
 
   it('suppresses live reaction gray tips while still forwarding the following reaction update', async () => {
