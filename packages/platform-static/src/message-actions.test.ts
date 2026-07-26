@@ -35,6 +35,7 @@ describe('StaticPlatform administrative domain', () => {
     const dialogs = await platform.getDialogs(session, { limit: 100 })
     const group = dialogs.dialogs.find((dialog) => dialog.conversation.id === 'qq-group')?.conversation
     expect(user?.avatar?.locator).toEqual({ mediaId: 'avatar:user:alice' } satisfies StaticMediaLocator)
+    expect(user?.about).toBe('Static Alice signature')
     expect(group?.avatar?.locator).toEqual({ mediaId: 'avatar:conversation:qq-group' } satisfies StaticMediaLocator)
     expect(await bytes(platform, user!.avatar!)).toEqual(await bytes(platform, group!.avatar!))
   })

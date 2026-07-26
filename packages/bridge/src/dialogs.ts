@@ -106,6 +106,8 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
+  private readonly _platformUsers = new Map<string, IMUser<any>>()
+  private readonly _pendingPlatformUsers = new Map<string, Promise<IMUser<any> | null>>()
   /** Platform user IDs from the latest authoritative contacts snapshot. */
   private readonly _contactUserIds = new Set<string>()
   private readonly _topicToConversation = new Map<number, string>()
@@ -603,6 +605,7 @@ export class DialogRpc {
       do {
         const page = await this._platform.getContacts(this._session, { cursor, limit: 500 })
         platformUsers.push(...page.users)
+        for (const user of page.users) this._platformUsers.set(user.id, user)
         cursor = page.nextCursor
       } while (cursor && platformUsers.length < 100_000)
     }
@@ -665,11 +668,27 @@ export class DialogRpc {
   async getFullUser(req: tl.users.RawGetFullUserRequest): Promise<tl.users.RawUserFull> {
     await this._hydratePeers()
     const user = await this._getInputUser(req.id)
+    const peerId = req.id._ === 'inputUserSelf'
+      ? this._session.userId
+      : req.id._ === 'inputUser' || req.id._ === 'inputUserFromMessage'
+        ? this._tlToPeer.get(req.id.userId)
+        : undefined
+    let profile = peerId ? this._platformUsers.get(peerId) : undefined
+    if (!profile && peerId && this._platform.getUser) {
+      try {
+        profile = await this._getPlatformUser(peerId) ?? undefined
+      } catch {
+        // Extended profile data is optional. A transient profile lookup must
+        // not make an otherwise resolvable users.getFullUser request fail.
+      }
+    }
+    const about = profile?.about
     return {
       _: 'users.userFull',
       fullUser: {
         _: 'userFull',
         id: user.id,
+        ...(about !== undefined ? { about } : {}),
         settings: { _: 'peerSettings' },
         notifySettings: { _: 'peerNotifySettings' },
         commonChatsCount: 0,
@@ -2311,7 +2330,7 @@ export class DialogRpc {
     if (cached) return cached
     const pending = this._pendingPeerUsers.get(peerId)
     if (pending) return pending
-    const lookup = Promise.resolve(this._platform.getUser?.(this._session, peerId))
+    const lookup = this._getPlatformUser(peerId)
       .then(async (upstream) => {
         const stored = upstream ? undefined : await this._store?.getUser(this._session.platformId, peerId)
         const user = upstream ?? (stored ? toUser(stored) : { id: peerId, firstName: fallbackName ?? peerId })
@@ -2324,6 +2343,22 @@ export class DialogRpc {
       })
       .finally(() => this._pendingPeerUsers.delete(peerId))
     this._pendingPeerUsers.set(peerId, lookup)
+    return lookup
+  }
+
+  private _getPlatformUser(peerId: string): Promise<IMUser<any> | null> {
+    const cached = this._platformUsers.get(peerId)
+    if (cached) return Promise.resolve(cached)
+    const pending = this._pendingPlatformUsers.get(peerId)
+    if (pending) return pending
+    const lookup = Promise.resolve()
+      .then(() => this._platform.getUser?.(this._session, peerId) ?? null)
+      .then((user) => {
+        if (user) this._platformUsers.set(peerId, user)
+        return user
+      })
+      .finally(() => this._pendingPlatformUsers.delete(peerId))
+    this._pendingPlatformUsers.set(peerId, lookup)
     return lookup
   }
 
