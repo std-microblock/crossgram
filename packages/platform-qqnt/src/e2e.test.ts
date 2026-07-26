@@ -2,6 +2,7 @@ import { createReadStream } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { PlatformSession } from '@mtproto-relay/bridge'
 import sharp from 'sharp'
@@ -105,7 +106,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     ]
     const imagePath = new URL('../../platform-static/src/test-image.png', import.meta.url)
     const image = await stat(imagePath)
-    const metadata = await sharp(imagePath).metadata()
+    const metadata = await sharp(fileURLToPath(imagePath)).metadata()
     if (!metadata.width || !metadata.height) throw new Error('test PNG dimensions are unavailable')
     for (const target of targets) {
       // A unique trailing payload keeps the PNG decodable while preventing QQ's
