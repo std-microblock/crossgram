@@ -2722,6 +2722,99 @@ describe('bridge login e2e', () => {
     }
   }, 15000)
 
+  it('keeps the live Telegram ID when QQ finalizes msgSeq before a recall', async () => {
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    const platformId = 'qq-final-sequence-e2e'
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: false,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
+      async getUser(_session, id) { return { id, firstName: id } },
+      async sendMessage() { throw new Error('unused') },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({
+      platform: { id: platformId, adapter: platform },
+    })
+    let client: TestClient | undefined
+    try {
+      await ctx.database.create('mtproto_platform_session', {
+        id: 'qq-final-sequence-ps', platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'QQ User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'qq-final-sequence-auth', virtualPhone: '99900889', totpSecret: '44'.repeat(20),
+        platformId, platformSessionId: 'qq-final-sequence-ps',
+      })
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x3456cdef, 0x7cde, false)
+      const code = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: '+99900889', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: '99900889', phoneCodeHash: code.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode('44'.repeat(20)),
+      }, 4)
+
+      const conversation: bridge.IMConversation = {
+        id: 'qq-final-sequence-group', kind: 'group', title: 'QQ final sequence group',
+      }
+      const make = (id: string, sequence: number, text: string): bridge.IMMessage => ({
+        id, conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_300,
+        metadata: { qqMsgSeq: String(sequence) },
+        content: { parts: [{ type: 'text', text }] },
+      })
+      await handler!({ type: 'message', conversation, message: make('previous', 100, 'previous') })
+      const previousPush = await readPush(client, key)
+      await handler!({ type: 'message', conversation, message: make('target', 99, 'target') })
+      const targetPush = await readPush(client, key)
+      const targetId = targetPush.updates[0].message.id
+
+      await handler!({ type: 'message', conversation, message: make('target', 101, 'target') })
+      await handler!({
+        type: 'message-delete', eventId: 'recall-target', conversation,
+        messageIds: ['target'], timestamp: 1_800_000_301,
+      })
+      const deletePush = await readPush(client, key)
+      expect(deletePush).toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateDeleteChannelMessages', messages: [targetId], ptsCount: 1 }],
+      })
+
+      const chatId = previousPush.chats[0].id
+      const difference = await callRpc(client, key, sid, {
+        _: 'updates.getChannelDifference', force: true,
+        channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
+        filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+      }, 6)
+      expect(difference).toMatchObject({ _: 'updates.channelDifference', final: true })
+      expect(difference.newMessages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: targetId, message: 'target' }),
+      ]))
+      expect(difference.newMessages.filter((message: any) => message.id === targetId)).toHaveLength(1)
+      expect(difference.otherUpdates).toEqual([
+        expect.objectContaining({ _: 'updateDeleteChannelMessages', messages: [targetId] }),
+      ])
+
+      const history = await callRpc(client, key, sid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 8)
+      expect(history.messages).toMatchObject([{ message: 'previous' }])
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 15000)
+
   it('returns recall-and-resend edits to the requester and pushes identical updates to observers', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let sentSequence = 0
