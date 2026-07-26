@@ -68,6 +68,41 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@bufbuild/protobuf@npm:2.13.0, @bufbuild/protobuf@npm:^2.13.0":
+  version: 2.13.0
+  resolution: "@bufbuild/protobuf@npm:2.13.0"
+  checksum: 10c0/bb4d39512302887399355ac2ba1228e562c1cae818ff88b4b85b3060758aba5fec94786fe80f69de8878f98e730911c0bd145741adb582d0abf6b42de921e50c
+  languageName: node
+  linkType: hard
+
+"@bufbuild/protoc-gen-es@npm:^2.13.0":
+  version: 2.13.0
+  resolution: "@bufbuild/protoc-gen-es@npm:2.13.0"
+  dependencies:
+    "@bufbuild/protobuf": "npm:2.13.0"
+    "@bufbuild/protoplugin": "npm:2.13.0"
+  peerDependencies:
+    "@bufbuild/protobuf": 2.13.0
+  peerDependenciesMeta:
+    "@bufbuild/protobuf":
+      optional: true
+  bin:
+    protoc-gen-es: bin/protoc-gen-es
+  checksum: 10c0/add71a8c898a859bf161ab5f379453a0600434d5c71523bbb6b2c2debb44487eb980609edf98f0d69c6423bbf32e495c363683a98fe6eab28eefa10b89f3c8b6
+  languageName: node
+  linkType: hard
+
+"@bufbuild/protoplugin@npm:2.13.0":
+  version: 2.13.0
+  resolution: "@bufbuild/protoplugin@npm:2.13.0"
+  dependencies:
+    "@bufbuild/protobuf": "npm:2.13.0"
+    "@typescript/vfs": "npm:^1.6.2"
+    typescript: "npm:5.4.5"
+  checksum: 10c0/d7230e48579c26692b0a462725a0297fdd690ea3422f6c750af6630a16df60f3a70e54b2decec6f72d95a7fbacf87de55e69bbc509ba8d631c18328ac48903f5
+  languageName: node
+  linkType: hard
+
 "@cordisjs/client@npm:^0.8.1":
   version: 0.8.2
   resolution: "@cordisjs/client@npm:0.8.2"
@@ -1852,6 +1887,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/platform-qqnt@workspace:packages/platform-qqnt"
   dependencies:
+    "@bufbuild/protobuf": "npm:^2.13.0"
+    "@bufbuild/protoc-gen-es": "npm:^2.13.0"
     "@mtproto-relay/bridge": "workspace:*"
     "@types/ws": "npm:^8.18.1"
     ffmpeg-static: "npm:^5.3.0"
@@ -2795,6 +2832,17 @@ __metadata:
   dependencies:
     "@types/node": "npm:*"
   checksum: 10c0/61aff1129143fcc4312f083bc9e9e168aa3026b7dd6e70796276dcfb2c8211c4292603f9c4864fae702f2ed86e4abd4d38aa421831c2fd7f856c931a481afbab
+  languageName: node
+  linkType: hard
+
+"@typescript/vfs@npm:^1.6.2":
+  version: 1.6.4
+  resolution: "@typescript/vfs@npm:1.6.4"
+  dependencies:
+    debug: "npm:^4.4.3"
+  peerDependencies:
+    typescript: "*"
+  checksum: 10c0/acb9de42f23fda3f75e3d7900ba106ef323a2f4e7cf0e4a94dbb457e26d353ca63bb35193ed1a32fc8733f3ae59099612b290b06bd6221694861beb9bfb62f62
   languageName: node
   linkType: hard
 
@@ -3841,7 +3889,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"debug@npm:4, debug@npm:^4.3.7, debug@npm:^4.4.0":
+"debug@npm:4, debug@npm:^4.3.7, debug@npm:^4.4.0, debug@npm:^4.4.3":
   version: 4.4.3
   resolution: "debug@npm:4.4.3"
   dependencies:
@@ -6851,6 +6899,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"typescript@npm:5.4.5":
+  version: 5.4.5
+  resolution: "typescript@npm:5.4.5"
+  bin:
+    tsc: bin/tsc
+    tsserver: bin/tsserver
+  checksum: 10c0/2954022ada340fd3d6a9e2b8e534f65d57c92d5f3989a263754a78aba549f7e6529acc1921913560a4b816c46dce7df4a4d29f9f11a3dc0d4213bb76d043251e
+  languageName: node
+  linkType: hard
+
 "typescript@npm:^5.9.3":
   version: 5.9.3
   resolution: "typescript@npm:5.9.3"
@@ -6858,6 +6916,16 @@ __metadata:
     tsc: bin/tsc
     tsserver: bin/tsserver
   checksum: 10c0/6bd7552ce39f97e711db5aa048f6f9995b53f1c52f7d8667c1abdc1700c68a76a308f579cd309ce6b53646deb4e9a1be7c813a93baaf0a28ccd536a30270e1c5
+  languageName: node
+  linkType: hard
+
+"typescript@patch:typescript@npm%3A5.4.5#optional!builtin<compat/typescript>":
+  version: 5.4.5
+  resolution: "typescript@patch:typescript@npm%3A5.4.5#optional!builtin<compat/typescript>::version=5.4.5&hash=5adc0c"
+  bin:
+    tsc: bin/tsc
+    tsserver: bin/tsserver
+  checksum: 10c0/db2ad2a16ca829f50427eeb1da155e7a45e598eec7b086d8b4e8ba44e5a235f758e606d681c66992230d3fc3b8995865e5fd0b22a2c95486d0b3200f83072ec9
   languageName: node
   linkType: hard
 
