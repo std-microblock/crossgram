@@ -67,7 +67,6 @@ interface HistoryIngestPrefetch {
 
 interface ProjectionAllocationCache {
   epochs: Map<string, number>
-  nativeOrderScopes: Set<string>
 }
 
 export interface StoredHistoryQuery {
@@ -153,7 +152,7 @@ export class MessageStore {
     if (!sources.length) return []
     return this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
-      const allocationCache: ProjectionAllocationCache = { epochs: new Map(), nativeOrderScopes: new Set() }
+      const allocationCache: ProjectionAllocationCache = { epochs: new Map() }
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
       if (!conversationRow) throw new Error('failed to persist conversation')
       const historyPrefetch = options.allocation === 'history' && sources.length > 1
@@ -180,7 +179,7 @@ export class MessageStore {
     if (!dialogs.length) return
     await this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
-      const allocationCache: ProjectionAllocationCache = { epochs: new Map(), nativeOrderScopes: new Set() }
+      const allocationCache: ProjectionAllocationCache = { epochs: new Map() }
       const existingConversations = new Map((await database.get('mtproto_im_conversation', {
         platformSessionId: session.platformSessionId,
       })).map((row) => [row.platformConversationId, row]))
@@ -1079,7 +1078,7 @@ export class MessageStore {
       const bounds = nativeSequence !== undefined
         ? await this._nativeSequenceBounds(database, conversation.id, nativeSequence)
         : nativeOrderKey !== undefined
-          ? await this._nativeOrderKeyBounds(database, scope, nativeOrderKey, allocationCache.nativeOrderScopes)
+          ? await this._nativeOrderKeyBounds(database, scope, nativeOrderKey)
           : {}
       const preferredId = nativeOrderKey === undefined
         ? clampedTimestampMessageIdBucket(
@@ -1260,9 +1259,7 @@ export class MessageStore {
     database: Database,
     scope: string,
     nativeOrderKey: string,
-    backfilledScopes: Set<string>,
   ): Promise<{ lowerExclusive?: number, upperExclusive?: number }> {
-    await this._backfillNativeOrderKeys(database, scope, backfilledScopes)
     const [previous] = await database.select('mtproto_tl_message_part', {
       scope,
       nativeOrderKey: { $lt: nativeOrderKey },
@@ -1285,30 +1282,6 @@ export class MessageStore {
         ? Math.min(...nextParts.map((part) => part.tlMessageId))
         : undefined,
     }
-  }
-
-  private async _backfillNativeOrderKeys(
-    database: Database,
-    scope: string,
-    backfilledScopes: Set<string>,
-  ): Promise<void> {
-    if (backfilledScopes.has(scope)) return
-    const legacyParts = (await database.get('mtproto_tl_message_part', { scope }))
-      .filter((part) => part.nativeOrderKey === null)
-    const messageIds = [...new Set(legacyParts.map((part) => part.messageId))]
-    const messages = messageIds.length
-      ? await database.get('mtproto_im_message', { id: { $in: messageIds } })
-      : []
-    const orderKeys = new Map(messages.flatMap((message) => {
-      const nativeOrderKey = decimalNativeOrderKey(message.primaryPlatformMessageId)
-      return nativeOrderKey ? [[message.id, nativeOrderKey] as const] : []
-    }))
-    const backfilled = legacyParts.flatMap((part) => {
-      const nativeOrderKey = orderKeys.get(part.messageId)
-      return nativeOrderKey ? [{ ...part, nativeOrderKey }] : []
-    })
-    if (backfilled.length) await database.upsert('mtproto_tl_message_part', backfilled, ['id'])
-    backfilledScopes.add(scope)
   }
 
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
@@ -1624,10 +1597,6 @@ function orderedMessagePreferredId(
     preferred = bounds.upperExclusive - 1
   }
   return Math.max(TIMESTAMP_MESSAGE_ID_SLOTS, Math.min(TELEGRAM_MESSAGE_ID_MAX, preferred))
-}
-
-function decimalNativeOrderKey(value: string): string | undefined {
-  return /^\d{1,20}$/.test(value) ? value.padStart(20, '0') : undefined
 }
 
 function middleOut(values: readonly number[], preferForward: boolean): number[] {
