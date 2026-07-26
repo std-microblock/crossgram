@@ -1052,8 +1052,6 @@ export class MessageStore {
     const requiresMigration = existing.some((part) => (
       part.scope !== scope
       || part.allocationVersion !== TIMESTAMP_ALLOCATION_VERSION
-      || (nativeSequence !== undefined && part.nativeSequence !== nativeSequence)
-      || (nativeOrderKey !== undefined && part.nativeOrderKey !== nativeOrderKey)
     ))
     if (requiresMigration) {
       for (const part of existing) await database.remove('mtproto_tl_message_part', { id: part.id })
@@ -1063,6 +1061,22 @@ export class MessageStore {
         await database.remove('mtproto_tl_message_part', { id: part.id })
       }
       existing = existing.slice(0, count)
+    }
+    // A live platform event can expose an optimistic ordering key before a
+    // later status/history record supplies the final value. Telegram message
+    // IDs are already visible to clients at that point and must remain
+    // immutable: changing the projection would leave durable update payloads
+    // referring to the old ID while a later recall deletes the new one.
+    for (const part of existing) {
+      const values = {
+        ...(nativeSequence !== undefined && part.nativeSequence !== nativeSequence
+          ? { nativeSequence }
+          : {}),
+        ...(nativeOrderKey !== undefined && part.nativeOrderKey !== nativeOrderKey
+          ? { nativeOrderKey }
+          : {}),
+      }
+      if (Object.keys(values).length) await database.set('mtproto_tl_message_part', { id: part.id }, values)
     }
     const groupable = count > 1 && new Set(media.map((item) => item.kind)).size === 1
     let groupedId = existing.find((part) => part.groupedId)?.groupedId ?? groupedIdBeforeMigration
