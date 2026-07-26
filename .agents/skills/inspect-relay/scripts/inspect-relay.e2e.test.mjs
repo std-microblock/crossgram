@@ -42,8 +42,42 @@ test('CLI discovers runtime databases and returns JSON from a child process', as
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('MTProto command waits through reload frames and consumes the real WebSocket protocol', async () => {
-  const server = createServer()
+test('MTProto command consumes the read-only HTTP API with server-side detail filters', async () => {
+  let requested
+  const server = createServer((req, res) => {
+    requested = new URL(req.url, 'http://localhost')
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({
+      capturing: true, dropped: 2, maxEvents: 2000, total: 4, matched: 1,
+      events: [{
+        id: 2, timestamp: Date.now(), direction: 'server->client', phase: 'message',
+        connectionId: 'conn-a', name: 'rpc_result -> pong', requestMessageId: '0x1',
+        payload: { _: 'rpc_result', result: { _: 'pong' } }, searchText: 'rpc_result pong',
+      }],
+    }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const { port } = server.address()
+    const result = await execute([
+      'mtproto', '--webui', `http://127.0.0.1:${port}`, '--direction', 'server->client',
+      '--request-message-id', '0x1', '--grep', 'pong', '--field', 'payload.result._=pong', '--limit', '10',
+    ], process.cwd())
+    assert.equal(result.matched, 1)
+    assert.deepEqual(result.events.map(event => event.id), [2])
+    assert.equal(requested.pathname, '/api/mtproto-debug/events')
+    assert.equal(requested.searchParams.get('requestMessageId'), '0x1')
+    assert.deepEqual(requested.searchParams.getAll('field'), ['payload.result._=pong'])
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
+})
+
+test('MTProto command falls back to WebUI and waits through reload frames on old deployments', async () => {
+  const server = createServer((req, res) => {
+    res.statusCode = 404
+    res.end('not found')
+  })
   const sockets = new WebSocketServer({ server, path: '/api' })
   sockets.on('connection', socket => {
     socket.send(JSON.stringify({ type: 'entry:init', body: { version: 'test', entries: { unrelated: { data: { messages: [] } } } } }))
@@ -66,6 +100,8 @@ test('MTProto command waits through reload frames and consumes the real WebSocke
     const result = await fetchMtprotoSnapshot(`http://127.0.0.1:${port}`, { direction: 'server->client', grep: 'pong', limit: 10 }, WebSocket)
     assert.equal(result.capturing, true)
     assert.equal(result.dropped, 2)
+    assert.equal(result.total, 2)
+    assert.equal(result.matched, 1)
     assert.deepEqual(result.events.map(event => event.id), [2])
   } finally {
     for (const client of sockets.clients) client.terminate()

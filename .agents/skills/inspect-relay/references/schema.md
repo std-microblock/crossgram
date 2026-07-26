@@ -26,4 +26,4 @@
 ## Runtime diagnostics
 
 - `data/logs.db`, table `logs`: persisted Cordis log messages from `@cordisjs/plugin-logger-webui`.
-- WebUI `/api`: in-memory MTProto debug entry. Its capture buffer is bounded and disappears on restart.
+- HTTP `/api/mtproto-debug/events`: read-only, server-filtered view of the in-memory MTProto debug capture. Its buffer is bounded and disappears on restart. Older deployments are inspected through the WebUI `/api` fallback.

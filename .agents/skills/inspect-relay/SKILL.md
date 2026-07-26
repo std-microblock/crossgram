@@ -28,8 +28,13 @@ node .agents/skills/inspect-relay/scripts/inspect-relay.mjs logs --limit 200 --s
 # Filter logs by logger name or text
 node .agents/skills/inspect-relay/scripts/inspect-relay.mjs logs --name mtproto --grep RPC
 
-# Current MTProto WebUI capture buffer
+# Current MTProto capture buffer through the read-only HTTP API
 node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --limit 100 --name messages.sendMessage
+
+# Correlate a result, connection, or decoded payload field
+node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --request-message-id 0x1234
+node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --connection-id conn-7 --grep RPC_ERROR
+node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --field payload.peer.channelId=42 --since 10m
 
 # Internal message id and every directly related row
 node .agents/skills/inspect-relay/scripts/inspect-relay.mjs message 42
@@ -43,7 +48,7 @@ node .agents/skills/inspect-relay/scripts/inspect-relay.mjs table mtproto_update
 node .agents/skills/inspect-relay/scripts/inspect-relay.mjs sql "SELECT * FROM mtproto_auth_session LIMIT 20"
 ```
 
-Use `--webui http://127.0.0.1:3140` when the server differs. Add `--compact` for JSONL-friendly compact output and `--output <file>` to save UTF-8 JSON.
+The `mtproto` command calls `/api/mtproto-debug/events` and falls back to the legacy WebUI snapshot on older deployments. Use `--webui http://127.0.0.1:3140` when the server differs, `--capture-path <path>` for a customized plugin path, or `--legacy-webui` to force the old protocol. Filters include `--since`, `--until`, `--after-id`, `--before-id`, `--id`, `--name`, `--direction`, `--phase`, `--connection-id`, `--message-id`, `--request-message-id`, `--auth-key-id`, `--session-id`, `--grep`, and repeatable `--field path=value`. Add `--compact` for JSONL-friendly compact output and `--output <file>` to save UTF-8 JSON.
 
 ## Correlate results
 

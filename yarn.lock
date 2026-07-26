@@ -1835,6 +1835,7 @@ __metadata:
     vitest: "npm:^2.1.9"
     vue: "npm:^3.5.33"
   peerDependencies:
+    "@cordisjs/plugin-server": ^1.6.2
     "@cordisjs/plugin-webui": ^0.8.1
     "@mtproto-relay/mtproto": "workspace:*"
     cordis: ^4.0.0-rc.5

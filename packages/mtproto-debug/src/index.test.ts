@@ -9,6 +9,7 @@ describe('MTProto debug Cordis entry', () => {
     const cleanups: Array<() => void> = []
     let data!: MtprotoDebugData
     let files!: { routes?: string[] }
+    let apiRoute!: { path: string, callback: (req: any, res: any) => Promise<void> }
 
     const ctx = {
       mtproto: {
@@ -24,6 +25,11 @@ describe('MTProto debug Cordis entry', () => {
           return { mutate: (callback: (target: MtprotoDebugData) => void) => callback(data) }
         },
       },
+      server: {
+        get(path: string, callback: (req: any, res: any) => Promise<void>) {
+          apiRoute = { path, callback }
+        },
+      },
       throttle: (callback: () => void) => callback,
       effect(callback: () => () => void) {
         cleanups.push(callback())
@@ -32,6 +38,7 @@ describe('MTProto debug Cordis entry', () => {
 
     apply(ctx as never, { maxEvents: 2 })
     expect(files.routes).toEqual(['/mtproto-debug'])
+    expect(apiRoute.path).toBe('/api/mtproto-debug/events')
     expect(data.capturing).toBe(true)
     expect(listeners.size).toBe(1)
 
@@ -46,6 +53,17 @@ describe('MTProto debug Cordis entry', () => {
     emit('first.call')
     emit('second.call')
     emit('third.call')
+    const response = {
+      headers: new Headers(), status: 200, body: undefined as unknown,
+      json(value: unknown) { this.body = value },
+    }
+    await apiRoute.callback({ query: new URLSearchParams('name=third&limit=1') }, response)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.body).toMatchObject({ total: 2, matched: 1, events: [{ name: 'third.call' }] })
+    await apiRoute.callback({ query: new URLSearchParams('direction=sideways') }, response)
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'Invalid direction: sideways' })
+
     await data.pause()
     expect(data.events.map(event => event.name)).toEqual(['second.call', 'third.call'])
     expect(data.dropped).toBe(1)
@@ -79,6 +97,7 @@ describe('MTProto debug Cordis entry', () => {
           return { mutate: (callback: (target: MtprotoDebugData) => void) => callback(data) }
         },
       },
+      server: { get: () => undefined },
       throttle: (callback: () => void) => callback,
       effect: (callback: () => () => void) => callback(),
     }

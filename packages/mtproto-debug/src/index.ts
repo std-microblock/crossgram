@@ -2,21 +2,24 @@ import type { Context } from 'cordis'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { serializeDebugEvent } from './serialize.js'
+import { CaptureQueryError, parseCaptureQuery, queryCapture } from './capture-api.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 
 export const name = 'mtproto-debug'
-export const inject = ['mtproto', 'webui']
+export const inject = ['mtproto', 'server', 'webui']
 
 export interface Config {
   maxEvents?: number
   initiallyPaused?: boolean
+  apiPath?: string
 }
 
 export const Config = z.object({
   maxEvents: z.natural().min(100).max(20_000).default(2_000),
   initiallyPaused: z.boolean().default(false),
+  apiPath: z.string().default('/api/mtproto-debug/events'),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -24,6 +27,7 @@ export const Config = z.object({
 
 export function apply(ctx: Context, config: Config = {}): void {
   const maxEvents = config.maxEvents ?? 2_000
+  const apiPath = normalizeApiPath(config.apiPath ?? '/api/mtproto-debug/events')
   let nextId = 0
   let pending: CapturedMtprotoEvent[] = []
   let flushTimer: ReturnType<typeof setTimeout> | undefined
@@ -80,6 +84,18 @@ export function apply(ctx: Context, config: Config = {}): void {
       flush()
     }, 50)
   }
+
+  ctx.server.get(apiPath, async (req, res) => {
+    try {
+      flush()
+      res.headers.set('cache-control', 'no-store')
+      res.json(queryCapture(data, parseCaptureQuery(req.query)))
+    } catch (error) {
+      if (!(error instanceof CaptureQueryError)) throw error
+      res.status = 400
+      res.json({ error: error.message })
+    }
+  })
   const onDebug = (event: MtprotoDebugEvent) => {
     if (!data.capturing) return
     pending.push(serializeDebugEvent(event, ++nextId))
@@ -97,3 +113,13 @@ export function apply(ctx: Context, config: Config = {}): void {
 
 export type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 export { serializeDebugEvent, toDebugJson } from './serialize.js'
+export {
+  CaptureQueryError, parseCaptureQuery, queryCapture,
+  type MtprotoCaptureFilters, type MtprotoCaptureSnapshot,
+} from './capture-api.js'
+
+function normalizeApiPath(value: string): string {
+  const path = value.trim()
+  if (!path.startsWith('/')) throw new Error(`MTProto debug apiPath must start with '/': ${value}`)
+  return path.length > 1 ? path.replace(/\/+$/, '') : path
+}
