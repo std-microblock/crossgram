@@ -144,7 +144,7 @@ export interface WireMessage {
     | WireTextPart
     | { type: 'media', media: WireMedia }
     | { type: 'sticker', sticker: WireSticker }
-    | { type: 'multi-forward', title: string, locator: WireMultiForwardLocator }
+    | { type: 'multi-forward', title: string, preview?: string, locator: WireMultiForwardLocator }
     | { type: 'card', card: WireCard }
   >
   reactionContext?: WireReactionState

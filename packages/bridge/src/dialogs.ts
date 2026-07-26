@@ -61,17 +61,6 @@ interface ResolvedStickerInput {
   stickerId: string
 }
 
-interface ConversationPreview {
-  description: string
-  firstMessageId?: number
-}
-
-interface VirtualMessageTarget {
-  conversationId: string
-  platformMessageId: string
-  tlMessageId: number
-}
-
 export interface LegacyGetForumTopicsRequest {
   _: 'channels.getForumTopics'
   channel: tl.TypeInputChannel
@@ -99,10 +88,6 @@ export class DialogRpc {
     string,
     Map<number, import('./platform.js').IMConversation>
   >()
-  private static readonly VIRTUAL_FIRST_MESSAGES = new Map<
-    string,
-    Map<number, VirtualMessageTarget>
-  >()
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
@@ -128,7 +113,6 @@ export class DialogRpc {
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
   private readonly _memberCursors = new Map<string, Map<number, string | null>>()
   private readonly _searchCursors = new Map<string, string>()
-  private readonly _conversationPreviews = new Map<string, ConversationPreview>()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peerHydration?: Promise<void>
@@ -190,7 +174,6 @@ export class DialogRpc {
     // absent during cold start. The no-store path still allocates Telegram IDs
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
-    await this._prepareConversationPreviews(all.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []))
     const materialized = await Promise.all(all.map((dialog) => this._materializeDialog(dialog)))
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
@@ -260,9 +243,6 @@ export class DialogRpc {
     if (!this._store) {
       await Promise.all(selected.map((dialog) => this._loadHistory(dialog.conversation.id)))
     }
-    await this._prepareConversationPreviews(
-      selected.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []),
-    )
     const materialized = await Promise.all(selected.map((dialog) => this._materializeDialog(dialog)))
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return {
@@ -303,7 +283,6 @@ export class DialogRpc {
         : 0
     const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
-    await this._prepareConversationPreviews(page.map((item) => item.source))
     const conversation = this._conversation(peerId)
     const senders = await this._messageSenders(page.map((item) => item.source))
     const peerUser = conversation.kind === 'direct'
@@ -344,7 +323,6 @@ export class DialogRpc {
     })
     const start = Math.max(0, req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
-    await this._prepareConversationPreviews(page.map((item) => item.source))
     const users = await this._messageSenders(page.map((item) => item.source))
     return {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
@@ -422,7 +400,6 @@ export class DialogRpc {
         this._searchCursors.delete(oldest)
       }
     }
-    await this._prepareConversationPreviews(page.map((item) => item.source))
     const users = await this._messageSenders(page.map((item) => item.source))
     const sliced = Boolean(upstream.nextCursor || cursor || req.offsetId > 0 || start > 0)
     return {
@@ -564,7 +541,6 @@ export class DialogRpc {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
         continue
       }
-      await this._prepareConversationPreviews([found.source])
       messages.push(this._makeMessage(found))
       linkedSources.push(found.source)
       const sender = await this._getMessageSender(found.source)
@@ -652,8 +628,6 @@ export class DialogRpc {
     this._conversations.set(conversation.id, conversation)
     this._peerToTl.set(conversation.id, tlId)
     this._tlToPeer.set(tlId, conversation.id)
-    const first = DialogRpc.VIRTUAL_FIRST_MESSAGES.get(this._session.platformSessionId)?.get(tlId)
-    if (first) this._rememberVirtualMessageTarget(first)
     return {
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: tlId },
       chats: [this._makeChat(conversation)], users: [],
@@ -1149,7 +1123,6 @@ export class DialogRpc {
       this._throwMessageAction(error, 'MESSAGE_FORWARD_FORBIDDEN')
     }
     const conversation = this._conversation(toId)
-    await this._prepareConversationPreviews(forwarded!)
     const projections = []
     for (const output of forwarded!) {
       const source: IMMessage<any> = { ...output, conversationId: toId, outgoing: true }
@@ -2178,7 +2151,7 @@ export class DialogRpc {
     if (!linked || linked.type !== 'conversation-link') return
 
     const url = this._conversationLinkUrl(linked.conversation)
-    const preview = this._conversationPreviews.get(linked.conversation.id)
+    const preview = linked.conversation.metadata?.qqMultiForwardPreview
     return {
       _: 'messageMediaWebPage', manual: true, safe: true,
       webpage: {
@@ -2187,64 +2160,11 @@ export class DialogRpc {
         url, displayUrl: linked.conversation.title, hash: 0,
         type: 'telegram_message',
         title: linked.conversation.title,
-        description: preview?.description || '点击查看合并转发消息',
+        description: typeof preview === 'string' && preview.trim()
+          ? preview.trim()
+          : '点击查看合并转发消息',
       },
     }
-  }
-
-  private async _prepareConversationPreviews(messages: readonly IMMessage[]): Promise<void> {
-    if (!this._platform.getHistory) return
-    const linked = new Map<string, import('./platform.js').IMConversation>()
-    for (const message of messages) {
-      for (const part of message.content.parts) {
-        if (part.type !== 'text') continue
-        for (const entity of part.entities ?? []) {
-          if (entity.type !== 'conversation-link' || !this._isVirtualConversation(entity.conversation)) continue
-          this._conversationLinkUrl(entity.conversation)
-          if (!this._conversationPreviews.has(entity.conversation.id)) {
-            linked.set(entity.conversation.id, entity.conversation)
-          }
-        }
-      }
-    }
-    await Promise.all([...linked.values()].map(async (conversation) => {
-      try {
-        const history = await this._loadHistory(conversation.id, { limit: 200 })
-        const messages = history
-          .filter((item) => item.ordinal === 0)
-          .sort((left, right) => left.source.timestamp - right.source.timestamp || left.tlId - right.tlId)
-        const first = messages[0]
-        if (first) {
-          const chatId = this._peerId(conversation.id)
-          const target = {
-            conversationId: conversation.id,
-            platformMessageId: first.source.id,
-            tlMessageId: first.tlId,
-          }
-          const shared = DialogRpc.VIRTUAL_FIRST_MESSAGES.get(this._session.platformSessionId) ?? new Map()
-          shared.set(chatId, target)
-          DialogRpc.VIRTUAL_FIRST_MESSAGES.set(this._session.platformSessionId, shared)
-          this._rememberVirtualMessageTarget(target)
-        }
-        const lines = messages.slice(0, 3).map((item) => this._conversationPreviewLine(item.source))
-        this._conversationPreviews.set(conversation.id, {
-          description: lines.join('\n') || `${messages.length} 条转发消息`,
-          firstMessageId: first?.tlId,
-        })
-      } catch {
-        // A preview is optional; the virtual chat remains addressable even if
-        // the upstream cannot expand the merged-forward summary right now.
-      }
-    }))
-  }
-
-  private _conversationPreviewLine(message: IMMessage): string {
-    const sender = message.sender
-      ? `${message.sender.firstName}${message.sender.lastName ? ` ${message.sender.lastName}` : ''}`
-      : message.senderId
-    const text = messageText(message).trim()
-      || (message.content.parts.some((part) => part.type === 'sticker') ? '[表情]' : '[媒体]')
-    return `${sender}: ${text}`
   }
 
   private _conversationLinkUrl(conversation: import('./platform.js').IMConversation): string {
@@ -2253,18 +2173,7 @@ export class DialogRpc {
     const shared = DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId) ?? new Map()
     shared.set(chatId, conversation)
     DialogRpc.VIRTUAL_CONVERSATIONS.set(this._session.platformSessionId, shared)
-    const post = this._conversationPreviews.get(conversation.id)?.firstMessageId
-    return `tg://resolve?domain=bridgechat_${chatId}${post ? `&post=${post}` : ''}`
-  }
-
-  private _rememberVirtualMessageTarget(target: VirtualMessageTarget): void {
-    this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}`, target.tlMessageId)
-    this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}\u00000`, target.tlMessageId)
-    this._tlToMessage.set(target.tlMessageId, {
-      peerId: target.conversationId,
-      platformMessageId: target.platformMessageId,
-      ordinal: 0,
-    })
+    return `tg://resolve?domain=bridgechat_${chatId}`
   }
 
   private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
