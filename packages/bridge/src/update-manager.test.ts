@@ -683,6 +683,49 @@ describe('UpdateManager', () => {
     expect(() => roundTrip(difference)).not.toThrow()
   })
 
+  it('replays and deletes the same Telegram ID after QQ finalizes a live msgSeq', async () => {
+    const { ctx, store } = await createHarness()
+    const manager = new UpdateManager(
+      ctx.database,
+      new PlatformRegistry([[session.platformId, platform]]),
+      store,
+      () => 0,
+    )
+    const conversation: IMConversation = { id: 'final-sequence', kind: 'group', title: 'Final sequence' }
+    const make = (id: string, sequence: number, text: string): IMMessage => ({
+      id, conversationId: conversation.id, senderId: 'alice', timestamp: 70,
+      metadata: { qqMsgSeq: String(sequence) },
+      content: { parts: [{ type: 'text', text }] },
+    })
+
+    await store.ingest(session, conversation, make('previous', 100, 'previous'))
+    const target = make('target', 99, 'target')
+    const created = await store.ingest(session, conversation, target)
+    await manager.publish(session, { event: { type: 'message', conversation, message: target }, result: created })
+    const pushedId = created.projection[0].tlMessageId
+
+    await store.ingest(session, conversation, make('target', 101, 'target'), { allocation: 'history' })
+    const deleted = await store.deleteMessages(session, conversation, ['target'])
+    await manager.publish(session, {
+      event: {
+        type: 'message-delete', eventId: 'recall-target', conversation,
+        messageIds: ['target'], timestamp: 71,
+      },
+      result: deleted,
+    })
+
+    const difference = await manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: { _: 'inputChannel', channelId: stableId('peer:final-sequence'), accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+    })
+    expect(difference).toMatchObject({
+      _: 'updates.channelDifference',
+      newMessages: [{ id: pushedId, message: 'target' }],
+      otherUpdates: [{ _: 'updateDeleteChannelMessages', messages: [pushedId] }],
+    })
+  })
+
   it('pushes and replays content.serviceAction through updates.getChannelDifference', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'service-group', kind: 'group', title: 'Service Group' }
