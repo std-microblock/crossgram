@@ -159,7 +159,7 @@ export class MessageStore {
         ))
       }
       return results
-    }), options.allocation === 'history' ? 'history-ingest' : 'ingest')
+    }), options.allocation === 'history' ? 'history-ingest' : 'ingest', true)
   }
 
   async ingestDialogs(session: PlatformSession, dialogs: readonly IMDialog[]): Promise<void> {
@@ -215,7 +215,7 @@ export class MessageStore {
           )
         }
       }
-    }))
+    }), 'dialog-ingest', true)
   }
 
   private async _ingestMessage(
@@ -406,7 +406,7 @@ export class MessageStore {
         messageIds: deletedMessageIds,
         tlMessageIds,
       }
-    }))
+    }), 'message-delete', true)
   }
 
   async setReactions(
@@ -437,7 +437,7 @@ export class MessageStore {
         message: await this._hydrateMessage(row),
         tlMessageIds: parts.map((part) => part.tlMessageId),
       }
-    }))
+    }), 'message-reactions', true)
   }
 
   async markRead(
@@ -1290,7 +1290,11 @@ export class MessageStore {
     await this._write(() => this._updateJournal.prune(platformSessionId, ACCOUNT_UPDATE_SCOPE))
   }
 
-  private async _write<T>(callback: () => Promise<T>, operation = 'write'): Promise<T> {
+  private async _write<T>(
+    callback: () => Promise<T>,
+    operation = 'write',
+    invalidatesHistory = false,
+  ): Promise<T> {
     const queuedAt = performance.now()
     const previous = this._writeTail
     let release!: () => void
@@ -1309,7 +1313,7 @@ export class MessageStore {
     const executeAt = performance.now()
     try {
       const result = await callback()
-      this._revision++
+      if (invalidatesHistory) this._revision++
       return result
     } finally {
       release()
