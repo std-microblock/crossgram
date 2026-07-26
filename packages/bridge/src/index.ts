@@ -81,6 +81,7 @@ export const Config = z.object({
 
 interface BridgeSessionState {
   generation: object
+  platform: IMPlatform
   session: PlatformSession
   dialogs: DialogRpc
   stickers: StickerRpc
@@ -328,7 +329,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }])
     ctx.mtproto.bindRoute(rpc.authKeyId, routeId)
     const state: BridgeSessionState = {
-      generation, session,
+      generation, platform, session,
       stickers: stickerRpcFor(platform, session),
       dialogs: undefined as never,
     }
@@ -659,46 +660,57 @@ function createSessionResolver(
 
   return async (rpc: ServerRpcContext): Promise<BridgeSessionState> => {
     const cached = rpc.getPlatformData<BridgeSessionState | null>()
-    if (cached?.generation === generation) return cached
+    if (
+      cached?.generation === generation
+      && registry.get(cached.session.platformId) === cached.platform
+    ) return cached
     if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
 
     const authKeyId = authKeyHex(rpc.authKeyId)
-    let pending = loading.get(authKeyId)
-    if (!pending) {
-      pending = (async () => {
-        const [binding] = await ctx.database.get('mtproto_auth_binding', { authKeyId })
-        if (!binding) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-        const platform = registry.get(binding.platformId)
-        if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
-        const [row] = await ctx.database.get('mtproto_platform_session', {
-          id: binding.platformSessionId,
-          active: true,
-        })
-        if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
-        const session = sessionFromRow(row)
-        await subscriptions.ensure(session)
-        const state: BridgeSessionState = {
-          generation, session,
-          stickers: stickerRpcFor(platform, session),
-          dialogs: undefined as never,
-        }
-        state.dialogs = new DialogRpc(
-          platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
-          new ReactionRpc(platform, session, dcId, ctx.database),
-          resources,
-          (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
-          authKeyId,
-          historyTrace,
-        )
-        return state
-      })()
-      loading.set(authKeyId, pending)
-      pending.finally(() => loading.delete(authKeyId)).catch(() => {})
-    }
+    while (true) {
+      let pending = loading.get(authKeyId)
+      if (!pending) {
+        pending = (async () => {
+          const [binding] = await ctx.database.get('mtproto_auth_binding', { authKeyId })
+          if (!binding) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+          const platform = registry.get(binding.platformId)
+          if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
+          const [row] = await ctx.database.get('mtproto_platform_session', {
+            id: binding.platformSessionId,
+            active: true,
+          })
+          if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
+          const session = sessionFromRow(row)
+          await subscriptions.ensure(session)
+          const state: BridgeSessionState = {
+            generation, platform, session,
+            stickers: stickerRpcFor(platform, session),
+            dialogs: undefined as never,
+          }
+          state.dialogs = new DialogRpc(
+            platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
+            new ReactionRpc(platform, session, dcId, ctx.database),
+            resources,
+            (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
+            authKeyId,
+            historyTrace,
+          )
+          return state
+        })()
+        loading.set(authKeyId, pending)
+        pending.finally(() => {
+          if (loading.get(authKeyId) === pending) loading.delete(authKeyId)
+        }).catch(() => {})
+      }
 
-    const session = await pending
-    rpc.setPlatformData(session)
-    return session
+      const state = await pending
+      if (registry.get(state.session.platformId) !== state.platform) {
+        if (loading.get(authKeyId) === pending) loading.delete(authKeyId)
+        continue
+      }
+      rpc.setPlatformData(state)
+      return state
+    }
   }
 }
 
