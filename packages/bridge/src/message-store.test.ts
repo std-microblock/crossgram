@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -572,6 +572,7 @@ describe('MessageStore', () => {
       id: `message-${index}`,
       conversationId: conversation.id,
       senderId: 'sender',
+      ...(index === 0 ? { sender: { id: 'sender', firstName: 'Batch Sender', username: 'batch-sender' } } : {}),
       timestamp: 100 - index,
       content: { parts: [{ type: 'text', text: `message ${index}` }] },
     }))
@@ -581,8 +582,63 @@ describe('MessageStore', () => {
     expect(results).toHaveLength(50)
     expect(await ctx.database.get('mtproto_im_conversation', {})).toHaveLength(1)
     expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(50)
+    await expect(store.getUser(session.platformId, 'sender')).resolves.toMatchObject({
+      firstName: 'Batch Sender', username: 'batch-sender',
+    })
+    const get = vi.spyOn(ctx.database, 'get')
+    const select = vi.spyOn(ctx.database, 'select')
+    expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, { limit: 50 }))
+      .map((message) => message.source.id)).toEqual(messages.map((message) => message.id))
+    // One message-page query plus six fixed relation queries. This must not
+    // grow with the fifty messages in the page.
+    expect(select).toHaveBeenCalledTimes(7)
+    expect(get).toHaveBeenCalledTimes(6)
+    expect(get.mock.calls.slice(1).map(([table]) => table)).toEqual([
+      'mtproto_im_message_alias',
+      'mtproto_im_message_reaction',
+      'mtproto_im_user',
+      'mtproto_tl_message_part',
+      'mtproto_im_media',
+    ])
+    get.mockRestore()
+    select.mockRestore()
     expect((await store.readHistory(session.platformSessionId, conversation.id, { limit: 50 }))
       .map((message) => message.id)).toEqual(messages.map((message) => message.id))
+  })
+
+  it('prefetches an unchanged history page with a constant number of database calls', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'warm-batch', kind: 'group' as const, title: 'Warm batch' }
+    const messages = Array.from({ length: 50 }, (_, index): IMMessage => ({
+      id: `warm-${index}`,
+      conversationId: conversation.id,
+      senderId: `sender-${index % 4}`,
+      timestamp: 1_000 - index,
+      content: { parts: [{ type: 'text', text: `warm message ${index}` }] },
+    }))
+    await store.ingestMany(session, conversation, messages, { allocation: 'history' })
+    const get = vi.spyOn(ctx.database, 'get')
+    const upsert = vi.spyOn(ctx.database, 'upsert')
+    const set = vi.spyOn(ctx.database, 'set')
+
+    const repeated = await store.ingestMany(session, conversation, messages, { allocation: 'history' })
+
+    expect(repeated).toHaveLength(50)
+    expect(repeated.every((result) => !result.created && !result.changed)).toBe(true)
+    expect(get.mock.calls.map(([table]) => table)).toEqual([
+      'mtproto_im_conversation',
+      'mtproto_im_conversation',
+      'mtproto_im_conversation',
+      'mtproto_im_user',
+      'mtproto_im_user',
+      'mtproto_im_user',
+      'mtproto_im_message_alias',
+      'mtproto_im_message',
+      'mtproto_tl_message_part',
+    ])
+    expect(get).toHaveBeenCalledTimes(9)
+    expect(upsert).toHaveBeenCalledTimes(2)
+    expect(set).not.toHaveBeenCalled()
   })
 
   it('serializes concurrent allocations without duplicate IDs', async () => {

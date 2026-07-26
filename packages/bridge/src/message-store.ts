@@ -1,6 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type {
-  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageRow, IMUserRow, TlMessagePartRow,
+  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMUserRow,
+  TlMessagePartRow,
 } from './models.js'
 import {
   messageMedia, messageText,
@@ -53,6 +54,14 @@ export interface StoredMedia {
 
 export interface IngestOptions {
   allocation?: 'live' | 'history'
+}
+
+interface HistoryIngestPrefetch {
+  usersByPlatformId: Map<string, IMUserRow>
+  aliasesByPlatformId: Map<string, IMMessageAliasRow>
+  messagesById: Map<number, IMMessageRow>
+  messagesByPrimaryId: Map<string, IMMessageRow>
+  projectionsByMessageId: Map<number, TlMessagePartRow[]>
 }
 
 export interface StoredHistoryQuery {
@@ -134,10 +143,13 @@ export class MessageStore {
       const epochCache = new Map<string, number>()
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
       if (!conversationRow) throw new Error('failed to persist conversation')
+      const historyPrefetch = options.allocation === 'history' && sources.length > 1
+        ? await this._prefetchHistoryIngest(database, session, conversationRow, sources, now)
+        : undefined
       const results: IngestResult[] = []
       for (const source of sources) {
         results.push(await this._ingestMessage(
-          database, session, conversationRow, source, options, now, epochCache,
+          database, session, conversationRow, source, options, now, epochCache, historyPrefetch,
         ))
       }
       return results
@@ -208,32 +220,42 @@ export class MessageStore {
     options: IngestOptions,
     now: Date,
     epochCache: Map<string, number>,
+    historyPrefetch?: HistoryIngestPrefetch,
   ): Promise<IngestResult> {
     const platformSessionId = session.platformSessionId
-    const sender = source.sender?.id === source.senderId
-      ? source.sender
-      : { id: source.senderId, firstName: source.senderId }
-    const senderRow = await this._upsertUser(database, session.platformId, sender, now)
-    for (const platformUserId of referencedUserIds(source)) {
-      if (platformUserId === sender.id) continue
-      await this._upsertUser(database, session.platformId, {
-        id: platformUserId, firstName: platformUserId,
-      }, now)
+    const sender = messageSender(source)
+    const senderRow = historyPrefetch?.usersByPlatformId.get(sender.id)
+      ?? await this._upsertUser(database, session.platformId, sender, now)
+    if (!historyPrefetch) {
+      for (const platformUserId of referencedUserIds(source)) {
+        if (platformUserId === sender.id) continue
+        await this._upsertUser(database, session.platformId, {
+          id: platformUserId, firstName: platformUserId,
+        }, now)
+      }
     }
     const sourceIds = [...new Set([source.id, ...(source.sourceIds ?? [])])]
     let existingAlias: IMMessageAliasRow | undefined
-    for (const platformMessageId of sourceIds) {
-      ;[existingAlias] = await database.get('mtproto_im_message_alias', {
-        platformSessionId,
-        conversationId: conversationRow.id,
-        platformMessageId,
-      })
-      if (existingAlias) break
+    if (historyPrefetch) {
+      existingAlias = sourceIds.map((id) => historyPrefetch.aliasesByPlatformId.get(id)).find(Boolean)
+    } else {
+      for (const platformMessageId of sourceIds) {
+        ;[existingAlias] = await database.get('mtproto_im_message_alias', {
+          platformSessionId,
+          conversationId: conversationRow.id,
+          platformMessageId,
+        })
+        if (existingAlias) break
+      }
     }
 
     let message: IMMessageRow | undefined
-    if (existingAlias) {
+    if (existingAlias && historyPrefetch) {
+      message = historyPrefetch.messagesById.get(existingAlias.messageId)
+    } else if (existingAlias) {
       ;[message] = await database.get('mtproto_im_message', { id: existingAlias.messageId })
+    } else if (historyPrefetch) {
+      message = historyPrefetch.messagesByPrimaryId.get(source.id)
     } else {
       ;[message] = await database.get('mtproto_im_message', {
         platformSessionId,
@@ -255,8 +277,9 @@ export class MessageStore {
       || JSON.stringify(message.metadata) !== JSON.stringify(storedMetadata)
     ))
     if (message && existingAlias && !message.deleted && !changed) {
-      const projection = await database.select('mtproto_tl_message_part', { messageId: message.id })
-        .orderBy('ordinal').execute()
+      const projection = historyPrefetch?.projectionsByMessageId.get(message.id)
+        ?? await database.select('mtproto_tl_message_part', { messageId: message.id })
+          .orderBy('ordinal').execute()
       return { message, created: false, changed: false, projection }
     }
     if (!message) {
@@ -289,6 +312,8 @@ export class MessageStore {
       ;[message] = await database.get('mtproto_im_message', { id: message.id })
       if (!message) throw new Error('message disappeared during ingestion')
     }
+    historyPrefetch?.messagesById.set(message.id, message)
+    for (const sourceId of sourceIds) historyPrefetch?.messagesByPrimaryId.set(sourceId, message)
 
     await database.upsert('mtproto_im_message_alias', sourceIds.map((platformMessageId, ordinal) => ({
       platformSessionId,
@@ -335,6 +360,7 @@ export class MessageStore {
       epochCache,
     )
     await this._replaceReactions(database, message.id, source.reactionContext, now)
+    historyPrefetch?.projectionsByMessageId.set(message.id, projection)
 
     return { message, created, changed, projection }
   }
@@ -520,13 +546,36 @@ export class MessageStore {
       ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
       ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
     }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
-    return Promise.all(rows.map(async (row) => ({
-      source: await this._hydrateMessage(row),
-      parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
-        .orderBy('ordinal').execute(),
-      media: await this._database.select('mtproto_im_media', { messageId: row.id })
-        .orderBy('ordinal').execute(),
-    })))
+    if (!rows.length) return []
+    const messageIds = rows.map((row) => row.id)
+    const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
+    const [aliases, reactions, senders, parts, media] = await Promise.all([
+      this._database.get('mtproto_im_message_alias', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_message_reaction', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_user', { id: { $in: senderUserIds } }),
+      this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_media', { messageId: { $in: messageIds } }),
+    ])
+    const aliasesByMessage = groupByMessageId(aliases, (left, right) => left.ordinal - right.ordinal)
+    const reactionsByMessage = groupByMessageId(reactions, (left, right) => left.id - right.id)
+    const partsByMessage = groupByMessageId(parts, (left, right) => left.ordinal - right.ordinal)
+    const mediaByMessage = groupByMessageId(media, (left, right) => left.ordinal - right.ordinal)
+    const sendersById = new Map(senders.map((sender) => [sender.id, sender]))
+    return rows.map((row) => {
+      const sender = sendersById.get(row.senderUserId)
+      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
+      return {
+        source: hydrateMessage(
+          row,
+          aliasesByMessage.get(row.id) ?? [],
+          reactionsByMessage.get(row.id) ?? [],
+          sender,
+          conversation.platformConversationId,
+        ),
+        parts: partsByMessage.get(row.id) ?? [],
+        media: mediaByMessage.get(row.id) ?? [],
+      }
+    })
   }
 
   async findProjectedByTlId(
@@ -829,6 +878,87 @@ export class MessageStore {
     }))
   }
 
+  private async _prefetchHistoryIngest(
+    database: Database,
+    session: PlatformSession,
+    conversation: IMConversationRow,
+    sources: readonly IMMessage[],
+    now: Date,
+  ): Promise<HistoryIngestPrefetch> {
+    const usersByPlatformId = await this._upsertMessageUsers(database, session.platformId, sources, now)
+    const sourceIds = [...new Set(sources.flatMap((source) => [source.id, ...(source.sourceIds ?? [])]))]
+    const aliases = await database.get('mtproto_im_message_alias', {
+      platformSessionId: session.platformSessionId,
+      conversationId: conversation.id,
+      platformMessageId: { $in: sourceIds },
+    })
+    const aliasesByPlatformId = new Map(aliases.map((alias) => [alias.platformMessageId, alias]))
+    const aliasedMessageIds = [...new Set(aliases.map((alias) => alias.messageId))]
+    const unresolvedPrimaryIds = sources
+      .filter((source) => ![source.id, ...(source.sourceIds ?? [])]
+        .some((id) => aliasesByPlatformId.has(id)))
+      .map((source) => source.id)
+    const [aliasedMessages, primaryMessages] = await Promise.all([
+      aliasedMessageIds.length
+        ? database.get('mtproto_im_message', { id: { $in: aliasedMessageIds } })
+        : Promise.resolve([]),
+      unresolvedPrimaryIds.length
+        ? database.get('mtproto_im_message', {
+            platformSessionId: session.platformSessionId,
+            conversationId: conversation.id,
+            primaryPlatformMessageId: { $in: unresolvedPrimaryIds },
+          })
+        : Promise.resolve([]),
+    ])
+    const messages = [...aliasedMessages, ...primaryMessages]
+    const messagesById = new Map(messages.map((message) => [message.id, message]))
+    const messagesByPrimaryId = new Map(messages.map((message) => [message.primaryPlatformMessageId, message]))
+    const projections = messages.length
+      ? await database.get('mtproto_tl_message_part', { messageId: { $in: [...messagesById.keys()] } })
+      : []
+    return {
+      usersByPlatformId,
+      aliasesByPlatformId,
+      messagesById,
+      messagesByPrimaryId,
+      projectionsByMessageId: groupByMessageId(projections, (left, right) => left.ordinal - right.ordinal),
+    }
+  }
+
+  private async _upsertMessageUsers(
+    database: Database,
+    platformId: string,
+    sources: readonly IMMessage[],
+    now: Date,
+  ): Promise<Map<string, IMUserRow>> {
+    const inputs = sources.flatMap((source) => [
+      messageSender(source),
+      ...[...referencedUserIds(source)]
+        .filter((platformUserId) => platformUserId !== source.senderId)
+        .map((platformUserId) => ({ id: platformUserId, firstName: platformUserId })),
+    ])
+    const platformUserIds = [...new Set(inputs.map((user) => user.id))]
+    const existing = await database.get('mtproto_im_user', {
+      platformId, platformUserId: { $in: platformUserIds },
+    })
+    const merged = new Map(existing.map((row) => [row.platformUserId, toUser(row)]))
+    for (const input of inputs) merged.set(input.id, mergePlatformUser(merged.get(input.id), input))
+    await database.upsert('mtproto_im_user', [...merged.values()].map((user) => ({
+      platformId,
+      platformUserId: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName ?? null,
+      username: user.username ?? null,
+      avatar: (user.avatar ?? null) as unknown as JsonValue | null,
+      metadata: user.metadata ?? {},
+      updatedAt: now,
+    })), ['platformId', 'platformUserId'])
+    const rows = await database.get('mtproto_im_user', {
+      platformId, platformUserId: { $in: platformUserIds },
+    })
+    return new Map(rows.map((row) => [row.platformUserId, row]))
+  }
+
   private async _upsertUser(
     database: Database,
     platformId: string,
@@ -1110,30 +1240,7 @@ export class MessageStore {
       .orderBy('id').execute()
     const [senderRow] = await this._database.get('mtproto_im_user', { id: row.senderUserId })
     if (!senderRow) throw new Error(`message references missing user ${row.senderUserId}`)
-    const { replyToId, metadata } = hydrateMessageMetadata(row.metadata)
-    const sender = toUser(senderRow)
-    return {
-      id: row.primaryPlatformMessageId,
-      sourceIds: aliases.map((alias) => alias.platformMessageId),
-      conversationId: (await this._conversationId(row.conversationId)),
-      senderId: sender.id,
-      sender,
-      content: hydrateMessageContent(row.content),
-      timestamp: row.timestamp,
-      outgoing: row.outgoing,
-      groupId: row.platformGroupId ?? undefined,
-      replyToId,
-      metadata,
-      reactionContext: reactions.length ? {
-        available: reactions.map((reaction) => reaction.definition as unknown as IMReactionDefinition),
-        reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
-          key: reaction.nativeReactionKey, count: reaction.count,
-          selected: reaction.selected,
-          recentActors: reaction.recentActors as unknown as IMReactionActor[],
-        })),
-        maxSelected: Number(row.metadata.reactionMaxSelected ?? 1),
-      } : undefined,
-    }
+    return hydrateMessage(row, aliases, reactions, senderRow, await this._conversationId(row.conversationId))
   }
 
   private async _replaceReactions(
@@ -1209,6 +1316,53 @@ export class MessageStore {
   }
 }
 
+function groupByMessageId<T extends { messageId: number }>(
+  rows: readonly T[],
+  compare: (left: T, right: T) => number,
+): Map<number, T[]> {
+  const grouped = new Map<number, T[]>()
+  for (const row of rows) {
+    const values = grouped.get(row.messageId)
+    if (values) values.push(row)
+    else grouped.set(row.messageId, [row])
+  }
+  for (const values of grouped.values()) values.sort(compare)
+  return grouped
+}
+
+function hydrateMessage(
+  row: IMMessageRow,
+  aliases: readonly IMMessageAliasRow[],
+  reactions: readonly IMMessageReactionRow[],
+  senderRow: IMUserRow,
+  conversationId: string,
+): IMMessage {
+  const { replyToId, metadata } = hydrateMessageMetadata(row.metadata)
+  const sender = toUser(senderRow)
+  return {
+    id: row.primaryPlatformMessageId,
+    sourceIds: aliases.map((alias) => alias.platformMessageId),
+    conversationId,
+    senderId: sender.id,
+    sender,
+    content: hydrateMessageContent(row.content),
+    timestamp: row.timestamp,
+    outgoing: row.outgoing,
+    groupId: row.platformGroupId ?? undefined,
+    replyToId,
+    metadata,
+    reactionContext: reactions.length ? {
+      available: reactions.map((reaction) => reaction.definition as unknown as IMReactionDefinition),
+      reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
+        key: reaction.nativeReactionKey, count: reaction.count,
+        selected: reaction.selected,
+        recentActors: reaction.recentActors as unknown as IMReactionActor[],
+      })),
+      maxSelected: Number(row.metadata.reactionMaxSelected ?? 1),
+    } : undefined,
+  }
+}
+
 function profileMilliseconds(value: number): number {
   return Math.round(value * 100) / 100
 }
@@ -1268,6 +1422,26 @@ export function toUser(row: IMUserRow): IMUser {
 
 function uniquePlatformUsers(users: readonly IMUser[]): IMUser[] {
   return [...new Map(users.map((user) => [user.id, user])).values()]
+}
+
+function messageSender(message: IMMessage): IMUser {
+  return message.sender?.id === message.senderId
+    ? message.sender
+    : { id: message.senderId, firstName: message.senderId }
+}
+
+function mergePlatformUser(existing: IMUser | undefined, incoming: IMUser): IMUser {
+  const placeholder = incoming.firstName === incoming.id
+    && !incoming.lastName && !incoming.username && !incoming.avatar
+    && Object.keys(incoming.metadata ?? {}).length === 0
+  return {
+    id: incoming.id,
+    firstName: placeholder && existing ? existing.firstName : incoming.firstName,
+    lastName: incoming.lastName ?? existing?.lastName,
+    username: incoming.username ?? existing?.username,
+    avatar: incoming.avatar ?? existing?.avatar,
+    metadata: { ...existing?.metadata, ...incoming.metadata },
+  }
 }
 
 function persistMessageContent(content: IMMessageContent): JsonValue {
