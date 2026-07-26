@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Logger } from '@mtcute/core/utils.js'
-import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
+import { __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
+import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerSession } from './server-session.js'
+import { getServerReaderMap } from '../rpc/server-reader-map.js'
 
 describe('ServerSession RPC error logging', () => {
   it('logs implemented RPC failures at error level with method and wire error details', () => {
@@ -32,7 +34,48 @@ describe('ServerSession RPC error logging', () => {
   })
 })
 
-function createSession(): {
+describe('ServerSession msg_container isolation', () => {
+  it('returns an error for one invalid inner request and still dispatches the following RPC', async () => {
+    const dispatch = vi.fn().mockResolvedValue({ _: 'boolTrue' })
+    const { session, logger } = createSession(dispatch)
+    ;(session as unknown as { _apiLayer: number })._apiLayer = 228
+
+    const invalid = TlBinaryWriter.manual(4)
+    invalid.uint(0xdeadbeef)
+    const valid = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getNearestDc' })
+    const container = TlBinaryWriter.manual(8 + 16 + invalid.result().length + 16 + valid.length)
+    container.uint(0x73f1f8dc)
+    container.uint(2)
+    container.long(Long.fromInt(100))
+    container.uint(1)
+    container.uint(invalid.result().length)
+    container.raw(invalid.result())
+    container.long(Long.fromInt(104))
+    container.uint(3)
+    container.uint(valid.length)
+    container.raw(valid)
+
+    await (session as unknown as {
+      _processDecryptedMessage: (id: Long, seqNo: number, reader: TlBinaryReader) => Promise<void>
+    })._processDecryptedMessage(
+      Long.fromInt(96),
+      1,
+      new TlBinaryReader(getServerReaderMap(), container.result()),
+    )
+
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ apiLayer: 228 }),
+      { _: 'help.getNearestDc' },
+    )
+    expect(logger.error).toHaveBeenCalledWith(
+      'error handling container message %s (constructor=%s, seq=%d): %s',
+      '64', '0xdeadbeef', 1, expect.stringContaining('Unknown object id'),
+    )
+  })
+})
+
+function createSession(dispatch = vi.fn()): {
   session: ServerSession
   logger: { error: ReturnType<typeof vi.fn>, warn: ReturnType<typeof vi.fn> }
 } {
@@ -42,12 +85,12 @@ function createSession(): {
   const session = new ServerSession(
     {} as never,
     new NodeCryptoProvider(),
-    __tlReaderMap,
+    getServerReaderMap(),
     __tlWriterMap,
     logger as unknown as Logger,
     '',
     Long.ZERO,
-    { dispatch: vi.fn() },
+    { dispatch },
     new AuthKeyDataStore(),
   )
   // RPC result serialization and logging are independent of transport
