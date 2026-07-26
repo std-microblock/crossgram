@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  cardActionLabel, cardUrl, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
+  cardUrl, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
@@ -2243,10 +2243,8 @@ export class DialogRpc {
       }
       if (part.type === 'card') {
         const url = cardUrl(part.card)
-        const action = cardActionLabel(part.card.kind)
-        if (url && text.endsWith(action)) output.push({
-          _: 'messageEntityTextUrl', offset: base + text.length - action.length,
-          length: action.length, url,
+        if (url) output.push({
+          _: 'messageEntityTextUrl', offset: base, length: text.length, url,
         })
       }
       base += text.length + (index + 1 < rendered.length ? 1 : 0)
