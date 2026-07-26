@@ -30,7 +30,7 @@ describe('historical server reader map', () => {
   it('decodes Telegram Android legacy/private requests used at the current layer', () => {
     const channel = TlBinaryWriter.serializeObject(__tlWriterMap, {
       _: 'inputChannel', channelId: 42, accessHash: Long.ZERO,
-    })
+    } as any)
     const channelRequest = TlBinaryWriter.manual(4 + channel.length + 4 + 4 + 8)
     channelRequest.uint(0x93d7b347)
     channelRequest.raw(channel)
