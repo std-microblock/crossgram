@@ -384,6 +384,72 @@ describe('MessageStore', () => {
     expect(await ctx.database.get('mtproto_message_id_epoch', {})).toHaveLength(2)
   })
 
+  it('projects a Discord-scale conversation spanning beyond the int32 timestamp window', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'long-lived-discord-guild', kind: 'channel' as const, title: 'Long lived' }
+    const make = (id: string, timestamp: number, nativeOrderKey?: string): IMMessage => ({
+      id, conversationId: conversation.id, senderId: 'sender', timestamp,
+      nativeOrderKey,
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+
+    // The old row models a projection written before native Discord order keys existed.
+    const from2021 = await store.ingest(
+      session, conversation, make('800000000000000001', 1_611_455_302),
+    )
+    const from2026 = await store.ingest(session, conversation, make(
+      '1400000000000000001', 1_785_073_377, '01400000000000000001',
+    ))
+
+    expect(from2021.projection[0].tlMessageId).toBe(0x40000000)
+    expect(from2026.projection[0].tlMessageId).toBeGreaterThan(from2021.projection[0].tlMessageId)
+    expect(from2026.projection[0].tlMessageId).toBeLessThanOrEqual(0x7fffffff)
+    expect(await ctx.database.get('mtproto_tl_message_part', {})).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nativeOrderKey: '00800000000000000001' }),
+      expect.objectContaining({ nativeOrderKey: '01400000000000000001' }),
+    ]))
+    await expect(store.readProjectedHistory(session.platformSessionId, conversation.id, { limit: 10 }))
+      .resolves.toHaveLength(2)
+  })
+
+  it('orders Discord direct messages globally by snowflake instead of adapter timestamps', async () => {
+    const { store } = await createStore()
+    const newerConversation = { id: 'discord-dm-newer', kind: 'direct' as const, title: 'Newer DM' }
+    const olderConversation = { id: 'discord-dm-older', kind: 'direct' as const, title: 'Older DM' }
+    const newer = await store.ingest(session, newerConversation, {
+      id: '1400000000000000001', conversationId: newerConversation.id, senderId: 'newer',
+      timestamp: 1_611_455_302, nativeOrderKey: '01400000000000000001',
+      content: { parts: [{ type: 'text', text: 'newer snowflake, older timestamp' }] },
+    })
+    const older = await store.ingest(session, olderConversation, {
+      id: '900000000000000001', conversationId: olderConversation.id, senderId: 'older',
+      timestamp: 1_785_073_377, nativeOrderKey: '00900000000000000001',
+      content: { parts: [{ type: 'text', text: 'older snowflake, newer timestamp' }] },
+    }, { allocation: 'history' })
+
+    expect(older.projection[0].scope).toBe(`account:${session.platformSessionId}`)
+    expect(older.projection[0].tlMessageId).toBeLessThan(newer.projection[0].tlMessageId)
+  })
+
+  it('serializes first-epoch allocation across store facades sharing one database', async () => {
+    const { ctx, store } = await createStore()
+    const concurrentStore = new MessageStore(ctx.database)
+    const conversation = { id: 'concurrent-epoch', kind: 'channel' as const, title: 'Concurrent epoch' }
+    const make = (id: string, timestamp: number): IMMessage => ({
+      id, conversationId: conversation.id, senderId: 'sender', timestamp,
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+
+    const results = await Promise.all([
+      store.ingest(session, conversation, make('concurrent-a', 1_785_073_376)),
+      concurrentStore.ingest(session, conversation, make('concurrent-b', 1_785_073_377)),
+    ])
+
+    expect(await ctx.database.get('mtproto_message_id_epoch', {})).toHaveLength(1)
+    expect(new Set(results.map((result) => result.projection[0].tlMessageId))).toHaveLength(2)
+    expect(await ctx.database.get('mtproto_tl_message_part', {})).toHaveLength(2)
+  })
+
   it('fills all sixteen slots in a second and probes nearby seconds in both directions', async () => {
     const { store } = await createStore()
     const live = { id: 'slot-live', kind: 'group' as const, title: 'Live slots' }

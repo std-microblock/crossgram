@@ -304,6 +304,7 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
   static readonly HISTORY_SYNC_FRESH_MS = 1_000
+  private static readonly _dialogLoads = new WeakMap<IMPlatform, Map<string, Promise<IMDialogPage>>>()
   private static readonly _historySyncs = new Map<string, Promise<void>>()
   private readonly _freshHistorySyncs = new Map<string, number>()
 
@@ -320,6 +321,24 @@ export class PlatformDataService {
   }
 
   async getDialogsPage(query: { limit?: number, afterId?: string } = {}): Promise<IMDialogPage> {
+    const key = dialogLoadKey(this._session, query)
+    let loads = PlatformDataService._dialogLoads.get(this._platform)
+    if (!loads) {
+      loads = new Map()
+      PlatformDataService._dialogLoads.set(this._platform, loads)
+    }
+    const existing = loads.get(key)
+    if (existing) return existing
+    const pending = this._loadDialogsPage(query)
+    loads.set(key, pending)
+    try {
+      return await pending
+    } finally {
+      if (loads.get(key) === pending) loads.delete(key)
+    }
+  }
+
+  private async _loadDialogsPage(query: { limit?: number, afterId?: string }): Promise<IMDialogPage> {
     let upstream: IMDialog[] = []
     let upstreamPage: IMDialogPage | undefined
     const hasUpstream = Boolean(this._platform.capabilities.history && this._platform.getDialogs)
@@ -480,6 +499,18 @@ export class PlatformDataService {
   private async _ingestDialogs(dialogs: readonly IMDialog[]): Promise<void> {
     await this._store.ingestDialogs(this._session, dialogs)
   }
+}
+
+function dialogLoadKey(
+  session: PlatformSession,
+  query: { limit?: number, afterId?: string },
+): string {
+  return JSON.stringify([
+    session.platformId,
+    session.platformSessionId,
+    query.limit ?? null,
+    query.afterId ?? null,
+  ])
 }
 
 function historySyncKey(

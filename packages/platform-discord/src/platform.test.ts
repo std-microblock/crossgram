@@ -248,6 +248,22 @@ describe('DiscordPlatform userbot', () => {
     })
   })
 
+  it('recovers an invalid cached creation time from the Discord snowflake', async () => {
+    const channel = dmChannel()
+    const input = message(channel, {
+      id: '900000000000000001',
+      createdTimestamp: Number.NaN,
+    })
+    channel.messages.fetch.mockResolvedValue(input)
+    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient([channel]) })
+
+    const mapped = await platform.getMessage(session, { id: channel.id }, input.id)
+    const expected = Number(((BigInt(input.id) >> 22n) + 1_420_070_400_000n) / 1_000n)
+    expect(mapped?.timestamp).toBe(expected)
+    expect(mapped?.nativeOrderKey).toBe('00900000000000000001')
+    expect(Number.isSafeInteger(mapped?.timestamp)).toBe(true)
+  })
+
   it('forwards history anchors and returns a stable next cursor', async () => {
     const channel = dmChannel()
     const older = message(channel, { id: '900000000000000001', content: 'older' })

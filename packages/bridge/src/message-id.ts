@@ -35,6 +35,21 @@ export function timestampMessageIdBucket(epoch: number, timestamp: number): numb
   return relativeSecond * TIMESTAMP_MESSAGE_ID_SLOTS
 }
 
+/**
+ * Return the closest representable bucket for a valid timestamp.
+ *
+ * A single int32 Telegram message-ID scope can only cover roughly 4.25 years.
+ * Long-lived upstream conversations must remain readable after crossing either
+ * edge, so callers that allocate durable IDs can probe inward from the nearest
+ * boundary instead of failing the entire history/dialog request.
+ */
+export function clampedTimestampMessageIdBucket(epoch: number, timestamp: number): number {
+  assertTimestamp(epoch)
+  assertTimestamp(timestamp)
+  const relativeSecond = Math.max(1, Math.min(TIMESTAMP_MESSAGE_ID_MAX_SECOND, timestamp - epoch))
+  return relativeSecond * TIMESTAMP_MESSAGE_ID_SLOTS
+}
+
 export function messageIdBucketStart(messageId: number): number {
   return Math.floor(messageId / TIMESTAMP_MESSAGE_ID_SLOTS) * TIMESTAMP_MESSAGE_ID_SLOTS
 }

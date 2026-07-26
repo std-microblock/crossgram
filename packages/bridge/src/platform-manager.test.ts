@@ -425,6 +425,36 @@ describe('PlatformDataService', () => {
     expect(calls).toBe(1)
   })
 
+  it('coalesces dialog fetch and persistence across data-service instances', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'shared-dialog-room', kind: 'group', title: 'Shared' }
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const getDialogs = vi.fn(async () => {
+      await gate
+      return { dialogs: [{ conversation, unreadCount: 0, lastMessage: incoming('10', conversation.id) }] }
+    })
+    platform.getDialogs = getDialogs
+    const store = new MessageStore(database)
+    const ingestDialogs = vi.spyOn(store, 'ingestDialogs')
+    const first = new PlatformDataService(platform, session, store)
+    const second = new PlatformDataService(platform, session, store)
+
+    const pages = Promise.all([
+      first.getDialogsPage({ limit: 50 }),
+      second.getDialogsPage({ limit: 50 }),
+      first.getDialogsPage({ limit: 50 }),
+    ])
+    await vi.waitFor(() => expect(getDialogs).toHaveBeenCalledOnce())
+    release()
+
+    await expect(pages).resolves.toHaveLength(3)
+    expect(ingestDialogs).toHaveBeenCalledOnce()
+    expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
+  })
+
   it('does not return stale stored dialogs that are absent from an authoritative upstream page', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
