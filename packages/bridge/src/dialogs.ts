@@ -24,6 +24,7 @@ import type { ReactionRpc } from './reaction-rpc.js'
 import type { TelegramResourceService } from './resource-provider.js'
 import { probeImageDimensions } from './image-dimensions.js'
 import { withAutoLinkEntities } from './message-entities.js'
+import { registerVirtualConversation, virtualConversation } from './virtual-conversations.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -83,11 +84,6 @@ export interface LegacyGetForumTopicsByIdRequest {
  */
 export class DialogRpc {
   private static readonly PEER_HYDRATION_TTL_MS = 5_000
-  /** Linked non-dialog peers must be resolvable from every MTProto connection. */
-  private static readonly VIRTUAL_CONVERSATIONS = new Map<
-    string,
-    Map<number, import('./platform.js').IMConversation>
-  >()
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
@@ -649,9 +645,7 @@ export class DialogRpc {
   resolveUsername(req: tl.contacts.RawResolveUsernameRequest): tl.contacts.RawResolvedPeer {
     const match = /^bridgechat_(\d+)$/.exec(req.username)
     const tlId = match ? Number(match[1]) : 0
-    const conversation = tlId
-      ? DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId)?.get(tlId)
-      : undefined
+    const conversation = tlId ? virtualConversation(this._session.platformSessionId, tlId) : undefined
     if (!conversation || !this._isVirtualConversation(conversation)) {
       throw new RpcError(400, 'USERNAME_NOT_OCCUPIED')
     }
@@ -2251,30 +2245,16 @@ export class DialogRpc {
       .find((entity) => entity.type === 'conversation-link')
     if (!linked || linked.type !== 'conversation-link') return
 
-    const url = this._conversationLinkUrl(linked.conversation)
-    const preview = linked.conversation.metadata?.qqMultiForwardPreview
-    return {
-      _: 'messageMediaWebPage', manual: true, safe: true,
-      webpage: {
-        _: 'webPage',
-        id: Long.fromNumber(stableId(`conversation-preview:${linked.conversation.id}`)),
-        url, displayUrl: linked.conversation.title, hash: 0,
-        type: 'telegram_message',
-        title: linked.conversation.title,
-        description: typeof preview === 'string' && preview.trim()
-          ? preview.trim()
-          : '点击查看合并转发消息',
-      },
-    }
+    return makeTlConversationPreview(
+      linked.conversation,
+      this._conversationLinkUrl(linked.conversation),
+    )
   }
 
   private _conversationLinkUrl(conversation: import('./platform.js').IMConversation): string {
     const chatId = this._peerId(conversation.id)
     this._conversations.set(conversation.id, conversation)
-    const shared = DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId) ?? new Map()
-    shared.set(chatId, conversation)
-    DialogRpc.VIRTUAL_CONVERSATIONS.set(this._session.platformSessionId, shared)
-    return `tg://resolve?domain=bridgechat_${chatId}`
+    return registerVirtualConversation(this._session.platformSessionId, chatId, conversation)
   }
 
   private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
@@ -2527,7 +2507,7 @@ export class DialogRpc {
     const tlId = inputPeerId(peer)
     let id = this._tlToPeer.get(tlId)
     if (!id && peer._ === 'inputPeerChat') {
-      const virtual = DialogRpc.VIRTUAL_CONVERSATIONS.get(this._session.platformSessionId)?.get(tlId)
+      const virtual = virtualConversation(this._session.platformSessionId, tlId)
       if (virtual) {
         this._conversations.set(virtual.id, virtual)
         this._peerToTl.set(virtual.id, tlId)
@@ -2546,8 +2526,7 @@ export class DialogRpc {
   private _resolveChat(chatId: number): import('./platform.js').IMConversation {
     let peerId = this._tlToPeer.get(chatId)
     if (!peerId) {
-      const virtual = DialogRpc.VIRTUAL_CONVERSATIONS
-        .get(this._session.platformSessionId)?.get(chatId)
+      const virtual = virtualConversation(this._session.platformSessionId, chatId)
       if (virtual) {
         this._conversations.set(virtual.id, virtual)
         this._peerToTl.set(virtual.id, chatId)
@@ -2836,6 +2815,27 @@ export function makeTlCardPreview(
       siteName: card.source || (card.kind === 'mini-app' ? 'QQ 小程序' : 'QQ'),
       title: card.title,
       description: card.description,
+    },
+  }
+}
+
+/** Builds the native Telegram WebPage card used by virtual merged-forward chats. */
+export function makeTlConversationPreview(
+  conversation: IMConversation,
+  url: string,
+): tl.RawMessageMediaWebPage {
+  const preview = conversation.metadata?.qqMultiForwardPreview
+  return {
+    _: 'messageMediaWebPage', manual: true, safe: true,
+    webpage: {
+      _: 'webPage',
+      id: Long.fromNumber(stableId(`conversation-preview:${conversation.id}`)),
+      url, displayUrl: conversation.title, hash: 0,
+      type: 'telegram_message',
+      title: conversation.title,
+      description: typeof preview === 'string' && preview.trim()
+        ? preview.trim()
+        : '点击查看合并转发消息',
     },
   }
 }
