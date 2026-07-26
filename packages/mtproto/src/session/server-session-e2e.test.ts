@@ -111,6 +111,16 @@ class TestClient {
     this._sock.write(into.result())
   }
 
+  async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
+    const packets: Buffer[] = []
+    for (const frame of frames) {
+      const into = Bytes.alloc(frame.length + 64)
+      await this._codec.encode(frame, into)
+      packets.push(Buffer.from(into.result()))
+    }
+    this._sock.write(Buffer.concat(packets))
+  }
+
   read(): Promise<Uint8Array> {
     if (this._frames.length > 0) return Promise.resolve(this._frames.shift()!)
     return new Promise((res) => { this._waiter = res })
@@ -119,15 +129,19 @@ class TestClient {
   close(): void { this._sock.destroy() }
 }
 
-/** Send a plaintext (auth_key_id=0) message. */
-async function sendPlain(client: TestClient, obj: { _: string, [k: string]: unknown }, sub: number): Promise<void> {
+/** Serialize a plaintext (auth_key_id=0) message. */
+function plainFrame(obj: { _: string, [k: string]: unknown }, sub: number): Uint8Array {
   const len = TlSerializationCounter.countNeededBytes(__tlWriterMap, obj)
   const w = TlBinaryWriter.alloc(__tlWriterMap, len + 20)
   w.long(Long.ZERO)
   w.long(makeMsgId(sub))
   w.uint(len)
   w.object(obj)
-  await client.send(w.result())
+  return w.result()
+}
+
+async function sendPlain(client: TestClient, obj: { _: string, [k: string]: unknown }, sub: number): Promise<void> {
+  await client.send(plainFrame(obj, sub))
 }
 
 function serializeInitializedRpc(query: object, layer = CURRENT_API_LAYER): Uint8Array {
@@ -191,6 +205,7 @@ async function doClientHandshake(
   temp: boolean,
   tempExpiresIn = 3600,
   acknowledgePlaintextResponses = false,
+  batchFirstAcknowledgement = false,
 ): Promise<ClientKey> {
   const nonce = crypto.randomBytes(16)
   await sendPlain(client, { _: 'mt_req_pq_multi', nonce }, 4)
@@ -198,9 +213,6 @@ async function doClientHandshake(
   const resPqMessage = await readPlainMessage(client)
   const resPq = resPqMessage.object
   expect(resPq._).toBe('mt_resPQ')
-  if (acknowledgePlaintextResponses) {
-    await sendPlain(client, { _: 'mt_msgs_ack', msgIds: [resPqMessage.messageId] }, 5)
-  }
   const serverNonce = resPq.serverNonce
   const [p, q] = await crypto.factorizePQ(resPq.pq)
 
@@ -213,10 +225,21 @@ async function doClientHandshake(
     : { _: 'mt_p_q_inner_data_dc', pq: resPq.pq, p, q, nonce, newNonce, serverNonce, dc: 1 }
   const encryptedData = rsaPad(TlBinaryWriter.serializeObject(__tlWriterMap, pqInner), pubKey)
 
-  await sendPlain(client, {
+  const requestDhParams = plainFrame({
     _: 'mt_req_DH_params', nonce, serverNonce, p, q,
     publicKeyFingerprint: Long.fromString(pubKey.fingerprint, true, 16), encryptedData,
   }, 8)
+  if (acknowledgePlaintextResponses && batchFirstAcknowledgement) {
+    await client.sendBatch([
+      plainFrame({ _: 'mt_msgs_ack', msgIds: [resPqMessage.messageId] }, 5),
+      requestDhParams,
+    ])
+  } else {
+    if (acknowledgePlaintextResponses) {
+      await sendPlain(client, { _: 'mt_msgs_ack', msgIds: [resPqMessage.messageId] }, 5)
+    }
+    await client.send(requestDhParams)
+  }
 
   const dhParamsMessage = await readPlainMessage(client)
   const dhParams = dhParamsMessage.object
@@ -355,6 +378,15 @@ function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap 
   return reader
 }
 
+function serverSessionId(key: ClientKey, data: Uint8Array): Long {
+  expect(typed.equal(data.subarray(0, 8), key.authKeyId)).toBe(true)
+  const messageKey = data.subarray(8, 24)
+  let ciphertext = data.subarray(24)
+  if (ciphertext.byteLength % 16) ciphertext = ciphertext.subarray(0, ciphertext.byteLength - (ciphertext.byteLength % 16))
+  const plain = createAesIgeForMessage(crypto, key.authKey, messageKey, false).decrypt(ciphertext)
+  return new TlBinaryReader(__tlReaderMap, plain, 8).long(true)
+}
+
 async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   port: number
   pubKey: any
@@ -467,12 +499,12 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
 }
 
 describe('e2e: obfuscated transport + PFS + RPC', () => {
-  it('accepts Android handshakes that acknowledge every plaintext response', async () => {
+  it('accepts a coalesced Android acknowledgement and next handshake frame', async () => {
     await crypto.initialize?.()
     const { port, pubKey, stop } = await startServer()
     try {
       const client = await TestClient.connect(port)
-      const perm = await doClientHandshake(client, pubKey, false, 3600, true)
+      const perm = await doClientHandshake(client, pubKey, false, 3600, true, true)
       const sessionId = crypto.randomBytes(8)
       const sessionView = typed.toDataView(sessionId)
       const sessionLong = new Long(sessionView.getInt32(0, true), sessionView.getInt32(4, true))
@@ -618,6 +650,54 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       client.close()
     } finally {
       releaseFirst()
+      await stop()
+    }
+  })
+
+  it('keeps a queued RPC response on its request session after a later ping', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, register, stop } = await startServer()
+    let releaseRpc!: () => void
+    const rpcBlocked = new Promise<void>((resolve) => { releaseRpc = resolve })
+    let markRpcStarted!: () => void
+    const rpcStarted = new Promise<void>((resolve) => { markRpcStarted = resolve })
+    register('help.getAppConfig', async () => {
+      markRpcStarted()
+      await rpcBlocked
+      return { _: 'help.appConfig', hash: 7, config: { _: 'jsonObject', value: [] } }
+    })
+
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionA = new Long(0x61616161, 0x11111111)
+      const sessionB = new Long(0x62626262, 0x22222222)
+      const requestMessageId = makeMsgId(60)
+      await client.send(clientEncryptWithMessageId(
+        perm,
+        serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }),
+        perm.salt,
+        sessionA,
+        requestMessageId,
+      ))
+      await rpcStarted
+
+      const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_ping', pingId: Long.fromInt(7),
+      } as { _: string })
+      await client.send(clientEncrypt(perm, ping, perm.salt, sessionB, 64))
+      const pongFrame = await client.read()
+      expect(serverSessionId(perm, pongFrame).toString()).toBe(sessionB.toString())
+      expect(clientDecrypt(perm, pongFrame).object()).toMatchObject({ _: 'mt_pong', pingId: Long.fromInt(7) })
+
+      releaseRpc()
+      const response = await readRpcResultEnvelope(client, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({ _: 'help.appConfig', hash: 7 })
+      expect(response.sessionId.toString()).toBe(sessionA.toString())
+      client.close()
+    } finally {
+      releaseRpc()
       await stop()
     }
   })
@@ -894,6 +974,31 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       ))
       expect(await readRpcResult(main, perm)).toMatchObject({ _: 'updates.state', pts: 1 })
 
+      // A media-style service frame can use another MTProto session on the same
+      // TCP connection. It must not retarget external account updates away from
+      // the session that established updates.getState above.
+      const transientSession = new Long(0x33333333, 0x33333333)
+      const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_ping', pingId: Long.fromInt(31337),
+      } as { _: string })
+      await main.send(clientEncrypt(perm, ping, perm.salt, transientSession, 6))
+      let pong: { sessionId: Long, payload: any } | undefined
+      for (let i = 0; i < 10; i++) {
+        const frame = await main.read()
+        const sessionId = serverSessionId(perm, frame)
+        const reader = clientDecrypt(perm, frame)
+        try {
+          const payload = reader.object() as { _: string }
+          if (payload._ === 'mt_pong') {
+            pong = { sessionId, payload }
+            break
+          }
+        } catch { /* Ignore acknowledgements from the update RPC. */ }
+      }
+      expect(pong).toBeDefined()
+      expect(pong!.sessionId.toString()).toBe(transientSession.toString())
+      expect(pong!.payload).toMatchObject({ _: 'mt_pong', pingId: Long.fromInt(31337) })
+
       const media = await TestClient.connect(port)
       const mediaSession = new Long(0x32323232, 0x32323232)
       await media.send(clientEncrypt(
@@ -922,6 +1027,24 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       } as unknown as tl.TypeUpdates)
 
       expect(delivered).toBe(1)
+      let pushed: { sessionId: Long, update: any } | undefined
+      for (let i = 0; i < 10; i++) {
+        const frame = await main.read()
+        const sessionId = serverSessionId(perm, frame)
+        const reader = clientDecrypt(perm, frame)
+        try {
+          const update = reader.object() as { _: string }
+          if (update._ === 'updates') {
+            pushed = { sessionId, update }
+            break
+          }
+        } catch { /* Ignore the ping acknowledgement. */ }
+      }
+      expect(pushed).toBeDefined()
+      expect(pushed!.sessionId.toString()).toBe(mainSession.toString())
+      expect(pushed!.update).toMatchObject({
+        updates: [{ _: 'updateNewMessage', message: { message: 'main only' } }],
+      })
       expect(debugEvents.filter((event) => (
         event.direction === 'server->client'
         && (event.payload as { _?: string })._ === 'updates'
@@ -1164,9 +1287,10 @@ async function readRpcResultEnvelope(
   client: TestClient,
   key: ClientKey,
   readerMap: TlReaderMap = __tlReaderMap,
-): Promise<{ requestMessageId: Long, result: any }> {
+): Promise<{ requestMessageId: Long, result: any, sessionId: Long }> {
   for (let i = 0; i < 10; i++) {
     const frame = await client.read()
+    const sessionId = serverSessionId(key, frame)
     const reader = clientDecrypt(key, frame, readerMap)
     const saved = reader.pos
     const id = reader.uint()
@@ -1174,11 +1298,11 @@ async function readRpcResultEnvelope(
       const requestMessageId = reader.long(true)
       const resultId = reader.uint()
       // Bool results aren't in mtcute's reader map (it models Bool as a JS boolean).
-      if (resultId === 0x997275b5) return { requestMessageId, result: { _: 'boolTrue' } }
-      if (resultId === 0xbc799737) return { requestMessageId, result: { _: 'boolFalse' } }
-      if (resultId === 0x1cb5c415) return { requestMessageId, result: reader.vector(reader.object, true) }
+      if (resultId === 0x997275b5) return { requestMessageId, result: { _: 'boolTrue' }, sessionId }
+      if (resultId === 0xbc799737) return { requestMessageId, result: { _: 'boolFalse' }, sessionId }
+      if (resultId === 0x1cb5c415) return { requestMessageId, result: reader.vector(reader.object, true), sessionId }
       reader.pos -= 4
-      return { requestMessageId, result: reader.object() }
+      return { requestMessageId, result: reader.object(), sessionId }
     }
     reader.pos = saved
     try { reader.object() } catch { /* service message we don't model; keep reading */ }

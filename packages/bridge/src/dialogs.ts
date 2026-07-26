@@ -153,6 +153,8 @@ export class DialogRpc {
       excludeAuthKeyId?: string,
     ) => Promise<void>,
     private readonly _notificationSettings?: NotificationSettingsStore,
+    /** Canonical persisted Telegram ID for this authorized platform user. */
+    private readonly _authenticatedSelfId?: number,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -2650,7 +2652,7 @@ export class DialogRpc {
     const profile = this._selfUser
     const photo = avatar ?? profile?.avatar
     return makeUser({
-      id: this._selfId,
+      id: this._authenticatedSelfId ?? this._selfId,
       self: true,
       premium: true,
       firstName: profile?.firstName ?? String(this._session.metadata.firstName ?? 'Bridge'),

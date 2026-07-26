@@ -313,6 +313,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platformId: ps.platformId,
       platformSessionId: ps.id,
     }])
+    const selfRow = await store.getUser(session.platformId, session.userId)
+      ?? await store.upsertUser(session, {
+        id: session.userId,
+        firstName: (ps.metadata.firstName as string) ?? 'Bridge',
+        lastName: ps.metadata.lastName as string | undefined,
+        username: ps.metadata.username as string | undefined,
+        metadata: ps.metadata,
+      })
     const state: BridgeSessionState = {
       generation, platform, session,
       stickers: stickerRpcFor(platform, session),
@@ -330,18 +338,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         localSession, update, excludeAuthKeyId,
       ),
       notificationSettings,
+      selfRow.id,
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
 
-    const selfRow = await store.getUser(session.platformId, session.userId)
-      ?? await store.upsertUser(session, {
-        id: session.userId,
-        firstName: (ps.metadata.firstName as string) ?? 'Bridge',
-        lastName: ps.metadata.lastName as string | undefined,
-        username: ps.metadata.username as string | undefined,
-        metadata: ps.metadata,
-      })
     const user = makeUser({
       id: selfRow.id,
       self: true,
@@ -720,6 +721,14 @@ function createSessionResolver(
           })
           if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
           const session = sessionFromRow(row)
+          const selfRow = await store.getUser(session.platformId, session.userId)
+            ?? await store.upsertUser(session, {
+              id: session.userId,
+              firstName: (row.metadata.firstName as string) ?? 'Bridge',
+              lastName: row.metadata.lastName as string | undefined,
+              username: row.metadata.username as string | undefined,
+              metadata: row.metadata,
+            })
           await subscriptions.ensure(session)
           const state: BridgeSessionState = {
             generation, platform, session,
@@ -736,6 +745,7 @@ function createSessionResolver(
             drafts,
             onDraftUpdate,
             notificationSettings,
+            selfRow.id,
           )
           return state
         })()

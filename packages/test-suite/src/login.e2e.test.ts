@@ -541,6 +541,66 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
+  it('keeps the authorization user and self lookups on one Telegram ID', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    let media: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x7654321e, 0x4abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      const authorization = await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+      expect(authorization).toMatchObject({
+        _: 'auth.authorization', user: { self: true, premium: true },
+      })
+
+      const selfUsers = await callRpc(client, key, sid, {
+        _: 'users.getUsers', id: [{ _: 'inputUserSelf' }],
+      }, 6)
+      const selfFull = await callRpc(client, key, sid, {
+        _: 'users.getFullUser', id: { _: 'inputUserSelf' },
+      }, 8)
+      expect(selfUsers).toMatchObject([{
+        _: 'user', id: authorization.user.id, self: true, premium: true,
+      }])
+      expect(selfFull).toMatchObject({
+        _: 'users.userFull', fullUser: { _: 'userFull', id: authorization.user.id },
+        users: [{ _: 'user', id: authorization.user.id, self: true, premium: true }],
+      })
+
+      const exported = await callRpc(client, key, sid, { _: 'auth.exportAuthorization', dcId: 2 }, 10)
+      media = await TestClient.connect(port)
+      const mediaKey = await doClientHandshake(media, pubKey)
+      const mediaSid = new Long(0x7654321d, 0x4abc, false)
+      const imported = await callRpc(media, mediaKey, mediaSid, {
+        _: 'auth.importAuthorization', id: exported.id, bytes: exported.bytes,
+      }, 12)
+      const importedFull = await callRpc(media, mediaKey, mediaSid, {
+        _: 'users.getFullUser', id: { _: 'inputUserSelf' },
+      }, 14)
+      expect(imported).toMatchObject({ _: 'auth.authorization', user: {
+        id: authorization.user.id, self: true, premium: true,
+      } })
+      expect(importedFull).toMatchObject({
+        _: 'users.userFull', fullUser: { _: 'userFull', id: authorization.user.id },
+        users: [{ _: 'user', id: authorization.user.id, self: true, premium: true }],
+      })
+    } finally {
+      media?.close()
+      client?.close()
+      await stop()
+    }
+  })
+
   it('serves every optional RPC observed in the Telegram Android layer-228 capture', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
