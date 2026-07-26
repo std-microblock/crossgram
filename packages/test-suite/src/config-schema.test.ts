@@ -19,7 +19,7 @@ const cases = [
     'previewMaxDimension', 'ffmpegPath', 'grayTipFilters',
   ]],
   ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
-  ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'syncTimeoutMs', 'requestTimeoutMs']],
+  ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'proxy', 'syncTimeoutMs', 'requestTimeoutMs']],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['satori', satoriConfig, ['bot']],
   ['relay', relayConfig, ['apiId', 'apiHash', 'storagePath', 'disableUpdates', 'routeId']],
@@ -76,9 +76,11 @@ describe('plugin config schemas', () => {
     const root = json.refs[json.uid]
     const homeserver = json.refs[root.dict!.homeserver as unknown as number]
     const accessToken = json.refs[root.dict!.accessToken as unknown as number]
+    const proxy = json.refs[root.dict!.proxy as unknown as number]
     expect(homeserver.meta.required).toBe(true)
     expect(accessToken.meta.required).toBe(true)
     expect(accessToken.meta.role).toBe('secret')
+    expect(proxy.meta.role).toBe('secret')
   })
 
   it('marks relay credentials required and hides its API hash input', () => {
