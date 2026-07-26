@@ -41,6 +41,7 @@ function source(conversation: IMConversation): IMMessage {
 const sentTargets: string[] = []
 const sentInputs: Array<import('./platform.js').IMMessageInput> = []
 const actionCalls: string[] = []
+const subdialogCalls: Array<{ parentId: string, limit?: number, afterId?: string }> = []
 const platform: IMPlatform = {
   capabilities: {
     history: true,
@@ -55,6 +56,14 @@ const platform: IMPlatform = {
   async subscribe() { return () => {} },
   async getDialogs() {
     return { dialogs: conversations.map((conversation) => ({ conversation, unreadCount: 0, lastMessage: source(conversation) })) }
+  },
+  async getSubdialogs(_session, parent, query) {
+    subdialogCalls.push({ parentId: parent.id, limit: query?.limit, afterId: query?.afterId })
+    const children = conversations.filter((conversation) => conversation.parentId === parent.id)
+    return {
+      dialogs: children.map((conversation) => ({ conversation, unreadCount: 0, lastMessage: source(conversation) })),
+      total: children.length,
+    }
   },
   async getHistory(_session, target) {
     const conversation = conversations.find((item) => item.id === target.id)!
@@ -112,6 +121,7 @@ afterEach(async () => {
   sentTargets.length = 0
   sentInputs.length = 0
   actionCalls.length = 0
+  subdialogCalls.length = 0
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
@@ -738,6 +748,7 @@ describe('conversation kinds', () => {
       messages: [{ _: 'message', peerId: { _: 'peerChannel', channelId: parent.id } }],
       chats: [{ _: 'channel', id: parent.id, forum: true }],
     })
+    expect(subdialogCalls).toEqual([{ parentId: 'parent-channel', limit: 100, afterId: undefined }])
     const topic = topics.topics[0] as tl.RawForumTopic
     const byId = await rpc.getForumTopics({ _: 'messages.getForumTopicsByID', peer, topics: [topic.id] })
     expect(byId.topics).toMatchObject([{ id: topic.id, title: 'Discord / support' }])

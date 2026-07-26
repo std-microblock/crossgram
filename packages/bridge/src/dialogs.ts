@@ -776,20 +776,33 @@ export class DialogRpc {
     const parentId = this._resolvePeer(req.peer)
     const parent = this._conversation(parentId)
     if (parent.kind !== 'channel') throw new RpcError(400, 'CHANNEL_FORUM_MISSING')
-    const children = this._subchannels(parentId)
-    await this._ensureTopics(parentId)
-    const selected = req._ === 'messages.getForumTopicsByID'
-      ? children.filter((child) => req.topics.includes(this._conversationToTopic.get(child.id) ?? -1))
-      : children.filter((child) => !req.q || child.title.toLowerCase().includes(req.q.toLowerCase()))
-    const materialized = await Promise.all(selected.map((child) => this._materializeTopic(parent, child)))
-    const offset = req._ === 'messages.getForumTopics'
-      ? Math.max(0, materialized.findIndex((item) => item.topic.id === req.offsetTopic) + 1)
-      : 0
-    const limit = req._ === 'messages.getForumTopics' ? clampLimit(req.limit) : materialized.length
-    const page = materialized.slice(offset, offset + limit)
+    let count: number
+    let page: Array<{ topic: tl.RawForumTopic, top: MaterializedMessage }>
+    if (req._ === 'messages.getForumTopics' && this._platform.getSubdialogs) {
+      if (req.offsetTopic && !this._topicToConversation.has(req.offsetTopic)) await this._ensureTopics(parentId)
+      const afterId = req.offsetTopic ? this._topicToConversation.get(req.offsetTopic) : undefined
+      const loaded = await this._loadSubdialogPage(parentId, { limit: clampLimit(req.limit), afterId })
+      const children = loaded.dialogs.map((dialog) => dialog.conversation)
+        .filter((child) => !req.q || child.title.toLowerCase().includes(req.q.toLowerCase()))
+      page = await Promise.all(children.map((child) => this._materializeTopic(parent, child)))
+      count = loaded.total ?? page.length
+    } else {
+      await this._ensureTopics(parentId)
+      const children = this._subchannels(parentId)
+      const selected = req._ === 'messages.getForumTopicsByID'
+        ? children.filter((child) => req.topics.includes(this._conversationToTopic.get(child.id) ?? -1))
+        : children.filter((child) => !req.q || child.title.toLowerCase().includes(req.q.toLowerCase()))
+      const materialized = await Promise.all(selected.map((child) => this._materializeTopic(parent, child)))
+      const offset = req._ === 'messages.getForumTopics'
+        ? Math.max(0, materialized.findIndex((item) => item.topic.id === req.offsetTopic) + 1)
+        : 0
+      const limit = req._ === 'messages.getForumTopics' ? clampLimit(req.limit) : materialized.length
+      page = materialized.slice(offset, offset + limit)
+      count = materialized.length
+    }
     const users = await this._messageSenders(page.map((item) => item.top.source))
     return {
-      _: 'messages.forumTopics', count: materialized.length,
+      _: 'messages.forumTopics', count,
       topics: page.map((item) => item.topic),
       messages: page.map((item) => this._makeMessage(item.top)),
       chats: [this._makeChat(parent)], users: uniqueUsers([...users, this._makeSelfUser()]), pts: this._pts,
@@ -2045,6 +2058,7 @@ export class DialogRpc {
         this._conversations.set(dialog.conversation.id, dialog.conversation)
         this._peerId(dialog.conversation.id)
       }
+      await this._syncStoredUsers()
       this._peersHydratedAt = Date.now()
     })
     this._peerHydration = pending
@@ -2076,6 +2090,26 @@ export class DialogRpc {
       }
     }
     return { ...page, dialogs: dialogs.filter((dialog) => !this._isSubchannel(dialog.conversation)) }
+  }
+
+  private async _loadSubdialogPage(
+    parentId: string,
+    query: { limit?: number, afterId?: string },
+  ): Promise<IMDialogPage> {
+    const load = this._platform.getSubdialogs
+    if (!load) return { dialogs: [], total: 0 }
+    const page = this._data
+      ? await this._data.getSubdialogsPage(parentId, query)
+      : await load.call(this._platform, this._session, { id: parentId }, query)
+    for (const dialog of page.dialogs) {
+      this._dialogCache.set(dialog.conversation.id, dialog)
+      this._conversations.set(dialog.conversation.id, dialog.conversation)
+      if (dialog.readInboxMaxMessage) {
+        this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
+      }
+    }
+    await this._syncStoredUsers()
+    return page
   }
 
   private async _getInputUser(input: tl.TypeInputUser): Promise<tl.TypeUser> {
@@ -2598,7 +2632,10 @@ export class DialogRpc {
     return {
       _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
-      forum: !broadcast && this._subchannels(conversation.id).length > 0 || undefined,
+      forum: !broadcast && (
+        this._subchannels(conversation.id).length > 0
+        || conversation.metadata?.hasSubchannels === true
+      ) || undefined,
       photo: conversation.avatar ? this._makeAvatarPhoto(conversation.avatar, 'chat') : { _: 'chatPhotoEmpty' }, date: 0,
       participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
     }

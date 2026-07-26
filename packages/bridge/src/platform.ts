@@ -461,6 +461,12 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMMessage<TMediaLocator>>
 
   getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage<TMediaLocator>>
+  /** Child conversations exposed lazily beneath one parent dialog, such as Discord guild channels. */
+  getSubdialogs?(
+    session: PlatformSession,
+    parent: IMConversationRef,
+    query?: IMPageQuery,
+  ): Promise<IMDialogPage<TMediaLocator>>
   /** Address-book contacts. This is intentionally separate from recent dialogs. */
   getContacts?(session: PlatformSession, query?: IMPageQuery): Promise<IMUserPage<TMediaLocator>>
   getHistory?(

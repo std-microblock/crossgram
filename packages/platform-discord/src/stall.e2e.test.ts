@@ -22,7 +22,7 @@ afterAll(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createStore(): Promise<MessageStore> {
+async function createStore() {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -32,7 +32,7 @@ async function createStore(): Promise<MessageStore> {
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return new MessageStore(ctx.database)
+  return { database: ctx.database, store: new MessageStore(ctx.database) }
 }
 
 function user(id: string, name: string) {
@@ -103,7 +103,7 @@ describe('Discord stall regression E2E', () => {
     ;(client as any).emit('raw', { t: 'READY', d: { read_state: { entries: [{
       id: channel.id, last_message_id: read.id, mention_count: 0,
     }] } } })
-    const store = await createStore()
+    const { store } = await createStore()
     const ingestDialogs = vi.spyOn(store, 'ingestDialogs')
     const connections = Array.from({ length: 6 }, () => new DialogRpc(platform, session, store))
 
@@ -129,6 +129,56 @@ describe('Discord stall regression E2E', () => {
     }
     expect(channel.messages.fetch).toHaveBeenCalledOnce()
     expect(ingestDialogs).toHaveBeenCalledOnce()
+    platform.stop()
+  })
+
+  it('keeps a five-thousand-channel guild out of the root dialog ingestion transaction', async () => {
+    const self = user('100', 'Self')
+    const guild: any = {
+      id: '700000000000000001', name: 'Large guild', systemChannelId: '800000000000000000',
+      memberCount: 5_000, iconURL: () => null, channels: { cache: new Collection() },
+    }
+    const channels = Array.from({ length: 5_001 }, (_, index) => {
+      const id = `8${String(index).padStart(17, '0')}`
+      return {
+        id, type: 'GUILD_TEXT', guild, name: index === 0 ? 'general' : `channel-${index}`,
+        parent: null, rawPosition: index, viewable: true, lastMessageId: null,
+        createdTimestamp: 1_900_000_000_000 + index,
+        messages: { cache: new Collection(), fetch: vi.fn() },
+        permissionsFor: () => ({ has: () => true }), isThread: () => false,
+      }
+    })
+    guild.channels.cache = new Collection(channels.map((channel) => [channel.id, channel]))
+
+    const client = new EventEmitter() as any
+    client.user = self
+    client.channels = { cache: guild.channels.cache, fetch: vi.fn() }
+    client.users = { fetch: vi.fn(async () => self) }
+    client.relationships = { fetch: vi.fn(), friendCache: new Collection() }
+    client.guilds = { cache: new Collection([[guild.id, guild]]) }
+    client.isReady = vi.fn(() => true)
+    client.login = vi.fn()
+    client.destroy = vi.fn()
+    client.refreshAttachmentURL = vi.fn()
+
+    const platform = new DiscordPlatform({ token: 'token' }, { client: client as Client })
+    const getDialogs = vi.spyOn(platform, 'getDialogs')
+    const { database, store } = await createStore()
+    const connections = Array.from({ length: 6 }, () => new DialogRpc(platform, session, store))
+    const requests = Array.from(
+      { length: 24 },
+      (_, index) => connections[index % connections.length]!.getDialogs(dialogsRequest()),
+    )
+    const results = await Promise.race([
+      Promise.all(requests),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('large guild replay timed out')), 5_000)),
+    ])
+
+    expect(results).toHaveLength(24)
+    expect(results.every((result) => (result as tl.messages.RawDialogs).dialogs.length === 1)).toBe(true)
+    expect(getDialogs).toHaveBeenCalledOnce()
+    expect(await database.get('mtproto_im_conversation', {})).toHaveLength(1)
+    expect(await database.get('mtproto_im_message', {})).toHaveLength(0)
     platform.stop()
   })
 })

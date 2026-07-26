@@ -283,19 +283,37 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const start = pageStart(roots.map((root) => root.id), query)
     const limit = clampLimit(query.limit)
     const selected = roots.slice(start, start + limit)
-    const channelsToMap = selected.flatMap((root) => root.channels.map((channel) => ({
-      channel,
-      fetchMessages: channel.id === root.primary.id,
-    })))
     const dialogs = await mapConcurrent(
-      channelsToMap,
+      selected,
       DIALOG_MAPPING_CONCURRENCY,
-      ({ channel, fetchMessages }) => this.mapDialog(channel, fetchMessages),
+      (root) => this.mapDialog(root.primary),
     )
     return {
       dialogs,
       total: roots.length,
       nextCursor: start + selected.length < roots.length ? String(start + selected.length) : undefined,
+    }
+  }
+
+  async getSubdialogs(
+    _session: PlatformSession,
+    parent: IMConversationRef,
+    query: IMPageQuery = {},
+  ): Promise<IMDialogPage<DiscordMediaLocator>> {
+    await this.ensureReady()
+    const guildId = parseGuildConversationId(parent.id)
+    const guild = guildId ? this.client.guilds.cache.get(guildId) : undefined
+    if (!guild) return { dialogs: [], total: 0 }
+    const channels = visibleGuildChannels(guild, this.selfUser()).sort(compareChannels)
+    const root = selectGuildRoot(channels)
+    const children = root ? channels.filter((channel) => channel.id !== root.id) : channels
+    const start = pageStart(children.map((channel) => channel.id), query)
+    const limit = clampLimit(query.limit)
+    const selected = children.slice(start, start + limit)
+    return {
+      dialogs: await mapConcurrent(selected, DIALOG_MAPPING_CONCURRENCY, (channel) => this.mapDialog(channel)),
+      total: children.length,
+      nextCursor: start + selected.length < children.length ? String(start + selected.length) : undefined,
     }
   }
 
@@ -725,6 +743,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
         ...(rootConversation ? {
           discordGuildRoot: true, discordRootChannelId: channel.id,
           discordRootChannelName: channel.name, participantsCount: guild.memberCount,
+          hasSubchannels: visibleGuildChannels(guild, this.selfUser()).some((item) => item.id !== channel.id),
         } : {}),
         ...(channel.isThread() && channel.memberCount !== null
           ? { participantsCount: channel.memberCount }
