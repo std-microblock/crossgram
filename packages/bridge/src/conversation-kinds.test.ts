@@ -438,6 +438,30 @@ describe('conversation kinds', () => {
     expect(contacts.users).toMatchObject([{ _: 'user', firstName: 'direct' }])
   })
 
+  it('rehydrates conversations persisted during the peer-cache TTL', async () => {
+    const pushOnlyPlatform: IMPlatform = {
+      ...platform,
+      capabilities: { ...platform.capabilities, history: false },
+    }
+    const { rpc, store } = await createRpc(pushOnlyPlatform)
+    await rpc.getUsers({ _: 'users.getUsers', id: [{ _: 'inputUserSelf' }] })
+
+    const lateConversation: IMConversation = {
+      id: 'late-push-group', kind: 'group', title: 'Late push group',
+    }
+    await store.ingest(session, lateConversation, {
+      id: 'late-message', conversationId: lateConversation.id, senderId: session.userId,
+      outgoing: true, timestamp: 1_700_000_000,
+      content: { parts: [{ type: 'text', text: 'late push' }] },
+    })
+    const channelId = stableId(`peer:${lateConversation.id}`)
+
+    await expect(rpc.getPeerSettings({
+      _: 'messages.getPeerSettings',
+      peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ONE },
+    })).resolves.toMatchObject({ _: 'messages.peerSettings' })
+  })
+
   it('projects edit, forward, and administrator deletion through platform actions', async () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())

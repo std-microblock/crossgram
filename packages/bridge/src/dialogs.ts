@@ -88,6 +88,8 @@ export class DialogRpc {
   private static readonly PEER_HYDRATION_TTL_MS = 5_000
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
+  private readonly _userToTl = new Map<string, number>()
+  private readonly _tlToUser = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
   private readonly _tlToMessage = new Map<number, MessageRef>()
   private _nextMessageId = 1
@@ -119,6 +121,7 @@ export class DialogRpc {
   private readonly _searchCursors = new Map<string, string>()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
+  private _peersHydratedStoreRevision = -1
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
 
@@ -157,7 +160,7 @@ export class DialogRpc {
     await this._hydrateUsers()
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
       ? undefined
-      : this._tlToPeer.get(inputPeerId(req.offsetPeer))
+      : this._resolveKnownInputPeer(req.offsetPeer)
     const loaded = await this._loadDialogPage({
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
@@ -190,7 +193,7 @@ export class DialogRpc {
       this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
-      const offsetPeer = this._tlToPeer.get(inputPeerId(req.offsetPeer))
+      const offsetPeer = this._resolveKnownInputPeer(req.offsetPeer)
       const index = offsetPeer === undefined ? -1 : materialized.findIndex((item) => item.source.conversation.id === offsetPeer)
       if (index >= 0) start = index + 1
     } else if (req.offsetId > 0 || req.offsetDate > 0) {
@@ -221,7 +224,7 @@ export class DialogRpc {
     let loaded = [...this._dialogCache.values()]
     const missingRequestedPeer = req.peers.some((requested) => {
       if (requested._ === 'inputDialogPeerFolder') return false
-      const peerId = this._tlToPeer.get(inputPeerId(requested.peer))
+      const peerId = this._resolveKnownInputPeer(requested.peer)
       return peerId !== undefined && !this._dialogCache.has(peerId)
     })
     if (missingRequestedPeer) {
@@ -428,7 +431,7 @@ export class DialogRpc {
     const fromUserId = req.fromId?._ === 'inputPeerSelf'
       ? this._session.userId
       : req.fromId?._ === 'inputPeerUser'
-        ? this._tlToPeer.get(req.fromId.userId)
+        ? this._tlToUser.get(req.fromId.userId)
         : undefined
     const fingerprint = JSON.stringify([
       peerId, req.q, req.filter._, fromUserId ?? '', req.minDate, req.maxDate,
@@ -728,7 +731,7 @@ export class DialogRpc {
     const peerId = req.id._ === 'inputUserSelf'
       ? this._session.userId
       : req.id._ === 'inputUser' || req.id._ === 'inputUserFromMessage'
-        ? this._tlToPeer.get(req.id.userId)
+        ? this._tlToUser.get(req.id.userId)
         : undefined
     let profile = peerId ? this._platformUsers.get(peerId) : undefined
     if (!profile && peerId && this._platform.getUser) {
@@ -920,7 +923,7 @@ export class DialogRpc {
     const userId = req.participant._ === 'inputPeerSelf'
       ? this._session.userId
       : req.participant._ === 'inputPeerUser'
-        ? this._tlToPeer.get(req.participant.userId)
+        ? this._tlToUser.get(req.participant.userId)
         : undefined
     const member = userId && this._platform.getConversationMember
       ? await this._platform.getConversationMember(this._session, { id: conversation.id }, userId)
@@ -1367,7 +1370,7 @@ export class DialogRpc {
     if (peer._ === 'inputPeerSelf') {
       media = (await this._platform.getUser?.(this._session, this._session.userId))?.avatar
     } else if (peer._ === 'inputPeerUser') {
-      let userId = this._tlToPeer.get(peer.userId)
+      let userId = this._tlToUser.get(peer.userId)
       if (!userId && this._store) {
         const row = await this._store.getUserByTlId(this._session.platformId, peer.userId)
         if (row) {
@@ -1576,6 +1579,9 @@ export class DialogRpc {
   }
 
   peerTlId(peerId: string): number {
+    const conversation = this._conversations.get(peerId)
+    if (conversation?.kind === 'direct') return this._userId(peerId)
+    if (!conversation && this._userToTl.has(peerId)) return this._userId(peerId)
     return this._peerId(peerId)
   }
 
@@ -1586,7 +1592,7 @@ export class DialogRpc {
       this._registerUser(stored)
       return stored.id
     }
-    if (!this._store && this._peerToTl.has(platformUserId)) return this._userId(platformUserId)
+    if (!this._store && this._userToTl.has(platformUserId)) return this._userId(platformUserId)
     await this._getPeerUser(platformUserId)
     return this._userId(platformUserId)
   }
@@ -2073,19 +2079,19 @@ export class DialogRpc {
   private async _persistUsers(users: readonly IMUser[]): Promise<void> {
     if (!users.length) return
     if (!this._store) {
-      for (const user of users) this._peerId(user.id)
+      for (const user of users) this._userId(user.id)
       return
     }
     for (const row of await this._store.upsertUsers(this._session, users)) this._registerUser(row)
   }
 
   private _registerUser(row: IMUserRow): void {
-    const existingPlatformId = this._tlToPeer.get(row.id)
+    const existingPlatformId = this._tlToUser.get(row.id)
     if (existingPlatformId && existingPlatformId !== row.platformUserId) {
       throw new Error(`Telegram user ID ${row.id} is already mapped to ${existingPlatformId}`)
     }
-    this._peerToTl.set(row.platformUserId, row.id)
-    this._tlToPeer.set(row.id, row.platformUserId)
+    this._userToTl.set(row.platformUserId, row.id)
+    this._tlToUser.set(row.id, row.platformUserId)
     const user = toUser(row)
     if (row.platformUserId === this._session.userId) {
       this._selfId = row.id
@@ -2098,15 +2104,24 @@ export class DialogRpc {
   }
 
   private _userId(platformUserId: string): number {
-    const id = this._peerToTl.get(platformUserId)
+    const id = this._userToTl.get(platformUserId)
     if (id !== undefined) return id
-    if (!this._store) return this._peerId(platformUserId)
+    if (!this._store) {
+      const allocated = this._allocate(`peer:${platformUserId}`, this._tlToUser)
+      this._userToTl.set(platformUserId, allocated)
+      this._tlToUser.set(allocated, platformUserId)
+      return allocated
+    }
     throw new Error(`platform user was not persisted before projection: ${platformUserId}`)
   }
 
   private async _hydratePeers(force = false): Promise<void> {
     await this._hydrateUsers()
-    if (!force && Date.now() - this._peersHydratedAt < DialogRpc.PEER_HYDRATION_TTL_MS) return
+    if (
+      !force
+      && Date.now() - this._peersHydratedAt < DialogRpc.PEER_HYDRATION_TTL_MS
+      && (!this._store || this._peersHydratedStoreRevision === this._store.revision)
+    ) return
     if (this._peerHydration) return this._peerHydration
 
     const pending = this._loadDialogs().then(async (dialogs) => {
@@ -2129,6 +2144,7 @@ export class DialogRpc {
       }
       await this._syncStoredUsers()
       this._peersHydratedAt = Date.now()
+      this._peersHydratedStoreRevision = this._store?.revision ?? -1
     })
     this._peerHydration = pending
     try {
@@ -2186,7 +2202,7 @@ export class DialogRpc {
     if (input._ !== 'inputUser' && input._ !== 'inputUserFromMessage') {
       throw new RpcError(400, 'USER_ID_INVALID')
     }
-    let peerId = this._tlToPeer.get(input.userId)
+    let peerId = this._tlToUser.get(input.userId)
     if (!peerId && this._store) {
       const row = await this._store.getUserByTlId(this._session.platformId, input.userId)
       if (row) {
@@ -2406,8 +2422,8 @@ export class DialogRpc {
       if (entity._ !== 'inputMessageEntityMentionName' && entity._ !== 'messageEntityMentionName') continue
       let userId: string | undefined
       if (input.userId?._ === 'inputUserSelf') userId = this._session.userId
-      else if (input.userId?._ === 'inputUser') userId = this._tlToPeer.get(Number(input.userId.userId))
-      else if (input.userId !== undefined) userId = this._tlToPeer.get(Number(input.userId))
+      else if (input.userId?._ === 'inputUser') userId = this._tlToUser.get(Number(input.userId.userId))
+      else if (input.userId !== undefined) userId = this._tlToUser.get(Number(input.userId))
       if (!userId || input.offset < 0 || input.length <= 0 || input.offset + input.length > text.length) continue
       mapped.push({ type: 'mention', offset: input.offset, length: input.length, userId })
     }
@@ -2622,7 +2638,9 @@ export class DialogRpc {
       throw new RpcError(400, 'PEER_ID_INVALID')
     }
     const tlId = inputPeerId(peer)
-    let id = this._tlToPeer.get(tlId)
+    let id = peer._ === 'inputPeerUser'
+      ? this._tlToUser.get(tlId)
+      : this._tlToPeer.get(tlId)
     if (!id && peer._ === 'inputPeerChat') {
       const virtual = virtualConversation(this._session.platformSessionId, tlId)
       if (virtual) {
@@ -2748,9 +2766,10 @@ export class DialogRpc {
     const target = this._isSubchannel(conversation)
       ? this._conversation(conversation.parentId!)
       : conversation
+    if (target.kind === 'direct') return { _: 'peerUser', userId: this._userId(target.id) }
     const id = this._peerId(target.id)
     if (this._isTelegramChannel(target)) return { _: 'peerChannel', channelId: id }
-    return { _: 'peerUser', userId: id }
+    return { _: 'peerUser', userId: this._userId(target.id) }
   }
 
   private _makeChat(conversation: import('./platform.js').IMConversation): tl.TypeChat {
@@ -2880,6 +2899,14 @@ export class DialogRpc {
     this._peerToTl.set(peerId, id)
     this._tlToPeer.set(id, peerId)
     return id
+  }
+
+  private _resolveKnownInputPeer(peer: tl.TypeInputPeer): string | undefined {
+    if (peer._ === 'inputPeerSelf') return this._session.userId
+    if (peer._ === 'inputPeerUser') return this._tlToUser.get(peer.userId)
+    if (peer._ === 'inputPeerChat') return this._tlToPeer.get(peer.chatId)
+    if (peer._ === 'inputPeerChannel') return this._tlToPeer.get(peer.channelId)
+    return undefined
   }
 
   private _messageId(peerId: string, messageId: string): number {

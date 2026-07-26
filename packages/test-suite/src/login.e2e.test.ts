@@ -2857,6 +2857,20 @@ describe('bridge login e2e', () => {
       expect(historicalLooseDocument).toMatchObject({
         _: 'document', mimeType: 'image/webp', fileReference: expect.any(Uint8Array),
       })
+      const initialDialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 19)
+      const persistedGroup = initialDialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
+      expect(persistedGroup).toMatchObject({ _: 'channel', id: expect.any(Number) })
+      const persistedGroupId = persistedGroup.id
+      // QQ user numbers and QQ group numbers occupy separate namespaces and
+      // can legitimately be identical. Persist the exact collision observed
+      // in the Android capture before restarting the whole service.
+      await new bridge.MessageStore(first.ctx.database).upsertUser(
+        bridge.sessionFromRow(platformLogin.session),
+        { id: 'qq-group', firstName: 'Conflicting QQ user' },
+      )
       client.close()
       client = undefined
       await first.stop()
@@ -2865,6 +2879,16 @@ describe('bridge login e2e', () => {
       second = await startApp({ rsaKey, databasePath, authKeyStorePath })
       client = await TestClient.connect(second.port)
       const resumedSid = new Long(0x456789ab, 0x4abc, false)
+      expect(await callRpc(client, key, resumedSid, {
+        _: 'messages.getPeerDialogs', peers: [{
+          _: 'inputDialogPeer',
+          peer: { _: 'inputPeerChannel', channelId: persistedGroupId, accessHash: Long.ONE },
+        }],
+      }, 4)).toMatchObject({
+        _: 'messages.peerDialogs',
+        dialogs: [{ peer: { _: 'peerChannel', channelId: persistedGroupId } }],
+        chats: [{ _: 'channel', id: persistedGroupId, title: 'Static QQ Group' }],
+      })
       expect(await callRpc(client, key, resumedSid, {
         _: 'users.getUsers',
         id: [{ _: 'inputUser', userId: persistedAliceId, accessHash: Long.ZERO }],
