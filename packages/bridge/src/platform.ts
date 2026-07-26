@@ -543,13 +543,40 @@ export function messageText(message: IMMessage<unknown>): string {
 export function messagePartText(part: IMMessagePart<unknown>): string {
   if (part.type === 'text') return part.text
   if (part.type !== 'card') return ''
-  const label = part.card.kind === 'mini-app' ? '[小程序]' : '[卡片]'
-  return [
-    part.card.source ? `${label} ${part.card.source}` : label,
-    part.card.title,
-    part.card.description,
-    part.card.url,
-  ].filter((item, index, values) => item && values.indexOf(item) === index).join('\n')
+  const label = cardKindLabel(part.card.kind)
+  const source = part.card.source?.trim()
+  const summary = source ? `${label} · ${source}` : label
+  return cardUrl(part.card) ? `${summary}\n${cardActionLabel(part.card.kind)}` : summary
+}
+
+export function cardUrl(card: IMMessageCard): string | undefined {
+  if (!card.url) return
+  try {
+    const url = new URL(card.url)
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !/\s/u.test(card.url)
+      ? card.url
+      : undefined
+  } catch {
+    return
+  }
+}
+
+export function cardActionLabel(kind: IMMessageCard['kind']): string {
+  if (kind === 'mini-app') return '打开小程序'
+  if (kind === 'music') return '打开音乐'
+  if (kind === 'contact') return '查看联系人'
+  if (kind === 'location') return '查看位置'
+  if (kind === 'application') return '打开应用'
+  return '打开链接'
+}
+
+function cardKindLabel(kind: IMMessageCard['kind']): string {
+  if (kind === 'mini-app') return '小程序'
+  if (kind === 'music') return '音乐'
+  if (kind === 'contact') return '联系人'
+  if (kind === 'location') return '位置'
+  if (kind === 'application') return '应用'
+  return '分享'
 }
 
 export function messageMedia<TMediaLocator>(message: IMMessage<TMediaLocator>): IMMedia<TMediaLocator>[] {
