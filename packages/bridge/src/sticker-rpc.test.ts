@@ -5,6 +5,20 @@ import type { IMSticker, IMStickerProvider, StickerProviderRegistry } from './st
 import type { IMPlatform, PlatformSession } from './platform.js'
 
 describe('StickerRpc', () => {
+  it('rejects unsupported built-in sets instead of claiming an initial request was not modified', async () => {
+    const { rpc } = stickerHarness()
+
+    await expect(rpc.getStickerSet({
+      _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetDice', emoticon: '🎲' }, hash: 0,
+    })).rejects.toMatchObject({ code: 400, text: 'STICKERSET_INVALID' })
+    await expect(rpc.getStickerSet({
+      _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetEmojiDefaultStatuses' }, hash: 0,
+    })).rejects.toMatchObject({ code: 400, text: 'STICKERSET_INVALID' })
+    await expect(rpc.getStickerSet({
+      _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetEmojiDefaultTopicIcons' }, hash: 0,
+    })).rejects.toMatchObject({ code: 400, text: 'STICKERSET_INVALID' })
+  })
+
   it('projects and serves a cached first-frame thumbnail without marking the sticker as a mask', async () => {
     const thumbnail = new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4])
     const { rpc, provider, sticker } = stickerHarness()
