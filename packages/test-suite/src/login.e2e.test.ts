@@ -3093,7 +3093,7 @@ describe('bridge login e2e', () => {
         },
         message: 'sent after legacy langpack probe',
         randomId: Long.fromString('7000000000000001'),
-      })
+      } as any)
       const [languages, sendResult] = await sendRpcContainer(
         client,
         key,
