@@ -1,5 +1,5 @@
 import type { Context } from 'cordis'
-import { randomUUID } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import z from 'schemastery'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
@@ -305,7 +305,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   ): Promise<IMMessage<DiscordMediaLocator> | null> {
     await this.ensureReady()
     const channel = await this.requireChannel(conversation.id)
-    const message = await channel.messages.fetch(messageId).catch(() => null)
+    const message = await Promise.resolve(channel.messages.fetch(messageId)).catch(() => null)
     return message && this.shouldExposeMessage(message) ? this.mapMessage(message) : null
   }
 
@@ -359,7 +359,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     await this.ensureReady()
     const channel = await this.requireChannel(conversation.id)
     const payload = await this.createPayload(content, options)
-    const nonce = randomUUID()
+    const nonce = randomBytes(12).toString('hex')
     this.originNonces.add(nonce)
     try {
       const message = await channel.send({ ...payload, nonce })
@@ -595,13 +595,16 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const unread = Boolean(lastId && state?.lastMessageId && compareSnowflakes(lastId, state.lastMessageId) > 0)
     let messages: Message[] = []
     if (unread && state?.lastMessageId) {
-      const fetched = await channel.messages.fetch({ after: state.lastMessageId, limit: 100 }).catch(() => null)
+      const fetched = await Promise.resolve(channel.messages.fetch({ after: state.lastMessageId, limit: 100 }))
+        .catch(() => null)
       if (fetched) messages = [...fetched.values()].sort((a, b) => compareSnowflakes(b.id, a.id))
     }
     let lastMessage = messages[0]
-    if (!lastMessage && lastId) lastMessage = await channel.messages.fetch(lastId).catch(() => undefined)
+    if (!lastMessage && lastId) {
+      lastMessage = await Promise.resolve(channel.messages.fetch(lastId)).catch(() => undefined)
+    }
     const readMessage = state?.lastMessageId
-      ? await channel.messages.fetch(state.lastMessageId).catch(() => undefined)
+      ? await Promise.resolve(channel.messages.fetch(state.lastMessageId)).catch(() => undefined)
       : undefined
     return {
       conversation: this.mapConversation(channel),
