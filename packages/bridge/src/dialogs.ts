@@ -2630,7 +2630,7 @@ export class DialogRpc {
     }
     const broadcast = conversation.metadata?.broadcast === true
     return {
-      _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
+      _: 'channel', creator: true, id, accessHash: Long.ONE, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
       forum: !broadcast && (
         this._subchannels(conversation.id).length > 0

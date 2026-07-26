@@ -103,10 +103,16 @@ describe('UpdateManager', () => {
     expect(sent[0].update).toMatchObject({
       _: 'updates', seq: 1,
       updates: [{ _: 'updateNewChannelMessage', pts: 2, ptsCount: 1, message: { message: 'pushed' } }],
-      chats: [{ _: 'channel', title: 'Group', megagroup: true, photo: { _: 'chatPhoto', dcId: 1 } }],
+      chats: [{
+        _: 'channel', title: 'Group', megagroup: true, accessHash: Long.ONE,
+        photo: { _: 'chatPhoto', dcId: 1 },
+      }],
       users: [
-        { _: 'user', self: true },
-        { _: 'user', firstName: 'Group Alias', photo: { _: 'userProfilePhoto', dcId: 1 } },
+        { _: 'user', self: true, accessHash: Long.ONE },
+        {
+          _: 'user', firstName: 'Group Alias', accessHash: Long.ONE,
+          photo: { _: 'userProfilePhoto', dcId: 1 },
+        },
       ],
     })
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
