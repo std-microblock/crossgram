@@ -134,11 +134,12 @@ export class DialogRpc {
       options?: PlatformEventDeliveryOptions,
     ) => Promise<PlatformEventPublishResult>,
     private readonly _authKeyId?: string,
+    private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
       this._store = store
-      this._data = new PlatformDataService(_platform, _session, store)
+      this._data = new PlatformDataService(_platform, _session, store, _onTrace)
     }
   }
 
@@ -259,9 +260,18 @@ export class DialogRpc {
   }
 
   async getHistory(req: GetHistoryRequest): Promise<tl.messages.TypeMessages> {
+    const startedAt = performance.now()
+    this._onTrace?.(
+      'history rpc profile stage=start offsetId=%d addOffset=%d limit=%d',
+      req.offsetId, req.addOffset, req.limit,
+    )
     await this._hydratePeers()
+    const hydrateMs = performance.now() - startedAt
     const peerId = this._resolvePeer(req.peer)
+    const loadAt = performance.now()
     const all = await this._loadHistory(peerId, req)
+    const loadMs = performance.now() - loadAt
+    const selectAt = performance.now()
     const filtered = all.filter((item) => {
       // A negative add_offset asks for a window which starts before (newer
       // than) offset_id. Keep both sides of the anchor until the window has
@@ -283,12 +293,16 @@ export class DialogRpc {
         : 0
     const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
+    const selectMs = performance.now() - selectAt
     const conversation = this._conversation(peerId)
+    const sendersAt = performance.now()
     const senders = await this._messageSenders(page.map((item) => item.source))
     const peerUser = conversation.kind === 'direct'
       ? [await this._getPeerUser(peerId, conversation.title)]
       : []
-    return {
+    const sendersMs = performance.now() - sendersAt
+    const projectAt = performance.now()
+    const result = {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
       messages: page.map((item) => this._makeMessage(item)),
@@ -299,6 +313,15 @@ export class DialogRpc {
       ]),
       users: uniqueUsers([...peerUser, ...senders, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
+    const projectMs = performance.now() - projectAt
+    this._onTrace?.(
+      'history rpc profile peer=%s offsetId=%d addOffset=%d limit=%d loaded=%d filtered=%d returned=%d hydrateMs=%d loadMs=%d selectMs=%d sendersMs=%d projectMs=%d totalMs=%d',
+      peerId, req.offsetId, req.addOffset, req.limit, all.length, filtered.length, page.length,
+      profileMilliseconds(hydrateMs), profileMilliseconds(loadMs), profileMilliseconds(selectMs),
+      profileMilliseconds(sendersMs), profileMilliseconds(projectMs),
+      profileMilliseconds(performance.now() - startedAt),
+    )
+    return result
   }
 
   async search(req: tl.messages.RawSearchRequest): Promise<tl.messages.TypeMessages> {
@@ -1779,11 +1802,15 @@ export class DialogRpc {
   }
 
   private async _loadHistory(peerId: string, request: HistoryWindow = { limit: 1 }): Promise<MaterializedMessage[]> {
+    const startedAt = performance.now()
+    this._onTrace?.('history load profile stage=start peer=%s limit=%d', peerId, request.limit ?? 1)
     if (this._data && this._store) {
       const anchorId = request.offsetId || request.maxId || undefined
+      const anchorAt = performance.now()
       const anchor = anchorId
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, anchorId, peerId)
         : undefined
+      const anchorMs = performance.now() - anchorAt
       const fetchLimit = Math.max(1, Math.min(
         (request.limit ?? 1) + Math.abs(request.addOffset ?? 0) + 1,
         200,
@@ -1794,6 +1821,7 @@ export class DialogRpc {
         anchor.source.id === readInboxMaxMessageId
         || anchor.source.sourceIds?.includes(readInboxMaxMessageId ?? '')
       )
+      const upstreamAt = performance.now()
       if (aroundUnread) {
         // Telegram Desktop opens an unread dialog with
         // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
@@ -1811,12 +1839,18 @@ export class DialogRpc {
           before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
         })
       }
+      const upstreamMs = performance.now() - upstreamAt
+      const usersAt = performance.now()
       await this._syncStoredUsers()
+      const usersMs = performance.now() - usersAt
+      const projectAt = performance.now()
       const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
         limit: fetchLimit,
         beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
         maxTimestamp: !negativeOffset ? anchor?.source.timestamp : undefined,
       })
+      const projectionReadMs = performance.now() - projectAt
+      const materializeAt = performance.now()
       const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
         const item: MaterializedMessage = {
           source,
@@ -1828,8 +1862,18 @@ export class DialogRpc {
         this._rememberMessage(item)
         return item
       })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+      const materializeMs = performance.now() - materializeAt
+      const repliesAt = performance.now()
       await this._rememberReplyTargets(history.map((item) => item.source))
+      const repliesMs = performance.now() - repliesAt
       this._historyCache.set(peerId, history)
+      this._onTrace?.(
+        'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
+        peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(aroundUnread), projected.length, history.length,
+        profileMilliseconds(anchorMs), profileMilliseconds(upstreamMs), profileMilliseconds(usersMs),
+        profileMilliseconds(projectionReadMs), profileMilliseconds(materializeMs), profileMilliseconds(repliesMs),
+        profileMilliseconds(performance.now() - startedAt),
+      )
       return history
     }
 
@@ -1844,6 +1888,10 @@ export class DialogRpc {
       return item
     }).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
     this._historyCache.set(peerId, materialized)
+    this._onTrace?.(
+      'history load profile peer=%s store=false fetched=%d materialized=%d totalMs=%d',
+      peerId, history.length, materialized.length, profileMilliseconds(performance.now() - startedAt),
+    )
     return materialized
   }
 
@@ -1930,6 +1978,7 @@ export class DialogRpc {
     if (this._peerHydration) return this._peerHydration
 
     const pending = this._loadDialogs().then(async (dialogs) => {
+      const storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
       const directUsers = dialogs
         .filter((dialog) => dialog.conversation.kind === 'direct')
         .map((dialog) => ({
@@ -1938,6 +1987,10 @@ export class DialogRpc {
           avatar: dialog.conversation.avatar,
         }))
       await this._persistUsers(directUsers)
+      for (const conversation of storedConversations) {
+        this._conversations.set(conversation.id, conversation)
+        this._peerId(conversation.id)
+      }
       for (const dialog of dialogs) {
         this._conversations.set(dialog.conversation.id, dialog.conversation)
         this._peerId(dialog.conversation.id)
@@ -2772,6 +2825,10 @@ function inputPeerId(peer: tl.TypeInputPeer): number {
   if (peer._ === 'inputPeerChat') return peer.chatId
   if (peer._ === 'inputPeerChannel') return peer.channelId
   return 0
+}
+
+function profileMilliseconds(value: number): number {
+  return Math.round(value * 100) / 100
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {

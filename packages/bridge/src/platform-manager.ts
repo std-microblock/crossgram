@@ -281,6 +281,10 @@ function formatError(error: unknown): string {
   return error.stack ?? `${error.name}: ${error.message}`
 }
 
+function profileMilliseconds(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
 export type CommittedPlatformEvent =
   | { event: Extract<IMEvent, { type: 'message' }>, result: IngestResult }
   | { event: Extract<IMEvent, { type: 'message-edit' }>, result: IngestResult }
@@ -303,6 +307,7 @@ export class PlatformDataService {
     private readonly _platform: IMPlatform,
     private readonly _session: PlatformSession,
     private readonly _store: MessageStore,
+    private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
 
   async getDialogs(query: { limit?: number, afterId?: string } = {}): Promise<IMDialog[]> {
@@ -342,27 +347,53 @@ export class PlatformDataService {
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {
+    const startedAt = performance.now()
+    this._onTrace?.(
+      'history data profile stage=start conversation=%s limit=%d',
+      conversationId, query.limit ?? 100,
+    )
     let conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
     if (!conversation) {
       await this.getDialogs()
       conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
     }
     conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
+    const conversationMs = performance.now() - startedAt
 
+    let upstreamMs = 0
+    let ingestMs = 0
+    let upstreamMessages = 0
     if (this._platform.capabilities.history && this._platform.getHistory) {
+      const upstreamAt = performance.now()
+      this._onTrace?.('history data profile stage=upstream-start conversation=%s', conversationId)
       const page = await this._platform.getHistory(this._session, { id: conversationId }, query)
+      upstreamMs = performance.now() - upstreamAt
+      upstreamMessages = page.messages.length
+      const ingestAt = performance.now()
+      this._onTrace?.(
+        'history data profile stage=ingest-start conversation=%s upstreamMs=%d messages=%d',
+        conversationId, profileMilliseconds(upstreamMs), upstreamMessages,
+      )
       await this._store.ingestMany(
         this._session,
         conversation,
         page.messages.slice().sort((left, right) => right.timestamp - left.timestamp),
         { allocation: 'history' },
       )
+      ingestMs = performance.now() - ingestAt
     }
-    return {
-      messages: await this._store.readHistory(
-        this._session.platformSessionId, conversationId, { limit: query.limit ?? 100 },
-      ),
-    }
+    const readAt = performance.now()
+    const messages = await this._store.readHistory(
+      this._session.platformSessionId, conversationId, { limit: query.limit ?? 100 },
+    )
+    const readMs = performance.now() - readAt
+    this._onTrace?.(
+      'history data profile conversation=%s limit=%d upstreamMessages=%d storedMessages=%d conversationMs=%d upstreamMs=%d ingestMs=%d readMs=%d totalMs=%d',
+      conversationId, query.limit ?? 100, upstreamMessages, messages.length,
+      profileMilliseconds(conversationMs), profileMilliseconds(upstreamMs), profileMilliseconds(ingestMs),
+      profileMilliseconds(readMs), profileMilliseconds(performance.now() - startedAt),
+    )
+    return { messages }
   }
 
   async searchMessages(

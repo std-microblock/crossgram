@@ -148,6 +148,7 @@ describe('MessageStore', () => {
     })
     expect((await store.findByExternalId(session.platformSessionId, conversationId, physicalIds[1]))?.id)
       .toBe(first.message.id)
+    await expect(store.listConversations(session.platformSessionId)).resolves.toMatchObject([conversation])
     const hydrated = await store.readHistory(session.platformSessionId, conversationId)
     expect(hydrated).toMatchObject([{
       sender: {
