@@ -800,6 +800,11 @@ export class MessageStore {
     return row ? toConversation(row) : undefined
   }
 
+  async listConversations(platformSessionId: string): Promise<IMConversation[]> {
+    const rows = await this._database.get('mtproto_im_conversation', { platformSessionId })
+    return rows.map(toConversation)
+  }
+
   async findByExternalId(
     platformSessionId: string,
     platformConversationId: string,
