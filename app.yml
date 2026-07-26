@@ -14,7 +14,7 @@
 - id: bridge01
   name: '@mtproto-relay/bridge'
   config:
-    serverHost: 0.0.0.0
+    serverHost: 192.168.8.101
 - id: satori-core
   name: '@satorijs/core'
   disabled: true
@@ -41,19 +41,19 @@
   name: '@mtproto-relay/platform-qqnt'
   config:
     webSocketEndpoint: ws://127.0.0.1:18767/v1/events/ws
-    endpoint: http://127.0.0.1:18768/v1
     generatePreviews: true
+    grayTipFilters:
+      - 回应了你的
 - id: discord
   name: '@mtproto-relay/platform-discord'
   disabled: true
   config:
-    token: ''
+    token: 
+    proxy:
 - id: matrix
   name: '@mtproto-relay/platform-matrix'
-  disabled: true
   config:
-    homeserver: https://matrix.example.com
-    accessToken: replace-with-matrix-access-token
+    homeserver: https://matrix-client.matrix.org/_matrix/client/v3
     proxy: http://127.0.0.1:7890
     syncTimeoutMs: 30000
     requestTimeoutMs: 30000
@@ -61,6 +61,7 @@
   name: '@mtproto-relay/mtproto-debug'
   config:
     maxEvents: 2000
+    initiallyPaused: true
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:
