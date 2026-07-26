@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect MTProto Relay"
+  short_description: "Inspect relay logs, MTProto events, and SQLite data"
+  default_prompt: "Inspect the running mtproto-relay instance and gather the logs, MTProto debug events, or database records needed to diagnose the issue."
