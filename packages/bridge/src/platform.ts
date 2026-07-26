@@ -96,6 +96,7 @@ export interface IMUser<TMediaLocator = unknown> {
   firstName: string
   lastName?: string
   username?: string
+  about?: string
   avatar?: IMMedia<TMediaLocator>
   metadata?: JsonObject
 }

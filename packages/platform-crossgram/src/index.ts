@@ -153,6 +153,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         id: user.id,
         firstName: user.name,
         username: user.numericId ?? status.selfUin,
+        about: typeof user.signature === 'string' ? user.signature : undefined,
         avatar: user.avatar ? mapMedia(user.avatar) : undefined,
         metadata: user.numericId ? { qq: user.numericId } : undefined,
       },
@@ -375,6 +376,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         id: user.id,
         firstName: user.name,
         username: user.numericId,
+        about: typeof user.signature === 'string' ? user.signature : undefined,
         avatar: user.avatar ? mapMedia(user.avatar) : undefined,
         metadata: user.numericId ? { qq: user.numericId } : undefined,
       })),
@@ -449,6 +451,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       id: user.id,
       firstName: user.name,
       username: user.numericId,
+      about: typeof user.signature === 'string' ? user.signature : undefined,
       avatar: user.avatar ? mapMedia(user.avatar) : undefined,
       metadata: user.numericId ? { qq: user.numericId } : undefined,
     }
