@@ -341,6 +341,38 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 }
 
 describe('bridge login e2e', () => {
+  it('advertises one configured DC and has no cross-DC authorization route', async () => {
+    const { port, pubKey, stop } = await startApp({
+      bridgeConfig: { dcId: 4, serverHost: '10.20.30.40', serverPort: 8443 },
+    })
+    let client: TestClient | undefined
+    try {
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x76543200, 0x4abc, false)
+
+      expect(await callRpc(client, key, sid, { _: 'help.getConfig' }, 2)).toMatchObject({
+        _: 'config',
+        thisDc: 4,
+        webfileDcId: 4,
+        dcOptions: [{
+          _: 'dcOption', id: 4, ipAddress: '10.20.30.40', port: 8443,
+          tcpoOnly: true, static: true,
+        }],
+      })
+      expect(await callRpc(client, key, sid, {
+        _: 'auth.exportAuthorization', dcId: 2,
+      }, 4)).toEqual({
+        _: 'mt_rpc_error',
+        errorCode: 500,
+        errorMessage: 'METHOD_NOT_IMPLEMENTED: auth.exportAuthorization',
+      })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 15_000)
+
   it('returns RPC errors for unsupported Android built-in sticker sets', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
@@ -658,13 +690,6 @@ describe('bridge login e2e', () => {
       expect((config as any).dcOptions).toEqual([expect.objectContaining({
         id: 1, ipAddress: '127.0.0.1', port: 4430, tcpoOnly: true, static: true,
       })])
-      expect(await callRpc(resumed, key, resumedSid, {
-        _: 'auth.exportAuthorization', dcId: 2,
-      }, 16)).toEqual({
-        _: 'mt_rpc_error',
-        errorCode: 500,
-        errorMessage: 'METHOD_NOT_IMPLEMENTED: auth.exportAuthorization',
-      })
       dbg('post-login sync ok:', state._, status._, filters._, countries._)
 
       const contacts = await callRpc(resumed, key, resumedSid, {
