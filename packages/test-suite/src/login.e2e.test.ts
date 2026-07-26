@@ -2184,7 +2184,7 @@ describe('bridge login e2e', () => {
           webpage: {
             _: 'webPage', type: 'telegram_message', title: virtual.title,
             description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-            url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+            url: `https://t.me/bridgechat_${virtualChat.id}`,
           },
         },
       })
@@ -2204,12 +2204,12 @@ describe('bridge login e2e', () => {
             _: 'message', message: '查看聊天记录',
             entities: [{
               _: 'messageEntityTextUrl',
-              url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+              url: `https://t.me/bridgechat_${virtualChat.id}`,
             }],
             media: { webpage: {
               _: 'webPage', title: virtual.title,
               description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-              url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+              url: `https://t.me/bridgechat_${virtualChat.id}`,
             } },
           },
         }],
@@ -2241,7 +2241,7 @@ describe('bridge login e2e', () => {
         media: { webpage: {
           _: 'webPage', title: innerVirtual.title,
           description: 'Carol: inner first message',
-          url: `tg://resolve?domain=bridgechat_${innerChat.id}`,
+          url: `https://t.me/bridgechat_${innerChat.id}`,
         } },
       })
       expect(historyCalls).toEqual([parent.id, virtual.id])
