@@ -593,6 +593,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ))
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
+  // Official Telegram Android still sends the parameterless #800fd57d form.
+  // An empty remote list preserves the app's bundled language packs.
+  rpc.register('langpack.getLanguages', async () => bareVector([]))
+  // Both the public and Android-internal registerDevice forms are advisory for
+  // this bridge; accepting them prevents push registration probes from stalling
+  // the rest of an Android msg_container.
+  rpc.register('account.registerDevice', async (rpc) => {
+    await requireBridgeSession(rpc)
+    return { _: 'boolTrue' }
+  })
   rpc.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))
   rpc.register('account.getNotifySettings', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getNotifySettings(
