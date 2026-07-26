@@ -125,9 +125,8 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
     apiHash: 'mtproto-relay-history-profiler',
     storage,
     defaultDcs: { main: dc, media: dc },
-    disableUpdates: true,
     updates: false,
-    logLevel: 0,
+    logLevel: options.logLevel,
   })
   const request = {
     _: 'messages.getHistory' as const,
@@ -151,6 +150,10 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
         codeSentCallback: () => {},
       })
     }
+    // Keep the profiled request below mtcute's gzip threshold. The relay does
+    // not currently unwrap gzip_packed requests, while a direct getHistory is
+    // what Telegram Desktop sends after its connection is initialized.
+    await client.call({ _: 'updates.getState' }, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
     process.stdout.write(`${JSON.stringify({
       event: 'connected',
       connectMs: Math.round((performance.now() - connectStarted) * 100) / 100,
@@ -179,7 +182,7 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
           _: 'messages.getDialogs', excludePinned: false, folderId: 0,
           offsetDate: 0, offsetId: 0, offsetPeer,
           limit: 100, hash: Long.ZERO,
-        })
+        }, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
         if (dialogs._ === 'messages.dialogsNotModified') break
         dialogCount += dialogs.dialogs.length
         seeded = [...dialogs.chats, ...dialogs.users].some(peer => peer.id === peerId)
@@ -199,7 +202,7 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
     const samples: number[] = []
     for (let index = -options.warmup; index < options.repeat; index++) {
       const started = performance.now()
-      const result = await client.call(request)
+      const result = await client.call(request, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
       const durationMs = performance.now() - started
       const warmup = index < 0
       const notModified = result._ === 'messages.messagesNotModified'
