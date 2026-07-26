@@ -18,7 +18,7 @@ function user(id: string, name: string, bot = false) {
 }
 
 function message(channel: any, options: Partial<any> = {}) {
-  const author = options.author ?? user('200', 'Alice')
+  const author = Object.hasOwn(options, 'author') ? options.author : user('200', 'Alice')
   const value = {
     id: options.id ?? '900000000000000001', channelId: channel.id, channel, author,
     member: options.member ?? null, nonce: options.nonce ?? null,
@@ -123,6 +123,87 @@ describe('DiscordPlatform userbot', () => {
     await expect(platform.getDialogs(session, { cursor: '1', limit: 1 })).resolves.toMatchObject({
       dialogs: [{ conversation: { id: first.id, kind: 'direct' } }],
     })
+  })
+
+  it('ignores null and authorless messages in dialog and history collections', async () => {
+    const channel = dmChannel()
+    const read = message(channel, { id: '900000000000000001', content: 'read' })
+    const authorless = message(channel, { id: '900000000000000002', author: null, content: 'partial' })
+    const unread = message(channel, { id: '900000000000000003', content: 'unread' })
+    channel.lastMessageId = unread.id
+    channel.messages.cache.set(read.id, read)
+    channel.messages.cache.set(authorless.id, authorless)
+    channel.messages.cache.set('900000000000000004', null)
+    channel.messages.fetch.mockImplementation(async (input: any) => {
+      if (input?.after === read.id) return new Collection([
+        [authorless.id, authorless], ['900000000000000004', null], [unread.id, unread],
+      ])
+      return new Collection([
+        [authorless.id, authorless], ['900000000000000004', null], [unread.id, unread],
+      ])
+    })
+    const client = fakeClient([channel])
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    ;(client as any).emit('raw', { t: 'READY', d: { read_state: { entries: [{
+      id: channel.id, last_message_id: read.id, mention_count: 0,
+    }] } } })
+
+    await expect(platform.getDialogs(session)).resolves.toMatchObject({
+      dialogs: [{ unreadCount: 1, lastMessage: { id: unread.id }, readInboxMaxMessage: { id: read.id } }],
+    })
+    await expect(platform.getHistory(session, { id: channel.id }, { limit: 10 })).resolves.toMatchObject({
+      messages: [{ id: unread.id }],
+    })
+    await expect((platform as any).mapDialog(channel, false)).resolves.toMatchObject({
+      unreadCount: 1,
+    })
+  })
+
+  it('coalesces identical concurrent dialog loads and releases the completed flight', async () => {
+    const channel = dmChannel()
+    const latest = message(channel, { id: '900000000000000010' })
+    channel.lastMessageId = latest.id
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    channel.messages.fetch.mockImplementation(async () => {
+      await gate
+      return latest
+    })
+    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient([channel]) })
+
+    const requests = Array.from({ length: 32 }, () => platform.getDialogs(session, { limit: 25 }))
+    await vi.waitFor(() => expect(channel.messages.fetch).toHaveBeenCalledOnce())
+    release()
+    const pages = await Promise.all(requests)
+    expect(pages).toHaveLength(32)
+    expect(pages.every((page) => page.dialogs[0]?.lastMessage?.id === latest.id)).toBe(true)
+
+    await platform.getDialogs(session, { limit: 25 })
+    expect(channel.messages.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds Discord channel mapping concurrency', async () => {
+    let active = 0
+    let maximum = 0
+    const channels = Array.from({ length: 24 }, (_, index) => {
+      const channel = dmChannel(`800000000000000${String(index).padStart(3, '0')}`)
+      const latest = message(channel, { id: `900000000000000${String(index).padStart(3, '0')}` })
+      channel.lastMessageId = latest.id
+      channel.messages.fetch.mockImplementation(async () => {
+        active++
+        maximum = Math.max(maximum, active)
+        await new Promise((resolve) => setTimeout(resolve, 2))
+        active--
+        return latest
+      })
+      return channel
+    })
+    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient(channels) })
+
+    const page = await platform.getDialogs(session, { limit: channels.length })
+    expect(page.dialogs).toHaveLength(channels.length)
+    expect(maximum).toBeGreaterThan(1)
+    expect(maximum).toBeLessThanOrEqual(8)
   })
 
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {
