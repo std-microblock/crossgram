@@ -28,6 +28,9 @@ const requests: Record<string, tl.RpcMethod> = {
     _: 'contacts.getTopPeers', correspondents: true, botsInline: true,
     offset: 0, limit: 20, hash: Long.ZERO,
   },
+  'bots.getBotRecommendations': {
+    _: 'bots.getBotRecommendations', bot: { _: 'inputUserSelf' },
+  },
   'help.getInviteText': { _: 'help.getInviteText' },
   'help.getTimezonesList': { _: 'help.getTimezonesList', hash: 0 },
   'messages.getArchivedStickers': {
@@ -48,6 +51,9 @@ const requests: Record<string, tl.RpcMethod> = {
   },
   'messages.getMessageReadParticipants': {
     _: 'messages.getMessageReadParticipants', peer: self, msgId: 1,
+  },
+  'messages.getMessagesViews': {
+    _: 'messages.getMessagesViews', peer: self, id: [11, 22, 33], increment: true,
   },
   'messages.getQuickReplies': { _: 'messages.getQuickReplies', hash: Long.ZERO },
   'messages.getSavedDialogs': {
@@ -70,6 +76,7 @@ const requests: Record<string, tl.RpcMethod> = {
   'payments.getSavedStarGifts': {
     _: 'payments.getSavedStarGifts', peer: self, offset: '', limit: 100,
   },
+  'payments.getStarGifts': { _: 'payments.getStarGifts', hash: 0 },
   'payments.getStarGiftCollections': {
     _: 'payments.getStarGiftCollections', peer: self, hash: Long.ZERO,
   },
@@ -81,6 +88,10 @@ const requests: Record<string, tl.RpcMethod> = {
   'stories.getPeerMaxIDs': { _: 'stories.getPeerMaxIDs', id: [self, self] },
   'premium.getBoostsStatus': { _: 'premium.getBoostsStatus', peer: self },
   'premium.getMyBoosts': { _: 'premium.getMyBoosts' },
+  'photos.getUserPhotos': {
+    _: 'photos.getUserPhotos', userId: { _: 'inputUserSelf' },
+    offset: 0, maxId: Long.ZERO, limit: 80,
+  },
 }
 
 describe('Telegram Android optional RPC responses', () => {
@@ -123,6 +134,20 @@ describe('Telegram Android optional RPC responses', () => {
       })
   })
 
+  it('returns one zeroed view record for every requested message id', () => {
+    expect(androidRpcHandlers['messages.getMessagesViews'](requests['messages.getMessagesViews']))
+      .toEqual({
+        _: 'messages.messageViews',
+        views: [
+          { _: 'messageViews', views: 0, forwards: 0 },
+          { _: 'messageViews', views: 0, forwards: 0 },
+          { _: 'messageViews', views: 0, forwards: 0 },
+        ],
+        chats: [],
+        users: [],
+      })
+  })
+
   it('returns one empty recent-story marker for every requested peer', () => {
     expect(androidRpcHandlers['stories.getPeerMaxIDs'](requests['stories.getPeerMaxIDs']))
       .toEqual({ _: 'vector', items: [{ _: 'recentStory' }, { _: 'recentStory' }] })
@@ -155,6 +180,12 @@ describe('Telegram Android optional RPC responses', () => {
       .toEqual({ _: 'messages.savedDialogs', dialogs: [], messages: [], chats: [], users: [] })
     expect(androidRpcHandlers['messages.getSponsoredMessages'](requests['messages.getSponsoredMessages']))
       .toEqual({ _: 'messages.sponsoredMessagesEmpty' })
+    expect(androidRpcHandlers['bots.getBotRecommendations'](requests['bots.getBotRecommendations']))
+      .toEqual({ _: 'users.users', users: [] })
+    expect(androidRpcHandlers['photos.getUserPhotos'](requests['photos.getUserPhotos']))
+      .toEqual({ _: 'photos.photos', photos: [], users: [] })
+    expect(androidRpcHandlers['payments.getStarGifts'](requests['payments.getStarGifts']))
+      .toEqual({ _: 'payments.starGifts', hash: 0, gifts: [], chats: [], users: [] })
     expect(androidRpcHandlers['stories.getPinnedStories'](requests['stories.getPinnedStories']))
       .toEqual({ _: 'stories.stories', count: 0, stories: [], chats: [], users: [] })
   })
