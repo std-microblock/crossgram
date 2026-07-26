@@ -338,6 +338,35 @@ export class PlatformDataService {
     }
   }
 
+  async getSubdialogsPage(
+    parentId: string,
+    query: { limit?: number, afterId?: string } = {},
+  ): Promise<IMDialogPage> {
+    if (!this._platform.getSubdialogs) return { dialogs: [], total: 0 }
+    const key = `subdialogs:${parentId}:${dialogLoadKey(this._session, query)}`
+    let loads = PlatformDataService._dialogLoads.get(this._platform)
+    if (!loads) {
+      loads = new Map()
+      PlatformDataService._dialogLoads.set(this._platform, loads)
+    }
+    const existing = loads.get(key)
+    if (existing) return existing
+    const pending = this._platform.getSubdialogs(
+      this._session,
+      { id: parentId },
+      query,
+    ).then(async (page) => {
+      await this._ingestDialogs(page.dialogs)
+      return page
+    })
+    loads.set(key, pending)
+    try {
+      return await pending
+    } finally {
+      if (loads.get(key) === pending) loads.delete(key)
+    }
+  }
+
   private async _loadDialogsPage(query: { limit?: number, afterId?: string }): Promise<IMDialogPage> {
     let upstream: IMDialog[] = []
     let upstreamPage: IMDialogPage | undefined
