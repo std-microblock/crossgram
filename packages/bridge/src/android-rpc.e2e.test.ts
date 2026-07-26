@@ -110,6 +110,14 @@ describe('Telegram Android capture RPC e2e', () => {
       _: 'messages.getSavedDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
     }, 'messages.savedDialogs'],
+    ['bot recommendations', {
+      _: 'bots.getBotRecommendations', bot: { _: 'inputUserSelf' },
+    }, 'users.users'],
+    ['user photos', {
+      _: 'photos.getUserPhotos', userId: { _: 'inputUserSelf' },
+      offset: 0, maxId: Long.ZERO, limit: 80,
+    }, 'photos.photos'],
+    ['star gifts', { _: 'payments.getStarGifts', hash: 0 }, 'payments.starGifts'],
   ])('serves the captured %s retry probe through a wrapped layer-228 request', async (_label, request, expected) => {
     await expect(roundTripRpc(request)).resolves.toMatchObject({ _: expected })
   })
@@ -141,6 +149,20 @@ describe('Telegram Android capture RPC e2e', () => {
   it('returns a valid empty Updates object for the Android read-all-stories probe', async () => {
     await expect(roundTripRpc({ _: 'stories.getAllReadPeerStories' })).resolves.toMatchObject({
       _: 'updates', updates: [], users: [], chats: [], seq: 0,
+    })
+  })
+
+  it('preserves message-view result cardinality through the wrapped RPC envelope', async () => {
+    await expect(roundTripRpc({
+      _: 'messages.getMessagesViews', peer: self, id: [101, 202], increment: true,
+    })).resolves.toEqual({
+      _: 'messages.messageViews',
+      views: [
+        { _: 'messageViews', views: 0, forwards: 0 },
+        { _: 'messageViews', views: 0, forwards: 0 },
+      ],
+      chats: [],
+      users: [],
     })
   })
 })

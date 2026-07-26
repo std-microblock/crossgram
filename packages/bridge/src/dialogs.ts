@@ -1069,10 +1069,7 @@ export class DialogRpc {
     // tries to reserve zero PTS, causing a retry storm that competes with user
     // sends. An empty vector is a successful no-op and must not touch upstream.
     if (!req.id.length) {
-      const pts = channel && 'channelId' in channel
-        ? (await this._store.getChannelUpdateState(this._session.platformSessionId, channel.channelId)).pts
-        : (await this._store.getUpdateState(this._session.platformSessionId)).pts
-      return { _: 'messages.affectedMessages', pts, ptsCount: 0 }
+      return this._emptyDeleteResult(channel)
     }
     // Message ownership and action policy must be evaluated against a fresh
     // upstream preview rather than the short-lived read-side peer cache.
@@ -1125,12 +1122,24 @@ export class DialogRpc {
       if (cache) this._historyCache.set(conversationId, cache.filter((item) => !affected.has(item.tlId)))
     }
     const ptsCount = affected.size
+    // Deleting stale or already-deleted Telegram ids is idempotent. No rows
+    // changed, so keep the current PTS instead of attempting to reserve zero
+    // entries (which is invalid and previously triggered a client retry storm).
+    if (!ptsCount) return this._emptyDeleteResult(channel)
     const pts = await this._reservePts(
       ptsCount,
       Math.floor(Date.now() / 1000),
       expectedConversation ? this._conversation(expectedConversation) : undefined,
     )
     return { _: 'messages.affectedMessages', pts, ptsCount }
+  }
+
+  private async _emptyDeleteResult(channel?: tl.TypeInputChannel): Promise<tl.messages.RawAffectedMessages> {
+    if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    const pts = channel && 'channelId' in channel
+      ? (await this._store.getChannelUpdateState(this._session.platformSessionId, channel.channelId)).pts
+      : (await this._store.getUpdateState(this._session.platformSessionId)).pts
+    return { _: 'messages.affectedMessages', pts, ptsCount: 0 }
   }
 
   async editMessage(req: tl.messages.RawEditMessageRequest): Promise<tl.TypeUpdates> {

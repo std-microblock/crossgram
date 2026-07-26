@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
+import { gzipSync } from 'node:zlib'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter, type TlReaderMap } from '@mtcute/tl-runtime'
 import { __tlReaderMap, __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
@@ -37,6 +38,7 @@ const crypto = new NodeCryptoProvider()
 const log = new LogManager('e2e', new NodePlatform())
 log.level = LogManager.OFF
 const clientLog = log.create('client')
+const GZIP_PACKED_ID = 0x3072CFA1
 
 function nowSec() { return Math.floor(Date.now() / 1000) }
 function makeMsgId(sub: number) { return Long.fromBits((Date.now() % 1000 << 21) | sub, nowSec()) }
@@ -144,6 +146,14 @@ function serializeInitializedRpc(query: object, layer = CURRENT_API_LAYER): Uint
       query,
     },
   } as { _: string })
+}
+
+function gzipPacked(body: Uint8Array): Uint8Array {
+  const packed = gzipSync(body)
+  const writer = TlBinaryWriter.manual(4 + TlSerializationCounter.countBytesOverhead(packed.length) + packed.length)
+  writer.uint(GZIP_PACKED_ID)
+  writer.bytes(packed)
+  return writer.result()
 }
 
 /** Telegram Desktop's TCP endpoint probe uses the legacy req_pq constructor. */
@@ -682,6 +692,63 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       ))
       expect(debugResponse).toBeDefined()
       expect((debugResponse!.payload as { reqMsgId: Long }).reqMsgId.toString()).toBe(requestMessageId.toString())
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('answers rpc_drop_answer with a valid MTProto drop status', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop } = await startServer((event) => debugEvents.push(event))
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x54545454, 0x54545454)
+      const requestMessageId = makeMsgId(52)
+      const droppedRequestMessageId = requestMessageId.subtract(4000)
+      const request = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_rpc_drop_answer', reqMsgId: droppedRequestMessageId,
+      } as { _: string })
+      await client.send(clientEncryptWithMessageId(perm, request, perm.salt, sessionId, requestMessageId))
+
+      const response = await readRpcResultEnvelope(client, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toEqual({ _: 'mt_rpc_answer_unknown' })
+      const debugResponse = debugEvents.find((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'rpc_result'
+        && (event.payload as { result?: { _?: string } }).result?._ === 'mt_rpc_answer_unknown'
+      ))
+      expect(debugResponse).toBeDefined()
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('unwraps gzip_packed RPC requests before dispatch', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop } = await startServer((event) => debugEvents.push(event))
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x55555555, 0x55555555)
+      const request = gzipPacked(serializeInitializedRpc({ _: 'help.getConfig' }))
+      await client.send(clientEncrypt(perm, request, perm.salt, sessionId, 56))
+
+      const response = await readRpcResult(client, perm)
+      expect(response).toMatchObject({ _: 'config', thisDc: 1 })
+      expect(debugEvents.some((event) => (
+        event.direction === 'client->server'
+        && (event.payload as { _?: string })._ === 'invokeWithLayer'
+      ))).toBe(true)
+      expect(debugEvents.some((event) => (
+        (event.payload as { _?: string })._ === 'unparsed'
+        && (event.payload as { constructorId?: number }).constructorId === GZIP_PACKED_ID
+      ))).toBe(false)
       client.close()
     } finally {
       await stop()
