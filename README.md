@@ -214,6 +214,7 @@ yarn build && yarn start  # 生产模式
     homeserver: https://matrix.example.com
     accessToken: replace-with-your-access-token
     # userId: '@alice:example.com'  # 可选，默认自动探测
+    proxy: http://127.0.0.1:7890    # 可选；Node 不会自动使用系统代理
 ```
 </details>
 

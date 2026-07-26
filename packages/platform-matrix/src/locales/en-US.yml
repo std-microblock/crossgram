@@ -1,5 +1,6 @@
 homeserver: Matrix homeserver base URL, for example https://matrix.example.com.
 accessToken: Matrix access token used to authenticate the account.
 userId: Optional Matrix user ID. When omitted it is discovered with /account/whoami.
+proxy: Optional HTTP(S) proxy for Matrix API and media requests, for example http://127.0.0.1:7890.
 syncTimeoutMs: Duration of each Matrix long-poll sync request in milliseconds.
 requestTimeoutMs: Maximum duration of a non-sync Matrix HTTP request in milliseconds.

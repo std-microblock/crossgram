@@ -11,6 +11,8 @@ to one named Cordis platform entry and exposes joined rooms to Telegram clients.
     accessToken: replace-with-your-access-token
     # Optional; otherwise /account/whoami is used.
     userId: '@alice:example.com'
+    # Optional HTTP(S) proxy for API and media requests.
+    proxy: http://127.0.0.1:7890
     syncTimeoutMs: 30000
     requestTimeoutMs: 30000
 ```
@@ -38,5 +40,6 @@ yarn workspace @mtproto-relay/platform-matrix test
 yarn workspace @mtproto-relay/platform-matrix test:e2e
 ```
 
-The e2e suite starts a real local HTTP server and exercises the adapter through
-the same authenticated HTTP transport used for a homeserver.
+The e2e suite starts a real local HTTP server and a tunneling HTTP proxy, then
+exercises the adapter through the same authenticated transport used for a
+homeserver.

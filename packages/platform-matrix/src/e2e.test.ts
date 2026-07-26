@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createConnection, type AddressInfo } from 'node:net'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { PlatformSession } from '@mtproto-relay/bridge'
 import { MatrixPlatform } from './index.js'
 
@@ -17,22 +17,51 @@ describe('Matrix platform HTTP e2e', () => {
     })
     await route(request, response, body)
   })
+  const proxyConnections: string[] = []
+  const proxy = createServer((_request, response) => {
+    response.writeHead(405)
+    response.end()
+  })
+  proxy.on('connect', (request, clientSocket, head) => {
+    proxyConnections.push(request.url ?? '')
+    const target = new URL(`http://${request.url}`)
+    const upstream = createConnection({ host: target.hostname, port: Number(target.port) }, () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      if (head.length) upstream.write(head)
+      upstream.pipe(clientSocket)
+      clientSocket.pipe(upstream)
+    })
+    upstream.on('error', () => clientSocket.destroy())
+    clientSocket.on('error', () => upstream.destroy())
+  })
   let homeserver: string
+  let proxyUrl: string
+  let activePlatform: MatrixPlatform | undefined
 
   beforeAll(async () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve))
     const address = server.address() as AddressInfo
+    const proxyAddress = proxy.address() as AddressInfo
     homeserver = `http://127.0.0.1:${address.port}`
+    proxyUrl = `http://127.0.0.1:${proxyAddress.port}`
   })
 
   afterAll(async () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    await new Promise<void>((resolve, reject) => proxy.close((error) => error ? reject(error) : resolve()))
+  })
+
+  afterEach(async () => {
+    await activePlatform?.stop()
+    activePlatform = undefined
   })
 
   it('bridges a complete account, dialog, history, send, and media workflow over real HTTP', async () => {
-    const platform = new MatrixPlatform({
+    const platform = activePlatform = new MatrixPlatform({
       homeserver,
       accessToken: 'e2e-token',
+      proxy: proxyUrl,
       requestTimeoutMs: 2_000,
       syncTimeoutMs: 100,
     })
@@ -76,6 +105,7 @@ describe('Matrix platform HTTP e2e', () => {
     expect(upload?.body).toEqual(new Uint8Array([10, 20, 30, 40]))
     const sends = requests.filter((request) => request.path.includes('/send/m.room.message/'))
     expect(sends).toHaveLength(2)
+    expect(proxyConnections).toContain(new URL(homeserver).host)
     expect(JSON.parse(new TextDecoder().decode(sends[0]!.body))).toMatchObject({
       msgtype: 'm.text', body: 'sent through e2e',
     })
