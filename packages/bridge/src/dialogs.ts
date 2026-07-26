@@ -16,6 +16,7 @@ import {
 import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
+import type { PlatformEventDeliveryOptions, PlatformEventPublishResult } from './platform-manager.js'
 import type { IMMediaRow, IMUserRow } from './models.js'
 import type { StagedMedia, UploadedFile, UploadManager } from './upload-manager.js'
 import type { StickerRpc } from './sticker-rpc.js'
@@ -143,7 +144,12 @@ export class DialogRpc {
     private readonly _stickers?: StickerRpc,
     private readonly _reactions?: ReactionRpc,
     private readonly _resources?: TelegramResourceService,
-    private readonly _onLocalEvent?: (session: PlatformSession, event: IMEvent) => Promise<void>,
+    private readonly _onLocalEvent?: (
+      session: PlatformSession,
+      event: IMEvent,
+      options?: PlatformEventDeliveryOptions,
+    ) => Promise<PlatformEventPublishResult>,
+    private readonly _authKeyId?: string,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -1046,17 +1052,39 @@ export class DialogRpc {
     const now = source.timestamp || Math.floor(Date.now() / 1000)
     if (edited!.replacedMessageId && this._onLocalEvent) {
       const replacementKey = `${edited!.replacedMessageId}:${source.id}`
-      await this._onLocalEvent(this._session, {
+      const delivery = { excludeAuthKeyId: this._authKeyId, deliveredViaRpc: true }
+      const deleted = await this._onLocalEvent(this._session, {
         type: 'message-delete',
         eventId: `local-edit-replace:${replacementKey}`,
         conversation,
         messageIds: [edited!.replacedMessageId],
         timestamp: now,
-      })
-      await this._onLocalEvent(this._session, { type: 'message', conversation, message: source })
+      }, delivery)
+      const replacement = await this._onLocalEvent(
+        this._session,
+        { type: 'message', conversation, message: source },
+        delivery,
+      )
       this._historyCache.delete(conversationId)
-      // The committed events above are broadcast to every bound connection,
-      // including the requester. Returning them again would consume PTS twice.
+      // The requester receives the same durable PTS-bearing updates as the
+      // observer sockets, but in the edit RPC response instead of as a push.
+      const payloads = [deleted, replacement]
+        .map((published) => published as tl.RawUpdates | undefined)
+        .filter((payload): payload is tl.RawUpdates => payload?._ === 'updates')
+      if (payloads.length === 1) return payloads[0]
+      if (payloads.length > 1) {
+        const first = payloads[0]
+        const last = payloads.at(-1)!
+        return {
+          _: 'updatesCombined',
+          updates: payloads.flatMap((payload) => payload.updates),
+          users: uniqueUsers(payloads.flatMap((payload) => payload.users) as tl.RawUser[]),
+          chats: uniqueChats(payloads.flatMap((payload) => payload.chats)),
+          date: last.date,
+          seqStart: first.seq,
+          seq: last.seq,
+        }
+      }
       return this._updates(conversation, [], now)
     }
     const updates: tl.TypeUpdate[] = []

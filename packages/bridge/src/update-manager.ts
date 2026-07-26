@@ -12,7 +12,9 @@ import {
 } from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
 import type { IMSticker } from './sticker-provider.js'
-import type { CommittedPlatformEvent, PlatformRegistry } from './platform-manager.js'
+import type {
+  CommittedPlatformEvent, PlatformEventDeliveryOptions, PlatformEventPublishResult, PlatformRegistry,
+} from './platform-manager.js'
 import { makeUser } from './synthetic.js'
 
 /** Converts committed platform events to account-scoped MTProto updates. */
@@ -33,17 +35,18 @@ export class UpdateManager {
   async publish(
     session: PlatformSession,
     committed: CommittedPlatformEvent,
-  ): Promise<void> {
+    options: PlatformEventDeliveryOptions = {},
+  ): Promise<PlatformEventPublishResult> {
     this._onTrace?.(
       'update publish start platform=%s session=%s %s',
       session.platformId, session.platformSessionId, committedEventSummary(committed),
     )
     if (committed.event.type === 'message-delete') {
-      await this._publishDelete(
+      return this._publishDelete(
         session,
         committed as Extract<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+        options,
       )
-      return
     }
     if (committed.event.type === 'message-reactions') {
       await this._publishReactions(
@@ -59,11 +62,12 @@ export class UpdateManager {
       )
       return
     }
-    await this._publishMessage(
+    return this._publishMessage(
       session,
       committed as Exclude<CommittedPlatformEvent, {
         event: { type: 'message-delete' | 'message-reactions' | 'read' }
       }>,
+      options,
     )
   }
 
@@ -166,7 +170,8 @@ export class UpdateManager {
     committed: Exclude<CommittedPlatformEvent, {
       event: { type: 'message-delete' | 'message-reactions' | 'read' }
     }>,
-  ): Promise<void> {
+    options: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
     const { event, result } = committed
     const isEdit = event.type === 'message-edit'
     const eventKey = isEdit
@@ -336,7 +341,7 @@ export class UpdateManager {
       'update payload stored eventKey=%s updates=%d types=%s pts=%d seq=%d',
       eventKey, updates.length, updates.map((update) => update._).join(','), delivery.pts, delivery.seq,
     )
-    if (await this._send(session.platformSessionId, payload)) {
+    if (await this._send(session.platformSessionId, payload, options.excludeAuthKeyId) || options.deliveredViaRpc) {
       await this._store.markUpdatePublished(eventKey)
       this._onTrace?.('update published eventKey=%s session=%s', eventKey, session.platformSessionId)
     } else {
@@ -345,12 +350,14 @@ export class UpdateManager {
         eventKey, session.platformSessionId,
       )
     }
+    return payload
   }
 
   private async _publishDelete(
     session: PlatformSession,
     committed: Extract<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
-  ): Promise<void> {
+    options: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
     const { event, result } = committed
     const eventKey = `${session.platformSessionId}:delete:${event.eventId}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
@@ -391,12 +398,17 @@ export class UpdateManager {
       seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
-    if (await this._send(session.platformSessionId, payload)) {
+    if (await this._send(session.platformSessionId, payload, options.excludeAuthKeyId) || options.deliveredViaRpc) {
       await this._store.markUpdatePublished(eventKey)
     }
+    return payload
   }
 
-  private async _send(platformSessionId: string, payload: tl.RawUpdates): Promise<boolean> {
+  private async _send(
+    platformSessionId: string,
+    payload: tl.RawUpdates,
+    excludeAuthKeyId?: string,
+  ): Promise<boolean> {
     const bindings = await this._database.get('mtproto_auth_binding', { platformSessionId })
     let delivered = 0
     this._onTrace?.(
@@ -405,6 +417,7 @@ export class UpdateManager {
       payload.updates.map((update) => update._).join(','),
     )
     for (const binding of bindings) {
+      if (binding.authKeyId === excludeAuthKeyId) continue
       const connections = this._sendUpdate(hexBytes(binding.authKeyId), payload)
       delivered += connections
       this._onTrace?.(
