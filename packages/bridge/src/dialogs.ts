@@ -1845,15 +1845,15 @@ export class DialogRpc {
         // Telegram Desktop opens an unread dialog with
         // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
         // perform their initial unread-aware fetch (QQNT uses firstUnreadSeq).
-        await this._data.getHistory(peerId, { limit: fetchLimit })
+        await this._data.syncHistory(peerId, { limit: fetchLimit })
       } else if (negativeOffset && anchor) {
         // A generic jump also needs both sides of its anchor, but must not be
         // mistaken for QQNT's conversation-level unread anchor.
         const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
-        await this._data.getHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
-        await this._data.getHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
+        await this._data.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
+        await this._data.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
       } else {
-        await this._data.getHistory(peerId, {
+        await this._data.syncHistory(peerId, {
           limit: fetchLimit,
           before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
         })
