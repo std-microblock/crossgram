@@ -40,6 +40,7 @@ class DialogTestPlatform implements IMPlatform {
   contactIds = ['alice', 'bob']
   lastInput?: IMMessageInput
   readonly readTargets: Array<{ conversationId: string, messageId: string }> = []
+  readonly historyCalls: string[] = []
 
   addMessage(conversationId: string, message: IMMessage): void {
     ;(this._messages[conversationId] ??= []).push(message)
@@ -72,6 +73,7 @@ class DialogTestPlatform implements IMPlatform {
   }
 
   async getHistory(_session: PlatformSession, conversation: { id: string }): Promise<IMHistoryPage> {
+    this.historyCalls.push(conversation.id)
     return { messages: this._messages[conversation.id] ?? [] }
   }
 
@@ -762,7 +764,8 @@ describe('DialogRpc', () => {
   it('renders an addressable non-dialog conversation as a Telegram message preview card', async () => {
     const platform = new DialogTestPlatform()
     const temporary = {
-      id: 'temporary-forward', kind: 'group' as const, title: '聊天记录', metadata: { virtual: true },
+      id: 'temporary-forward', kind: 'group' as const, title: '聊天记录',
+      metadata: { virtual: true, qqMultiForwardPreview: 'Bob: native preview\nAlice: work' },
     }
     platform.addMessage('alice', {
       id: 'merged', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
@@ -783,6 +786,7 @@ describe('DialogRpc', () => {
     })
     const rpc = new DialogRpc(platform, session)
     await rpc.getDialogs(getDialogsRequest())
+    expect(platform.historyCalls).not.toContain(temporary.id)
     const aliceId = rpc.peerTlId('alice')
     const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
     const merged = history.messages.find((item) => item._ === 'message' && item.id > 0) as tl.RawMessage
@@ -791,8 +795,6 @@ describe('DialogRpc', () => {
       throw new Error('merged forward preview was not projected as a full webpage')
     }
     const url = merged.media.webpage.url
-    const insideFirstId = Number(new URL(url).searchParams.get('post'))
-    expect(insideFirstId).toBeGreaterThan(0)
     expect(merged.message).toBe('查看聊天记录')
     expect(merged.entities).toMatchObject([{
       _: 'messageEntityTextUrl', offset: 0, length: 6, url,
@@ -801,9 +803,9 @@ describe('DialogRpc', () => {
       _: 'messageMediaWebPage', manual: true, safe: true,
       webpage: {
         _: 'webPage',
-        url: `tg://resolve?domain=bridgechat_${temporaryId}&post=${insideFirstId}`,
+        url: `tg://resolve?domain=bridgechat_${temporaryId}`,
         displayUrl: '聊天记录', type: 'telegram_message',
-        title: '聊天记录', description: 'Bob: forwarded content\nAlice: work',
+        title: '聊天记录', description: 'Bob: native preview\nAlice: work',
       },
     })
     expect(history.chats).toMatchObject([{ _: 'chat', id: temporaryId, title: '聊天记录' }])
@@ -827,11 +829,6 @@ describe('DialogRpc', () => {
     })).toMatchObject({
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: temporaryId },
       chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
-    })
-    await expect(freshRpc.getMessages({
-      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: insideFirstId }],
-    })).resolves.toMatchObject({
-      messages: [{ _: 'message', id: insideFirstId, message: 'forwarded content' }],
     })
     await expect(freshRpc.getScheduledHistory({
       _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,

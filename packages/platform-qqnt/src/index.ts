@@ -1171,6 +1171,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   private readonly registerMultiForward = (
     title: string,
+    preview: string | undefined,
     locator: WireMultiForwardLocator,
   ): IMConversation<QQMediaLocator> => {
     const id = multiForwardConversationId(locator)
@@ -1178,7 +1179,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       id,
       kind: 'group',
       title: title || '聊天记录',
-      metadata: { virtual: true, qqTemporaryMultiForward: true },
+      metadata: {
+        virtual: true,
+        qqTemporaryMultiForward: true,
+        ...(preview ? { qqMultiForwardPreview: preview } : {}),
+      },
     }
     this.multiForwardLocators.set(id, locator)
     this.conversations.set(id, conversation)
@@ -1252,7 +1257,11 @@ function mapMessage(
   memberName: MemberNameMode,
   reactionCatalog?: IMReactionContext,
   stickerProviderId = 'qqnt:stickers',
-  registerMultiForward?: (title: string, locator: WireMultiForwardLocator) => IMConversation<QQMediaLocator>,
+  registerMultiForward?: (
+    title: string,
+    preview: string | undefined,
+    locator: WireMultiForwardLocator,
+  ) => IMConversation<QQMediaLocator>,
 ): IMMessage<QQMediaLocator> {
   return {
     id: input.id,
@@ -1298,7 +1307,11 @@ function mapParts(
   input: WireMessage,
   stickerProviderId: string,
   reactionCatalog?: IMReactionContext,
-  registerMultiForward?: (title: string, locator: WireMultiForwardLocator) => IMConversation<QQMediaLocator>,
+  registerMultiForward?: (
+    title: string,
+    preview: string | undefined,
+    locator: WireMultiForwardLocator,
+  ) => IMConversation<QQMediaLocator>,
 ): IMMessage<QQMediaLocator>['content']['parts'] {
   const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
   for (const part of input.parts) {
@@ -1316,7 +1329,7 @@ function mapParts(
         parts.push(normalized)
       }
     } else if (part.type === 'multi-forward') {
-      const conversation = registerMultiForward?.(part.title, part.locator)
+      const conversation = registerMultiForward?.(part.title, part.preview, part.locator)
       const text = '查看聊天记录'
       parts.push({
         type: 'text', text,
