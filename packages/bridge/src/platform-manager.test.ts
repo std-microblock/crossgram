@@ -374,7 +374,9 @@ describe('PlatformDataService', () => {
     const conversation: IMConversation = { id: 'fresh-room', kind: 'group', title: 'Fresh room' }
     const store = new MessageStore(database)
     await store.upsertConversation(session, conversation)
-    const getHistory = vi.fn(async () => ({ messages: [incoming('8', conversation.id)] }))
+    const getHistory = vi.fn<NonNullable<IMPlatform['getHistory']>>(
+      async () => ({ messages: [incoming('8', conversation.id)] }),
+    )
     platform.getHistory = getHistory
     const data = new PlatformDataService(platform, session, store, undefined, () => 10_000)
 
