@@ -58,12 +58,32 @@ function fakeClient(channels: any[] = []) {
   }
   emitter.users = { fetch: vi.fn(async (id: string) => id === emitter.user.id ? emitter.user : user(id, `User ${id}`)) }
   emitter.relationships = { fetch: vi.fn(), friendCache: new Collection([['200', user('200', 'Alice')]]) }
-  emitter.guilds = { cache: new Collection() }
+  emitter.guilds = { cache: new Collection(channels.flatMap((channel) =>
+    channel.guild ? [[channel.guild.id, channel.guild] as const] : [])) }
   emitter.isReady = vi.fn(() => true)
   emitter.login = vi.fn(async () => 'token')
   emitter.destroy = vi.fn()
   emitter.refreshAttachmentURL = vi.fn(async (url: string) => [{ original: url, refreshed: `${url}?renewed=1` }])
   return emitter as Client
+}
+
+function guildChannels(childCount: number) {
+  const guild: any = {
+    id: '700000000000000001', name: 'Large guild', systemChannelId: '800000000000000000',
+    memberCount: 42, iconURL: () => null, channels: { cache: new Collection() },
+  }
+  const channels = Array.from({ length: childCount + 1 }, (_, index) => {
+    const id = `8${String(index).padStart(17, '0')}`
+    return {
+      id, type: 'GUILD_TEXT', guild, name: index === 0 ? 'general' : `channel-${index}`,
+      parent: null, rawPosition: index, viewable: true, lastMessageId: null,
+      createdTimestamp: 1_900_000_000_000 + index,
+      messages: { cache: new Collection(), fetch: vi.fn(), delete: vi.fn() },
+      permissionsFor: () => ({ has: () => true }), isThread: () => false,
+    }
+  })
+  guild.channels.cache = new Collection(channels.map((channel) => [channel.id, channel]))
+  return { guild, channels }
 }
 
 describe('DiscordPlatform userbot', () => {
@@ -204,6 +224,27 @@ describe('DiscordPlatform userbot', () => {
     expect(page.dialogs).toHaveLength(channels.length)
     expect(maximum).toBeGreaterThan(1)
     expect(maximum).toBeLessThanOrEqual(8)
+  })
+
+  it('keeps guild children out of the bounded root dialog page and paginates them lazily', async () => {
+    const { guild, channels } = guildChannels(250)
+    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient(channels) })
+
+    await expect(platform.getDialogs(session, { limit: 1 })).resolves.toMatchObject({
+      total: 1,
+      dialogs: [{ conversation: { id: `discord:guild:${guild.id}`, metadata: { hasSubchannels: true } } }],
+    })
+    const first = await platform.getSubdialogs(session, { id: `discord:guild:${guild.id}` }, { limit: 25 })
+    const second = await platform.getSubdialogs(
+      session,
+      { id: `discord:guild:${guild.id}` },
+      { cursor: first.nextCursor, limit: 25 },
+    )
+
+    expect(first).toMatchObject({ total: 250, nextCursor: '25' })
+    expect(first.dialogs).toHaveLength(25)
+    expect(second.dialogs).toHaveLength(25)
+    expect(new Set([...first.dialogs, ...second.dialogs].map((dialog) => dialog.conversation.id)).size).toBe(50)
   })
 
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {
