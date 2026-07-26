@@ -101,6 +101,10 @@ export class DialogRpc {
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
   private readonly _historyCache = new Map<string, MaterializedMessage[]>()
+  private readonly _historyCacheMetadata = new Map<
+    string,
+    { requestKey: string, storeRevision: number, freshUntil: number }
+  >()
   private readonly _dialogCache = new Map<string, IMDialog>()
   private readonly _readInboxMaxMessageIds = new Map<string, string>()
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
@@ -1824,6 +1828,21 @@ export class DialogRpc {
     const startedAt = performance.now()
     this._onTrace?.('history load profile stage=start peer=%s limit=%d', peerId, request.limit ?? 1)
     if (this._data && this._store) {
+      const requestKey = historyWindowKey(request)
+      const cached = this._historyCache.get(peerId)
+      const cacheMetadata = this._historyCacheMetadata.get(peerId)
+      if (
+        cached
+        && cacheMetadata?.requestKey === requestKey
+        && cacheMetadata.storeRevision === this._store.revision
+        && cacheMetadata.freshUntil > startedAt
+      ) {
+        this._onTrace?.(
+          'history load profile peer=%s cache=true materialized=%d totalMs=%d',
+          peerId, cached.length, profileMilliseconds(performance.now() - startedAt),
+        )
+        return cached
+      }
       const anchorId = request.offsetId || request.maxId || undefined
       const anchorAt = performance.now()
       const anchor = anchorId
@@ -1863,6 +1882,7 @@ export class DialogRpc {
       await this._syncStoredUsers()
       const usersMs = performance.now() - usersAt
       const projectAt = performance.now()
+      const projectionRevision = this._store.revision
       const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
         limit: fetchLimit,
         beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
@@ -1886,6 +1906,15 @@ export class DialogRpc {
       await this._rememberReplyTargets(history.map((item) => item.source))
       const repliesMs = performance.now() - repliesAt
       this._historyCache.set(peerId, history)
+      if (projectionRevision === this._store.revision) {
+        this._historyCacheMetadata.set(peerId, {
+          requestKey,
+          storeRevision: projectionRevision,
+          freshUntil: performance.now() + PlatformDataService.HISTORY_SYNC_FRESH_MS,
+        })
+      } else {
+        this._historyCacheMetadata.delete(peerId)
+      }
       this._onTrace?.(
         'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
         peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(aroundUnread), projected.length, history.length,
@@ -2864,6 +2893,17 @@ function inputPeerId(peer: tl.TypeInputPeer): number {
 
 function profileMilliseconds(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+function historyWindowKey(request: HistoryWindow): string {
+  return JSON.stringify([
+    request.offsetId ?? 0,
+    request.offsetDate ?? 0,
+    request.addOffset ?? 0,
+    request.limit,
+    request.maxId ?? 0,
+    request.minId ?? 0,
+  ])
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {

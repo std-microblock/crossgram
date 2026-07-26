@@ -102,7 +102,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const dcId = config.dcId ?? 1
   const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
   const bridgeLogger = ctx.logger('bridge')
-  const historyTrace = (format: string, ...args: unknown[]) => bridgeLogger.info(format, ...args)
+  const historyTrace = (format: string, ...args: unknown[]) => bridgeLogger.debug(format, ...args)
   const authTransfers = new AuthTransferStore()
 
   defineModels(ctx)

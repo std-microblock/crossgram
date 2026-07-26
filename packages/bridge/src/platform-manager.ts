@@ -303,13 +303,16 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
+  static readonly HISTORY_SYNC_FRESH_MS = 1_000
   private static readonly _historySyncs = new Map<string, Promise<void>>()
+  private readonly _freshHistorySyncs = new Map<string, number>()
 
   constructor(
     private readonly _platform: IMPlatform,
     private readonly _session: PlatformSession,
     private readonly _store: MessageStore,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
+    private readonly _now: () => number = () => performance.now(),
   ) {}
 
   async getDialogs(query: { limit?: number, afterId?: string } = {}): Promise<IMDialog[]> {
@@ -355,12 +358,23 @@ export class PlatformDataService {
   /** Fetch and persist one upstream page without hydrating rows the caller will not consume. */
   async syncHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<void> {
     const key = historySyncKey(this._session, conversationId, query)
+    const now = this._now()
+    const freshUntil = this._freshHistorySyncs.get(key)
+    if (freshUntil !== undefined) {
+      if (freshUntil > now) return
+      this._freshHistorySyncs.delete(key)
+    }
     const existing = PlatformDataService._historySyncs.get(key)
     if (existing) return existing
     const pending = this._loadHistory(conversationId, query, false).then(() => {})
     PlatformDataService._historySyncs.set(key, pending)
     try {
       await pending
+      this._freshHistorySyncs.delete(key)
+      this._freshHistorySyncs.set(key, this._now() + PlatformDataService.HISTORY_SYNC_FRESH_MS)
+      if (this._freshHistorySyncs.size > 256) {
+        this._freshHistorySyncs.delete(this._freshHistorySyncs.keys().next().value!)
+      }
     } finally {
       if (PlatformDataService._historySyncs.get(key) === pending) {
         PlatformDataService._historySyncs.delete(key)

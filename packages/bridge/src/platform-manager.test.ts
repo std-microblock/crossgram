@@ -347,7 +347,8 @@ describe('PlatformDataService', () => {
       return { messages: [incoming('8', conversation.id)] }
     })
     platform.getHistory = getHistory
-    const data = new PlatformDataService(platform, session, store)
+    let now = 10_000
+    const data = new PlatformDataService(platform, session, store, undefined, () => now)
 
     const syncs = Promise.all([
       data.syncHistory(conversation.id, { limit: 50 }),
@@ -360,6 +361,53 @@ describe('PlatformDataService', () => {
 
     expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
     await data.syncHistory(conversation.id, { limit: 50 })
+    expect(getHistory).toHaveBeenCalledOnce()
+    now += PlatformDataService.HISTORY_SYNC_FRESH_MS + 1
+    await data.syncHistory(conversation.id, { limit: 50 })
+    expect(getHistory).toHaveBeenCalledTimes(2)
+  })
+
+  it('only reuses a fresh sync for the exact history window', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'fresh-room', kind: 'group', title: 'Fresh room' }
+    const store = new MessageStore(database)
+    await store.upsertConversation(session, conversation)
+    const getHistory = vi.fn<NonNullable<IMPlatform['getHistory']>>(
+      async () => ({ messages: [incoming('8', conversation.id)] }),
+    )
+    platform.getHistory = getHistory
+    const data = new PlatformDataService(platform, session, store, undefined, () => 10_000)
+
+    await data.syncHistory(conversation.id, { limit: 50 })
+    await data.syncHistory(conversation.id, { limit: 50 })
+    await data.syncHistory(conversation.id, {
+      limit: 50,
+      before: { id: '8', timestamp: 8 },
+    })
+
+    expect(getHistory).toHaveBeenCalledTimes(2)
+    expect(getHistory.mock.calls[1]?.[2]).toMatchObject({ before: { id: '8', timestamp: 8 } })
+  })
+
+  it('does not mark a failed history sync as fresh', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'retry-room', kind: 'group', title: 'Retry room' }
+    const store = new MessageStore(database)
+    await store.upsertConversation(session, conversation)
+    const getHistory = vi.fn()
+      .mockRejectedValueOnce(new Error('temporary upstream failure'))
+      .mockResolvedValueOnce({ messages: [incoming('9', conversation.id)] })
+    platform.getHistory = getHistory
+    const data = new PlatformDataService(platform, session, store, undefined, () => 10_000)
+
+    await expect(data.syncHistory(conversation.id, { limit: 50 }))
+      .rejects.toThrow('temporary upstream failure')
+    await expect(data.syncHistory(conversation.id, { limit: 50 })).resolves.toBeUndefined()
+
     expect(getHistory).toHaveBeenCalledTimes(2)
   })
 

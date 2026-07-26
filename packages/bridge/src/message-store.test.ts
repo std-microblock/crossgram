@@ -42,6 +42,36 @@ async function createStore() {
 }
 
 describe('MessageStore', () => {
+  it('advances its cache revision only for writes that can change projected history', async () => {
+    const { store } = await createStore()
+    expect(store.revision).toBe(0)
+
+    await store.listUsers(session.platformId)
+    expect(store.revision).toBe(0)
+
+    await store.upsertUser(session, { id: 'revision-user', firstName: 'Revision' })
+    expect(store.revision).toBe(0)
+
+    await store.getUser(session.platformId, 'revision-user')
+    expect(store.revision).toBe(0)
+
+    await store.upsertConversation(session, { id: 'revision-room', kind: 'group', title: 'Revision' })
+    expect(store.revision).toBe(0)
+
+    await store.ingest(
+      session,
+      { id: 'revision-room', kind: 'group', title: 'Revision' },
+      {
+        id: 'revision-message', conversationId: 'revision-room', senderId: 'revision-user',
+        timestamp: 1, content: { parts: [{ type: 'text', text: 'revision' }] },
+      },
+    )
+    expect(store.revision).toBe(1)
+
+    await store.readProjectedHistory(session.platformSessionId, 'revision-room', { limit: 10 })
+    expect(store.revision).toBe(1)
+  })
+
   it('reserves RPC pts without advancing the push sequence', async () => {
     const { store } = await createStore()
     await store.prepareUpdateDelivery('push-1', session.platformSessionId, 2, 1_800_000_000)
