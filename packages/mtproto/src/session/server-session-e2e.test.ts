@@ -258,8 +258,18 @@ async function doClientHandshake(
 
 /** Encrypt a client→server message (MTProto v2, client direction). */
 function clientEncrypt(key: ClientKey, body: Uint8Array, salt: Long, sessionId: Long, sub: number): Uint8Array {
+  return clientEncryptWithMessageId(key, body, salt, sessionId, makeMsgId(sub))
+}
+
+function clientEncryptWithMessageId(
+  key: ClientKey,
+  body: Uint8Array,
+  salt: Long,
+  sessionId: Long,
+  messageId: Long,
+): Uint8Array {
   const inner = TlBinaryWriter.manual(16 + body.length)
-  inner.long(makeMsgId(sub))
+  inner.long(messageId)
   inner.uint(1)
   inner.uint(body.length)
   inner.raw(body)
@@ -341,6 +351,7 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   uploadedParts: Uint8Array[]
   transferAuthKeyIds: Uint8Array[]
   downloadBytes: Uint8Array
+  register: Mtproto['register']
   broadcastUpdate: (update: tl.TypeUpdates) => void
   sendUpdateToAuthKey: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number
   stop: () => Promise<void>
@@ -438,6 +449,7 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
   return {
     port: ctx.mtproto.port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes,
+    register: ctx.mtproto.register.bind(ctx.mtproto),
     broadcastUpdate: (update) => ctx.mtproto.broadcastUpdate(update),
     sendUpdateToAuthKey: (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
     stop: () => Promise.resolve(fiber.dispose()),
@@ -531,6 +543,145 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         { _: 'userEmpty', id: 1 },
         { _: 'userEmpty', id: 2 },
       ])
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('executes an Android-style invokeAfterMsg only after its referenced RPC completes', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, register, stop } = await startServer()
+    const order: string[] = []
+    let releaseFirst!: () => void
+    let markFirstStarted!: () => void
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve })
+    register('help.getAppConfig', async () => {
+      order.push('first:start')
+      markFirstStarted()
+      await firstGate
+      order.push('first:end')
+      return { _: 'help.appConfig', hash: 1, config: { _: 'jsonObject', value: [] } }
+    })
+    register('help.getNearestDc', async () => {
+      order.push('second:run')
+      return { _: 'nearestDc', country: 'test', thisDc: 1, nearestDc: 1 } as unknown as tl.TlObject
+    })
+
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x51515151, 0x51515151)
+      const firstMessageId = makeMsgId(40)
+      const secondMessageId = firstMessageId.add(4)
+      const first = serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 })
+      await client.send(clientEncryptWithMessageId(perm, first, perm.salt, sessionId, firstMessageId))
+      await firstStarted
+
+      const second = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'invokeAfterMsg',
+        msgId: firstMessageId,
+        query: {
+          _: 'invokeWithLayer',
+          layer: CURRENT_API_LAYER,
+          query: {
+            _: 'initConnection', apiId: 1, deviceModel: 'Android', systemVersion: 'test',
+            appVersion: 'test', systemLangCode: 'en', langPack: 'android', langCode: 'en',
+            query: { _: 'help.getNearestDc' },
+          },
+        },
+      } as { _: string })
+      await client.send(clientEncryptWithMessageId(perm, second, perm.salt, sessionId, secondMessageId))
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 30))
+      expect(order).toEqual(['first:start'])
+
+      releaseFirst()
+      const firstResult = await readRpcResultEnvelope(client, perm)
+      const secondResult = await readRpcResultEnvelope(client, perm)
+      expect(firstResult.requestMessageId.toString()).toBe(firstMessageId.toString())
+      expect(firstResult.result).toMatchObject({ _: 'help.appConfig', hash: 1 })
+      expect(secondResult.requestMessageId.toString()).toBe(secondMessageId.toString())
+      expect(secondResult.result).toMatchObject({ _: 'nearestDc', thisDc: 1 })
+      expect(order).toEqual(['first:start', 'first:end', 'second:run'])
+      client.close()
+    } finally {
+      releaseFirst()
+      await stop()
+    }
+  })
+
+  it('returns MSG_WAIT_FAILED when invokeAfterMsg references an unknown message id', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop } = await startServer((event) => debugEvents.push(event))
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x52525252, 0x52525252)
+      const requestMessageId = makeMsgId(44)
+      const unknownDependency = requestMessageId.subtract(4000)
+      const request = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'invokeAfterMsg',
+        msgId: unknownDependency,
+        query: {
+          _: 'invokeWithLayer', layer: CURRENT_API_LAYER,
+          query: {
+            _: 'initConnection', apiId: 1, deviceModel: 'Android', systemVersion: 'test',
+            appVersion: 'test', systemLangCode: 'en', langPack: 'android', langCode: 'en',
+            query: { _: 'help.getConfig' },
+          },
+        },
+      } as { _: string })
+      await client.send(clientEncryptWithMessageId(perm, request, perm.salt, sessionId, requestMessageId))
+
+      const response = await readRpcResultEnvelope(client, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 500, errorMessage: 'MSG_WAIT_FAILED',
+      })
+      const debugResponse = debugEvents.find((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'rpc_result'
+        && ((event.payload as { result?: { errorMessage?: string } }).result?.errorMessage === 'MSG_WAIT_FAILED')
+      ))
+      expect(debugResponse).toBeDefined()
+      expect((debugResponse!.payload as { reqMsgId: Long }).reqMsgId.toString()).toBe(requestMessageId.toString())
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('returns an explicit rpc_error for an unhandled content-related TL message', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop } = await startServer((event) => debugEvents.push(event))
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x53535353, 0x53535353)
+      const requestMessageId = makeMsgId(48)
+      const request = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_msg_resend_req', msgIds: [Long.ONE],
+      } as { _: string })
+      await client.send(clientEncryptWithMessageId(perm, request, perm.salt, sessionId, requestMessageId))
+
+      const response = await readRpcResultEnvelope(client, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 500,
+        errorMessage: 'METHOD_NOT_IMPLEMENTED: mt_msg_resend_req',
+      })
+      const debugResponse = debugEvents.find((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'rpc_result'
+        && ((event.payload as { result?: { errorMessage?: string } }).result?.errorMessage
+          === 'METHOD_NOT_IMPLEMENTED: mt_msg_resend_req')
+      ))
+      expect(debugResponse).toBeDefined()
+      expect((debugResponse!.payload as { reqMsgId: Long }).reqMsgId.toString()).toBe(requestMessageId.toString())
       client.close()
     } finally {
       await stop()
@@ -939,20 +1090,28 @@ async function readEncryptedObject(client: TestClient, key: ClientKey, type: str
 
 /** Read encrypted frames until an rpc_result is found; return the inner result object. */
 async function readRpcResult(client: TestClient, key: ClientKey, readerMap: TlReaderMap = __tlReaderMap): Promise<any> {
+  return (await readRpcResultEnvelope(client, key, readerMap)).result
+}
+
+async function readRpcResultEnvelope(
+  client: TestClient,
+  key: ClientKey,
+  readerMap: TlReaderMap = __tlReaderMap,
+): Promise<{ requestMessageId: Long, result: any }> {
   for (let i = 0; i < 10; i++) {
     const frame = await client.read()
     const reader = clientDecrypt(key, frame, readerMap)
     const saved = reader.pos
     const id = reader.uint()
     if (id === 0xf35c6d01) { // rpc_result
-      reader.long(true) // req_msg_id
+      const requestMessageId = reader.long(true)
       const resultId = reader.uint()
       // Bool results aren't in mtcute's reader map (it models Bool as a JS boolean).
-      if (resultId === 0x997275b5) return { _: 'boolTrue' }
-      if (resultId === 0xbc799737) return { _: 'boolFalse' }
-      if (resultId === 0x1cb5c415) return reader.vector(reader.object, true)
+      if (resultId === 0x997275b5) return { requestMessageId, result: { _: 'boolTrue' } }
+      if (resultId === 0xbc799737) return { requestMessageId, result: { _: 'boolFalse' } }
+      if (resultId === 0x1cb5c415) return { requestMessageId, result: reader.vector(reader.object, true) }
       reader.pos -= 4
-      return reader.object()
+      return { requestMessageId, result: reader.object() }
     }
     reader.pos = saved
     try { reader.object() } catch { /* service message we don't model; keep reading */ }
