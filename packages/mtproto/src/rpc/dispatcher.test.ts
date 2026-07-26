@@ -11,14 +11,25 @@ function makeContext(): ServerRpcContext {
     authKeyId: null,
     sessionId: Long.ZERO,
     isAuthorized: true,
-    routeId: null,
     sendUpdate() {},
     getPlatformData: <T>() => null as T,
     setPlatformData() {},
   }
 }
 
-describe('RpcDispatcher API layers', () => {
+describe('RpcDispatcher', () => {
+  it('returns METHOD_NOT_IMPLEMENTED for unregistered methods', async () => {
+    const dispatcher = new RpcDispatcher()
+
+    await expect(dispatcher.dispatch(makeContext(), {
+      _: 'help.getNearestDc',
+    } as tl.RpcMethod)).resolves.toEqual({
+      _: 'mt_rpc_error',
+      errorCode: 500,
+      errorMessage: 'METHOD_NOT_IMPLEMENTED: help.getNearestDc',
+    })
+  })
+
   it('returns invokeWithLayer explicitly while unwrapping the request', () => {
     const unwrapped = unwrapRpcRequest({
       _: 'invokeWithLayer', layer: 225,

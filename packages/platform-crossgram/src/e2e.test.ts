@@ -61,7 +61,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     }
     const custom = context.available.find((item) => item.key === '1:14'
       && item.presentation.type === 'custom')
-    // Relay only advertises standard reactions for which its Telegram catalog
+    // Bridge only advertises standard reactions for which its Telegram catalog
     // has renderer assets. QQ's 128514 maps to the supported 😂 reaction.
     const emoji = context.available.find((item) => item.key === '2:128514')
     expect(custom).toBeTruthy()

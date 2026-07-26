@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { bigint, Emitter, typed, u8 } from '@fuman/utils'
+import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -21,7 +21,6 @@ import Server from '@cordisjs/plugin-server'
 import WebUI from '@cordisjs/plugin-webui'
 import { Mtproto, AbridgedPacketCodec, CURRENT_API_LAYER, generateRsaKeyPair } from '@mtproto-relay/mtproto'
 import * as bridge from '@mtproto-relay/bridge'
-import * as relay from '@mtproto-relay/relay'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
 
@@ -280,7 +279,6 @@ async function startApp(options: {
   databasePath?: string
   authKeyStorePath?: string
   bridgeConfig?: bridge.BridgeConfig
-  relayConfig?: relay.RelayConfig
   platform?: { id: string, adapter: bridge.IMPlatform }
 } = {}) {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
@@ -297,7 +295,6 @@ async function startApp(options: {
     }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
     ctx.plugin(telegramResourcesPlugin),
-    ...(options.relayConfig ? [ctx.plugin(relay, options.relayConfig)] : []),
     options.platform
       ? ctx.plugin(makePlatformPlugin(options.platform.id, options.platform.adapter))
       : ctx.plugin(staticPlatformPlugin, {
@@ -344,6 +341,38 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 }
 
 describe('bridge login e2e', () => {
+  it('advertises one configured DC and has no cross-DC authorization route', async () => {
+    const { port, pubKey, stop } = await startApp({
+      bridgeConfig: { dcId: 4, serverHost: '10.20.30.40', serverPort: 8443 },
+    })
+    let client: TestClient | undefined
+    try {
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x76543200, 0x4abc, false)
+
+      expect(await callRpc(client, key, sid, { _: 'help.getConfig' }, 2)).toMatchObject({
+        _: 'config',
+        thisDc: 4,
+        webfileDcId: 4,
+        dcOptions: [{
+          _: 'dcOption', id: 4, ipAddress: '10.20.30.40', port: 8443,
+          tcpoOnly: true, static: true,
+        }],
+      })
+      expect(await callRpc(client, key, sid, {
+        _: 'auth.exportAuthorization', dcId: 2,
+      }, 4)).toEqual({
+        _: 'mt_rpc_error',
+        errorCode: 500,
+        errorMessage: 'METHOD_NOT_IMPLEMENTED: auth.exportAuthorization',
+      })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 15_000)
+
   it('returns RPC errors for unsupported Android built-in sticker sets', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
@@ -720,44 +749,10 @@ describe('bridge login e2e', () => {
       expect(config).toMatchObject({
         _: 'config', thisDc: 1,
       })
-      expect((config as any).dcOptions).toEqual([1, 2, 3, 4, 5, 6].map(id => expect.objectContaining({
-        id, ipAddress: '127.0.0.1', port: 4430, tcpoOnly: true, static: true,
-      })))
+      expect((config as any).dcOptions).toEqual([expect.objectContaining({
+        id: 1, ipAddress: '127.0.0.1', port: 4430, tcpoOnly: true, static: true,
+      })])
       dbg('post-login sync ok:', state._, status._, filters._, countries._)
-
-      // Media and auxiliary DC connections use distinct permanent auth keys.
-      // Copy the logged-in bridge identity to a newly handshaken key exactly as
-      // Telegram Desktop does after reading the six logical DCs above.
-      const exported = await callRpc(resumed, key, resumedSid, {
-        _: 'auth.exportAuthorization', dcId: 2,
-      }, 15)
-      expect(exported).toMatchObject({ _: 'auth.exportedAuthorization' })
-      expect(Long.isLong(exported.id)).toBe(true)
-      expect(exported.bytes).toHaveLength(32)
-
-      const mediaClient = await TestClient.connect(port)
-      const mediaKey = await doClientHandshake(mediaClient, pubKey)
-      const mediaSid = new Long(0x34567890, 0x3abc, false)
-      expect(await callRpc(mediaClient, mediaKey, mediaSid, {
-        _: 'auth.importAuthorization', id: exported.id, bytes: exported.bytes,
-      }, 16)).toMatchObject({
-        _: 'auth.authorization', user: { self: true, firstName: 'Static User' },
-      })
-      expect(await callRpc(mediaClient, mediaKey, mediaSid, {
-        _: 'contacts.getContacts', hash: Long.ZERO,
-      }, 17)).toMatchObject({
-        _: 'contacts.contacts', users: expect.arrayContaining([
-          expect.objectContaining({ firstName: 'Alice' }),
-          expect.objectContaining({ firstName: 'Bob' }),
-        ]),
-      })
-      const [mediaBinding] = await ctx.database.get('mtproto_auth_binding', {
-        authKeyId: Buffer.from(mediaKey.authKeyId).toString('hex'),
-      })
-      expect(mediaBinding).toMatchObject({
-        platformId: 'static', platformSessionId: platformLogin.session.id,
-      })
-      mediaClient.close()
 
       const contacts = await callRpc(resumed, key, resumedSid, {
         _: 'contacts.getContacts', hash: Long.ZERO,
@@ -2888,193 +2883,6 @@ describe('bridge login e2e', () => {
     } finally {
       client?.close()
       await stop()
-    }
-  }, 15000)
-})
-
-describe('relay e2e', () => {
-  it('forwards raw RPCs and upstream updates over the downstream socket', async () => {
-    const rsaKey = generateRsaKeyPair()
-    addPublicKey(crypto, rsaKey.publicKeyPem, false)
-    const ctx = new Context()
-    const calls: tl.RpcMethod[] = []
-    const upstreams: Array<{
-      onServerUpdate: Emitter<tl.TypeUpdates>
-      destroyed: boolean
-    }> = []
-    const fibers = [
-      ctx.plugin(Database),
-      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
-      ctx.plugin(Mtproto, { port: 0, host: '127.0.0.1', rsaKey, log }),
-      ctx.plugin(relay, {
-        apiId: 1,
-        apiHash: 'test',
-        clientFactory: () => {
-          const state = {
-            onServerUpdate: new Emitter<tl.TypeUpdates>(),
-            destroyed: false,
-          }
-          upstreams.push(state)
-          return {
-            onServerUpdate: state.onServerUpdate,
-            async call(request) {
-              calls.push(request)
-              return { _: 'nearestDc', country: 'NL', thisDc: 2, nearestDc: 2 }
-            },
-            async destroy() { state.destroyed = true },
-          }
-        },
-      }),
-    ]
-    await Promise.all(fibers)
-    await new Promise(resolve => setTimeout(resolve, 50))
-    const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
-    const client = await TestClient.connect(ctx.mtproto.port)
-    const key = await doClientHandshake(client, pubKey)
-    const sid = new Long(0x34567890, 0x3abc, false)
-    try {
-      const result = await callRpc(client, key, sid, { _: 'help.getNearestDc' }, 4)
-      expect(result).toEqual({ _: 'nearestDc', country: 'NL', thisDc: 2, nearestDc: 2 })
-      expect(calls).toMatchObject([{ _: 'help.getNearestDc' }])
-      expect(upstreams).toHaveLength(1)
-
-      upstreams[0].onServerUpdate.emit({
-        _: 'updateShort',
-        update: {
-          _: 'updateUserStatus', userId: 1,
-          status: { _: 'userStatusOnline', expires: nowSec() + 60 },
-        },
-        date: nowSec(),
-      } as tl.TypeUpdates)
-      expect(await readPush(client, key)).toMatchObject({
-        _: 'updateShort',
-        update: { _: 'updateUserStatus', userId: 1 },
-      })
-    } finally {
-      client.close()
-      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
-    }
-    expect(upstreams[0].destroyed).toBe(true)
-  }, 15000)
-
-  it('routes bridge and relay accounts independently and restores both routes after restart', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'mtproto-routes-e2e-'))
-    const databasePath = pathToFileURL(join(directory, 'routes.db')).href
-    const authKeyStorePath = join(directory, 'auth-keys.json')
-    const rsaKey = generateRsaKeyPair()
-    const upstreamCalls: string[] = []
-    const relayConfig: relay.RelayConfig = {
-      apiId: 1,
-      apiHash: 'test',
-      clientFactory: () => ({
-        onServerUpdate: new Emitter<tl.TypeUpdates>(),
-        async call(request) {
-          upstreamCalls.push(request._)
-          if (request._ === 'auth.sendCode') {
-            return {
-              _: 'auth.sentCode', type: { _: 'auth.sentCodeTypeApp', length: 5 },
-              phoneCodeHash: 'official-hash',
-            }
-          }
-          if (request._ === 'auth.signIn') {
-            return {
-              _: 'auth.authorization',
-              user: {
-                _: 'user', id: 777, self: true, accessHash: Long.ZERO,
-                firstName: 'Official Relay', phone: '15550001111',
-              },
-            }
-          }
-          if (request._ === 'contacts.getContacts') {
-            return {
-              _: 'contacts.contacts', contacts: [], savedCount: 0,
-              users: [{
-                _: 'user', id: 777, self: true, accessHash: Long.ZERO,
-                firstName: 'Official Relay', phone: '15550001111',
-              }],
-            }
-          }
-          throw Object.assign(new Error('METHOD_INVALID'), { code: 400, text: 'METHOD_INVALID' })
-        },
-        async notifyLoggedIn() {
-          return {
-            _: 'user', id: 777, self: true, accessHash: Long.ZERO,
-            firstName: 'Official Relay', phone: '15550001111',
-          } as tl.RawUser
-        },
-        async destroy() {},
-      }),
-    }
-    let first: Awaited<ReturnType<typeof startApp>> | undefined
-    let second: Awaited<ReturnType<typeof startApp>> | undefined
-    let bridgeClient: TestClient | undefined
-    let relayClient: TestClient | undefined
-
-    try {
-      first = await startApp({ rsaKey, databasePath, authKeyStorePath, relayConfig })
-      const platformLogin = await waitForPlatformLogin(first.ctx, 'static')
-
-      bridgeClient = await TestClient.connect(first.port)
-      const bridgeKey = await doClientHandshake(bridgeClient, first.pubKey)
-      const bridgeSid = new Long(0x11111111, 0x11aa, false)
-      expect(await callRpc(bridgeClient, bridgeKey, bridgeSid, {
-        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
-      }, 2)).toMatchObject({ _: 'auth.loginToken' })
-      const bridgeCode = await callRpc(bridgeClient, bridgeKey, bridgeSid, {
-        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
-        settings: { _: 'codeSettings' },
-      }, 4)
-      expect(await callRpc(bridgeClient, bridgeKey, bridgeSid, {
-        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
-        phoneCodeHash: bridgeCode.phoneCodeHash,
-        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
-      }, 6)).toMatchObject({ _: 'auth.authorization', user: { firstName: 'Static User' } })
-
-      relayClient = await TestClient.connect(first.port)
-      const relayKey = await doClientHandshake(relayClient, first.pubKey)
-      const relaySid = new Long(0x22222222, 0x22aa, false)
-      const relayCode = await callRpc(relayClient, relayKey, relaySid, {
-        _: 'auth.sendCode', phoneNumber: '+15550001111', apiId: 1, apiHash: 'x',
-        settings: { _: 'codeSettings' },
-      }, 4)
-      expect(relayCode).toMatchObject({ _: 'auth.sentCode', phoneCodeHash: 'official-hash' })
-      expect(await callRpc(relayClient, relayKey, relaySid, {
-        _: 'auth.signIn', phoneNumber: '15550001111',
-        phoneCodeHash: relayCode.phoneCodeHash, phoneCode: '12345',
-      }, 6)).toMatchObject({ _: 'auth.authorization', user: { firstName: 'Official Relay' } })
-
-      const routeRows = await first.ctx.database.get('mtproto_route_binding', {})
-      expect(new Map(routeRows.map(row => [row.authKeyId, row.routeId]))).toEqual(new Map([
-        [Buffer.from(bridgeKey.authKeyId).toString('hex'), 'bridge:default'],
-        [Buffer.from(relayKey.authKeyId).toString('hex'), 'relay:official'],
-      ]))
-
-      bridgeClient.close()
-      relayClient.close()
-      bridgeClient = relayClient = undefined
-      await first.stop()
-      first = undefined
-
-      second = await startApp({ rsaKey, databasePath, authKeyStorePath, relayConfig })
-      bridgeClient = await TestClient.connect(second.port)
-      relayClient = await TestClient.connect(second.port)
-      const bridgeContacts = await callRpc(
-        bridgeClient, bridgeKey, new Long(0x33333333, 0x33aa, false),
-        { _: 'contacts.getContacts', hash: Long.ZERO }, 8,
-      )
-      const relayContacts = await callRpc(
-        relayClient, relayKey, new Long(0x44444444, 0x44aa, false),
-        { _: 'contacts.getContacts', hash: Long.ZERO }, 8,
-      )
-      expect(bridgeContacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
-      expect(relayContacts.users.map((user: any) => user.firstName)).toEqual(['Official Relay'])
-      expect(upstreamCalls.filter(method => method === 'contacts.getContacts')).toHaveLength(1)
-    } finally {
-      bridgeClient?.close()
-      relayClient?.close()
-      await second?.stop()
-      await first?.stop()
-      await rm(directory, { recursive: true, force: true })
     }
   }, 15000)
 })

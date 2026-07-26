@@ -807,7 +807,6 @@ export class ServerSession {
       authKeyId: this._permAuthKey.ready ? this._permAuthKey.id : null,
       sessionId: this._sessionId,
       isAuthorized: this._authorized,
-      routeId: null,
       sendUpdate: (update) => this.sendUpdate(update),
       getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
       setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),

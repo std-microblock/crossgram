@@ -1,4 +1,3 @@
-routeId: 向 MTProto 服务公开的账户路由标识。
 dcId: 网桥向 Telegram 客户端公布的数据中心 ID。
 serverHost: 向 Telegram 客户端公布的 MTProto 主机地址。
 serverPort: 向 Telegram 客户端公布的 MTProto 端口。
