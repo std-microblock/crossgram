@@ -1,4 +1,5 @@
 import type { mtp, tl } from '@mtcute/core'
+import type Long from 'long'
 import type { ServerRpcContext } from './context.js'
 import { RpcError, RpcErrors, isRpcError, toRpcError } from './errors.js'
 
@@ -38,12 +39,30 @@ export interface UnwrappedRpcRequest {
   request: tl.RpcMethod
   /** Layer declared by invokeWithLayer, if this request negotiated one. */
   apiLayer: number | null
+  /** Earlier MTProto message ids that must finish before this request runs. */
+  afterMessageIds: readonly Long[]
+}
+
+const RPC_WRAPPER_METHODS = new Set([
+  'initConnection',
+  'invokeAfterMsg',
+  'invokeAfterMsgs',
+  'invokeWithLayer',
+  'invokeWithMessagesRange',
+  'invokeWithTakeout',
+  'invokeWithoutUpdates',
+])
+
+/** Whether a decoded TL object is an API RPC method or a known RPC envelope. */
+export function isRpcRequestObject(method: string): boolean {
+  return method.includes('.') || RPC_WRAPPER_METHODS.has(method)
 }
 
 /** Unwrap Telegram RPC envelopes while explicitly returning invokeWithLayer.layer. */
 export function unwrapRpcRequest(request: tl.RpcMethod): UnwrappedRpcRequest {
   let req = request
   let apiLayer: number | null = null
+  const afterMessageIds: Long[] = []
   for (;;) {
     const method = req._
     if (method === 'invokeWithLayer') {
@@ -56,11 +75,23 @@ export function unwrapRpcRequest(request: tl.RpcMethod): UnwrappedRpcRequest {
       req = (req as unknown as { query: tl.RpcMethod }).query
       continue
     }
-    if (method === 'invokeAfterMsg' || method === 'invokeAfterMsgs' || method === 'invokeWithMessagesRange' || method === 'invokeWithTakeout') {
+    if (method === 'invokeAfterMsg') {
+      const wrapper = req as unknown as { msgId: Long, query: tl.RpcMethod }
+      afterMessageIds.push(wrapper.msgId)
+      req = wrapper.query
+      continue
+    }
+    if (method === 'invokeAfterMsgs') {
+      const wrapper = req as unknown as { msgIds: Long[], query: tl.RpcMethod }
+      afterMessageIds.push(...wrapper.msgIds)
+      req = wrapper.query
+      continue
+    }
+    if (method === 'invokeWithMessagesRange' || method === 'invokeWithTakeout') {
       req = (req as unknown as { query: tl.RpcMethod }).query
       continue
     }
-    return { request: req, apiLayer }
+    return { request: req, apiLayer, afterMessageIds }
   }
 }
 
