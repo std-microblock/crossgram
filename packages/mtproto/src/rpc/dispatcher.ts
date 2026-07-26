@@ -13,8 +13,13 @@ export interface BareVector {
   readonly items: readonly tl.TlObject[]
 }
 
-/** Result of an RPC call — a TL response object, a bare vector, or an MTProto rpc_error. */
-export type RpcResult = tl.TlObject | BareVector | mtp.RawMt_rpc_error
+/** A bare Bool constructor serialized directly inside `rpc_result`. */
+export interface BareBool {
+  readonly _: 'boolTrue' | 'boolFalse'
+}
+
+/** Result of an RPC call — a TL response object, bare result, or MTProto rpc_error. */
+export type RpcResult = tl.TlObject | BareBool | BareVector | mtp.RawMt_rpc_error
 
 /** Build a bare `Vector<X>` RPC result (e.g. for `users.getUsers`). */
 export function bareVector(items: readonly tl.TlObject[]): BareVector {

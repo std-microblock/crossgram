@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   expandTelegramStrippedThumbnail, IMPlatformService, IMStickerService,
-} from '@mtproto-relay/bridge'
+} from '../../bridge/src/index.js'
 import type {
   IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMTransferProgress, PlatformSession,
-} from '@mtproto-relay/bridge'
-import { StaticPlatform, type StaticMediaLocator } from '@mtproto-relay/platform-static'
-import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
+} from '../../bridge/src/index.js'
+import { StaticPlatform, type StaticMediaLocator } from '../../platform-static/src/index.js'
+import * as staticPlatformPlugin from '../../platform-static/src/index.js'
 
 const session: PlatformSession = {
   platformSessionId: 'static-session', platformId: 'static', userId: 'self', credentials: {}, metadata: {},
@@ -59,6 +59,11 @@ function loadedStaticPlugin(id: string, config: staticPlatformPlugin.Config = {}
   return plugin
 }
 
+async function waitForPlugin(handle: ReturnType<Context['plugin']>): Promise<void> {
+  const fiber = Object.getPrototypeOf(handle) as { await(): Promise<unknown> }
+  await fiber.await()
+}
+
 describe('StaticPlatform', () => {
   it('registers multiple Cordis plugin instances and disposes them independently', async () => {
     const ctx = new Context()
@@ -66,14 +71,17 @@ describe('StaticPlatform', () => {
       new IMPlatformService(serviceCtx)
       new IMStickerService(serviceCtx)
     })
+    await waitForPlugin(service)
     const first = ctx.plugin(loadedStaticPlugin('static-one'))
     const second = ctx.plugin(loadedStaticPlugin('static-two', { transferChunkSize: 4 }))
-    await Promise.all([service, first, second])
+    await Promise.all([waitForPlugin(first), waitForPlugin(second)])
 
     expect(ctx.imPlatform.ids).toEqual(['static-one', 'static-two'])
-    expect(ctx.imPlatform.require('static-one')).toBeInstanceOf(StaticPlatform)
-    expect(ctx.imPlatform.require('static-two')).toBeInstanceOf(StaticPlatform)
-    expect(ctx.imPlatform.require('static-one')).not.toBe(ctx.imPlatform.require('static-two'))
+    const firstPlatform = ctx.imPlatform.require('static-one')
+    const secondPlatform = ctx.imPlatform.require('static-two')
+    expect(firstPlatform).toBeInstanceOf(StaticPlatform)
+    expect(secondPlatform).toBeInstanceOf(StaticPlatform)
+    expect(firstPlatform === secondPlatform).toBe(false)
     expect(ctx.imSticker.ids).toEqual([
       'static-one:native', 'static-one:plugin', 'static-two:native', 'static-two:plugin',
     ])
@@ -94,9 +102,10 @@ describe('StaticPlatform', () => {
       new IMPlatformService(serviceCtx)
       new IMStickerService(serviceCtx)
     })
+    await waitForPlugin(service)
     const plugin = ctx.plugin(loadedStaticPlugin('static-default'))
     try {
-      await Promise.all([service, plugin])
+      await waitForPlugin(plugin)
       const events: import('@mtproto-relay/bridge').IMEvent[] = []
       const unsubscribe = await ctx.imPlatform.require('static-default').subscribe(session, (event) => { events.push(event) })
       await vi.advanceTimersByTimeAsync(10_000)
@@ -115,9 +124,10 @@ describe('StaticPlatform', () => {
       new IMPlatformService(serviceCtx)
       new IMStickerService(serviceCtx)
     })
+    await waitForPlugin(service)
     const plugin = ctx.plugin(loadedStaticPlugin('static-catalog'))
     try {
-      await Promise.all([service, plugin])
+      await waitForPlugin(plugin)
       const platform = ctx.imPlatform.require('static-catalog')
       expect(platform.capabilities.stickers).toEqual({
         native: true, upload: true, formats: ['static', 'video'],
