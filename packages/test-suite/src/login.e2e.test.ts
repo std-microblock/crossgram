@@ -207,27 +207,104 @@ async function sendRpc(
   sub: number,
 ): Promise<any> {
   const body = TlBinaryWriter.serializeObject(__tlWriterMap, obj as any)
+  return sendRawRpc(client, key, sessionId, body, sub, String((obj as any)._))
+}
+
+async function sendRawRpc(
+  client: TestClient,
+  key: ClientKey,
+  sessionId: Long,
+  body: Uint8Array,
+  sub: number,
+  method: string,
+): Promise<any> {
   await client.send(clientEncrypt(key, body, key.salt, sessionId, sub))
   for (let i = 0; i < 12; i++) {
-    const reader = clientDecrypt(key, await readRpcFrame(client, String((obj as any)._)))
-    const saved = reader.pos
-    const id = reader.uint()
-    if (id === 0xf35c6d01) {
-      reader.long(true)
-      const rid = reader.uint()
-      if (rid === 0x997275b5) return { _: 'boolTrue' }
-      if (rid === 0xbc799737) return { _: 'boolFalse' }
-      if (rid === 0x1cb5c415) {
-        const count = reader.uint()
-        return Array.from({ length: count }, () => reader.object())
-      }
-      reader.pos -= 4
-      return reader.object()
-    }
-    reader.pos = saved
+    const reader = clientDecrypt(key, await readRpcFrame(client, method))
+    const rpcResult = decodeRpcResult(reader)
+    if (rpcResult) return rpcResult.result
     try { reader.object() } catch { /* service msg */ }
   }
   throw new Error('no rpc_result')
+}
+
+function decodeRpcResult(reader: TlBinaryReader): { requestMessageId: Long, result: any } | null {
+  const saved = reader.pos
+  if (reader.uint() !== 0xf35c6d01) {
+    reader.pos = saved
+    return null
+  }
+  const requestMessageId = reader.long(true)
+  const constructor = reader.uint()
+  if (constructor === 0x997275b5) return { requestMessageId, result: { _: 'boolTrue' } }
+  if (constructor === 0xbc799737) return { requestMessageId, result: { _: 'boolFalse' } }
+  if (constructor === 0x1cb5c415) {
+    const count = reader.uint()
+    return {
+      requestMessageId,
+      result: Array.from({ length: count }, () => reader.object()),
+    }
+  }
+  reader.pos -= 4
+  return { requestMessageId, result: reader.object() }
+}
+
+async function sendRpcContainer(
+  client: TestClient,
+  key: ClientKey,
+  sessionId: Long,
+  bodies: readonly Uint8Array[],
+  sub: number,
+): Promise<any[]> {
+  const messageIds = bodies.map((_, index) => makeMsgId(sub + (index + 1) * 4))
+  const size = 8 + bodies.reduce((total, body) => total + 16 + body.length, 0)
+  const container = TlBinaryWriter.manual(size)
+  container.uint(0x73f1f8dc)
+  container.uint(bodies.length)
+  bodies.forEach((body, index) => {
+    container.long(messageIds[index])
+    container.uint(index * 2 + 1)
+    container.uint(body.length)
+    container.raw(body)
+  })
+  await client.send(clientEncrypt(key, container.result(), key.salt, sessionId, sub))
+
+  const byMessageId = new Map<string, any>()
+  for (let i = 0; i < 24 && byMessageId.size < bodies.length; i++) {
+    const reader = clientDecrypt(key, await readRpcFrame(client, 'msg_container'))
+    const rpcResult = decodeRpcResult(reader)
+    if (rpcResult) {
+      byMessageId.set(rpcResult.requestMessageId.toString(), rpcResult.result)
+      continue
+    }
+    try { reader.object() } catch { /* service msg */ }
+  }
+  if (byMessageId.size !== bodies.length) throw new Error('missing container rpc_result')
+  return messageIds.map(id => byMessageId.get(id.toString()))
+}
+
+function telegramAndroidRegisterDevice(token: string): Uint8Array {
+  const encoded = shortTlString(token)
+  const writer = TlBinaryWriter.manual(8 + encoded.length)
+  writer.uint(0x637ea878)
+  writer.uint(7)
+  writer.raw(encoded)
+  return writer.result()
+}
+
+function telegramAndroidGetLanguages(): Uint8Array {
+  const writer = TlBinaryWriter.manual(4)
+  writer.uint(0x800fd57d)
+  return writer.result()
+}
+
+function shortTlString(value: string): Uint8Array {
+  const bytes = new TextEncoder().encode(value)
+  if (bytes.length >= 254) throw new Error('test helper only supports short TL strings')
+  const result = new Uint8Array(Math.ceil((bytes.length + 1) / 4) * 4)
+  result[0] = bytes.length
+  result.set(bytes, 1)
+  return result
 }
 
 async function readRpcFrame(client: TestClient, method: string): Promise<Uint8Array> {
@@ -2972,6 +3049,82 @@ describe('bridge login e2e', () => {
       await second?.stop()
       await first?.stop()
       await rm(directory, { recursive: true, force: true })
+    }
+  }, 15000)
+
+  it('accepts Telegram Android compatibility RPCs without dropping a batched sendMessage', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x6abcde00, 0x6abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 4)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 6)
+
+      expect(await sendRawRpc(
+        client,
+        key,
+        sid,
+        telegramAndroidRegisterDevice('internal-push-token'),
+        8,
+        'account.registerDevice#637ea878',
+      )).toEqual({ _: 'boolTrue' })
+
+      const contacts = await callRpc(client, key, sid, {
+        _: 'contacts.getContacts', hash: Long.ZERO,
+      }, 12)
+      const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      expect(alice).toMatchObject({ _: 'user', id: expect.any(Number) })
+
+      const sendMessage = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'messages.sendMessage',
+        peer: {
+          _: 'inputPeerUser', userId: alice.id,
+          accessHash: alice.accessHash ?? Long.ZERO,
+        },
+        message: 'sent after legacy langpack probe',
+        randomId: Long.fromString('7000000000000001'),
+      } as any)
+      const [languages, sendResult] = await sendRpcContainer(
+        client,
+        key,
+        sid,
+        [telegramAndroidGetLanguages(), sendMessage],
+        20,
+      )
+
+      expect(languages).toEqual([])
+      expect(sendResult).toMatchObject({
+        _: 'updateShortSentMessage',
+        id: expect.any(Number),
+        date: expect.any(Number),
+      })
+
+      expect(await callRpc(client, key, sid, {
+        _: 'messages.getHistory',
+        peer: {
+          _: 'inputPeerUser', userId: alice.id,
+          accessHash: alice.accessHash ?? Long.ZERO,
+        },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 20,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 32)).toMatchObject({
+        messages: expect.arrayContaining([
+          expect.objectContaining({ message: 'sent after legacy langpack probe', out: true }),
+        ]),
+      })
+    } finally {
+      client?.close()
+      await stop()
     }
   }, 15000)
 
