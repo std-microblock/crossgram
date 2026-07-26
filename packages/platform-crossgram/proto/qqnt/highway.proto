@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package qqnt.highway;
+
+message HighwayRequestHead {
+  HighwayBaseHead base = 1;
+  HighwaySegmentHead segment = 2;
+  bytes extend_info = 3;
+  uint32 field4 = 4;
+  HighwayLoginSigHead login_sig = 5;
+}
+
+message HighwayResponseHead {
+  HighwaySegmentHead segment = 2;
+  int32 error_code = 3;
+}
+
+message HighwayBaseHead {
+  uint32 version = 1;
+  string self_uin = 2;
+  string command = 3;
+  uint32 sequence = 4;
+  uint32 app_id = 6;
+  uint32 data_flag = 7;
+  uint32 command_id = 8;
+}
+
+message HighwaySegmentHead {
+  uint64 file_size = 2;
+  uint64 offset = 3;
+  uint32 length = 4;
+  int32 return_code = 5;
+  bytes ticket = 6;
+  bytes chunk_md5 = 8;
+  bytes file_md5 = 9;
+}
+
+message HighwayLoginSigHead {
+  uint32 field1 = 1;
+  uint32 app_id = 3;
+}

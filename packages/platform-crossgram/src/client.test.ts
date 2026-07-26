@@ -10,6 +10,16 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(chunks)
 }
 
+function highwayResponse(): Buffer {
+  return Buffer.from([0x28, 0, 0, 0, 0, 0, 0, 0, 0, 0x29])
+}
+
+function highwayBody(frame: Buffer): Buffer {
+  const headLength = frame.readUInt32BE(1)
+  const bodyLength = frame.readUInt32BE(5)
+  return frame.subarray(9 + headLength, 9 + headLength + bodyLength)
+}
+
 describe('QQNTClient streaming transport', () => {
   let server: Server | undefined
   afterEach(async () => {
@@ -64,17 +74,38 @@ describe('QQNTClient streaming transport', () => {
     expect(requestUrl).toBe('/conversations/group%2F1/search?q=%E6%B5%8B%E8%AF%95+key&cursor=opaque&limit=25&fromUserId=sender&minTimestamp=10&maxTimestamp=20&mediaKind=image')
   })
 
-  it('streams upload chunks and reports monotonic progress', async () => {
-    const received: Buffer[] = []
+  it('streams media directly to QQ Highway and posts only CDN metadata to the local bridge', async () => {
+    const highwayFrames: Buffer[] = []
+    const localMessageBodies: Buffer[] = []
     let manifest: Record<string, any> | undefined
     server = createServer(async (request, response) => {
-      const encoded = request.headers['x-qqnt-manifest']
-      if (typeof encoded === 'string') manifest = JSON.parse(Buffer.from(encoded, 'base64url').toString())
-      try {
-        for await (const chunk of request) received.push(Buffer.from(chunk))
-      } catch {
+      if (request.url === '/uploads/prepare') {
+        const body = JSON.parse((await collect(request)).toString())
+        expect(body).toMatchObject({ conversationId: '1:uid', media: {
+          kind: 'file', name: 'x.mp4', size: 5,
+          md5: '7cfdd07889b3295d6a550914ab35e068',
+        } })
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          prepared: { kind: 'file', fileUuid: 'file-uuid', fileHash: 'file-hash', exists: false, commandId: 95 },
+          highway: {
+            servers: [{ host: '127.0.0.1', port: (server!.address() as { port: number }).port }],
+            ticket: Buffer.from('ticket').toString('base64url'),
+            extendInfo: Buffer.from('extend').toString('base64url'),
+            selfUin: '1715311957', commandId: 95, sequenceStart: 71,
+            blockSize: 2, fileSize: 5, fileMd5: '7cfdd07889b3295d6a550914ab35e068',
+          },
+        }))
         return
       }
+      if (request.url?.startsWith('/cgi-bin/httpconn?')) {
+        highwayFrames.push(await collect(request))
+        response.end(highwayResponse())
+        return
+      }
+      const encoded = request.headers['x-qqnt-manifest']
+      if (typeof encoded === 'string') manifest = JSON.parse(Buffer.from(encoded, 'base64url').toString())
+      localMessageBodies.push(await collect(request))
       response.setHeader('content-type', 'application/json')
       response.end(JSON.stringify({
         id: 'sent', conversationId: '1:uid', senderId: 'self', timestamp: 1, outgoing: true,
@@ -94,9 +125,11 @@ describe('QQNTClient streaming transport', () => {
       source: { size: 5, async *stream() { streamCalls++; yield* chunks } },
     }], { onProgress: (item) => { progress.push(item.transferredBytes) } }, 'origin-1')
     expect(message.id).toBe('sent')
-    expect(Buffer.concat(received)).toEqual(Buffer.from([1, 2, 3, 4, 5]))
-    expect(progress).toEqual([2, 5])
+    expect(Buffer.concat(highwayFrames.map(highwayBody))).toEqual(Buffer.from([1, 2, 3, 4, 5]))
+    expect(highwayFrames.map((frame) => frame.readUInt32BE(5))).toEqual([2, 2, 1])
+    expect(progress).toEqual([2, 4, 5])
     expect(streamCalls).toBe(2)
+    expect(localMessageBodies).toEqual([Buffer.alloc(0)])
     expect(manifest).toMatchObject({
       conversationId: '1:uid', originRequestId: 'origin-1',
       media: [{
@@ -105,7 +138,11 @@ describe('QQNTClient streaming transport', () => {
         sha1: '11966ab9c099f8fabefac54c08d5be2bd8c903af',
         file10MMd5: '7cfdd07889b3295d6a550914ab35e068',
       }],
+      uploadedMedia: [{
+        kind: 'file', fileUuid: 'file-uuid', fileHash: 'file-hash', exists: false, commandId: 95,
+      }],
     })
+    expect(manifest).not.toHaveProperty('mediaFraming')
   })
 
   it('does not silently accept a short media source', async () => {
@@ -128,13 +165,24 @@ describe('QQNTClient streaming transport', () => {
     }])).rejects.toThrow(/incomplete media source/)
   })
 
-  it('frames multiple media streams independently and reports per-item progress', async () => {
-    const received: Buffer[] = []
+  it('uses fast-upload metadata for multiple media without reopening or posting their bytes', async () => {
+    const localBodies: Buffer[] = []
     let manifest: Record<string, any> | undefined
     server = createServer(async (request, response) => {
+      if (request.url === '/uploads/prepare') {
+        const body = JSON.parse((await collect(request)).toString()) as { media: { name: string } }
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          prepared: {
+            kind: 'image', fileUuid: `${body.media.name}-uuid`,
+            msgInfo: Buffer.from(`${body.media.name}-msg-info`).toString('base64url'),
+          },
+        }))
+        return
+      }
       const encoded = request.headers['x-qqnt-manifest']
       if (typeof encoded === 'string') manifest = JSON.parse(Buffer.from(encoded, 'base64url').toString())
-      for await (const chunk of request) received.push(Buffer.from(chunk))
+      localBodies.push(await collect(request))
       response.setHeader('content-type', 'application/json')
       response.end(JSON.stringify({
         id: 'sent', conversationId: '1:uid', senderId: 'self', timestamp: 1, outgoing: true, parts: [],
@@ -146,22 +194,25 @@ describe('QQNTClient streaming transport', () => {
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
     const progress: Array<[number, number]> = []
+    const streamCalls = [0, 0]
 
     await client.sendMessage('1:uid', undefined, [{
-      kind: 'image', name: 'one.png', source: { async *stream() { yield Uint8Array.of(1, 2) } },
+      kind: 'image', name: 'one.png', source: { async *stream() { streamCalls[0]++; yield Uint8Array.of(1, 2) } },
     }, {
-      kind: 'image', name: 'two.png', source: { async *stream() { yield Uint8Array.of(3, 4, 5) } },
+      kind: 'image', name: 'two.png', source: { async *stream() { streamCalls[1]++; yield Uint8Array.of(3, 4, 5) } },
     }], { onProgress: (item) => { progress.push([item.mediaIndex, item.transferredBytes]) } })
 
-    expect(Buffer.concat(received)).toEqual(Buffer.from([
-      0, 0, 0, 2, 1, 2, 0, 0, 0, 0,
-      0, 0, 0, 3, 3, 4, 5, 0, 0, 0, 0,
-    ]))
+    expect(localBodies).toEqual([Buffer.alloc(0)])
     expect(progress).toEqual([[0, 2], [1, 3]])
+    expect(streamCalls).toEqual([1, 1])
     expect(manifest).toMatchObject({
-      mediaFraming: 'length-prefixed-v1',
       media: [{ name: 'one.png' }, { name: 'two.png' }],
+      uploadedMedia: [
+        { kind: 'image', fileUuid: 'one.png-uuid' },
+        { kind: 'image', fileUuid: 'two.png-uuid' },
+      ],
     })
+    expect(manifest).not.toHaveProperty('mediaFraming')
   })
 
   it('downloads user and group avatars from platform-constructed qlogo URLs', async () => {
