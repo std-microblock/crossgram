@@ -42,6 +42,23 @@ async function createStore() {
 }
 
 describe('MessageStore', () => {
+  it('advances its cache revision on writes but not reads', async () => {
+    const { store } = await createStore()
+    expect(store.revision).toBe(0)
+
+    await store.listUsers(session.platformId)
+    expect(store.revision).toBe(0)
+
+    await store.upsertUser(session, { id: 'revision-user', firstName: 'Revision' })
+    expect(store.revision).toBe(1)
+
+    await store.getUser(session.platformId, 'revision-user')
+    expect(store.revision).toBe(1)
+
+    await store.upsertConversation(session, { id: 'revision-room', kind: 'group', title: 'Revision' })
+    expect(store.revision).toBe(2)
+  })
+
   it('reserves RPC pts without advancing the push sequence', async () => {
     const { store } = await createStore()
     await store.prepareUpdateDelivery('push-1', session.platformSessionId, 2, 1_800_000_000)

@@ -440,6 +440,8 @@ describe('bridge login e2e', () => {
       })
       const persistedBefore = await ctx.database.get('mtproto_im_message', { conversationId: conversation.id })
 
+      const databaseGet = vi.spyOn(ctx.database, 'get')
+      const databaseSelect = vi.spyOn(ctx.database, 'select')
       const repeated = await callRpc(client, key, sid, request, 10)
       const persistedAfter = await ctx.database.get('mtproto_im_message', { conversationId: conversation.id })
 
@@ -447,6 +449,12 @@ describe('bridge login e2e', () => {
         .toEqual(first.messages.map((item: any) => [item.id, item.message]))
       expect(persistedAfter).toHaveLength(persistedBefore.length)
       expect(getHistory).toHaveBeenCalledTimes(upstreamCallsAfterFirstPage)
+      const historyTables = new Set([
+        'mtproto_im_message', 'mtproto_im_message_alias', 'mtproto_im_message_reaction',
+        'mtproto_tl_message_part', 'mtproto_im_media',
+      ])
+      expect(databaseGet.mock.calls.filter(([table]) => historyTables.has(table))).toHaveLength(1)
+      expect(databaseSelect.mock.calls.filter(([table]) => historyTables.has(table))).toHaveLength(0)
     } finally {
       client?.close()
       await stop()
