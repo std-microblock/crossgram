@@ -4,6 +4,7 @@ import { stat } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { PlatformSession } from '@mtproto-relay/bridge'
+import sharp from 'sharp'
 import { QQNTPlatform } from './index.js'
 
 const enabled = process.env.QQNT_BRIDGE_E2E === '1'
@@ -104,6 +105,8 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     ]
     const imagePath = new URL('../../platform-static/src/test-image.png', import.meta.url)
     const image = await stat(imagePath)
+    const metadata = await sharp(imagePath).metadata()
+    if (!metadata.width || !metadata.height) throw new Error('test PNG dimensions are unavailable')
     for (const target of targets) {
       // A unique trailing payload keeps the PNG decodable while preventing QQ's
       // fast-upload cache from bypassing the real platform-to-Highway stream.
@@ -112,7 +115,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
       const sent = await platform.sendMessage(session, { id: target.id }, {
         parts: [{ type: 'media', media: {
           kind: 'image', name: `direct-${target.peerUin}-${Date.now()}-${basename(imagePath.pathname)}`,
-          mimeType: 'image/png', size,
+          mimeType: 'image/png', size, width: metadata.width, height: metadata.height,
           source: {
             size,
             async *stream() {
@@ -123,7 +126,9 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
         } }],
       })
       expect(sent.conversationId).toBe(target.id)
-      expect(sent.content.parts).toMatchObject([{ type: 'media', media: { kind: 'image' } }])
+      expect(sent.content.parts).toMatchObject([{ type: 'media', media: {
+        kind: 'image', width: metadata.width, height: metadata.height,
+      } }])
     }
   }, 180_000)
 
