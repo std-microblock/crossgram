@@ -747,6 +747,50 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('binds an Android reconnect temp key to the requested stored key after a fresh perm handshake', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      // The login connection establishes the durable account key and attaches
+      // backend state to it.
+      const login = await TestClient.connect(port)
+      const accountKey = await doClientHandshake(login, pubKey, false)
+      const loginSession = new Long(0x21212121, 0x21212121)
+      await login.send(clientEncrypt(
+        accountKey,
+        serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }),
+        accountKey.salt,
+        loginSession,
+        4,
+      ))
+      expect(await readRpcResult(login, accountKey)).toMatchObject({ _: 'help.appConfig', hash: 1 })
+      login.close()
+
+      // Android's next API connection performs a fresh permanent handshake,
+      // then a PFS handshake, but bindTempAuthKey names the durable account key
+      // from the previous connection. The fresh key must not become the RPC
+      // identity after that bind.
+      const resumed = await TestClient.connect(port)
+      const freshKey = await doClientHandshake(resumed, pubKey, false)
+      expect(typed.equal(freshKey.authKeyId, accountKey.authKeyId)).toBe(false)
+      const tempKey = await doClientHandshake(resumed, pubKey, true)
+      const resumedSession = new Long(0x23232323, 0x23232323)
+      await bindTempAuthKey(resumed, accountKey, tempKey, resumedSession)
+
+      await resumed.send(clientEncrypt(
+        tempKey,
+        serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }),
+        tempKey.salt,
+        resumedSession,
+        8,
+      ))
+      expect(await readRpcResult(resumed, tempKey)).toMatchObject({ _: 'help.appConfig', hash: 2 })
+      resumed.close()
+    } finally {
+      await stop()
+    }
+  })
+
   it('resumes a bound PFS key after a req_pq probe for upload and download', async () => {
     await crypto.initialize?.()
     const { port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes, stop } = await startServer()
