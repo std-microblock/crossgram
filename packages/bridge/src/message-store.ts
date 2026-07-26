@@ -78,6 +78,7 @@ const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
   private _writeTail = Promise.resolve()
+  private _revision = 0
 
   constructor(
     private readonly _database: Database,
@@ -85,6 +86,11 @@ export class MessageStore {
     private readonly _updateJournal: UpdateDeliveryJournal = new MemoryUpdateDeliveryJournal(updateDeliveryRetention),
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
+
+  /** Monotonic process-local version used to invalidate materialized read caches. */
+  get revision(): number {
+    return this._revision
+  }
 
   async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
     return this._write(() => this._database.withTransaction(async (database) =>
@@ -1302,7 +1308,9 @@ export class MessageStore {
     }
     const executeAt = performance.now()
     try {
-      return await callback()
+      const result = await callback()
+      this._revision++
+      return result
     } finally {
       release()
       const executeMs = performance.now() - executeAt
