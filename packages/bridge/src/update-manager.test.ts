@@ -234,9 +234,9 @@ describe('UpdateManager', () => {
     const payload = roundTrip(sent[0].update) as tl.RawUpdates
     const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
     expect(update.message).toMatchObject({
-      _: 'message', message: '分享 · 示例资讯\n打开链接',
+      _: 'message', message: '分享 · 示例资讯',
       entities: [{
-        _: 'messageEntityTextUrl', offset: '分享 · 示例资讯\n'.length, length: '打开链接'.length,
+        _: 'messageEntityTextUrl', offset: 0, length: '分享 · 示例资讯'.length,
         url: 'https://example.com/live',
       }],
       media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {

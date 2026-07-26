@@ -545,8 +545,7 @@ export function messagePartText(part: IMMessagePart<unknown>): string {
   if (part.type !== 'card') return ''
   const label = cardKindLabel(part.card.kind)
   const source = part.card.source?.trim()
-  const summary = source ? `${label} · ${source}` : label
-  return cardUrl(part.card) ? `${summary}\n${cardActionLabel(part.card.kind)}` : summary
+  return source ? `${label} · ${source}` : label
 }
 
 export function cardUrl(card: IMMessageCard): string | undefined {
@@ -559,15 +558,6 @@ export function cardUrl(card: IMMessageCard): string | undefined {
   } catch {
     return
   }
-}
-
-export function cardActionLabel(kind: IMMessageCard['kind']): string {
-  if (kind === 'mini-app') return '打开小程序'
-  if (kind === 'music') return '打开音乐'
-  if (kind === 'contact') return '查看联系人'
-  if (kind === 'location') return '查看位置'
-  if (kind === 'application') return '打开应用'
-  return '打开链接'
 }
 
 function cardKindLabel(kind: IMMessageCard['kind']): string {
