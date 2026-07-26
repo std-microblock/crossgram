@@ -114,9 +114,7 @@ describe('Telegram Android capture RPC e2e', () => {
 
   it('serializes bare Bool acknowledgements exactly as rpc_result payloads', async () => {
     await expect(roundTripRpc({
-      _: 'account.updateNotifySettings',
-      peer: { _: 'inputNotifyPeer', peer: self },
-      settings: { _: 'inputPeerNotifySettings' },
+      _: 'messages.reportReadMetrics', peer: self, metrics: [],
     })).resolves.toEqual({ _: 'boolTrue' })
   })
 

@@ -212,6 +212,14 @@ export interface DraftRow {
   date: number
 }
 
+export interface NotificationSettingsRow {
+  id: string
+  platformSessionId: string
+  scope: string
+  settings: JsonObject
+  updatedAt: Date
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
@@ -234,6 +242,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_im_message_reaction: IMMessageReactionRow
     mtproto_sticker_set_install: StickerSetInstallRow
     mtproto_draft: DraftRow
+    mtproto_notification_settings: NotificationSettingsRow
   }
 }
 
@@ -407,6 +416,14 @@ export function defineModels(ctx: Context): void {
   }, {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'platformConversationId', 'topMsgId']],
+    indexes: ['platformSessionId'],
+  })
+
+  ctx.model.extend('mtproto_notification_settings', {
+    id: 'string', platformSessionId: 'string', scope: 'text', settings: 'json', updatedAt: 'timestamp',
+  }, {
+    primary: 'id',
+    unique: [['platformSessionId', 'scope']],
     indexes: ['platformSessionId'],
   })
 }
