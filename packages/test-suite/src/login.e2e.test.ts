@@ -1207,6 +1207,20 @@ describe('bridge login e2e', () => {
         startupSub += 2
       }
 
+      // Android asks for built-in dice/status sets with hash=0 during startup.
+      // Unsupported packs must be an RPC error: stickerSetNotModified has no
+      // `set` payload and Android's TL subclass would dereference it and crash.
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetDice', emoticon: '🎲' }, hash: 0,
+      }, 160)).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'STICKERSET_INVALID',
+      })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getStickerSet', stickerset: { _: 'inputStickerSetEmojiDefaultStatuses' }, hash: 0,
+      }, 162)).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'STICKERSET_INVALID',
+      })
+
       // Sticker providers are aggregated by bridge: static exposes one native
       // provider and one standalone/plugin provider in the same account.
       const allStickers = await callRpc(resumed, key, resumedSid, {

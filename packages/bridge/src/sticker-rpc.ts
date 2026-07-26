@@ -71,7 +71,11 @@ export class StickerRpc {
       || req.stickerset._ === 'inputStickerSetDice'
       || req.stickerset._ === 'inputStickerSetEmojiDefaultStatuses'
       || req.stickerset._ === 'inputStickerSetEmojiDefaultTopicIcons') {
-      return { _: 'messages.stickerSetNotModified' }
+      // NotModified is only valid when the request hash matched a previously
+      // loaded full set. Android represents this constructor as a subclass of
+      // TL_messages_stickerSet, so returning it for an initial hash=0 request
+      // makes MediaDataController dereference its absent `set` field and crash.
+      throw new RpcError(400, 'STICKERSET_INVALID')
     }
     const ref = await this._resolveSet(req.stickerset)
     const provider = this._registry.require(ref.providerId)
