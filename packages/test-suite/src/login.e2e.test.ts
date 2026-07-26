@@ -384,6 +384,79 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
+  it('serves every optional RPC observed in the Telegram Android layer-228 capture', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x7654321f, 0x4abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+
+      const self = { _: 'inputPeerSelf' }
+      const calls: Array<[object, unknown]> = [
+        [{ _: 'messages.getEmojiKeywords', langCode: 'zh-hans' }, {
+          _: 'emojiKeywordsDifference', langCode: 'zh-hans', keywords: [],
+        }],
+        [{ _: 'messages.getOnlines', peer: self }, { _: 'chatOnlines', onlines: 0 }],
+        [{
+          _: 'messages.getSavedHistory', peer: self, offsetId: 0, offsetDate: 0,
+          addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+        }, { _: 'messages.messages', messages: [] }],
+        [{
+          _: 'messages.getMessageReadParticipants', peer: self, msgId: 1,
+        }, []],
+        [{
+          _: 'messages.getSearchCounters', peer: self,
+          filters: [{ _: 'inputMessagesFilterPhotos' }, { _: 'inputMessagesFilterVideo' }],
+        }, [
+          { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterPhotos' }, count: 0 },
+          { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterVideo' }, count: 0 },
+        ]],
+        [{
+          _: 'messages.reportReadMetrics', peer: self, metrics: [],
+        }, { _: 'boolTrue' }],
+        [{
+          _: 'channels.getChannelRecommendations',
+        }, { _: 'messages.chats', chats: [] }],
+        [{
+          _: 'payments.getSavedStarGifts', peer: self, offset: '', limit: 100,
+        }, { _: 'payments.savedStarGifts', count: 0, gifts: [] }],
+        [{
+          _: 'payments.getStarGiftCollections', peer: self, hash: Long.ZERO,
+        }, { _: 'payments.starGiftCollections', collections: [] }],
+        [{
+          _: 'stories.getAlbums', peer: self, hash: Long.ZERO,
+        }, { _: 'stories.albums', albums: [] }],
+        [{
+          _: 'stories.getPeerMaxIDs', id: [self, self],
+        }, [{ _: 'recentStory' }, { _: 'recentStory' }]],
+        [{
+          _: 'premium.getBoostsStatus', peer: self,
+        }, { _: 'premium.boostsStatus', level: 0, currentLevelBoosts: 0, boosts: 0 }],
+      ]
+
+      for (let index = 0; index < calls.length; index++) {
+        const [request, expected] = calls[index]!
+        const response = await callRpc(client, key, sid, request, 6 + index * 2)
+        expect(response).toMatchObject(expected as object)
+        expect(response?._).not.toBe('mt_rpc_error')
+      }
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('keeps users seen only in dialogs out of MTProto contacts', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
