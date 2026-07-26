@@ -1,7 +1,7 @@
 /**
- * Process-local backend state shared by every connection using the same
- * permanent auth key. Backends persist durable bindings separately; this store
- * keeps their hydrated state (ID maps, subscriptions, counters) consistent
+ * Process-local bridge state shared by every connection using the same
+ * permanent auth key. The bridge persists durable account bindings separately;
+ * this store keeps hydrated state (ID maps, subscriptions, counters) consistent
  * across Telegram Desktop's parallel main/upload/download connections.
  */
 export class AuthKeyDataStore {

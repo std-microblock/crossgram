@@ -21,7 +21,6 @@
     "@mtproto-relay/platform-matrix": "workspace:*",
     "@mtproto-relay/platform-satori": "workspace:*",
     "@mtproto-relay/platform-static": "workspace:*",
-    "@mtproto-relay/relay": "workspace:*",
     "@mtproto-relay/telegram-resources": "workspace:*",
     "@satorijs/core": "^4.6.0",
     "cordis": "^4.0.0-rc.5",
