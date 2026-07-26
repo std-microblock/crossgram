@@ -263,7 +263,11 @@ describe('PlatformDataService', () => {
       if (!query?.before) return { messages: [incoming('2', conversation.id)], nextCursor: 'history-2' }
       return { messages: [incoming('1', conversation.id)] }
     }
-    const data = new PlatformDataService(platform, session, new MessageStore(database))
+    const traces: Array<{ format: string, args: unknown[] }> = []
+    const trace = (format: string, ...args: unknown[]) => traces.push({ format, args })
+    const data = new PlatformDataService(
+      platform, session, new MessageStore(database, undefined, undefined, trace), trace,
+    )
 
     const dialogPage = await data.getDialogsPage()
     const dialogs = dialogPage.dialogs
@@ -282,6 +286,16 @@ describe('PlatformDataService', () => {
     const history = await data.getHistory(conversation.id)
     expect(historyCalls).toBe(1)
     expect(history.messages.map((message) => message.id)).toEqual(['2'])
+    expect(traces).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        format: expect.stringContaining('message store write profile operation=%s queueWaitMs=%d executeMs=%d'),
+        args: expect.arrayContaining(['history-ingest']),
+      }),
+      expect.objectContaining({
+        format: expect.stringContaining('history data profile conversation=%s'),
+        args: expect.arrayContaining([conversation.id]),
+      }),
+    ]))
     await data.getHistory(conversation.id, { limit: 1, before: { id: '2', timestamp: 2 } })
     expect(historyCalls).toBe(2)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(2)

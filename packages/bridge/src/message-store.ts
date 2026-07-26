@@ -74,6 +74,7 @@ export class MessageStore {
     private readonly _database: Database,
     updateDeliveryRetention = UPDATE_DELIVERY_RETENTION,
     private readonly _updateJournal: UpdateDeliveryJournal = new MemoryUpdateDeliveryJournal(updateDeliveryRetention),
+    private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
 
   async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
@@ -140,7 +141,7 @@ export class MessageStore {
         ))
       }
       return results
-    }))
+    }), options.allocation === 'history' ? 'history-ingest' : 'ingest')
   }
 
   async ingestDialogs(session: PlatformSession, dialogs: readonly IMDialog[]): Promise<void> {
@@ -1171,17 +1172,40 @@ export class MessageStore {
     await this._write(() => this._updateJournal.prune(platformSessionId, ACCOUNT_UPDATE_SCOPE))
   }
 
-  private async _write<T>(callback: () => Promise<T>): Promise<T> {
+  private async _write<T>(callback: () => Promise<T>, operation = 'write'): Promise<T> {
+    const queuedAt = performance.now()
     const previous = this._writeTail
     let release!: () => void
     this._writeTail = new Promise<void>((resolve) => { release = resolve })
+    if (operation === 'history-ingest') {
+      this._onTrace?.('message store write profile operation=%s stage=queued', operation)
+    }
     await previous.catch(() => {})
+    const queueWaitMs = performance.now() - queuedAt
+    if (operation === 'history-ingest') {
+      this._onTrace?.(
+        'message store write profile operation=%s stage=acquired queueWaitMs=%d',
+        operation, profileMilliseconds(queueWaitMs),
+      )
+    }
+    const executeAt = performance.now()
     try {
       return await callback()
     } finally {
       release()
+      const executeMs = performance.now() - executeAt
+      if (operation === 'history-ingest' || queueWaitMs >= 25 || executeMs >= 50) {
+        this._onTrace?.(
+          'message store write profile operation=%s queueWaitMs=%d executeMs=%d',
+          operation, profileMilliseconds(queueWaitMs), profileMilliseconds(executeMs),
+        )
+      }
     }
   }
+}
+
+function profileMilliseconds(value: number): number {
+  return Math.round(value * 100) / 100
 }
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
