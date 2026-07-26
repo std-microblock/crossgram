@@ -886,9 +886,24 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const parts = await Promise.all(message.content.parts.map(async (part) => {
       if (part.type === 'sticker') {
         try {
-          return { ...part, sticker: await this.prepareSticker(part.sticker) }
+          const restored = await this.restoreSticker(part.sticker)
+          if (restored) return { ...part, sticker: restored }
         } catch {
-          return part
+          // Treat a failed cache lookup as a miss. Background preparation logs
+          // the actionable error and leaves the placeholder intact.
+        }
+        const locator = part.sticker.locator as unknown as QQStickerReference | undefined
+        if (!locator) return part
+        deferred = true
+        return {
+          ...part,
+          sticker: {
+            ...part.sticker,
+            size: 0,
+            thumbnail: undefined,
+            outline: undefined,
+            locator: { ...locator, deferred: true } as never,
+          },
         }
       }
       if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) return part
@@ -1141,6 +1156,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       size: sticker.size,
       width: sticker.width,
       height: sticker.height,
+    })
+  }
+
+  private restoreSticker(sticker: IMSticker): Promise<IMSticker | undefined> {
+    const reference = sticker.locator as unknown as QQStickerReference | undefined
+    if (!this.mediaCache || !reference) return Promise.resolve(undefined)
+    return this.mediaCache.restoreSticker({
+      ...sticker,
+      format: reference.animated ? 'animated' : 'static',
+      mimeType: reference.animated ? 'image/gif' : 'image/png',
     })
   }
 

@@ -13,6 +13,7 @@ import { MessageStore, StickerRpc, type IngestResult, type PlatformSession } fro
 import { defineModels } from '../../bridge/src/models.js'
 import { QQNTPlatform } from './index.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
+import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
   platformSessionId: 'qqnt-order-e2e', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
@@ -494,6 +495,125 @@ describe('QQNT deferred history media E2E', () => {
     })
     expect(await collect(platform.downloadMedia(session, ready!.media as any))).toEqual(jpeg)
     expect(await ctx.database.get('mtproto_im_media', {})).toHaveLength(1)
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
+    await unsubscribe()
+  })
+
+  it('persists an empty sticker document and edits the same message after HTTP preparation', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQMediaCacheModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const png = await sharp({
+      create: { width: 24, height: 18, channels: 4, background: { r: 40, g: 120, b: 210, alpha: 1 } },
+    }).png().toBuffer()
+    const releaseSticker = Promise.withResolvers<void>()
+    const stickerRequested = Promise.withResolvers<void>()
+    let assetRequests = 0
+    let server: Server | undefined
+    server = createServer(async (request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/stickers/asset') {
+        assetRequests++
+        stickerRequested.resolve()
+        await releaseSticker.promise
+        response.setHeader('content-type', 'image/png')
+        response.setHeader('content-length', String(png.length))
+        response.end(png)
+        return
+      }
+      response.writeHead(404).end('not found')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-sticker-e2e-'))
+    temporaryDirectories.push(cachePath)
+    const cache = new QQMediaCache({ path: cachePath, database: ctx.database, previewMaxDimension: 10 })
+    const platform = new QQNTPlatform({
+      endpoint: `http://127.0.0.1:${address.port}/v1`,
+    }, 'qqnt:stickers', cache)
+    const provider = new QQStickerProvider(platform.client, 'qqnt:stickers', cache)
+    const conversation = { id: '2:sticker-history', kind: 'group' as const, title: 'Sticker history' }
+    const wireMessage = {
+      id: 'history-sticker', conversationId: conversation.id, senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'sticker' as const,
+        sticker: {
+          stickerId: 'favorite:history-http', title: 'HTTP sticker',
+          format: 'static' as const, mimeType: 'image/png', width: 24, height: 18, size: png.length,
+          reference: {
+            kind: 'favorite' as const, resId: 'history-http', path: '/saved/history.png',
+            name: 'history.png', animated: false as const,
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const store = new MessageStore(ctx.database)
+    const editCompleted = Promise.withResolvers<IngestResult>()
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (event.type !== 'message-edit') return
+      editCompleted.resolve(await store.ingest(session, event.conversation, event.message))
+    })
+
+    const history = await platform.getHistory(session, conversation)
+    const placeholderPart = history.messages[0].content.parts[0]
+    if (placeholderPart.type !== 'sticker') throw new Error('history sticker placeholder is unavailable')
+    expect(placeholderPart.sticker).toMatchObject({
+      format: 'static', mimeType: 'image/webp', size: 0, locator: { deferred: true },
+    })
+    const initial = await store.ingest(session, conversation, history.messages[0], { allocation: 'history' })
+    const requestsBeforePlaceholderRead = assetRequests
+    const placeholderAsset = await provider.openAsset({ session, platformKind: 'qq' }, placeholderPart.sticker)
+    expect(await collect(placeholderAsset.source.stream())).toHaveLength(0)
+    expect(assetRequests).toBe(requestsBeforePlaceholderRead)
+
+    await stickerRequested.promise
+    expect(assetRequests).toBe(1)
+    releaseSticker.resolve()
+    const edited = await Promise.race([
+      editCompleted.promise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('history sticker edit timed out')), 5_000)),
+    ])
+    expect(edited.projection[0].tlMessageId).toBe(initial.projection[0].tlMessageId)
+    const [stored] = await store.readHistory(session.platformSessionId, conversation.id, { limit: 1 })
+    const readyPart = stored?.content.parts[0]
+    if (readyPart?.type !== 'sticker') throw new Error('prepared history sticker is unavailable')
+    expect(readyPart.sticker).toMatchObject({
+      format: 'static', mimeType: 'image/webp', size: expect.any(Number),
+      locator: expect.not.objectContaining({ deferred: expect.anything() }),
+      thumbnail: { mimeType: 'image/webp', width: 10, height: 8 },
+    })
+    const readyBytes = await collect((await provider.openAsset(
+      { session, platformKind: 'qq' }, readyPart.sticker,
+    )).source.stream())
+    expect(readyBytes.subarray(8, 12).toString()).toBe('WEBP')
+    expect(assetRequests).toBe(1)
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
     await unsubscribe()
   })

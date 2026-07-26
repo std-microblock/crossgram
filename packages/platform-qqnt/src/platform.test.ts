@@ -1066,6 +1066,87 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.downloadFile).toHaveBeenCalledTimes(2)
   }, 30_000)
 
+  it('returns uncached history stickers as empty placeholders and edits them when ready', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-sticker-placeholder-'))
+    temporaryDirectories.push(cachePath)
+    const cache = new QQMediaCache({ path: cachePath, previewMaxDimension: 8 })
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', cache)
+    const provider = new QQStickerProvider(platform.client, 'qqnt:stickers', cache)
+    const png = await sharp({
+      create: { width: 16, height: 12, channels: 4, background: { r: 70, g: 150, b: 220, alpha: 1 } },
+    }).png().toBuffer()
+    const releaseSource = Promise.withResolvers<void>()
+    const sourceStarted = Promise.withResolvers<void>()
+    const edited = Promise.withResolvers<any>()
+    const wireMessage = {
+      id: 'history-sticker', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'sticker' as const,
+        sticker: {
+          stickerId: 'favorite:history-sticker', title: 'History sticker',
+          format: 'static' as const, mimeType: 'image/png', width: 16, height: 12, size: png.length,
+          reference: {
+            kind: 'favorite' as const, resId: 'history-sticker', path: '/saved/history.png',
+            name: 'history.png', animated: false as const,
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.stickerSource = vi.fn(() => ({
+      size: png.length,
+      async *stream() {
+        sourceStarted.resolve()
+        await releaseSource.promise
+        yield png
+      },
+    }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      if (event.type === 'message-edit') edited.resolve(event)
+    })
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'sticker') throw new Error('missing history sticker placeholder')
+    expect(part.sticker).toMatchObject({
+      stickerId: 'favorite:history-sticker', format: 'static', mimeType: 'image/webp',
+      size: 0, locator: { deferred: true },
+    })
+    const callsBeforePlaceholderRead = vi.mocked(platform.client.stickerSource).mock.calls.length
+    const placeholderAsset = await provider.openAsset({ session, platformKind: 'qq' }, part.sticker)
+    const placeholderBytes: Uint8Array[] = []
+    for await (const chunk of placeholderAsset.source.stream()) placeholderBytes.push(chunk)
+    expect(placeholderAsset.size).toBe(0)
+    expect(placeholderBytes).toEqual([])
+    expect(platform.client.stickerSource).toHaveBeenCalledTimes(callsBeforePlaceholderRead)
+
+    await sourceStarted.promise
+    releaseSource.resolve()
+    const update = await edited.promise
+    expect(update).toMatchObject({
+      type: 'message-edit',
+      eventId: 'qqnt-media-ready-v1:2:group:history-sticker',
+      message: { content: { parts: [{ sticker: {
+        stickerId: 'favorite:history-sticker', format: 'static', mimeType: 'image/webp',
+        size: expect.any(Number),
+        locator: expect.not.objectContaining({ deferred: expect.anything() }),
+        thumbnail: { mimeType: 'image/webp', width: 8, height: 6 },
+      } }] } },
+    })
+
+    const cached = await platform.getHistory(session, { id: '2:group' })
+    expect(cached.messages[0].content.parts[0]).toMatchObject({
+      sticker: { size: expect.any(Number), locator: expect.not.objectContaining({ deferred: expect.anything() }) },
+    })
+    expect(platform.client.stickerSource).toHaveBeenCalledTimes(1)
+    await unsubscribe()
+  })
+
   it('projects QQ animated system faces as WebM video stickers without leaking fallback text', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-message-sticker-'))
     temporaryDirectories.push(cachePath)

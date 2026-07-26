@@ -144,6 +144,28 @@ export class QQMediaCache {
     })
   }
 
+  /** Restore an already transformed sticker without opening its upstream source. */
+  async restoreSticker(sticker: IMSticker): Promise<IMSticker | undefined> {
+    const animated = sticker.format === 'animated' || isAnimatedImage(sticker.mimeType)
+    const asset = cachedAsset(
+      this.path,
+      cacheKey(
+        animated ? 'sticker-webm-v1' : 'sticker-webp-v1',
+        sticker.providerId, sticker.stickerId, sticker.version ?? 0, sticker.locator,
+      ),
+      animated ? 'webm' : 'webp',
+      animated ? 'video/webm' : 'image/webp',
+      sticker.width, sticker.height,
+    )
+    if (!asset) return
+    return this.restoreStickerThumbnail({
+      ...this.projectSticker(sticker),
+      size: asset.size,
+      width: asset.width ?? sticker.width,
+      height: asset.height ?? sticker.height,
+    })
+  }
+
   async openSticker(sticker: IMSticker, original: IMStickerAsset): Promise<IMStickerAsset> {
     const animated = sticker.format === 'animated' || isAnimatedImage(original.mimeType)
     const kind = animated ? 'sticker-webm-v1' : 'sticker-webp-v1'
