@@ -149,7 +149,7 @@ describe('rich-media projection', () => {
 
     expect(message).toMatchObject({
       _: 'message',
-      message: '小程序 · 腾讯文档\n打开小程序',
+      message: '小程序 · 腾讯文档',
       media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
         _: 'webPage', url: 'https://docs.qq.com/sheet/example', displayUrl: 'docs.qq.com',
         type: 'app', siteName: '腾讯文档', title: '项目排期', description: '本周项目安排',
@@ -157,7 +157,7 @@ describe('rich-media projection', () => {
       } },
     })
     expect(message.entities).toEqual([{
-      _: 'messageEntityTextUrl', offset: '小程序 · 腾讯文档\n'.length, length: '打开小程序'.length,
+      _: 'messageEntityTextUrl', offset: 0, length: '小程序 · 腾讯文档'.length,
       url: 'https://docs.qq.com/sheet/example',
     }])
     expect(() => wireRoundTrip(result)).not.toThrow()

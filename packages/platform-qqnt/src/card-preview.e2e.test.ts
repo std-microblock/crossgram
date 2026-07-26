@@ -90,9 +90,9 @@ describe('QQNT card preview E2E', () => {
     const projected = result.messages[0] as tl.RawMessage
 
     expect(projected).toMatchObject({
-      _: 'message', message: '分享 · 示例资讯\n打开链接',
+      _: 'message', message: '分享 · 示例资讯',
       entities: [{
-        _: 'messageEntityTextUrl', offset: '分享 · 示例资讯\n'.length, length: '打开链接'.length,
+        _: 'messageEntityTextUrl', offset: 0, length: '分享 · 示例资讯'.length,
         url: 'https://example.com/articles/42',
       }],
       media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
