@@ -1978,6 +1978,7 @@ export class DialogRpc {
     if (this._peerHydration) return this._peerHydration
 
     const pending = this._loadDialogs().then(async (dialogs) => {
+      const storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
       const directUsers = dialogs
         .filter((dialog) => dialog.conversation.kind === 'direct')
         .map((dialog) => ({
@@ -1986,6 +1987,10 @@ export class DialogRpc {
           avatar: dialog.conversation.avatar,
         }))
       await this._persistUsers(directUsers)
+      for (const conversation of storedConversations) {
+        this._conversations.set(conversation.id, conversation)
+        this._peerId(conversation.id)
+      }
       for (const dialog of dialogs) {
         this._conversations.set(dialog.conversation.id, dialog.conversation)
         this._peerId(dialog.conversation.id)
