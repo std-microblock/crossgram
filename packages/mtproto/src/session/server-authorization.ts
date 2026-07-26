@@ -13,6 +13,21 @@ interface LegacyReqPq {
   nonce: Uint8Array
 }
 
+type PlainHandshakeObject = mtp.TlObject | LegacyReqPq
+
+export async function receivePlainHandshakeObject(
+  readerMap: TlReaderMap,
+  log: Logger,
+  recvPlain: () => Promise<Uint8Array>,
+): Promise<PlainHandshakeObject> {
+  for (;;) {
+    const data = await recvPlain()
+    const object = new TlBinaryReader(readerMap, data, 20).object() as PlainHandshakeObject
+    if (object._ !== 'mt_msgs_ack') return object
+    log.debug('ignoring plaintext msgs_ack during handshake')
+  }
+}
+
 // The standard Telegram DH prime — we use this so clients don't need to validate it
 // eslint-disable-next-line style/max-len
 const KNOWN_DH_PRIME = 0xC71CAEB9C6B1C9048E6C522F70F13F73980D40238E3E21C14934D037563D930F48198A0AA7C14058229493D22530F4DBFA336F6E0AC925139543AED44CCE7C3720FD51F69458705AC68CD4FE6B6B13ABDC9746512969328454F18FAF8C595F642477FE96BB2A941D5BCD1D4AC8CC49880708FA9B378E3C4F3A9060BEE67CF9A4A4A695811051907E162753B56B0F6B410DBA74D8A84B2A14B3144E0EF1284754FD17ED950D5965B4B9DD46582DB1178D169C6BC465B0D6FF9CA3928FEF5B9AE4E418FC15E83EBEA0F87FA9FF5EED70050DED2849F47BF959D956850CE929851F0D8115F635B105EE2E4E15D04B2454BF6F4FADF034B10403119CD8E3B92FCC5Bn
@@ -80,8 +95,7 @@ export async function doServerAuthorization(
 
   let reqDh: mtp.RawMt_req_DH_params
   for (;;) {
-    const data = await recvPlain()
-    const obj = new TlBinaryReader(readerMap, data, 20).object() as mtp.TlObject | LegacyReqPq
+    const obj = await receivePlainHandshakeObject(readerMap, authLog, recvPlain)
 
     if (obj._ === 'mt_req_DH_params') {
       reqDh = obj as mtp.RawMt_req_DH_params
@@ -195,9 +209,7 @@ export async function doServerAuthorization(
 
   // ── Step 3: Receive set_client_DH_params, compute auth key, return dh_gen_ok ──
 
-  const setClientDhData = await recvPlain()
-  const setClientDhReader = new TlBinaryReader(readerMap, setClientDhData, 20)
-  const setClientDh = setClientDhReader.object() as mtp.RawMt_set_client_DH_params
+  const setClientDh = await receivePlainHandshakeObject(readerMap, authLog, recvPlain)
 
   if (setClientDh._ !== 'mt_set_client_DH_params') {
     throw new Error(`Expected mt_set_client_DH_params, got ${setClientDh._}`)
