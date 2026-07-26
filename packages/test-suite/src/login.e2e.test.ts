@@ -367,12 +367,27 @@ describe('bridge login e2e', () => {
       }, 6)
       expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
       expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
+      const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      await expect(callRpc(client, key, sid, {
+        _: 'users.getFullUser',
+        id: { _: 'inputUser', userId: alice.id, accessHash: Long.ZERO },
+      }, 7)).resolves.toMatchObject({
+        _: 'users.userFull',
+        fullUser: { _: 'userFull', id: alice.id, about: 'Static Alice signature' },
+      })
+      await expect(callRpc(client, key, sid, {
+        _: 'users.getFullUser', id: { _: 'inputUserSelf' },
+      }, 8)).resolves.toMatchObject({
+        _: 'users.userFull',
+        fullUser: { _: 'userFull', about: 'Static self signature' },
+        users: [{ _: 'user', self: true, firstName: 'Static User' }],
+      })
 
       const dialogs = await callRpc(client, key, sid, {
         _: 'messages.getDialogs', excludePinned: true, folderId: 0,
         offsetDate: 0, offsetId: 0,
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
-      }, 8)
+      }, 10)
       const users = new Map(dialogs.users.map((user: any) => [user.firstName, user]))
       expect(users.get('Alice')).toMatchObject({ contact: true, mutualContact: true })
       expect(users.get('Bob')).toMatchObject({ contact: true, mutualContact: true })
