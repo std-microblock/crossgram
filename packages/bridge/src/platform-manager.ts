@@ -1,4 +1,5 @@
 import type { Database } from '@cordisjs/plugin-database'
+import type { tl } from '@mtcute/core'
 import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
@@ -107,14 +108,18 @@ export class PlatformSubscriptionManager {
     platformId: string
     pending: Promise<Unsubscribe>
   }>()
-  private readonly _eventQueues = new Map<string, Promise<void>>()
+  private readonly _eventQueues = new Map<string, Promise<PlatformEventPublishResult>>()
 
   constructor(
     private readonly _database: Database,
     private readonly _registry: PlatformRegistry,
     private readonly _store: MessageStore,
     private readonly _onError: (error: unknown, session?: PlatformSession) => void = () => {},
-    private readonly _onEvent?: (session: PlatformSession, event: CommittedPlatformEvent) => void | Promise<void>,
+    private readonly _onEvent?: (
+      session: PlatformSession,
+      event: CommittedPlatformEvent,
+      options?: PlatformEventDeliveryOptions,
+    ) => PlatformEventPublishResult | Promise<PlatformEventPublishResult>,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
 
@@ -144,7 +149,9 @@ export class PlatformSubscriptionManager {
     this._onTrace?.(
       'platform subscription start platform=%s session=%s', session.platformId, session.platformSessionId,
     )
-    const pending = platform.subscribe(session, (event) => this._enqueue(session, event))
+    const pending = platform.subscribe(session, async (event) => {
+      await this._enqueue(session, event)
+    })
     this._subscriptions.set(session.platformSessionId, { platformId: session.platformId, pending })
     try {
       await pending
@@ -163,8 +170,12 @@ export class PlatformSubscriptionManager {
    * Commits an event produced by a local RPC action through the same ordered
    * persistence and update-delivery pipeline as adapter subscription events.
    */
-  ingestLocalEvent(session: PlatformSession, event: IMEvent): Promise<void> {
-    return this._enqueue(session, event)
+  ingestLocalEvent(
+    session: PlatformSession,
+    event: IMEvent,
+    options?: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
+    return this._enqueue(session, event, options)
   }
 
   async stopPlatform(platformId: string): Promise<void> {
@@ -188,14 +199,18 @@ export class PlatformSubscriptionManager {
     }))
   }
 
-  private _enqueue(session: PlatformSession, event: IMEvent): Promise<void> {
+  private _enqueue(
+    session: PlatformSession,
+    event: IMEvent,
+    options?: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
     const key = session.platformSessionId
     this._onTrace?.(
       'platform event enqueue platform=%s session=%s %s queued=%s',
       session.platformId, key, platformEventSummary(event), this._eventQueues.has(key),
     )
     const previous = this._eventQueues.get(key) ?? Promise.resolve()
-    const current = previous.catch(() => {}).then(() => this._ingestEvent(session, event))
+    const current = previous.catch(() => {}).then(() => this._ingestEvent(session, event, options))
     this._eventQueues.set(key, current)
     current.catch((error) => {
       this._onTrace?.(
@@ -209,7 +224,11 @@ export class PlatformSubscriptionManager {
     return current
   }
 
-  private async _ingestEvent(session: PlatformSession, event: IMEvent): Promise<void> {
+  private async _ingestEvent(
+    session: PlatformSession,
+    event: IMEvent,
+    options?: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
     if (event.type === 'conversation') {
       await this._store.upsertConversation(session, event.conversation)
     } else if (event.type === 'message') {
@@ -219,23 +238,24 @@ export class PlatformSubscriptionManager {
         session.platformId, session.platformSessionId, event.conversation.id, event.message.id,
         result.created, result.changed, result.projection.length,
       )
-      await this._onEvent?.(session, { event, result })
+      const published = await this._onEvent?.(session, { event, result }, options)
       this._onTrace?.(
         'platform message committed platform=%s session=%s conversation=%s message=%s',
         session.platformId, session.platformSessionId, event.conversation.id, event.message.id,
       )
+      return published
     } else if (event.type === 'message-edit') {
       const result = await this._store.ingest(session, event.conversation, event.message)
-      await this._onEvent?.(session, { event, result })
+      return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'message-delete') {
       const result = await this._store.deleteMessages(session, event.conversation, event.messageIds)
-      await this._onEvent?.(session, { event, result })
+      return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'message-reactions') {
       const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
-      await this._onEvent?.(session, { event, result })
+      return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'read') {
       const result = await this._store.markRead(session, event.conversationId, event.upToMessageId)
-      if (result) await this._onEvent?.(session, { event, result })
+      if (result) return this._onEvent?.(session, { event, result }, options)
     }
   }
 }
@@ -267,6 +287,15 @@ export type CommittedPlatformEvent =
   | { event: Extract<IMEvent, { type: 'message-delete' }>, result: DeleteResult }
   | { event: Extract<IMEvent, { type: 'message-reactions' }>, result: ReactionResult }
   | { event: Extract<IMEvent, { type: 'read' }>, result: ReadResult }
+
+export interface PlatformEventDeliveryOptions {
+  /** Do not push an update to the auth key receiving the same payload via RPC. */
+  excludeAuthKeyId?: string
+  /** Treat the durable delivery as published even when no socket push was sent. */
+  deliveredViaRpc?: boolean
+}
+
+export type PlatformEventPublishResult = tl.RawUpdates | void
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {

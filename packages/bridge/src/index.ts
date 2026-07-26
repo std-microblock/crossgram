@@ -133,7 +133,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       session?.platformId ?? 'unknown', session?.platformSessionId ?? 'unknown',
       error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error),
     ),
-    (session, event) => updates.publish(session, event),
+    (session, event, options) => updates.publish(session, event, options),
     (format, ...args) => bridgeLogger.debug(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
@@ -335,7 +335,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
       new ReactionRpc(platform, session, dcId, ctx.database),
       resources,
-      (localSession, event) => subscriptions.ingestLocalEvent(localSession, event),
+      (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
+      authKeyHex(rpc.authKeyId),
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -682,7 +683,8 @@ function createSessionResolver(
           platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
           new ReactionRpc(platform, session, dcId, ctx.database),
           resources,
-          (localSession, event) => subscriptions.ingestLocalEvent(localSession, event),
+          (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
+          authKeyId,
         )
         return state
       })()
