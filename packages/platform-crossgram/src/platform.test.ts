@@ -186,6 +186,7 @@ describe('QQNTPlatform mapping', () => {
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
+      signature: 'Self signature',
       avatar: {
         id: 'avatar-self', kind: 'image' as const, mimeType: 'image/jpeg',
         locator: {
@@ -198,7 +199,7 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).resolves.toMatchObject({
       credentials: {},
       user: {
-        id: 'u_self', firstName: 'Platform Alice', username: '10001',
+        id: 'u_self', firstName: 'Platform Alice', username: '10001', about: 'Self signature',
         avatar: { id: 'avatar-self:original-v1', kind: 'image' }, metadata: { qq: '10001' },
       },
     })
@@ -791,7 +792,7 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getMembers).not.toHaveBeenCalled()
   })
 
-  it('keeps the full buddy address book separate from recent dialogs and exposes avatars', async () => {
+  it('keeps the buddy address book separate and maps QQ signatures in contacts and user profiles', async () => {
     const platform = new QQNTPlatform()
     const avatar = {
       id: 'avatar:user:u1', kind: 'image' as const, name: 'avatar.png', size: 12,
@@ -801,13 +802,28 @@ describe('QQNTPlatform mapping', () => {
       },
     }
     platform.client.getContacts = vi.fn(async () => ({
-      users: [{ id: 'u1', numericId: '10001', name: 'Friend', avatar }],
+      users: [{ id: 'u1', numericId: '10001', name: 'Friend', signature: 'QQ signature', avatar }],
     }))
     const contacts = await platform.getContacts(session, { limit: 500 })
     expect(contacts.users).toMatchObject([{
-      id: 'u1', firstName: 'Friend', username: '10001',
+      id: 'u1', firstName: 'Friend', username: '10001', about: 'QQ signature',
       avatar: { id: 'avatar:user:u1:original-v1', locator: { filePath: '/tmp/avatar.png' } },
     }])
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'u1', numericId: '10001', name: 'Friend', signature: 'Updated signature', avatar,
+    }))
+    await expect(platform.getUser(session, 'u1')).resolves.toMatchObject({
+      id: 'u1', firstName: 'Friend', username: '10001', about: 'Updated signature',
+      avatar: { id: 'avatar:user:u1:original-v1', locator: { filePath: '/tmp/avatar.png' } },
+    })
+    expect(platform.client.getUser).toHaveBeenCalledWith('u1')
+
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'u1', numericId: '10001', name: 'Friend', signature: null as unknown as string,
+    }))
+    await expect(platform.getUser(session, 'u1')).resolves.toMatchObject({
+      id: 'u1', firstName: 'Friend', about: undefined,
+    })
   })
 
   it('keeps cached conversation identity fields when an incremental event is incomplete', async () => {

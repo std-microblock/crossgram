@@ -26,8 +26,8 @@ class DialogTestPlatform implements IMPlatform {
     conversations: { groups: false, channels: false, subchannels: false },
   }
   private readonly _users: Record<string, IMUser> = {
-    alice: { id: 'alice', firstName: 'Alice', username: 'alice' },
-    bob: { id: 'bob', firstName: 'Bob', username: 'bob' },
+    alice: { id: 'alice', firstName: 'Alice', username: 'alice', about: 'Alice signature' },
+    bob: { id: 'bob', firstName: 'Bob', username: 'bob', about: '' },
   }
   private readonly _messages: Record<string, IMMessage[]> = {
     alice: [
@@ -78,6 +78,7 @@ class DialogTestPlatform implements IMPlatform {
   }
 
   async getUser(_session: PlatformSession, id: string): Promise<IMUser | null> {
+    if (id === 'me') return { id, firstName: 'Current', about: 'Self signature' }
     return this._users[id] ?? null
   }
 
@@ -559,8 +560,10 @@ describe('DialogRpc', () => {
   })
 
   it('builds contacts plus basic and full users with contact metadata', async () => {
-    const rpc = new DialogRpc(new DialogTestPlatform(), session)
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
     const contacts = await rpc.getContacts()
+    const getUser = vi.spyOn(platform, 'getUser')
     expect(contacts.contacts).toEqual([
       { _: 'contact', userId: rpc.peerTlId('alice'), mutual: true },
       { _: 'contact', userId: rpc.peerTlId('bob'), mutual: true },
@@ -585,11 +588,53 @@ describe('DialogRpc', () => {
     })
     expect(full).toMatchObject({
       _: 'users.userFull',
-      fullUser: { _: 'userFull', id: rpc.peerTlId('alice'), commonChatsCount: 0 },
+      fullUser: {
+        _: 'userFull', id: rpc.peerTlId('alice'), about: 'Alice signature', commonChatsCount: 0,
+      },
       users: [{ _: 'user', firstName: 'Alice' }],
     })
+    const self = await rpc.getFullUser({
+      _: 'users.getFullUser', id: { _: 'inputUserSelf' },
+    })
+    expect(self).toMatchObject({
+      fullUser: { _: 'userFull', about: 'Self signature' },
+      users: [{ _: 'user', self: true, firstName: 'Current' }],
+    })
+
+    const emptyAbout = await rpc.getFullUser({
+      _: 'users.getFullUser',
+      id: { _: 'inputUser', userId: rpc.peerTlId('bob'), accessHash: Long.ZERO },
+    })
+    expect(emptyAbout).toMatchObject({
+      fullUser: { _: 'userFull', id: rpc.peerTlId('bob'), about: '' },
+    })
+    expect(getUser.mock.calls).toEqual([[session, 'me']])
     expect(() => wireRoundTrip(contacts)).not.toThrow()
     expect(() => wireRoundTrip(full)).not.toThrow()
+    expect(() => wireRoundTrip(self)).not.toThrow()
+    expect(() => wireRoundTrip(emptyAbout)).not.toThrow()
+  })
+
+  it('uses one cold profile lookup and degrades when optional self profile loading fails', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    const getUser = vi.spyOn(platform, 'getUser')
+    const aliceId = rpc.peerTlId('alice')
+
+    await expect(rpc.getFullUser({
+      _: 'users.getFullUser',
+      id: { _: 'inputUser', userId: aliceId, accessHash: Long.ZERO },
+    })).resolves.toMatchObject({
+      fullUser: { _: 'userFull', id: aliceId, about: 'Alice signature' },
+    })
+    expect(getUser.mock.calls).toEqual([[session, 'alice']])
+
+    getUser.mockRejectedValueOnce(new Error('profile temporarily unavailable'))
+    await expect(rpc.getFullUser({
+      _: 'users.getFullUser', id: { _: 'inputUserSelf' },
+    })).resolves.toMatchObject({
+      fullUser: { _: 'userFull' }, users: [{ _: 'user', self: true }],
+    })
   })
 
   it('marks only authoritative address-book users as contacts and refreshes cached flags', async () => {

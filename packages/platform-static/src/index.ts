@@ -704,11 +704,17 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
 
   private _seed(): void {
     const users: IMUser<StaticMediaLocator>[] = [
-      { id: 'alice', firstName: 'Alice', username: 'alice', avatar: this._avatar('user:alice') },
+      {
+        id: 'alice', firstName: 'Alice', username: 'alice', about: 'Static Alice signature',
+        avatar: this._avatar('user:alice'),
+      },
       { id: 'bob', firstName: 'Bob', username: 'bob', avatar: this._avatar('user:bob') },
       { id: 'carol', firstName: 'Carol', username: 'carol', avatar: this._avatar('user:carol') },
       { id: 'mirror-user', firstName: 'Mirror User', username: 'mirror_user', avatar: this._avatar('user:mirror-user') },
-      { id: 'self', firstName: 'Static User', username: 'static_user', avatar: this._avatar('user:self') },
+      {
+        id: 'self', firstName: 'Static User', username: 'static_user', about: 'Static self signature',
+        avatar: this._avatar('user:self'),
+      },
     ]
     for (const user of users) this._users.set(user.id, user)
     const conversations: IMConversation<StaticMediaLocator>[] = [

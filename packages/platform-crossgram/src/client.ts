@@ -56,7 +56,9 @@ export class QQNTClient {
   }
 
   getContacts(query: { cursor?: string, limit?: number } = {}): Promise<{
-    users: Array<{ id: string, numericId?: string, name: string, avatar?: import('./protocol.js').WireMedia }>
+    users: Array<{
+      id: string, numericId?: string, name: string, signature?: string, avatar?: import('./protocol.js').WireMedia
+    }>
     nextCursor?: string
   }> {
     return this.json(`/contacts${queryString(query)}`)
@@ -100,6 +102,7 @@ export class QQNTClient {
     id: string
     numericId?: string
     name: string
+    signature?: string
     avatarUrl?: string
     avatar?: import('./protocol.js').WireMedia
   } | null> {
