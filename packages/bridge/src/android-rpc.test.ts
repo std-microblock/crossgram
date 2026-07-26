@@ -13,15 +13,22 @@ function roundTrip(object: tl.TlObject): tl.TlObject {
 
 const self = { _: 'inputPeerSelf' as const }
 const requests: Record<string, tl.RpcMethod> = {
+  'account.getDefaultProfilePhotoEmojis': { _: 'account.getDefaultProfilePhotoEmojis', hash: Long.ZERO },
   'account.getContactSignUpNotification': { _: 'account.getContactSignUpNotification' },
   'account.getGlobalPrivacySettings': { _: 'account.getGlobalPrivacySettings' },
+  'account.getPassword': { _: 'account.getPassword' },
+  'account.getPrivacy': { _: 'account.getPrivacy', key: { _: 'inputPrivacyKeyStatusTimestamp' } },
+  'account.getRecentEmojiStatuses': { _: 'account.getRecentEmojiStatuses', hash: Long.ZERO },
+  'account.getSavedRingtones': { _: 'account.getSavedRingtones', hash: Long.ZERO },
   'account.getThemes': { _: 'account.getThemes', format: 'android', hash: Long.ZERO },
   'account.getWebBrowserSettings': { _: 'account.getWebBrowserSettings', hash: Long.ZERO },
   'contacts.getBlocked': { _: 'contacts.getBlocked', offset: 0, limit: 100 },
+  'contacts.getBirthdays': { _: 'contacts.getBirthdays' },
   'contacts.getTopPeers': {
     _: 'contacts.getTopPeers', correspondents: true, botsInline: true,
     offset: 0, limit: 20, hash: Long.ZERO,
   },
+  'help.getInviteText': { _: 'help.getInviteText' },
   'help.getTimezonesList': { _: 'help.getTimezonesList', hash: 0 },
   'messages.getArchivedStickers': {
     _: 'messages.getArchivedStickers', offsetId: Long.ZERO, limit: 0,
@@ -30,6 +37,10 @@ const requests: Record<string, tl.RpcMethod> = {
     _: 'messages.getEmojiKeywordsLanguages', langCodes: ['', 'en', 'en', 'zh-CN'],
   },
   'messages.getEmojiKeywords': { _: 'messages.getEmojiKeywords', langCode: 'zh-hans' },
+  'messages.getEmojiKeywordsDifference': {
+    _: 'messages.getEmojiKeywordsDifference', langCode: 'zh-hans', fromVersion: 42,
+  },
+  'messages.getEmojiStatusGroups': { _: 'messages.getEmojiStatusGroups', hash: 0 },
   'messages.getOnlines': { _: 'messages.getOnlines', peer: self },
   'messages.getSavedHistory': {
     _: 'messages.getSavedHistory', peer: self, offsetId: 0, offsetDate: 0,
@@ -39,6 +50,10 @@ const requests: Record<string, tl.RpcMethod> = {
     _: 'messages.getMessageReadParticipants', peer: self, msgId: 1,
   },
   'messages.getQuickReplies': { _: 'messages.getQuickReplies', hash: Long.ZERO },
+  'messages.getSavedDialogs': {
+    _: 'messages.getSavedDialogs', offsetDate: 0, offsetId: 0,
+    offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+  },
   'messages.getSearchCounters': {
     _: 'messages.getSearchCounters',
     peer: self,
@@ -90,6 +105,11 @@ describe('Telegram Android optional RPC responses', () => {
   it('echoes the requested emoji language in an empty keyword difference', () => {
     expect(androidRpcHandlers['messages.getEmojiKeywords'](requests['messages.getEmojiKeywords']))
       .toMatchObject({ _: 'emojiKeywordsDifference', langCode: 'zh-hans', keywords: [] })
+    expect(androidRpcHandlers['messages.getEmojiKeywordsDifference'](
+      requests['messages.getEmojiKeywordsDifference'],
+    )).toMatchObject({
+      _: 'emojiKeywordsDifference', langCode: 'zh-hans', fromVersion: 42, version: 42, keywords: [],
+    })
   })
 
   it('returns one zero search counter for every requested filter', () => {
@@ -118,8 +138,21 @@ describe('Telegram Android optional RPC responses', () => {
   })
 
   it('returns stable empty containers for optional account and content resources', () => {
+    expect(androidRpcHandlers['account.getDefaultProfilePhotoEmojis'](
+      requests['account.getDefaultProfilePhotoEmojis'],
+    )).toEqual({ _: 'emojiList', hash: Long.ZERO, documentId: [] })
+    expect(androidRpcHandlers['account.getPrivacy'](requests['account.getPrivacy']))
+      .toEqual({ _: 'account.privacyRules', rules: [{ _: 'privacyValueAllowAll' }], chats: [], users: [] })
+    expect(androidRpcHandlers['account.getPassword'](requests['account.getPassword']))
+      .toMatchObject({
+        _: 'account.password',
+        newAlgo: { _: 'passwordKdfAlgoUnknown' },
+        newSecureAlgo: { _: 'securePasswordKdfAlgoUnknown' },
+      })
     expect(androidRpcHandlers['premium.getMyBoosts'](requests['premium.getMyBoosts']))
       .toEqual({ _: 'premium.myBoosts', myBoosts: [], chats: [], users: [] })
+    expect(androidRpcHandlers['messages.getSavedDialogs'](requests['messages.getSavedDialogs']))
+      .toEqual({ _: 'messages.savedDialogs', dialogs: [], messages: [], chats: [], users: [] })
     expect(androidRpcHandlers['messages.getSponsoredMessages'](requests['messages.getSponsoredMessages']))
       .toEqual({ _: 'messages.sponsoredMessagesEmpty' })
     expect(androidRpcHandlers['stories.getPinnedStories'](requests['stories.getPinnedStories']))

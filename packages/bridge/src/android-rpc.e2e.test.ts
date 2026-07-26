@@ -94,6 +94,26 @@ async function roundTripRpc(query: tl.RpcMethod): Promise<unknown> {
 }
 
 describe('Telegram Android capture RPC e2e', () => {
+  it.each<[string, tl.RpcMethod, string]>([
+    ['profile photo emoji', { _: 'account.getDefaultProfilePhotoEmojis', hash: Long.ZERO }, 'emojiList'],
+    ['privacy', { _: 'account.getPrivacy', key: { _: 'inputPrivacyKeyStatusTimestamp' } }, 'account.privacyRules'],
+    ['password', { _: 'account.getPassword' }, 'account.password'],
+    ['recent emoji status', { _: 'account.getRecentEmojiStatuses', hash: Long.ZERO }, 'account.emojiStatuses'],
+    ['saved ringtone', { _: 'account.getSavedRingtones', hash: Long.ZERO }, 'account.savedRingtones'],
+    ['birthday', { _: 'contacts.getBirthdays' }, 'contacts.contactBirthdays'],
+    ['invite text', { _: 'help.getInviteText' }, 'help.inviteText'],
+    ['emoji status group', { _: 'messages.getEmojiStatusGroups', hash: 0 }, 'messages.emojiGroups'],
+    ['emoji keyword difference', {
+      _: 'messages.getEmojiKeywordsDifference', langCode: 'zh-hans', fromVersion: 42,
+    }, 'emojiKeywordsDifference'],
+    ['saved dialog', {
+      _: 'messages.getSavedDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    }, 'messages.savedDialogs'],
+  ])('serves the captured %s retry probe through a wrapped layer-228 request', async (_label, request, expected) => {
+    await expect(roundTripRpc(request)).resolves.toMatchObject({ _: expected })
+  })
+
   it('serves empty premium and sponsored resources through a wrapped layer-228 request', async () => {
     await expect(roundTripRpc({ _: 'premium.getMyBoosts' })).resolves.toEqual({
       _: 'premium.myBoosts', myBoosts: [], chats: [], users: [],
