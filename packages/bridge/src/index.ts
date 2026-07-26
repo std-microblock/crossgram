@@ -33,7 +33,6 @@ import {
   makePlatformAccountView, makeUnavailableAccountView,
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
-import { AuthTransferStore } from './auth-transfer.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -49,7 +48,6 @@ export * from './resource-provider.js'
 export * from './login-code.js'
 export * from './platform-account.js'
 export * from './account-dashboard.js'
-export * from './auth-transfer.js'
 export * from './stripped-thumbnail.js'
 export * from './sticker-outline.js'
 
@@ -57,8 +55,6 @@ export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui']
 
 export interface BridgeConfig {
-  /** Account route exposed to the MTProto service (default: bridge:default). */
-  routeId?: string
   dcId?: number
   serverHost?: string
   serverPort?: number
@@ -69,7 +65,6 @@ export interface BridgeConfig {
 }
 
 export const Config = z.object({
-  routeId: z.string().default('bridge:default'),
   dcId: z.natural().min(1).max(6).default(1),
   serverHost: z.string().default('127.0.0.1'),
   serverPort: z.natural().min(1).max(65_535).default(4430),
@@ -99,13 +94,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const stickerProviders = new IMStickerService(ctx)
   const resources = new TelegramResourceService(ctx)
   const registry = platforms.registry
-  const routeId = config.routeId ?? 'bridge:default'
-  const rpc = ctx.mtproto.route(routeId)
+  const rpc = ctx.mtproto
   const dcId = config.dcId ?? 1
   const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
   const bridgeLogger = ctx.logger('bridge')
   const historyTrace = (format: string, ...args: unknown[]) => bridgeLogger.debug(format, ...args)
-  const authTransfers = new AuthTransferStore()
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database, undefined, undefined, historyTrace)
@@ -233,26 +226,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     res.body = Buffer.concat(chunks)
   })
 
-  ctx.mtproto.resolveRoute(async (requestContext, request) => {
-    if (requestContext.authKeyId) {
-      const [binding] = await ctx.database.get('mtproto_route_binding', {
-        authKeyId: authKeyHex(requestContext.authKeyId),
-      })
-      if (binding) return binding.routeId
-    }
-    if (request._ === 'auth.importAuthorization') {
-      const transfer = request as tl.auth.RawImportAuthorizationRequest
-      return authTransfers.has(transfer.id, transfer.bytes) ? routeId : undefined
-    }
-    if (request._ !== 'auth.sendCode' && request._ !== 'auth.signIn') return
-    const phoneNumber = (request as unknown as { phoneNumber?: string }).phoneNumber
-    if (!phoneNumber) return
-    const [auth] = await ctx.database.get('mtproto_auth_session', {
-      virtualPhone: normPhone(phoneNumber),
-    })
-    return auth ? routeId : undefined
-  })
-
   platforms.onChange((event, platformId) => {
     if (event === 'register') {
       ctx.logger('bridge').info('IM platform registered: %s', platformId)
@@ -323,12 +296,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       platformId: ps.platformId,
       platformSessionId: ps.id,
     }])
-    await ctx.database.upsert('mtproto_route_binding', [{
-      authKeyId: authKeyHex(rpc.authKeyId),
-      routeId,
-      createdAt: new Date(),
-    }])
-    ctx.mtproto.bindRoute(rpc.authKeyId, routeId)
     const state: BridgeSessionState = {
       generation, platform, session,
       stickers: stickerRpcFor(platform, session),
@@ -361,64 +328,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       lastName: ps.metadata.lastName as string | undefined,
       username: ps.metadata.username as string | undefined,
       phone: phoneNumber,
-    })
-    return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
-  })
-
-  rpc.register('auth.exportAuthorization', async (rpc, req) => {
-    const request = req as tl.auth.RawExportAuthorizationRequest
-    if (!Number.isInteger(request.dcId) || request.dcId < 1 || request.dcId > 6) {
-      throw new RpcError(400, 'DC_ID_INVALID')
-    }
-    const { session } = await requireBridgeSession(rpc)
-    const exported = authTransfers.issue({
-      platformId: session.platformId,
-      platformSessionId: session.platformSessionId,
-    }, request.dcId)
-    return { _: 'auth.exportedAuthorization', ...exported } as tl.auth.RawExportedAuthorization
-  })
-
-  rpc.register('auth.importAuthorization', async (rpc, req) => {
-    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-    const request = req as tl.auth.RawImportAuthorizationRequest
-    const identity = authTransfers.take(request.id, request.bytes)
-    if (!identity) throw new RpcError(400, 'AUTH_BYTES_INVALID')
-
-    const [platformSession] = await ctx.database.get('mtproto_platform_session', {
-      id: identity.platformSessionId,
-      platformId: identity.platformId,
-      active: true,
-    })
-    if (!platformSession) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
-    const [authSession] = await ctx.database.get('mtproto_auth_session', {
-      platformId: identity.platformId,
-      platformSessionId: identity.platformSessionId,
-    })
-    if (!authSession) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-
-    const authKeyId = authKeyHex(rpc.authKeyId)
-    await ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }])
-    await ctx.database.upsert('mtproto_route_binding', [{ authKeyId, routeId, createdAt: new Date() }])
-    ctx.mtproto.bindRoute(rpc.authKeyId, routeId)
-    const { session } = await requireBridgeSession(rpc)
-
-    const metadata = platformSession.metadata
-    const selfRow = await store.getUser(session.platformId, session.userId)
-      ?? await store.upsertUser(session, {
-        id: session.userId,
-        firstName: (metadata.firstName as string) ?? 'Bridge',
-        lastName: metadata.lastName as string | undefined,
-        username: metadata.username as string | undefined,
-        metadata,
-      })
-    const user = makeUser({
-      id: selfRow.id,
-      self: true,
-      premium: true,
-      firstName: (metadata.firstName as string) ?? 'Bridge',
-      lastName: metadata.lastName as string | undefined,
-      username: metadata.username as string | undefined,
-      phone: authSession.virtualPhone,
     })
     return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
   })

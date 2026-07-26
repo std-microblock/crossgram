@@ -1931,21 +1931,6 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@mtproto-relay/relay@workspace:*, @mtproto-relay/relay@workspace:packages/relay":
-  version: 0.0.0-use.local
-  resolution: "@mtproto-relay/relay@workspace:packages/relay"
-  dependencies:
-    "@fuman/utils": "npm:^0.0.20"
-    "@mtcute/core": "npm:^0.30.3"
-    "@mtcute/node": "npm:^0.30.3"
-    "@mtproto-relay/mtproto": "workspace:*"
-    schemastery: "npm:^3.18.0"
-  peerDependencies:
-    "@cordisjs/plugin-database": ^4.0.0
-    cordis: ^4.0.0-rc.5
-  languageName: unknown
-  linkType: soft
-
 "@mtproto-relay/telegram-resources@workspace:*, @mtproto-relay/telegram-resources@workspace:packages/telegram-resources":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/telegram-resources@workspace:packages/telegram-resources"
@@ -1980,7 +1965,6 @@ __metadata:
     "@mtproto-relay/platform-matrix": "workspace:*"
     "@mtproto-relay/platform-satori": "workspace:*"
     "@mtproto-relay/platform-static": "workspace:*"
-    "@mtproto-relay/relay": "workspace:*"
     "@mtproto-relay/telegram-resources": "workspace:*"
     "@satorijs/core": "npm:^4.6.0"
     cordis: "npm:^4.0.0-rc.5"

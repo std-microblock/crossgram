@@ -77,7 +77,6 @@ export interface RpcDispatch {
  */
 export class RpcDispatcher {
   private _handlers = new Map<string, RpcHandler>()
-  private _fallback?: RpcHandler
 
   /**
    * Register a handler for a specific RPC method.
@@ -96,20 +95,6 @@ export class RpcDispatcher {
   }
 
   /**
-   * Register a fallback handler that receives all unregistered methods.
-   * If no fallback is set, unregistered methods return a 500 error.
-   */
-  fallback(handler: RpcHandler): this {
-    this._fallback = handler
-    return this
-  }
-
-  /** Remove the fallback handler (for lifecycle-managed registration / HMR). */
-  clearFallback(): void {
-    this._fallback = undefined
-  }
-
-  /**
    * Dispatch an RPC call to the appropriate handler.
    * Unwraps `invokeWithLayer`/`initConnection`/`invokeWithoutUpdates` wrappers
    * automatically. Returns the TL response object, or an `rpc_error` on failure.
@@ -118,7 +103,7 @@ export class RpcDispatcher {
     const req = unwrapRpcRequest(request).request
 
     const method = req._
-    const handler = this._handlers.get(method) ?? this._fallback
+    const handler = this._handlers.get(method)
 
     if (!handler) {
       return toRpcError(RpcErrors.notImplemented(method))
@@ -133,16 +118,6 @@ export class RpcDispatcher {
       const msg = e instanceof Error ? e.message : String(e)
       return toRpcError(RpcErrors.internal(msg))
     }
-  }
-
-  /** Check if a method has a registered handler */
-  has(method: string): boolean {
-    return this._handlers.has(method) || !!this._fallback
-  }
-
-  /** Check for a method-specific handler without considering fallback. */
-  hasDirect(method: string): boolean {
-    return this._handlers.has(method)
   }
 }
 
