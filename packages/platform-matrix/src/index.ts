@@ -19,6 +19,8 @@ export interface Config {
   homeserver: string
   accessToken: string
   userId?: string
+  /** HTTP(S) proxy used for Matrix Client-Server API and media requests. */
+  proxy?: string
   syncTimeoutMs?: number
   requestTimeoutMs?: number
   /** Test-only HTTP transport injection. */
@@ -29,6 +31,7 @@ export const Config = z.object({
   homeserver: z.string().required(),
   accessToken: z.string().role('secret').required(),
   userId: z.string(),
+  proxy: z.string().role('secret'),
   syncTimeoutMs: z.natural().min(1).default(30_000),
   requestTimeoutMs: z.natural().min(1).default(30_000),
 }).i18n({
@@ -41,7 +44,9 @@ export const inject = ['imPlatform']
 
 export function apply(ctx: Context, config: Config): void {
   const id = resolvePlatformPluginId(ctx, 'matrix')
-  ctx.imPlatform.register(new MatrixPlatform(config, ctx.logger('platform-matrix')), id)
+  const platform = new MatrixPlatform(config, ctx.logger('platform-matrix'))
+  ctx.imPlatform.register(platform, id)
+  ctx.effect(() => () => platform.stop())
 }
 
 export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
@@ -81,6 +86,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.configuredUserId = config.userId
     this.syncTimeoutMs = config.syncTimeoutMs ?? 30_000
     this.logger = logger
+  }
+
+  async stop(): Promise<void> {
+    await this.client.close()
   }
 
   async getAccount() {

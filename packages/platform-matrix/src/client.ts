@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixEventContextResponse, MatrixJoinedRoomsResponse, MatrixMembersResponse,
   MatrixMessagesResponse, MatrixProfile, MatrixSyncResponse, MatrixWhoAmI,
@@ -7,6 +8,7 @@ import type {
 export interface MatrixClientOptions {
   homeserver: string
   accessToken: string
+  proxy?: string
   requestTimeoutMs?: number
   fetch?: typeof globalThis.fetch
 }
@@ -27,12 +29,28 @@ export class MatrixClient {
   private readonly accessToken: string
   private readonly requestTimeoutMs: number
   private readonly fetch: typeof globalThis.fetch
+  private readonly proxyDispatcher?: UndiciProxyAgent
 
   constructor(options: MatrixClientOptions) {
     this.homeserver = options.homeserver.replace(/\/+$/, '')
     this.accessToken = options.accessToken
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000
-    this.fetch = options.fetch ?? globalThis.fetch
+    const proxy = normalizeHttpProxy(options.proxy)
+    if (options.fetch) {
+      this.fetch = options.fetch
+    } else if (proxy) {
+      this.proxyDispatcher = new UndiciProxyAgent(proxy)
+      this.fetch = ((input, init) => undiciFetch(input as string | URL, {
+        ...(init as import('undici').RequestInit),
+        dispatcher: this.proxyDispatcher,
+      }) as unknown as Promise<Response>) as typeof globalThis.fetch
+    } else {
+      this.fetch = globalThis.fetch
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.proxyDispatcher?.close()
   }
 
   whoAmI(): Promise<MatrixWhoAmI> {
@@ -220,6 +238,15 @@ interface RequestOptions {
 
 function segment(value: string): string {
   return encodeURIComponent(value)
+}
+
+function normalizeHttpProxy(input?: string): string | undefined {
+  if (!input?.trim()) return undefined
+  const url = new URL(input.trim())
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Matrix proxy must use http:// or https://: ${url.protocol}`)
+  }
+  return url.toString()
 }
 
 export function parseMxc(value: string): { serverName: string, mediaId: string } {
