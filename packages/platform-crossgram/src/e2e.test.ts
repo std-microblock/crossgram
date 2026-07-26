@@ -1,8 +1,11 @@
 import { createReadStream } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { PlatformSession } from '@mtproto-relay/bridge'
+import sharp from 'sharp'
 import { QQNTPlatform } from './index.js'
 
 const enabled = process.env.QQNT_BRIDGE_E2E === '1'
@@ -96,21 +99,38 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     }
   }, 90_000)
 
-  it('streams an image through IMPlatform only to MicroBlock', async () => {
-    const target = await platform.client.resolveConversation('direct', directTarget)
+  it('streams unique images through IMPlatform only to the approved private and group chats', async () => {
+    const targets = [
+      await platform.client.resolveConversation('direct', directTarget),
+      await platform.client.resolveConversation('group', groupTargets[0]),
+    ]
     const imagePath = new URL('../../platform-static/src/test-image.png', import.meta.url)
     const image = await stat(imagePath)
-    const sent = await platform.sendMessage(session, { id: target.id }, {
-      parts: [{ type: 'media', media: {
-        kind: 'image', name: basename(imagePath.pathname), mimeType: 'image/png', size: image.size,
-        source: {
-          size: image.size,
-          async *stream() { for await (const chunk of createReadStream(imagePath)) yield new Uint8Array(chunk) },
-        },
-      } }],
-    })
-    expect(sent.conversationId).toBe(target.id)
-    expect(sent.content.parts).toMatchObject([{ type: 'media', media: { kind: 'image' } }])
+    const metadata = await sharp(fileURLToPath(imagePath)).metadata()
+    if (!metadata.width || !metadata.height) throw new Error('test PNG dimensions are unavailable')
+    for (const target of targets) {
+      // A unique trailing payload keeps the PNG decodable while preventing QQ's
+      // fast-upload cache from bypassing the real platform-to-Highway stream.
+      const suffix = randomBytes(32)
+      const size = image.size + suffix.length
+      const sent = await platform.sendMessage(session, { id: target.id }, {
+        parts: [{ type: 'media', media: {
+          kind: 'image', name: `direct-${target.peerUin}-${Date.now()}-${basename(imagePath.pathname)}`,
+          mimeType: 'image/png', size, width: metadata.width, height: metadata.height,
+          source: {
+            size,
+            async *stream() {
+              for await (const chunk of createReadStream(imagePath)) yield new Uint8Array(chunk)
+              yield suffix
+            },
+          },
+        } }],
+      })
+      expect(sent.conversationId).toBe(target.id)
+      expect(sent.content.parts).toMatchObject([{ type: 'media', media: {
+        kind: 'image', width: metadata.width, height: metadata.height,
+      } }])
+    }
   }, 180_000)
 
   it('streams two images in one IMPlatform message only to MicroBlock', async () => {
@@ -134,7 +154,7 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     expect(sent.content.parts.filter((part) => part.type === 'media')).toHaveLength(2)
   }, 180_000)
 
-  it('sends through the IMPlatform API only to MicroBlock and the two approved groups', async () => {
+  it('sends through the IMPlatform API only to the approved private and group chats', async () => {
     const targets = [
       await platform.client.resolveConversation('direct', directTarget),
       ...await Promise.all(groupTargets.map((id) => platform.client.resolveConversation('group', id))),
