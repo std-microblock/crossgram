@@ -21,7 +21,7 @@ import type {
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
 
-const MIN_PROTOCOL_VERSION = 18
+const MIN_PROTOCOL_VERSION = 19
 
 export interface Config extends QQNTClientOptions {
   /**

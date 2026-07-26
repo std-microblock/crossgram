@@ -1,4 +1,3 @@
-import { Readable } from 'node:stream'
 import { createHash } from 'node:crypto'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
@@ -7,6 +6,7 @@ import type {
   WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
   WireTextPart,
 } from './protocol.js'
+import { uploadHighway, type QQMediaUploadPlan } from './highway.js'
 
 export interface QQNTClientOptions {
   endpoint?: string
@@ -188,6 +188,41 @@ export class QQNTClient {
       item,
       hashes: await hashMediaSource(item.source, options.signal),
     })))
+    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({ item, hashes }, mediaIndex) => {
+      const mediaSpec = {
+        kind: item.kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
+        md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
+        width: item.width, height: item.height, duration: item.duration,
+      }
+      const plan = await this.json<QQMediaUploadPlan>('/uploads/prepare', false, {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ conversationId, media: mediaSpec }),
+        signal: options.signal,
+      })
+      if (plan.prepared.kind !== item.kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
+      if (plan.highway) {
+        if (plan.highway.fileSize !== hashes.size || plan.highway.fileMd5.toLowerCase() !== hashes.md5) {
+          throw new Error('QQNT bridge returned mismatched Highway file metadata')
+        }
+        await uploadHighway(
+          plan.highway,
+          item.source.stream({ signal: options.signal }),
+          this.fetchImpl,
+          {
+            signal: options.signal,
+            onProgress: (transferredBytes) => options.onProgress?.({
+              phase: 'upload', mediaIndex, transferredBytes, totalBytes: hashes.size,
+            }),
+          },
+        )
+      } else {
+        await options.onProgress?.({
+          phase: 'upload', mediaIndex, transferredBytes: hashes.size, totalBytes: hashes.size,
+        })
+      }
+      return plan.prepared
+    }))
     const manifest = {
       conversationId,
       text,
@@ -200,28 +235,15 @@ export class QQNTClient {
         md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
         width: item.width, height: item.height, duration: item.duration,
       })),
-      mediaFraming: media && media.length > 1 ? 'length-prefixed-v1' : undefined,
+      uploadedMedia,
     }
     const headers = this.headers({
       'x-qqnt-manifest': Buffer.from(JSON.stringify(manifest)).toString('base64url'),
-      ...(preparedMedia?.length === 1
-        ? { 'content-length': String(preparedMedia[0].hashes.size) }
-        : {}),
     })
-    let body: BodyInit | undefined
-    const uploadState: { error?: Error } = {}
-    if (media?.length) body = Readable.from(media.length === 1
-      ? uploadStream(media[0].source, options, uploadState, 0)
-      : framedUploadStream(media.map((item) => item.source), options, uploadState)) as unknown as BodyInit
-    else body = new Uint8Array()
-    try {
-      const response = await this.fetchImpl(`${this.endpoint}/messages`, {
-        method: 'POST', headers, body, signal: options.signal, duplex: 'half',
-      } as RequestInit)
-      return responseJson(response)
-    } catch (error) {
-      throw uploadState.error ?? error
-    }
+    const response = await this.fetchImpl(`${this.endpoint}/messages`, {
+      method: 'POST', headers, body: new Uint8Array(), signal: options.signal,
+    })
+    return responseJson(response)
   }
 
   async deleteMessages(conversationId: string, messageIds: readonly string[], forEveryone: boolean): Promise<void> {
@@ -604,47 +626,6 @@ async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Pro
     throw new Error(`incomplete media source: expected ${source.size} bytes, streamed ${size}`)
   }
   return { size, md5: md5.digest('hex'), sha1: sha1.digest('hex'), file10MMd5: first10M.digest('hex') }
-}
-
-async function* uploadStream(
-  source: IMMediaSource,
-  options: IMTransferOptions,
-  state: { error?: Error },
-  mediaIndex: number,
-): AsyncIterable<Uint8Array> {
-  let transferred = 0
-  for await (const chunk of source.stream({ signal: options.signal })) {
-    if (options.signal?.aborted) throw options.signal.reason ?? new Error('upload aborted')
-    transferred += chunk.length
-    await options.onProgress?.({
-      phase: 'upload', mediaIndex, transferredBytes: transferred, totalBytes: source.size,
-    })
-    yield chunk
-  }
-  if (source.size !== undefined && transferred !== source.size) {
-    state.error = new Error(`incomplete media source: expected ${source.size} bytes, streamed ${transferred}`)
-    throw state.error
-  }
-}
-
-async function* framedUploadStream(
-  sources: IMMediaSource[],
-  options: IMTransferOptions,
-  state: { error?: Error },
-): AsyncIterable<Uint8Array> {
-  const maxFrame = 64 * 1024
-  for (const [mediaIndex, source] of sources.entries()) {
-    for await (const chunk of uploadStream(source, options, state, mediaIndex)) {
-      for (let offset = 0; offset < chunk.length; offset += maxFrame) {
-        const frame = chunk.subarray(offset, Math.min(chunk.length, offset + maxFrame))
-        const header = Buffer.allocUnsafe(4)
-        header.writeUInt32BE(frame.length)
-        yield header
-        yield frame
-      }
-    }
-    yield Buffer.alloc(4)
-  }
 }
 
 function queryString(query: Record<string, string | number | undefined>): string {
