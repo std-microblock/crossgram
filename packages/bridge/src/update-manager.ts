@@ -9,7 +9,7 @@ import {
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
-  cardActionLabel, cardUrl, messagePartText, telegramReplyToMessageId,
+  cardUrl, messagePartText, telegramReplyToMessageId,
   type IMConversation, type IMMessage, type PlatformSession,
 } from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
@@ -597,10 +597,8 @@ function makeMessageEntities(
     }
     if (part.type === 'card') {
       const url = cardUrl(part.card)
-      const action = cardActionLabel(part.card.kind)
-      if (url && text.endsWith(action)) entities.push({
-        _: 'messageEntityTextUrl', offset: base + text.length - action.length,
-        length: action.length, url,
+      if (url) entities.push({
+        _: 'messageEntityTextUrl', offset: base, length: text.length, url,
       })
     }
     base += text.length + (index + 1 < rendered.length ? 1 : 0)
