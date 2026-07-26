@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -581,6 +581,23 @@ describe('MessageStore', () => {
     expect(results).toHaveLength(50)
     expect(await ctx.database.get('mtproto_im_conversation', {})).toHaveLength(1)
     expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(50)
+    const get = vi.spyOn(ctx.database, 'get')
+    const select = vi.spyOn(ctx.database, 'select')
+    expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, { limit: 50 }))
+      .map((message) => message.source.id)).toEqual(messages.map((message) => message.id))
+    // One message-page query plus six fixed relation queries. This must not
+    // grow with the fifty messages in the page.
+    expect(select).toHaveBeenCalledTimes(7)
+    expect(get).toHaveBeenCalledTimes(6)
+    expect(get.mock.calls.slice(1).map(([table]) => table)).toEqual([
+      'mtproto_im_message_alias',
+      'mtproto_im_message_reaction',
+      'mtproto_im_user',
+      'mtproto_tl_message_part',
+      'mtproto_im_media',
+    ])
+    get.mockRestore()
+    select.mockRestore()
     expect((await store.readHistory(session.platformSessionId, conversation.id, { limit: 50 }))
       .map((message) => message.id)).toEqual(messages.map((message) => message.id))
   })

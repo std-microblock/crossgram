@@ -1,6 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type {
-  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageRow, IMUserRow, TlMessagePartRow,
+  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMUserRow,
+  TlMessagePartRow,
 } from './models.js'
 import {
   messageMedia, messageText,
@@ -520,13 +521,36 @@ export class MessageStore {
       ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
       ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
     }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
-    return Promise.all(rows.map(async (row) => ({
-      source: await this._hydrateMessage(row),
-      parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
-        .orderBy('ordinal').execute(),
-      media: await this._database.select('mtproto_im_media', { messageId: row.id })
-        .orderBy('ordinal').execute(),
-    })))
+    if (!rows.length) return []
+    const messageIds = rows.map((row) => row.id)
+    const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
+    const [aliases, reactions, senders, parts, media] = await Promise.all([
+      this._database.get('mtproto_im_message_alias', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_message_reaction', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_user', { id: { $in: senderUserIds } }),
+      this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_media', { messageId: { $in: messageIds } }),
+    ])
+    const aliasesByMessage = groupByMessageId(aliases, (left, right) => left.ordinal - right.ordinal)
+    const reactionsByMessage = groupByMessageId(reactions, (left, right) => left.id - right.id)
+    const partsByMessage = groupByMessageId(parts, (left, right) => left.ordinal - right.ordinal)
+    const mediaByMessage = groupByMessageId(media, (left, right) => left.ordinal - right.ordinal)
+    const sendersById = new Map(senders.map((sender) => [sender.id, sender]))
+    return rows.map((row) => {
+      const sender = sendersById.get(row.senderUserId)
+      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
+      return {
+        source: hydrateMessage(
+          row,
+          aliasesByMessage.get(row.id) ?? [],
+          reactionsByMessage.get(row.id) ?? [],
+          sender,
+          conversation.platformConversationId,
+        ),
+        parts: partsByMessage.get(row.id) ?? [],
+        media: mediaByMessage.get(row.id) ?? [],
+      }
+    })
   }
 
   async findProjectedByTlId(
@@ -1110,30 +1134,7 @@ export class MessageStore {
       .orderBy('id').execute()
     const [senderRow] = await this._database.get('mtproto_im_user', { id: row.senderUserId })
     if (!senderRow) throw new Error(`message references missing user ${row.senderUserId}`)
-    const { replyToId, metadata } = hydrateMessageMetadata(row.metadata)
-    const sender = toUser(senderRow)
-    return {
-      id: row.primaryPlatformMessageId,
-      sourceIds: aliases.map((alias) => alias.platformMessageId),
-      conversationId: (await this._conversationId(row.conversationId)),
-      senderId: sender.id,
-      sender,
-      content: hydrateMessageContent(row.content),
-      timestamp: row.timestamp,
-      outgoing: row.outgoing,
-      groupId: row.platformGroupId ?? undefined,
-      replyToId,
-      metadata,
-      reactionContext: reactions.length ? {
-        available: reactions.map((reaction) => reaction.definition as unknown as IMReactionDefinition),
-        reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
-          key: reaction.nativeReactionKey, count: reaction.count,
-          selected: reaction.selected,
-          recentActors: reaction.recentActors as unknown as IMReactionActor[],
-        })),
-        maxSelected: Number(row.metadata.reactionMaxSelected ?? 1),
-      } : undefined,
-    }
+    return hydrateMessage(row, aliases, reactions, senderRow, await this._conversationId(row.conversationId))
   }
 
   private async _replaceReactions(
@@ -1206,6 +1207,53 @@ export class MessageStore {
         )
       }
     }
+  }
+}
+
+function groupByMessageId<T extends { messageId: number }>(
+  rows: readonly T[],
+  compare: (left: T, right: T) => number,
+): Map<number, T[]> {
+  const grouped = new Map<number, T[]>()
+  for (const row of rows) {
+    const values = grouped.get(row.messageId)
+    if (values) values.push(row)
+    else grouped.set(row.messageId, [row])
+  }
+  for (const values of grouped.values()) values.sort(compare)
+  return grouped
+}
+
+function hydrateMessage(
+  row: IMMessageRow,
+  aliases: readonly IMMessageAliasRow[],
+  reactions: readonly IMMessageReactionRow[],
+  senderRow: IMUserRow,
+  conversationId: string,
+): IMMessage {
+  const { replyToId, metadata } = hydrateMessageMetadata(row.metadata)
+  const sender = toUser(senderRow)
+  return {
+    id: row.primaryPlatformMessageId,
+    sourceIds: aliases.map((alias) => alias.platformMessageId),
+    conversationId,
+    senderId: sender.id,
+    sender,
+    content: hydrateMessageContent(row.content),
+    timestamp: row.timestamp,
+    outgoing: row.outgoing,
+    groupId: row.platformGroupId ?? undefined,
+    replyToId,
+    metadata,
+    reactionContext: reactions.length ? {
+      available: reactions.map((reaction) => reaction.definition as unknown as IMReactionDefinition),
+      reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
+        key: reaction.nativeReactionKey, count: reaction.count,
+        selected: reaction.selected,
+        recentActors: reaction.recentActors as unknown as IMReactionActor[],
+      })),
+      maxSelected: Number(row.metadata.reactionMaxSelected ?? 1),
+    } : undefined,
   }
 }
 
