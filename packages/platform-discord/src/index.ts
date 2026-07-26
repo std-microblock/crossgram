@@ -71,6 +71,7 @@ interface DiscordDialogRoot {
 
 const COMMON_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
 const MAX_PAGE_SIZE = 100
+const DIALOG_MAPPING_CONCURRENCY = 8
 
 export interface DiscordPlatformDependencies {
   client?: Client
@@ -116,6 +117,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   private readonly readStates = new Map<string, ReadState>()
   private readonly handlers = new Map<string, (event: IMEvent<DiscordMediaLocator>) => void | Promise<void>>()
   private readonly originNonces = new Set<string>()
+  private readonly dialogLoads = new Map<string, Promise<IMDialogPage<DiscordMediaLocator>>>()
   private loginPromise?: Promise<void>
   private lastKnownUser?: User
   private stopped = false
@@ -253,7 +255,26 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
   }
 
-  async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<DiscordMediaLocator>> {
+  async getDialogs(session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<DiscordMediaLocator>> {
+    const key = JSON.stringify([
+      session.platformSessionId,
+      query.cursor ?? null,
+      query.afterId ?? null,
+      clampLimit(query.limit),
+    ])
+    const existing = this.dialogLoads.get(key)
+    if (existing) return existing
+
+    const pending = this.loadDialogs(query)
+    this.dialogLoads.set(key, pending)
+    try {
+      return await pending
+    } finally {
+      if (this.dialogLoads.get(key) === pending) this.dialogLoads.delete(key)
+    }
+  }
+
+  private async loadDialogs(query: IMPageQuery): Promise<IMDialogPage<DiscordMediaLocator>> {
     await this.ensureReady()
     const channels = [...this.client.channels.cache.values()]
       .filter((channel): channel is DiscordChannel => isSupportedChannel(channel) && this.isVisible(channel))
@@ -262,9 +283,15 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const start = pageStart(roots.map((root) => root.id), query)
     const limit = clampLimit(query.limit)
     const selected = roots.slice(start, start + limit)
-    const dialogs = (await Promise.all(selected.map(async (root) => Promise.all(root.channels.map((channel) =>
-      this.mapDialog(channel, channel.id === root.primary.id),
-    ))))).flat()
+    const channelsToMap = selected.flatMap((root) => root.channels.map((channel) => ({
+      channel,
+      fetchMessages: channel.id === root.primary.id,
+    })))
+    const dialogs = await mapConcurrent(
+      channelsToMap,
+      DIALOG_MAPPING_CONCURRENCY,
+      ({ channel, fetchMessages }) => this.mapDialog(channel, fetchMessages),
+    )
     return {
       dialogs,
       total: roots.length,
@@ -301,7 +328,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       before: query.before?.id ?? (!query.after ? query.cursor : undefined),
       after: isSyntheticTopicMessageId(query.after?.id) ? undefined : query.after?.id,
     })
-    const ordered = [...messages.values()]
+    const ordered = usableMessages(messages.values())
       .sort((left, right) => compareSnowflakes(right.id, left.id))
     const mapped = ordered
       .filter((message) => this.shouldExposeMessage(message))
@@ -618,8 +645,11 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     return isVisibleChannel(channel, this.selfUser())
   }
 
-  private shouldExposeMessage(message: Message): boolean {
-    return isSupportedChannel(message.channel)
+  private shouldExposeMessage(
+    message: Message | PartialMessage | null | undefined,
+  ): message is Message & { channel: DiscordChannel } {
+    return isUsableMessage(message)
+      && isSupportedChannel(message.channel)
       && this.isVisible(message.channel)
       && (this.includeBots || !message.author.bot)
   }
@@ -633,22 +663,22 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       if (fetchMessages) {
         const fetched = await Promise.resolve(channel.messages.fetch({ after: state.lastMessageId, limit: 100 }))
           .catch(() => null)
-        if (fetched) messages = [...fetched.values()].sort((a, b) => compareSnowflakes(b.id, a.id))
+        if (fetched) messages = usableMessages(fetched.values()).sort((a, b) => compareSnowflakes(b.id, a.id))
       } else {
-        messages = [...channel.messages.cache.values()]
+        messages = usableMessages(channel.messages.cache.values())
           .filter((message) => compareSnowflakes(message.id, state.lastMessageId!) > 0)
           .sort((a, b) => compareSnowflakes(b.id, a.id))
       }
     }
     let lastMessage = messages[0]
-    if (!lastMessage && lastId) lastMessage = channel.messages.cache.get(lastId)
+    if (!lastMessage && lastId) lastMessage = usableMessage(channel.messages.cache.get(lastId))
     if (!lastMessage && lastId && fetchMessages) {
-      lastMessage = await Promise.resolve(channel.messages.fetch(lastId)).catch(() => undefined)
+      lastMessage = usableMessage(await Promise.resolve(channel.messages.fetch(lastId)).catch(() => undefined))
     }
     const readMessage = state?.lastMessageId
-      ? channel.messages.cache.get(state.lastMessageId)
+      ? usableMessage(channel.messages.cache.get(state.lastMessageId))
         ?? (fetchMessages
-          ? await Promise.resolve(channel.messages.fetch(state.lastMessageId)).catch(() => undefined)
+          ? usableMessage(await Promise.resolve(channel.messages.fetch(state.lastMessageId)).catch(() => undefined))
           : undefined)
       : undefined
     const mappedLastMessage = !fetchMessages && isGuildChannel(channel)
@@ -954,6 +984,40 @@ function isSupportedChannel(channel: AnyChannel): channel is DiscordChannel {
     || channel.type === 'GUILD_TEXT' || channel.type === 'GUILD_NEWS'
     || channel.type === 'GUILD_PUBLIC_THREAD' || channel.type === 'GUILD_PRIVATE_THREAD'
     || channel.type === 'GUILD_NEWS_THREAD'
+}
+
+function isUsableMessage(value: unknown): value is Message {
+  if (!value || typeof value !== 'object') return false
+  const message = value as { id?: unknown, author?: { id?: unknown } | null, channel?: unknown }
+  return typeof message.id === 'string'
+    && typeof message.author?.id === 'string'
+    && Boolean(message.channel)
+}
+
+function usableMessage(value: unknown): Message | undefined {
+  return isUsableMessage(value) ? value : undefined
+}
+
+function usableMessages(values: Iterable<unknown>): Message[] {
+  return [...values].filter(isUsableMessage)
+}
+
+async function mapConcurrent<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (true) {
+      const index = next++
+      if (index >= values.length) return
+      results[index] = await mapper(values[index]!, index)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 function isGuildChannel(channel: DiscordChannel): channel is DiscordGuildChannel {
