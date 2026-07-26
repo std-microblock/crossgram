@@ -42,22 +42,24 @@ test('CLI discovers runtime databases and returns JSON from a child process', as
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('MTProto command consumes the real WebSocket entry:init protocol', async () => {
+test('MTProto command waits through reload frames and consumes the real WebSocket protocol', async () => {
   const server = createServer()
   const sockets = new WebSocketServer({ server, path: '/api' })
-  sockets.on('connection', socket => socket.send(JSON.stringify({
-    type: 'entry:init',
-    body: {
-      version: 'test',
-      entries: {
-        unrelated: { data: { messages: [] } },
-        debug: { data: { capturing: true, dropped: 2, maxEvents: 2000, events: [
-          { id: 1, timestamp: Date.now(), direction: 'client->server', phase: 'message', name: 'ping', searchText: 'ping' },
-          { id: 2, timestamp: Date.now(), direction: 'server->client', phase: 'message', name: 'rpc_result -> pong', searchText: 'rpc_result pong' },
-        ] } },
+  sockets.on('connection', socket => {
+    socket.send(JSON.stringify({ type: 'entry:init', body: { version: 'test', entries: { unrelated: { data: { messages: [] } } } } }))
+    setTimeout(() => socket.send(JSON.stringify({
+      type: 'entry:init',
+      body: {
+        version: 'test',
+        entries: {
+          debug: { data: { capturing: true, dropped: 2, maxEvents: 2000, events: [
+            { id: 1, timestamp: Date.now(), direction: 'client->server', phase: 'message', name: 'ping', searchText: 'ping' },
+            { id: 2, timestamp: Date.now(), direction: 'server->client', phase: 'message', name: 'rpc_result -> pong', searchText: 'rpc_result pong' },
+          ] } },
+        },
       },
-    },
-  })))
+    })), 20)
+  })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   try {
     const { port } = server.address()

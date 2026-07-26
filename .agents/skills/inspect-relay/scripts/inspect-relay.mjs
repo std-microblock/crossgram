@@ -180,18 +180,26 @@ export async function fetchMtprotoSnapshot(webui, options = {}, WebSocketImpl = 
   const endpoint = new URL(options.apiPath || '/api', webui)
   endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:'
   const timeoutMs = Number(options.timeout ?? 5_000)
-  const init = await new Promise((resolveInit, reject) => {
+  const debug = await new Promise((resolveDebug, reject) => {
     const socket = new WebSocketImpl(endpoint)
-    const timer = setTimeout(() => { socket.close(); reject(new Error(`Timed out connecting to ${endpoint}`)) }, timeoutMs)
-    const fail = event => { clearTimeout(timer); reject(new Error(`WebUI WebSocket failed: ${event?.message || endpoint}`)) }
+    let settled = false
+    const finish = (callback) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.close()
+      callback()
+    }
+    const timer = setTimeout(() => finish(() => reject(new Error(`MTProto debug entry was not available at ${endpoint} within ${timeoutMs}ms`))), timeoutMs)
+    const fail = event => finish(() => reject(new Error(`WebUI WebSocket failed: ${event?.message || endpoint}`)))
     const receive = event => {
       try {
         const payload = JSON.parse(typeof event.data === 'string' ? event.data : Buffer.from(event.data).toString('utf8'))
         if (payload.type !== 'entry:init') return
-        clearTimeout(timer)
-        socket.close()
-        resolveInit(payload.body)
-      } catch (error) { clearTimeout(timer); socket.close(); reject(error) }
+        const match = Object.values(payload.body?.entries || {}).map(entry => entry?.data)
+          .find(data => data && Array.isArray(data.events) && 'maxEvents' in data)
+        if (match) finish(() => resolveDebug(match))
+      } catch (error) { finish(() => reject(error)) }
     }
     if (typeof socket.addEventListener === 'function') {
       socket.addEventListener('error', fail)
@@ -201,9 +209,6 @@ export async function fetchMtprotoSnapshot(webui, options = {}, WebSocketImpl = 
       socket.on('message', data => receive({ data }))
     }
   })
-  const entries = Object.values(init.entries || {})
-  const debug = entries.map(entry => entry?.data).find(data => data && Array.isArray(data.events) && 'maxEvents' in data)
-  if (!debug) throw new Error('MTProto debug entry is not available in WebUI')
   let events = debug.events
   if (options.since !== undefined) events = events.filter(event => event.timestamp >= parseDuration(options.since))
   if (options.name) events = events.filter(event => String(event.name).toLowerCase().includes(String(options.name).toLowerCase()))
