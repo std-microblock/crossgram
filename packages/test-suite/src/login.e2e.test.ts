@@ -1870,6 +1870,7 @@ describe('bridge login e2e', () => {
     }
     let virtualMemberCalls = 0
     let virtualReactionCalls = 0
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     const historyCalls: string[] = []
     const platform: bridge.IMPlatform = {
       capabilities: {
@@ -1882,7 +1883,10 @@ describe('bridge login e2e', () => {
       async getAccount() {
         return { credentials: {}, user: { id: 'self', firstName: 'Virtual Test User' } }
       },
-      async subscribe() { return () => {} },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
       async getDialogs() {
         return { dialogs: [{ conversation: parent, unreadCount: 0, lastMessage: merged }] }
       },
@@ -1952,6 +1956,36 @@ describe('bridge login e2e', () => {
         },
       })
       expect(historyCalls).toEqual([parent.id])
+
+      expect(handler).toBeTypeOf('function')
+      const liveMerged: bridge.IMMessage = {
+        ...merged, id: 'merged-live', timestamp: merged.timestamp + 1,
+      }
+      await handler!({ type: 'message', conversation: parent, message: liveMerged })
+      const livePreview = await readPush(client, key)
+      expect(livePreview).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewChannelMessage',
+          message: {
+            _: 'message', message: '查看聊天记录',
+            entities: [{
+              _: 'messageEntityTextUrl',
+              url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+            }],
+            media: { webpage: {
+              _: 'webPage', title: virtual.title,
+              description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
+              url: `tg://resolve?domain=bridgechat_${virtualChat.id}`,
+            } },
+          },
+        }],
+        chats: [
+          { _: 'channel', title: parent.title },
+          { _: 'chat', id: virtualChat.id, title: virtual.title },
+        ],
+      })
+      expect(JSON.stringify(livePreview)).not.toContain('tg://privatepost')
 
       client.close()
       const fresh = await TestClient.connect(port)
