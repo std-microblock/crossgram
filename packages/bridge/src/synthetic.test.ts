@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
+import Long from 'long'
 import { makeConfig, makeUser, RELAY_DC_IDS } from './synthetic.js'
 
 function roundTrip(object: tl.TlObject): tl.TlObject {
