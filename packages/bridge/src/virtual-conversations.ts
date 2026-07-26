@@ -11,7 +11,10 @@ export function registerVirtualConversation(
   const session = conversations.get(platformSessionId) ?? new Map<number, IMConversation>()
   session.set(chatId, conversation)
   conversations.set(platformSessionId, session)
-  return `tg://resolve?domain=bridgechat_${chatId}`
+  // HTTPS t.me links are handled natively by both Telegram Desktop and
+  // Android clients. The synthetic username still resolves to a basic
+  // peerChat, so opening the link does not require a channel/megagroup.
+  return `https://t.me/bridgechat_${chatId}`
 }
 
 export function virtualConversation(

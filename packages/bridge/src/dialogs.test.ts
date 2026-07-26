@@ -852,7 +852,7 @@ describe('DialogRpc', () => {
       _: 'messageMediaWebPage', manual: true, safe: true,
       webpage: {
         _: 'webPage',
-        url: `tg://resolve?domain=bridgechat_${temporaryId}`,
+        url: `https://t.me/bridgechat_${temporaryId}`,
         displayUrl: '聊天记录', type: 'telegram_message',
         title: '聊天记录', description: 'Bob: native preview\nAlice: work',
       },
