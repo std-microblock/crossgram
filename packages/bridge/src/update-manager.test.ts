@@ -44,6 +44,7 @@ async function createHarness(
   updateDeliveryRetention?: number,
   targetPlatform: IMPlatform = platform,
   projectSticker?: ConstructorParameters<typeof UpdateManager>[6],
+  deliveredConnections = 1,
 ) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
@@ -61,7 +62,10 @@ async function createHarness(
   const store = new MessageStore(ctx.database, updateDeliveryRetention)
   const manager = new UpdateManager(
     ctx.database, new PlatformRegistry([[session.platformId, targetPlatform]]), store,
-    (authKeyId, update) => sent.push({ authKeyId, update }),
+    (authKeyId, update) => {
+      sent.push({ authKeyId, update })
+      return deliveredConnections
+    },
     1, undefined, projectSticker,
   )
   disposals.push(async () => {
@@ -133,6 +137,57 @@ describe('UpdateManager', () => {
     expect((payload.updates[0] as tl.RawUpdateNewChannelMessage).message).toMatchObject({
       fromId: { _: 'peerUser', userId: (payload.users[0] as tl.RawUser).id },
     })
+  })
+
+  it('returns RPC-delivered replacements while pushing only to observer auth keys', async () => {
+    const { ctx, store, manager, sent } = await createHarness(undefined, platform, undefined, 0)
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '1122334455667788',
+      platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+    })
+    const conversation: IMConversation = { id: 'replacement-room', kind: 'group', title: 'Replacement Room' }
+    const original: IMMessage = {
+      id: 'original', conversationId: conversation.id, senderId: session.userId,
+      timestamp: 1_800_000_010, outgoing: true,
+      content: { parts: [{ type: 'text', text: 'before edit' }] },
+    }
+    const created = await store.ingest(session, conversation, original)
+    const deleted = await store.deleteMessages(session, conversation, [original.id])
+    const options = { excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true }
+    const deletePayload = await manager.publish(session, {
+      event: {
+        type: 'message-delete', eventId: 'local-edit:original:replacement', conversation,
+        messageIds: [original.id], timestamp: original.timestamp + 1,
+      },
+      result: deleted,
+    }, options) as tl.RawUpdates
+
+    const replacement: IMMessage = {
+      ...original, id: 'replacement', timestamp: original.timestamp + 1,
+      content: { parts: [{ type: 'text', text: 'after edit' }] },
+    }
+    const replacementResult = await store.ingest(session, conversation, replacement)
+    const replacementPayload = await manager.publish(session, {
+      event: { type: 'message', conversation, message: replacement },
+      result: replacementResult,
+    }, options) as tl.RawUpdates
+
+    expect(sent).toHaveLength(2)
+    expect(sent.map(({ authKeyId }) => Buffer.from(authKeyId).toString('hex')))
+      .toEqual(['1122334455667788', '1122334455667788'])
+    expect(deletePayload.updates).toMatchObject([{
+      _: 'updateDeleteChannelMessages', messages: [created.projection[0].tlMessageId], ptsCount: 1,
+    }])
+    expect(replacementPayload.updates).toMatchObject([{
+      _: 'updateNewChannelMessage', ptsCount: 1, message: { message: 'after edit', out: true },
+    }])
+    expect(replacementPayload.updates[0]).toMatchObject({
+      pts: (deletePayload.updates[0] as tl.RawUpdateDeleteChannelMessages).pts + 1,
+    })
+    expect(sent[0].update).toEqual(deletePayload)
+    expect(sent[1].update).toEqual(replacementPayload)
+    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
   })
 
   it('includes clickable URL entities in live updates', async () => {

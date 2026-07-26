@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
+import type { tl } from '@mtcute/core'
 import { defineModels } from './models.js'
 import { MessageStore } from './message-store.js'
 import {
@@ -128,28 +129,41 @@ describe('PlatformSubscriptionManager', () => {
     const platform = new PushPlatform()
     const store = new MessageStore(database)
     const committed: IMEvent[] = []
+    const deliveryOptions: unknown[] = []
     const manager = new PlatformSubscriptionManager(
       database, new PlatformRegistry([['push', platform]]), store, undefined,
-      (_session, value) => { committed.push(value.event) },
+      (_session, value, options) => {
+        committed.push(value.event)
+        deliveryOptions.push(options)
+        return {
+          _: 'updates', updates: [], users: [], chats: [],
+          date: value.event.type === 'message-delete' ? 1 : 2,
+          seq: value.event.type === 'message-delete' ? 1 : 2,
+        } satisfies tl.RawUpdates
+      },
     )
     const conversation: IMConversation = { id: 'room', kind: 'group', title: 'Room' }
     await manager.ensure(session)
     await platform.emit({ type: 'message', conversation, message: incoming('original') })
     committed.length = 0
+    deliveryOptions.length = 0
 
     const replacement = {
       ...incoming('replacement'), outgoing: true, senderId: 'self',
       content: { parts: [{ type: 'text' as const, text: 'replacement body' }] },
     }
-    await Promise.all([
+    const options = { excludeAuthKeyId: 'requester', deliveredViaRpc: true }
+    const published = await Promise.all([
       manager.ingestLocalEvent(session, {
         type: 'message-delete', eventId: 'local-edit:original:replacement', conversation,
         messageIds: ['original'], timestamp: 2,
-      }),
-      manager.ingestLocalEvent(session, { type: 'message', conversation, message: replacement }),
+      }, options),
+      manager.ingestLocalEvent(session, { type: 'message', conversation, message: replacement }, options),
     ])
 
     expect(committed.map((event) => event.type)).toEqual(['message-delete', 'message'])
+    expect(deliveryOptions).toEqual([options, options])
+    expect(published).toMatchObject([{ _: 'updates', seq: 1 }, { _: 'updates', seq: 2 }])
     expect(await store.readHistory(session.platformSessionId, conversation.id)).toMatchObject([
       { id: 'replacement', content: { parts: [{ type: 'text', text: 'replacement body' }] } },
     ])

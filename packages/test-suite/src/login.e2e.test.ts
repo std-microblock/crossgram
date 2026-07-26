@@ -904,7 +904,7 @@ describe('bridge login e2e', () => {
         },
       }, 59)
       expect(stagedSent).toMatchObject({
-        _: 'updates',
+        _: 'updatesCombined',
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(803) },
           {
@@ -2177,7 +2177,18 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
         id: sentMedia.updates[1].message.id, message: 'replacement after recall',
       }, 26)
-      expect(editResult).toMatchObject({ _: 'updates', updates: [] })
+      expect(editResult).toMatchObject({
+        _: 'updates',
+        updates: [
+          {
+            _: 'updateDeleteChannelMessages', messages: [sentMedia.updates[1].message.id], ptsCount: 1,
+          },
+          {
+            _: 'updateNewChannelMessage', ptsCount: 1,
+            message: { message: 'replacement after recall', out: true },
+          },
+        ],
+      })
       expect(deletedMessageIds).toEqual(['sent-1'])
 
       const recalledPush = await readPush(observer, observerKey)
@@ -2197,6 +2208,7 @@ describe('bridge login e2e', () => {
       })
       expect(replacementPush.updates[0].message.id).not.toBe(sentMedia.updates[1].message.id)
       expect(replacementPush.updates[0].pts).toBe(recalledPush.updates[0].pts + 1)
+      expect(editResult.updates).toEqual([recalledPush.updates[0], replacementPush.updates[0]])
 
       const replacementHistory = await callRpc(observer, observerKey, observerSid, {
         _: 'messages.getHistory',
@@ -2213,6 +2225,142 @@ describe('bridge login e2e', () => {
       client?.close()
       await stop()
       await rm(uploadPath, { recursive: true, force: true })
+    }
+  }, 15000)
+
+  it('returns recall-and-resend edits to the requester and pushes identical updates to observers', async () => {
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    let sentSequence = 0
+    const deletedMessageIds: string[] = []
+    const platformId = 'edit-replacement-e2e'
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: false,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: true },
+        messageActions: {
+          delete: { own: { supported: true }, others: { supported: false } },
+          edit: { mode: 'delete-and-resend' },
+          forward: { mode: 'unsupported', preservesAuthor: false },
+        },
+      },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
+      async sendMessage(_session, target, content) {
+        return {
+          id: `replacement-${++sentSequence}`,
+          conversationId: target.id,
+          senderId: 'self',
+          outgoing: true,
+          timestamp: 1_800_000_201 + sentSequence,
+          content: {
+            parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []),
+          },
+        }
+      },
+      async deleteMessages(_session, _target, ids) {
+        deletedMessageIds.push(...ids)
+      },
+      async getUser(_session, id) { return { id, firstName: id } },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({
+      platform: { id: platformId, adapter: platform },
+    })
+    let requester: TestClient | undefined
+    let observer: TestClient | undefined
+    try {
+      await ctx.database.create('mtproto_platform_session', {
+        id: 'edit-replacement-ps', platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Edit User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'edit-replacement-auth', virtualPhone: '99900888', totpSecret: '33'.repeat(20),
+        platformId, platformSessionId: 'edit-replacement-ps',
+      })
+      requester = await TestClient.connect(port)
+      const requesterKey = await doClientHandshake(requester, pubKey)
+      const requesterSid = new Long(0x1234abcd, 0x7abc, false)
+      const requesterCode = await callRpc(requester, requesterKey, requesterSid, {
+        _: 'auth.sendCode', phoneNumber: '+99900888', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(requester, requesterKey, requesterSid, {
+        _: 'auth.signIn', phoneNumber: '99900888', phoneCodeHash: requesterCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode('33'.repeat(20)),
+      }, 4)
+
+      const conversation: bridge.IMConversation = {
+        id: 'edit-replacement-group', kind: 'group', title: 'Edit Replacement Group',
+      }
+      await handler!({
+        type: 'message', conversation,
+        message: {
+          id: 'seed', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_200,
+          content: { parts: [{ type: 'text', text: 'seed' }] },
+        },
+      })
+      const seedPush = await readPush(requester, requesterKey)
+      const chatId = seedPush.chats[0].id
+      await callRpc(requester, requesterKey, requesterSid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' },
+        limit: 100, hash: Long.ZERO,
+      }, 5)
+      const sent = await callRpc(requester, requesterKey, requesterSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        message: 'before edit', randomId: Long.fromNumber(801),
+      }, 6)
+      expect(sent).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
+      const originalMessageId = sent.id
+
+      observer = await TestClient.connect(port)
+      const observerKey = await doClientHandshake(observer, pubKey)
+      const observerSid = new Long(0x2345bcde, 0x7bcd, false)
+      const observerCode = await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.sendCode', phoneNumber: '+99900888', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 8)
+      await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.signIn', phoneNumber: '99900888', phoneCodeHash: observerCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode('33'.repeat(20)),
+      }, 10)
+
+      const editResult = await callRpc(requester, requesterKey, requesterSid, {
+        _: 'messages.editMessage',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        id: originalMessageId,
+        message: 'after edit',
+      }, 12)
+      expect(editResult).toMatchObject({
+        _: 'updatesCombined',
+        updates: [
+          { _: 'updateDeleteChannelMessages', messages: [originalMessageId], ptsCount: 1 },
+          { _: 'updateNewChannelMessage', message: { message: 'after edit', out: true }, ptsCount: 1 },
+        ],
+      })
+      expect(editResult.seq).toBe(editResult.seqStart + 1)
+      expect(deletedMessageIds).toEqual(['replacement-1'])
+
+      const deletePush = await readPush(observer, observerKey)
+      const replacementPush = await readPush(observer, observerKey)
+      expect(editResult.updates).toEqual([deletePush.updates[0], replacementPush.updates[0]])
+      expect(replacementPush.updates[0].pts).toBe(deletePush.updates[0].pts + 1)
+      expect(replacementPush.updates[0].message.id).not.toBe(originalMessageId)
+
+      const history = await callRpc(observer, observerKey, observerSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 14)
+      expect(history.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: replacementPush.updates[0].message.id, message: 'after edit' }),
+      ]))
+      expect(history.messages.some((message: any) => message.id === originalMessageId)).toBe(false)
+    } finally {
+      observer?.close()
+      requester?.close()
+      await stop()
     }
   }, 15000)
 
