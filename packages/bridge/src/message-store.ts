@@ -78,6 +78,7 @@ const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
   private _writeTail = Promise.resolve()
+  private _revision = 0
 
   constructor(
     private readonly _database: Database,
@@ -85,6 +86,11 @@ export class MessageStore {
     private readonly _updateJournal: UpdateDeliveryJournal = new MemoryUpdateDeliveryJournal(updateDeliveryRetention),
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
+
+  /** Monotonic process-local version used to invalidate materialized read caches. */
+  get revision(): number {
+    return this._revision
+  }
 
   async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
     return this._write(() => this._database.withTransaction(async (database) =>
@@ -153,7 +159,7 @@ export class MessageStore {
         ))
       }
       return results
-    }), options.allocation === 'history' ? 'history-ingest' : 'ingest')
+    }), options.allocation === 'history' ? 'history-ingest' : 'ingest', true)
   }
 
   async ingestDialogs(session: PlatformSession, dialogs: readonly IMDialog[]): Promise<void> {
@@ -209,7 +215,7 @@ export class MessageStore {
           )
         }
       }
-    }))
+    }), 'dialog-ingest', true)
   }
 
   private async _ingestMessage(
@@ -400,7 +406,7 @@ export class MessageStore {
         messageIds: deletedMessageIds,
         tlMessageIds,
       }
-    }))
+    }), 'message-delete', true)
   }
 
   async setReactions(
@@ -431,7 +437,7 @@ export class MessageStore {
         message: await this._hydrateMessage(row),
         tlMessageIds: parts.map((part) => part.tlMessageId),
       }
-    }))
+    }), 'message-reactions', true)
   }
 
   async markRead(
@@ -1284,7 +1290,11 @@ export class MessageStore {
     await this._write(() => this._updateJournal.prune(platformSessionId, ACCOUNT_UPDATE_SCOPE))
   }
 
-  private async _write<T>(callback: () => Promise<T>, operation = 'write'): Promise<T> {
+  private async _write<T>(
+    callback: () => Promise<T>,
+    operation = 'write',
+    invalidatesHistory = false,
+  ): Promise<T> {
     const queuedAt = performance.now()
     const previous = this._writeTail
     let release!: () => void
@@ -1302,7 +1312,9 @@ export class MessageStore {
     }
     const executeAt = performance.now()
     try {
-      return await callback()
+      const result = await callback()
+      if (invalidatesHistory) this._revision++
+      return result
     } finally {
       release()
       const executeMs = performance.now() - executeAt

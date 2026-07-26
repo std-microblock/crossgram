@@ -403,6 +403,7 @@ describe('bridge login e2e', () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
     try {
+      const getHistory = vi.spyOn(ctx.imPlatform.require('static'), 'getHistory')
       const platformLogin = await waitForPlatformLogin(ctx, 'static')
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
@@ -432,17 +433,35 @@ describe('bridge login e2e', () => {
       const first = await callRpc(client, key, sid, request, 8)
       expect(first.messages).toHaveLength(100)
       expect(first.messages[0].message).toBe('Group D history message 10000')
+      const upstreamCallsAfterFirstPage = getHistory.mock.calls.length
+      expect(upstreamCallsAfterFirstPage).toBeGreaterThan(0)
       const [conversation] = await ctx.database.get('mtproto_im_conversation', {
         platformSessionId: platformLogin.session.id, platformConversationId: 'group-d',
       })
       const persistedBefore = await ctx.database.get('mtproto_im_message', { conversationId: conversation.id })
 
+      const databaseGet = vi.spyOn(ctx.database, 'get')
+      const databaseSelect = vi.spyOn(ctx.database, 'select')
       const repeated = await callRpc(client, key, sid, request, 10)
+      databaseGet.mockClear()
+      databaseSelect.mockClear()
+      const cached = await callRpc(client, key, sid, request, 12)
+      const historyTables = new Set([
+        'mtproto_im_message', 'mtproto_im_message_alias', 'mtproto_im_message_reaction',
+        'mtproto_tl_message_part', 'mtproto_im_media',
+      ])
+      const cachedHistoryGets = databaseGet.mock.calls.filter(([table]) => historyTables.has(table))
+      const cachedHistorySelects = databaseSelect.mock.calls.filter(([table]) => historyTables.has(table))
       const persistedAfter = await ctx.database.get('mtproto_im_message', { conversationId: conversation.id })
 
       expect(repeated.messages.map((item: any) => [item.id, item.message]))
         .toEqual(first.messages.map((item: any) => [item.id, item.message]))
+      expect(cached.messages.map((item: any) => [item.id, item.message]))
+        .toEqual(first.messages.map((item: any) => [item.id, item.message]))
       expect(persistedAfter).toHaveLength(persistedBefore.length)
+      expect(getHistory).toHaveBeenCalledTimes(upstreamCallsAfterFirstPage)
+      expect(cachedHistoryGets).toHaveLength(0)
+      expect(cachedHistorySelects).toHaveLength(0)
     } finally {
       client?.close()
       await stop()
