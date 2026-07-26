@@ -117,6 +117,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   private readonly handlers = new Map<string, (event: IMEvent<DiscordMediaLocator>) => void | Promise<void>>()
   private readonly originNonces = new Set<string>()
   private loginPromise?: Promise<void>
+  private lastKnownUser?: User
   private stopped = false
 
   constructor(
@@ -151,7 +152,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   async getAccount() {
     await this.ensureReady()
-    return { credentials: {}, user: mapUser(this.client.user) }
+    return { credentials: {}, user: mapUser(this.selfUser()) }
   }
 
   async subscribe(
@@ -358,7 +359,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const channel = await this.requireChannel(conversation.id)
     if (channel.type === 'DM' || channel.type === 'GROUP_DM') {
       const user = channel.type === 'DM'
-        ? [channel.recipient, this.client.user].find((item) => item.id === userId)
+        ? [channel.recipient, this.selfUser()].find((item) => item.id === userId)
         : channel.recipients.get(userId)
       return user ? this.mapPrivateMember(channel, user) : null
     }
@@ -490,7 +491,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const message = await channel.messages.fetch(target.targetId)
     const requested = new Set(reactionKeys)
     for (const reaction of message.reactions.cache.values()) {
-      if (reaction.me && !requested.has(reactionKey(reaction))) await reaction.users.remove(this.client.user)
+      if (reaction.me && !requested.has(reactionKey(reaction))) await reaction.users.remove(this.selfUser())
     }
     const selected = new Set([...message.reactions.cache.values()].filter((item) => item.me).map(reactionKey))
     for (const key of requested) {
@@ -535,13 +536,27 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   private async ensureReady(): Promise<void> {
     if (this.stopped) throw new Error('Discord platform has stopped')
-    if (this.client.isReady()) return
+    if (this.client.isReady() && this.client.user) {
+      this.lastKnownUser = this.client.user
+      return
+    }
     if (!this.config.token) throw new Error('Discord user token is required')
-    this.loginPromise ??= (this.client as Client).login(this.config.token).then(() => undefined).catch((error) => {
-      this.loginPromise = undefined
-      throw error
-    })
-    await this.loginPromise
+    const pending = this.loginPromise ??= (this.client as Client).login(this.config.token).then(() => undefined)
+    try {
+      await pending
+    } finally {
+      if (this.loginPromise === pending) this.loginPromise = undefined
+    }
+    if (!this.client.user) {
+      throw new Error('Discord login completed without a ready user')
+    }
+    this.lastKnownUser = this.client.user
+  }
+
+  private selfUser(): User {
+    if (this.client.user) this.lastKnownUser = this.client.user
+    if (!this.lastKnownUser) throw new Error('Discord current user is unavailable')
+    return this.lastKnownUser
   }
 
   private handleRaw(packet: { t?: string, d?: any }): void {
@@ -588,7 +603,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const guildId = parseGuildConversationId(id)
     if (!guildId) return
     const guild = this.client.guilds.cache.get(guildId)
-    return guild ? selectGuildRoot(visibleGuildChannels(guild, this.client.user)) : undefined
+    return guild ? selectGuildRoot(visibleGuildChannels(guild, this.selfUser())) : undefined
   }
 
   private async requireChannel(id: string): Promise<DiscordChannel> {
@@ -600,7 +615,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   }
 
   private isVisible(channel: DiscordChannel): boolean {
-    return isVisibleChannel(channel, this.client.user)
+    return isVisibleChannel(channel, this.selfUser())
   }
 
   private shouldExposeMessage(message: Message): boolean {
@@ -641,7 +656,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       : lastMessage && this.shouldExposeMessage(lastMessage) ? this.mapMessage(lastMessage) : undefined
     return {
       conversation: this.mapConversation(channel),
-      unreadCount: unread ? Math.max(1, messages.filter((item) => item.author.id !== this.client.user.id).length) : 0,
+      unreadCount: unread ? Math.max(1, messages.filter((item) => item.author.id !== this.selfUser().id).length) : 0,
       lastMessage: mappedLastMessage,
       readInboxMaxMessage: fetchMessages && readMessage && this.shouldExposeMessage(readMessage)
         ? this.mapMessage(readMessage)
@@ -660,13 +675,13 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       const icon = channel.iconURL({ format: 'png', size: 256 })
       return {
         id: channel.id, kind: 'group', title: channel.name ?? [...channel.recipients.values()]
-          .filter((user) => user.id !== this.client.user.id).map((user) => user.displayName).join(', '),
+          .filter((user) => user.id !== this.selfUser().id).map((user) => user.displayName).join(', '),
         avatar: icon ? urlMedia(`discord:gdm:${channel.id}`, icon, 'image', 'group.png', 'image/png') : undefined,
         metadata: { discordChannelType: channel.type, participantsCount: channel.recipients.size },
       }
     }
     const guild = channel.guild
-    const root = selectGuildRoot(visibleGuildChannels(guild, this.client.user))
+    const root = selectGuildRoot(visibleGuildChannels(guild, this.selfUser()))
     const rootConversation = root?.id === channel.id
     const icon = guild.iconURL({ format: 'png', size: 256 })
     return {
@@ -723,18 +738,20 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   private topicPlaceholder(channel: GuildBasedChannel | ThreadChannel): IMMessage<DiscordMediaLocator> {
     const conversation = this.mapConversation(channel as DiscordChannel)
+    const now = Math.trunc(Date.now() / 1_000)
+    const safeTimestamp = Math.max(Math.trunc(channel.createdTimestamp / 1_000), now - 365 * 24 * 60 * 60)
     return {
       id: syntheticTopicMessageId(channel.id), conversationId: conversation.id,
-      senderId: this.client.user.id, sender: mapUser(this.client.user),
+      senderId: this.selfUser().id, sender: mapUser(this.selfUser()),
       content: { parts: [], serviceAction: { type: 'custom', text: conversation.title } },
-      timestamp: Math.trunc(channel.createdTimestamp / 1_000), outgoing: true,
+      timestamp: safeTimestamp, outgoing: true,
       metadata: { discordSyntheticTopicRoot: true },
     }
   }
 
   private mapMessage(message: Message): IMMessage<DiscordMediaLocator> {
     const parts: IMMessage<DiscordMediaLocator>['content']['parts'] = []
-    const text = mapDiscordText(message)
+    const text = mapDiscordText(message, this.selfUser())
     if (text.text) parts.push({ type: 'text', text: text.text, entities: text.entities.length ? text.entities : undefined })
     for (const attachment of message.attachments.values()) parts.push({ type: 'media', media: mapAttachment(attachment) })
     for (const sticker of message.stickers.values()) {
@@ -762,7 +779,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
         serviceAction: message.system ? { type: 'custom', text: message.cleanContent || message.type } : undefined,
       },
       timestamp: Math.trunc(message.createdTimestamp / 1_000),
-      outgoing: message.author.id === this.client.user.id,
+      outgoing: message.author.id === this.selfUser().id,
       replyToId: message.reference?.messageId,
       reactionContext,
       metadata: {
@@ -774,7 +791,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   private async channelMembers(channel: DiscordChannel): Promise<IMConversationMember<DiscordMediaLocator>[]> {
     if (channel.type === 'DM') {
-      return [this.mapPrivateMember(channel, this.client.user), this.mapPrivateMember(channel, channel.recipient)]
+      return [this.mapPrivateMember(channel, this.selfUser()), this.mapPrivateMember(channel, channel.recipient)]
     }
     if (channel.type === 'GROUP_DM') {
       return [...channel.recipients.values()].map((user) => this.mapPrivateMember(channel, user))
@@ -1050,7 +1067,7 @@ function mapAttachment(attachment: MessageAttachment): IMMedia<DiscordMediaLocat
   }
 }
 
-function mapDiscordText(message: Message): {
+function mapDiscordText(message: Message, self: User): {
   text: string
   entities: import('@mtproto-relay/bridge').IMTextEntity[]
 } {
@@ -1079,7 +1096,10 @@ function mapDiscordText(message: Message): {
         : id}`
       text += label
       if (channel && isSupportedChannel(channel)) {
-        entities.push({ type: 'conversation-link', offset, length: label.length, conversation: mapLinkedConversation(channel) })
+        entities.push({
+          type: 'conversation-link', offset, length: label.length,
+          conversation: mapLinkedConversation(channel, self),
+        })
       }
     } else {
       const animated = match[3] === 'a'
@@ -1098,10 +1118,10 @@ function mapDiscordText(message: Message): {
   return { text, entities }
 }
 
-function mapLinkedConversation(channel: DiscordChannel): IMConversation<DiscordMediaLocator> {
+function mapLinkedConversation(channel: DiscordChannel, self: User): IMConversation<DiscordMediaLocator> {
   if (channel.type === 'DM') return { id: channel.id, kind: 'direct', title: channel.recipient.displayName }
   if (channel.type === 'GROUP_DM') return { id: channel.id, kind: 'group', title: channel.name ?? 'Group DM' }
-  const root = selectGuildRoot(visibleGuildChannels(channel.guild, channel.client.user))
+  const root = selectGuildRoot(visibleGuildChannels(channel.guild, self))
   const rootConversation = root?.id === channel.id
   return {
     id: rootConversation ? guildConversationId(channel.guild.id) : channel.id,
