@@ -399,6 +399,56 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
+  it('returns the same warm 100-message history page without duplicate persistence', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x76543211, 0x4abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 6)
+      const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')
+      expect(longHistoryGroup).toMatchObject({ _: 'channel', megagroup: true })
+      const request = {
+        _: 'messages.getHistory' as const,
+        peer: { _: 'inputPeerChannel' as const, channelId: longHistoryGroup.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }
+
+      const first = await callRpc(client, key, sid, request, 8)
+      expect(first.messages).toHaveLength(100)
+      expect(first.messages[0].message).toBe('Group D history message 10000')
+      const [conversation] = await ctx.database.get('mtproto_im_conversation', {
+        platformSessionId: platformLogin.session.id, platformConversationId: 'group-d',
+      })
+      const persistedBefore = await ctx.database.get('mtproto_im_message', { conversationId: conversation.id })
+
+      const repeated = await callRpc(client, key, sid, request, 10)
+      const persistedAfter = await ctx.database.get('mtproto_im_message', { conversationId: conversation.id })
+
+      expect(repeated.messages.map((item: any) => [item.id, item.message]))
+        .toEqual(first.messages.map((item: any) => [item.id, item.message]))
+      expect(persistedAfter).toHaveLength(persistedBefore.length)
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('logs in, resumes on a fresh connection, reads contacts/history, and sends a message', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(1_700_001_000_000)
     const { ctx, port, pubKey, stop } = await startApp()
