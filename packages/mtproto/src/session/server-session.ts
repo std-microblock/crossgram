@@ -661,12 +661,18 @@ export class ServerSession {
    * MTProto message encryption. We decrypt and verify it, then reply boolTrue.
    */
   private async _handleBindTempAuthKey(msgId: Long, req: tl.auth.RawBindTempAuthKeyRequest): Promise<void> {
-    if (!this._permAuthKey.ready) {
-      const permanentId = longToBytesLE(req.permAuthKeyId)
+    const permanentId = longToBytesLE(req.permAuthKeyId)
+    if (!this._permAuthKey.match(permanentId)) {
       const permanent = await this._keyStore?.get(permanentId)
       if (permanent && !permanent.permanentKeyId) {
+        const replacedFreshKey = this._permAuthKey.ready
         this._permAuthKey.setup(permanent.key)
-        this._log.info('loaded permanent key %h for direct temp-key binding', this._permAuthKey.id)
+        this._log.info(
+          replacedFreshKey
+            ? 'replaced fresh permanent key with requested key %h for temp-key binding'
+            : 'loaded permanent key %h for direct temp-key binding',
+          this._permAuthKey.id,
+        )
       }
     }
     const ok = this._verifyBindInner(req)
