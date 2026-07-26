@@ -118,6 +118,7 @@ describe('StickerRpc', () => {
     const saved = await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
     expect(saved._).toBe('messages.favedStickers')
     if (saved._ !== 'messages.favedStickers') throw new Error('expected full saved stickers')
+    expect(saved.stickers).toMatchObject([{ _: 'document', size: 321 }])
 
     await expect(rpc.getAllStickers({
       _: 'messages.getAllStickers', hash: all.hash,
@@ -270,7 +271,7 @@ describe('StickerRpc', () => {
 function stickerHarness(cacheTtlMs = 5 * 60_000) {
   const sticker: IMSticker = {
     providerId: 'qq:stickers', stickerId: 'market:11690:wave', packId: '11690',
-    title: 'Wave', format: 'static', mimeType: 'image/png', version: 3,
+    title: 'Wave', format: 'static', mimeType: 'image/png', size: 321, version: 3,
   }
   const provider: IMStickerProvider = {
     capabilities: { platformKinds: ['qq'], sessionScoped: true },

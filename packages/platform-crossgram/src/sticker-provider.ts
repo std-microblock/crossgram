@@ -14,6 +14,7 @@ export class QQStickerProvider implements IMStickerProvider {
     private readonly client: QQNTClient,
     private readonly providerId: string,
     private readonly mediaCache?: QQMediaCache,
+    private readonly logger?: QQStickerLogger,
   ) {}
 
   async listPacks(_context: StickerProviderContext, query: StickerPageQuery = {}) {
@@ -36,8 +37,19 @@ export class QQStickerProvider implements IMStickerProvider {
 
   async listSavedStickers(_context: StickerProviderContext, query: StickerPageQuery = {}) {
     const page = await this.client.getSavedStickers(query)
+    const stickers = await mapConcurrent(page.stickers, 4, async (sticker) => {
+      try {
+        return await this.mapSticker(sticker)
+      } catch (error) {
+        this.logger?.warn(
+          'Skipping QQ saved sticker %s because its asset could not be prepared: %s',
+          sticker.stickerId,
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+    })
     return {
-      stickers: await mapConcurrent(page.stickers, 4, (sticker) => this.mapSticker(sticker)),
+      stickers: stickers.filter((sticker): sticker is IMSticker => sticker !== undefined),
       nextCursor: page.nextCursor,
     }
   }
@@ -113,6 +125,10 @@ export class QQStickerProvider implements IMStickerProvider {
       height: sticker.height,
     }
   }
+}
+
+interface QQStickerLogger {
+  warn(format: string, ...args: unknown[]): void
 }
 
 async function mapConcurrent<T, U>(
