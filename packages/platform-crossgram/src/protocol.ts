@@ -45,7 +45,7 @@ export interface WireMedia {
   locator: QQMediaLocator
 }
 
-export type QQStickerReference =
+export type QQStickerReference = (
   | {
       kind: 'sysface'
       faceId: string
@@ -87,6 +87,13 @@ export type QQStickerReference =
       animated: boolean
       locator?: QQMediaLocator
     }
+) & {
+  /**
+   * History placeholder whose transformed bytes are intentionally unavailable
+   * until the adapter publishes the prepared sticker through message-edit.
+   */
+  deferred?: true
+}
 
 export interface WireSticker {
   stickerId: string
