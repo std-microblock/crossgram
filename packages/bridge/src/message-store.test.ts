@@ -604,6 +604,31 @@ describe('MessageStore', () => {
       .resolves.toMatchObject({ source: { id: source.id } })
   })
 
+  it('keeps a published Telegram ID when QQ replaces an optimistic msgSeq with the final sequence', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'qq-final-sequence', kind: 'group' as const, title: 'QQ final sequence' }
+    const make = (id: string, sequence: number, text: string): IMMessage => ({
+      id, conversationId: conversation.id, senderId: 'sender', timestamp: 100,
+      metadata: { qqMsgSeq: String(sequence) },
+      content: { parts: [{ type: 'text', text }] },
+    })
+
+    await store.ingest(session, conversation, make('previous', 100, 'previous'))
+    const optimistic = await store.ingest(session, conversation, make('target', 99, 'target'))
+    const finalized = await store.ingest(session, conversation, make('target', 101, 'target'))
+
+    expect(finalized.projection[0]).toMatchObject({
+      tlMessageId: optimistic.projection[0].tlMessageId,
+      nativeSequence: 101,
+    })
+    await expect(store.findProjectedByNativeSequence(
+      session.platformSessionId, conversation.id, 99,
+    )).resolves.toBeUndefined()
+    await expect(store.findProjectedByNativeSequence(
+      session.platformSessionId, conversation.id, 101,
+    )).resolves.toMatchObject({ source: { id: 'target' } })
+  })
+
   it('keeps duplicate platform-provided group IDs addressable with a synthetic fallback', async () => {
     const { store } = await createStore()
     const group = { id: 'group', kind: 'group' as const, title: 'Group' }
