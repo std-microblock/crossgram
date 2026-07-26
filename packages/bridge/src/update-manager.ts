@@ -9,7 +9,7 @@ import {
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
-  messagePartText, telegramReplyToMessageId,
+  cardActionLabel, cardUrl, messagePartText, telegramReplyToMessageId,
   type IMConversation, type IMMessage, type PlatformSession,
 } from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
@@ -292,7 +292,7 @@ export class UpdateManager {
           : sticker?.type === 'sticker'
             ? this._projectSticker?.(session, sticker.sticker)
             : card?.type === 'card'
-              ? makeTlCardPreview(card.card)
+              ? makeTlCardPreview(card.card, this._dcId)
               : makeConversationPreviewMedia(projected.source, session.platformSessionId),
         entities: makeMessageEntities(projected.source, session.platformSessionId, userIds),
         reactions: projected.source.reactionContext?.reactions.length
@@ -594,6 +594,14 @@ function makeMessageEntities(
           ].join(':'))),
         })
       }
+    }
+    if (part.type === 'card') {
+      const url = cardUrl(part.card)
+      const action = cardActionLabel(part.card.kind)
+      if (url && text.endsWith(action)) entities.push({
+        _: 'messageEntityTextUrl', offset: base + text.length - action.length,
+        length: action.length, url,
+      })
     }
     base += text.length + (index + 1 < rendered.length ? 1 : 0)
   }
