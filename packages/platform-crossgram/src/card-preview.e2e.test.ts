@@ -1,6 +1,6 @@
 import { once } from 'node:events'
 import { createServer, type Server } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -17,6 +17,7 @@ const session: PlatformSession = {
 const disposals: Array<() => Promise<void>> = []
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
@@ -82,17 +83,45 @@ describe('QQNT card preview E2E', () => {
 
     const store = new MessageStore(ctx.database)
     const ingested = await store.ingest(session, conversation, history.messages[0], { allocation: 'history' })
-    const result = await new DialogRpc(platform, session, store).getMessages({
+    const rpc = new DialogRpc(platform, session, store)
+    const result = await rpc.getMessages({
       _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: ingested.projection[0].tlMessageId }],
     }) as tl.messages.RawMessages
     const projected = result.messages[0] as tl.RawMessage
 
     expect(projected).toMatchObject({
-      _: 'message', message: '[卡片] 示例资讯\n完整分享标题\n完整分享摘要\nhttps://example.com/articles/42',
+      _: 'message', message: '分享 · 示例资讯\n打开链接',
+      entities: [{
+        _: 'messageEntityTextUrl', offset: '分享 · 示例资讯\n'.length, length: '打开链接'.length,
+        url: 'https://example.com/articles/42',
+      }],
       media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
         _: 'webPage', url: 'https://example.com/articles/42', displayUrl: 'example.com',
         type: 'article', siteName: '示例资讯', title: '完整分享标题', description: '完整分享摘要',
+        photo: { _: 'photo', dcId: 1, sizes: [{ _: 'photoSize', type: 'x' }] },
       } },
     })
+
+    const media = projected.media as tl.RawMessageMediaWebPage
+    if (media.webpage._ !== 'webPage' || media.webpage.photo?._ !== 'photo') {
+      throw new Error('expected a downloadable card thumbnail')
+    }
+    const thumbnail = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9])
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(thumbnail, {
+      headers: { 'content-type': 'image/jpeg' },
+    }))
+    const file = await rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPhotoFileLocation', id: media.webpage.photo.id,
+        accessHash: media.webpage.photo.accessHash,
+        fileReference: media.webpage.photo.fileReference, thumbSize: 'x',
+      },
+      offset: 0, limit: 1024,
+    })
+    expect(fetchMock).toHaveBeenCalledWith('https://cdn.example.com/cover.jpg', expect.objectContaining({
+      redirect: 'manual',
+    }))
+    expect(file).toMatchObject({ _: 'upload.file', type: { _: 'storage.fileJpeg' }, bytes: thumbnail })
   })
 })
