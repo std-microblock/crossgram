@@ -904,7 +904,7 @@ describe('bridge login e2e', () => {
         },
       }, 59)
       expect(stagedSent).toMatchObject({
-        _: 'updates',
+        _: 'updatesCombined',
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(803) },
           {
@@ -2171,7 +2171,18 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
         id: sentMedia.updates[1].message.id, message: 'replacement after recall',
       }, 26)
-      expect(editResult).toMatchObject({ _: 'updates', updates: [] })
+      expect(editResult).toMatchObject({
+        _: 'updates',
+        updates: [
+          {
+            _: 'updateDeleteChannelMessages', messages: [sentMedia.updates[1].message.id], ptsCount: 1,
+          },
+          {
+            _: 'updateNewChannelMessage', ptsCount: 1,
+            message: { message: 'replacement after recall', out: true },
+          },
+        ],
+      })
       expect(deletedMessageIds).toEqual(['sent-1'])
 
       const recalledPush = await readPush(observer, observerKey)
@@ -2191,6 +2202,7 @@ describe('bridge login e2e', () => {
       })
       expect(replacementPush.updates[0].message.id).not.toBe(sentMedia.updates[1].message.id)
       expect(replacementPush.updates[0].pts).toBe(recalledPush.updates[0].pts + 1)
+      expect(editResult.updates).toEqual([recalledPush.updates[0], replacementPush.updates[0]])
 
       const replacementHistory = await callRpc(observer, observerKey, observerSid, {
         _: 'messages.getHistory',

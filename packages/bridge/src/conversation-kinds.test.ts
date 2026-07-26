@@ -133,13 +133,37 @@ async function createRpc(
     : undefined
   const store = new MessageStore(ctx.database)
   const localEvents: IMEvent[] = []
+  const localDeliveryOptions: Array<import('./platform-manager.js').PlatformEventDeliveryOptions | undefined> = []
   const onLocalEvent = options.publishLocalEvents
-    ? async (localSession: PlatformSession, event: IMEvent) => {
+    ? async (
+        localSession: PlatformSession,
+        event: IMEvent,
+        delivery?: import('./platform-manager.js').PlatformEventDeliveryOptions,
+      ) => {
         localEvents.push(event)
+        localDeliveryOptions.push(delivery)
         if (event.type === 'message') {
-          await store.ingest(localSession, event.conversation, event.message)
+          const result = await store.ingest(localSession, event.conversation, event.message)
+          return {
+            _: 'updates' as const,
+            updates: result.projection.map((part) => ({
+              _: 'updateNewChannelMessage' as const,
+              message: { _: 'messageEmpty' as const, id: part.tlMessageId },
+              pts: 12, ptsCount: 1,
+            })),
+            users: [], chats: [], date: event.message.timestamp, seq: 2,
+          }
         } else if (event.type === 'message-delete') {
-          await store.deleteMessages(localSession, event.conversation, event.messageIds)
+          const result = await store.deleteMessages(localSession, event.conversation, event.messageIds)
+          return {
+            _: 'updates' as const,
+            updates: [{
+              _: 'updateDeleteChannelMessages' as const,
+              channelId: stableId(`peer:${event.conversation.id}`),
+              messages: result.tlMessageIds, pts: 11, ptsCount: result.tlMessageIds.length,
+            }],
+            users: [], chats: [], date: event.timestamp, seq: 1,
+          }
         }
       }
     : undefined
@@ -147,10 +171,11 @@ async function createRpc(
     ctx,
     store,
     localEvents,
+    localDeliveryOptions,
     rpc: new DialogRpc(
       selectedPlatform, session, store,
       undefined, undefined, 1, undefined, reactions,
-      undefined, onLocalEvent,
+      undefined, onLocalEvent, '0011223344556677',
     ),
   }
 }
@@ -446,7 +471,9 @@ describe('conversation kinds', () => {
     const originalMode = actions.edit.mode
     actions.edit.mode = 'delete-and-resend'
     try {
-      const { rpc, store, localEvents } = await createRpc(platform, { publishLocalEvents: true })
+      const { rpc, store, localEvents, localDeliveryOptions } = await createRpc(
+        platform, { publishLocalEvents: true },
+      )
       await rpc.getDialogs(dialogsRequest())
       const groupId = stableId('peer:group')
       const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
@@ -455,8 +482,16 @@ describe('conversation kinds', () => {
 
       const result = await rpc.editMessage({
         _: 'messages.editMessage', peer: groupPeer, id: originalId, message: 'replacement body',
-      }) as tl.RawUpdates
-      expect(result.updates).toEqual([])
+      }) as tl.RawUpdatesCombined
+      expect(result).toMatchObject({ _: 'updatesCombined', seqStart: 1, seq: 2 })
+      expect(result.updates).toMatchObject([
+        { _: 'updateDeleteChannelMessages', messages: [originalId], pts: 11, ptsCount: 1 },
+        { _: 'updateNewChannelMessage', message: { _: 'messageEmpty' }, pts: 12, ptsCount: 1 },
+      ])
+      expect(localDeliveryOptions).toEqual([
+        { excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true },
+        { excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true },
+      ])
       expect(localEvents).toMatchObject([
         {
           type: 'message-delete', conversation: { id: 'group' },
