@@ -142,7 +142,8 @@ describe('Discord stall regression E2E', () => {
       const id = `8${String(index).padStart(17, '0')}`
       return {
         id, type: 'GUILD_TEXT', guild, name: index === 0 ? 'general' : `channel-${index}`,
-        parent: null, rawPosition: index, viewable: true, lastMessageId: null,
+        parent: null, rawPosition: index, viewable: true,
+        lastMessageId: `9${String(index).padStart(17, '0')}`,
         createdTimestamp: 1_900_000_000_000 + index,
         messages: { cache: new Collection(), fetch: vi.fn() },
         permissionsFor: () => ({ has: () => true }), isThread: () => false,
@@ -179,6 +180,7 @@ describe('Discord stall regression E2E', () => {
     expect(getDialogs).toHaveBeenCalledOnce()
     expect(await database.get('mtproto_im_conversation', {})).toHaveLength(1)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(0)
+    expect(channels.every((channel) => !channel.messages.fetch.mock.calls.length)).toBe(true)
     platform.stop()
   })
 })

@@ -226,14 +226,27 @@ describe('DiscordPlatform userbot', () => {
     expect(maximum).toBeLessThanOrEqual(8)
   })
 
-  it('keeps guild children out of the bounded root dialog page and paginates them lazily', async () => {
+  it('lists guild channels lazily without prefetching messages or flattening nested threads', async () => {
     const { guild, channels } = guildChannels(250)
-    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient(channels) })
+    for (const [index, channel] of channels.entries()) {
+      channel.lastMessageId = `9${String(index).padStart(17, '0')}`
+    }
+    const threads = channels.slice(1, 51).map((parent, index) => ({
+      id: `7${String(index).padStart(17, '0')}`, type: 'GUILD_PUBLIC_THREAD', guild,
+      name: `thread-${index}`, parent, viewable: true, lastMessageId: `6${String(index).padStart(17, '0')}`,
+      createdTimestamp: 1_900_000_100_000 + index, memberCount: 2,
+      messages: { cache: new Collection(), fetch: vi.fn(), delete: vi.fn() },
+      permissionsFor: () => ({ has: () => true }), isThread: () => true,
+    }))
+    guild.channels.cache = new Collection([...channels, ...threads].map((channel) => [channel.id, channel]))
+    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient([...channels, ...threads]) })
 
-    await expect(platform.getDialogs(session, { limit: 1 })).resolves.toMatchObject({
+    const roots = await platform.getDialogs(session, { limit: 1 })
+    expect(roots).toMatchObject({
       total: 1,
       dialogs: [{ conversation: { id: `discord:guild:${guild.id}`, metadata: { hasSubchannels: true } } }],
     })
+    expect(roots.dialogs[0]?.lastMessage).toBeUndefined()
     const first = await platform.getSubdialogs(session, { id: `discord:guild:${guild.id}` }, { limit: 25 })
     const second = await platform.getSubdialogs(
       session,
@@ -245,6 +258,11 @@ describe('DiscordPlatform userbot', () => {
     expect(first.dialogs).toHaveLength(25)
     expect(second.dialogs).toHaveLength(25)
     expect(new Set([...first.dialogs, ...second.dialogs].map((dialog) => dialog.conversation.id)).size).toBe(50)
+    expect([...first.dialogs, ...second.dialogs].every((dialog) =>
+      dialog.lastMessage?.id === `discord:topic:${dialog.conversation.id}`)).toBe(true)
+    expect([...channels, ...threads].every((channel) => !channel.messages.fetch.mock.calls.length)).toBe(true)
+    expect([...first.dialogs, ...second.dialogs].every((dialog) =>
+      dialog.conversation.metadata?.discordChannelType !== 'GUILD_PUBLIC_THREAD')).toBe(true)
   })
 
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {
