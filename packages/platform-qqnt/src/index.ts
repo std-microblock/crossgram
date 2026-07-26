@@ -1,4 +1,4 @@
-import type { Context } from 'cordis'
+import type { Context, Logger } from 'cordis'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import z from 'schemastery'
@@ -131,7 +131,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     options: Config = {},
     private readonly stickerProviderId = 'qqnt:stickers',
     private readonly mediaCache?: QQMediaCache,
-    private readonly logger?: QQNTLogger,
+    private readonly logger?: Logger,
   ) {
     this.client = new QQNTClient(options)
     this.memberName = options.memberName ?? 'groupAlias'
@@ -200,13 +200,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       )
       try {
         await this.client.subscribe(async (event, eventId) => {
-          this.logger?.info(
+          this.logger?.debug(
             'WebSocket event received session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', wireEventSummary(event),
           )
           if (event.type === 'message' && this.isFilteredGrayTip(event.message)) {
             knownConversationIds.add(event.conversation.id)
-            this.logger?.info(
+            this.logger?.debug(
               'WebSocket event filtered session=%s reason=gray-tip streamEventId=%s message=%s text=%s',
               platformSessionId, eventId ?? '<none>', event.message.id,
               event.message.serviceAction?.text ?? '',
@@ -216,14 +216,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           if (event.type === 'message' && event.message.originRequestId
             && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
             knownConversationIds.add(event.conversation.id)
-            this.logger?.info(
+            this.logger?.debug(
               'WebSocket event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
               platformSessionId, eventId ?? '<none>', event.message.id, event.message.originRequestId,
             )
             return
           }
           const mapped = this.mapEvent(event)
-          this.logger?.info(
+          this.logger?.debug(
             'WebSocket event mapped session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
           )
@@ -233,7 +233,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           } else {
             await handler(mapped)
           }
-          this.logger?.info(
+          this.logger?.debug(
             'WebSocket event handled session=%s streamEventId=%s %s',
             platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
           )
@@ -1184,11 +1184,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     this.conversations.set(id, conversation)
     return conversation
   }
-}
-
-interface QQNTLogger {
-  info(format: string, ...args: unknown[]): void
-  warn(format: string, ...args: unknown[]): void
 }
 
 function wireEventSummary(event: WireEvent): string {
