@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  initialTimestampMessageIdEpoch, TIMESTAMP_MESSAGE_ID_INITIAL_SECOND,
+  clampedTimestampMessageIdBucket, initialTimestampMessageIdEpoch, TIMESTAMP_MESSAGE_ID_INITIAL_SECOND,
   TIMESTAMP_MESSAGE_ID_MAX_SECOND, TIMESTAMP_MESSAGE_ID_SLOTS, timestampMessageIdBucket,
   qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata,
 } from './message-id.js'
@@ -37,5 +37,15 @@ describe('timestamp Telegram message ID encoding', () => {
     expect(() => timestampMessageIdBucket(epoch, epoch - 1)).toThrow('time window')
     expect(() => timestampMessageIdBucket(epoch, epoch + TIMESTAMP_MESSAGE_ID_MAX_SECOND + 1))
       .toThrow('time window')
+  })
+
+  it('clamps long-lived conversations to the nearest representable bucket', () => {
+    const epoch = 1_700_000_000
+    expect(clampedTimestampMessageIdBucket(epoch, epoch - 1)).toBe(TIMESTAMP_MESSAGE_ID_SLOTS)
+    expect(clampedTimestampMessageIdBucket(
+      epoch,
+      epoch + TIMESTAMP_MESSAGE_ID_MAX_SECOND + 1,
+    )).toBe(TIMESTAMP_MESSAGE_ID_MAX_SECOND * TIMESTAMP_MESSAGE_ID_SLOTS)
+    expect(() => clampedTimestampMessageIdBucket(epoch, Number.NaN)).toThrow('safe integer')
   })
 })
