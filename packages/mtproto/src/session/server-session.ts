@@ -200,6 +200,12 @@ export class ServerSession {
     // second plaintext handshake on the same connection to negotiate a PFS
     // temporary auth key (Telegram Desktop / TDLib always do this).
     if (keyId.every(b => b === 0)) {
+      const object = new TlBinaryReader(this._readerMap, data, 20).object() as mtp.TlObject
+      if (object._ === 'mt_msgs_ack') {
+        this._capturePlain(data, 'client->server')
+        this._log.debug('ignoring plaintext msgs_ack after handshake')
+        return
+      }
       if (this._tempAuthKey?.ready) {
         this._log.warn('unexpected plaintext frame after temp key established, ignoring')
         return

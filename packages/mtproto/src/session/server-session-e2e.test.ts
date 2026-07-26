@@ -161,8 +161,15 @@ async function sendLegacyReqPq(client: TestClient, nonce: Uint8Array, sub: numbe
 }
 
 async function readPlainObj(client: TestClient): Promise<any> {
+  return (await readPlainMessage(client)).object
+}
+
+async function readPlainMessage(client: TestClient): Promise<{ messageId: Long, object: any }> {
   const frame = await client.read()
-  return new TlBinaryReader(__tlReaderMap, frame, 20).object()
+  const reader = new TlBinaryReader(__tlReaderMap, frame, 8)
+  const messageId = reader.long()
+  reader.uint()
+  return { messageId, object: reader.object() }
 }
 
 interface ClientKey { authKey: Uint8Array, authKeyId: Uint8Array, salt: Long }
@@ -173,12 +180,17 @@ async function doClientHandshake(
   pubKey: any,
   temp: boolean,
   tempExpiresIn = 3600,
+  acknowledgePlaintextResponses = false,
 ): Promise<ClientKey> {
   const nonce = crypto.randomBytes(16)
   await sendPlain(client, { _: 'mt_req_pq_multi', nonce }, 4)
 
-  const resPq = await readPlainObj(client)
+  const resPqMessage = await readPlainMessage(client)
+  const resPq = resPqMessage.object
   expect(resPq._).toBe('mt_resPQ')
+  if (acknowledgePlaintextResponses) {
+    await sendPlain(client, { _: 'mt_msgs_ack', msgIds: [resPqMessage.messageId] }, 5)
+  }
   const serverNonce = resPq.serverNonce
   const [p, q] = await crypto.factorizePQ(resPq.pq)
 
@@ -196,8 +208,12 @@ async function doClientHandshake(
     publicKeyFingerprint: Long.fromString(pubKey.fingerprint, true, 16), encryptedData,
   }, 8)
 
-  const dhParams = await readPlainObj(client)
+  const dhParamsMessage = await readPlainMessage(client)
+  const dhParams = dhParamsMessage.object
   expect(dhParams._).toBe('mt_server_DH_params_ok')
+  if (acknowledgePlaintextResponses) {
+    await sendPlain(client, { _: 'mt_msgs_ack', msgIds: [dhParamsMessage.messageId] }, 9)
+  }
 
   const [aesKey, aesIv] = generateKeyAndIvFromNonce(crypto, serverNonce, newNonce)
   const ige = crypto.createAesIge(aesKey, aesIv)
@@ -224,8 +240,12 @@ async function doClientHandshake(
 
   await sendPlain(client, { _: 'mt_set_client_DH_params', nonce, serverNonce, encryptedData: clientDhEnc }, 12)
 
-  const dhGen = await readPlainObj(client)
+  const dhGenMessage = await readPlainMessage(client)
+  const dhGen = dhGenMessage.object
   expect(dhGen._).toBe('mt_dh_gen_ok')
+  if (acknowledgePlaintextResponses) {
+    await sendPlain(client, { _: 'mt_msgs_ack', msgIds: [dhGenMessage.messageId] }, 13)
+  }
 
   const saltBytes = u8.xor(newNonce.subarray(0, 8), serverNonce.subarray(0, 8))
   const sdv = typed.toDataView(saltBytes)
@@ -425,6 +445,27 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
 }
 
 describe('e2e: obfuscated transport + PFS + RPC', () => {
+  it('accepts Android handshakes that acknowledge every plaintext response', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false, 3600, true)
+      const sessionId = crypto.randomBytes(8)
+      const sessionView = typed.toDataView(sessionId)
+      const sessionLong = new Long(sessionView.getInt32(0, true), sessionView.getInt32(4, true))
+
+      const request = serializeInitializedRpc({ _: 'help.getConfig' })
+      await client.send(clientEncrypt(perm, request, perm.salt, sessionLong, 14))
+
+      const config = await readRpcResult(client, perm)
+      expect(config).toMatchObject({ _: 'config', thisDc: 1 })
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
   it('completes perm handshake and answers an RPC over the perm key', async () => {
     await crypto.initialize?.()
     const debugEvents: MtprotoDebugEvent[] = []
