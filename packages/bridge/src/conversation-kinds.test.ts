@@ -655,6 +655,10 @@ describe('conversation kinds', () => {
       _: 'channels.getMessages', channel,
       id: [{ _: 'inputMessageID', id: channelMessage.id }],
     })
+    const legacyChannelMessages = await rpc.getChannelMessages({
+      _: 'channels.getMessages', channel,
+      id: [channelMessage.id],
+    })
     const chats = await rpc.getChannels({ _: 'channels.getChannels', id: [group, channel, group] })
 
     expect(groupMessages).toMatchObject({
@@ -666,6 +670,10 @@ describe('conversation kinds', () => {
       _: 'messages.channelMessages',
       messages: [{ _: 'message', message: 'Discord / general' }],
       chats: [{ _: 'channel', id: channelId, title: 'Discord / general' }],
+    })
+    expect(legacyChannelMessages).toMatchObject({
+      _: 'messages.channelMessages',
+      messages: [{ _: 'message', id: channelMessage.id, message: 'Discord / general' }],
     })
     expect(chats).toMatchObject({
       _: 'messages.chats',
@@ -680,7 +688,7 @@ describe('conversation kinds', () => {
     await expect(rpc.readChannelMessageContents({
       _: 'channels.readMessageContents', channel, id: [channelMessage.id],
     })).resolves.toEqual({ _: 'boolTrue' })
-    for (const result of [groupMessages, channelMessages, chats]) {
+    for (const result of [groupMessages, channelMessages, legacyChannelMessages, chats]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
   })

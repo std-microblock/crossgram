@@ -33,7 +33,10 @@ type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
 type GetHistoryRequest = tl.messages.RawGetHistoryRequest
 type GetMessagesRequest = tl.messages.RawGetMessagesRequest
-type GetChannelMessagesRequest = tl.channels.RawGetMessagesRequest
+type GetChannelMessagesRequest = Omit<tl.channels.RawGetMessagesRequest, 'id'> & {
+  /** Official Telegram Android's #93d7b347 request uses Vector<int>. */
+  id: Array<tl.TypeInputMessage | number>
+}
 type SendMessageRequest = tl.messages.RawSendMessageRequest
 type SendMediaRequest = tl.messages.RawSendMediaRequest
 type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
@@ -567,7 +570,10 @@ export class DialogRpc {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
     await this._loadHistory(conversation.id, { limit: Math.max(1, req.id.length) })
-    return this._getMessages(req.id, conversation.id)
+    const ids = req.id.map(input => typeof input === 'number'
+      ? { _: 'inputMessageID' as const, id: input }
+      : input)
+    return this._getMessages(ids, conversation.id)
   }
 
   private async _getMessages(

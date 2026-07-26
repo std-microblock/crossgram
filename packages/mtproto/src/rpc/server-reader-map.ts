@@ -22,6 +22,23 @@ req_pq#60469778 nonce:int128 = ResPQ;
 `
 
 /**
+ * Telegram Android still emits these legacy/private requests while declaring
+ * the current public API layer. They are present in the official Android
+ * sources but absent from both mtcute's current schema and the public TDLib
+ * layer history mirrored by this project.
+ *
+ * Keep them as an explicit server compatibility surface: constructor IDs are
+ * the wire identity, while the shared method names let the normal dispatcher
+ * route them to the canonical handlers after decoding.
+ */
+const TELEGRAM_ANDROID_COMPAT_SCHEMA = `
+---functions---
+channels.getMessages#93d7b347 channel:InputChannel id:Vector<int> = messages.Messages;
+langpack.getLanguages#800fd57d = Vector<LangPackLanguage>;
+account.registerDevice#637ea878 token_type:int token:string = Bool;
+`
+
+/**
  * Build a TL reader map that includes RPC method requests, by merging
  * mtcute's built-in `__tlReaderMap` with method readers generated at
  * runtime via `@mtcute/tl-utils`.
@@ -40,6 +57,12 @@ export function getServerReaderMap(): TlReaderMap {
   const apiSchema = parseFullTlSchema((apiSchemaRaw.e ?? apiSchemaRaw) as unknown as TlEntry[])
   const mtpSchema = parseFullTlSchema(mtpSchemaRaw as unknown as TlEntry[])
 
+  const compatApiEntries = parseTlToEntries(TELEGRAM_ANDROID_COMPAT_SCHEMA)
+  const apiEntries = [
+    ...apiSchema.entries,
+    ...compatApiEntries.filter(e => !apiSchema.entries.some(x => x.id === e.id)),
+  ]
+
   // Merge mtcute's MTProto entries with the server-only constructors it omits.
   // Keep mtcute's entries authoritative (so field shapes match its generated
   // TS types), only adding definitions whose ctor id isn't already present.
@@ -53,7 +76,7 @@ export function getServerReaderMap(): TlReaderMap {
     entries.filter(it => !it.name.startsWith('mtcute.') || it.name === 'mtcute.customMethod')
 
   // Generate reader code with methods included
-  let code = generateReaderCodeForTlEntries(removeInternal(apiSchema.entries), {
+  let code = generateReaderCodeForTlEntries(removeInternal(apiEntries), {
     variableName: 'm',
     includeMethods: true,
     includeMethodResults: true,

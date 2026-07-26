@@ -512,7 +512,11 @@ export class ServerSession {
         const innerLength = reader.uint()
         const innerBody = reader.raw(innerLength)
         const innerReader = new TlBinaryReader(this._readerMap, innerBody)
-        await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader)
+        try {
+          await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader)
+        } catch (error) {
+          this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error)
+        }
       }
       return
     }
@@ -589,6 +593,52 @@ export class ServerSession {
     }
 
     this._flushAcks()
+  }
+
+  /**
+   * A msg_container is only a transport batch. One malformed or unsupported
+   * inner RPC must not discard its siblings (Telegram Android commonly batches
+   * background probes together with user-visible requests such as sendMessage).
+   */
+  private _handleContainerMessageError(
+    msgId: Long,
+    seqNo: number,
+    body: Uint8Array,
+    error: unknown,
+  ): void {
+    const constructorId = body.length >= 4
+      ? new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(0, true)
+      : null
+    const constructor = constructorId === null
+      ? 'truncated'
+      : `0x${constructorId.toString(16).padStart(8, '0')}`
+    const message = error instanceof Error ? error.message : String(error)
+    this._log.error(
+      'error handling container message %s (constructor=%s, seq=%d): %s',
+      msgId.toString(16),
+      constructor,
+      seqNo,
+      message,
+    )
+    this._capture('client->server', 'message', {
+      _: 'unparsed', constructorId, bytes: body.length,
+    }, { messageId: msgId, seqNo, error: message })
+
+    if ((seqNo & 1) === 0) return
+    this._queueAck(msgId)
+    try {
+      this._sendRpcResult(msgId, {
+        _: 'mt_rpc_error',
+        errorCode: 400,
+        errorMessage: 'METHOD_INVALID',
+      } as mtp.RawMt_rpc_error, constructor)
+    } catch (sendError) {
+      this._log.error(
+        'failed to return METHOD_INVALID for container message %s: %s',
+        msgId.toString(16),
+        sendError instanceof Error ? sendError.message : String(sendError),
+      )
+    }
   }
 
   // ── Service message handlers ──
