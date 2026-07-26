@@ -229,6 +229,28 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('acknowledges a deleted legacy projection whose platform alias is missing', async () => {
+    const { ctx, rpc } = await createRpc()
+    const channel = {
+      _: 'inputChannel' as const,
+      channelId: stableId('peer:group'),
+      accessHash: Long.ZERO,
+    }
+    const history = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: channel.channelId, accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
+    const messageId = (history.messages[0] as tl.RawMessage).id
+    await ctx.database.remove('mtproto_im_message_alias', {
+      platformSessionId: session.platformSessionId,
+      platformMessageId: 'message-group',
+    })
+
+    await expect(rpc.deleteMessages({
+      _: 'channels.deleteMessages', channel, id: [messageId],
+    }, channel)).resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
+    expect(actionCalls).toEqual(['delete:group:message-group:true'])
+  })
+
   it('promotes newly selected reactions without treating removals as recent usage', async () => {
     const group = conversations.find((item) => item.id === 'group')!
     const available = [
