@@ -24,9 +24,6 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
     _: 'account.webBrowserSettings',
     externalExceptions: [], inappExceptions: [], hash: Long.ZERO,
   } as unknown as tl.TlObject),
-  'account.updateNotifySettings': () => ({
-    _: 'boolTrue',
-  }),
   'contacts.getBlocked': () => ({
     _: 'contacts.blocked', blocked: [], chats: [], users: [],
   } as unknown as tl.TlObject),

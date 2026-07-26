@@ -10,7 +10,9 @@ import { Config as satoriConfig } from '../../platform-satori/src/index.js'
 import { Config as resourcesConfig } from '../../telegram-resources/src/index.js'
 
 const cases = [
-  ['bridge', bridgeConfig, ['dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath']],
+  ['bridge', bridgeConfig, [
+    'dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
+  ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
@@ -48,6 +50,7 @@ describe('plugin config schemas', () => {
       serverPort: 4430,
       apiPrefix: '/api',
       uploadPath: 'data/bridge-uploads',
+      autoMuteGroupChats: true,
     })
     expect(debugConfig({})).toEqual({
       maxEvents: 2_000,

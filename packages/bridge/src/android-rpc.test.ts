@@ -17,11 +17,6 @@ const requests: Record<string, tl.RpcMethod> = {
   'account.getGlobalPrivacySettings': { _: 'account.getGlobalPrivacySettings' },
   'account.getThemes': { _: 'account.getThemes', format: 'android', hash: Long.ZERO },
   'account.getWebBrowserSettings': { _: 'account.getWebBrowserSettings', hash: Long.ZERO },
-  'account.updateNotifySettings': {
-    _: 'account.updateNotifySettings',
-    peer: { _: 'inputNotifyPeer', peer: self },
-    settings: { _: 'inputPeerNotifySettings' },
-  },
   'contacts.getBlocked': { _: 'contacts.getBlocked', offset: 0, limit: 100 },
   'contacts.getTopPeers': {
     _: 'contacts.getTopPeers', correspondents: true, botsInline: true,
@@ -132,8 +127,6 @@ describe('Telegram Android optional RPC responses', () => {
   })
 
   it('acknowledges harmless state updates without inventing unread state', () => {
-    expect(androidRpcHandlers['account.updateNotifySettings'](requests['account.updateNotifySettings']))
-      .toEqual({ _: 'boolTrue' })
     expect(androidRpcHandlers['messages.readReactions'](requests['messages.readReactions']))
       .toEqual({ _: 'messages.affectedHistory', pts: 0, ptsCount: 0, offset: 0 })
     expect(androidRpcHandlers['stories.getAllReadPeerStories'](requests['stories.getAllReadPeerStories']))
