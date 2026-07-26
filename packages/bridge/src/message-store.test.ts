@@ -2,6 +2,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
+import type { tl } from '@mtcute/core'
+import { __tlWriterMap } from '@mtcute/core/utils.js'
+import { TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
+import Long from 'long'
+import { getApiLayerWriterMap } from '@mtproto-relay/mtproto'
 import { defineModels } from './models.js'
 import { MessageStore } from './message-store.js'
 import type { IMConversation, IMMessage, PlatformSession } from './platform.js'
@@ -614,6 +619,60 @@ describe('MessageStore', () => {
     expect(stored).toMatchObject({ content: message.content, metadata: { source: 'qq' } })
     const [hydrated] = await store.readHistory(session.platformSessionId, conversation.id)
     expect(hydrated).toMatchObject({ id: message.id, content: message.content, metadata: { source: 'qq' } })
+  })
+
+  it('rehydrates legacy sticker outlines for Layer 228 dialog serialization', async () => {
+    const { ctx, store } = await createStore()
+    const conversation: IMConversation = { id: 'stickers', kind: 'group', title: 'Stickers' }
+    const outline = new Uint8Array([4, 255, 17, 128, 0, 63])
+    const message: IMMessage = {
+      id: 'sticker-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { parts: [{ type: 'sticker', sticker: {
+        providerId: 'qqnt:stickers', stickerId: 'favorite:legacy',
+        format: 'static', mimeType: 'image/webp', width: 64, height: 64, size: 321, outline,
+      } }] },
+    }
+    const ingested = await store.ingest(session, conversation, message)
+    const [stored] = await ctx.database.get('mtproto_im_message', { id: ingested.message.id })
+    const storedContent = stored.content as unknown as IMMessage['content']
+    const storedPart = storedContent.parts[0]
+    if (storedPart?.type !== 'sticker') throw new Error('stored sticker missing')
+    expect(storedPart.sticker.outline).toEqual([...outline])
+    await ctx.database.set('mtproto_im_message', { id: stored.id }, {
+      content: {
+        parts: [{
+          ...storedPart,
+          sticker: { ...storedPart.sticker, outline: Object.fromEntries(outline.entries()) },
+        }],
+      } as never,
+    })
+
+    const [hydrated] = await store.readHistory(session.platformSessionId, conversation.id)
+    const hydratedPart = hydrated.content.parts[0]
+    if (hydratedPart?.type !== 'sticker') throw new Error('hydrated sticker missing')
+    expect(hydratedPart.sticker.outline).toBeInstanceOf(Uint8Array)
+    expect(hydratedPart.sticker.outline).toEqual(outline)
+
+    const media: tl.RawMessageMediaDocument = {
+      _: 'messageMediaDocument', document: {
+        _: 'document', id: Long.ONE, accessHash: Long.ONE, fileReference: new Uint8Array(),
+        date: 1, mimeType: 'image/webp', size: 321,
+        thumbs: [{ _: 'photoPathSize', type: 'j', bytes: hydratedPart.sticker.outline! }],
+        dcId: 1, attributes: [{ _: 'documentAttributeFilename', fileName: 'sticker.webp' }],
+      },
+    }
+    const dialogs: tl.messages.RawDialogsSlice = {
+      _: 'messages.dialogsSlice', count: 1,
+      dialogs: [],
+      messages: [{
+        _: 'message', id: 1, peerId: { _: 'peerChannel', channelId: 1 },
+        date: 1, message: '', media,
+      }],
+      chats: [], users: [],
+    }
+    const writerMap = getApiLayerWriterMap(__tlWriterMap, 228)
+    expect(TlSerializationCounter.countNeededBytes(writerMap, dialogs)).toBeGreaterThan(0)
+    expect(() => TlBinaryWriter.serializeObject(writerMap, dialogs)).not.toThrow()
   })
 
   it('rejects mismatched conversation payloads without writing partial rows', async () => {
