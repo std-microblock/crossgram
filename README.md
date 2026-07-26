@@ -20,7 +20,6 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 | **Satori adaptor** | `@mtproto-relay/platform-satori` | ⚠️ 通用核心能力 |
 | **Matrix** | `@mtproto-relay/platform-matrix` | ✅（未加密房间） |
 | **参考实现（static）** | `@mtproto-relay/platform-static` | ✅ |
-| **官方 Telegram 透传（relay）** | `@mtproto-relay/relay` | ✅ |
 | 微信 / 其它 | — | 🚧 |
 
 > [!CAUTION]
@@ -34,108 +33,108 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 <details open>
 <summary>历史记录 <code>history</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 历史消息拉取 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 历史消息拉取 | ✅ | ✅ | ✅ | ✅ |
 
 </details>
 
 <details open>
 <summary>发送 <code>send</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 文字 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 图片 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 文件 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 图文混排 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 文字 | ✅ | ✅ | ✅ | ✅ |
+| 图片 | ✅ | ✅ | ✅ | ✅ |
+| 文件 | ✅ | ✅ | ✅ | ✅ |
+| 图文混排 | ✅ | ✅ | ✅ | ✅ |
 
 </details>
 
 <details open>
 <summary>会话类型 <code>conversations</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 私聊 (direct) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 群聊 (group) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 频道 (channel) | ❌ | ✅ | ⚠️ Space | ✅ | ✅ |
-| 子频道 / 话题 (subchannel) | ❌ | ✅ | ❌ | ✅ | ✅ |
-| 群公告（接收） | 🗓️ | ✅ | ❌ | 🗓️ | ✅ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 私聊 (direct) | ✅ | ✅ | ✅ | ✅ |
+| 群聊 (group) | ✅ | ✅ | ✅ | ✅ |
+| 频道 (channel) | ❌ | ✅ | ⚠️ Space | ✅ |
+| 子频道 / 话题 (subchannel) | ❌ | ✅ | ❌ | ✅ |
+| 群公告（接收） | 🗓️ | ✅ | ❌ | 🗓️ |
 
 </details>
 
 <details open>
 <summary>成员与权限 <code>members</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 成员列表 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 管理员信息 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 成员权限 | ❌ | ✅ | ✅ | ✅ | ✅ |
-| 移除群成员 | 🗓️ | ❌ | ❌ | ❌ | ✅ |
-| 入群申请管理 | 🗓️ | ❌ | ❌ | ❌ | ✅ |
-| 管理群公告 | 🗓️ | ❌ | ❌ | ❌ | ✅ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 成员列表 | ✅ | ✅ | ✅ | ✅ |
+| 管理员信息 | ✅ | ✅ | ✅ | ✅ |
+| 成员权限 | ❌ | ✅ | ✅ | ✅ |
+| 移除群成员 | 🗓️ | ❌ | ❌ | ❌ |
+| 入群申请管理 | 🗓️ | ❌ | ❌ | ❌ |
+| 管理群公告 | 🗓️ | ❌ | ❌ | ❌ |
 
 </details>
 
 <details open>
 <summary>消息操作 <code>messageActions</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 撤回自己的消息 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 撤回他人消息（管理员） | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 编辑消息 | 撤回重发 | ✅ | ⚠️ 文字 | ✅ | ✅ |
-| 转发 | ✅ | ✅ | ❌ | ✅ | ✅ |
-| 合并转发 | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 撤回自己的消息 | ✅ | ✅ | ✅ | ✅ |
+| 撤回他人消息（管理员） | ✅ | ✅ | ✅ | ✅ |
+| 编辑消息 | 撤回重发 | ✅ | ⚠️ 文字 | ✅ |
+| 转发 | ✅ | ✅ | ❌ | ✅ |
+| 合并转发 | ✅ | ❌ | ❌ | ❌ |
 
 </details>
 
 <details open>
 <summary>消息响应 <code>reactions</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 读取 | ✅ | ✅ | ❌ | ✅ | ✅ |
-| 发送 | ✅ | ✅ | ❌ | ✅ | ✅ |
-| 实时事件 | ✅ | ✅ | ❌ | ✅ | ✅ |
-| 显示点赞者 | ✅ | ✅ | ❌ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 读取 | ✅ | ✅ | ❌ | ✅ |
+| 发送 | ✅ | ✅ | ❌ | ✅ |
+| 实时事件 | ✅ | ✅ | ❌ | ✅ |
+| 显示点赞者 | ✅ | ✅ | ❌ | ✅ |
 
 </details>
 
 <details open>
 <summary>头像 <code>avatars</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 用户头像 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 会话头像 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 用户头像 | ✅ | ✅ | ✅ | ✅ |
+| 会话头像 | ✅ | ✅ | ✅ | ✅ |
 
 </details>
 
 <details open>
 <summary>表情包 <code>stickers</code></summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 查看 | ✅ | ⚠️ | ❌ | ✅ | ✅ |
-| 收藏管理 | ✅ | ❌ | ❌ | ✅ | ✅ |
-| 上传/下载 | ❌ | ❌ | ❌ | ❌ | ✅ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 查看 | ✅ | ⚠️ | ❌ | ✅ |
+| 收藏管理 | ✅ | ❌ | ❌ | ✅ |
+| 上传/下载 | ❌ | ❌ | ❌ | ❌ |
 
 </details>
 
 <details open>
 <summary>其它</summary>
 
-| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） | 官方 Telegram（relay） |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 系统消息（灰字） | 🗓️ | ✅ | ❌ | 🗓️ | ✅ |
-| 小程序（Web App） | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Stories / Premium 等 | ❌ | ❌ | ❌ | ❌ | ✅ |
-| 语音 / 视频通话 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Secret Chat / E2EE | ❌ | ❌ | ❌ | ❌ | ❌ |
-| 红包 / 转账 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| 能力 | QQ（QQNT） | Discord | Matrix | 参考实现（static） |
+|---|:---:|:---:|:---:|:---: |
+| 系统消息（灰字） | 🗓️ | ✅ | ❌ | 🗓️ |
+| 小程序（Web App） | ❌ | ❌ | ❌ | ❌ |
+| Stories / Premium 等 | ❌ | ❌ | ❌ | ❌ |
+| 语音 / 视频通话 | ❌ | ❌ | ❌ | ❌ |
+| Secret Chat / E2EE | ❌ | ❌ | ❌ | ❌ |
+| 红包 / 转账 | ❌ | ❌ | ❌ | ❌ |
 
 </details>
 </details>
@@ -257,6 +256,7 @@ node binary_patch/patch-tdesktop.cjs --host 192.168.1.10 --port 4430 --no-resign
 默认会：
 - 自动用 `data/rsa-key.json.pem` 替换客户端内的 RSA 公钥（也可 `--key` 指定别的 PEM）
 - 把所有内置 DC 地址改成 `--host`（默认 `127.0.0.1`），端口改成 `--port`（默认 `4430`）
+- 服务端的 `help.getConfig` 只公布 bridge 配置的单个 `dcId`；补丁仍改写所有内置地址，防止客户端绕回官方 Telegram
 - 生成 `<binary>.original` 备份，macOS 上自动 `codesign` 重签名并去除隔离属性
 
 <details>

@@ -2,7 +2,7 @@ import { Context, Service } from 'cordis'
 import { Server, type Socket } from 'node:net'
 import { resolve } from 'node:path'
 import { __tlWriterMap, LogManager, type ICryptoProvider, type Logger } from '@mtcute/core/utils.js'
-import type { mtp, tl } from '@mtcute/core'
+import type { tl } from '@mtcute/core'
 import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import Long from 'long'
@@ -11,7 +11,7 @@ import { ServerConnection } from './transport/server-connection.js'
 import { ServerSession } from './session/server-session.js'
 import { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './session/auth-key-store.js'
 import { AuthKeyDataStore } from './session/auth-key-data-store.js'
-import { RpcDispatcher, unwrapRpcRequest, type RpcHandler, type RpcResult } from './rpc/dispatcher.js'
+import { RpcDispatcher, type RpcHandler, type RpcResult } from './rpc/dispatcher.js'
 import type { ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
 import { createCordisLogManager } from './cordis-logger.js'
@@ -54,23 +54,12 @@ export const Config = z.object({
   'zh-CN': zhCN,
 })
 
-export type RouteResolver = (
-  ctx: ServerRpcContext,
-  request: tl.RpcMethod,
-) => string | undefined | Promise<string | undefined>
-
-export interface RouteRegistrar {
-  readonly id: string
-  register(method: string, handler: RpcHandler): () => void
-  fallback(handler: RpcHandler): () => void
-}
-
 /**
  * The MTProto server, as a native cordis service (`ctx.mtproto`).
  *
  * Owns the TCP listener and per-connection MTProto sessions directly (the
  * `@cordisjs/plugin-server` pattern). Backend plugins inject `mtproto` and
- * register RPC handlers via {@link register} / {@link fallback} — each
+ * register RPC handlers via {@link register} — each
  * registration is a `ctx.effect`, so a backend hot-reloads (or unloads) cleanly
  * while the listener and live connections stay up.
  */
@@ -88,11 +77,7 @@ export class Mtproto extends Service {
   private readonly _log: Logger
   private readonly _sessions = new Set<ServerSession>()
   private readonly _sockets = new Set<Socket>()
-  private readonly _routes = new Map<string, RpcDispatcher>()
-  private readonly _routeRefs = new Map<string, number>()
-  private readonly _authRoutes = new Map<string, string>()
   private readonly _authApiLayers = new Map<string, number>()
-  private readonly _routeResolvers = new Set<RouteResolver>()
   private _connectionSeq = 0
   private _server: Server | null = null
 
@@ -131,58 +116,6 @@ export class Mtproto extends Service {
       this.dispatcher.register(method, handler)
       return () => this.dispatcher.unregister(method)
     }, `mtproto.register(${method})`)
-  }
-
-  /** Register a fallback handler (e.g. relay passthrough), tied to the caller (HMR-safe). */
-  fallback(handler: RpcHandler): () => void {
-    return this.ctx.effect(() => {
-      this.dispatcher.fallback(handler)
-      return () => this.dispatcher.clearFallback()
-    }, 'mtproto.fallback')
-  }
-
-  /** Register handlers for one isolated account backend route. */
-  route(routeId: string): RouteRegistrar {
-    if (!routeId) throw new Error('routeId is required')
-    const dispatcher = this._requireRoute(routeId)
-    this._routeRefs.set(routeId, (this._routeRefs.get(routeId) ?? 0) + 1)
-    this.ctx.effect(() => () => {
-      const refs = (this._routeRefs.get(routeId) ?? 1) - 1
-      if (refs > 0) {
-        this._routeRefs.set(routeId, refs)
-      } else {
-        this._routeRefs.delete(routeId)
-        if (this._routes.get(routeId) === dispatcher) this._routes.delete(routeId)
-      }
-    }, `mtproto.route(${routeId})`)
-    return {
-      id: routeId,
-      register: (method, handler) => this.ctx.effect(() => {
-        dispatcher.register(method, handler)
-        return () => dispatcher.unregister(method)
-      }, `mtproto.route(${routeId}).register(${method})`),
-      fallback: (handler) => this.ctx.effect(() => {
-        dispatcher.fallback(handler)
-        return () => dispatcher.clearFallback()
-      }, `mtproto.route(${routeId}).fallback`),
-    }
-  }
-
-  /** Resolve an unbound auth key to a route (usually from a persistent store or login request). */
-  resolveRoute(resolver: RouteResolver): () => void {
-    return this.ctx.effect(() => {
-      this._routeResolvers.add(resolver)
-      return () => this._routeResolvers.delete(resolver)
-    }, 'mtproto.routeResolver')
-  }
-
-  /** Bind a permanent downstream auth key to a backend route in the live registry. */
-  bindRoute(authKeyId: Uint8Array, routeId: string): void {
-    this._authRoutes.set(bytesHex(authKeyId), routeId)
-  }
-
-  getRoute(authKeyId: Uint8Array | null): string | undefined {
-    return authKeyId ? this._authRoutes.get(bytesHex(authKeyId)) : undefined
   }
 
   /** Broadcast a server-initiated update to all authorized sessions. */
@@ -273,15 +206,6 @@ export class Mtproto extends Service {
     connection.start()
   }
 
-  private _requireRoute(routeId: string): RpcDispatcher {
-    let route = this._routes.get(routeId)
-    if (!route) {
-      route = new RpcDispatcher()
-      this._routes.set(routeId, route)
-    }
-    return route
-  }
-
   private _rememberApiLayer(authKeyId: Uint8Array, layer: number): void {
     const key = bytesHex(authKeyId)
     this._authApiLayers.set(key, layer)
@@ -299,36 +223,7 @@ export class Mtproto extends Service {
   }
 
   private async _dispatch(ctx: ServerRpcContext, request: tl.RpcMethod): Promise<RpcResult> {
-    const unwrapped = unwrapRpcRequest(request).request
-    // Shared protocol/config handlers remain usable before an account has been
-    // selected and as a fallback for route-specific dispatchers.
-    if (!this.getRoute(ctx.authKeyId) && this.dispatcher.hasDirect(unwrapped._)) {
-      return this.dispatcher.dispatch(ctx, unwrapped)
-    }
-
-    let routeId = this.getRoute(ctx.authKeyId)
-    if (!routeId) {
-      for (const resolver of this._routeResolvers) {
-        routeId = await resolver(ctx, unwrapped)
-        if (routeId) {
-          if (ctx.authKeyId) this.bindRoute(ctx.authKeyId, routeId)
-          break
-        }
-      }
-    }
-    if (!routeId && this._routes.size === 1) routeId = this._routes.keys().next().value
-    ctx.routeId = routeId ?? null
-
-    if (routeId) {
-      const route = this._routes.get(routeId)
-      if (!route) {
-        return {
-          _: 'mt_rpc_error', errorCode: 503, errorMessage: `ROUTE_NOT_AVAILABLE_${routeId}`,
-        } as mtp.RawMt_rpc_error
-      }
-      if (route.has(unwrapped._)) return route.dispatch(ctx, unwrapped)
-    }
-    return this.dispatcher.dispatch(ctx, unwrapped)
+    return this.dispatcher.dispatch(ctx, request)
   }
 }
 

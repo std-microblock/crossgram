@@ -26,12 +26,6 @@
 - id: telegram-resources
   name: '@mtproto-relay/telegram-resources'
   config: {}
-- id: relay01
-  name: '@mtproto-relay/relay'
-  disabled: true
-  config:
-    apiId: 0
-    apiHash: ''
 - id: static
   name: '@mtproto-relay/platform-static'
   disabled: true
