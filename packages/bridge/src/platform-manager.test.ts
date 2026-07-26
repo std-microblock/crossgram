@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -311,6 +311,26 @@ describe('PlatformDataService', () => {
 
     expect(await data.getDialogs()).toMatchObject([{ conversation: { id: 'push-room', kind: 'channel' } }])
     expect((await data.getHistory(conversation.id)).messages.map((message) => message.id)).toEqual(['9'])
+  })
+
+  it('syncs an upstream history page without performing a discarded stored read', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'sync-room', kind: 'group', title: 'Sync room' }
+    platform.getHistory = async () => ({ messages: [incoming('7', conversation.id)] })
+    const store = new MessageStore(database)
+    await store.upsertConversation(session, conversation)
+    const readHistory = vi.spyOn(store, 'readHistory')
+    const data = new PlatformDataService(platform, session, store)
+
+    await data.syncHistory(conversation.id, { limit: 50 })
+
+    expect(readHistory).not.toHaveBeenCalled()
+    expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
+    await expect(data.getHistory(conversation.id, { limit: 50 }))
+      .resolves.toMatchObject({ messages: [{ id: '7' }] })
+    expect(readHistory).toHaveBeenCalledOnce()
   })
 
   it('does not chase an upstream nextCursor during a single bridge read', async () => {

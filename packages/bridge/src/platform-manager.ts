@@ -347,6 +347,19 @@ export class PlatformDataService {
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {
+    return { messages: await this._loadHistory(conversationId, query, true) }
+  }
+
+  /** Fetch and persist one upstream page without hydrating rows the caller will not consume. */
+  async syncHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<void> {
+    await this._loadHistory(conversationId, query, false)
+  }
+
+  private async _loadHistory(
+    conversationId: string,
+    query: IMHistoryQuery,
+    readStored: boolean,
+  ): Promise<IMMessage[]> {
     const startedAt = performance.now()
     this._onTrace?.(
       'history data profile stage=start conversation=%s limit=%d',
@@ -382,18 +395,24 @@ export class PlatformDataService {
       )
       ingestMs = performance.now() - ingestAt
     }
-    const readAt = performance.now()
-    const messages = await this._store.readHistory(
-      this._session.platformSessionId, conversationId, { limit: query.limit ?? 100 },
-    )
-    const readMs = performance.now() - readAt
+    let readMs = 0
+    const messages = readStored
+      ? await (async () => {
+          const readAt = performance.now()
+          const stored = await this._store.readHistory(
+            this._session.platformSessionId, conversationId, { limit: query.limit ?? 100 },
+          )
+          readMs = performance.now() - readAt
+          return stored
+        })()
+      : []
     this._onTrace?.(
-      'history data profile conversation=%s limit=%d upstreamMessages=%d storedMessages=%d conversationMs=%d upstreamMs=%d ingestMs=%d readMs=%d totalMs=%d',
-      conversationId, query.limit ?? 100, upstreamMessages, messages.length,
+      'history data profile conversation=%s limit=%d readStored=%s upstreamMessages=%d storedMessages=%d conversationMs=%d upstreamMs=%d ingestMs=%d readMs=%d totalMs=%d',
+      conversationId, query.limit ?? 100, readStored, upstreamMessages, messages.length,
       profileMilliseconds(conversationMs), profileMilliseconds(upstreamMs), profileMilliseconds(ingestMs),
       profileMilliseconds(readMs), profileMilliseconds(performance.now() - startedAt),
     )
-    return { messages }
+    return messages
   }
 
   async searchMessages(
