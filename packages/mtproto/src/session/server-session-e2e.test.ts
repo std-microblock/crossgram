@@ -600,8 +600,10 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       releaseFirst()
       const firstResult = await readRpcResultEnvelope(client, perm)
       const secondResult = await readRpcResultEnvelope(client, perm)
-      expect(firstResult).toMatchObject({ requestMessageId: firstMessageId, result: { _: 'help.appConfig', hash: 1 } })
-      expect(secondResult).toMatchObject({ requestMessageId: secondMessageId, result: { _: 'nearestDc', thisDc: 1 } })
+      expect(firstResult.requestMessageId.toString()).toBe(firstMessageId.toString())
+      expect(firstResult.result).toMatchObject({ _: 'help.appConfig', hash: 1 })
+      expect(secondResult.requestMessageId.toString()).toBe(secondMessageId.toString())
+      expect(secondResult.result).toMatchObject({ _: 'nearestDc', thisDc: 1 })
       expect(order).toEqual(['first:start', 'first:end', 'second:run'])
       client.close()
     } finally {
@@ -635,19 +637,17 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       await client.send(clientEncryptWithMessageId(perm, request, perm.salt, sessionId, requestMessageId))
 
       const response = await readRpcResultEnvelope(client, perm)
-      expect(response).toMatchObject({
-        requestMessageId,
-        result: { _: 'mt_rpc_error', errorCode: 500, errorMessage: 'MSG_WAIT_FAILED' },
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 500, errorMessage: 'MSG_WAIT_FAILED',
       })
-      expect(debugEvents).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          direction: 'server->client', phase: 'message',
-          payload: expect.objectContaining({
-            _: 'rpc_result', reqMsgId: requestMessageId,
-            result: expect.objectContaining({ errorMessage: 'MSG_WAIT_FAILED' }),
-          }),
-        }),
-      ]))
+      const debugResponse = debugEvents.find((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'rpc_result'
+        && ((event.payload as { result?: { errorMessage?: string } }).result?.errorMessage === 'MSG_WAIT_FAILED')
+      ))
+      expect(debugResponse).toBeDefined()
+      expect((debugResponse!.payload as { reqMsgId: Long }).reqMsgId.toString()).toBe(requestMessageId.toString())
       client.close()
     } finally {
       await stop()
@@ -669,22 +669,19 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       await client.send(clientEncryptWithMessageId(perm, request, perm.salt, sessionId, requestMessageId))
 
       const response = await readRpcResultEnvelope(client, perm)
-      expect(response).toMatchObject({
-        requestMessageId,
-        result: {
-          _: 'mt_rpc_error', errorCode: 500,
-          errorMessage: 'METHOD_NOT_IMPLEMENTED: mt_msg_resend_req',
-        },
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 500,
+        errorMessage: 'METHOD_NOT_IMPLEMENTED: mt_msg_resend_req',
       })
-      expect(debugEvents).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          direction: 'server->client', phase: 'message',
-          payload: expect.objectContaining({
-            _: 'rpc_result', reqMsgId: requestMessageId,
-            result: expect.objectContaining({ errorMessage: 'METHOD_NOT_IMPLEMENTED: mt_msg_resend_req' }),
-          }),
-        }),
-      ]))
+      const debugResponse = debugEvents.find((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'rpc_result'
+        && ((event.payload as { result?: { errorMessage?: string } }).result?.errorMessage
+          === 'METHOD_NOT_IMPLEMENTED: mt_msg_resend_req')
+      ))
+      expect(debugResponse).toBeDefined()
+      expect((debugResponse!.payload as { reqMsgId: Long }).reqMsgId.toString()).toBe(requestMessageId.toString())
       client.close()
     } finally {
       await stop()
