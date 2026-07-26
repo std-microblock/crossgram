@@ -11,11 +11,29 @@ type AndroidRpcHandler = (request: tl.RpcMethod) => RpcResult
  * responses instead of making the client retry METHOD_NOT_IMPLEMENTED errors.
  */
 export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
+  'account.getDefaultProfilePhotoEmojis': () => ({
+    _: 'emojiList', hash: Long.ZERO, documentId: [],
+  } as unknown as tl.TlObject),
   'account.getContactSignUpNotification': () => ({
     _: 'boolFalse',
   }),
   'account.getGlobalPrivacySettings': () => ({
     _: 'globalPrivacySettings',
+  } as unknown as tl.TlObject),
+  'account.getPassword': () => ({
+    _: 'account.password',
+    newAlgo: { _: 'passwordKdfAlgoUnknown' },
+    newSecureAlgo: { _: 'securePasswordKdfAlgoUnknown' },
+    secureRandom: new Uint8Array(),
+  } as unknown as tl.TlObject),
+  'account.getPrivacy': () => ({
+    _: 'account.privacyRules', rules: [{ _: 'privacyValueAllowAll' }], chats: [], users: [],
+  } as unknown as tl.TlObject),
+  'account.getRecentEmojiStatuses': () => ({
+    _: 'account.emojiStatuses', hash: Long.ZERO, statuses: [],
+  } as unknown as tl.TlObject),
+  'account.getSavedRingtones': () => ({
+    _: 'account.savedRingtones', hash: Long.ZERO, ringtones: [],
   } as unknown as tl.TlObject),
   'account.getThemes': () => ({
     _: 'account.themes', hash: Long.ZERO, themes: [],
@@ -27,11 +45,17 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'contacts.getBlocked': () => ({
     _: 'contacts.blocked', blocked: [], chats: [], users: [],
   } as unknown as tl.TlObject),
+  'contacts.getBirthdays': () => ({
+    _: 'contacts.contactBirthdays', contacts: [], users: [],
+  } as unknown as tl.TlObject),
   'contacts.getTopPeers': () => ({
     _: 'contacts.topPeers', categories: [], chats: [], users: [],
   } as unknown as tl.TlObject),
   'help.getTimezonesList': () => ({
     _: 'help.timezonesList', timezones: [], hash: 0,
+  } as unknown as tl.TlObject),
+  'help.getInviteText': () => ({
+    _: 'help.inviteText', message: '',
   } as unknown as tl.TlObject),
   'messages.getArchivedStickers': () => ({
     _: 'messages.archivedStickers', count: 0, sets: [],
@@ -47,6 +71,19 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
     version: 0,
     keywords: [],
   } as unknown as tl.TlObject),
+  'messages.getEmojiKeywordsDifference': request => {
+    const query = request as tl.messages.RawGetEmojiKeywordsDifferenceRequest
+    return {
+      _: 'emojiKeywordsDifference',
+      langCode: query.langCode,
+      fromVersion: query.fromVersion,
+      version: query.fromVersion,
+      keywords: [],
+    } as unknown as tl.TlObject
+  },
+  'messages.getEmojiStatusGroups': () => ({
+    _: 'messages.emojiGroups', hash: 0, groups: [],
+  } as unknown as tl.TlObject),
   'messages.getOnlines': () => ({
     _: 'chatOnlines', onlines: 0,
   } as unknown as tl.TlObject),
@@ -54,6 +91,9 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'messages.getMessageReadParticipants': () => bareVector([]),
   'messages.getQuickReplies': () => ({
     _: 'messages.quickReplies', quickReplies: [], messages: [], chats: [], users: [],
+  } as unknown as tl.TlObject),
+  'messages.getSavedDialogs': () => ({
+    _: 'messages.savedDialogs', dialogs: [], messages: [], chats: [], users: [],
   } as unknown as tl.TlObject),
   'messages.getSearchCounters': request => bareVector(
     (request as tl.messages.RawGetSearchCountersRequest).filters.map(filter => ({

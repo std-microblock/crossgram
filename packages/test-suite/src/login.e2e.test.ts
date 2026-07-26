@@ -3052,7 +3052,7 @@ describe('bridge login e2e', () => {
     }
   }, 15000)
 
-  it('accepts Telegram Android compatibility RPCs without dropping a batched sendMessage', async () => {
+  it('accepts Android compatibility probes and empty deletes without delaying a batched sendMessage', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
     try {
@@ -3085,24 +3085,40 @@ describe('bridge login e2e', () => {
       const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
       expect(alice).toMatchObject({ _: 'user', id: expect.any(Number) })
 
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 14)
+      const group = dialogs.chats.find((chat: any) => chat._ === 'channel')
+      expect(group).toMatchObject({ _: 'channel', id: expect.any(Number), accessHash: expect.anything() })
+
+      const emptyDelete = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'channels.deleteMessages',
+        channel: { _: 'inputChannel', channelId: group.id, accessHash: group.accessHash },
+        id: [],
+      } as any)
+
       const sendMessage = TlBinaryWriter.serializeObject(__tlWriterMap, {
         _: 'messages.sendMessage',
         peer: {
-          _: 'inputPeerUser', userId: alice.id,
-          accessHash: alice.accessHash ?? Long.ZERO,
+          _: 'inputPeerChannel', channelId: group.id,
+          accessHash: group.accessHash ?? Long.ZERO,
         },
-        message: 'sent after legacy langpack probe',
+        message: 'sent after Android cleanup probes',
         randomId: Long.fromString('7000000000000001'),
       } as any)
-      const [languages, sendResult] = await sendRpcContainer(
+      const [languages, firstDelete, secondDelete, thirdDelete, sendResult] = await sendRpcContainer(
         client,
         key,
         sid,
-        [telegramAndroidGetLanguages(), sendMessage],
+        [telegramAndroidGetLanguages(), emptyDelete, emptyDelete, emptyDelete, sendMessage],
         20,
       )
 
       expect(languages).toEqual([])
+      for (const result of [firstDelete, secondDelete, thirdDelete]) {
+        expect(result).toMatchObject({ _: 'messages.affectedMessages', pts: expect.any(Number), ptsCount: 0 })
+      }
       expect(sendResult).toMatchObject({
         _: 'updateShortSentMessage',
         id: expect.any(Number),
@@ -3112,14 +3128,14 @@ describe('bridge login e2e', () => {
       expect(await callRpc(client, key, sid, {
         _: 'messages.getHistory',
         peer: {
-          _: 'inputPeerUser', userId: alice.id,
-          accessHash: alice.accessHash ?? Long.ZERO,
+          _: 'inputPeerChannel', channelId: group.id,
+          accessHash: group.accessHash ?? Long.ZERO,
         },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 20,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 32)).toMatchObject({
         messages: expect.arrayContaining([
-          expect.objectContaining({ message: 'sent after legacy langpack probe', out: true }),
+          expect.objectContaining({ message: 'sent after Android cleanup probes', out: true }),
         ]),
       })
     } finally {

@@ -210,6 +210,25 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('conversation kinds', () => {
+  it('acknowledges an empty channel deletion without refreshing dialogs or calling the platform', async () => {
+    const getDialogs = vi.spyOn(platform, 'getDialogs')
+    try {
+      const { rpc } = await createRpc()
+      const channel = {
+        _: 'inputChannel' as const,
+        channelId: stableId('peer:group'),
+        accessHash: Long.ZERO,
+      }
+
+      await expect(rpc.deleteMessages({ _: 'channels.deleteMessages', channel, id: [] }, channel))
+        .resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
+      expect(getDialogs).not.toHaveBeenCalled()
+      expect(actionCalls).toEqual([])
+    } finally {
+      getDialogs.mockRestore()
+    }
+  })
+
   it('promotes newly selected reactions without treating removals as recent usage', async () => {
     const group = conversations.find((item) => item.id === 'group')!
     const available = [
