@@ -59,7 +59,15 @@ interface ReadState {
   mentionCount: number
 }
 
-type DiscordChannel = DMChannel | GroupDMChannel | TextChannel | NewsChannel | ThreadChannel
+type DiscordGuildChannel = TextChannel | NewsChannel | ThreadChannel
+type DiscordChannel = DMChannel | GroupDMChannel | DiscordGuildChannel
+
+interface DiscordDialogRoot {
+  id: string
+  primary: DiscordChannel
+  channels: DiscordChannel[]
+  lastActivityId: string
+}
 
 const COMMON_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
 const MAX_PAGE_SIZE = 100
@@ -200,11 +208,12 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       if (!message || !this.shouldExposeMessage(message)) return
       const context = await this.mapReactionContext(message, true)
       const key = reactionKey(reaction)
+      const conversation = this.mapConversation(message.channel)
       this.dispatch(handler, {
         type: 'message-reactions',
         eventId: `discord:reaction-${action}:${message.channelId}:${message.id}:${key}:${Date.now()}`,
-        conversation: this.mapConversation(message.channel),
-        target: { conversationId: message.channelId, messageId: message.id, targetId: message.id },
+        conversation,
+        target: { conversationId: conversation.id, messageId: message.id, targetId: message.id },
         context, timestamp: Math.trunc(Date.now() / 1_000),
       })
     }
@@ -248,14 +257,17 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const channels = [...this.client.channels.cache.values()]
       .filter((channel): channel is DiscordChannel => isSupportedChannel(channel) && this.isVisible(channel))
       .sort(compareChannels)
-    const start = pageStart(channels.map((channel) => channel.id), query)
+    const roots = this.dialogRoots(channels)
+    const start = pageStart(roots.map((root) => root.id), query)
     const limit = clampLimit(query.limit)
-    const selected = channels.slice(start, start + limit)
-    const dialogs = await Promise.all(selected.map((channel) => this.mapDialog(channel)))
+    const selected = roots.slice(start, start + limit)
+    const dialogs = (await Promise.all(selected.map(async (root) => Promise.all(root.channels.map((channel) =>
+      this.mapDialog(channel, channel.id === root.primary.id),
+    ))))).flat()
     return {
       dialogs,
-      total: channels.length,
-      nextCursor: start + selected.length < channels.length ? String(start + selected.length) : undefined,
+      total: roots.length,
+      nextCursor: start + selected.length < roots.length ? String(start + selected.length) : undefined,
     }
   }
 
@@ -281,11 +293,12 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   ): Promise<IMHistoryPage<DiscordMediaLocator>> {
     await this.ensureReady()
     const channel = await this.requireChannel(conversation.id)
+    if (isSyntheticTopicMessageId(query.before?.id ?? query.cursor)) return { messages: [] }
     const limit = clampLimit(query.limit)
     const messages = await channel.messages.fetch({
       limit,
       before: query.before?.id ?? (!query.after ? query.cursor : undefined),
-      after: query.after?.id,
+      after: isSyntheticTopicMessageId(query.after?.id) ? undefined : query.after?.id,
     })
     const ordered = [...messages.values()]
       .sort((left, right) => compareSnowflakes(right.id, left.id))
@@ -293,7 +306,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       .filter((message) => this.shouldExposeMessage(message))
       .map((message) => this.mapMessage(message))
     return {
-      messages: mapped,
+      messages: mapped.length || !isGuildChannel(channel) ? mapped : [this.topicPlaceholder(channel)],
       nextCursor: messages.size >= limit ? ordered.at(-1)?.id : undefined,
     }
   }
@@ -305,6 +318,9 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   ): Promise<IMMessage<DiscordMediaLocator> | null> {
     await this.ensureReady()
     const channel = await this.requireChannel(conversation.id)
+    if (isGuildChannel(channel) && messageId === syntheticTopicMessageId(channel.id)) {
+      return this.topicPlaceholder(channel)
+    }
     const message = await Promise.resolve(channel.messages.fetch(messageId)).catch(() => null)
     return message && this.shouldExposeMessage(message) ? this.mapMessage(message) : null
   }
@@ -442,7 +458,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const channel = await this.requireChannel(target.conversationId)
     const message = await channel.messages.fetch(target.messageId)
     await message.markRead()
-    this.readStates.set(target.conversationId, { lastMessageId: target.messageId, mentionCount: 0 })
+    this.readStates.set(channel.id, { lastMessageId: target.messageId, mentionCount: 0 })
   }
 
   async getAvailableReactions(
@@ -541,8 +557,10 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const messageId = packet.d?.message_id
     if (typeof channelId !== 'string' || typeof messageId !== 'string') return
     this.updateReadState(channelId, packet.d)
+    const channel = this.resolveChannel(channelId)
+    const conversationId = channel ? this.mapConversation(channel).id : channelId
     for (const handler of this.handlers.values()) {
-      this.dispatch(handler, { type: 'read', conversationId: channelId, upToMessageId: messageId })
+      this.dispatch(handler, { type: 'read', conversationId, upToMessageId: messageId })
     }
   }
 
@@ -566,7 +584,11 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   private resolveChannel(id: string): DiscordChannel | undefined {
     const channel = this.client.channels.cache.get(id)
-    return channel && isSupportedChannel(channel) ? channel : undefined
+    if (channel && isSupportedChannel(channel)) return channel
+    const guildId = parseGuildConversationId(id)
+    if (!guildId) return
+    const guild = this.client.guilds.cache.get(guildId)
+    return guild ? selectGuildRoot(visibleGuildChannels(guild, this.client.user)) : undefined
   }
 
   private async requireChannel(id: string): Promise<DiscordChannel> {
@@ -578,9 +600,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   }
 
   private isVisible(channel: DiscordChannel): boolean {
-    if (channel.type === 'DM' || channel.type === 'GROUP_DM') return true
-    return channel.viewable
-      && Boolean(channel.permissionsFor(this.client.user)?.has('READ_MESSAGE_HISTORY'))
+    return isVisibleChannel(channel, this.client.user)
   }
 
   private shouldExposeMessage(message: Message): boolean {
@@ -589,28 +609,43 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       && (this.includeBots || !message.author.bot)
   }
 
-  private async mapDialog(channel: DiscordChannel): Promise<IMDialog<DiscordMediaLocator>> {
+  private async mapDialog(channel: DiscordChannel, fetchMessages = true): Promise<IMDialog<DiscordMediaLocator>> {
     const state = this.readStates.get(channel.id)
     const lastId = channel.lastMessageId ?? undefined
     const unread = Boolean(lastId && state?.lastMessageId && compareSnowflakes(lastId, state.lastMessageId) > 0)
     let messages: Message[] = []
     if (unread && state?.lastMessageId) {
-      const fetched = await Promise.resolve(channel.messages.fetch({ after: state.lastMessageId, limit: 100 }))
-        .catch(() => null)
-      if (fetched) messages = [...fetched.values()].sort((a, b) => compareSnowflakes(b.id, a.id))
+      if (fetchMessages) {
+        const fetched = await Promise.resolve(channel.messages.fetch({ after: state.lastMessageId, limit: 100 }))
+          .catch(() => null)
+        if (fetched) messages = [...fetched.values()].sort((a, b) => compareSnowflakes(b.id, a.id))
+      } else {
+        messages = [...channel.messages.cache.values()]
+          .filter((message) => compareSnowflakes(message.id, state.lastMessageId!) > 0)
+          .sort((a, b) => compareSnowflakes(b.id, a.id))
+      }
     }
     let lastMessage = messages[0]
-    if (!lastMessage && lastId) {
+    if (!lastMessage && lastId) lastMessage = channel.messages.cache.get(lastId)
+    if (!lastMessage && lastId && fetchMessages) {
       lastMessage = await Promise.resolve(channel.messages.fetch(lastId)).catch(() => undefined)
     }
     const readMessage = state?.lastMessageId
-      ? await Promise.resolve(channel.messages.fetch(state.lastMessageId)).catch(() => undefined)
+      ? channel.messages.cache.get(state.lastMessageId)
+        ?? (fetchMessages
+          ? await Promise.resolve(channel.messages.fetch(state.lastMessageId)).catch(() => undefined)
+          : undefined)
       : undefined
+    const mappedLastMessage = !fetchMessages && isGuildChannel(channel)
+      ? this.topicPlaceholder(channel)
+      : lastMessage && this.shouldExposeMessage(lastMessage) ? this.mapMessage(lastMessage) : undefined
     return {
       conversation: this.mapConversation(channel),
       unreadCount: unread ? Math.max(1, messages.filter((item) => item.author.id !== this.client.user.id).length) : 0,
-      lastMessage: lastMessage && this.shouldExposeMessage(lastMessage) ? this.mapMessage(lastMessage) : undefined,
-      readInboxMaxMessage: readMessage && this.shouldExposeMessage(readMessage) ? this.mapMessage(readMessage) : undefined,
+      lastMessage: mappedLastMessage,
+      readInboxMaxMessage: fetchMessages && readMessage && this.shouldExposeMessage(readMessage)
+        ? this.mapMessage(readMessage)
+        : undefined,
     }
   }
 
@@ -631,17 +666,69 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       }
     }
     const guild = channel.guild
+    const root = selectGuildRoot(visibleGuildChannels(guild, this.client.user))
+    const rootConversation = root?.id === channel.id
     const icon = guild.iconURL({ format: 'png', size: 256 })
     return {
-      id: channel.id, kind: 'channel', title: channel.name,
-      parentId: channel.parentId ?? undefined, spaceId: guild.id,
+      id: rootConversation ? guildConversationId(guild.id) : channel.id,
+      kind: 'channel', title: rootConversation ? guild.name : channelTopicTitle(channel),
+      parentId: rootConversation || !root ? undefined : guildConversationId(guild.id),
+      spaceId: guild.id,
       avatar: icon ? urlMedia(`discord:guild:${guild.id}`, icon, 'image', 'guild.png', 'image/png') : undefined,
       metadata: {
         discordChannelType: channel.type, discordGuildId: guild.id, discordGuildName: guild.name,
+        ...(rootConversation ? {
+          discordGuildRoot: true, discordRootChannelId: channel.id,
+          discordRootChannelName: channel.name, participantsCount: guild.memberCount,
+        } : {}),
         ...(channel.isThread() && channel.memberCount !== null
           ? { participantsCount: channel.memberCount }
           : {}),
       },
+    }
+  }
+
+  private dialogRoots(channels: DiscordChannel[]): DiscordDialogRoot[] {
+    const roots: DiscordDialogRoot[] = []
+    const guildChannels = new Map<string, DiscordChannel[]>()
+    for (const channel of channels) {
+      if (channel.type === 'DM' || channel.type === 'GROUP_DM') {
+        roots.push({
+          id: channel.id, primary: channel, channels: [channel],
+          lastActivityId: channel.lastMessageId ?? channel.id,
+        })
+        continue
+      }
+      const grouped = guildChannels.get(channel.guild.id) ?? []
+      grouped.push(channel)
+      guildChannels.set(channel.guild.id, grouped)
+    }
+    for (const grouped of guildChannels.values()) {
+      const primary = selectGuildRoot(grouped)
+      if (!primary) continue
+      const channels = [primary, ...grouped.filter((channel) => channel.id !== primary.id).sort(compareChannels)]
+      roots.push({
+        id: guildConversationId(primary.guild.id), primary, channels,
+        lastActivityId: channels.reduce((latest, channel) => {
+          const candidate = channel.lastMessageId ?? channel.id
+          return compareSnowflakes(candidate, latest) > 0 ? candidate : latest
+        }, primary.lastMessageId ?? primary.id),
+      })
+    }
+    return roots.sort((left, right) =>
+      compareSnowflakes(right.lastActivityId, left.lastActivityId)
+      || compareSnowflakes(right.id.replace(/^discord:guild:/, ''), left.id.replace(/^discord:guild:/, '')),
+    )
+  }
+
+  private topicPlaceholder(channel: GuildBasedChannel | ThreadChannel): IMMessage<DiscordMediaLocator> {
+    const conversation = this.mapConversation(channel as DiscordChannel)
+    return {
+      id: syntheticTopicMessageId(channel.id), conversationId: conversation.id,
+      senderId: this.client.user.id, sender: mapUser(this.client.user),
+      content: { parts: [], serviceAction: { type: 'custom', text: conversation.title } },
+      timestamp: Math.trunc(channel.createdTimestamp / 1_000), outgoing: true,
+      metadata: { discordSyntheticTopicRoot: true },
     }
   }
 
@@ -667,7 +754,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
     const reactionContext = this.mapCachedReactionContext(message)
     return {
-      id: message.id, conversationId: message.channelId, senderId: message.author.id,
+      id: message.id, conversationId: this.mapConversation(message.channel as DiscordChannel).id,
+      senderId: message.author.id,
       sender: mapUser(message.author, message.member?.displayName),
       content: {
         parts,
@@ -851,6 +939,71 @@ function isSupportedChannel(channel: AnyChannel): channel is DiscordChannel {
     || channel.type === 'GUILD_NEWS_THREAD'
 }
 
+function isGuildChannel(channel: DiscordChannel): channel is DiscordGuildChannel {
+  return channel.type !== 'DM' && channel.type !== 'GROUP_DM'
+}
+
+function isVisibleChannel(channel: DiscordChannel, self: User): boolean {
+  if (!isGuildChannel(channel)) return true
+  return channel.viewable && Boolean(channel.permissionsFor(self)?.has('READ_MESSAGE_HISTORY'))
+}
+
+function visibleGuildChannels(guild: Guild, self: User): DiscordChannel[] {
+  return [...guild.channels.cache.values()]
+    .filter((channel): channel is DiscordGuildChannel => isSupportedGuildChannel(channel)
+      && isVisibleChannel(channel, self))
+}
+
+function isSupportedGuildChannel(channel: GuildBasedChannel): channel is DiscordGuildChannel {
+  return channel.type === 'GUILD_TEXT' || channel.type === 'GUILD_NEWS'
+    || channel.type === 'GUILD_PUBLIC_THREAD' || channel.type === 'GUILD_PRIVATE_THREAD'
+    || channel.type === 'GUILD_NEWS_THREAD'
+}
+
+function selectGuildRoot(channels: DiscordChannel[]): DiscordGuildChannel | undefined {
+  const guildChannels = channels.filter(isGuildChannel)
+  if (!guildChannels.length) return
+  const regular = guildChannels.filter((channel): channel is TextChannel | NewsChannel => !channel.isThread())
+  const guild = guildChannels[0]!.guild
+  const system = regular.find((channel) => channel.id === guild.systemChannelId)
+  if (system) return system
+  const byPosition = (left: DiscordGuildChannel, right: DiscordGuildChannel) =>
+    channelPosition(left) - channelPosition(right) || compareSnowflakes(left.id, right.id)
+  const general = regular.filter((channel) => channel.name.toLowerCase() === 'general').sort(byPosition)[0]
+  if (general) return general
+  return (regular.length ? regular : guildChannels).slice().sort(byPosition)[0]
+}
+
+function channelPosition(channel: DiscordGuildChannel): number {
+  return channel.isThread() ? Number.MAX_SAFE_INTEGER : channel.rawPosition
+}
+
+function guildConversationId(guildId: string): string {
+  return `discord:guild:${guildId}`
+}
+
+function parseGuildConversationId(id: string): string | undefined {
+  const match = /^discord:guild:(\d+)$/.exec(id)
+  return match?.[1]
+}
+
+function syntheticTopicMessageId(channelId: string): string {
+  return `discord:topic:${channelId}`
+}
+
+function isSyntheticTopicMessageId(id?: string): boolean {
+  return Boolean(id && /^discord:topic:\d+$/.test(id))
+}
+
+function channelTopicTitle(channel: TextChannel | NewsChannel | ThreadChannel): string {
+  if (channel.isThread()) {
+    const parent = channel.parent
+    const category = parent?.parent
+    return [category?.name, parent?.name, channel.name].filter(Boolean).join(' / ')
+  }
+  return [channel.parent?.name, channel.name].filter(Boolean).join(' / ')
+}
+
 function mapUser(user: User, displayName?: string): IMUser<DiscordMediaLocator> {
   return {
     id: user.id,
@@ -948,9 +1101,13 @@ function mapDiscordText(message: Message): {
 function mapLinkedConversation(channel: DiscordChannel): IMConversation<DiscordMediaLocator> {
   if (channel.type === 'DM') return { id: channel.id, kind: 'direct', title: channel.recipient.displayName }
   if (channel.type === 'GROUP_DM') return { id: channel.id, kind: 'group', title: channel.name ?? 'Group DM' }
+  const root = selectGuildRoot(visibleGuildChannels(channel.guild, channel.client.user))
+  const rootConversation = root?.id === channel.id
   return {
-    id: channel.id, kind: 'channel', title: channel.name,
-    parentId: channel.parentId ?? undefined, spaceId: channel.guild.id,
+    id: rootConversation ? guildConversationId(channel.guild.id) : channel.id,
+    kind: 'channel', title: rootConversation ? channel.guild.name : channelTopicTitle(channel),
+    parentId: rootConversation || !root ? undefined : guildConversationId(channel.guild.id),
+    spaceId: channel.guild.id,
   }
 }
 

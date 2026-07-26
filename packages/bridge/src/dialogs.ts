@@ -2651,7 +2651,8 @@ export class DialogRpc {
     parent: import('./platform.js').IMConversation,
     child: import('./platform.js').IMConversation,
   ): Promise<{ topic: tl.RawForumTopic, top: MaterializedMessage }> {
-    const history = await this._loadHistory(child.id, { limit: 100 })
+    const stored = await this._storedTopicSeed(child.id)
+    const history = stored.length ? stored : await this._loadHistory(child.id, { limit: 100 })
     const top = history[0]
     const oldest = history.at(-1)
     if (!top || !oldest) throw new RpcError(500, 'FORUM_TOPIC_EMPTY')
@@ -2671,6 +2672,25 @@ export class DialogRpc {
         notifySettings: { _: 'peerNotifySettings' },
       },
     }
+  }
+
+  private async _storedTopicSeed(conversationId: string): Promise<MaterializedMessage[]> {
+    const cached = this._historyCache.get(conversationId)
+    if (cached?.length) return cached
+    if (!this._store) return []
+    const projected = await this._store.readProjectedHistory(
+      this._session.platformSessionId, conversationId, { limit: 1 },
+    )
+    const history = projected.flatMap(({ source, parts, media }) => parts.map((part): MaterializedMessage => ({
+      source,
+      tlId: part.tlMessageId,
+      ordinal: part.ordinal,
+      groupedId: part.groupedId ?? undefined,
+      media: media.find((entry) => entry.id === part.mediaId),
+    }))).sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId)
+    for (const item of history) this._rememberMessage(item)
+    if (history.length) this._historyCache.set(conversationId, history)
+    return history
   }
 
   private _topicReplyHeader(
