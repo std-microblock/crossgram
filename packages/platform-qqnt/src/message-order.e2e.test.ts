@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { WebSocketServer } from 'ws'
+import { WebSocketServer, type WebSocket } from 'ws'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -122,6 +122,111 @@ describe('QQNT same-second message ordering E2E', () => {
       .toEqual([0x40000007, 0x40000009, 0x4000000b])
     expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(3)
     expect(await ctx.database.get('mtproto_tl_message_part', {})).toHaveLength(3)
+  })
+
+  it('closes a stale same-session WebSocket before replacing it and keeps the replacement subscribed', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    let server: Server | undefined
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    const lifecycle: string[] = []
+    const sockets: WebSocket[] = []
+    let activeConnections = 0
+    let maximumActiveConnections = 0
+    webSocketServer.on('connection', (webSocket) => {
+      sockets.push(webSocket)
+      activeConnections++
+      maximumActiveConnections = Math.max(maximumActiveConnections, activeConnections)
+      lifecycle.push(`open-${sockets.length}`)
+      webSocket.once('close', () => {
+        activeConnections--
+        lifecycle.push(`close-${sockets.indexOf(webSocket) + 1}`)
+      })
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const exclusiveSession = { ...session, platformSessionId: 'qqnt-exclusive-websocket-e2e' }
+    const endpoint = `ws://127.0.0.1:${address.port}/events`
+    const first = new QQNTPlatform({ endpoint: 'http://127.0.0.1:1/v1', webSocketEndpoint: endpoint })
+    const second = new QQNTPlatform({ endpoint: 'http://127.0.0.1:1/v1', webSocketEndpoint: endpoint })
+    for (const platform of [first, second]) {
+      platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+      platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    }
+    const store = new MessageStore(ctx.database)
+    const delivered: string[] = []
+    let unsubscribeFirst: (() => Promise<void>) | undefined
+    let unsubscribeSecond: (() => Promise<void>) | undefined
+    try {
+      unsubscribeFirst = await first.subscribe(exclusiveSession, () => {})
+      await vi.waitFor(() => expect(lifecycle).toContain('open-1'))
+      unsubscribeSecond = await second.subscribe(exclusiveSession, async (event) => {
+        if (event.type !== 'message') return
+        await store.ingest(exclusiveSession, event.conversation, event.message)
+        delivered.push(event.message.id)
+      })
+      await vi.waitFor(() => expect(lifecycle).toEqual(['open-1', 'close-1', 'open-2']))
+      expect(maximumActiveConnections).toBe(1)
+
+      const send = (id: string, streamEventId: string) => sockets[1]!.send(JSON.stringify({
+        id: streamEventId,
+        event: {
+          type: 'message',
+          conversation: {
+            id: 'exclusive-group', kind: 'group', title: 'Exclusive group',
+            peerUid: 'exclusive-group', peerUin: '42', chatType: 2,
+          },
+          message: {
+            id, conversationId: 'exclusive-group', senderId: 'alice', timestamp: 1,
+            outgoing: false, parts: [{ type: 'text', text: id }],
+          },
+        },
+      }))
+      send('replacement-first', '1')
+      await vi.waitFor(() => expect(delivered).toEqual(['replacement-first']))
+      await unsubscribeFirst()
+      send('replacement-after-old-unsubscribe', '2')
+      await vi.waitFor(() => expect(delivered).toEqual([
+        'replacement-first', 'replacement-after-old-unsubscribe',
+      ]))
+      expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(2)
+
+      await unsubscribeSecond()
+      await vi.waitFor(() => expect(activeConnections).toBe(0))
+    } finally {
+      await unsubscribeSecond?.()
+      await unsubscribeFirst?.()
+    }
   })
 })
 
