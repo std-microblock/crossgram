@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import test from 'node:test'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import {
   extractSnapshots,
@@ -29,7 +29,7 @@ test('normalizes and validates a complete TDLib API schema', () => {
 
 test('parses local TDLib history and layer range CLI options', () => {
   const options = parseArgs(['--', '--td-repo', '../td', '--ref', 'master', '--from', '199', '--to', '224'])
-  assert.equal(options.tdRepo.endsWith('/td'), true)
+  assert.equal(options.tdRepo, resolve('../td'))
   assert.equal(options.ref, 'master')
   assert.equal(options.from, 199)
   assert.equal(options.to, 224)
@@ -45,7 +45,8 @@ test('uses the newest schema commit within each layer and writes a reproducible 
   await execFileAsync('git', ['-C', repo, 'config', 'user.email', 'schema@example.invalid'])
 
   const writeSnapshot = async (layer, constructor, message) => {
-    await execFileAsync('mkdir', ['-p', join(repo, 'td/telegram'), join(repo, 'td/generate/scheme')])
+    await mkdir(join(repo, 'td/telegram'), { recursive: true })
+    await mkdir(join(repo, 'td/generate/scheme'), { recursive: true })
     await writeFile(join(repo, 'td/telegram/Version.h'), `constexpr int32 MTPROTO_LAYER = ${layer};\n`)
     await writeFile(join(repo, 'td/generate/scheme/telegram_api.tl'), `${constructor} = Thing;\n---functions---\ngetThing#9876abcd = Thing;\n`)
     await execFileAsync('git', ['-C', repo, 'add', '.'])
