@@ -15,6 +15,7 @@ import {
   type LegacyGetForumTopicsByIdRequest, type LegacyGetForumTopicsRequest,
 } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
+import { androidRpcHandlers } from './android-rpc.js'
 import { MessageStore } from './message-store.js'
 import {
   IMPlatformService, PlatformSubscriptionManager, migrateQualifiedPlatformIds,
@@ -630,6 +631,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   for (const [method, handler] of Object.entries(startupRpcHandlers)) {
     rpc.register(method, async () => handler())
+  }
+  for (const [method, handler] of Object.entries(androidRpcHandlers)) {
+    rpc.register(method, async (rpc, request) => {
+      await requireBridgeSession(rpc)
+      return handler(request)
+    })
   }
 
   ctx.mtproto.broadcastUpdate({
