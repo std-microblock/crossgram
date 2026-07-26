@@ -18,6 +18,8 @@ export interface HistoryProfileOptions {
   minId: number
   warmup: number
   repeat: number
+  timeoutMs: number
+  logLevel: number
 }
 
 export function parseHistoryProfileOptions(argv: readonly string[]): HistoryProfileOptions {
@@ -59,6 +61,8 @@ export function parseHistoryProfileOptions(argv: readonly string[]): HistoryProf
     minId: integer('min-id', 0),
     warmup: integer('warmup', 1),
     repeat: integer('repeat', 5, 1),
+    timeoutMs: integer('timeout-ms', 30_000, 1),
+    logLevel: integer('log-level', 0),
   }
   if (!options.conversation && !options.peer) {
     throw new Error('pass --conversation <platform conversation id> or --peer <channel|chat|user>:<id>')

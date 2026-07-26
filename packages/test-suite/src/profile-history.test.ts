@@ -11,6 +11,7 @@ describe('history profiler', () => {
       rsaKey: expect.stringMatching(/[\\/]data[\\/]rsa-key\.json$/),
       authKeyStore: expect.stringMatching(/[\\/]data[\\/]auth-keys\.json$/),
       offsetId: 1, addOffset: -25, limit: 50, warmup: 1, repeat: 7,
+      timeoutMs: 30_000, logLevel: 0,
     })
   })
 
