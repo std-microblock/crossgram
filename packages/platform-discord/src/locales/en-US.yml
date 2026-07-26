@@ -1,3 +1,4 @@
 token: Discord user account token. Userbots violate the Discord Terms of Service and may lead to account restriction or termination.
 includeBots: Whether messages sent by bots are exposed.
+proxy: HTTP or HTTPS proxy URL used for Discord REST, Gateway, and CDN traffic. Credentials may be included in the URL.
 downloadChunkSize: Size in bytes of each streamed Discord CDN download chunk.

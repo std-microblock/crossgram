@@ -14,7 +14,10 @@ Configure the plugin with the user account token:
   name: '@mtproto-relay/platform-discord'
   config:
     token: YOUR_USER_TOKEN
+    proxy: http://127.0.0.1:7890
 ```
+
+`proxy` is optional and accepts `http://` or `https://` URLs, including authenticated forms such as `http://user:password@127.0.0.1:7890`. It is applied to Discord REST calls, the Gateway WebSocket, and CDN media downloads.
 
 Private messages, group DMs, guild text/announcement channels, and threads visible to the account are exposed to Telegram. The adapter uses Discord's private user API to synchronize the account's read state.
 
