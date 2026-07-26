@@ -1,6 +1,8 @@
 import type { Context } from 'cordis'
 import { randomUUID } from 'node:crypto'
 import z from 'schemastery'
+import { HttpsProxyAgent } from 'https-proxy-agent'
+import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
 import {
   Client, type AnyChannel, type ClientEvents, type DMChannel, type Guild, type GuildBasedChannel,
   type GuildEmoji, type GuildMember, type GroupDMChannel, type Message, type MessageAttachment,
@@ -28,6 +30,8 @@ export interface Config {
   token?: string
   /** Include messages authored by bot accounts. */
   includeBots?: boolean
+  /** HTTP(S) proxy shared by Discord REST, Gateway, and CDN requests. */
+  proxy?: string
   /** Maximum chunk size yielded by CDN downloads. */
   downloadChunkSize?: number
 }
@@ -35,6 +39,7 @@ export interface Config {
 export const Config = z.object({
   token: z.string().role('secret').required(),
   includeBots: z.boolean().default(true),
+  proxy: z.string().role('secret'),
   downloadChunkSize: z.natural().min(1).default(256 * 1024),
 }).i18n({
   'en-US': enUS,
@@ -97,6 +102,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   readonly client: Client
   private readonly fetchImpl: typeof globalThis.fetch
+  private readonly proxyDispatcher?: UndiciProxyAgent
   private readonly includeBots: boolean
   private readonly downloadChunkSize: number
   private readonly readStates = new Map<string, ReadState>()
@@ -110,11 +116,26 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     dependencies: DiscordPlatformDependencies = {},
     private readonly logger?: DiscordLogger,
   ) {
+    const proxy = normalizeHttpProxy(config.proxy)
     this.client = dependencies.client ?? new Client({
       allowedMentions: { parse: [], repliedUser: false },
       failIfNotExists: false,
+      ...(proxy ? {
+        http: { agent: { uri: proxy } },
+        ws: { agent: createWebSocketProxyAgent(proxy) },
+      } : {}),
     })
-    this.fetchImpl = dependencies.fetch ?? globalThis.fetch
+    if (dependencies.fetch) {
+      this.fetchImpl = dependencies.fetch
+    } else if (proxy) {
+      this.proxyDispatcher = new UndiciProxyAgent(proxy)
+      this.fetchImpl = ((input, init) => undiciFetch(input as string | URL, {
+        ...(init as import('undici').RequestInit),
+        dispatcher: this.proxyDispatcher,
+      }) as unknown as Promise<Response>) as typeof globalThis.fetch
+    } else {
+      this.fetchImpl = globalThis.fetch
+    }
     this.includeBots = config.includeBots ?? true
     this.downloadChunkSize = config.downloadChunkSize ?? 256 * 1024
     this.client.on('raw', (packet) => this.handleRaw(packet))
@@ -493,6 +514,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     this.stopped = true
     this.handlers.clear()
     this.client.destroy()
+    void this.proxyDispatcher?.close()
   }
 
   private async ensureReady(): Promise<void> {
@@ -801,6 +823,22 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       if (remaining <= 0) break
     }
   }
+}
+
+function normalizeHttpProxy(input?: string): string | undefined {
+  if (!input?.trim()) return undefined
+  const url = new URL(input.trim())
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Discord proxy must use http:// or https://: ${url.protocol}`)
+  }
+  return url.toString()
+}
+
+function createWebSocketProxyAgent(proxy: string) {
+  const agent = new HttpsProxyAgent(proxy)
+  // discord.js-selfbot-v13 validates these compatibility fields before
+  // forwarding the object itself to ws as a standard Node Agent.
+  return Object.assign(agent, { httpAgent: agent, httpsAgent: agent })
 }
 
 function isSupportedChannel(channel: AnyChannel): channel is DiscordChannel {

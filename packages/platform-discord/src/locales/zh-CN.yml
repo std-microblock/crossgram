@@ -1,3 +1,4 @@
 token: Discord 用户账号 Token。使用 userbot 违反 Discord 服务条款，可能导致账号受限或封禁。
 includeBots: 是否显示 Bot 发送的消息。
+proxy: Discord REST、Gateway 与 CDN 流量共用的 HTTP 或 HTTPS 代理地址；可以在 URL 中包含认证信息。
 downloadChunkSize: 下载 Discord CDN 附件时每个流分片的字节数。

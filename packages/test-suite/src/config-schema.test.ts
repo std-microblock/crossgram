@@ -18,7 +18,7 @@ const cases = [
     'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'generatePreviews',
     'previewMaxDimension', 'ffmpegPath', 'grayTipFilters',
   ]],
-  ['discord', discordConfig, ['token', 'includeBots', 'downloadChunkSize']],
+  ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'syncTimeoutMs', 'requestTimeoutMs']],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['satori', satoriConfig, ['bot']],

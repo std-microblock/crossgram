@@ -206,6 +206,7 @@ yarn build && yarn start  # 生产模式
   name: '@mtproto-relay/platform-discord'
   config:
     token: YOUR_DISCORD_USER_TOKEN
+    proxy: http://127.0.0.1:7890
 
 - id: matrix   # Matrix 平台（一个配置项对应一个账号）
   name: '@mtproto-relay/platform-matrix'
