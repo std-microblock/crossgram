@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
+  cardActionLabel, cardUrl, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
@@ -25,6 +25,7 @@ import type { TelegramResourceService } from './resource-provider.js'
 import { probeImageDimensions } from './image-dimensions.js'
 import { withAutoLinkEntities } from './message-entities.js'
 import { registerVirtualConversation, virtualConversation } from './virtual-conversations.js'
+import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from './card-thumbnail.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -1221,6 +1222,13 @@ export class DialogRpc {
     if (req.location._ !== 'inputDocumentFileLocation' && req.location._ !== 'inputPhotoFileLocation') {
       throw new RpcError(400, 'LOCATION_INVALID')
     }
+    if (req.location._ === 'inputPhotoFileLocation') {
+      const thumbnail = await getCardThumbnailFile(req.location, offset, req.limit)
+      if (thumbnail) return {
+        _: 'upload.file', type: storageFileType(thumbnail.mimeType),
+        mtime: Math.floor(Date.now() / 1000), bytes: thumbnail.bytes,
+      }
+    }
     if (req.location._ === 'inputDocumentFileLocation') {
       // 官方资源优先：按真实 doc id 从本地 TGS 仓库回源
       const official = await this._resources?.getFile(req.location.id)
@@ -2109,7 +2117,7 @@ export class DialogRpc {
         : sticker?.type === 'sticker'
           ? this._stickers?.makeMessageMedia(sticker.sticker)
           : card?.type === 'card'
-            ? makeTlCardPreview(card.card)
+            ? makeTlCardPreview(card.card, this._dcId)
             : this._conversationPreviewMedia(source),
       entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
       reactions: source.reactionContext?.reactions.length
@@ -2232,6 +2240,14 @@ export class DialogRpc {
             documentId: reaction.documentId,
           })
         }
+      }
+      if (part.type === 'card') {
+        const url = cardUrl(part.card)
+        const action = cardActionLabel(part.card.kind)
+        if (url && text.endsWith(action)) output.push({
+          _: 'messageEntityTextUrl', offset: base + text.length - action.length,
+          length: action.length, url,
+        })
       }
       base += text.length + (index + 1 < rendered.length ? 1 : 0)
     }
@@ -2796,8 +2812,9 @@ export function stableId(value: string): number {
 /** Builds a self-contained Telegram preview without asking Telegram to scrape QQ URLs. */
 export function makeTlCardPreview(
   card: import('./platform.js').IMMessageCard,
+  dcId = 1,
 ): tl.RawMessageMediaWebPage {
-  const url = /^https?:\/\/\S+$/i.test(card.url ?? '') ? card.url! : 'https://im.qq.com/'
+  const url = cardUrl(card) ?? 'https://im.qq.com/'
   let displayUrl = card.source || card.title
   try {
     displayUrl = new URL(url).hostname || displayUrl
@@ -2815,6 +2832,7 @@ export function makeTlCardPreview(
       siteName: card.source || (card.kind === 'mini-app' ? 'QQ 小程序' : 'QQ'),
       title: card.title,
       description: card.description,
+      photo: makeCardThumbnailPhoto(card.thumbnailUrl, dcId),
     },
   }
 }
