@@ -51,6 +51,9 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'contacts.getTopPeers': () => ({
     _: 'contacts.topPeers', categories: [], chats: [], users: [],
   } as unknown as tl.TlObject),
+  'bots.getBotRecommendations': () => ({
+    _: 'users.users', users: [],
+  } as unknown as tl.TlObject),
   'help.getTimezonesList': () => ({
     _: 'help.timezonesList', timezones: [], hash: 0,
   } as unknown as tl.TlObject),
@@ -89,6 +92,14 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   } as unknown as tl.TlObject),
   'messages.getSavedHistory': () => emptyMessages(),
   'messages.getMessageReadParticipants': () => bareVector([]),
+  'messages.getMessagesViews': request => ({
+    _: 'messages.messageViews',
+    views: (request as tl.messages.RawGetMessagesViewsRequest).id.map(() => ({
+      _: 'messageViews', views: 0, forwards: 0,
+    })),
+    chats: [],
+    users: [],
+  } as unknown as tl.TlObject),
   'messages.getQuickReplies': () => ({
     _: 'messages.quickReplies', quickReplies: [], messages: [], chats: [], users: [],
   } as unknown as tl.TlObject),
@@ -118,6 +129,9 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'payments.getSavedStarGifts': () => ({
     _: 'payments.savedStarGifts', count: 0, gifts: [], chats: [], users: [],
   } as unknown as tl.TlObject),
+  'payments.getStarGifts': () => ({
+    _: 'payments.starGifts', hash: 0, gifts: [], chats: [], users: [],
+  } as unknown as tl.TlObject),
   'payments.getStarGiftCollections': () => ({
     _: 'payments.starGiftCollections', collections: [],
   } as unknown as tl.TlObject),
@@ -144,6 +158,9 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   } as unknown as tl.TlObject),
   'premium.getMyBoosts': () => ({
     _: 'premium.myBoosts', myBoosts: [], chats: [], users: [],
+  } as unknown as tl.TlObject),
+  'photos.getUserPhotos': () => ({
+    _: 'photos.photos', photos: [], users: [],
   } as unknown as tl.TlObject),
 }
 

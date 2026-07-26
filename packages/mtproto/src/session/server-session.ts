@@ -4,6 +4,7 @@ import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { typed, u8 } from '@fuman/utils'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
 import { createAesIgeForMessageOld } from '@mtcute/core/utils.js'
+import { gunzipSync } from 'node:zlib'
 import Long from 'long'
 import { ServerAuthKey } from './server-auth-key.js'
 import type { AuthKeyStore, StoredAuthKey } from './auth-key-store.js'
@@ -20,8 +21,10 @@ import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 const RPC_RESULT_ID = 0xF35C6D01
 const BOOL_TRUE_ID = 0x997275B5
 const BOOL_FALSE_ID = 0xBC799737
+const GZIP_PACKED_ID = 0x3072CFA1
 // Bare Vector<X> prefix (https://core.telegram.org/type/Vector%20X)
 const VECTOR_ID = 0x1CB5C415
+const MAX_GZIP_UNPACKED_SIZE = 16 * 1024 * 1024
 
 class ResumeStoredAuthKey extends Error {
   constructor(
@@ -521,8 +524,17 @@ export class ServerSession {
       return
     }
 
-    // Not a container — restore position and read normally
-    reader.pos = savedPos
+    // gzip_packed is an MTProto envelope around one ordinary TL object. The
+    // upstream tl-runtime documents the constructor but does not currently
+    // inflate it, so unwrap it at the server boundary before normal dispatch.
+    if (constructorId === GZIP_PACKED_ID) {
+      const packedData = reader.bytes()
+      const unpacked = gunzipSync(packedData, { maxOutputLength: MAX_GZIP_UNPACKED_SIZE })
+      reader = new TlBinaryReader(this._readerMap, unpacked)
+    } else {
+      // Not a container or compressed envelope — restore position and read normally.
+      reader.pos = savedPos
+    }
     obj = reader.object() as { _: string }
     const objId = obj._
 
@@ -548,6 +560,10 @@ export class ServerSession {
 
       case 'mt_get_future_salts':
         this._handleGetFutureSalts(msgId, obj as unknown as mtp.RawMt_get_future_salts)
+        break
+
+      case 'mt_rpc_drop_answer':
+        this._handleRpcDropAnswer(msgId, obj as unknown as mtp.RawMt_rpc_drop_answer)
         break
 
       case 'mt_msgs_state_req':
@@ -974,6 +990,13 @@ export class ServerSession {
       if (oldest === undefined) break
       this._completedMessageIds.delete(oldest)
     }
+  }
+
+  private _handleRpcDropAnswer(msgId: Long, request: mtp.RawMt_rpc_drop_answer): void {
+    const result: mtp.TypeRpcDropAnswer = this._processingMessages.has(request.reqMsgId.toString())
+      ? { _: 'mt_rpc_answer_dropped_running' }
+      : { _: 'mt_rpc_answer_unknown' }
+    this._sendRpcResult(msgId, result as unknown as tl.TlObject, request._)
   }
 
   // ── Sending ──
