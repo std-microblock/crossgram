@@ -30,6 +30,7 @@ import { TelegramResourceService } from './resource-provider.js'
 import { PlatformAccountProvisioner, type ProvisionedPlatformAccount } from './platform-account.js'
 import { verifyLoginCode } from './login-code.js'
 import { DraftStore } from './draft-store.js'
+import { NotificationSettingsStore } from './notification-settings.js'
 import {
   makePlatformAccountView, makeUnavailableAccountView,
   type PlatformAccountDashboardData,
@@ -65,6 +66,8 @@ export interface BridgeConfig {
   /** HTTP prefix for platform account assets (default: /api). */
   apiPrefix?: string
   uploadPath?: string
+  /** Mute group chats by default unless the Telegram user explicitly enables them. */
+  autoMuteGroupChats?: boolean
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
@@ -74,6 +77,7 @@ export const Config = z.object({
   serverPort: z.natural().min(1).max(65_535).default(4430),
   apiPrefix: z.string().default('/api'),
   uploadPath: z.string().default('data/bridge-uploads'),
+  autoMuteGroupChats: z.boolean().default(true),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -108,6 +112,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   defineModels(ctx)
   const store = new MessageStore(ctx.database, undefined, undefined, historyTrace)
   const drafts = new DraftStore(ctx.database)
+  const notificationSettings = new NotificationSettingsStore(
+    ctx.database, config.autoMuteGroupChats ?? true,
+  )
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
   const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
@@ -139,7 +146,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (format, ...args) => bridgeLogger.debug(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, stickerRpcFor, resources, store, drafts, subscriptions, uploads, generation,
+    ctx, registry, stickerRpcFor, resources, store, drafts, notificationSettings,
+    subscriptions, uploads, generation,
     (localSession, update, excludeAuthKeyId) => updates.publishDraft(
       localSession, update, excludeAuthKeyId,
     ),
@@ -321,6 +329,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       (localSession, update, excludeAuthKeyId) => updates.publishDraft(
         localSession, update, excludeAuthKeyId,
       ),
+      notificationSettings,
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -585,9 +594,32 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   // ── Post-login misc (keep the client's initial sync from stalling) ──
   rpc.register('account.updateStatus', async () => ({ _: 'boolTrue' } as unknown as tl.TlObject))
-  rpc.register('account.getNotifySettings', async () => ({
-    _: 'peerNotifySettings',
-  } as unknown as tl.TlObject))
+  rpc.register('account.getNotifySettings', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getNotifySettings(
+      req as tl.account.RawGetNotifySettingsRequest,
+    ))
+  rpc.register('account.updateNotifySettings', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const changed = await state.dialogs.updateNotifySettings(
+      req as tl.account.RawUpdateNotifySettingsRequest,
+    )
+    await updates.publishNotification(state.session, [{
+      _: 'updateNotifySettings', peer: changed.peer, notifySettings: changed.settings,
+    }], rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined)
+    return { _: 'boolTrue' }
+  })
+  rpc.register('account.resetNotifySettings', async (rpc) => {
+    const state = await requireBridgeSession(rpc)
+    const changed = await state.dialogs.resetNotifySettings()
+    await updates.publishNotification(
+      state.session, changed, rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+    return { _: 'boolTrue' }
+  })
+  rpc.register('account.getNotifyExceptions', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getNotifyExceptions(
+      req as tl.account.RawGetNotifyExceptionsRequest,
+    ))
   rpc.register('help.getCountriesList', async () => ({
     _: 'help.countriesList', countries: [], hash: 0,
   } as unknown as tl.TlObject))
@@ -640,6 +672,7 @@ function createSessionResolver(
   resources: TelegramResourceService,
   store: MessageStore,
   drafts: DraftStore,
+  notificationSettings: NotificationSettingsStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
   generation: object,
@@ -692,6 +725,7 @@ function createSessionResolver(
             historyTrace,
             drafts,
             onDraftUpdate,
+            notificationSettings,
           )
           return state
         })()

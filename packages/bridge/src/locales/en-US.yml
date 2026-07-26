@@ -3,3 +3,4 @@ serverHost: Public MTProto host advertised to Telegram clients.
 serverPort: Public MTProto port advertised to Telegram clients.
 apiPrefix: HTTP prefix used for platform account assets.
 uploadPath: Directory used to store uploads received from Telegram clients.
+autoMuteGroupChats: Mute group chats by default; per-chat Telegram settings can override this.

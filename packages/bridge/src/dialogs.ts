@@ -27,6 +27,7 @@ import { withAutoLinkEntities } from './message-entities.js'
 import { registerVirtualConversation, virtualConversation } from './virtual-conversations.js'
 import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from './card-thumbnail.js'
 import type { DraftStore, StoredDraft } from './draft-store.js'
+import type { NotificationSettingsStore, NotificationTarget } from './notification-settings.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -148,6 +149,7 @@ export class DialogRpc {
       update: tl.RawUpdateDraftMessage,
       excludeAuthKeyId?: string,
     ) => Promise<void>,
+    private readonly _notificationSettings?: NotificationSettingsStore,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -750,7 +752,7 @@ export class DialogRpc {
         id: user.id,
         ...(about !== undefined ? { about } : {}),
         settings: { _: 'peerSettings' },
-        notifySettings: { _: 'peerNotifySettings' },
+        notifySettings: await this._peerNotifySettings(peerId ?? this._session.userId),
         commonChatsCount: 0,
       },
       chats: [],
@@ -782,7 +784,7 @@ export class DialogRpc {
           version: 1,
         },
         chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
-        notifySettings: { _: 'peerNotifySettings' }, botInfo: [],
+        notifySettings: await this._peerNotifySettings(conversation.id), botInfo: [],
       },
       chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
     }
@@ -802,7 +804,7 @@ export class DialogRpc {
         participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
         readInboxMaxId: 0, readOutboxMaxId: 0, unreadCount: 0,
         chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
-        notifySettings: { _: 'peerNotifySettings' }, botInfo: [], pts: this._pts,
+        notifySettings: await this._peerNotifySettings(conversation.id), botInfo: [], pts: this._pts,
         availableReactions: this._reactions?.chatReactions(conversation.id, reactionContext),
       },
       chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
@@ -1908,7 +1910,7 @@ export class DialogRpc {
       unreadMentionsCount: 0,
       unreadReactionsCount: 0,
       unreadPollVotesCount: 0,
-      notifySettings: { _: 'peerNotifySettings' },
+      notifySettings: await this._peerNotifySettings(platformPeerId),
       draft: storedDraft?.draft,
     }
     return { source, dialog, message, users, chat }
@@ -2852,7 +2854,7 @@ export class DialogRpc {
         readInboxMaxId: top.tlId, readOutboxMaxId: top.tlId,
         unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
         fromId: { _: 'peerUser', userId: this._userId(oldest.source.senderId) },
-        notifySettings: { _: 'peerNotifySettings' },
+        notifySettings: await this._topicNotifySettings(parent.id, topicId),
         draft: (await this._drafts?.get(
           this._session.platformSessionId, child.id, topicId,
         ))?.draft,
@@ -2907,6 +2909,127 @@ export class DialogRpc {
     if (peer._ === 'inputPeerChat') return this._tlToPeer.get(peer.chatId)
     if (peer._ === 'inputPeerChannel') return this._tlToPeer.get(peer.channelId)
     return undefined
+  }
+
+  async getNotifySettings(req: tl.account.RawGetNotifySettingsRequest): Promise<tl.RawPeerNotifySettings> {
+    await this._hydratePeers()
+    return this._notificationSettings?.get(
+      this._session.platformSessionId,
+      this._notificationTarget(req.peer),
+    ) ?? { _: 'peerNotifySettings' }
+  }
+
+  async updateNotifySettings(req: tl.account.RawUpdateNotifySettingsRequest): Promise<{
+    settings: tl.RawPeerNotifySettings
+    peer: tl.TypeNotifyPeer
+  }> {
+    await this._hydratePeers()
+    const target = this._notificationTarget(req.peer)
+    const settings = await this._notificationSettings?.update(
+      this._session.platformSessionId, target, req.settings,
+    ) ?? { _: 'peerNotifySettings' as const }
+    return { settings, peer: this._notifyPeer(target) }
+  }
+
+  async getNotifyExceptions(req: tl.account.RawGetNotifyExceptionsRequest): Promise<tl.RawUpdates> {
+    await this._hydratePeers()
+    const requested = req.peer ? this._notificationTarget(req.peer) : undefined
+    const overrides = await this._notificationSettings?.listOverrides(this._session.platformSessionId) ?? []
+    const selected = overrides.filter(({ target, settings }) => {
+      if (requested && !this._notificationTargetMatches(target, requested)) return false
+      const soundChanged = settings.otherSound !== undefined
+      const storiesChanged = settings.storiesMuted !== undefined
+        || settings.storiesHideSender !== undefined
+        || settings.storiesOtherSound !== undefined
+      if (req.compareSound || req.compareStories) {
+        return (req.compareSound && soundChanged) || (req.compareStories && storiesChanged)
+      }
+      return true
+    })
+    const users: tl.RawUser[] = []
+    const chats: tl.TypeChat[] = []
+    for (const { target } of selected) {
+      const conversation = this._conversation(target.peerId)
+      if (conversation.kind === 'direct') users.push(await this._getPeerUser(target.peerId))
+      else chats.push(this._makeChat(conversation))
+    }
+    return {
+      _: 'updates',
+      updates: selected.map(({ target, settings }) => ({
+        _: 'updateNotifySettings', peer: this._notifyPeer(target), notifySettings: settings,
+      })),
+      users: uniqueUsers(users), chats: uniqueChats(chats),
+      date: Math.floor(Date.now() / 1000), seq: 0,
+    }
+  }
+
+  async resetNotifySettings(): Promise<tl.RawUpdateNotifySettings[]> {
+    await this._hydratePeers()
+    if (!this._notificationSettings) return []
+    const overrides = await this._notificationSettings.listOverrides(this._session.platformSessionId)
+    await this._notificationSettings.reset(this._session.platformSessionId)
+    const targets: NotificationTarget[] = [
+      { type: 'users' }, { type: 'chats' }, { type: 'broadcasts' },
+      ...overrides.map(({ target }) => target),
+    ]
+    return Promise.all(targets.map(async (target) => ({
+      _: 'updateNotifySettings' as const,
+      peer: this._notifyPeer(target),
+      notifySettings: await this._notificationSettings!.get(this._session.platformSessionId, target),
+    })))
+  }
+
+  private _notificationTarget(peer: tl.TypeInputNotifyPeer): NotificationTarget {
+    if (peer._ === 'inputNotifyUsers') return { type: 'users' }
+    if (peer._ === 'inputNotifyChats') return { type: 'chats' }
+    if (peer._ === 'inputNotifyBroadcasts') return { type: 'broadcasts' }
+    const peerId = this._resolveNotificationPeer(peer.peer)
+    return peer._ === 'inputNotifyForumTopic'
+      ? { type: 'topic', peerId, topMsgId: peer.topMsgId }
+      : { type: 'peer', peerId }
+  }
+
+  private _notificationTargetMatches(
+    target: Extract<NotificationTarget, { type: 'peer' | 'topic' }>,
+    requested: NotificationTarget,
+  ): boolean {
+    if (requested.type === 'peer') return target.type === 'peer' && target.peerId === requested.peerId
+    if (requested.type === 'topic') {
+      return target.type === 'topic'
+        && target.peerId === requested.peerId
+        && target.topMsgId === requested.topMsgId
+    }
+    const conversation = this._conversation(target.peerId)
+    if (requested.type === 'users') return conversation.kind === 'direct'
+    const broadcast = conversation.metadata?.broadcast === true
+    return requested.type === 'broadcasts' ? broadcast : conversation.kind !== 'direct' && !broadcast
+  }
+
+  private _resolveNotificationPeer(peer: tl.TypeInputPeer): string {
+    if (peer._ === 'inputPeerSelf') return this._session.userId
+    return this._resolvePeer(peer)
+  }
+
+  private _notifyPeer(target: NotificationTarget): tl.TypeNotifyPeer {
+    if (target.type === 'users') return { _: 'notifyUsers' }
+    if (target.type === 'chats') return { _: 'notifyChats' }
+    if (target.type === 'broadcasts') return { _: 'notifyBroadcasts' }
+    const peer = this._conversationPeer(this._conversation(target.peerId))
+    return target.type === 'topic'
+      ? { _: 'notifyForumTopic', peer, topMsgId: target.topMsgId }
+      : { _: 'notifyPeer', peer }
+  }
+
+  private _peerNotifySettings(peerId: string): Promise<tl.RawPeerNotifySettings> {
+    return this._notificationSettings?.get(
+      this._session.platformSessionId, { type: 'peer', peerId },
+    ) ?? Promise.resolve({ _: 'peerNotifySettings' })
+  }
+
+  private _topicNotifySettings(peerId: string, topMsgId: number): Promise<tl.RawPeerNotifySettings> {
+    return this._notificationSettings?.get(
+      this._session.platformSessionId, { type: 'topic', peerId, topMsgId },
+    ) ?? Promise.resolve({ _: 'peerNotifySettings' })
   }
 
   private _messageId(peerId: string, messageId: string): number {
