@@ -54,6 +54,7 @@
   config:
     homeserver: https://matrix.example.com
     accessToken: replace-with-matrix-access-token
+    proxy: http://127.0.0.1:7890
     syncTimeoutMs: 30000
     requestTimeoutMs: 30000
 - id: mtproto-debug

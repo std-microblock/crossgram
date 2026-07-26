@@ -34,6 +34,22 @@ describe('MatrixClient', () => {
     expect(error).toMatchObject({ status: 401, errcode: 'M_UNKNOWN_TOKEN', message: 'Access token is invalid' })
   })
 
+  it('accepts HTTP(S) proxies and rejects unsupported proxy protocols', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ user_id: '@me:example.org' }))
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', proxy: '  http://127.0.0.1:7890  ', fetch,
+    })
+
+    await expect(client.whoAmI()).resolves.toEqual({ user_id: '@me:example.org' })
+    expect(() => new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', proxy: 'socks5://127.0.0.1:1080', fetch,
+    })).toThrow('Matrix proxy must use http:// or https://: socks5:')
+    expect(() => new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', proxy: 'not a URL', fetch,
+    })).toThrow()
+    await client.close()
+  })
+
   it('uploads binary data with progress and downloads an mxc URI', async () => {
     const requests: Array<{ url: URL, method: string, body?: Uint8Array }> = []
     const client = new MatrixClient({
