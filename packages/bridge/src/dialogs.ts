@@ -26,6 +26,7 @@ import { probeImageDimensions } from './image-dimensions.js'
 import { withAutoLinkEntities } from './message-entities.js'
 import { registerVirtualConversation, virtualConversation } from './virtual-conversations.js'
 import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from './card-thumbnail.js'
+import type { DraftStore, StoredDraft } from './draft-store.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -138,6 +139,12 @@ export class DialogRpc {
     ) => Promise<PlatformEventPublishResult>,
     private readonly _authKeyId?: string,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
+    private readonly _drafts?: DraftStore,
+    private readonly _onDraftUpdate?: (
+      session: PlatformSession,
+      update: tl.RawUpdateDraftMessage,
+      excludeAuthKeyId?: string,
+    ) => Promise<void>,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -178,7 +185,9 @@ export class DialogRpc {
     // absent during cold start. The no-store path still allocates Telegram IDs
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
-    const materialized = await Promise.all(all.map((dialog) => this._materializeDialog(dialog)))
+    const drafts = await this._mainDrafts()
+    const materialized = await Promise.all(all.map((dialog) =>
+      this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
       const offsetPeer = this._tlToPeer.get(inputPeerId(req.offsetPeer))
@@ -247,7 +256,9 @@ export class DialogRpc {
     if (!this._store) {
       await Promise.all(selected.map((dialog) => this._loadHistory(dialog.conversation.id)))
     }
-    const materialized = await Promise.all(selected.map((dialog) => this._materializeDialog(dialog)))
+    const drafts = await this._mainDrafts()
+    const materialized = await Promise.all(selected.map((dialog) =>
+      this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return {
       _: 'messages.peerDialogs',
@@ -259,6 +270,53 @@ export class DialogRpc {
         _: 'updates.state', pts: state?.pts ?? this._pts, qts: state?.qts ?? 0,
         date: state?.date ?? Math.floor(Date.now() / 1000), seq: state?.seq ?? 0, unreadCount: 0,
       },
+    }
+  }
+
+  async saveDraft(req: tl.messages.RawSaveDraftRequest): Promise<tl.TlObject> {
+    if (!this._drafts) throw new RpcError(500, 'DRAFT_STORE_UNAVAILABLE')
+    if (req.richMessage) throw new RpcError(400, 'DRAFT_RICH_MESSAGE_UNSUPPORTED')
+    await this._hydratePeers()
+    const scope = await this._resolveDraftScope(req.peer, req.replyTo)
+    const date = Math.floor(Date.now() / 1000)
+    if (hasDraftContent(req)) {
+      const draft: tl.RawDraftMessage = {
+        _: 'draftMessage',
+        noWebpage: req.noWebpage,
+        invertMedia: req.invertMedia,
+        replyTo: req.replyTo,
+        message: req.message,
+        entities: req.entities,
+        media: req.media,
+        date,
+        effect: req.effect,
+        suggestedPost: req.suggestedPost,
+      }
+      await this._drafts.save(
+        this._session.platformSessionId, scope.conversationId, scope.topMsgId, draft,
+      )
+      await this._publishDraft(scope.conversationId, scope.topMsgId, draft)
+    } else {
+      await this._drafts.remove(
+        this._session.platformSessionId, scope.conversationId, scope.topMsgId,
+      )
+      await this._publishDraft(scope.conversationId, scope.topMsgId, {
+        _: 'draftMessageEmpty', date,
+      })
+    }
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  }
+
+  async getAllDrafts(): Promise<tl.TypeUpdates> {
+    await this._hydratePeers()
+    const drafts = await this._drafts?.list(this._session.platformSessionId) ?? []
+    const state = await this._store?.getUpdateState(this._session.platformSessionId)
+    return {
+      _: 'updates',
+      updates: drafts.map((stored) => this._makeDraftUpdate(stored)),
+      users: [], chats: [],
+      date: state?.date ?? Math.floor(Date.now() / 1000),
+      seq: state?.seq ?? 0,
     }
   }
 
@@ -933,7 +991,10 @@ export class DialogRpc {
     const existing = this._sentByRandomId.get(randomId)
     if (existing) return existing
 
-    const pending = this._sendMessage(req)
+    const pending = this._sendMessage(req).then(async (result) => {
+      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+      return result
+    })
     this._sentByRandomId.set(randomId, pending)
     try {
       return await pending
@@ -952,10 +1013,15 @@ export class DialogRpc {
         parts.push({ type: 'sticker', sticker: resolved.sticker })
         const updates = await this._sendRichContent(req.peer, { parts }, [], [req.randomId], req.replyTo)
         await this._stickers?.markUsedByRef(resolved.providerId, resolved.stickerId)
+        if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
         return updates
       }
       parts.push({ type: 'media', media: resolved.media })
-      return this._sendRichContent(req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo)
+      const updates = await this._sendRichContent(
+        req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo,
+      )
+      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+      return updates
     })
   }
 
@@ -970,13 +1036,15 @@ export class DialogRpc {
       const captions = req.multiMedia.map((item) => item.message).filter(Boolean)
       if (captions.length) parts.push(this._multiMediaCaption(req.multiMedia))
       for (const item of mediaResolved) parts.push({ type: 'media', media: item.media })
-      return this._sendRichContent(
+      const updates = await this._sendRichContent(
         req.peer,
         { parts },
         mediaResolved.map((item) => item.upload),
         req.multiMedia.map((item) => item.randomId),
         req.replyTo,
       )
+      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+      return updates
     })
   }
 
@@ -1760,7 +1828,7 @@ export class DialogRpc {
     return this._pts
   }
 
-  private async _materializeDialog(source: IMDialog) {
+  private async _materializeDialog(source: IMDialog, storedDraft?: StoredDraft) {
     const platformPeerId = source.conversation.id
     this._conversations.set(platformPeerId, source.conversation)
     const peer = this._conversationPeer(source.conversation)
@@ -1835,6 +1903,7 @@ export class DialogRpc {
       unreadReactionsCount: 0,
       unreadPollVotesCount: 0,
       notifySettings: { _: 'peerNotifySettings' },
+      draft: storedDraft?.draft,
     }
     return { source, dialog, message, users, chat }
   }
@@ -2603,6 +2672,71 @@ export class DialogRpc {
     return childId && this._conversation(childId).parentId === parentId ? childId : parentId
   }
 
+  private async _resolveDraftScope(
+    peer: tl.TypeInputPeer,
+    replyTo?: tl.TypeInputReplyTo,
+  ): Promise<{ conversationId: string, topMsgId: number }> {
+    const parentId = this._resolvePeer(peer)
+    if (replyTo?._ !== 'inputReplyToMessage') return { conversationId: parentId, topMsgId: 0 }
+    if (replyTo.topMsgId !== undefined && !this._topicToConversation.has(replyTo.topMsgId)) {
+      const parent = this._conversation(parentId)
+      if (parent.kind === 'channel') await this._ensureTopics(parentId)
+    }
+    const topMsgId = replyTo.topMsgId
+      ?? (this._topicToConversation.has(replyTo.replyToMsgId) ? replyTo.replyToMsgId : 0)
+    const childId = topMsgId ? this._topicToConversation.get(topMsgId) : undefined
+    if (!childId || this._conversation(childId).parentId !== parentId) {
+      return { conversationId: parentId, topMsgId: 0 }
+    }
+    return { conversationId: childId, topMsgId }
+  }
+
+  private async _mainDrafts(): Promise<Map<string, StoredDraft>> {
+    const drafts = await this._drafts?.list(this._session.platformSessionId) ?? []
+    return new Map(drafts.filter((draft) => draft.topMsgId === 0)
+      .map((draft) => [draft.conversationId, draft]))
+  }
+
+  private _makeDraftUpdate(stored: {
+    conversationId: string
+    topMsgId: number
+    draft: tl.TypeDraftMessage
+  }): tl.RawUpdateDraftMessage {
+    const conversation = this._conversation(stored.conversationId)
+    const display = stored.topMsgId && conversation.parentId
+      ? this._conversation(conversation.parentId)
+      : conversation
+    return {
+      _: 'updateDraftMessage',
+      peer: this._conversationPeer(display),
+      topMsgId: stored.topMsgId || undefined,
+      draft: stored.draft,
+    }
+  }
+
+  private async _publishDraft(
+    conversationId: string,
+    topMsgId: number,
+    draft: tl.TypeDraftMessage,
+  ): Promise<void> {
+    if (!this._onDraftUpdate) return
+    const update = this._makeDraftUpdate({ conversationId, topMsgId, draft })
+    await this._onDraftUpdate(this._session, update, this._authKeyId)
+  }
+
+  private async _clearDraftAfterSend(peer: tl.TypeInputPeer, replyTo?: tl.TypeInputReplyTo): Promise<void> {
+    if (!this._drafts) return
+    try {
+      const scope = await this._resolveDraftScope(peer, replyTo)
+      await this._drafts.remove(this._session.platformSessionId, scope.conversationId, scope.topMsgId)
+      await this._publishDraft(scope.conversationId, scope.topMsgId, {
+        _: 'draftMessageEmpty', date: Math.floor(Date.now() / 1000),
+      })
+    } catch (error) {
+      this._onTrace?.('draft clear after send failed: %s', String(error))
+    }
+  }
+
   private _conversation(peerId: string): import('./platform.js').IMConversation {
     return this._conversations.get(peerId) ?? { id: peerId, kind: 'direct', title: peerId }
   }
@@ -2700,6 +2834,9 @@ export class DialogRpc {
         unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
         fromId: { _: 'peerUser', userId: this._userId(oldest.source.senderId) },
         notifySettings: { _: 'peerNotifySettings' },
+        draft: (await this._drafts?.get(
+          this._session.platformSessionId, child.id, topicId,
+        ))?.draft,
       },
     }
   }
@@ -2962,6 +3099,14 @@ function inputPeerId(peer: tl.TypeInputPeer): number {
   if (peer._ === 'inputPeerChat') return peer.chatId
   if (peer._ === 'inputPeerChannel') return peer.channelId
   return 0
+}
+
+function hasDraftContent(request: tl.messages.RawSaveDraftRequest): boolean {
+  if (request.message.length || request.media || request.suggestedPost || request.richMessage) return true
+  if (request.effect && !request.effect.isZero()) return true
+  if (request.replyTo?._ === 'inputReplyToStory') return true
+  if (request.replyTo?._ === 'inputReplyToMessage' && request.replyTo.replyToMsgId > 0) return true
+  return false
 }
 
 function profileMilliseconds(value: number): number {

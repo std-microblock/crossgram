@@ -35,6 +35,18 @@ export class UpdateManager {
     ) => tl.TypeMessageMedia | undefined,
   ) {}
 
+  async publishDraft(
+    session: PlatformSession,
+    update: tl.RawUpdateDraftMessage,
+    excludeAuthKeyId?: string,
+  ): Promise<void> {
+    const state = await this._store.getUpdateState(session.platformSessionId)
+    await this._send(session.platformSessionId, {
+      _: 'updates', updates: [update], users: [], chats: [],
+      date: Math.floor(Date.now() / 1000), seq: state.seq,
+    }, excludeAuthKeyId)
+  }
+
   async publish(
     session: PlatformSession,
     committed: CommittedPlatformEvent,

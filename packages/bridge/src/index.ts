@@ -29,6 +29,7 @@ import { ReactionRpc } from './reaction-rpc.js'
 import { TelegramResourceService } from './resource-provider.js'
 import { PlatformAccountProvisioner, type ProvisionedPlatformAccount } from './platform-account.js'
 import { verifyLoginCode } from './login-code.js'
+import { DraftStore } from './draft-store.js'
 import {
   makePlatformAccountView, makeUnavailableAccountView,
   type PlatformAccountDashboardData,
@@ -46,6 +47,7 @@ export * from './sticker-rpc.js'
 export * from './reaction-rpc.js'
 export * from './resource-provider.js'
 export * from './login-code.js'
+export * from './draft-store.js'
 export * from './platform-account.js'
 export * from './account-dashboard.js'
 export * from './stripped-thumbnail.js'
@@ -102,6 +104,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database, undefined, undefined, historyTrace)
+  const drafts = new DraftStore(ctx.database)
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
   const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
@@ -133,7 +136,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (format, ...args) => bridgeLogger.debug(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, stickerRpcFor, resources, store, subscriptions, uploads, generation,
+    ctx, registry, stickerRpcFor, resources, store, drafts, subscriptions, uploads, generation,
+    (localSession, update, excludeAuthKeyId) => updates.publishDraft(
+      localSession, update, excludeAuthKeyId,
+    ),
     config.onTransferProgress, dcId, historyTrace,
   )
 
@@ -308,6 +314,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
       authKeyHex(rpc.authKeyId),
       historyTrace,
+      drafts,
+      (localSession, update, excludeAuthKeyId) => updates.publishDraft(
+        localSession, update, excludeAuthKeyId,
+      ),
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -337,6 +347,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getDialogs(req as tl.messages.RawGetDialogsRequest))
   rpc.register('messages.getPeerDialogs', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getPeerDialogs(req as tl.messages.RawGetPeerDialogsRequest))
+  rpc.register('messages.saveDraft', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.saveDraft(req as tl.messages.RawSaveDraftRequest))
+  rpc.register('messages.getAllDrafts', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getAllDrafts())
   rpc.register('messages.getHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
   rpc.register('messages.getMessages', async (rpc, req) =>
@@ -565,9 +579,15 @@ function createSessionResolver(
   stickerRpcFor: (platform: IMPlatform, session: PlatformSession) => StickerRpc,
   resources: TelegramResourceService,
   store: MessageStore,
+  drafts: DraftStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
   generation: object,
+  onDraftUpdate: (
+    session: PlatformSession,
+    update: tl.RawUpdateDraftMessage,
+    excludeAuthKeyId?: string,
+  ) => Promise<void>,
   onTransferProgress?: BridgeConfig['onTransferProgress'],
   dcId = 1,
   historyTrace?: (format: string, ...args: unknown[]) => void,
@@ -610,6 +630,8 @@ function createSessionResolver(
             (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
             authKeyId,
             historyTrace,
+            drafts,
+            onDraftUpdate,
           )
           return state
         })()

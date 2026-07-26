@@ -541,6 +541,72 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
+  it('persists Telegram drafts inside the bridge without syncing them to the platform', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      const platform = ctx.imPlatform.require('static')
+      const sendMessage = vi.spyOn(platform, 'sendMessage')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x7654322a, 0x4abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+
+      const requestDialogs = (messageId: number) => callRpc(client!, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' },
+        limit: 100, hash: Long.ZERO,
+      }, messageId)
+      const initial = await requestDialogs(6)
+      const alice = initial.users.find((user: any) => user.firstName === 'Alice')
+      const peer = { _: 'inputPeerUser', userId: alice.id, accessHash: alice.accessHash }
+
+      await expect(callRpc(client, key, sid, {
+        _: 'messages.saveDraft', peer, noWebpage: true,
+        message: 'bridge-side draft',
+        entities: [{ _: 'messageEntityBold', offset: 0, length: 11 }],
+      }, 8)).resolves.toEqual({ _: 'boolTrue' })
+      expect(sendMessage).not.toHaveBeenCalled()
+
+      const projected = await requestDialogs(10)
+      const aliceDialog = projected.dialogs.find((dialog: any) =>
+        dialog.peer._ === 'peerUser' && dialog.peer.userId === alice.id)
+      expect(aliceDialog.draft).toMatchObject({
+        _: 'draftMessage', noWebpage: true, message: 'bridge-side draft',
+        entities: [{ _: 'messageEntityBold', offset: 0, length: 11 }],
+      })
+
+      const allDrafts = await callRpc(client, key, sid, { _: 'messages.getAllDrafts' }, 12)
+      expect(allDrafts).toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateDraftMessage', peer: { _: 'peerUser', userId: alice.id },
+          draft: { _: 'draftMessage', message: 'bridge-side draft' },
+        }],
+      })
+
+      await expect(callRpc(client, key, sid, {
+        _: 'messages.sendMessage', peer, message: 'consume local draft',
+        randomId: Long.fromNumber(0x42), clearDraft: true,
+      }, 14)).resolves.toMatchObject({ _: 'updateShortSentMessage' })
+      expect(sendMessage).toHaveBeenCalledTimes(1)
+      await expect(callRpc(client, key, sid, { _: 'messages.getAllDrafts' }, 16))
+        .resolves.toMatchObject({ _: 'updates', updates: [] })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('returns nonzero peer access hashes and serves user and channel avatars', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
