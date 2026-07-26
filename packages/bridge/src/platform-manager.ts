@@ -303,6 +303,8 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
+  private static readonly _historySyncs = new Map<string, Promise<void>>()
+
   constructor(
     private readonly _platform: IMPlatform,
     private readonly _session: PlatformSession,
@@ -352,7 +354,18 @@ export class PlatformDataService {
 
   /** Fetch and persist one upstream page without hydrating rows the caller will not consume. */
   async syncHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<void> {
-    await this._loadHistory(conversationId, query, false)
+    const key = historySyncKey(this._session, conversationId, query)
+    const existing = PlatformDataService._historySyncs.get(key)
+    if (existing) return existing
+    const pending = this._loadHistory(conversationId, query, false).then(() => {})
+    PlatformDataService._historySyncs.set(key, pending)
+    try {
+      await pending
+    } finally {
+      if (PlatformDataService._historySyncs.get(key) === pending) {
+        PlatformDataService._historySyncs.delete(key)
+      }
+    }
   }
 
   private async _loadHistory(
@@ -453,6 +466,25 @@ export class PlatformDataService {
   private async _ingestDialogs(dialogs: readonly IMDialog[]): Promise<void> {
     await this._store.ingestDialogs(this._session, dialogs)
   }
+}
+
+function historySyncKey(
+  session: PlatformSession,
+  conversationId: string,
+  query: IMHistoryQuery,
+): string {
+  return JSON.stringify([
+    session.platformId,
+    session.platformSessionId,
+    conversationId,
+    query.limit ?? 100,
+    query.cursor ?? null,
+    query.afterId ?? null,
+    query.before?.id ?? null,
+    query.before?.timestamp ?? null,
+    query.after?.id ?? null,
+    query.after?.timestamp ?? null,
+  ])
 }
 
 function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined): boolean {

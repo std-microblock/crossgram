@@ -333,6 +333,36 @@ describe('PlatformDataService', () => {
     expect(readHistory).toHaveBeenCalledOnce()
   })
 
+  it('coalesces concurrent syncs for the same history window', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'coalesced-room', kind: 'group', title: 'Coalesced room' }
+    const store = new MessageStore(database)
+    await store.upsertConversation(session, conversation)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const getHistory = vi.fn(async () => {
+      await gate
+      return { messages: [incoming('8', conversation.id)] }
+    })
+    platform.getHistory = getHistory
+    const data = new PlatformDataService(platform, session, store)
+
+    const syncs = Promise.all([
+      data.syncHistory(conversation.id, { limit: 50 }),
+      data.syncHistory(conversation.id, { limit: 50 }),
+      data.syncHistory(conversation.id, { limit: 50 }),
+    ])
+    await vi.waitFor(() => expect(getHistory).toHaveBeenCalledOnce())
+    release()
+    await syncs
+
+    expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
+    await data.syncHistory(conversation.id, { limit: 50 })
+    expect(getHistory).toHaveBeenCalledTimes(2)
+  })
+
   it('does not chase an upstream nextCursor during a single bridge read', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
