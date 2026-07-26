@@ -243,10 +243,11 @@ export class MessageStore {
 
     const created = !message
     const storedMetadata = messageMetadata(source)
+    const storedContent = persistMessageContent(source.content)
     const changed = !message || (!message.deleted && (
       message.senderUserId !== senderRow.id
       || message.text !== messageText(source)
-      || JSON.stringify(message.content) !== JSON.stringify(source.content)
+      || JSON.stringify(message.content) !== JSON.stringify(storedContent)
       || message.timestamp !== source.timestamp
       || message.outgoing !== (source.outgoing ?? false)
       || message.platformGroupId !== (source.groupId ?? null)
@@ -264,7 +265,7 @@ export class MessageStore {
         primaryPlatformMessageId: source.id,
         senderUserId: senderRow.id,
         text: messageText(source),
-        content: source.content as unknown as JsonValue,
+        content: storedContent,
         timestamp: source.timestamp,
         outgoing: source.outgoing ?? false,
         deleted: false,
@@ -277,7 +278,7 @@ export class MessageStore {
       await database.set('mtproto_im_message', { id: message.id }, {
         senderUserId: senderRow.id,
         text: messageText(source),
-        content: source.content as unknown as JsonValue,
+        content: storedContent,
         timestamp: source.timestamp,
         outgoing: source.outgoing ?? false,
         platformGroupId: source.groupId ?? null,
@@ -1111,7 +1112,7 @@ export class MessageStore {
       conversationId: (await this._conversationId(row.conversationId)),
       senderId: sender.id,
       sender,
-      content: row.content as unknown as IMMessageContent,
+      content: hydrateMessageContent(row.content),
       timestamp: row.timestamp,
       outgoing: row.outgoing,
       groupId: row.platformGroupId ?? undefined,
@@ -1238,6 +1239,55 @@ export function toUser(row: IMUserRow): IMUser {
 
 function uniquePlatformUsers(users: readonly IMUser[]): IMUser[] {
   return [...new Map(users.map((user) => [user.id, user])).values()]
+}
+
+function persistMessageContent(content: IMMessageContent): JsonValue {
+  return {
+    ...content,
+    parts: content.parts.map((part) => part.type === 'sticker' && part.sticker.outline
+      ? { ...part, sticker: { ...part.sticker, outline: [...part.sticker.outline] } }
+      : part),
+  } as unknown as JsonValue
+}
+
+function hydrateMessageContent(value: JsonValue): IMMessageContent {
+  const content = value as unknown as IMMessageContent
+  return {
+    ...content,
+    parts: content.parts.map((part) => {
+      if (part.type !== 'sticker' || part.sticker.outline === undefined) return part
+      return {
+        ...part,
+        sticker: {
+          ...part.sticker,
+          outline: hydrateByteArray(part.sticker.outline as unknown),
+        },
+      }
+    }),
+  }
+}
+
+function hydrateByteArray(value: unknown): Uint8Array | undefined {
+  if (value instanceof Uint8Array) return value
+  if (value instanceof ArrayBuffer) return new Uint8Array(value)
+  if (Array.isArray(value)) return validBytes(value) ? Uint8Array.from(value) : undefined
+  if (!value || typeof value !== 'object') return
+  if ('type' in value && value.type === 'Buffer' && 'data' in value && Array.isArray(value.data)) {
+    return validBytes(value.data) ? Uint8Array.from(value.data) : undefined
+  }
+  const entries = Object.entries(value)
+    .map(([index, byte]) => [Number(index), byte] as const)
+    .sort(([left], [right]) => left - right)
+  if (!entries.every(([index, byte], position) => index === position && validByte(byte))) return
+  return Uint8Array.from(entries.map(([, byte]) => byte as number))
+}
+
+function validBytes(value: unknown[]): value is number[] {
+  return value.every(validByte)
+}
+
+function validByte(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 255
 }
 
 function referencedUserIds(message: IMMessage): Set<string> {
