@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
-import { makeConfig, RELAY_DC_IDS } from './synthetic.js'
+import { makeConfig, makeUser, RELAY_DC_IDS } from './synthetic.js'
 
 function roundTrip(object: tl.TlObject): tl.TlObject {
   const bytes = TlBinaryWriter.serializeObject(__tlWriterMap, object)
@@ -41,5 +41,15 @@ describe('relay MTProto config', () => {
     expect(decoded.dcOptions.every(option =>
       option.ipAddress === '127.0.0.1' && option.port === 4430 && option.tcpoOnly === true,
     )).toBe(true)
+  })
+})
+
+describe('relay synthetic peers', () => {
+  it('gives users a non-zero access hash that survives TL serialization', () => {
+    const user = makeUser({ id: 42, firstName: 'Alice' })
+    const decoded = roundTrip(user) as tl.RawUser
+
+    expect(user.accessHash).toEqual(Long.ONE)
+    expect(decoded).toMatchObject({ _: 'user', id: 42, accessHash: Long.ONE })
   })
 })
