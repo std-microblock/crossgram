@@ -403,6 +403,7 @@ describe('bridge login e2e', () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
     try {
+      const getHistory = vi.spyOn(ctx.imPlatform.require('static'), 'getHistory')
       const platformLogin = await waitForPlatformLogin(ctx, 'static')
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
@@ -432,6 +433,8 @@ describe('bridge login e2e', () => {
       const first = await callRpc(client, key, sid, request, 8)
       expect(first.messages).toHaveLength(100)
       expect(first.messages[0].message).toBe('Group D history message 10000')
+      const upstreamCallsAfterFirstPage = getHistory.mock.calls.length
+      expect(upstreamCallsAfterFirstPage).toBeGreaterThan(0)
       const [conversation] = await ctx.database.get('mtproto_im_conversation', {
         platformSessionId: platformLogin.session.id, platformConversationId: 'group-d',
       })
@@ -443,6 +446,7 @@ describe('bridge login e2e', () => {
       expect(repeated.messages.map((item: any) => [item.id, item.message]))
         .toEqual(first.messages.map((item: any) => [item.id, item.message]))
       expect(persistedAfter).toHaveLength(persistedBefore.length)
+      expect(getHistory).toHaveBeenCalledTimes(upstreamCallsAfterFirstPage)
     } finally {
       client?.close()
       await stop()
