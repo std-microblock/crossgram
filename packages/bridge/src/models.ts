@@ -203,6 +203,15 @@ export interface StickerSetInstallRow {
   archived: boolean
 }
 
+export interface DraftRow {
+  id: number
+  platformSessionId: string
+  platformConversationId: string
+  topMsgId: number
+  payload: ArrayBuffer
+  date: number
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
@@ -224,6 +233,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_reaction_recent: ReactionRecentRow
     mtproto_im_message_reaction: IMMessageReactionRow
     mtproto_sticker_set_install: StickerSetInstallRow
+    mtproto_draft: DraftRow
   }
 }
 
@@ -389,5 +399,14 @@ export function defineModels(ctx: Context): void {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'providerId', 'providerPackId']],
     indexes: [['platformSessionId', 'archived', 'sortOrder']],
+  })
+
+  ctx.model.extend('mtproto_draft', {
+    id: 'unsigned', platformSessionId: 'string', platformConversationId: 'text',
+    topMsgId: 'unsigned', payload: 'binary', date: 'unsigned',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'platformConversationId', 'topMsgId']],
+    indexes: ['platformSessionId'],
   })
 }

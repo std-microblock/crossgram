@@ -80,6 +80,31 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
+  it('pushes draft updates only to other auth keys of the same bridge account', async () => {
+    const { ctx, manager, sent } = await createHarness()
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '1021324354657687',
+      platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+    })
+
+    await manager.publishDraft(session, {
+      _: 'updateDraftMessage',
+      peer: { _: 'peerUser', userId: 42 },
+      draft: { _: 'draftMessage', message: 'local draft', date: 1_800_000_000 },
+    }, '0011223344556677')
+
+    expect(sent).toHaveLength(1)
+    expect(Buffer.from(sent[0]!.authKeyId).toString('hex')).toBe('1021324354657687')
+    expect(roundTrip(sent[0]!.update)).toMatchObject({
+      _: 'updates',
+      updates: [{
+        _: 'updateDraftMessage', peer: { _: 'peerUser', userId: 42 },
+        draft: { _: 'draftMessage', message: 'local draft' },
+      }],
+    })
+  })
+
   it('advances persisted state and targets only auth keys bound to the source platform session', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = {
