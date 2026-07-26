@@ -3104,13 +3104,9 @@ describe('bridge login e2e', () => {
 
       expect(languages).toEqual([])
       expect(sendResult).toMatchObject({
-        _: 'updates',
-        updates: expect.arrayContaining([
-          expect.objectContaining({
-            _: 'updateNewMessage',
-            message: expect.objectContaining({ message: 'sent after legacy langpack probe' }),
-          }),
-        ]),
+        _: 'updateShortSentMessage',
+        id: expect.any(Number),
+        date: expect.any(Number),
       })
 
       expect(await callRpc(client, key, sid, {
