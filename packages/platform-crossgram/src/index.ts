@@ -85,7 +85,10 @@ class QQNTEventHandlingError extends Error {
     readonly eventSummary: string,
     cause: unknown,
   ) {
-    super(`QQNT event handler failed streamEventId=${eventId ?? '<none>'} ${eventSummary}`, { cause })
+    super(
+      `QQNT event handler failed streamEventId=${eventId ?? '<none>'} ${eventSummary}: ${formatError(cause)}`,
+      { cause },
+    )
     this.name = 'QQNTEventHandlingError'
   }
 }
