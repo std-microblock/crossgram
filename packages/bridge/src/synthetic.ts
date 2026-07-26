@@ -58,7 +58,7 @@ export function makeUser(opts: {
     contact: opts.contact,
     mutualContact: opts.mutualContact,
     id: opts.id,
-    accessHash: Long.ZERO,
+    accessHash: Long.ONE,
     firstName: opts.firstName,
     lastName: opts.lastName ?? undefined,
     username: opts.username ?? undefined,
