@@ -42,13 +42,13 @@ function user(id: string, name: string) {
   }
 }
 
-function discordMessage(channel: any, id: string, author: any, content: string) {
+function discordMessage(channel: any, id: string, author: any, content: string, createdTimestamp = Date.now()) {
   return {
     id, channelId: channel.id, channel, author, member: null, nonce: null,
     content, cleanContent: content, attachments: new Collection(), stickers: new Collection(),
     reactions: { cache: new Collection() },
     mentions: { users: new Collection(), members: new Collection(), channels: new Collection() },
-    embeds: [], system: false, type: 'DEFAULT', createdTimestamp: Date.now(),
+    embeds: [], system: false, type: 'DEFAULT', createdTimestamp,
     editedTimestamp: null, reference: null, partial: false,
   }
 }
@@ -69,9 +69,9 @@ describe('Discord stall regression E2E', () => {
       lastMessageId: '900000000000000003',
       messages: { cache: new Collection(), fetch: vi.fn() },
     }
-    const read = discordMessage(channel, '900000000000000001', alice, 'read')
+    const read = discordMessage(channel, '900000000000000001', alice, 'read', 1_611_455_302_000)
     const authorless = discordMessage(channel, '900000000000000002', null, 'partial')
-    const unread = discordMessage(channel, '900000000000000003', alice, 'unread')
+    const unread = discordMessage(channel, '900000000000000003', alice, 'unread', 1_785_073_377_000)
     channel.messages.cache.set(read.id, read)
     channel.messages.cache.set(authorless.id, authorless)
     channel.messages.cache.set('900000000000000004', null)
@@ -103,9 +103,14 @@ describe('Discord stall regression E2E', () => {
     ;(client as any).emit('raw', { t: 'READY', d: { read_state: { entries: [{
       id: channel.id, last_message_id: read.id, mention_count: 0,
     }] } } })
-    const rpc = new DialogRpc(platform, session, await createStore())
+    const store = await createStore()
+    const ingestDialogs = vi.spyOn(store, 'ingestDialogs')
+    const connections = Array.from({ length: 6 }, () => new DialogRpc(platform, session, store))
 
-    const requests = Array.from({ length: 24 }, () => rpc.getDialogs(dialogsRequest()))
+    const requests = Array.from(
+      { length: 24 },
+      (_, index) => connections[index % connections.length]!.getDialogs(dialogsRequest()),
+    )
     await vi.waitFor(() => expect(channel.messages.fetch).toHaveBeenCalledOnce())
     release()
     const results = await Promise.race([
@@ -123,6 +128,7 @@ describe('Discord stall regression E2E', () => {
       ])
     }
     expect(channel.messages.fetch).toHaveBeenCalledOnce()
+    expect(ingestDialogs).toHaveBeenCalledOnce()
     platform.stop()
   })
 })

@@ -255,6 +255,8 @@ export interface IMMessage<TMediaLocator = unknown> {
   sender?: IMUser<TMediaLocator>
   content: IMMessageContent<TMediaLocator>
   timestamp: number
+  /** Stable lexicographically sortable native ID used to preserve message order without relying on timestamps. */
+  nativeOrderKey?: string
   outgoing?: boolean
   /** Opaque platform grouping key, retained for album reconciliation. */
   groupId?: string

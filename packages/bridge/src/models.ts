@@ -117,6 +117,7 @@ export interface TlMessagePartRow {
   scope: string
   tlMessageId: number
   nativeSequence: number | null
+  nativeOrderKey: string | null
   allocationVersion: number | null
   groupedId: string | null
   ordinal: number
@@ -311,6 +312,7 @@ export function defineModels(ctx: Context): void {
     id: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
     messageId: 'unsigned', mediaId: { type: 'unsigned', nullable: true }, scope: 'string',
     tlMessageId: 'unsigned', nativeSequence: { type: 'unsigned', nullable: true },
+    nativeOrderKey: { type: 'string', nullable: true },
     allocationVersion: { type: 'unsigned', nullable: true },
     groupedId: { type: 'string', nullable: true }, ordinal: 'unsigned',
   }, {
@@ -320,6 +322,7 @@ export function defineModels(ctx: Context): void {
       'messageId',
       ['platformSessionId', 'conversationId', 'tlMessageId'],
       ['platformSessionId', 'conversationId', 'nativeSequence'],
+      ['scope', 'nativeOrderKey'],
     ],
   })
 
