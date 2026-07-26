@@ -976,6 +976,53 @@ describe('DialogRpc', () => {
       .rejects.toMatchObject({ code: 400, text: 'MESSAGE_SEND_UNAVAILABLE' })
   })
 
+  it('keeps channel and user IDs independent when their platform IDs are identical', async () => {
+    const collisionId = '1002974327'
+    const conversation = { id: collisionId, kind: 'group' as const, title: 'Colliding QQ group' }
+    const message: IMMessage = {
+      id: 'group-message', conversationId: collisionId, senderId: collisionId,
+      sender: { id: collisionId, firstName: 'Colliding QQ user' },
+      timestamp: 1_700_000_000, content: { parts: [{ type: 'text', text: 'first chat history' }] },
+    }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: message }] } },
+      async getHistory() { return { messages: [message] } },
+      async getUser(_session, id) { return { id, firstName: 'Colliding QQ user' } },
+    }
+    const rpc = new DialogRpc(platform, session)
+    ;(rpc as any)._registerUser({
+      id: 42, platformId: session.platformId, platformUserId: collisionId,
+      firstName: 'Colliding QQ user', lastName: null, username: null, avatar: null,
+      metadata: {}, updatedAt: new Date(),
+    })
+
+    const channelId = stableId(`peer:${collisionId}`)
+    const history = await rpc.getHistory({
+      _: 'messages.getHistory',
+      peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ONE },
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    const [user] = await rpc.getUsers({
+      _: 'users.getUsers', id: [{ _: 'inputUser', userId: 42, accessHash: Long.ONE }],
+    })
+
+    expect(history.messages).toMatchObject([{
+      _: 'message', peerId: { _: 'peerChannel', channelId }, message: 'first chat history',
+      fromId: { _: 'peerUser', userId: 42 },
+    }])
+    expect(history.chats).toMatchObject([{ _: 'channel', id: channelId, title: 'Colliding QQ group' }])
+    expect(user).toMatchObject({ _: 'user', id: 42, firstName: 'Colliding QQ user' })
+    expect(() => wireRoundTrip(history)).not.toThrow()
+  })
+
   it('rejects unknown peers and platforms without history support', async () => {
     const rpc = new DialogRpc(new DialogTestPlatform(), session)
     await expect(rpc.getHistory(getHistoryRequest(123456))).rejects.toMatchObject({
