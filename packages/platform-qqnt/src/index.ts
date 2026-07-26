@@ -75,9 +75,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     ffmpegPath: config.ffmpegPath,
     database: ctx.database,
   })
-  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, ctx.logger('platform-qqnt'))
+  const logger = ctx.logger('platform-qqnt')
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger)
   ctx.imPlatform.register(platform, id)
-  ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId, mediaCache), stickerProviderId)
+  ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId, mediaCache, logger), stickerProviderId)
 }
 
 export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
