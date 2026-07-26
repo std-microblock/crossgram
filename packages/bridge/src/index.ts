@@ -102,10 +102,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const dcId = config.dcId ?? 1
   const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
   const bridgeLogger = ctx.logger('bridge')
+  const historyTrace = (format: string, ...args: unknown[]) => bridgeLogger.info(format, ...args)
   const authTransfers = new AuthTransferStore()
 
   defineModels(ctx)
-  const store = new MessageStore(ctx.database)
+  const store = new MessageStore(ctx.database, undefined, undefined, historyTrace)
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
   const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
@@ -138,7 +139,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, stickerRpcFor, resources, store, subscriptions, uploads, generation,
-    config.onTransferProgress, dcId,
+    config.onTransferProgress, dcId, historyTrace,
   )
 
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
@@ -337,6 +338,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       resources,
       (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
       authKeyHex(rpc.authKeyId),
+      historyTrace,
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -651,6 +653,7 @@ function createSessionResolver(
   generation: object,
   onTransferProgress?: BridgeConfig['onTransferProgress'],
   dcId = 1,
+  historyTrace?: (format: string, ...args: unknown[]) => void,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
@@ -685,6 +688,7 @@ function createSessionResolver(
           resources,
           (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
           authKeyId,
+          historyTrace,
         )
         return state
       })()

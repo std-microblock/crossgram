@@ -25,6 +25,7 @@
     "schema:test": "node --test scripts/sync-telegram-schemas.test.mjs",
     "binary-clean:test": "node --test binary_patch/clean-materialgram.unit.test.cjs binary_patch/clean-materialgram.e2e.test.cjs",
     "skill:test": "node --test .agents/skills/inspect-relay/scripts/*.test.mjs",
+    "profile:history": "tsx packages/test-suite/src/profile-history.ts",
     "typecheck": "tsc --project tsconfig.test.json --pretty false"
   },
   "devDependencies": {
