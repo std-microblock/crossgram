@@ -55,12 +55,6 @@ function inputPeer(specification: string): ProfileInputPeer {
   return { _: 'inputPeerUser', userId: id, accessHash: Long.ZERO }
 }
 
-function inputPeerFromPeer(peer: tl.TypePeer): ProfileInputPeer {
-  if (peer._ === 'peerChannel') return { _: 'inputPeerChannel', channelId: peer.channelId, accessHash: Long.ZERO }
-  if (peer._ === 'peerChat') return { _: 'inputPeerChat', chatId: peer.chatId }
-  return { _: 'inputPeerUser', userId: peer.userId, accessHash: Long.ZERO }
-}
-
 function loadTarget(options: HistoryProfileOptions): {
   auth: AuthRow
   peer: ProfileInputPeer
@@ -168,37 +162,6 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
         limit: request.limit, maxId: request.maxId, minId: request.minId,
       },
     })}\n`)
-    if (!options.serverAuthKeyId) {
-      const seedStarted = performance.now()
-      const peerId = target.peer._ === 'inputPeerChannel' ? target.peer.channelId
-        : target.peer._ === 'inputPeerChat' ? target.peer.chatId : target.peer.userId
-      let offsetPeer: tl.TypeInputPeer = { _: 'inputPeerEmpty' }
-      let seeded = false
-      let dialogCount = 0
-      let pages = 0
-      for (; pages < 100 && !seeded;) {
-        pages++
-        const dialogs = await client.call({
-          _: 'messages.getDialogs', excludePinned: false, folderId: 0,
-          offsetDate: 0, offsetId: 0, offsetPeer,
-          limit: 100, hash: Long.ZERO,
-        }, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
-        if (dialogs._ === 'messages.dialogsNotModified') break
-        dialogCount += dialogs.dialogs.length
-        seeded = [...dialogs.chats, ...dialogs.users].some(peer => peer.id === peerId)
-        const last = dialogs.dialogs.at(-1)
-        if (seeded || dialogs.dialogs.length < 100 || !last) break
-        offsetPeer = inputPeerFromPeer(last.peer)
-      }
-      process.stdout.write(`${JSON.stringify({
-        event: 'dialogs-seeded',
-        durationMs: Math.round((performance.now() - seedStarted) * 100) / 100,
-        seeded,
-        pages,
-        dialogs: dialogCount,
-      })}\n`)
-      if (!seeded) throw new Error('target peer was not returned while paging messages.getDialogs')
-    }
     const samples: number[] = []
     for (let index = -options.warmup; index < options.repeat; index++) {
       const started = performance.now()
