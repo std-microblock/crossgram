@@ -6,8 +6,8 @@ import type { PlatformSession } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
 
 const enabled = process.env.QQNT_BRIDGE_E2E === '1'
-const directTarget = '1715311957'
-const groupTargets = ['1058754719', '1084013940'] as const
+const directTarget = '2426125592'
+const groupTargets = ['1084013940'] as const
 const platformOptions = {
   endpoint: process.env.QQNT_BRIDGE_URL ?? 'http://127.0.0.1:18767/v1',
   webSocketEndpoint: process.env.QQNT_BRIDGE_WEBSOCKET_URL,
