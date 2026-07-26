@@ -4,7 +4,9 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
-import { makeTlCardPreview, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
+import {
+  makeTlCardPreview, makeTlConversationPreview, makeTlMessageMedia, projectTlMessage, stableId,
+} from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
   messagePartText, telegramReplyToMessageId,
@@ -16,6 +18,7 @@ import type {
   CommittedPlatformEvent, PlatformEventDeliveryOptions, PlatformEventPublishResult, PlatformRegistry,
 } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
+import { registerVirtualConversation } from './virtual-conversations.js'
 
 /** Converts committed platform events to account-scoped MTProto updates. */
 export class UpdateManager {
@@ -288,7 +291,9 @@ export class UpdateManager {
           ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
           : sticker?.type === 'sticker'
             ? this._projectSticker?.(session, sticker.sticker)
-            : card?.type === 'card' ? makeTlCardPreview(card.card) : undefined,
+            : card?.type === 'card'
+              ? makeTlCardPreview(card.card)
+              : makeConversationPreviewMedia(projected.source, session.platformSessionId),
         entities: makeMessageEntities(projected.source, session.platformSessionId, userIds),
         reactions: projected.source.reactionContext?.reactions.length
           ? makeMessageReactions(projected.source, session.platformSessionId)
@@ -578,7 +583,7 @@ function makeMessageEntities(
       } else if (entity.type === 'conversation-link') {
         entities.push({
           _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
-          url: `tg://privatepost?channel=${stableId(`peer:${entity.conversation.id}`)}&post=1`,
+          url: conversationLinkUrl(platformSessionId, entity.conversation),
         })
       } else if (entity.definition.presentation.type === 'custom') {
         entities.push({
@@ -614,6 +619,15 @@ function linkedConversations(message: IMMessage): import('./platform.js').IMConv
 
 function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {
   const id = stableId(`peer:${conversation.id}`)
+  if (conversation.metadata?.virtual === true) {
+    return {
+      _: 'chat', creator: true, id, title: conversation.title,
+      photo: conversation.avatar
+        ? makeUpdateAvatar(conversation.avatar.id, dcId, 'chat')
+        : { _: 'chatPhotoEmpty' },
+      participantsCount: 1, date: 0, version: 1,
+    }
+  }
   const broadcast = conversation.metadata?.broadcast === true
   return {
     _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
@@ -624,6 +638,23 @@ function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): 
       : { _: 'chatPhotoEmpty' }, date: 0,
     participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
   }
+}
+
+function conversationLinkUrl(platformSessionId: string, conversation: IMConversation): string {
+  return registerVirtualConversation(
+    platformSessionId,
+    stableId(`peer:${conversation.id}`),
+    conversation,
+  )
+}
+
+function makeConversationPreviewMedia(
+  message: IMMessage,
+  platformSessionId: string,
+): tl.RawMessageMediaWebPage | undefined {
+  const linked = linkedConversations(message)[0]
+  if (!linked) return
+  return makeTlConversationPreview(linked, conversationLinkUrl(platformSessionId, linked))
 }
 
 function makeUpdateAvatar(mediaId: string, dcId: number, kind: 'user'): tl.RawUserProfilePhoto
