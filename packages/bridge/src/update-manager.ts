@@ -636,7 +636,7 @@ function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): 
   }
   const broadcast = conversation.metadata?.broadcast === true
   return {
-    _: 'channel', creator: true, id, accessHash: Long.ZERO, title: conversation.title,
+    _: 'channel', creator: true, id, accessHash: Long.ONE, title: conversation.title,
     broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
     forum: forum || undefined,
     photo: conversation.avatar

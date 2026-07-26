@@ -703,6 +703,7 @@ describe('bridge login e2e', () => {
       expect(contacts._).toBe('contacts.contacts')
       expect(contacts.users.map((user: any) => user.firstName)).toEqual(['Alice', 'Bob'])
       expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
+      expect(contacts.users.every((user: any) => user.accessHash.equals(Long.ONE))).toBe(true)
       const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
       const platformUsers = await ctx.database.get('mtproto_im_user', { platformId: 'static' })
       const selfRow = platformUsers.find(user => user.platformUserId === 'self')
@@ -721,7 +722,7 @@ describe('bridge login e2e', () => {
         _: 'upload.getFile', offset: 0, limit: 1024,
         location: {
           _: 'inputPeerPhotoFileLocation',
-          peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+          peer: { _: 'inputPeerUser', userId: alice.id, accessHash: alice.accessHash },
           photoId: alice.photo.photoId,
         },
       }, 17)
@@ -758,6 +759,7 @@ describe('bridge login e2e', () => {
       expect(new Set(dialogs.users.map((user: any) => user.firstName)))
         .toEqual(new Set(['Carol', 'Mirror User', 'Alice', 'Bob']))
       const dialogUsers = new Map(dialogs.users.map((user: any) => [user.firstName, user]))
+      expect(dialogs.users.every((user: any) => user.accessHash.equals(Long.ONE))).toBe(true)
       expect(dialogUsers.get('Alice')).toMatchObject({ contact: true, mutualContact: true })
       expect(dialogUsers.get('Bob')).toMatchObject({ contact: true, mutualContact: true })
       expect(dialogUsers.get('Carol')).toMatchObject({ contact: false, mutualContact: false })
@@ -766,9 +768,19 @@ describe('bridge login e2e', () => {
         'Group A - Live Mutations', 'Static QQ Group', 'Group C - Mirror Target',
         'Group B - Mirror Source', 'general', 'Reaction & Sticker Lab', 'Group D - Long History',
       ])
+      expect(dialogs.chats.every((chat: any) => chat._ !== 'channel' || chat.accessHash.equals(Long.ONE))).toBe(true)
       const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
-      expect(group).toMatchObject({ _: 'channel', megagroup: true })
+      expect(group).toMatchObject({ _: 'channel', megagroup: true, accessHash: Long.ONE })
       expect(group.photo).toMatchObject({ _: 'chatPhoto', dcId: 1 })
+      const groupAvatar = await callRpc(resumed, key, resumedSid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPeerPhotoFileLocation',
+          peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: group.accessHash },
+          photoId: group.photo.photoId,
+        },
+      }, 23)
+      expect([...groupAvatar.bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
       const mirrorSourceGroup = dialogs.chats.find((chat: any) => chat.title === 'Group B - Mirror Source')
       const mirrorTargetGroup = dialogs.chats.find((chat: any) => chat.title === 'Group C - Mirror Target')
       const longHistoryGroup = dialogs.chats.find((chat: any) => chat.title === 'Group D - Long History')

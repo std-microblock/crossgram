@@ -151,6 +151,7 @@ describe('DialogRpc', () => {
       'Meeting at 3?', 'How are you?',
     ])
     expect(decoded.users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual(['Bob', 'Alice'])
+    expect(decoded.users.every((user) => user._ !== 'user' || user.accessHash?.equals(Long.ONE))).toBe(true)
     expect(decoded.dialogs[0]).toMatchObject({
       _: 'dialog', unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0,
       notifySettings: { _: 'peerNotifySettings' },
@@ -180,6 +181,9 @@ describe('DialogRpc', () => {
     const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
     const dialog = dialogs.dialogs[0] as tl.RawDialog
 
+    expect(dialogs.chats).toMatchObject([{
+      _: 'channel', title: 'Group', accessHash: Long.ONE,
+    }])
     expect(dialogs.messages[0]).toMatchObject({
       _: 'messageService', id: dialog.topMessage,
       action: { _: 'messageActionCustomAction', message: 'Alice joined the group' },
