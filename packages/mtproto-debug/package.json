@@ -15,11 +15,13 @@
     "service": {
       "required": [
         "mtproto",
+        "server",
         "webui"
       ]
     }
   },
   "peerDependencies": {
+    "@cordisjs/plugin-server": "^1.6.2",
     "@cordisjs/plugin-webui": "^0.8.1",
     "@mtproto-relay/mtproto": "workspace:*",
     "cordis": "^4.0.0-rc.5"

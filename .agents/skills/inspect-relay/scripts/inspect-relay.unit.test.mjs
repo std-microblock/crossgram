@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import {
-  findRuntime, parseArgs, parseDuration, queryLogs, queryMessage, queryReadOnlySql, queryTable,
+  buildMtprotoCaptureUrl, filterMtprotoSnapshot, findRuntime, parseArgs, parseDuration,
+  queryLogs, queryMessage, queryReadOnlySql, queryTable,
 } from './inspect-relay.mjs'
 
 function fixture() {
@@ -37,8 +38,33 @@ function fixture() {
 }
 
 test('parseArgs supports positional values, camelized options, and repeated filters', () => {
-  assert.deepEqual(parseArgs(['table', 'items', '--logs-db', 'x.db', '--where', 'a=1', '--where=b=2']), {
-    command: 'table', options: { _: ['items'], logsDb: 'x.db', where: ['a=1', 'b=2'] },
+  assert.deepEqual(parseArgs(['table', 'items', '--logs-db', 'x.db', '--where', 'a=1', '--where=b=2', '--field', 'payload._=rpc_result']), {
+    command: 'table', options: { _: ['items'], logsDb: 'x.db', where: ['a=1', 'b=2'], field: ['payload._=rpc_result'] },
+  })
+})
+
+test('MTProto API URL forwards every server-side capture filter', () => {
+  const url = buildMtprotoCaptureUrl('http://127.0.0.1:3140', {
+    capturePath: '/custom/capture', limit: 25, since: '10m', until: 1234, afterId: 2, beforeId: 20,
+    id: 9, name: 'sendMessage', direction: 'client->server', phase: 'message', connectionId: 'conn-a',
+    messageId: '0x10', requestMessageId: '0x08', authKeyId: 'auth-a', sessionId: '0x50', grep: 'hello',
+    field: ['payload.peer.channelId=42', 'payload.message=hello world'],
+  })
+  assert.equal(url.pathname, '/custom/capture')
+  assert.equal(url.searchParams.get('requestMessageId'), '0x08')
+  assert.deepEqual(url.searchParams.getAll('field'), ['payload.peer.channelId=42', 'payload.message=hello world'])
+  assert.equal(url.searchParams.get('grep'), 'hello')
+})
+
+test('legacy MTProto snapshots support cursor, identifier, detail field, and text filters', () => {
+  const debug = { capturing: false, dropped: 3, maxEvents: 100, events: [
+    { id: 1, timestamp: 1000, direction: 'client->server', phase: 'message', connectionId: 'a', name: 'ping', messageId: '0x1', payload: { _: 'ping' }, searchText: 'ping' },
+    { id: 2, timestamp: 2000, direction: 'server->client', phase: 'message', connectionId: 'a', name: 'rpc_result -> pong', requestMessageId: '0x1', payload: { _: 'rpc_result', result: { _: 'pong' } }, searchText: 'rpc_result pong' },
+  ] }
+  assert.deepEqual(filterMtprotoSnapshot(debug, {
+    afterId: 1, requestMessageId: '0x1', grep: 'PONG', field: ['payload.result._=pong'], limit: 10,
+  }), {
+    capturing: false, dropped: 3, maxEvents: 100, total: 2, matched: 1, events: [debug.events[1]],
   })
 })
 

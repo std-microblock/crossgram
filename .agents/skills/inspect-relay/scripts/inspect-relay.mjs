@@ -25,7 +25,7 @@ export function parseArgs(argv) {
     const key = rawKey.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())
     const next = tokens[index + 1]
     const value = inlineValue ?? (next !== undefined && !next.startsWith('--') ? tokens[++index] : true)
-    if (key === 'where') (options.where ??= []).push(value)
+    if (key === 'where' || key === 'field') (options[key] ??= []).push(value)
     else options[key] = value
   }
   return { command, options }
@@ -175,9 +175,64 @@ export function queryMessage(db, identifier, options = {}) {
   return bundle
 }
 
-export async function fetchMtprotoSnapshot(webui, options = {}, WebSocketImpl = globalThis.WebSocket) {
+const MTPROTO_API_OPTIONS = [
+  'limit', 'since', 'until', 'afterId', 'beforeId', 'id', 'name', 'direction', 'phase',
+  'connectionId', 'messageId', 'requestMessageId', 'authKeyId', 'sessionId', 'grep',
+]
+
+export function buildMtprotoCaptureUrl(webui, options = {}) {
+  const endpoint = new URL(options.capturePath || '/api/mtproto-debug/events', webui)
+  for (const key of MTPROTO_API_OPTIONS) {
+    if (options[key] !== undefined) endpoint.searchParams.set(key, String(options[key]))
+  }
+  for (const field of options.field ?? []) endpoint.searchParams.append('field', String(field))
+  return endpoint
+}
+
+export async function fetchMtprotoApi(webui, options = {}, fetchImpl = globalThis.fetch) {
+  if (!fetchImpl) throw new Error('This Node.js runtime does not provide fetch support')
+  const endpoint = buildMtprotoCaptureUrl(webui, options)
+  const timeoutMs = Number(options.timeout ?? 5_000)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let response
+  try {
+    response = await fetchImpl(endpoint, { headers: { accept: 'application/json' }, signal: controller.signal })
+  } catch (error) {
+    throw new MtprotoApiUnavailableError(`MTProto capture API failed at ${endpoint}: ${error.message}`)
+  } finally {
+    clearTimeout(timer)
+  }
+  if (response.status === 404 || response.status === 405) {
+    throw new MtprotoApiUnavailableError(`MTProto capture API is not available at ${endpoint}`)
+  }
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`MTProto capture API returned HTTP ${response.status}: ${body.slice(0, 500)}`)
+  }
+  const result = await response.json()
+  if (!result || !Array.isArray(result.events) || typeof result.maxEvents !== 'number') {
+    throw new Error(`MTProto capture API returned an invalid response at ${endpoint}`)
+  }
+  return result
+}
+
+class MtprotoApiUnavailableError extends Error {}
+
+export async function fetchMtprotoSnapshot(webui, options = {}, WebSocketImpl = globalThis.WebSocket, fetchImpl = globalThis.fetch) {
+  if (options.legacyWebui !== true && options.legacyWebui !== 'true') {
+    try {
+      return await fetchMtprotoApi(webui, options, fetchImpl)
+    } catch (error) {
+      if (!(error instanceof MtprotoApiUnavailableError) || options.fallback === false || options.fallback === 'false') throw error
+    }
+  }
+  return fetchLegacyMtprotoSnapshot(webui, options, WebSocketImpl)
+}
+
+export async function fetchLegacyMtprotoSnapshot(webui, options = {}, WebSocketImpl = globalThis.WebSocket) {
   if (!WebSocketImpl) throw new Error('This Node.js runtime does not provide WebSocket support')
-  const endpoint = new URL(options.apiPath || '/api', webui)
+  const endpoint = new URL(options.webuiPath || '/api', webui)
   endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:'
   const timeoutMs = Number(options.timeout ?? 5_000)
   const debug = await new Promise((resolveDebug, reject) => {
@@ -209,14 +264,50 @@ export async function fetchMtprotoSnapshot(webui, options = {}, WebSocketImpl = 
       socket.on('message', data => receive({ data }))
     }
   })
+  return filterMtprotoSnapshot(debug, options)
+}
+
+export function filterMtprotoSnapshot(debug, options = {}) {
   let events = debug.events
   if (options.since !== undefined) events = events.filter(event => event.timestamp >= parseDuration(options.since))
+  if (options.until !== undefined) events = events.filter(event => event.timestamp <= parseDuration(options.until))
+  if (options.afterId !== undefined) events = events.filter(event => event.id > Number(options.afterId))
+  if (options.beforeId !== undefined) events = events.filter(event => event.id < Number(options.beforeId))
+  if (options.id !== undefined) events = events.filter(event => event.id === Number(options.id))
   if (options.name) events = events.filter(event => String(event.name).toLowerCase().includes(String(options.name).toLowerCase()))
   if (options.direction) events = events.filter(event => event.direction === options.direction)
   if (options.phase) events = events.filter(event => event.phase === options.phase)
+  for (const key of ['connectionId', 'messageId', 'requestMessageId', 'authKeyId', 'sessionId']) {
+    if (options[key] !== undefined) events = events.filter(event => String(event[key]) === String(options[key]))
+  }
   if (options.grep) events = events.filter(event => (event.searchText || JSON.stringify(event)).toLowerCase().includes(String(options.grep).toLowerCase()))
+  for (const expression of options.field ?? []) {
+    const separator = String(expression).indexOf('=')
+    if (separator < 1) throw new Error(`Invalid --field expression: ${expression}`)
+    const path = String(expression).slice(0, separator)
+    const expected = String(expression).slice(separator + 1)
+    events = events.filter(event => scalarText(readPath(event, path)) === expected)
+  }
+  const matched = events.length
   events = events.slice(-boundedLimit(options.limit, 100))
-  return { capturing: debug.capturing, dropped: debug.dropped, maxEvents: debug.maxEvents, events }
+  return {
+    capturing: debug.capturing, dropped: debug.dropped, maxEvents: debug.maxEvents,
+    total: debug.events.length, matched, events,
+  }
+}
+
+function readPath(value, path) {
+  let current = value
+  for (const part of path.split('.')) {
+    if (!current || typeof current !== 'object') return undefined
+    current = current[part]
+  }
+  return current
+}
+
+function scalarText(value) {
+  if (value === null) return 'null'
+  if (['string', 'number', 'boolean'].includes(typeof value)) return String(value)
 }
 
 export async function run(argv, io = {}) {
@@ -229,7 +320,7 @@ export async function run(argv, io = {}) {
     const db = openReadOnly(runtime.logsDb)
     try { result = queryLogs(db, options) } finally { db.close() }
   } else if (command === 'mtproto') {
-    result = await fetchMtprotoSnapshot(runtime.webui, options, io.WebSocket)
+    result = await fetchMtprotoSnapshot(runtime.webui, options, io.WebSocket, io.fetch)
   } else if (command === 'tables') {
     const db = openReadOnly(runtime.db)
     try { result = tableNames(db) } finally { db.close() }

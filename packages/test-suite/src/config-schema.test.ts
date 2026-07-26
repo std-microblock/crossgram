@@ -11,7 +11,7 @@ import { Config as resourcesConfig } from '../../telegram-resources/src/index.js
 
 const cases = [
   ['bridge', bridgeConfig, ['dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath']],
-  ['debug', debugConfig, ['maxEvents', 'initiallyPaused']],
+  ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
     'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'generatePreviews',
@@ -48,6 +48,11 @@ describe('plugin config schemas', () => {
       serverPort: 4430,
       apiPrefix: '/api',
       uploadPath: 'data/bridge-uploads',
+    })
+    expect(debugConfig({})).toEqual({
+      maxEvents: 2_000,
+      initiallyPaused: false,
+      apiPath: '/api/mtproto-debug/events',
     })
     expect(qqntConfig({})).toMatchObject({ grayTipFilters: ['回应了你的消息'] })
     expect(discordConfig({ token: 'user-token' })).toMatchObject({
