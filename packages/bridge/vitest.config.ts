@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from 'vitest/config'
 import { existsSync } from 'node:fs'
+import unyaml from '@cordisjs/unyaml/vite'
 
 /**
  * Rewrite `.js` import specifiers to `.ts` for local files, so vitest resolves
@@ -19,7 +20,7 @@ function jsToTsPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [jsToTsPlugin()],
+  plugins: [unyaml(), jsToTsPlugin()],
   test: {
     include: ['src/**/*.test.ts', 'client/**/*.test.ts', 'client/**/*.test.tsx'],
     testTimeout: 30000,
