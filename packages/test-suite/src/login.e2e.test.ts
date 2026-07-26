@@ -512,6 +512,68 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
+  it('returns nonzero peer access hashes and serves user and channel avatars', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x76543219, 0x4abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+
+      const contacts = await callRpc(client, key, sid, {
+        _: 'contacts.getContacts', hash: Long.ZERO,
+      }, 6)
+      const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      expect(alice).toMatchObject({
+        _: 'user', accessHash: Long.ONE, photo: { _: 'userProfilePhoto', dcId: 1 },
+      })
+
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 8)
+      expect(dialogs.users.every((user: any) => user.accessHash.equals(Long.ONE))).toBe(true)
+      expect(dialogs.chats.every((chat: any) => chat._ !== 'channel' || chat.accessHash.equals(Long.ONE))).toBe(true)
+      const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
+      expect(group).toMatchObject({
+        _: 'channel', accessHash: Long.ONE, photo: { _: 'chatPhoto', dcId: 1 },
+      })
+
+      const userAvatar = await callRpc(client, key, sid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPeerPhotoFileLocation',
+          peer: { _: 'inputPeerUser', userId: alice.id, accessHash: alice.accessHash },
+          photoId: alice.photo.photoId,
+        },
+      }, 10)
+      expect([...userAvatar.bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+
+      const groupAvatar = await callRpc(client, key, sid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputPeerPhotoFileLocation',
+          peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: group.accessHash },
+          photoId: group.photo.photoId,
+        },
+      }, 12)
+      expect([...groupAvatar.bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('returns the same warm 100-message history page without duplicate persistence', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
