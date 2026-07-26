@@ -57,6 +57,7 @@ export class QQStickerProvider implements IMStickerProvider {
   async openAsset(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset> {
     const reference = sticker.locator as unknown as QQStickerReference | undefined
     if (!reference) throw new Error(`QQ sticker ${sticker.stickerId} has no native reference`)
+    if (reference.deferred) return emptyStickerAsset(sticker)
     const original = this.originalAsset(sticker, reference)
     return this.mediaCache
       ? this.mediaCache.openSticker({ ...sticker, format: reference.animated ? 'animated' : 'static' }, original)
@@ -124,6 +125,19 @@ export class QQStickerProvider implements IMStickerProvider {
       width: sticker.width,
       height: sticker.height,
     }
+  }
+}
+
+function emptyStickerAsset(sticker: IMSticker): IMStickerAsset {
+  return {
+    source: {
+      size: 0,
+      async *stream() {},
+    },
+    mimeType: sticker.mimeType,
+    size: 0,
+    width: sticker.width,
+    height: sticker.height,
   }
 }
 
