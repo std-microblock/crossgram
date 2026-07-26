@@ -48,10 +48,11 @@
   name: '@mtproto-relay/platform-discord'
   disabled: true
   config:
-    token: 
-    proxy:
+    token: null
+    proxy: null
 - id: matrix
   name: '@mtproto-relay/platform-matrix'
+  disabled: true
   config:
     homeserver: https://matrix-client.matrix.org/_matrix/client/v3
     proxy: http://127.0.0.1:7890
