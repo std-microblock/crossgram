@@ -769,12 +769,12 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   private topicPlaceholder(channel: GuildBasedChannel | ThreadChannel): IMMessage<DiscordMediaLocator> {
     const conversation = this.mapConversation(channel as DiscordChannel)
     const now = Math.trunc(Date.now() / 1_000)
-    const safeTimestamp = Math.max(Math.trunc(channel.createdTimestamp / 1_000), now - 365 * 24 * 60 * 60)
+    const safeTimestamp = Math.max(discordTimestamp(channel.id, channel.createdTimestamp), now - 365 * 24 * 60 * 60)
     return {
       id: syntheticTopicMessageId(channel.id), conversationId: conversation.id,
       senderId: this.selfUser().id, sender: mapUser(this.selfUser()),
       content: { parts: [], serviceAction: { type: 'custom', text: conversation.title } },
-      timestamp: safeTimestamp, outgoing: true,
+      timestamp: safeTimestamp, nativeOrderKey: discordOrderKey(channel.id), outgoing: true,
       metadata: { discordSyntheticTopicRoot: true },
     }
   }
@@ -808,7 +808,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
         parts,
         serviceAction: message.system ? { type: 'custom', text: message.cleanContent || message.type } : undefined,
       },
-      timestamp: Math.trunc(message.createdTimestamp / 1_000),
+      timestamp: discordTimestamp(message.id, message.createdTimestamp),
+      nativeOrderKey: discordOrderKey(message.id),
       outgoing: message.author.id === this.selfUser().id,
       replyToId: message.reference?.messageId,
       reactionContext,
@@ -992,6 +993,25 @@ function isUsableMessage(value: unknown): value is Message {
   return typeof message.id === 'string'
     && typeof message.author?.id === 'string'
     && Boolean(message.channel)
+}
+
+const DISCORD_EPOCH_MS = 1_420_070_400_000n
+
+/** Recover timestamps from snowflakes when discord.js exposes an incomplete cached message. */
+function discordTimestamp(id: string, timestampMs: number): number {
+  const timestamp = Math.trunc(timestampMs / 1_000)
+  if (Number.isSafeInteger(timestamp)) return timestamp
+  if (!/^\d+$/.test(id)) throw new RangeError(`Discord object has no valid timestamp: ${id}`)
+  const snowflakeTimestamp = Number(((BigInt(id) >> 22n) + DISCORD_EPOCH_MS) / 1_000n)
+  if (!Number.isSafeInteger(snowflakeTimestamp)) {
+    throw new RangeError(`Discord snowflake timestamp is outside the safe integer range: ${id}`)
+  }
+  return snowflakeTimestamp
+}
+
+function discordOrderKey(id: string): string {
+  if (!/^\d{1,20}$/.test(id)) throw new RangeError(`Invalid Discord snowflake: ${id}`)
+  return id.padStart(20, '0')
 }
 
 function usableMessage(value: unknown): Message | undefined {

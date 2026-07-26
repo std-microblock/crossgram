@@ -10,8 +10,9 @@ import {
   type IMUser, type JsonObject, type JsonValue, type PlatformSession,
 } from './platform.js'
 import {
-  initialTimestampMessageIdEpoch, messageIdBucketStart, qqMessageSequenceFromMetadata,
-  TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS, timestampMessageIdBucket,
+  clampedTimestampMessageIdBucket, initialTimestampMessageIdEpoch, messageIdBucketStart,
+  qqMessageSequenceFromMetadata,
+  TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS,
 } from './message-id.js'
 import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
 
@@ -64,6 +65,11 @@ interface HistoryIngestPrefetch {
   projectionsByMessageId: Map<number, TlMessagePartRow[]>
 }
 
+interface ProjectionAllocationCache {
+  epochs: Map<string, number>
+  nativeOrderScopes: Set<string>
+}
+
 export interface StoredHistoryQuery {
   limit: number
   beforeTimestamp?: number
@@ -77,7 +83,8 @@ const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
-  private _writeTail = Promise.resolve()
+  /** Serialize writes across every store facade sharing the same database. */
+  private static readonly _writeTails = new WeakMap<Database, Promise<void>>()
   private _revision = 0
 
   constructor(
@@ -146,7 +153,7 @@ export class MessageStore {
     if (!sources.length) return []
     return this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
-      const epochCache = new Map<string, number>()
+      const allocationCache: ProjectionAllocationCache = { epochs: new Map(), nativeOrderScopes: new Set() }
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
       if (!conversationRow) throw new Error('failed to persist conversation')
       const historyPrefetch = options.allocation === 'history' && sources.length > 1
@@ -155,7 +162,7 @@ export class MessageStore {
       const results: IngestResult[] = []
       for (const source of sources) {
         results.push(await this._ingestMessage(
-          database, session, conversationRow, source, options, now, epochCache, historyPrefetch,
+          database, session, conversationRow, source, options, now, allocationCache, historyPrefetch,
         ))
       }
       return results
@@ -173,7 +180,7 @@ export class MessageStore {
     if (!dialogs.length) return
     await this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
-      const epochCache = new Map<string, number>()
+      const allocationCache: ProjectionAllocationCache = { epochs: new Map(), nativeOrderScopes: new Set() }
       const existingConversations = new Map((await database.get('mtproto_im_conversation', {
         platformSessionId: session.platformSessionId,
       })).map((row) => [row.platformConversationId, row]))
@@ -197,7 +204,7 @@ export class MessageStore {
         if (!conversationRow) throw new Error('failed to persist conversation')
         if (dialog.lastMessage) {
           await this._ingestMessage(
-            database, session, conversationRow, dialog.lastMessage, {}, now, epochCache,
+            database, session, conversationRow, dialog.lastMessage, {}, now, allocationCache,
           )
         }
         if (
@@ -211,7 +218,7 @@ export class MessageStore {
             dialog.readInboxMaxMessage,
             { allocation: 'history' },
             now,
-            epochCache,
+            allocationCache,
           )
         }
       }
@@ -225,7 +232,7 @@ export class MessageStore {
     source: IMMessage,
     options: IngestOptions,
     now: Date,
-    epochCache: Map<string, number>,
+    allocationCache: ProjectionAllocationCache,
     historyPrefetch?: HistoryIngestPrefetch,
   ): Promise<IngestResult> {
     const platformSessionId = session.platformSessionId
@@ -363,7 +370,8 @@ export class MessageStore {
     const projection = await this._ensureProjection(
       database, platformSessionId, conversationRow, message, storedMedia,
       options.allocation ?? 'live',
-      epochCache,
+      source.nativeOrderKey,
+      allocationCache,
     )
     await this._replaceReactions(database, message.id, source.reactionContext, now)
     historyPrefetch?.projectionsByMessageId.set(message.id, projection)
@@ -1031,7 +1039,8 @@ export class MessageStore {
     message: IMMessageRow,
     media: IMMediaRow[],
     allocation: 'live' | 'history',
-    epochCache: Map<string, number>,
+    nativeOrderKey: string | undefined,
+    allocationCache: ProjectionAllocationCache,
   ): Promise<TlMessagePartRow[]> {
     const count = Math.max(1, media.length)
     const scope = conversation.kind !== 'direct'
@@ -1045,6 +1054,7 @@ export class MessageStore {
       part.scope !== scope
       || part.allocationVersion !== TIMESTAMP_ALLOCATION_VERSION
       || (nativeSequence !== undefined && part.nativeSequence !== nativeSequence)
+      || (nativeOrderKey !== undefined && part.nativeOrderKey !== nativeOrderKey)
     ))
     if (requiresMigration) {
       for (const part of existing) await database.remove('mtproto_tl_message_part', { id: part.id })
@@ -1066,18 +1076,24 @@ export class MessageStore {
     }
     if (existing.length < count) {
       const missing = count - existing.length
-      const epoch = await this._messageIdEpoch(database, scope, message.timestamp, epochCache)
-      const preferredId = timestampMessageIdBucket(epoch, message.timestamp)
-      const bounds = nativeSequence === undefined
-        ? {}
-        : await this._nativeSequenceBounds(database, conversation.id, nativeSequence)
+      const bounds = nativeSequence !== undefined
+        ? await this._nativeSequenceBounds(database, conversation.id, nativeSequence)
+        : nativeOrderKey !== undefined
+          ? await this._nativeOrderKeyBounds(database, scope, nativeOrderKey, allocationCache.nativeOrderScopes)
+          : {}
+      const preferredId = nativeOrderKey === undefined
+        ? clampedTimestampMessageIdBucket(
+            await this._messageIdEpoch(database, scope, message.timestamp, allocationCache.epochs),
+            message.timestamp,
+          )
+        : orderedMessagePreferredId(bounds)
       const ids = await this._allocateSlottedMessageIds(
         database,
         scope,
         missing,
         preferredId,
         allocation,
-        nativeSequence !== undefined,
+        nativeSequence !== undefined || nativeOrderKey !== undefined,
         existing.map((part) => part.tlMessageId),
         bounds,
       )
@@ -1091,6 +1107,7 @@ export class MessageStore {
           scope,
           tlMessageId,
           nativeSequence: nativeSequence ?? null,
+          nativeOrderKey: nativeOrderKey ?? null,
           allocationVersion: TIMESTAMP_ALLOCATION_VERSION,
           groupedId,
           ordinal,
@@ -1239,6 +1256,61 @@ export class MessageStore {
     }
   }
 
+  private async _nativeOrderKeyBounds(
+    database: Database,
+    scope: string,
+    nativeOrderKey: string,
+    backfilledScopes: Set<string>,
+  ): Promise<{ lowerExclusive?: number, upperExclusive?: number }> {
+    await this._backfillNativeOrderKeys(database, scope, backfilledScopes)
+    const [previous] = await database.select('mtproto_tl_message_part', {
+      scope,
+      nativeOrderKey: { $lt: nativeOrderKey },
+    }).orderBy('nativeOrderKey', 'desc').limit(1).execute()
+    const [next] = await database.select('mtproto_tl_message_part', {
+      scope,
+      nativeOrderKey: { $gt: nativeOrderKey },
+    }).orderBy('nativeOrderKey').limit(1).execute()
+    const previousParts = previous?.nativeOrderKey
+      ? await database.get('mtproto_tl_message_part', { scope, nativeOrderKey: previous.nativeOrderKey })
+      : []
+    const nextParts = next?.nativeOrderKey
+      ? await database.get('mtproto_tl_message_part', { scope, nativeOrderKey: next.nativeOrderKey })
+      : []
+    return {
+      lowerExclusive: previousParts.length
+        ? Math.max(...previousParts.map((part) => part.tlMessageId))
+        : undefined,
+      upperExclusive: nextParts.length
+        ? Math.min(...nextParts.map((part) => part.tlMessageId))
+        : undefined,
+    }
+  }
+
+  private async _backfillNativeOrderKeys(
+    database: Database,
+    scope: string,
+    backfilledScopes: Set<string>,
+  ): Promise<void> {
+    if (backfilledScopes.has(scope)) return
+    const legacyParts = (await database.get('mtproto_tl_message_part', { scope }))
+      .filter((part) => part.nativeOrderKey === null)
+    const messageIds = [...new Set(legacyParts.map((part) => part.messageId))]
+    const messages = messageIds.length
+      ? await database.get('mtproto_im_message', { id: { $in: messageIds } })
+      : []
+    const orderKeys = new Map(messages.flatMap((message) => {
+      const nativeOrderKey = decimalNativeOrderKey(message.primaryPlatformMessageId)
+      return nativeOrderKey ? [[message.id, nativeOrderKey] as const] : []
+    }))
+    const backfilled = legacyParts.flatMap((part) => {
+      const nativeOrderKey = orderKeys.get(part.messageId)
+      return nativeOrderKey ? [{ ...part, nativeOrderKey }] : []
+    })
+    if (backfilled.length) await database.upsert('mtproto_tl_message_part', backfilled, ['id'])
+    backfilledScopes.add(scope)
+  }
+
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
     const aliases = await this._database.select('mtproto_im_message_alias', { messageId: row.id })
       .orderBy('ordinal').execute()
@@ -1296,9 +1368,10 @@ export class MessageStore {
     invalidatesHistory = false,
   ): Promise<T> {
     const queuedAt = performance.now()
-    const previous = this._writeTail
+    const previous = MessageStore._writeTails.get(this._database) ?? Promise.resolve()
     let release!: () => void
-    this._writeTail = new Promise<void>((resolve) => { release = resolve })
+    const tail = new Promise<void>((resolve) => { release = resolve })
+    MessageStore._writeTails.set(this._database, tail)
     if (operation === 'history-ingest') {
       this._onTrace?.('message store write profile operation=%s stage=queued', operation)
     }
@@ -1317,6 +1390,9 @@ export class MessageStore {
       return result
     } finally {
       release()
+      if (MessageStore._writeTails.get(this._database) === tail) {
+        MessageStore._writeTails.delete(this._database)
+      }
       const executeMs = performance.now() - executeAt
       if (operation === 'history-ingest' || queueWaitMs >= 25 || executeMs >= 50) {
         this._onTrace?.(
@@ -1534,6 +1610,24 @@ function slottedMessageIdBucketRange(
     messageIdBucketStart(lastCandidate),
   )
   return first <= last ? { first, last } : undefined
+}
+
+function orderedMessagePreferredId(
+  bounds: { lowerExclusive?: number, upperExclusive?: number },
+): number {
+  let preferred = 0x40000000
+  if (bounds.lowerExclusive !== undefined && bounds.upperExclusive !== undefined) {
+    preferred = Math.floor((bounds.lowerExclusive + bounds.upperExclusive) / 2)
+  } else if (bounds.lowerExclusive !== undefined) {
+    preferred = bounds.lowerExclusive + 1
+  } else if (bounds.upperExclusive !== undefined) {
+    preferred = bounds.upperExclusive - 1
+  }
+  return Math.max(TIMESTAMP_MESSAGE_ID_SLOTS, Math.min(TELEGRAM_MESSAGE_ID_MAX, preferred))
+}
+
+function decimalNativeOrderKey(value: string): string | undefined {
+  return /^\d{1,20}$/.test(value) ? value.padStart(20, '0') : undefined
 }
 
 function middleOut(values: readonly number[], preferForward: boolean): number[] {
