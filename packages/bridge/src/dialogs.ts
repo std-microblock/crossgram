@@ -1064,6 +1064,16 @@ export class DialogRpc {
     channel?: tl.TypeInputChannel,
   ): Promise<tl.messages.RawAffectedMessages> {
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    // Telegram Android periodically sends empty channel deletions as a cleanup
+    // probe. Treating them like real deletes refreshes every dialog and then
+    // tries to reserve zero PTS, causing a retry storm that competes with user
+    // sends. An empty vector is a successful no-op and must not touch upstream.
+    if (!req.id.length) {
+      const pts = channel && 'channelId' in channel
+        ? (await this._store.getChannelUpdateState(this._session.platformSessionId, channel.channelId)).pts
+        : (await this._store.getUpdateState(this._session.platformSessionId)).pts
+      return { _: 'messages.affectedMessages', pts, ptsCount: 0 }
+    }
     // Message ownership and action policy must be evaluated against a fresh
     // upstream preview rather than the short-lived read-side peer cache.
     await this._hydratePeers(true)
