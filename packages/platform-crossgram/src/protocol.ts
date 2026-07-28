@@ -203,8 +203,27 @@ export interface WireConversation {
   readInboxMaxMessage?: WireMessage
 }
 
+export interface WireNativeAvsdkEvent {
+  type: 'native-avsdk'
+  version: 1
+  callback: string
+  args: unknown[]
+}
+
+export interface WireCallSignalEvent {
+  type: 'call-signal'
+  version: 1
+  signal: 'incoming' | 'accept-requested' | 'refuse-requested' | 'logout-requested' | 'ended'
+  media: 'voice' | 'unknown'
+  callId: string
+  conversation: WireConversation
+  timestamp: number
+}
+
 export type WireEvent =
   | { type: 'message', conversation: WireConversation, message: WireMessage }
+  | WireCallSignalEvent
+  | WireNativeAvsdkEvent
   | {
       type: 'message-delete'
       eventId: string
