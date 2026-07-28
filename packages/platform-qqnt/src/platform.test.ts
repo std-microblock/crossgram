@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
+import type { Logger } from 'cordis'
 import type { PlatformSession } from '@mtproto-relay/bridge'
 import { PlatformMessageActions } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
@@ -183,7 +184,7 @@ describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 19, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 20, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
@@ -207,21 +208,34 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getUser).toHaveBeenCalledWith('u_self')
   })
 
+  it('accepts bridge protocol 19 during the call-signal rollout', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 19, ready: true, selfUin: '10001', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn(async () => ({ id: 'u_self', name: 'Platform Alice' }))
+
+    await expect(platform.getAccount()).resolves.toMatchObject({ user: { id: 'u_self' } })
+  })
+
   it('refuses to invent an account while QQNT is not ready', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({ protocolVersion: 1, ready: false }))
     await expect(platform.getAccount()).rejects.toThrow('not ready')
   })
 
-  it('rejects bridge protocols that can still fall back to local media downloads', async () => {
-    const platform = new QQNTPlatform()
-    platform.client.status = vi.fn(async () => ({
-      protocolVersion: 15, ready: true, selfUin: '10001', selfUid: 'u_self',
-    }))
-    platform.client.getUser = vi.fn()
+  it('rejects bridge protocols outside the supported 19-20 range', async () => {
+    for (const protocolVersion of [18, 21, 19.5, Number.NaN, '19', undefined]) {
+      const platform = new QQNTPlatform()
+      const status = {
+        protocolVersion, ready: true, selfUin: '10001', selfUid: 'u_self',
+      } as unknown as Awaited<ReturnType<typeof platform.client.status>>
+      platform.client.status = vi.fn(async () => status)
+      platform.client.getUser = vi.fn()
 
-    await expect(platform.getAccount()).rejects.toThrow('platform features require 19')
-    expect(platform.client.getUser).not.toHaveBeenCalled()
+      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-20')
+      expect(platform.client.getUser).not.toHaveBeenCalled()
+    }
   })
 
   it('edits QQ messages by recalling the old message and resending the replacement', async () => {
@@ -724,8 +738,220 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.subscribe).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(1)
     expect(platform.client.subscribe).toHaveBeenCalledTimes(3)
-    expect(platform.client.subscribe.mock.calls[1]?.[2]?.lastEventId).toBeUndefined()
+    expect(vi.mocked(platform.client.subscribe).mock.calls[1]?.[2]?.lastEventId).toBeUndefined()
 
+    await unsubscribe()
+  })
+
+  it('drops native AVSDK frames without delivering, reconnecting, or logging each frame', async () => {
+    const logger = {
+      debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    } as unknown as Logger
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, logger)
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const frames: unknown[] = [
+      { type: 'native-avsdk', version: 1, callback: 'native.avsdk.callback', args: [] },
+      { type: 'native-avsdk', version: 1, callback: 'native.avsdk.callback', args: {} },
+      { type: 'native-avsdk', version: 1, args: [] },
+      { type: 'native-avsdk', version: 2, callback: 'native.avsdk.callback', args: [] },
+      ...Array.from({ length: 10 }, () => ({
+        type: 'native-avsdk', version: 1, callback: 'native.avsdk.callback', args: [],
+      })),
+    ]
+    const acknowledged: string[] = []
+    platform.client.subscribe = vi.fn(async (handler, signal, options) => {
+      for (const [index, frame] of frames.entries()) {
+        await handler(frame as never, `avsdk-${index}`)
+        options?.onEventId?.(`avsdk-${index}`)
+        acknowledged.push(`avsdk-${index}`)
+      }
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(acknowledged).toHaveLength(frames.length))
+
+    expect(received).toEqual([])
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(1)
+    expect(logger.info).toHaveBeenCalledTimes(1)
+    expect(logger.debug).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalled()
+    expect(logger.error).not.toHaveBeenCalled()
+    await unsubscribe()
+  })
+
+  it('maps validated call signals into stable Telegram service messages', async () => {
+    const logger = {
+      debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    }
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, logger as unknown as Logger)
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const conversation = {
+      id: '1:alice', kind: 'direct' as const, title: 'Alice', peerUid: 'alice', peerUin: '10001', chatType: 1 as const,
+      participantCount: 999,
+    }
+    const cases = [
+      { signal: 'incoming', media: 'voice', text: 'QQ 语音通话呼入', outgoing: false },
+      { signal: 'incoming', media: 'unknown', text: 'QQ 通话呼入', outgoing: false },
+      { signal: 'accept-requested', media: 'voice', text: '已请求接听 QQ 通话', outgoing: true },
+      { signal: 'refuse-requested', media: 'voice', text: '已拒绝 QQ 通话', outgoing: true },
+      { signal: 'logout-requested', media: 'voice', text: '已请求挂断 QQ 通话', outgoing: true },
+      { signal: 'ended', media: 'voice', text: 'QQ 通话已结束', outgoing: true },
+    ] as const
+    const frames = cases.map(({ signal, media }, index) => ({
+      type: 'call-signal' as const, version: 1 as const, signal, media,
+      callId: `call_${index}-stable`, conversation, timestamp: 100 + index,
+    }))
+    frames.push({ ...frames[0]!, timestamp: 200 })
+    const acknowledged: string[] = []
+    platform.client.subscribe = vi.fn(async (handler, signal, options) => {
+      for (const [index, frame] of frames.entries()) {
+        await handler(frame, `call-${index}`)
+        options.onEventId?.(`call-${index}`)
+        acknowledged.push(`call-${index}`)
+      }
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(acknowledged).toHaveLength(frames.length))
+
+    expect(received.slice(0, cases.length)).toEqual(cases.map(({ signal, media, text, outgoing }, index) => ({
+      type: 'message',
+      conversation: expect.objectContaining({ id: conversation.id }),
+      message: {
+        id: expect.stringMatching(new RegExp(`^qq-call:[a-f0-9]{32}:${signal}$`)),
+        conversationId: conversation.id,
+        senderId: conversation.id,
+        timestamp: 100 + index,
+        outgoing,
+        metadata: { qqCallSignal: signal, qqCallMedia: media },
+        content: { serviceAction: { type: 'custom', text }, parts: [] },
+      },
+    })))
+    expect((received[frames.length - 1] as any).message.id).toBe((received[0] as any).message.id)
+    expect((received[0] as any).conversation.metadata).not.toHaveProperty('participantsCount')
+    expect(JSON.stringify(received)).not.toContain('call_0-stable')
+    const debug = logger.debug.mock.calls.flat().join(' ')
+    expect(debug).toContain('type=call-signal version=1 signal=incoming media=voice conversation=1:alice')
+    expect(debug).not.toContain('call_0-stable')
+    await unsubscribe()
+  })
+
+  it('ACKs invalid call-signal frames without delivery, reconnection, or payload logging', async () => {
+    const logger = {
+      debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    }
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, logger as unknown as Logger)
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const conversation = {
+      id: '1:alice', kind: 'direct' as const, title: 'Alice', peerUid: 'alice', peerUin: '10001', chatType: 1 as const,
+    }
+    const overlong = 'a'.repeat(257)
+    const frames: unknown[] = [
+      { type: 'call-signal', version: 2, signal: 'incoming', media: 'voice', callId: 'payload-version', conversation, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'state', media: 'voice', callId: 'payload-signal', conversation, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'video', callId: 'payload-media', conversation, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload/id', conversation, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-conversation', conversation: { ...conversation, chatType: 2 }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-group', conversation: { ...conversation, kind: 'group', chatType: 2 }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-empty-id', conversation: { ...conversation, id: '' }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-empty-peer', conversation: { ...conversation, peerUid: '' }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-empty-uin', conversation: { ...conversation, peerUin: '' }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-empty-title', conversation: { ...conversation, title: '' }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-long-id', conversation: { ...conversation, id: overlong }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-long-peer', conversation: { ...conversation, peerUid: overlong }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-long-uin', conversation: { ...conversation, peerUin: '1'.repeat(33) }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-long-title', conversation: { ...conversation, title: overlong }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-unsafe-id', conversation: { ...conversation, id: 'alice/value' }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-control-title', conversation: { ...conversation, title: 'Alice\nBob' }, timestamp: 1 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-timestamp', conversation, timestamp: 1.5 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-timestamp-overflow', conversation, timestamp: 0x80000000 },
+      { type: 'call-signal', version: 1, signal: 'incoming', media: 'voice', callId: 'payload-timestamp-unsafe', conversation, timestamp: Number.MAX_SAFE_INTEGER + 1 },
+    ]
+    const acknowledged: string[] = []
+    platform.client.subscribe = vi.fn(async (handler, signal, options) => {
+      for (const [index, frame] of frames.entries()) {
+        await handler(frame as never, `invalid-${index}`)
+        options.onEventId?.(`invalid-${index}`)
+        acknowledged.push(`invalid-${index}`)
+      }
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(acknowledged).toHaveLength(frames.length))
+
+    expect(received).toEqual([])
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(1)
+    expect(logger.debug).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalled()
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain('payload-')
+    await unsubscribe()
+  })
+
+  it('delivers call-signal bursts through the normal message path', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const conversation = {
+      id: '1:alice', kind: 'direct' as const, title: 'Alice', peerUid: 'alice', peerUin: '10001', chatType: 1 as const,
+    }
+    const frames = Array.from({ length: 32 }, (_, index) => ({
+      type: 'call-signal' as const, version: 1 as const, signal: 'ended' as const, media: 'voice' as const,
+      callId: `burst_${index}`, conversation, timestamp: 1_000 + index,
+    }))
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      for (const frame of frames) await handler(frame)
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(received).toHaveLength(frames.length))
+
+    const messageIds = received.map((event: any) => event.message.id)
+    expect(messageIds).toHaveLength(frames.length)
+    expect(messageIds.every((id) => /^qq-call:[a-f0-9]{32}:ended$/.test(id))).toBe(true)
+    expect(JSON.stringify(received)).not.toContain('burst_0')
+    await unsubscribe()
+  })
+
+  it('does not advance a call-signal checkpoint when its handler rejects', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const frame = {
+      type: 'call-signal' as const, version: 1 as const, signal: 'incoming' as const, media: 'voice' as const,
+      callId: 'checkpoint_call',
+      conversation: {
+        id: '1:alice', kind: 'direct' as const, title: 'Alice', peerUid: 'alice', peerUin: '10001', chatType: 1 as const,
+      },
+      timestamp: 1,
+    }
+    const subscribe = vi.fn(async (handler, _signal, options) => {
+      await handler(frame, 'call-checkpoint')
+      options.onEventId?.('call-checkpoint')
+    })
+    platform.client.subscribe = subscribe
+
+    const unsubscribe = await platform.subscribe(session, () => {
+      throw new Error('message service unavailable')
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(subscribe).toHaveBeenCalledTimes(2)
+    expect(subscribe.mock.calls[1]?.[2]?.lastEventId).toBeUndefined()
     await unsubscribe()
   })
 
