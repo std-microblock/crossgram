@@ -1260,15 +1260,28 @@ export class DialogRpc {
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
     if (req.id.length !== req.randomId.length) throw new RpcError(400, 'RANDOM_ID_INVALID')
     await this._hydratePeers()
-    const fromId = this._resolvePeer(req.fromPeer)
     const toId = this._resolveMessageTarget(req.toPeer, req.replyTo)
+    let fromId = req.fromPeer._ === 'inputPeerEmpty'
+      ? undefined
+      : this._resolvePeer(req.fromPeer)
     const sourceIds: string[] = []
     for (const tlId of req.id) {
-      const projected = await this._store.findProjectedByTlId(this._session.platformSessionId, tlId, fromId)
+      const projected = await this._store.findProjectedByTlId(
+        this._session.platformSessionId,
+        tlId,
+        fromId,
+        fromId === undefined ? 'direct' : undefined,
+      )
       if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+      if (fromId === undefined) {
+        fromId = projected.source.conversationId
+      } else if (projected.source.conversationId !== fromId) {
+        throw new RpcError(400, 'MSG_ID_INVALID')
+      }
       const ordinal = projected.parts.find((part) => part.tlMessageId === tlId)?.ordinal ?? 0
       sourceIds.push(projected.source.sourceIds?.[ordinal] ?? projected.source.id)
     }
+    if (!fromId) throw new RpcError(400, 'MSG_ID_INVALID')
     let forwarded: IMMessage<any>[]
     try {
       forwarded = await this._actions.forward(
