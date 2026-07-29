@@ -177,6 +177,15 @@ export interface IMMedia<TLocator = unknown> {
   locator?: TLocator
 }
 
+/** A short-lived, adapter-issued URL that a patched client may download directly. */
+export interface IMDirectDownload {
+  url: string
+  /** Absolute Unix timestamp in milliseconds. */
+  expiresAt: number
+  /** Whether the origin is expected to honor HTTP byte-range requests. */
+  supportsRange: boolean
+}
+
 export interface IMMediaSource {
   size?: number
   stream(options?: { signal?: AbortSignal }): AsyncIterable<Uint8Array>
@@ -524,6 +533,15 @@ export interface IMPlatform<TMediaLocator = unknown> {
     media: IMMedia<TMediaLocator>,
     options?: IMDownloadOptions,
   ): AsyncIterable<Uint8Array>
+  /**
+   * Resolve a short-lived direct download URL for the exact stored media.
+   * The bridge only calls this after authorizing the media against the current
+   * MTProto session; implementations must not return local/cache-only assets.
+   */
+  resolveMediaUrl?(
+    session: PlatformSession,
+    media: IMMedia<TMediaLocator>,
+  ): Promise<IMDirectDownload | undefined>
   setMessageReactions?(
     session: PlatformSession,
     target: IMMessageTarget,

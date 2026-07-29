@@ -38,6 +38,12 @@ langpack.getLanguages#800fd57d = Vector<LangPackLanguage>;
 account.registerDevice#637ea878 token_type:int token:string = Bool;
 `
 
+/** Crossgram client extensions. Constructor ids are a stable wire contract. */
+export const CROSSGRAM_API_SCHEMA = `
+---functions---
+crossgram.getFileUrl#7520f6ea location:InputFileLocation = DataJSON;
+`
+
 /**
  * Build a TL reader map that includes RPC method requests, by merging
  * mtcute's built-in `__tlReaderMap` with method readers generated at
@@ -57,7 +63,7 @@ export function getServerReaderMap(): TlReaderMap {
   const apiSchema = parseFullTlSchema((apiSchemaRaw.e ?? apiSchemaRaw) as unknown as TlEntry[])
   const mtpSchema = parseFullTlSchema(mtpSchemaRaw as unknown as TlEntry[])
 
-  const compatApiEntries = parseTlToEntries(TELEGRAM_ANDROID_COMPAT_SCHEMA)
+  const compatApiEntries = parseTlToEntries(`${TELEGRAM_ANDROID_COMPAT_SCHEMA}\n${CROSSGRAM_API_SCHEMA}`)
   const apiEntries = [
     ...apiSchema.entries,
     ...compatApiEntries.filter(e => !apiSchema.entries.some(x => x.id === e.id)),

@@ -1393,6 +1393,44 @@ export class DialogRpc {
     }
   }
 
+  async getFileUrl(location: tl.TypeInputFileLocation): Promise<tl.RawDataJSON> {
+    if (location._ !== 'inputDocumentFileLocation' && location._ !== 'inputPhotoFileLocation') {
+      throw new RpcError(400, 'LOCATION_INVALID')
+    }
+    if (!this._store || !this._platform.resolveMediaUrl) {
+      throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
+    }
+    const mediaId = location.id.toNumber()
+    if (!Number.isSafeInteger(mediaId) || mediaId <= 0
+      || !location.accessHash.equals(location.id)
+      || decodeBridgeMediaReference(location.fileReference) !== mediaId) {
+      throw new RpcError(400, 'FILE_REFERENCE_INVALID')
+    }
+    const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
+    if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
+    const media = location.thumbSize === 'm' && stored.media.preview
+      ? previewMedia(stored.media)
+      : stored.media
+    let resolved: import('./platform.js').IMDirectDownload | undefined
+    try {
+      resolved = await this._platform.resolveMediaUrl(this._session, media)
+    } catch {
+      throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
+    }
+    if (!resolved || !isHttpUrl(resolved.url) || !Number.isFinite(resolved.expiresAt)
+      || resolved.expiresAt <= Date.now()) {
+      throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
+    }
+    return {
+      _: 'dataJSON',
+      data: JSON.stringify({
+        url: resolved.url,
+        expiresAt: Math.trunc(resolved.expiresAt),
+        supportsRange: resolved.supportsRange,
+      }),
+    }
+  }
+
   private async _resolveAvatarMedia(peer: tl.TypeInputPeer, photoId: Long): Promise<IMMedia<any> | undefined> {
     await this._hydratePeers()
     let media: IMMedia<any> | undefined
@@ -3384,6 +3422,28 @@ function previewMedia(media: IMMedia<any>): IMMedia<any> {
   return {
     id: `${media.id}:preview`, kind: 'image', mimeType: preview.mimeType,
     size: preview.size, width: preview.width, height: preview.height, locator: preview.locator,
+  }
+}
+
+function decodeBridgeMediaReference(bytes: Uint8Array): number | undefined {
+  let value: string
+  try {
+    value = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return
+  }
+  const match = /^bridge-media:([1-9]\d*)$/.exec(value)
+  if (!match) return
+  const id = Number(match[1])
+  return Number.isSafeInteger(id) ? id : undefined
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
   }
 }
 
