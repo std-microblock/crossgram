@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from 'node:path'
 
 export interface HistoryProfileOptions {
+  operation: 'history' | 'dialogs' | 'peer-dialogs' | 'conversation'
   host: string
   port: number
   database: string
@@ -43,7 +44,12 @@ export function parseHistoryProfileOptions(argv: readonly string[]): HistoryProf
     return value
   }
   const database = resolve(values.get('database') ?? 'data/cordis.db')
+  const operation = values.get('operation') ?? 'history'
+  if (!['history', 'dialogs', 'peer-dialogs', 'conversation'].includes(operation)) {
+    throw new Error('--operation must be history, dialogs, peer-dialogs, or conversation')
+  }
   const options: HistoryProfileOptions = {
+    operation: operation as HistoryProfileOptions['operation'],
     host: values.get('host') ?? '127.0.0.1',
     port: integer('port', 4430, 1),
     database,
@@ -64,7 +70,7 @@ export function parseHistoryProfileOptions(argv: readonly string[]): HistoryProf
     timeoutMs: integer('timeout-ms', 30_000, 1),
     logLevel: integer('log-level', 0),
   }
-  if (!options.conversation && !options.peer) {
+  if (options.operation !== 'dialogs' && !options.conversation && !options.peer) {
     throw new Error('pass --conversation <platform conversation id> or --peer <channel|chat|user>:<id>')
   }
   return options
