@@ -95,6 +95,7 @@ async function roundTripRpc(query: tl.RpcMethod): Promise<unknown> {
 
 describe('Telegram Android capture RPC e2e', () => {
   it.each<[string, tl.RpcMethod, string]>([
+    ['auto-download settings', { _: 'account.getAutoDownloadSettings' }, 'account.autoDownloadSettings'],
     ['profile photo emoji', { _: 'account.getDefaultProfilePhotoEmojis', hash: Long.ZERO }, 'emojiList'],
     ['privacy', { _: 'account.getPrivacy', key: { _: 'inputPrivacyKeyStatusTimestamp' } }, 'account.privacyRules'],
     ['password', { _: 'account.getPassword' }, 'account.password'],

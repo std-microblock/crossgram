@@ -621,6 +621,12 @@ describe('bridge login e2e', () => {
 
       const self = { _: 'inputPeerSelf' }
       const calls: Array<[object, unknown]> = [
+        [{ _: 'account.getAutoDownloadSettings' }, {
+          _: 'account.autoDownloadSettings',
+          low: { _: 'autoDownloadSettings', photoSizeMax: 1_048_576, videoSizeMax: 512_000 },
+          medium: { _: 'autoDownloadSettings', videoSizeMax: 10_485_760 },
+          high: { _: 'autoDownloadSettings', videoSizeMax: 15_728_640, fileSizeMax: 3_145_728 },
+        }],
         [{ _: 'messages.getEmojiKeywords', langCode: 'zh-hans' }, {
           _: 'emojiKeywordsDifference', langCode: 'zh-hans', keywords: [],
         }],

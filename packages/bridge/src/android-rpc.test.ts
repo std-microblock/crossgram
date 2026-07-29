@@ -13,6 +13,7 @@ function roundTrip(object: tl.TlObject): tl.TlObject {
 
 const self = { _: 'inputPeerSelf' as const }
 const requests: Record<string, tl.RpcMethod> = {
+  'account.getAutoDownloadSettings': { _: 'account.getAutoDownloadSettings' },
   'account.getDefaultProfilePhotoEmojis': { _: 'account.getDefaultProfilePhotoEmojis', hash: Long.ZERO },
   'account.getContactSignUpNotification': { _: 'account.getContactSignUpNotification' },
   'account.getGlobalPrivacySettings': { _: 'account.getGlobalPrivacySettings' },
@@ -163,6 +164,34 @@ describe('Telegram Android optional RPC responses', () => {
   })
 
   it('returns stable empty containers for optional account and content resources', () => {
+    expect(androidRpcHandlers['account.getAutoDownloadSettings'](
+      requests['account.getAutoDownloadSettings'],
+    )).toEqual({
+      _: 'account.autoDownloadSettings',
+      low: expect.objectContaining({
+        _: 'autoDownloadSettings',
+        phonecallsLessData: true,
+        photoSizeMax: 1_048_576,
+        videoSizeMax: 512_000,
+        fileSizeMax: 512_000,
+      }),
+      medium: expect.objectContaining({
+        _: 'autoDownloadSettings',
+        videoPreloadLarge: true,
+        audioPreloadNext: true,
+        photoSizeMax: 1_048_576,
+        videoSizeMax: 10_485_760,
+        fileSizeMax: 1_048_576,
+      }),
+      high: expect.objectContaining({
+        _: 'autoDownloadSettings',
+        videoPreloadLarge: true,
+        audioPreloadNext: true,
+        photoSizeMax: 1_048_576,
+        videoSizeMax: 15_728_640,
+        fileSizeMax: 3_145_728,
+      }),
+    })
     expect(androidRpcHandlers['account.getDefaultProfilePhotoEmojis'](
       requests['account.getDefaultProfilePhotoEmojis'],
     )).toEqual({ _: 'emojiList', hash: Long.ZERO, documentId: [] })
