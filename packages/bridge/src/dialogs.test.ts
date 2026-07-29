@@ -710,6 +710,22 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(first)).not.toThrow()
   })
 
+  it('resolves a reply from the message target loaded into the active dialog', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    const aliceId = rpc.peerTlId('alice')
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const target = history.messages.find((message) => message._ === 'message' && message.message === 'Hey there!')
+    expect(target).toMatchObject({ _: 'message' })
+
+    await rpc.sendMessage(sendMessageRequest(aliceId, {
+      randomId: Long.fromNumber(1235),
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId: target!.id },
+    }))
+
+    expect(platform.lastInput).toMatchObject({ replyToId: '1' })
+  })
+
   it('maps Telegram mention-name entities to opaque platform users and back', async () => {
     const platform = new DialogTestPlatform()
     const rpc = new DialogRpc(platform, session)
