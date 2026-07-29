@@ -2002,10 +2002,21 @@ export class DialogRpc {
       const usersMs = performance.now() - usersAt
       const projectAt = performance.now()
       const projectionRevision = this._store.revision
+      // Telegram Android paginates channels with add_offset=-1 so the anchor
+      // can overlap the next page. Read that window at the anchor instead of
+      // reading the globally newest rows; otherwise a deep anchor falls near
+      // or beyond the end of the materialized window and returns only a few
+      // newer messages. Larger negative offsets are around-message/unread
+      // windows and still need rows from both sides of the anchor.
+      const backwardPageMaxTimestamp = negativeOffset
+        && request.addOffset === -1
+        && !aroundUnread
+        ? anchor?.source.timestamp
+        : undefined
       const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
         limit: fetchLimit,
         beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
-        maxTimestamp: !negativeOffset ? anchor?.source.timestamp : undefined,
+        maxTimestamp: !negativeOffset ? anchor?.source.timestamp : backwardPageMaxTimestamp,
       })
       const projectionReadMs = performance.now() - projectAt
       const materializeAt = performance.now()

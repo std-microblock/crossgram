@@ -3,6 +3,8 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import type { tl } from '@mtcute/core'
+import Long from 'long'
+import { DialogRpc } from './dialogs.js'
 import { defineModels } from './models.js'
 import { MessageStore } from './message-store.js'
 import {
@@ -242,6 +244,51 @@ describe('PlatformSubscriptionManager', () => {
 })
 
 describe('PlatformDataService', () => {
+  it('materializes a deep Android channel page at its add_offset=-1 anchor', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'android-page-room', kind: 'group', title: 'Android page room' }
+    const messages = Array.from({ length: 120 }, (_, index): IMMessage => ({
+      id: `history-${120 - index}`,
+      conversationId: conversation.id,
+      senderId: 'alice',
+      sender: { id: 'alice', firstName: 'Alice' },
+      timestamp: 120 - index,
+      content: { parts: [{ type: 'text', text: `history ${120 - index}` }] },
+    }))
+    const store = new MessageStore(database)
+    await store.ingestMany(session, conversation, messages, { allocation: 'history' })
+    platform.getDialogs = async () => ({
+      dialogs: [{ conversation, unreadCount: 0, lastMessage: messages[0] }],
+    })
+    platform.getHistory = async () => ({ messages: [] })
+    const rpc = new DialogRpc(platform, session, store)
+    const peer = {
+      _: 'inputPeerChannel' as const,
+      channelId: rpc.peerTlId(conversation.id),
+      accessHash: Long.ONE,
+    }
+    const first = await rpc.getHistory({
+      _: 'messages.getHistory', peer,
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 50,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    const anchor = first.messages.at(-1)?.id
+    expect(anchor).toBeGreaterThan(0)
+
+    const second = await rpc.getHistory({
+      _: 'messages.getHistory', peer,
+      offsetId: anchor!, offsetDate: 0, addOffset: -1, limit: 50,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+
+    expect(second.messages).toHaveLength(50)
+    expect(second.messages.every((message) => message.id <= anchor!)).toBe(true)
+    expect(second.messages[0]?.id).toBe(anchor)
+    expect(second.messages.at(-1)!.id).toBeLessThan(anchor!)
+  })
+
   it('fetches one requested history window at a time and persists both windows', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
