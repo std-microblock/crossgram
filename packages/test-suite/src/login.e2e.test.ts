@@ -2190,7 +2190,9 @@ describe('bridge login e2e', () => {
       })
       const forwarded = await callRpc(resumed, key, resumedSid, {
         _: 'messages.forwardMessages',
-        fromPeer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        // Telegram Android sends inputPeerEmpty for direct/basic-group sources;
+        // only channel forwards carry an explicit source peer.
+        fromPeer: { _: 'inputPeerEmpty' },
         id: [sentMessage.id], randomId: [Long.fromNumber(900)],
         toPeer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
       }, 222)

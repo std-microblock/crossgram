@@ -567,6 +567,26 @@ describe('conversation kinds', () => {
     ])
   })
 
+  it('infers Android direct-message forwards whose from_peer is inputPeerEmpty', async () => {
+    const { rpc } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const directId = await rpc.userTlId('direct')
+    const directPeer = { _: 'inputPeerUser' as const, userId: directId, accessHash: Long.ZERO }
+    const history = await rpc.getHistory(historyRequest(directPeer)) as tl.messages.RawMessages
+    const messageId = (history.messages[0] as tl.RawMessage).id
+
+    const forwarded = await rpc.forwardMessages({
+      _: 'messages.forwardMessages', fromPeer: { _: 'inputPeerEmpty' }, id: [messageId],
+      randomId: [Long.fromNumber(100)], toPeer: directPeer,
+    }) as tl.RawUpdates
+
+    expect(forwarded.updates).toMatchObject([
+      { _: 'updateMessageID', randomId: Long.fromNumber(100) },
+      { _: 'updateNewMessage', message: { message: 'forwarded message-direct' } },
+    ])
+    expect(actionCalls).toContain('forward:direct:message-direct:direct')
+  })
+
   it('projects delete-and-resend editing as delete plus new-message updates', async () => {
     const actions = platform.capabilities.messageActions!
     const originalMode = actions.edit.mode
