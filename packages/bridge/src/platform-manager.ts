@@ -368,17 +368,28 @@ export class PlatformDataService {
   }
 
   private async _loadDialogsPage(query: { limit?: number, afterId?: string }): Promise<IMDialogPage> {
+    const storedPromise = this._store.listDialogs(this._session.platformSessionId, {
+      limit: query.limit,
+      afterConversationId: query.afterId,
+    })
     let upstream: IMDialog[] = []
     let upstreamPage: IMDialogPage | undefined
     const hasUpstream = Boolean(this._platform.capabilities.history && this._platform.getDialogs)
     if (hasUpstream) {
-      upstreamPage = await this._platform.getDialogs(this._session, query)
-      upstream = upstreamPage.dialogs
+      try {
+        upstreamPage = await this._platform.getDialogs(this._session, query)
+        upstream = upstreamPage.dialogs
+      } catch (error) {
+        const stored = await storedPromise
+        if (!stored.length) throw error
+        this._onTrace?.(
+          'dialog upstream refresh failed; serving stored page session=%s dialogs=%d error=%s',
+          this._session.platformSessionId, stored.length, String(error),
+        )
+        return { dialogs: stored, total: stored.length }
+      }
     }
-    const stored = await this._store.listDialogs(this._session.platformSessionId, {
-      limit: query.limit,
-      afterConversationId: query.afterId,
-    })
+    const stored = await storedPromise
     if (!hasUpstream) return { dialogs: stored, total: stored.length }
     // A history-capable adapter's current page is authoritative. Returning all
     // previously stored rows leaks removed dialogs and legacy conversation IDs
