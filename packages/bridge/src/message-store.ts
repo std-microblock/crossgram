@@ -1008,6 +1008,17 @@ export class MessageStore {
     unreadCount: number | undefined,
     now: Date,
   ): Promise<IMConversationRow> {
+    // A direct conversation is also the peer identity used by Telegram. The
+    // first durable event may be outgoing (so its sender is self), therefore
+    // message-sender ingestion alone cannot guarantee that the peer exists
+    // when the freshly committed message is projected.
+    if (conversation.kind === 'direct') {
+      await this._upsertUser(database, session.platformId, {
+        id: conversation.id,
+        firstName: conversation.title,
+        avatar: conversation.avatar,
+      }, now)
+    }
     const [existing] = await database.get('mtproto_im_conversation', {
       platformSessionId: session.platformSessionId,
       platformConversationId: conversation.id,

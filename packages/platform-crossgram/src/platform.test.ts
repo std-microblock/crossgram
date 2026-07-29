@@ -704,7 +704,7 @@ describe('QQNTPlatform mapping', () => {
         outgoing: false, parts: [{ type: 'text' as const, text: 'poison' }],
       },
     }
-    platform.client.subscribe = vi.fn(async (handler, _signal, options) => {
+    const subscribe = vi.spyOn(platform.client, 'subscribe').mockImplementation(async (handler, _signal, options) => {
       await handler(wireEvent, '329')
       options.onEventId?.('329')
     })
@@ -713,18 +713,18 @@ describe('QQNTPlatform mapping', () => {
       throw new Error('database generation disposed')
     })
     await vi.advanceTimersByTimeAsync(0)
-    expect(platform.client.subscribe).toHaveBeenCalledTimes(1)
+    expect(subscribe).toHaveBeenCalledTimes(1)
 
     await vi.advanceTimersByTimeAsync(999)
-    expect(platform.client.subscribe).toHaveBeenCalledTimes(1)
+    expect(subscribe).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1)
-    expect(platform.client.subscribe).toHaveBeenCalledTimes(2)
+    expect(subscribe).toHaveBeenCalledTimes(2)
 
     await vi.advanceTimersByTimeAsync(1_999)
-    expect(platform.client.subscribe).toHaveBeenCalledTimes(2)
+    expect(subscribe).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(1)
-    expect(platform.client.subscribe).toHaveBeenCalledTimes(3)
-    expect(platform.client.subscribe.mock.calls[1]?.[2]?.lastEventId).toBeUndefined()
+    expect(subscribe).toHaveBeenCalledTimes(3)
+    expect(subscribe.mock.calls[1]?.[2]?.lastEventId).toBeUndefined()
 
     await unsubscribe()
   })
