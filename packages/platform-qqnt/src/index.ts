@@ -1551,7 +1551,7 @@ function permissions(role: 'owner' | 'administrator' | 'member') {
     manageConversation: administrator,
     manageMembers: administrator,
     deleteAnyMessage: administrator,
-    editAnyMessage: false,
+    editAnyMessage: administrator,
     pinMessages: administrator,
     inviteMembers: true,
   }
