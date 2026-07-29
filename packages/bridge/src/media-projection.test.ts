@@ -133,6 +133,35 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('rich-media projection', () => {
+  it('persists a native reply when the platform send response does not echo its reply ID', async () => {
+    const { store, peerId } = await createStore()
+    const sendMessage = vi.fn(async (): Promise<IMMessage> => ({
+      id: 'sent-without-reply', conversationId: conversation.id, senderId: 'self',
+      timestamp: 1_800_000_100, outgoing: true,
+      content: { parts: [{ type: 'text', text: 'native reply' }] },
+    }))
+    const rpc = new DialogRpc({ ...platform, sendMessage }, session, store)
+    const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const target = history.messages.find((message) => message._ === 'message' && message.message === 'album caption')
+    expect(target).toMatchObject({ _: 'message' })
+
+    const sent = await rpc.sendMessage({
+      _: 'messages.sendMessage',
+      peer: { _: 'inputPeerUser', userId: peerId, accessHash: Long.ZERO },
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId: target!.id },
+      message: 'native reply', randomId: Long.fromNumber(9123),
+    })
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      session,
+      { id: conversation.id },
+      expect.objectContaining({ replyToId: album.id }),
+    )
+    await expect(store.findProjectedByTlId(
+      session.platformSessionId, sent.id, conversation.id,
+    )).resolves.toMatchObject({ source: { replyToId: album.id } })
+  })
+
   it('projects structured platform cards as serializable Telegram WebPage previews', async () => {
     const { store, peerId } = await createStore()
     const card: IMMessage = {
