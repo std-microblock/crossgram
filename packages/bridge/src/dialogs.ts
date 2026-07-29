@@ -1265,6 +1265,7 @@ export class DialogRpc {
       ? undefined
       : this._resolvePeer(req.fromPeer)
     const sourceIds: string[] = []
+    const sourceMessages: IMMessage<any>[] = []
     for (const tlId of req.id) {
       const projected = await this._store.findProjectedByTlId(
         this._session.platformSessionId,
@@ -1280,12 +1281,16 @@ export class DialogRpc {
       }
       const ordinal = projected.parts.find((part) => part.tlMessageId === tlId)?.ordinal ?? 0
       sourceIds.push(projected.source.sourceIds?.[ordinal] ?? projected.source.id)
+      sourceMessages.push(projected.source)
     }
     if (!fromId) throw new RpcError(400, 'MSG_ID_INVALID')
     let forwarded: IMMessage<any>[]
     try {
       forwarded = await this._actions.forward(
-        { id: fromId }, sourceIds, { id: toId }, { dropAuthor: req.dropAuthor },
+        { id: fromId }, sourceIds, { id: toId }, {
+          dropAuthor: req.dropAuthor,
+          sourceMessages,
+        },
       )
     } catch (error) {
       this._throwMessageAction(error, 'MESSAGE_FORWARD_FORBIDDEN')

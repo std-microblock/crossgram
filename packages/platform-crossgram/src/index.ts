@@ -736,47 +736,66 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMMessage<QQMediaLocator>[]> {
     if (!messageIds.length) return []
     if (options.dropAuthor) {
-      const outputs: IMMessage<QQMediaLocator>[] = []
-      for (const messageId of messageIds) {
-        const wire = await this.client.getMessage(from.id, messageId)
-        if (!wire) throw new Error(`QQ source message not found: ${messageId}`)
-        const source = this.mapMessage(wire)
-        const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
-          if (part.type === 'text') return { ...part }
-          if (part.type === 'card') return { type: 'text' as const, text: messagePartText(part) }
-          if (part.type === 'sticker') return {
-            type: 'sticker' as const,
-            sticker: {
-              type: 'native' as const,
-              providerId: part.sticker.providerId,
-              stickerId: part.sticker.stickerId,
-              packId: part.sticker.packId,
-              reference: part.sticker.locator!,
-            },
-          }
-          if (!part.media.locator) throw new Error(`QQ source media has no locator: ${part.media.id}`)
-          return {
-            type: 'media' as const,
-            media: {
-              kind: part.media.kind, name: part.media.name, mimeType: part.media.mimeType,
-              size: part.media.size, width: part.media.width, height: part.media.height,
-              source: {
-                size: part.media.size,
-                stream: ({ signal } = {}) => this.downloadMedia(session, part.media, { signal }),
-              },
-            },
-          }
-        })
-        outputs.push(await this.sendMessage(session, to, {
-          parts,
-          replyToId: options.replyToId,
-        }))
-      }
-      return outputs
+      return this.copyForwardedMessages(session, from, messageIds, to, options)
     }
     const merged = messageIds.length > 1
-    const messages = await this.client.forwardMessages(from.id, messageIds, to.id, merged)
-    return messages.map((message) => this.mapMessage(message))
+    try {
+      const messages = await this.client.forwardMessages(from.id, messageIds, to.id, merged)
+      return messages.map((message) => this.mapMessage(message))
+    } catch (error) {
+      if (!isNativeForwardRejection(error)
+        || options.sourceMessages?.length !== messageIds.length) throw error
+      return this.copyForwardedMessages(session, from, messageIds, to, options)
+    }
+  }
+
+  private async copyForwardedMessages(
+    session: PlatformSession,
+    from: IMConversationRef,
+    messageIds: readonly string[],
+    to: IMConversationRef,
+    options: import('@mtproto-relay/bridge').IMForwardMessagesOptions,
+  ): Promise<IMMessage<QQMediaLocator>[]> {
+    const outputs: IMMessage<QQMediaLocator>[] = []
+    for (const [index, messageId] of messageIds.entries()) {
+      const stored = options.sourceMessages?.[index] as IMMessage<QQMediaLocator> | undefined
+      const source = stored ?? await this.client.getMessage(from.id, messageId)
+        .then((wire) => {
+          if (!wire) throw new Error(`QQ source message not found: ${messageId}`)
+          return this.mapMessage(wire)
+        })
+      const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
+        if (part.type === 'text') return { ...part }
+        if (part.type === 'card') return { type: 'text' as const, text: messagePartText(part) }
+        if (part.type === 'sticker') return {
+          type: 'sticker' as const,
+          sticker: {
+            type: 'native' as const,
+            providerId: part.sticker.providerId,
+            stickerId: part.sticker.stickerId,
+            packId: part.sticker.packId,
+            reference: part.sticker.locator!,
+          },
+        }
+        if (!part.media.locator) throw new Error(`QQ source media has no locator: ${part.media.id}`)
+        return {
+          type: 'media' as const,
+          media: {
+            kind: part.media.kind, name: part.media.name, mimeType: part.media.mimeType,
+            size: part.media.size, width: part.media.width, height: part.media.height,
+            source: {
+              size: part.media.size,
+              stream: ({ signal } = {}) => this.downloadMedia(session, part.media, { signal }),
+            },
+          },
+        }
+      })
+      outputs.push(await this.sendMessage(session, to, {
+        parts,
+        replyToId: options.replyToId,
+      }))
+    }
+    return outputs
   }
 
   async *downloadMedia(
@@ -1590,6 +1609,11 @@ function rangedSize(size: number | undefined, offset = 0, limit?: number): numbe
   if (size === undefined) return limit
   const available = Math.max(0, size - Math.max(0, Math.trunc(offset)))
   return limit === undefined ? available : Math.min(available, Math.max(0, Math.trunc(limit)))
+}
+
+function isNativeForwardRejection(error: unknown): boolean {
+  return error instanceof Error
+    && /^QQNT bridge 500: (?:forwardMsg|multiForwardMsg):/.test(error.message)
 }
 
 async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
