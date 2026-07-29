@@ -57,7 +57,7 @@ function inputPeer(specification: string): ProfileInputPeer {
 
 function loadTarget(options: HistoryProfileOptions): {
   auth: AuthRow
-  peer: ProfileInputPeer
+  peer?: ProfileInputPeer
   conversation?: string
 } {
   const database = new DatabaseSync(options.database, { readOnly: true })
@@ -70,6 +70,7 @@ function loadTarget(options: HistoryProfileOptions): {
     }
     const auth = authRows[0]!
     if (options.peer) return { auth, peer: inputPeer(options.peer) }
+    if (!options.conversation) return { auth }
     const conversation = database.prepare(`
       SELECT platformConversationId, kind, metadata
       FROM mtproto_im_conversation
@@ -99,6 +100,36 @@ function mediaKinds(result: tl.messages.TypeMessages): Record<string, number> {
   return counts
 }
 
+function requiredPeer(target: ReturnType<typeof loadTarget>): ProfileInputPeer {
+  if (!target.peer) throw new Error('the selected operation requires a peer target')
+  return target.peer
+}
+
+function historyResultSummary(result: tl.messages.TypeMessages): Record<string, unknown> {
+  const notModified = result._ === 'messages.messagesNotModified'
+  return {
+    result: result._,
+    count: 'count' in result ? result.count : notModified ? 0 : result.messages.length,
+    messages: notModified ? 0 : result.messages.length,
+    chats: notModified ? 0 : result.chats.length,
+    users: notModified ? 0 : result.users.length,
+    mediaKinds: mediaKinds(result),
+  }
+}
+
+function dialogResultSummary(
+  result: tl.messages.TypeDialogs | tl.messages.RawPeerDialogs,
+): Record<string, unknown> {
+  return {
+    result: result._,
+    count: 'count' in result ? result.count : result.dialogs.length,
+    dialogs: result.dialogs.length,
+    messages: result.messages.length,
+    chats: result.chats.length,
+    users: result.users.length,
+  }
+}
+
 export async function profileHistory(options: HistoryProfileOptions): Promise<void> {
   const target = loadTarget(options)
   const rsaKey = JSON.parse(readFileSync(options.rsaKey, 'utf8')) as RsaKeyFile
@@ -122,7 +153,7 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
     updates: false,
     logLevel: options.logLevel,
   })
-  const request = {
+  const historyRequest = target.peer ? {
     _: 'messages.getHistory' as const,
     peer: target.peer,
     offsetId: options.offsetId,
@@ -132,7 +163,7 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
     maxId: options.maxId,
     minId: options.minId,
     hash: Long.ZERO,
-  }
+  } : undefined
   try {
     const connectStarted = performance.now()
     if (options.serverAuthKeyId) {
@@ -153,32 +184,65 @@ export async function profileHistory(options: HistoryProfileOptions): Promise<vo
       connectMs: Math.round((performance.now() - connectStarted) * 100) / 100,
       endpoint: `${options.host}:${options.port}`,
       reusedAuthKey: !!options.serverAuthKeyId,
+      operation: options.operation,
       conversation: target.conversation,
-      peerType: target.peer._,
-      peerId: target.peer._ === 'inputPeerChannel' ? target.peer.channelId
-        : target.peer._ === 'inputPeerChat' ? target.peer.chatId : target.peer.userId,
-      request: {
-        offsetId: request.offsetId, offsetDate: request.offsetDate, addOffset: request.addOffset,
-        limit: request.limit, maxId: request.maxId, minId: request.minId,
-      },
+      peerType: target.peer?._,
+      peerId: target.peer?._ === 'inputPeerChannel' ? target.peer.channelId
+        : target.peer?._ === 'inputPeerChat' ? target.peer.chatId : target.peer?.userId,
+      request: historyRequest ? {
+        offsetId: historyRequest.offsetId, offsetDate: historyRequest.offsetDate,
+        addOffset: historyRequest.addOffset, limit: historyRequest.limit,
+        maxId: historyRequest.maxId, minId: historyRequest.minId,
+      } : { limit: options.limit },
     })}\n`)
     const samples: number[] = []
     for (let index = -options.warmup; index < options.repeat; index++) {
       const started = performance.now()
-      const result = await client.call(request, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
+      let event: Record<string, unknown>
+      if (options.operation === 'dialogs') {
+        const result = await client.call({
+          _: 'messages.getDialogs', excludePinned: false,
+          offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' },
+          limit: options.limit, hash: Long.ZERO, folderId: undefined,
+        }, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
+        event = dialogResultSummary(result)
+      } else if (options.operation === 'peer-dialogs') {
+        const result = await client.call({
+          _: 'messages.getPeerDialogs',
+          peers: [{ _: 'inputDialogPeer', peer: requiredPeer(target) }],
+        }, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
+        event = dialogResultSummary(result)
+      } else if (options.operation === 'conversation') {
+        const peerStarted = performance.now()
+        const peerDialogs = await client.call({
+          _: 'messages.getPeerDialogs',
+          peers: [{ _: 'inputDialogPeer', peer: requiredPeer(target) }],
+        }, { abortSignal: AbortSignal.timeout(options.timeoutMs) })
+        const peerDialogsMs = performance.now() - peerStarted
+        const historyStarted = performance.now()
+        const history = await client.call(historyRequest!, {
+          abortSignal: AbortSignal.timeout(options.timeoutMs),
+        })
+        const historyMs = performance.now() - historyStarted
+        event = {
+          peerDialogsMs: Math.round(peerDialogsMs * 100) / 100,
+          historyMs: Math.round(historyMs * 100) / 100,
+          peerDialogs: dialogResultSummary(peerDialogs),
+          history: historyResultSummary(history),
+        }
+      } else {
+        const result = await client.call(historyRequest!, {
+          abortSignal: AbortSignal.timeout(options.timeoutMs),
+        })
+        event = historyResultSummary(result)
+      }
       const durationMs = performance.now() - started
       const warmup = index < 0
-      const notModified = result._ === 'messages.messagesNotModified'
       if (!warmup) samples.push(durationMs)
       process.stdout.write(`${JSON.stringify({
-        event: 'history', warmup, iteration: warmup ? index + options.warmup + 1 : index + 1,
+        event: options.operation, warmup, iteration: warmup ? index + options.warmup + 1 : index + 1,
         durationMs: Math.round(durationMs * 100) / 100,
-        result: result._,
-        count: 'count' in result ? result.count : notModified ? 0 : result.messages.length,
-        messages: notModified ? 0 : result.messages.length,
-        chats: notModified ? 0 : result.chats.length,
-        users: notModified ? 0 : result.users.length,
-        mediaKinds: mediaKinds(result),
+        ...event,
       })}\n`)
     }
     process.stdout.write(`${JSON.stringify({
