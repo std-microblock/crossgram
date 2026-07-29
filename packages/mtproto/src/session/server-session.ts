@@ -640,11 +640,15 @@ export class ServerSession {
 
     switch (objId) {
       case 'mt_ping':
-        this._handlePing(obj as unknown as mtp.RawMt_ping, clientSessionId)
+        this._handlePing(msgId, obj as unknown as mtp.RawMt_ping, clientSessionId)
         break
 
       case 'mt_ping_delay_disconnect':
-        this._handlePingDelayDisconnect(obj as unknown as mtp.RawMt_ping_delay_disconnect, clientSessionId)
+        this._handlePingDelayDisconnect(
+          msgId,
+          obj as unknown as mtp.RawMt_ping_delay_disconnect,
+          clientSessionId,
+        )
         break
 
       case 'mt_msgs_ack':
@@ -754,20 +758,24 @@ export class ServerSession {
 
   // ── Service message handlers ──
 
-  private _handlePing(ping: mtp.RawMt_ping, clientSessionId: Long): void {
+  private _handlePing(msgId: Long, ping: mtp.RawMt_ping, clientSessionId: Long): void {
     const pong: mtp.RawMt_pong = {
       _: 'mt_pong',
-      msgId: Long.ZERO,
+      msgId,
       pingId: ping.pingId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, pong)
     this._sendEncryptedMessage(serialized, true, pong, clientSessionId)
   }
 
-  private _handlePingDelayDisconnect(ping: mtp.RawMt_ping_delay_disconnect, clientSessionId: Long): void {
+  private _handlePingDelayDisconnect(
+    msgId: Long,
+    ping: mtp.RawMt_ping_delay_disconnect,
+    clientSessionId: Long,
+  ): void {
     const pong: mtp.RawMt_pong = {
       _: 'mt_pong',
-      msgId: Long.ZERO,
+      msgId,
       pingId: ping.pingId,
     }
     const serialized = TlBinaryWriter.serializeObject(this._writerMap, pong)
