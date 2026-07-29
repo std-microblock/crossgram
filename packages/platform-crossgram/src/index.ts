@@ -1,4 +1,5 @@
 import type { Context, Logger } from 'cordis'
+import type { Database } from '@cordisjs/plugin-database'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import z from 'schemastery'
@@ -12,6 +13,7 @@ import type {
 } from '@mtproto-relay/bridge'
 import { messagePartText, resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
+import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
@@ -96,6 +98,7 @@ class QQNTEventHandlingError extends Error {
 export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'qqnt')
   const stickerProviderId = `${id}:stickers`
+  defineQQNTEventCheckpointModel(ctx)
   defineQQMediaCacheModel(ctx)
   const mediaCache = new QQMediaCache({
     path: config.mediaCachePath ?? resolve(process.cwd(), 'data', 'qqnt-media-cache', id),
@@ -105,7 +108,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     database: ctx.database,
   })
   const logger = ctx.logger('platform-qqnt')
-  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger)
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger, ctx.database)
   ctx.imPlatform.register(platform, id)
   ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId, mediaCache, logger), stickerProviderId)
 }
@@ -161,6 +164,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     private readonly stickerProviderId = 'qqnt:stickers',
     private readonly mediaCache?: QQMediaCache,
     private readonly logger?: Logger,
+    private readonly database?: Database,
   ) {
     this.client = new QQNTClient(options)
     this.memberName = options.memberName ?? 'groupAlias'
@@ -250,6 +254,17 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     signal: AbortSignal,
   ): Promise<void> {
     let lastEventId: string | undefined
+    try {
+      const [checkpoint] = await this.database?.get('mtproto_qqnt_event_checkpoint', {
+        platformSessionId,
+      }) ?? []
+      lastEventId = checkpoint?.lastEventId
+    } catch (error) {
+      this.logger?.warn(
+        'Failed to load QQNT event checkpoint session=%s error=%s; starting without a cursor',
+        platformSessionId, formatError(error),
+      )
+    }
     let attempt = 0
     let failedEventId: string | undefined
     let consecutiveEventFailures = 0
@@ -307,7 +322,19 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           }
         }, signal, {
           lastEventId,
-          onEventId: (eventId) => { lastEventId = eventId },
+          onEventId: async (eventId) => {
+            // The client invokes this only after the event handler commits.
+            // Persist before advancing memory so a crash or reconnect can
+            // replay the event, but can never skip an uncommitted event.
+            if (this.database) {
+              await this.database.upsert('mtproto_qqnt_event_checkpoint', [{
+                platformSessionId,
+                lastEventId: eventId,
+                updatedAt: new Date(),
+              }])
+            }
+            lastEventId = eventId
+          },
         })
         if (!signal.aborted) this.logger?.warn(
           'WebSocket stream ended session=%s attempt=%d lastEventId=%s; reconnecting',
