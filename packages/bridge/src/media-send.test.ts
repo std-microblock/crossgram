@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -12,6 +12,7 @@ import Long from 'long'
 import { DialogRpc } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
+import { IMMessageSendRejectedError } from './platform.js'
 import type {
   IMConversation, IMMedia, IMMessage, IMMessageInput, IMPlatform, IMTransferOptions, PlatformSession,
 } from './platform.js'
@@ -324,6 +325,33 @@ describe('media send streaming', () => {
     await expect(rpc.sendMedia(request)).resolves.toMatchObject({ _: 'updates' })
     expect(consumed).toHaveLength(2)
     await expect(uploads.open(session.platformSessionId, '88', 1)).rejects.toThrow('part is missing')
+  })
+
+  it('maps permanent media send rejection without downgrading transient platform failures', async () => {
+    const { rpc, platform, uploads, peerId } = await createHarness()
+    const send = vi.spyOn(platform, 'sendMessage')
+      .mockRejectedValueOnce(new IMMessageSendRejectedError(
+        'permission-denied',
+        'QQNT bridge 403: QQ message send rejected',
+      ))
+      .mockRejectedValueOnce(new Error('QQNT bridge 500: temporary media send failure'))
+    await uploads.savePart(session.platformSessionId, '188', 0, new TextEncoder().encode('keep-me'))
+    const request = (randomId: number): tl.messages.RawSendMediaRequest => ({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(randomId), message: '',
+      media: {
+        _: 'inputMediaUploadedDocument', file: inputFile(188, 1, 'retry.txt'),
+        mimeType: 'text/plain', attributes: [],
+      },
+    })
+
+    await expect(rpc.sendMedia(request(18_801)))
+      .rejects.toMatchObject({ code: 403, text: 'CHAT_WRITE_FORBIDDEN' })
+    await expect(rpc.sendMedia(request(18_802)))
+      .rejects.toThrow('QQNT bridge 500: temporary media send failure')
+    expect(new TextDecoder().decode(await collectSource(
+      (await uploads.open(session.platformSessionId, '188', 1)).source,
+    ))).toBe('keep-me')
+    expect(send).toHaveBeenCalledTimes(2)
   })
 
   it('stages photos with the configured media DC and sends them by reference', async () => {

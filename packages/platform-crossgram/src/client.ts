@@ -25,6 +25,14 @@ export interface DirectUrl {
   expiresAt: number
 }
 
+/** The QQNT message endpoint permanently rejected this exact send. */
+export class QQNTMessageSendRejectedError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'QQNTMessageSendRejectedError'
+  }
+}
+
 export class QQNTClient {
   readonly endpoint: string
   readonly webSocketEndpoint: string
@@ -243,6 +251,9 @@ export class QQNTClient {
     const response = await this.fetchImpl(`${this.endpoint}/messages`, {
       method: 'POST', headers, body: new Uint8Array(), signal: options.signal,
     })
+    if (response.status === 403) {
+      throw new QQNTMessageSendRejectedError(await responseError(response))
+    }
     return responseJson(response)
   }
 
@@ -299,19 +310,24 @@ export class QQNTClient {
     return this.json('/reactions/catalog')
   }
 
-  getMessageReactions(conversationId: string, messageId: string): Promise<WireReactionState> {
-    return this.json(`/messages/reactions${queryString({ conversationId, messageId })}`)
+  getMessageReactions(
+    conversationId: string,
+    messageId: string,
+    messageSequence?: string,
+  ): Promise<WireReactionState> {
+    return this.json(`/messages/reactions${queryString({ conversationId, messageId, messageSequence })}`)
   }
 
   setMessageReactions(
     conversationId: string,
     messageId: string,
     reactionKeys: readonly string[],
+    messageSequence?: string,
   ): Promise<WireReactionState> {
     return this.json('/messages/reactions', false, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ conversationId, messageId, reactionKeys }),
+      body: JSON.stringify({ conversationId, messageId, messageSequence, reactionKeys }),
     })
   }
 
