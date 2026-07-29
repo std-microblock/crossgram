@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  cardUrl, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
+  IMMessageSendRejectedError, cardUrl, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
@@ -1694,11 +1694,11 @@ export class DialogRpc {
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(req.peer, req.replyTo)
     const replyToId = await this._resolveReplyToId(peerId, req.replyTo)
-    const sent = await this._platform.sendMessage(
+    const sent = await this._sendToPlatform(() => this._platform.sendMessage(
       this._session,
       { id: peerId },
       { parts: [this._inputTextPart(req.message, req.entities)], replyToId },
-    )
+    ))
     const source: IMMessage = {
       ...sent,
       conversationId: peerId,
@@ -1738,6 +1738,17 @@ export class DialogRpc {
     }
     return {
       _: 'updateShortSentMessage', out: true, id, pts, ptsCount: 1, date: source.timestamp,
+    }
+  }
+
+  private async _sendToPlatform(send: () => Promise<IMMessage>): Promise<IMMessage> {
+    try {
+      return await send()
+    } catch (error) {
+      if (error instanceof IMMessageSendRejectedError) {
+        throw new RpcError(403, 'CHAT_WRITE_FORBIDDEN')
+      }
+      throw error
     }
   }
 
@@ -1851,11 +1862,11 @@ export class DialogRpc {
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(inputPeer, replyTo)
     const replyToId = await this._resolveReplyToId(peerId, replyTo)
-    const sent = await this._platform.sendMessage(this._session, { id: peerId }, {
+    const sent = await this._sendToPlatform(() => this._platform.sendMessage(this._session, { id: peerId }, {
       ...content, replyToId,
     }, {
       onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
-    })
+    }))
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
     const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)

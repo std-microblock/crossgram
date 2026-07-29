@@ -6,6 +6,7 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
 import { ReactionRpc } from './reaction-rpc.js'
+import { IMMessageSendRejectedError } from './platform.js'
 import type {
   IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMMessageSearchQuery, IMPlatform, IMUser, PlatformSession,
 } from './platform.js'
@@ -708,6 +709,27 @@ describe('DialogRpc', () => {
     expect(sent).toHaveLength(1)
     expect(sent[0]).toMatchObject({ _: 'message', id: first.id, out: true })
     expect(() => wireRoundTrip(first)).not.toThrow()
+  })
+
+  it('maps permanent platform send rejection to a non-retryable MTProto error', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getContacts()
+    const aliceId = rpc.peerTlId('alice')
+    const send = vi.spyOn(platform, 'sendMessage')
+      .mockRejectedValueOnce(new IMMessageSendRejectedError(
+        'permission-denied',
+        'QQNT bridge 403: QQ message send rejected',
+      ))
+      .mockRejectedValueOnce(new Error('QQNT bridge 500: temporary send failure'))
+
+    await expect(rpc.sendMessage(sendMessageRequest(aliceId, {
+      randomId: Long.fromNumber(12_001),
+    }))).rejects.toMatchObject({ code: 403, text: 'CHAT_WRITE_FORBIDDEN' })
+    await expect(rpc.sendMessage(sendMessageRequest(aliceId, {
+      randomId: Long.fromNumber(12_002),
+    }))).rejects.toThrow('QQNT bridge 500: temporary send failure')
+    expect(send).toHaveBeenCalledTimes(2)
   })
 
   it('resolves a reply from the message target loaded into the active dialog', async () => {
