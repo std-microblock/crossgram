@@ -1215,6 +1215,52 @@ describe('bridge login e2e', () => {
         _: 'messageReactions',
         results: [{ reaction: { _: 'reactionEmoji', emoticon: '👍' }, count: 2 }],
       })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'contacts.block',
+        id: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+      }, 10_031)).toMatchObject({ _: 'boolTrue' })
+      const blockedPeers = await callRpc(resumed, key, resumedSid, {
+        _: 'contacts.getBlocked', offset: 0, limit: 100,
+      }, 10_032)
+      expect(blockedPeers).toMatchObject({
+        _: 'contacts.blocked',
+        blocked: [{ peerId: { _: 'peerUser', userId: alice.id } }],
+        users: [expect.objectContaining({ _: 'user', id: alice.id, firstName: 'Alice' })],
+      })
+      const blockedAliceFull = await callRpc(resumed, key, resumedSid, {
+        _: 'users.getFullUser',
+        id: { _: 'inputUser', userId: alice.id, accessHash: Long.ZERO },
+      }, 10_033)
+      expect(blockedAliceFull).toMatchObject({ fullUser: { blocked: true } })
+      const blockedAliceHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 10_034)
+      expect(blockedAliceHistory.messages).toEqual([])
+      const blockedGroupHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 10_035)
+      expect(blockedGroupHistory.messages.some((item: any) => item.message === 'Welcome to the group')).toBe(false)
+      expect(blockedGroupHistory.messages.find((item: any) => item.message === 'Group history works'))
+        .toMatchObject({ reactions: { results: [{ count: 1 }], recentReactions: [] } })
+      const blockedReactionList = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getMessageReactionsList',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        id: reactionMessage.id, offset: '', limit: 100,
+      }, 10_036)
+      expect(blockedReactionList).toMatchObject({ count: 1, reactions: [] })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'contacts.unblock',
+        id: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+      }, 10_037)).toMatchObject({ _: 'boolTrue' })
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'contacts.getBlocked', offset: 0, limit: 100,
+      }, 10_038)).toMatchObject({ _: 'contacts.blocked', blocked: [], users: [] })
       const seededDocument = groupHistory.messages[0].media.document
       const seededPhoto = groupHistory.messages[1].media.photo
       expect(seededPhoto.sizes).toMatchObject([

@@ -12,6 +12,7 @@ import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 import { UpdateManager } from './update-manager.js'
+import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 
 const session: PlatformSession = {
   platformSessionId: 'updates-session', platformId: 'updates-platform', userId: 'self',
@@ -45,6 +46,7 @@ async function createHarness(
   targetPlatform: IMPlatform = platform,
   projectSticker?: ConstructorParameters<typeof UpdateManager>[6],
   deliveredConnections = 1,
+  blockedMode?: BlockedContentMode,
 ) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
@@ -60,18 +62,19 @@ async function createHarness(
   })
   const sent: Array<{ authKeyId: Uint8Array, update: tl.TypeUpdates }> = []
   const store = new MessageStore(ctx.database, updateDeliveryRetention)
+  const blockedPeers = blockedMode ? new BlockedPeerStore(ctx.database, blockedMode) : undefined
   const manager = new UpdateManager(
     ctx.database, new PlatformRegistry([[session.platformId, targetPlatform]]), store,
     (authKeyId, update) => {
       sent.push({ authKeyId, update })
       return deliveredConnections
     },
-    1, undefined, projectSticker,
+    1, undefined, projectSticker, blockedPeers,
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { ctx, store, manager, sent }
+  return { ctx, store, manager, sent, blockedPeers }
 }
 
 function roundTrip<T>(object: T): T {
@@ -80,6 +83,33 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
+  it('deletes cached blocked content and suppresses later live messages from that user', async () => {
+    const harness = await createHarness(undefined, platform, undefined, 1, 'hide-user')
+    const conversation: IMConversation = { id: 'blocked-group', kind: 'group', title: 'Blocked Group' }
+    const first: IMMessage = {
+      id: 'blocked-first', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_000,
+      content: { parts: [{ type: 'text', text: 'hide me' }] },
+    }
+    await harness.store.ingest(session, conversation, first)
+    const alice = await harness.store.getUser(session.platformId, 'alice')
+    await harness.blockedPeers!.block(session.platformSessionId, 'alice')
+
+    await harness.manager.publishPeerBlocked(session, alice!.id, true, new Date(1_800_000_000_000))
+    expect(harness.sent).toHaveLength(2)
+    expect(harness.sent.map(({ update }) => (update as tl.RawUpdates).updates[0])).toMatchObject([
+      { _: 'updatePeerBlocked', blocked: true, peerId: { _: 'peerUser', userId: alice!.id } },
+      { _: 'updateDeleteChannelMessages', messages: expect.any(Array) },
+    ])
+
+    const second: IMMessage = {
+      ...first, id: 'blocked-second', timestamp: first.timestamp + 1,
+      content: { parts: [{ type: 'text', text: 'do not push me' }] },
+    }
+    const result = await harness.store.ingest(session, conversation, second)
+    await harness.manager.publish(session, { event: { type: 'message', conversation, message: second }, result })
+    expect(harness.sent).toHaveLength(2)
+  })
+
   it('pushes draft updates only to other auth keys of the same bridge account', async () => {
     const { ctx, manager, sent } = await createHarness()
     await ctx.database.create('mtproto_auth_binding', {
