@@ -25,6 +25,47 @@ const GZIP_PACKED_ID = 0x3072CFA1
 // Bare Vector<X> prefix (https://core.telegram.org/type/Vector%20X)
 const VECTOR_ID = 0x1CB5C415
 const MAX_GZIP_UNPACKED_SIZE = 16 * 1024 * 1024
+const MAX_SHARED_COMPLETED_MESSAGE_IDS = 16_384
+
+/**
+ * Tracks invokeAfterMsg dependencies across TCP connections that share the
+ * same permanent auth key. Telegram Android may create a request on one
+ * connection and resend it through another after reconnecting.
+ */
+export class RpcDependencyRegistry {
+  private readonly _processing = new Map<string, Promise<void>>()
+  private readonly _completed = new Map<string, true>()
+
+  register(authKeyId: Uint8Array, msgId: Long, processing: Promise<void>): void {
+    this._processing.set(this._key(authKeyId, msgId), processing)
+  }
+
+  complete(authKeyId: Uint8Array, msgId: Long, processing: Promise<void>): void {
+    const key = this._key(authKeyId, msgId)
+    if (this._processing.get(key) === processing) this._processing.delete(key)
+    this._completed.delete(key)
+    this._completed.set(key, true)
+    while (this._completed.size > MAX_SHARED_COMPLETED_MESSAGE_IDS) {
+      const oldest = this._completed.keys().next().value
+      if (oldest === undefined) break
+      this._completed.delete(oldest)
+    }
+  }
+
+  processing(authKeyId: Uint8Array, msgId: Long): Promise<void> | undefined {
+    return this._processing.get(this._key(authKeyId, msgId))
+  }
+
+  completed(authKeyId: Uint8Array, msgId: Long): boolean {
+    return this._completed.has(this._key(authKeyId, msgId))
+  }
+
+  private _key(authKeyId: Uint8Array, msgId: Long): string {
+    let scope = ''
+    for (const byte of authKeyId) scope += byte.toString(16).padStart(2, '0')
+    return `${scope}:${msgId.toString()}`
+  }
+}
 
 class ResumeStoredAuthKey extends Error {
   constructor(
@@ -129,6 +170,7 @@ export class ServerSession {
     private readonly _debug?: MtprotoDebugListener,
     private readonly _onApiLayer?: (authKeyId: Uint8Array, layer: number) => void,
     private readonly _getApiLayer?: (authKeyId: Uint8Array) => number | undefined,
+    private readonly _dependencyRegistry?: RpcDependencyRegistry,
   ) {
     this._permAuthKey = new ServerAuthKey(_crypto, _log, _readerMap)
     this._msgIdGen = new ServerMessageIdGenerator()
@@ -513,6 +555,10 @@ export class ServerSession {
       resolveCompletion = resolve
     })
     this._processingMessages.set(key, completion)
+    const dependencyAuthKeyId = this._permAuthKey.ready ? this._permAuthKey.id : null
+    if (dependencyAuthKeyId) {
+      this._dependencyRegistry?.register(dependencyAuthKeyId, msgId, completion)
+    }
 
     try {
       await this._processDecryptedMessage(msgId, seqNo, reader, clientSessionId)
@@ -521,6 +567,9 @@ export class ServerSession {
         this._processingMessages.delete(key)
       }
       this._rememberCompletedMessage(key)
+      if (dependencyAuthKeyId) {
+        this._dependencyRegistry?.complete(dependencyAuthKeyId, msgId, completion)
+      }
       resolveCompletion()
     }
   }
@@ -1038,6 +1087,7 @@ export class ServerSession {
     const waits: Promise<void>[] = []
     const missing: string[] = []
     const currentKey = msgId.toString()
+    const dependencyAuthKeyId = this._permAuthKey.ready ? this._permAuthKey.id : null
     for (const dependency of dependencies) {
       const key = dependency.toString()
       if (key === currentKey) {
@@ -1045,7 +1095,12 @@ export class ServerSession {
         continue
       }
       if (this._completedMessageIds.has(key)) continue
+      if (dependencyAuthKeyId
+        && this._dependencyRegistry?.completed(dependencyAuthKeyId, dependency)) continue
       const processing = this._processingMessages.get(key)
+        ?? (dependencyAuthKeyId
+          ? this._dependencyRegistry?.processing(dependencyAuthKeyId, dependency)
+          : undefined)
       if (processing) {
         waits.push(processing)
       } else {

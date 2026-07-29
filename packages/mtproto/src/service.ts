@@ -8,7 +8,7 @@ import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import Long from 'long'
 import { getServerReaderMap } from './rpc/server-reader-map.js'
 import { ServerConnection } from './transport/server-connection.js'
-import { ServerSession } from './session/server-session.js'
+import { RpcDependencyRegistry, ServerSession } from './session/server-session.js'
 import { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './session/auth-key-store.js'
 import { AuthKeyDataStore } from './session/auth-key-data-store.js'
 import { RpcDispatcher, type RpcHandler, type RpcResult } from './rpc/dispatcher.js'
@@ -78,6 +78,7 @@ export class Mtproto extends Service {
   private readonly _sessions = new Set<ServerSession>()
   private readonly _sockets = new Set<Socket>()
   private readonly _authApiLayers = new Map<string, number>()
+  private readonly _rpcDependencies = new RpcDependencyRegistry()
   private _connectionSeq = 0
   private _server: Server | null = null
 
@@ -192,6 +193,7 @@ export class Mtproto extends Service {
       (event) => this.onDebug.emit({ ...event, connectionId }),
       (authKeyId, layer) => { void this._rememberApiLayer(authKeyId, layer) },
       (authKeyId) => this._authApiLayers.get(bytesHex(authKeyId)),
+      this._rpcDependencies,
     )
     this._sessions.add(session)
     connection.onClose.add(() => {
