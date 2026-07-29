@@ -166,7 +166,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     private readonly logger?: Logger,
     private readonly database?: Database,
   ) {
-    this.client = new QQNTClient(options)
+    this.client = new QQNTClient({
+      ...options,
+      token: options.token ?? process.env.QQNT_BRIDGE_TOKEN,
+    })
     this.memberName = options.memberName ?? 'groupAlias'
     this.grayTipFilters = options.grayTipFilters ?? DEFAULT_GRAY_TIP_FILTERS
   }
