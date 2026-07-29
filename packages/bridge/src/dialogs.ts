@@ -1642,7 +1642,12 @@ export class DialogRpc {
       { id: peerId },
       { parts: [this._inputTextPart(req.message, req.entities)], replyToId },
     )
-    const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
+    const source: IMMessage = {
+      ...sent,
+      conversationId: peerId,
+      outgoing: true,
+      replyToId: sent.replyToId ?? replyToId,
+    }
     let persisted: Awaited<ReturnType<MessageStore['ingest']>> | undefined
     if (this._store) {
       const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
