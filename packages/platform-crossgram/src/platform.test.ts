@@ -848,8 +848,31 @@ describe('QQNTPlatform mapping', () => {
         metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
       },
       role: 'administrator',
-      permissions: { manageMembers: true, editAnyMessage: false },
+      permissions: { manageMembers: true, editAnyMessage: true },
     })
+  })
+
+  it('allows owners and administrators to edit any message but not regular members', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getMembers = vi.fn(async () => ({
+      members: [
+        { user: { id: 'owner', name: 'Owner' }, role: 'owner' as const },
+        { user: { id: 'admin', name: 'Admin' }, role: 'administrator' as const },
+        { user: { id: 'member', name: 'Member' }, role: 'member' as const },
+      ],
+      total: 3,
+    }))
+
+    const page = await platform.getConversationMembers(session, { id: 'group' })
+
+    expect(page.members.map(({ role, permissions }) => ({
+      role,
+      editAnyMessage: permissions?.editAnyMessage,
+    }))).toEqual([
+      { role: 'owner', editAnyMessage: true },
+      { role: 'administrator', editAnyMessage: true },
+      { role: 'member', editAnyMessage: false },
+    ])
   })
 
   it('can use the profile nickname instead of a conversation-scoped group alias', async () => {
