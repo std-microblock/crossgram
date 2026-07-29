@@ -42,6 +42,112 @@ async function createStore() {
 }
 
 describe('MessageStore', () => {
+  it('reads only requested dialogs in caller order with their latest stored message', async () => {
+    const { store } = await createStore()
+    const first = { id: 'first-dialog', kind: 'group' as const, title: 'First' }
+    const second = { id: 'second-dialog', kind: 'group' as const, title: 'Second' }
+    await store.ingestMany(session, first, [
+      {
+        id: 'first-old', conversationId: first.id, senderId: 'alice', timestamp: 1,
+        content: { parts: [{ type: 'text', text: 'old' }] },
+      },
+      {
+        id: 'first-latest', conversationId: first.id, senderId: 'alice', timestamp: 2,
+        content: { parts: [{ type: 'text', text: 'latest' }] },
+      },
+    ])
+    await store.ingest(session, second, {
+      id: 'second-only', conversationId: second.id, senderId: 'bob', timestamp: 3,
+      content: { parts: [{ type: 'text', text: 'second' }] },
+    })
+
+    await expect(store.readDialogs(session.platformSessionId, [second.id, 'missing', first.id]))
+      .resolves.toMatchObject([
+        { conversation: { id: second.id }, lastMessage: { id: 'second-only' } },
+        { conversation: { id: first.id }, lastMessage: { id: 'first-latest' } },
+      ])
+  })
+
+  it('hydrates a 100-dialog first screen with one bulk query per related table', async () => {
+    const { ctx, store } = await createStore()
+    const conversations = Array.from({ length: 100 }, (_, index) => ({
+      id: `bulk-dialog-${index}`, kind: 'group' as const, title: `Bulk ${index}`,
+    }))
+    await Promise.all(conversations.map((conversation, index) => store.ingest(session, conversation, {
+      id: `bulk-message-${index}`,
+      sourceIds: [`bulk-alias-${index}`],
+      conversationId: conversation.id,
+      senderId: `bulk-sender-${index % 5}`,
+      timestamp: index + 1,
+      content: { parts: [{ type: 'text', text: `message ${index}` }] },
+      reactionContext: {
+        available: [{ key: 'like', presentation: { type: 'emoji', emoticon: '👍' } }],
+        reactions: [{ key: 'like', count: 1 }],
+        maxSelected: 1,
+      },
+    })))
+    const get = vi.spyOn(ctx.database, 'get')
+    const select = vi.spyOn(ctx.database, 'select')
+
+    const startedAt = performance.now()
+    const dialogs = await Promise.race([
+      store.listDialogs(session.platformSessionId, { limit: 100 }),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('100-dialog first screen exceeded 100ms')),
+        100,
+      )),
+    ])
+    const elapsed = performance.now() - startedAt
+
+    expect(dialogs).toHaveLength(100)
+    expect(dialogs[0]).toMatchObject({
+      conversation: { id: 'bulk-dialog-99' },
+      lastMessage: {
+        id: 'bulk-message-99', sourceIds: ['bulk-message-99', 'bulk-alias-99'],
+        sender: { id: 'bulk-sender-4' },
+        reactionContext: { reactions: [{ key: 'like', count: 1 }] },
+      },
+    })
+    expect(elapsed).toBeLessThan(100)
+    const relatedTables = get.mock.calls.map(([table]) => table).filter((table) =>
+      table === 'mtproto_im_message_alias'
+      || table === 'mtproto_im_message_reaction'
+      || table === 'mtproto_im_user')
+    expect(relatedTables).toEqual([
+      'mtproto_im_message_alias',
+      'mtproto_im_message_reaction',
+      'mtproto_im_user',
+    ])
+    expect(select.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toHaveLength(0)
+
+    get.mockClear()
+    const projectedStartedAt = performance.now()
+    const projected = await Promise.race([
+      store.readProjectedByPlatformIds(session.platformSessionId, conversations.map((conversation, index) => ({
+        conversationId: conversation.id,
+        platformMessageId: `bulk-message-${index}`,
+      }))),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('100-dialog projection prefetch exceeded 100ms')),
+        100,
+      )),
+    ])
+    expect(projected).toHaveLength(100)
+    expect(projected[0]).toMatchObject({
+      source: { sourceIds: [expect.stringMatching(/^bulk-message-/), expect.stringMatching(/^bulk-alias-/)] },
+      parts: [{ ordinal: 0 }],
+    })
+    expect(performance.now() - projectedStartedAt).toBeLessThan(100)
+    const projectionTables = get.mock.calls.map(([table]) => table)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_conversation')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_message_alias')).toHaveLength(2)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_message')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_message_reaction')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_user')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_tl_message_part')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_media')).toHaveLength(1)
+  })
+
   it('persists a direct peer before projecting an outgoing first event', async () => {
     const { store } = await createStore()
     const conversation = {
