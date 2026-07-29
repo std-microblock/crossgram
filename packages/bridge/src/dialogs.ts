@@ -115,6 +115,7 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
+  private readonly _storedUsers = new Map<string, IMUser<any>>()
   private readonly _platformUsers = new Map<string, IMUser<any>>()
   private readonly _pendingPlatformUsers = new Map<string, Promise<IMUser<any> | null>>()
   /** Platform user IDs from the latest authoritative contacts snapshot. */
@@ -127,6 +128,7 @@ export class DialogRpc {
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peersHydratedStoreRevision = -1
+  private _dialogProjectionStoreRevision = -1
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
 
@@ -165,18 +167,23 @@ export class DialogRpc {
   }
 
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
+    const startedAt = performance.now()
     await this._hydrateUsers()
+    const hydrateMs = performance.now() - startedAt
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._resolveKnownInputPeer(req.offsetPeer)
+    const loadAt = performance.now()
     const loaded = await this._loadDialogPage({
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
     })
+    const loadMs = performance.now() - loadAt
     // Preserve the platform's authoritative order. Re-sorting each page makes
     // Telegram's last offset peer point into the middle of the upstream page,
     // causing the next request to overlap or repeat the first page.
     const all = loaded.dialogs.slice()
+    const usersAt = performance.now()
     await this._persistUsers(all
       .filter((dialog) => dialog.conversation.kind === 'direct')
       .map((dialog) => ({
@@ -184,7 +191,12 @@ export class DialogRpc {
         firstName: dialog.conversation.title,
         avatar: dialog.conversation.avatar,
       })))
-    await this._syncStoredUsers()
+    await this._syncStoredUsers(all.flatMap((dialog) => [
+      ...(dialog.conversation.kind === 'direct' ? [dialog.conversation.id] : []),
+      ...[dialog.lastMessage, dialog.readInboxMaxMessage]
+        .flatMap((message) => message ? messageReferencedUserIds(message) : []),
+    ]))
+    const usersMs = performance.now() - usersAt
     for (const dialog of all) {
       this._conversations.set(dialog.conversation.id, dialog.conversation)
       this._peerId(dialog.conversation.id)
@@ -196,9 +208,49 @@ export class DialogRpc {
     // absent during cold start. The no-store path still allocates Telegram IDs
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
+    const projectionsAt = performance.now()
+    if (this._store) {
+      const targets = all.flatMap((dialog) => [dialog.lastMessage, dialog.readInboxMaxMessage]
+        .flatMap((message) => message ? [{
+          conversationId: dialog.conversation.id,
+          platformMessageId: message.id,
+        }] : []))
+      const revisionBefore = this._store.revision
+      const cached = revisionBefore === this._dialogProjectionStoreRevision
+        && targets.every((target) => this._historyCache.get(target.conversationId)?.some((item) =>
+          item.source.id === target.platformMessageId
+          || item.source.sourceIds?.includes(target.platformMessageId)))
+      if (!cached) {
+        const projected = await this._store.readProjectedByPlatformIds(
+          this._session.platformSessionId,
+          targets,
+        )
+        for (const stored of projected) {
+          const additions = stored.parts.map((part): MaterializedMessage => ({
+            source: stored.source,
+            tlId: part.tlMessageId,
+            ordinal: part.ordinal,
+            groupedId: part.groupedId ?? undefined,
+            media: stored.media.find((entry) => entry.id === part.mediaId),
+          }))
+          const existing = this._historyCache.get(stored.source.conversationId) ?? []
+          const additionIds = new Set(additions.map((item) => item.tlId))
+          this._historyCache.set(stored.source.conversationId, [
+            ...existing.filter((item) => !additionIds.has(item.tlId)),
+            ...additions,
+          ].sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId))
+          for (const item of additions) this._rememberMessage(item)
+        }
+        const revisionAfter = this._store.revision
+        this._dialogProjectionStoreRevision = revisionBefore === revisionAfter ? revisionAfter : -1
+      }
+    }
+    const projectionsMs = performance.now() - projectionsAt
+    const materializeAt = performance.now()
     const drafts = await this._mainDrafts()
     const materialized = await Promise.all(all.map((dialog) =>
       this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))
+    const materializeMs = performance.now() - materializeAt
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
       const offsetPeer = this._resolveKnownInputPeer(req.offsetPeer)
@@ -224,19 +276,31 @@ export class DialogRpc {
       chats: uniqueChats(page.flatMap((item) => item.chat ? [item.chat] : [])),
       users: uniqueUsers(page.flatMap((item) => item.users)),
     }
+    const totalMs = performance.now() - startedAt
+    this._onTrace?.(
+      `${totalMs > 100 ? 'slow ' : ''}dialogs rpc profile loaded=%d returned=%d hydrateMs=%d loadMs=%d usersMs=%d projectionsMs=%d materializeMs=%d totalMs=%d`,
+      all.length, page.length, profileMilliseconds(hydrateMs), profileMilliseconds(loadMs),
+      profileMilliseconds(usersMs), profileMilliseconds(projectionsMs), profileMilliseconds(materializeMs),
+      profileMilliseconds(totalMs),
+    )
     return result as unknown as tl.messages.TypeDialogs
   }
 
   async getPeerDialogs(req: GetPeerDialogsRequest): Promise<tl.messages.RawPeerDialogs> {
     await this._hydratePeers()
     let loaded = [...this._dialogCache.values()]
-    const missingRequestedPeer = req.peers.some((requested) => {
-      if (requested._ === 'inputDialogPeerFolder') return false
+    const requestedPeerIds = req.peers.flatMap((requested) => {
+      if (requested._ === 'inputDialogPeerFolder') return []
       const peerId = this._resolveKnownInputPeer(requested.peer)
-      return peerId !== undefined && !this._dialogCache.has(peerId)
+      return peerId === undefined ? [] : [peerId]
     })
-    if (missingRequestedPeer) {
-      loaded = await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
+    const missingRequestedPeerIds = requestedPeerIds.filter((peerId) => !this._dialogCache.has(peerId))
+    if (missingRequestedPeerIds.length) {
+      const additions = this._store
+        ? await this._store.readDialogs(this._session.platformSessionId, missingRequestedPeerIds)
+        : await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
+      for (const dialog of additions) this._dialogCache.set(dialog.conversation.id, dialog)
+      loaded = [...this._dialogCache.values()]
     }
     const byId = new Map(loaded.map((dialog) => {
       this._peerId(dialog.conversation.id)
@@ -344,27 +408,7 @@ export class DialogRpc {
     const all = await this._loadHistory(peerId, req)
     const loadMs = performance.now() - loadAt
     const selectAt = performance.now()
-    const filtered = all.filter((item) => {
-      // A negative add_offset asks for a window which starts before (newer
-      // than) offset_id. Keep both sides of the anchor until the window has
-      // been selected below; filtering here used to make every unread-window
-      // request empty.
-      if (req.addOffset >= 0 && req.offsetId > 0 && item.tlId >= req.offsetId) return false
-      if (req.offsetDate > 0 && item.source.timestamp >= req.offsetDate) return false
-      if (req.maxId > 0 && item.tlId >= req.maxId) return false
-      if (req.minId > 0 && item.tlId <= req.minId) return false
-      return true
-    })
-    const anchorIndex = req.addOffset < 0 && req.offsetId > 0
-      ? filtered.findIndex((item) => item.tlId === req.offsetId)
-      : -1
-    const offsetIndex = anchorIndex >= 0
-      ? anchorIndex + 1
-      : req.addOffset < 0 && req.offsetId > 0
-        ? filtered.findIndex((item) => item.tlId < req.offsetId)
-        : 0
-    const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + req.addOffset)
-    const page = filtered.slice(start, start + clampLimit(req.limit))
+    const { filtered, start, page } = selectHistoryWindow(all, req)
     const selectMs = performance.now() - selectAt
     const conversation = this._conversation(peerId)
     const sendersAt = performance.now()
@@ -1178,7 +1222,14 @@ export class DialogRpc {
       this._throwMessageAction(error, 'MESSAGE_EDIT_FORBIDDEN')
     }
     const conversation = this._conversation(conversationId)
-    const source: IMMessage<any> = { ...edited!.message, conversationId, outgoing: true }
+    const source: IMMessage<any> = edited!.replacedMessageId
+      ? { ...edited!.message, conversationId, outgoing: true }
+      : {
+          ...edited!.message,
+          conversationId,
+          senderId: projected.source.senderId,
+          outgoing: projected.source.outgoing,
+        }
     const now = source.timestamp || Math.floor(Date.now() / 1000)
     if (edited!.replacedMessageId && this._onLocalEvent) {
       const replacementKey = `${edited!.replacedMessageId}:${source.id}`
@@ -2086,109 +2137,154 @@ export class DialogRpc {
       ))
       const negativeOffset = (request.addOffset ?? 0) < 0
       const readInboxMaxMessageId = this._readInboxMaxMessageIds.get(peerId)
-      const aroundUnread = negativeOffset && anchor && (
+      const isAroundUnread = () => negativeOffset && anchor && (
         anchor.source.id === readInboxMaxMessageId
         || anchor.source.sourceIds?.includes(readInboxMaxMessageId ?? '')
       )
-      const upstreamAt = performance.now()
-      if (aroundUnread) {
-        // Telegram Desktop opens an unread dialog with
-        // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
-        // perform their initial unread-aware fetch (QQNT uses firstUnreadSeq).
-        await this._data.syncHistory(peerId, { limit: fetchLimit })
-      } else if (negativeOffset && anchor) {
-        // A generic jump also needs both sides of its anchor, but must not be
-        // mistaken for QQNT's conversation-level unread anchor.
-        const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
-        await this._data.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
-        await this._data.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
-      } else {
-        await this._data.syncHistory(peerId, {
-          limit: fetchLimit,
-          before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
-        })
+      const syncHistoryWindow = async () => {
+        if (isAroundUnread()) {
+          // Telegram Desktop opens an unread dialog with
+          // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
+          // perform their initial unread-aware fetch (QQNT uses firstUnreadSeq).
+          await this._data!.syncHistory(peerId, { limit: fetchLimit })
+        } else if (negativeOffset && anchor) {
+          // A generic jump also needs both sides of its anchor, but must not be
+          // mistaken for QQNT's conversation-level unread anchor.
+          const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
+          await this._data!.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
+          await this._data!.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
+        } else {
+          await this._data!.syncHistory(peerId, {
+            limit: fetchLimit,
+            before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
+          })
+        }
       }
+      const readStoredWindow = async (loadMissingReplyTargets: boolean) => {
+        const projectAt = performance.now()
+        const projectionRevision = this._store!.revision
+        // Telegram Android paginates channels with add_offset=-1 so the anchor
+        // can overlap the next page. Read that window at the anchor instead of
+        // reading the globally newest rows; otherwise a deep anchor falls near
+        // or beyond the end of the materialized window and returns only a few
+        // newer messages. Larger negative offsets are around-message/unread
+        // windows and still need rows from both sides of the anchor.
+        const backwardPageMaxTimestamp = negativeOffset
+          && request.addOffset === -1
+          && !isAroundUnread()
+          ? anchor?.source.timestamp
+          : undefined
+        const projectionQuery = {
+          limit: fetchLimit,
+          beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
+        }
+        let projected: ProjectedMessage[]
+        if (negativeOffset && request.addOffset !== -1 && anchor) {
+          const [newer, older] = await Promise.all([
+            this._store!.readProjectedHistory(this._session.platformSessionId, peerId, {
+              ...projectionQuery,
+              minTimestamp: anchor.source.timestamp,
+              order: 'asc',
+            }),
+            this._store!.readProjectedHistory(this._session.platformSessionId, peerId, {
+              ...projectionQuery,
+              maxTimestamp: anchor.source.timestamp,
+            }),
+          ])
+          projected = uniqueProjectedMessages([...newer, ...older])
+        } else {
+          projected = await this._store!.readProjectedHistory(this._session.platformSessionId, peerId, {
+            ...projectionQuery,
+            maxTimestamp: !negativeOffset ? anchor?.source.timestamp : backwardPageMaxTimestamp,
+          })
+        }
+        const projectionReadMs = performance.now() - projectAt
+        const usersAt = performance.now()
+        await this._syncStoredUsers([
+          peerId,
+          ...projected.flatMap(({ source }) => messageReferencedUserIds(source)),
+        ])
+        const usersMs = performance.now() - usersAt
+        const materializeAt = performance.now()
+        const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
+          const item: MaterializedMessage = {
+            source,
+            tlId: part.tlMessageId,
+            ordinal: part.ordinal,
+            groupedId: part.groupedId ?? undefined,
+            media: media.find((entry) => entry.id === part.mediaId),
+          }
+          this._rememberMessage(item)
+          return item
+        })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+        const materializeMs = performance.now() - materializeAt
+        const repliesAt = performance.now()
+        await this._rememberReplyTargets(
+          history.map((item) => item.source),
+          loadMissingReplyTargets,
+        )
+        const repliesMs = performance.now() - repliesAt
+        return {
+          history, projected: projected.length, projectionRevision,
+          usersMs, projectionReadMs, materializeMs, repliesMs,
+        }
+      }
+      const cacheStoredWindow = (stored: Awaited<ReturnType<typeof readStoredWindow>>) => {
+        this._historyCache.set(peerId, stored.history)
+        if (stored.projectionRevision === this._store!.revision) {
+          this._historyCacheMetadata.set(peerId, {
+            requestKey,
+            storeRevision: stored.projectionRevision,
+            freshUntil: performance.now() + PlatformDataService.HISTORY_SYNC_FRESH_MS,
+          })
+        } else {
+          this._historyCacheMetadata.delete(peerId)
+        }
+      }
+      const traceStoredWindow = (
+        stored: Awaited<ReturnType<typeof readStoredWindow>>,
+        upstreamMs: number,
+        storeHit: boolean,
+      ) => this._onTrace?.(
+        'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s storeHit=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
+        peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(isAroundUnread()), storeHit,
+        stored.projected, stored.history.length,
+        profileMilliseconds(anchorMs), profileMilliseconds(upstreamMs), profileMilliseconds(stored.usersMs),
+        profileMilliseconds(stored.projectionReadMs), profileMilliseconds(stored.materializeMs),
+        profileMilliseconds(stored.repliesMs), profileMilliseconds(performance.now() - startedAt),
+      )
+
+      if (!anchorId || anchor) {
+        // This is a speculative local read. Missing reply targets may be part
+        // of the history page we are about to synchronize, so do not issue an
+        // extra foreground getMessage request before deciding whether the
+        // stored window is complete.
+        const stored = await readStoredWindow(false)
+        if (selectHistoryWindow(stored.history, request).page.length >= clampLimit(request.limit)) {
+          cacheStoredWindow(stored)
+          traceStoredWindow(stored, 0, true)
+          void syncHistoryWindow().catch((error) => this._onTrace?.(
+            'history background sync failed peer=%s error=%s', peerId, String(error),
+          ))
+          return stored.history
+        }
+      }
+
+      const upstreamAt = performance.now()
+      await syncHistoryWindow()
       const upstreamMs = performance.now() - upstreamAt
       if (anchorId && !anchor) {
         anchor = await this._store.findProjectedByTlId(
           this._session.platformSessionId, anchorId, peerId,
         )
       }
-      const usersAt = performance.now()
-      await this._syncStoredUsers()
-      const usersMs = performance.now() - usersAt
-      const projectAt = performance.now()
-      const projectionRevision = this._store.revision
-      // Telegram Android paginates channels with add_offset=-1 so the anchor
-      // can overlap the next page. Read that window at the anchor instead of
-      // reading the globally newest rows; otherwise a deep anchor falls near
-      // or beyond the end of the materialized window and returns only a few
-      // newer messages. Larger negative offsets are around-message/unread
-      // windows and still need rows from both sides of the anchor.
-      const backwardPageMaxTimestamp = negativeOffset
-        && request.addOffset === -1
-        && !aroundUnread
-        ? anchor?.source.timestamp
-        : undefined
-      const projectionQuery = {
-        limit: fetchLimit,
-        beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
-      }
-      let projected: ProjectedMessage[]
-      if (negativeOffset && request.addOffset !== -1 && anchor) {
-        const [newer, older] = await Promise.all([
-          this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
-            ...projectionQuery,
-            minTimestamp: anchor.source.timestamp,
-            order: 'asc',
-          }),
-          this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
-            ...projectionQuery,
-            maxTimestamp: anchor.source.timestamp,
-          }),
-        ])
-        projected = uniqueProjectedMessages([...newer, ...older])
-      } else {
-        projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
-          ...projectionQuery,
-          maxTimestamp: !negativeOffset ? anchor?.source.timestamp : backwardPageMaxTimestamp,
-        })
-      }
-      const projectionReadMs = performance.now() - projectAt
-      const materializeAt = performance.now()
-      const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
-        const item: MaterializedMessage = {
-          source,
-          tlId: part.tlMessageId,
-          ordinal: part.ordinal,
-          groupedId: part.groupedId ?? undefined,
-          media: media.find((entry) => entry.id === part.mediaId),
-        }
-        this._rememberMessage(item)
-        return item
-      })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
-      const materializeMs = performance.now() - materializeAt
-      const repliesAt = performance.now()
-      await this._rememberReplyTargets(history.map((item) => item.source))
-      const repliesMs = performance.now() - repliesAt
-      this._historyCache.set(peerId, history)
-      if (projectionRevision === this._store.revision) {
-        this._historyCacheMetadata.set(peerId, {
-          requestKey,
-          storeRevision: projectionRevision,
-          freshUntil: performance.now() + PlatformDataService.HISTORY_SYNC_FRESH_MS,
-        })
-      } else {
-        this._historyCacheMetadata.delete(peerId)
-      }
-      this._onTrace?.(
-        'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
-        peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(aroundUnread), projected.length, history.length,
-        profileMilliseconds(anchorMs), profileMilliseconds(upstreamMs), profileMilliseconds(usersMs),
-        profileMilliseconds(projectionReadMs), profileMilliseconds(materializeMs), profileMilliseconds(repliesMs),
-        profileMilliseconds(performance.now() - startedAt),
-      )
-      return history
+      // The upstream history page has already been synchronized. A reply
+      // target still missing now is genuinely outside that page and needs the
+      // targeted fallback to preserve Telegram reply headers.
+      const stored = await readStoredWindow(true)
+      cacheStoredWindow(stored)
+      traceStoredWindow(stored, upstreamMs, false)
+      return stored.history
     }
 
     const history = (await this._requireHistory(this._platform.getHistory).call(
@@ -2210,6 +2306,7 @@ export class DialogRpc {
   }
 
   private async _hydrateAllMessages(): Promise<void> {
+    await this._hydrateUsers()
     const dialogs = await this._loadDialogs()
     await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
   }
@@ -2222,8 +2319,7 @@ export class DialogRpc {
         this._selfId = stableId(`self:${this._session.platformSessionId}`)
         return
       }
-      let rows = await this._store.listUsers(this._session.platformId)
-      let self = rows.find((row) => row.platformUserId === this._session.userId)
+      let self = await this._store.getUser(this._session.platformId, this._session.userId)
       if (!self) {
         const profile = await this._platform.getUser?.(this._session, this._session.userId)
           ?? {
@@ -2234,9 +2330,8 @@ export class DialogRpc {
             metadata: this._session.metadata,
           }
         self = await this._store.upsertUser(this._session, profile)
-        rows = [...rows, self]
       }
-      for (const row of rows) this._registerUser(row)
+      this._registerUser(self)
       this._selfId = self.id
     })()
     this._userHydration = pending
@@ -2247,9 +2342,11 @@ export class DialogRpc {
     }
   }
 
-  private async _syncStoredUsers(): Promise<void> {
+  private async _syncStoredUsers(platformUserIds: readonly string[]): Promise<void> {
     if (!this._store) return
-    for (const row of await this._store.listUsers(this._session.platformId)) this._registerUser(row)
+    const missing = [...new Set(platformUserIds)].filter((id) => !this._userToTl.has(id))
+    if (!missing.length) return
+    for (const row of await this._store.readUsers(this._session.platformId, missing)) this._registerUser(row)
   }
 
   private async _persistUsers(users: readonly IMUser[]): Promise<void> {
@@ -2258,7 +2355,14 @@ export class DialogRpc {
       for (const user of users) this._userId(user.id)
       return
     }
-    for (const row of await this._store.upsertUsers(this._session, users)) this._registerUser(row)
+    const unique = [...new Map(users.map((user) => [user.id, user])).values()]
+    const missing = unique.filter((user) => !this._storedUsers.has(user.id)).map((user) => user.id)
+    if (missing.length) {
+      for (const row of await this._store.readUsers(this._session.platformId, missing)) this._registerUser(row)
+    }
+    const changed = unique.filter((user) => storedUserNeedsUpdate(this._storedUsers.get(user.id), user))
+    if (!changed.length) return
+    for (const row of await this._store.upsertUsers(this._session, changed)) this._registerUser(row)
   }
 
   private _registerUser(row: IMUserRow): void {
@@ -2269,6 +2373,7 @@ export class DialogRpc {
     this._userToTl.set(row.platformUserId, row.id)
     this._tlToUser.set(row.id, row.platformUserId)
     const user = toUser(row)
+    this._storedUsers.set(row.platformUserId, user)
     if (row.platformUserId === this._session.userId) {
       this._selfId = row.id
       this._selfUser = user
@@ -2300,8 +2405,14 @@ export class DialogRpc {
     ) return
     if (this._peerHydration) return this._peerHydration
 
-    const pending = this._loadDialogs().then(async (dialogs) => {
-      const storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
+    const pending = (async () => {
+      let storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
+      const dialogs = !this._store || force || !storedConversations.length
+        ? await this._loadDialogs()
+        : []
+      if (this._store && dialogs.length) {
+        storedConversations = await this._store.listConversations(this._session.platformSessionId)
+      }
       const directUsers = dialogs
         .filter((dialog) => dialog.conversation.kind === 'direct')
         .map((dialog) => ({
@@ -2318,10 +2429,13 @@ export class DialogRpc {
         this._conversations.set(dialog.conversation.id, dialog.conversation)
         this._peerId(dialog.conversation.id)
       }
-      await this._syncStoredUsers()
+      await this._syncStoredUsers([
+        ...storedConversations,
+        ...dialogs.map((dialog) => dialog.conversation),
+      ].flatMap((conversation) => conversation.kind === 'direct' ? [conversation.id] : []))
       this._peersHydratedAt = Date.now()
       this._peersHydratedStoreRevision = this._store?.revision ?? -1
-    })
+    })()
     this._peerHydration = pending
     try {
       await pending
@@ -2369,7 +2483,11 @@ export class DialogRpc {
         this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
       }
     }
-    await this._syncStoredUsers()
+    await this._syncStoredUsers(page.dialogs.flatMap((dialog) => [
+      ...(dialog.conversation.kind === 'direct' ? [dialog.conversation.id] : []),
+      ...[dialog.lastMessage, dialog.readInboxMaxMessage]
+        .flatMap((message) => message ? messageReferencedUserIds(message) : []),
+    ]))
     return page
   }
 
@@ -2439,7 +2557,10 @@ export class DialogRpc {
     })
   }
 
-  private async _rememberReplyTargets(messages: readonly IMMessage[]): Promise<void> {
+  private async _rememberReplyTargets(
+    messages: readonly IMMessage[],
+    loadMissing = true,
+  ): Promise<void> {
     if (!this._store) return
     const targets = new Map<string, { conversationId: string, targetId: string }>()
     for (const message of messages) {
@@ -2474,7 +2595,7 @@ export class DialogRpc {
       let projected = await this._store!.findProjectedByPlatformId(
         this._session.platformSessionId, conversationId, targetId,
       )
-      if (!projected && this._data) {
+      if (!projected && loadMissing && this._data) {
         await this._data.getMessage(conversationId, targetId).catch(() => null)
         projected = await this._store!.findProjectedByPlatformId(
           this._session.platformSessionId, conversationId, targetId,
@@ -2651,11 +2772,22 @@ export class DialogRpc {
     if (cached) return cached
     const pending = this._pendingPeerUsers.get(peerId)
     if (pending) return pending
-    const lookup = this._getPlatformUser(peerId)
-      .then(async (upstream) => {
-        const stored = upstream ? undefined : await this._store?.getUser(this._session.platformId, peerId)
-        const user = upstream ?? (stored ? toUser(stored) : { id: peerId, firstName: fallbackName ?? peerId })
-        await this._persistUsers([user])
+    const lookup = Promise.resolve()
+      .then(async () => {
+        const local = this._storedUsers.get(peerId)
+          ?? await this._store?.getUser(this._session.platformId, peerId).then((row) => {
+            if (!row) return
+            this._registerUser(row)
+            return toUser(row)
+          })
+        // Message ingestion can create a sender row whose only name is the
+        // opaque platform ID. Treat that as a placeholder so a later profile
+        // lookup can still replace it, while complete persisted identities
+        // remain available without a network request.
+        const stored = local && !isPlaceholderUser(local) ? local : undefined
+        const upstream = stored ? undefined : await this._getPlatformUser(peerId)
+        const user = stored ?? upstream ?? local ?? { id: peerId, firstName: fallbackName ?? peerId }
+        if (upstream || !local) await this._persistUsers([user])
         return this._makePeerUser(user)
       })
       .then((user) => {
@@ -3385,6 +3517,14 @@ export function projectTlMessage(options: {
     groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
   } = options
   const conversationId = stableId(`peer:${conversation.id}`)
+  const replyTo: tl.RawMessageReplyHeader | undefined = topicId && topicId !== tlId
+    ? {
+        _: 'messageReplyHeader', forumTopic: true,
+        replyToMsgId: replyToTlId ?? topicId, replyToTopId: topicId,
+      }
+    : replyToTlId
+      ? { _: 'messageReplyHeader', replyToMsgId: replyToTlId }
+      : undefined
   if (ordinal === 0 && source.content.serviceAction) {
     return {
       _: 'messageService', out: source.outgoing || undefined, id: tlId,
@@ -3392,11 +3532,7 @@ export function projectTlMessage(options: {
       peerId: peerId ?? (conversation.kind === 'direct'
         ? { _: 'peerUser', userId: conversationId }
         : { _: 'peerChannel', channelId: conversationId }),
-      replyTo: replyToTlId ? {
-        _: 'messageReplyHeader', replyToMsgId: replyToTlId,
-      } : topicId && topicId !== tlId ? {
-        _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
-      } : undefined,
+      replyTo,
       date: source.timestamp,
       action: { _: 'messageActionCustomAction', message: source.content.serviceAction.text },
     } as tl.RawMessageService
@@ -3408,11 +3544,7 @@ export function projectTlMessage(options: {
     peerId: peerId ?? (conversation.kind === 'direct'
       ? { _: 'peerUser', userId: conversationId }
       : { _: 'peerChannel', channelId: conversationId }),
-    replyTo: replyToTlId ? {
-      _: 'messageReplyHeader', replyToMsgId: replyToTlId,
-    } : topicId && topicId !== tlId ? {
-      _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
-    } : undefined,
+    replyTo,
     date: source.timestamp,
     message: text,
     entities: ordinal === 0 ? withAutoLinkEntities(text, entities) : undefined,
@@ -3453,6 +3585,19 @@ function profileMilliseconds(value: number): number {
   return Math.round(value * 100) / 100
 }
 
+function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): boolean {
+  if (!existing || existing.firstName !== incoming.firstName) return true
+  if (incoming.lastName !== undefined && existing.lastName !== incoming.lastName) return true
+  if (incoming.username !== undefined && existing.username !== incoming.username) return true
+  if (incoming.avatar !== undefined && JSON.stringify(existing.avatar) !== JSON.stringify(incoming.avatar)) return true
+  if (incoming.metadata !== undefined) {
+    for (const [key, value] of Object.entries(incoming.metadata)) {
+      if (JSON.stringify(existing.metadata?.[key]) !== JSON.stringify(value)) return true
+    }
+  }
+  return false
+}
+
 function historyWindowKey(request: HistoryWindow): string {
   return JSON.stringify([
     request.offsetId ?? 0,
@@ -3462,6 +3607,62 @@ function historyWindowKey(request: HistoryWindow): string {
     request.maxId ?? 0,
     request.minId ?? 0,
   ])
+}
+
+function selectHistoryWindow(
+  all: readonly MaterializedMessage[],
+  request: HistoryWindow,
+): { filtered: MaterializedMessage[], start: number, page: MaterializedMessage[] } {
+  const offsetId = request.offsetId ?? 0
+  const offsetDate = request.offsetDate ?? 0
+  const addOffset = request.addOffset ?? 0
+  const maxId = request.maxId ?? 0
+  const minId = request.minId ?? 0
+  const filtered = all.filter((item) => {
+    // A negative add_offset asks for a window which starts before (newer
+    // than) offset_id. Keep both sides of the anchor until the window has
+    // been selected below; filtering here used to make every unread-window
+    // request empty.
+    if (addOffset >= 0 && offsetId > 0 && item.tlId >= offsetId) return false
+    if (offsetDate > 0 && item.source.timestamp >= offsetDate) return false
+    if (maxId > 0 && item.tlId >= maxId) return false
+    if (minId > 0 && item.tlId <= minId) return false
+    return true
+  })
+  const anchorIndex = addOffset < 0 && offsetId > 0
+    ? filtered.findIndex((item) => item.tlId === offsetId)
+    : -1
+  const offsetIndex = anchorIndex >= 0
+    ? anchorIndex + 1
+    : addOffset < 0 && offsetId > 0
+      ? filtered.findIndex((item) => item.tlId < offsetId)
+      : 0
+  const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + addOffset)
+  return { filtered, start, page: filtered.slice(start, start + clampLimit(request.limit)) }
+}
+
+function messageReferencedUserIds(message: IMMessage): string[] {
+  const ids = new Set([message.senderId])
+  if (message.sender) ids.add(message.sender.id)
+  for (const part of message.content.parts) {
+    if (part.type !== 'text') continue
+    for (const entity of part.entities ?? []) {
+      if (entity.type === 'mention') ids.add(entity.userId)
+    }
+  }
+  for (const reaction of message.reactionContext?.reactions ?? []) {
+    for (const actor of reaction.recentActors ?? []) ids.add(actor.userId)
+  }
+  return [...ids]
+}
+
+function isPlaceholderUser(user: IMUser<any>): boolean {
+  return user.firstName === user.id
+    && !user.lastName
+    && !user.username
+    && !user.avatar
+    && !user.about
+    && Object.keys(user.metadata ?? {}).length === 0
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {
