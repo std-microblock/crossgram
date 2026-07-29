@@ -126,7 +126,6 @@ export class DialogRpc {
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peersHydratedStoreRevision = -1
-  private _storedUsersHydrated = false
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
 
@@ -184,7 +183,11 @@ export class DialogRpc {
         firstName: dialog.conversation.title,
         avatar: dialog.conversation.avatar,
       })))
-    await this._syncStoredUsers()
+    await this._syncStoredUsers(all.flatMap((dialog) => [
+      ...(dialog.conversation.kind === 'direct' ? [dialog.conversation.id] : []),
+      ...[dialog.lastMessage, dialog.readInboxMaxMessage]
+        .flatMap((message) => message ? messageReferencedUserIds(message) : []),
+    ]))
     for (const dialog of all) {
       this._conversations.set(dialog.conversation.id, dialog.conversation)
       this._peerId(dialog.conversation.id)
@@ -2107,7 +2110,10 @@ export class DialogRpc {
         }
         const projectionReadMs = performance.now() - projectAt
         const usersAt = performance.now()
-        await this._syncStoredUsers(projected.flatMap(({ source }) => messageReferencedUserIds(source)))
+        await this._syncStoredUsers([
+          peerId,
+          ...projected.flatMap(({ source }) => messageReferencedUserIds(source)),
+        ])
         const usersMs = performance.now() - usersAt
         const materializeAt = performance.now()
         const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
@@ -2212,8 +2218,7 @@ export class DialogRpc {
         this._selfId = stableId(`self:${this._session.platformSessionId}`)
         return
       }
-      let rows = await this._store.listUsers(this._session.platformId)
-      let self = rows.find((row) => row.platformUserId === this._session.userId)
+      let self = await this._store.getUser(this._session.platformId, this._session.userId)
       if (!self) {
         const profile = await this._platform.getUser?.(this._session, this._session.userId)
           ?? {
@@ -2224,10 +2229,8 @@ export class DialogRpc {
             metadata: this._session.metadata,
           }
         self = await this._store.upsertUser(this._session, profile)
-        rows = [...rows, self]
       }
-      for (const row of rows) this._registerUser(row)
-      this._storedUsersHydrated = true
+      this._registerUser(self)
       this._selfId = self.id
     })()
     this._userHydration = pending
@@ -2238,17 +2241,11 @@ export class DialogRpc {
     }
   }
 
-  private async _syncStoredUsers(platformUserIds?: readonly string[]): Promise<void> {
+  private async _syncStoredUsers(platformUserIds: readonly string[]): Promise<void> {
     if (!this._store) return
-    if (platformUserIds) {
-      const missing = [...new Set(platformUserIds)].filter((id) => !this._userToTl.has(id))
-      if (!missing.length) return
-      for (const row of await this._store.readUsers(this._session.platformId, missing)) this._registerUser(row)
-      return
-    }
-    if (this._storedUsersHydrated) return
-    for (const row of await this._store.listUsers(this._session.platformId)) this._registerUser(row)
-    this._storedUsersHydrated = true
+    const missing = [...new Set(platformUserIds)].filter((id) => !this._userToTl.has(id))
+    if (!missing.length) return
+    for (const row of await this._store.readUsers(this._session.platformId, missing)) this._registerUser(row)
   }
 
   private async _persistUsers(users: readonly IMUser[]): Promise<void> {
@@ -2318,7 +2315,10 @@ export class DialogRpc {
         this._conversations.set(dialog.conversation.id, dialog.conversation)
         this._peerId(dialog.conversation.id)
       }
-      await this._syncStoredUsers()
+      await this._syncStoredUsers([
+        ...storedConversations,
+        ...dialogs.map((dialog) => dialog.conversation),
+      ].flatMap((conversation) => conversation.kind === 'direct' ? [conversation.id] : []))
       this._peersHydratedAt = Date.now()
       this._peersHydratedStoreRevision = this._store?.revision ?? -1
     })()
@@ -2369,7 +2369,11 @@ export class DialogRpc {
         this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
       }
     }
-    await this._syncStoredUsers()
+    await this._syncStoredUsers(page.dialogs.flatMap((dialog) => [
+      ...(dialog.conversation.kind === 'direct' ? [dialog.conversation.id] : []),
+      ...[dialog.lastMessage, dialog.readInboxMaxMessage]
+        .flatMap((message) => message ? messageReferencedUserIds(message) : []),
+    ]))
     return page
   }
 
