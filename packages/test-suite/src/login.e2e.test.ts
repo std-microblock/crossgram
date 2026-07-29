@@ -1246,8 +1246,10 @@ describe('bridge login e2e', () => {
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 10_035)
       expect(blockedGroupHistory.messages.some((item: any) => item.message === 'Welcome to the group')).toBe(false)
-      expect(blockedGroupHistory.messages.find((item: any) => item.message === 'Group history works'))
-        .toMatchObject({ reactions: { results: [{ count: 1 }], recentReactions: [] } })
+      const blockedGroupReactionMessage = blockedGroupHistory.messages
+        .find((item: any) => item.message === 'Group history works')
+      expect(blockedGroupReactionMessage).toMatchObject({ reactions: { results: [{ count: 1 }] } })
+      expect(blockedGroupReactionMessage.reactions.recentReactions ?? []).toEqual([])
       const blockedReactionList = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessageReactionsList',
         peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
@@ -1680,11 +1682,19 @@ describe('bridge login e2e', () => {
         _: 'messages.getScheduledHistory',
         peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO }, hash: Long.ZERO,
       }, 83)).toMatchObject({ _: 'messages.messages', messages: [] })
-      expect(await callRpc(resumed, key, resumedSid, {
+      const blockedChannelDifference = await callRpc(resumed, key, resumedSid, {
         _: 'updates.getChannelDifference', force: true,
         channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
         filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
-      }, 85)).toMatchObject({ _: 'updates.channelDifferenceEmpty', final: true })
+      }, 85)
+      expect(blockedChannelDifference).toMatchObject({
+        _: 'updates.channelDifference', final: true,
+        otherUpdates: [expect.objectContaining({
+          _: 'updateDeleteChannelMessages', channelId: generalChannel.id,
+          messages: expect.any(Array),
+        })],
+      })
+      expect(blockedChannelDifference.otherUpdates[0].messages.length).toBeGreaterThan(0)
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'channels.toggleViewForumAsMessages',
         channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
