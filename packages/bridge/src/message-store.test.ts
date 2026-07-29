@@ -42,6 +42,24 @@ async function createStore() {
 }
 
 describe('MessageStore', () => {
+  it('persists a direct peer before projecting an outgoing first event', async () => {
+    const { store } = await createStore()
+    const conversation = {
+      id: 'direct-peer-without-incoming-sender', kind: 'direct' as const, title: 'Direct peer',
+    }
+
+    await store.ingest(session, conversation, {
+      id: 'outgoing-first', conversationId: conversation.id, senderId: session.userId,
+      sender: { id: session.userId, firstName: 'Self' }, outgoing: true, timestamp: 1,
+      content: { parts: [{ type: 'text', text: 'hello first' }] },
+    })
+
+    await expect(store.getUser(session.platformId, conversation.id)).resolves.toMatchObject({
+      platformUserId: conversation.id,
+      firstName: conversation.title,
+    })
+  })
+
   it('advances its cache revision only for writes that can change projected history', async () => {
     const { store } = await createStore()
     expect(store.revision).toBe(0)
