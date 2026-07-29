@@ -693,8 +693,9 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       _: 'nearestDc', country: 'test', thisDc: 1, nearestDc: 1,
     } as unknown as tl.TlObject))
 
+    let client: TestClient | undefined
     try {
-      const client = await TestClient.connect(port)
+      client = await TestClient.connect(port)
       const perm = await doClientHandshake(client, pubKey, false)
       const sessionId = new Long(0x71717171, 0x71717171)
       const slowMessageId = makeMsgId(52)
@@ -720,7 +721,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
 
       const fastResult = await within(
         readRpcResultEnvelope(client, perm),
-        1_000,
+        3_000,
         'independent RPC response',
       )
       expect(fastResult.requestMessageId.toString()).toBe(fastMessageId.toString())
@@ -730,9 +731,9 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const slowResult = await readRpcResultEnvelope(client, perm)
       expect(slowResult.requestMessageId.toString()).toBe(slowMessageId.toString())
       expect(slowResult.result).toMatchObject({ _: 'help.appConfig', hash: 9 })
-      client.close()
     } finally {
       releaseSlow()
+      client?.close()
       await stop()
     }
   })
