@@ -29,11 +29,12 @@ fi
 cd "$install_dir"
 run_as_service "$git_command" fetch --prune origin "$branch"
 run_as_service "$git_command" merge --ff-only "origin/$branch"
-run_as_service "$corepack_command" yarn install --immutable
+run_as_service env YARN_ENABLE_SCRIPTS=true "$corepack_command" yarn install --immutable
 run_as_service "$corepack_command" yarn build
 
 if [ "${1:-}" != "--no-restart" ]; then
   "$systemctl_command" restart crossgram.service
 fi
 
-echo "Crossgram updated to $("$git_command" rev-parse --short HEAD)"
+revision=$(run_as_service "$git_command" rev-parse --short HEAD)
+echo "Crossgram updated to $revision"

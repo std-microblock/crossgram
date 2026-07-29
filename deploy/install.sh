@@ -88,11 +88,13 @@ fetch_deploy_file() {
 }
 
 install -d -m 0755 /etc/crossgram
+install -d -m 0750 -o root -g "$service_user" "$install_dir/.runtime"
 template=$(mktemp)
 trap 'rm -f "$template"' EXIT HUP INT TERM
 fetch_deploy_file app.production.yml "$template" 0600
-sed -e "s/__CROSSGRAM_PUBLIC_HOST__/$public_host/g" -e "s/__CROSSGRAM_PORT__/$port/g" "$template" > /etc/crossgram/app.yml
-chmod 0600 /etc/crossgram/app.yml
+sed -e "s/__CROSSGRAM_PUBLIC_HOST__/$public_host/g" -e "s/__CROSSGRAM_PORT__/$port/g" "$template" > "$install_dir/.runtime/app.yml"
+chown root:"$service_user" "$install_dir/.runtime/app.yml"
+chmod 0640 "$install_dir/.runtime/app.yml"
 fetch_deploy_file crossgram.service /etc/systemd/system/crossgram.service 0644
 fetch_deploy_file update.sh /usr/local/sbin/crossgram-update 0755
 fetch_deploy_file generate-client-config.mjs /usr/local/sbin/crossgram-client-config 0755
@@ -109,4 +111,4 @@ systemctl enable --now crossgram.service
 echo "Crossgram is running on $public_host:$port"
 echo "Update later with: sudo crossgram-update"
 echo "Generate client JSON with: sudo crossgram-client-config --host $public_host --port $port"
-echo "Configuration: /etc/crossgram/app.yml"
+echo "Configuration: $install_dir/.runtime/app.yml"

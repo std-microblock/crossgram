@@ -5,6 +5,10 @@ Crossgram runs as the unprivileged `crossgram` user. Its checkout lives in
 cache live under `/var/lib/crossgram/data`. The WebUI binds only to localhost;
 the MTProto listener uses port 4430 by default.
 
+The rendered runtime configuration lives at `/opt/crossgram/.runtime/app.yml`
+so Cordis can resolve workspace plugins from the checkout. Git updates do not
+touch this untracked, root-managed directory.
+
 For a public checkout, install with:
 
 ```sh
@@ -30,6 +34,8 @@ sudo crossgram-update
 The updater only accepts a fast-forward from `origin/main`, then runs
 `yarn install --immutable`, `yarn build`, and restarts the service. It never
 resets local data or overwrites the files under `/var/lib/crossgram`.
+Yarn dependency build scripts are enabled only for the immutable install so
+the locked native dependencies (including SQLite and Sharp) are usable.
 
 After the first successful start creates the RSA key, generate one JSON file
 that both Crossgram Android and Crossgram Desktop can import:
