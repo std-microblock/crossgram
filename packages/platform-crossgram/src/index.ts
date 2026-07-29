@@ -811,7 +811,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const locator = media.locator
     // These assets live in relay-side cache, are generated locally, or have
     // not received a downloadable QQ identity yet.
-    if (!locator || locator.deferred || locator.cachedPath) return
+    if (!locator || locator.deferred || locator.cachedPath || locator.previewKey) return
     const resolved = await this.client.resolveFileUrl(locator)
     return { ...resolved, supportsRange: true }
   }
