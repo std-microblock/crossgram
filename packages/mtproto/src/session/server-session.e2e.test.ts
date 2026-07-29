@@ -828,6 +828,56 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('honors a completed invokeAfterMsg dependency from a previous connection', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      const first = await TestClient.connect(port)
+      const perm = await doClientHandshake(first, pubKey, false)
+      const firstSession = new Long(0x56565656, 0x56565656)
+      const dependencyMessageId = makeMsgId(45)
+      await first.send(clientEncryptWithMessageId(
+        perm,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        perm.salt,
+        firstSession,
+        dependencyMessageId,
+      ))
+      expect(await readRpcResult(first, perm)).toMatchObject({ _: 'config', thisDc: 1 })
+      first.close()
+
+      const resumed = await TestClient.connect(port)
+      const resumedSession = new Long(0x57575757, 0x57575757)
+      const requestMessageId = dependencyMessageId.add(4)
+      const request = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'invokeAfterMsg',
+        msgId: dependencyMessageId,
+        query: {
+          _: 'invokeWithLayer', layer: CURRENT_API_LAYER,
+          query: {
+            _: 'initConnection', apiId: 1, deviceModel: 'Android', systemVersion: 'test',
+            appVersion: 'test', systemLangCode: 'en', langPack: 'android', langCode: 'en',
+            query: { _: 'help.getConfig' },
+          },
+        },
+      } as { _: string })
+      await resumed.send(clientEncryptWithMessageId(
+        perm,
+        request,
+        perm.salt,
+        resumedSession,
+        requestMessageId,
+      ))
+
+      const response = await readRpcResultEnvelope(resumed, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({ _: 'config', thisDc: 1 })
+      resumed.close()
+    } finally {
+      await stop()
+    }
+  })
+
   it('returns an explicit rpc_error for an unhandled content-related TL message', async () => {
     await crypto.initialize?.()
     const debugEvents: MtprotoDebugEvent[] = []
