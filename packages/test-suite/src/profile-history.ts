@@ -120,6 +120,9 @@ function historyResultSummary(result: tl.messages.TypeMessages): Record<string, 
 function dialogResultSummary(
   result: tl.messages.TypeDialogs | tl.messages.RawPeerDialogs,
 ): Record<string, unknown> {
+  if (result._ === 'messages.dialogsNotModified') {
+    return { result: result._, count: 0, dialogs: 0, messages: 0, chats: 0, users: 0 }
+  }
   return {
     result: result._,
     count: 'count' in result ? result.count : result.dialogs.length,
