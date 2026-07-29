@@ -5,7 +5,7 @@
   "type": "module",
   "dependencies": {
     "@cordisjs/plugin-database": "^4.0.0",
-    "@cordisjs/plugin-database-sqlite": "^5.0.0",
+    "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch",
     "@cordisjs/plugin-http": "^1.5.0",
     "@cordisjs/plugin-loader": "^1.0.0-rc.4",
     "@cordisjs/plugin-server": "^1.6.0",
