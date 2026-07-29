@@ -23,7 +23,6 @@ const requests: Record<string, tl.RpcMethod> = {
   'account.getSavedRingtones': { _: 'account.getSavedRingtones', hash: Long.ZERO },
   'account.getThemes': { _: 'account.getThemes', format: 'android', hash: Long.ZERO },
   'account.getWebBrowserSettings': { _: 'account.getWebBrowserSettings', hash: Long.ZERO },
-  'contacts.getBlocked': { _: 'contacts.getBlocked', offset: 0, limit: 100 },
   'contacts.getBirthdays': { _: 'contacts.getBirthdays' },
   'contacts.getTopPeers': {
     _: 'contacts.getTopPeers', correspondents: true, botsInline: true,
