@@ -305,7 +305,7 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 export class PlatformDataService {
   static readonly HISTORY_SYNC_FRESH_MS = 1_000
   private static readonly _dialogLoads = new WeakMap<IMPlatform, Map<string, Promise<IMDialogPage>>>()
-  private static readonly _historySyncs = new Map<string, Promise<void>>()
+  private static readonly _historySyncs = new WeakMap<IMPlatform, Map<string, Promise<void>>>()
   private readonly _freshHistorySyncs = new Map<string, number>()
 
   constructor(
@@ -422,10 +422,15 @@ export class PlatformDataService {
       if (freshUntil > now) return
       this._freshHistorySyncs.delete(key)
     }
-    const existing = PlatformDataService._historySyncs.get(key)
+    let syncs = PlatformDataService._historySyncs.get(this._platform)
+    if (!syncs) {
+      syncs = new Map()
+      PlatformDataService._historySyncs.set(this._platform, syncs)
+    }
+    const existing = syncs.get(key)
     if (existing) return existing
     const pending = this._loadHistory(conversationId, query, false).then(() => {})
-    PlatformDataService._historySyncs.set(key, pending)
+    syncs.set(key, pending)
     try {
       await pending
       this._freshHistorySyncs.delete(key)
@@ -434,8 +439,8 @@ export class PlatformDataService {
         this._freshHistorySyncs.delete(this._freshHistorySyncs.keys().next().value!)
       }
     } finally {
-      if (PlatformDataService._historySyncs.get(key) === pending) {
-        PlatformDataService._historySyncs.delete(key)
+      if (syncs.get(key) === pending) {
+        syncs.delete(key)
       }
     }
   }
