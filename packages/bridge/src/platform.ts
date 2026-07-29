@@ -333,7 +333,12 @@ export interface IMMessageTarget {
   conversationId: string
   messageId: string
   targetId: string
+  /** Stable platform-native sequence used when opaque message IDs change between account views. */
+  nativeSequence?: string
 }
+
+/** The platform permanently cannot resolve the requested stored message target. */
+export class IMMessageTargetUnavailableError extends Error {}
 
 export interface IMReadTarget {
   conversationId: string
