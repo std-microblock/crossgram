@@ -98,7 +98,7 @@ export class DialogRpc {
   private readonly _tlToMessage = new Map<number, MessageRef>()
   private _nextMessageId = 1
   private _pts = 1
-  private readonly _sentByRandomId = new Map<string, Promise<tl.RawUpdateShortSentMessage>>()
+  private readonly _sentByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
   private readonly _sentMediaByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
   private _selfId = 0
   private _selfUser?: IMUser
@@ -999,7 +999,7 @@ export class DialogRpc {
     }
   }
 
-  async sendMessage(req: SendMessageRequest): Promise<tl.RawUpdateShortSentMessage> {
+  async sendMessage(req: SendMessageRequest): Promise<tl.TypeUpdates> {
     const randomId = req.randomId.toString()
     const existing = this._sentByRandomId.get(randomId)
     if (existing) return existing
@@ -1664,7 +1664,7 @@ export class DialogRpc {
     return this._userId(platformUserId)
   }
 
-  private async _sendMessage(req: SendMessageRequest): Promise<tl.RawUpdateShortSentMessage> {
+  private async _sendMessage(req: SendMessageRequest): Promise<tl.TypeUpdates> {
     if (!this._platform.capabilities.send.text) throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
     if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
     if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
@@ -1693,8 +1693,30 @@ export class DialogRpc {
       persisted = await this._store.ingest(this._session, conversation, source)
     }
     const id = persisted?.projection[0]?.tlMessageId ?? this._messageId(peerId, source.id)
-    this._rememberMessage({ source, tlId: id, ordinal: 0 })
+    const item: MaterializedMessage = { source, tlId: id, ordinal: 0 }
+    this._rememberMessage(item)
     const pts = await this._reservePts(1, source.timestamp)
+    const target = this._conversation(peerId)
+    if (this._isTelegramChannel(target)) {
+      // Android cannot reconstruct a channel sender from updateShortSentMessage,
+      // which carries neither fromId nor peerId. Return the complete outgoing
+      // message so the client attributes it to the authorized self user.
+      const displayTarget = this._isSubchannel(target)
+        ? this._conversation(target.parentId!)
+        : target
+      return {
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', id, randomId: req.randomId },
+          {
+            _: 'updateNewChannelMessage', message: this._makeMessage(item),
+            pts, ptsCount: 1,
+          },
+        ],
+        users: [this._makeSelfUser()], chats: [this._makeChat(displayTarget)],
+        date: source.timestamp, seq: 0,
+      }
+    }
     return {
       _: 'updateShortSentMessage', out: true, id, pts, ptsCount: 1, date: source.timestamp,
     }

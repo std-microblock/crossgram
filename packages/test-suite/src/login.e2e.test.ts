@@ -1286,6 +1286,28 @@ describe('bridge login e2e', () => {
       }, 37)
       expect(sentMessage).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
 
+      const sentGroupMessage = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        message: 'Sent to group through MTProto', randomId: Long.fromNumber(987654322),
+      }, 38)
+      expect(sentGroupMessage).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(987654322) },
+          {
+            _: 'updateNewChannelMessage', ptsCount: 1,
+            message: {
+              _: 'message', out: true, message: 'Sent to group through MTProto',
+              fromId: { _: 'peerUser', userId: selfRow!.id },
+              peerId: { _: 'peerChannel', channelId: group.id },
+            },
+          },
+        ],
+        users: [{ _: 'user', id: selfRow!.id, self: true }],
+        chats: [{ _: 'channel', id: group.id }],
+      })
+
       const updatedHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
@@ -1371,7 +1393,20 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerChannel', channelId: mirrorSourceGroup.id, accessHash: Long.ZERO },
         message: 'bridge mirror check', randomId: Long.fromNumber(802),
       }, 47)
-      expect(sentToMirrorSource).toMatchObject({ _: 'updateShortSentMessage', out: true })
+      expect(sentToMirrorSource).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(802) },
+          {
+            _: 'updateNewChannelMessage',
+            message: {
+              _: 'message', out: true, message: 'bridge mirror check',
+              fromId: { _: 'peerUser', userId: selfRow!.id },
+              peerId: { _: 'peerChannel', channelId: mirrorSourceGroup.id },
+            },
+          },
+        ],
+      })
       const mirroredHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerChannel', channelId: mirrorTargetGroup.id, accessHash: Long.ZERO },
@@ -2964,8 +2999,21 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
         message: 'before edit', randomId: Long.fromNumber(801),
       }, 6)
-      expect(sent).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
-      const originalMessageId = sent.id
+      expect(sent).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(801) },
+          {
+            _: 'updateNewChannelMessage', ptsCount: 1,
+            message: {
+              _: 'message', out: true, message: 'before edit',
+              peerId: { _: 'peerChannel', channelId: chatId },
+            },
+          },
+        ],
+      })
+      const originalMessageId = sent.updates
+        .find((update: any) => update._ === 'updateMessageID').id
 
       observer = await TestClient.connect(port)
       const observerKey = await doClientHandshake(observer, pubKey)
@@ -3279,8 +3327,17 @@ describe('bridge login e2e', () => {
         expect(result).toMatchObject({ _: 'messages.affectedMessages', pts: expect.any(Number), ptsCount: 0 })
       }
       expect(sendResult).toMatchObject({
-        _: 'updateShortSentMessage',
-        id: expect.any(Number),
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromString('7000000000000001') },
+          {
+            _: 'updateNewChannelMessage',
+            message: {
+              _: 'message', out: true, message: 'sent after Android cleanup probes',
+              peerId: { _: 'peerChannel', channelId: group.id },
+            },
+          },
+        ],
         date: expect.any(Number),
       })
 

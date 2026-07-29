@@ -696,8 +696,8 @@ describe('DialogRpc', () => {
     const aliceId = stableId('peer:alice')
     const request = sendMessageRequest(aliceId)
 
-    const first = await rpc.sendMessage(request)
-    const duplicate = await rpc.sendMessage(request)
+    const first = await rpc.sendMessage(request) as tl.RawUpdateShortSentMessage
+    const duplicate = await rpc.sendMessage(request) as tl.RawUpdateShortSentMessage
     expect(duplicate).toEqual(first)
     expect(first).toMatchObject({
       _: 'updateShortSentMessage', out: true, ptsCount: 1,
@@ -738,7 +738,7 @@ describe('DialogRpc', () => {
         _: 'inputMessageEntityMentionName', offset: 6, length: 4,
         userId: { _: 'inputUser', userId: bobId, accessHash: Long.ZERO },
       }],
-    }))
+    })) as tl.RawUpdateShortSentMessage
 
     expect(platform.lastInput).toEqual({ parts: [{
       type: 'text', text: 'hello @Bob',
