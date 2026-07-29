@@ -87,6 +87,7 @@ describe('MessageStore', () => {
       },
     })))
     const get = vi.spyOn(ctx.database, 'get')
+    const select = vi.spyOn(ctx.database, 'select')
 
     const startedAt = performance.now()
     const dialogs = await Promise.race([
@@ -117,6 +118,7 @@ describe('MessageStore', () => {
       'mtproto_im_message_reaction',
       'mtproto_im_user',
     ])
+    expect(select.mock.calls.filter(([table]) => table === 'mtproto_im_message').length).toBeLessThan(5)
 
     get.mockClear()
     const projectedStartedAt = performance.now()

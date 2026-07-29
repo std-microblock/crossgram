@@ -1,3 +1,4 @@
+import { $ } from '@cordisjs/plugin-database'
 import type { Database } from '@cordisjs/plugin-database'
 import type {
   IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMUserRow,
@@ -1404,12 +1405,7 @@ export class MessageStore {
   }
 
   private async _hydrateDialogs(conversations: readonly IMConversationRow[]): Promise<IMDialog[]> {
-    const latestRows = await Promise.all(conversations.map(async (conversation) => {
-      const [latest] = await this._database.select('mtproto_im_message', {
-        conversationId: conversation.id, deleted: false,
-      }).orderBy('timestamp', 'desc').limit(1).execute()
-      return latest
-    }))
+    const latestRows = await this._latestMessagesForConversations(conversations.map((conversation) => conversation.id))
     const rows = latestRows.flatMap((row) => row ? [row] : [])
     const hydrated = await this._hydrateMessages(rows, new Map(conversations.map((conversation) => [
       conversation.id, conversation.platformConversationId,
@@ -1423,6 +1419,30 @@ export class MessageStore {
         lastMessage: latest ? hydratedById.get(latest.id) : undefined,
       }
     })
+  }
+
+  private async _latestMessagesForConversations(
+    conversationIds: readonly number[],
+  ): Promise<Array<IMMessageRow | undefined>> {
+    if (!conversationIds.length) return []
+    const latestTimestamps = this._database.select('mtproto_im_message', {
+      conversationId: { $in: [...new Set(conversationIds)] },
+      deleted: false,
+    }).groupBy('conversationId', (row) => ({ timestamp: $.max(row.timestamp) }))
+    const candidates = this._database.join({
+      message: 'mtproto_im_message',
+      latest: latestTimestamps,
+    }, ({ message, latest }) => $.and(
+      $.eq(message.conversationId, latest.conversationId),
+      $.eq(message.timestamp, latest.timestamp),
+      $.eq(message.deleted, false),
+    )).project(({ message }) => ({ id: message.id, conversationId: message.conversationId }))
+    const latestIds = await candidates.groupBy('conversationId', (row) => ({ id: $.max(row.id) })).execute()
+    const rows = latestIds.length
+      ? await this._database.get('mtproto_im_message', { id: { $in: latestIds.map((row) => row.id) } })
+      : []
+    const byConversationId = new Map(rows.map((row) => [row.conversationId, row]))
+    return conversationIds.map((conversationId) => byConversationId.get(conversationId))
   }
 
   private async _hydrateMessages(
