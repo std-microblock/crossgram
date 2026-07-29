@@ -49,6 +49,13 @@ const MAX_PENDING_UPDATES = 256
 // considers the previous five seconds). Keep a wider bounded history so a
 // dependency that completed just before its wrapper was decoded is recognized.
 const MAX_COMPLETED_MESSAGE_IDS = 4096
+// These RPCs establish the platform identity stored behind an MTProto auth key.
+// Calls received after one of them must not observe the old authorization
+// state, but unrelated API calls may execute concurrently.
+const AUTHORIZATION_TRANSITION_METHODS = new Set([
+  'auth.signIn',
+  'auth.importAuthorization',
+])
 
 /** Serialize a Long to 8 little-endian bytes (matches an 8-byte auth key id). */
 function longToBytesLE(v: Long): Uint8Array {
@@ -103,10 +110,10 @@ export class ServerSession {
   private _msgHandler: ((data: Uint8Array) => void) | null = null
   private _processingMessages = new Map<string, Promise<void>>()
   private _completedMessageIds = new Map<string, true>()
-  // RPCs mutate authorization and platform state; process them in wire order.
-  // MTProto service frames remain unqueued so pings and acknowledgements cannot
-  // be delayed behind a slow RPC.
-  private _rpcMessageProcessing: Promise<void> = Promise.resolve()
+  // Only authorization transitions form a barrier. Serializing every API RPC
+  // lets one slow history/download request stall all later calls while pings
+  // still succeed, leaving Telegram with a deceptively half-alive connection.
+  private _authorizationTransitionProcessing: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly _connection: ServerConnection,
@@ -931,21 +938,30 @@ export class ServerSession {
   // ── RPC call handling ──
 
   /**
-   * Keep stateful RPC dispatch in wire order without holding service frames
-   * (pings, acks, and transport probes) behind an unrelated request.
+   * Commit authorization transitions in wire order. Ordinary RPCs wait for the
+   * transitions that arrived before them, then execute independently; explicit
+   * invokeAfterMsg dependencies are enforced by _waitForRpcDependencies.
    */
   private async _enqueueRpcCall(
     msgId: Long,
     request: tl.RpcMethod,
     clientSessionId: Long,
   ): Promise<void> {
-    const scheduled = this._rpcMessageProcessing.then(async () => {
-      await this._handleRpcCall(msgId, request, clientSessionId)
-    })
-    this._rpcMessageProcessing = scheduled.catch((err) => {
-      this._log.error('error handling RPC message %s: %s', msgId.toString(16), err)
-    })
-    await scheduled
+    const method = unwrapRpcRequest(request).request._
+    if (AUTHORIZATION_TRANSITION_METHODS.has(method)) {
+      const scheduled = this._authorizationTransitionProcessing.then(
+        () => this._handleRpcCall(msgId, request, clientSessionId),
+      )
+      this._authorizationTransitionProcessing = scheduled.catch((err) => {
+        this._log.error('error handling RPC message %s: %s', msgId.toString(16), err)
+      })
+      await scheduled
+      return
+    }
+
+    const precedingAuthorizationTransitions = this._authorizationTransitionProcessing
+    await precedingAuthorizationTransitions
+    await this._handleRpcCall(msgId, request, clientSessionId)
   }
 
   private async _handleRpcCall(

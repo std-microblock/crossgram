@@ -47,6 +47,20 @@ const GZIP_PACKED_ID = 0x3072CFA1
 function nowSec() { return Math.floor(Date.now() / 1000) }
 function makeMsgId(sub: number) { return Long.fromBits((Date.now() % 1000 << 21) | sub, nowSec()) }
 
+async function within<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** rsaPad (replicated from mtcute — not exported) for the "new" RSA padding. */
 function rsaPad(data: Uint8Array, key: { modulus: string, exponent: string }): Uint8Array {
   const keyModulus = BigInt(`0x${key.modulus}`)
@@ -659,6 +673,66 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       client.close()
     } finally {
       releaseFirst()
+      await stop()
+    }
+  })
+
+  it('answers an independent RPC while an earlier ordinary handler is blocked', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, register, stop } = await startServer()
+    let releaseSlow!: () => void
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
+    let markSlowStarted!: () => void
+    const slowStarted = new Promise<void>((resolve) => { markSlowStarted = resolve })
+    register('help.getAppConfig', async () => {
+      markSlowStarted()
+      await slowGate
+      return { _: 'help.appConfig', hash: 9, config: { _: 'jsonObject', value: [] } }
+    })
+    register('help.getNearestDc', async () => ({
+      _: 'nearestDc', country: 'test', thisDc: 1, nearestDc: 1,
+    } as unknown as tl.TlObject))
+
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x71717171, 0x71717171)
+      const slowMessageId = makeMsgId(52)
+      const fastMessageId = slowMessageId.add(4)
+
+      await client.send(clientEncryptWithMessageId(
+        perm,
+        serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }),
+        perm.salt,
+        sessionId,
+        slowMessageId,
+      ))
+      await slowStarted
+
+      const fast = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getNearestDc' })
+      await client.send(clientEncryptWithMessageId(
+        perm,
+        fast,
+        perm.salt,
+        sessionId,
+        fastMessageId,
+      ))
+
+      const fastResult = await within(
+        readRpcResultEnvelope(client, perm),
+        1_000,
+        'independent RPC response',
+      )
+      expect(fastResult.requestMessageId.toString()).toBe(fastMessageId.toString())
+      expect(fastResult.result).toMatchObject({ _: 'nearestDc', thisDc: 1 })
+
+      releaseSlow()
+      const slowResult = await readRpcResultEnvelope(client, perm)
+      expect(slowResult.requestMessageId.toString()).toBe(slowMessageId.toString())
+      expect(slowResult.result).toMatchObject({ _: 'help.appConfig', hash: 9 })
+      client.close()
+    } finally {
+      releaseSlow()
       await stop()
     }
   })
