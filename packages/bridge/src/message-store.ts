@@ -528,6 +528,34 @@ export class MessageStore {
     }))
   }
 
+  async readDialogs(
+    platformSessionId: string,
+    platformConversationIds: readonly string[],
+  ): Promise<IMDialog[]> {
+    if (!platformConversationIds.length) return []
+    const conversations = await this._database.get('mtproto_im_conversation', {
+      platformSessionId,
+      platformConversationId: { $in: [...new Set(platformConversationIds)] },
+    })
+    const byPlatformId = new Map(conversations.map((conversation) => [
+      conversation.platformConversationId,
+      conversation,
+    ]))
+    const dialogs = await Promise.all(platformConversationIds.map(async (platformConversationId) => {
+      const conversation = byPlatformId.get(platformConversationId)
+      if (!conversation) return
+      const [latest] = await this._database.select('mtproto_im_message', {
+        conversationId: conversation.id, deleted: false,
+      }).orderBy('timestamp', 'desc').limit(1).execute()
+      return {
+        conversation: toConversation(conversation),
+        unreadCount: conversation.unreadCount,
+        lastMessage: latest ? await this._hydrateMessage(latest) : undefined,
+      }
+    }))
+    return dialogs.filter((dialog): dialog is IMDialog => dialog !== undefined)
+  }
+
   async readHistory(
     platformSessionId: string,
     platformConversationId: string,
