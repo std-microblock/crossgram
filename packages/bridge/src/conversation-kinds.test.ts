@@ -545,9 +545,16 @@ describe('conversation kinds', () => {
     const edited = await rpc.editMessage({
       _: 'messages.editMessage', peer: groupPeer, id: groupMessageId, message: 'edited via abstraction',
     }) as tl.RawUpdates
+    const originalMessage = groupHistory.messages[0] as tl.RawMessage
     expect(edited.updates).toMatchObject([{
-      _: 'updateEditChannelMessage', message: { id: groupMessageId, message: 'edited via abstraction' },
+      _: 'updateEditChannelMessage',
+      message: {
+        id: groupMessageId,
+        message: 'edited via abstraction',
+        fromId: originalMessage.fromId,
+      },
     }])
+    expect((edited.updates[0] as tl.RawUpdateEditChannelMessage).message).toHaveProperty('out', undefined)
 
     const forwarded = await rpc.forwardMessages({
       _: 'messages.forwardMessages', fromPeer: groupPeer, id: [groupMessageId],

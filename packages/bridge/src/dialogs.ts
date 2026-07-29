@@ -1221,7 +1221,14 @@ export class DialogRpc {
       this._throwMessageAction(error, 'MESSAGE_EDIT_FORBIDDEN')
     }
     const conversation = this._conversation(conversationId)
-    const source: IMMessage<any> = { ...edited!.message, conversationId, outgoing: true }
+    const source: IMMessage<any> = edited!.replacedMessageId
+      ? { ...edited!.message, conversationId, outgoing: true }
+      : {
+          ...edited!.message,
+          conversationId,
+          senderId: projected.source.senderId,
+          outgoing: projected.source.outgoing,
+        }
     const now = source.timestamp || Math.floor(Date.now() / 1000)
     if (edited!.replacedMessageId && this._onLocalEvent) {
       const replacementKey = `${edited!.replacedMessageId}:${source.id}`
