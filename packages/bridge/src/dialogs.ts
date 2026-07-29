@@ -229,13 +229,18 @@ export class DialogRpc {
   async getPeerDialogs(req: GetPeerDialogsRequest): Promise<tl.messages.RawPeerDialogs> {
     await this._hydratePeers()
     let loaded = [...this._dialogCache.values()]
-    const missingRequestedPeer = req.peers.some((requested) => {
-      if (requested._ === 'inputDialogPeerFolder') return false
+    const requestedPeerIds = req.peers.flatMap((requested) => {
+      if (requested._ === 'inputDialogPeerFolder') return []
       const peerId = this._resolveKnownInputPeer(requested.peer)
-      return peerId !== undefined && !this._dialogCache.has(peerId)
+      return peerId === undefined ? [] : [peerId]
     })
-    if (missingRequestedPeer) {
-      loaded = await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
+    const missingRequestedPeerIds = requestedPeerIds.filter((peerId) => !this._dialogCache.has(peerId))
+    if (missingRequestedPeerIds.length) {
+      const additions = this._store
+        ? await this._store.readDialogs(this._session.platformSessionId, missingRequestedPeerIds)
+        : await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
+      for (const dialog of additions) this._dialogCache.set(dialog.conversation.id, dialog)
+      loaded = [...this._dialogCache.values()]
     }
     const byId = new Map(loaded.map((dialog) => {
       this._peerId(dialog.conversation.id)
@@ -343,27 +348,7 @@ export class DialogRpc {
     const all = await this._loadHistory(peerId, req)
     const loadMs = performance.now() - loadAt
     const selectAt = performance.now()
-    const filtered = all.filter((item) => {
-      // A negative add_offset asks for a window which starts before (newer
-      // than) offset_id. Keep both sides of the anchor until the window has
-      // been selected below; filtering here used to make every unread-window
-      // request empty.
-      if (req.addOffset >= 0 && req.offsetId > 0 && item.tlId >= req.offsetId) return false
-      if (req.offsetDate > 0 && item.source.timestamp >= req.offsetDate) return false
-      if (req.maxId > 0 && item.tlId >= req.maxId) return false
-      if (req.minId > 0 && item.tlId <= req.minId) return false
-      return true
-    })
-    const anchorIndex = req.addOffset < 0 && req.offsetId > 0
-      ? filtered.findIndex((item) => item.tlId === req.offsetId)
-      : -1
-    const offsetIndex = anchorIndex >= 0
-      ? anchorIndex + 1
-      : req.addOffset < 0 && req.offsetId > 0
-        ? filtered.findIndex((item) => item.tlId < req.offsetId)
-        : 0
-    const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + req.addOffset)
-    const page = filtered.slice(start, start + clampLimit(req.limit))
+    const { filtered, start, page } = selectHistoryWindow(all, req)
     const selectMs = performance.now() - selectAt
     const conversation = this._conversation(peerId)
     const sendersAt = performance.now()
@@ -2058,109 +2043,141 @@ export class DialogRpc {
       ))
       const negativeOffset = (request.addOffset ?? 0) < 0
       const readInboxMaxMessageId = this._readInboxMaxMessageIds.get(peerId)
-      const aroundUnread = negativeOffset && anchor && (
+      const isAroundUnread = () => negativeOffset && anchor && (
         anchor.source.id === readInboxMaxMessageId
         || anchor.source.sourceIds?.includes(readInboxMaxMessageId ?? '')
       )
-      const upstreamAt = performance.now()
-      if (aroundUnread) {
-        // Telegram Desktop opens an unread dialog with
-        // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
-        // perform their initial unread-aware fetch (QQNT uses firstUnreadSeq).
-        await this._data.syncHistory(peerId, { limit: fetchLimit })
-      } else if (negativeOffset && anchor) {
-        // A generic jump also needs both sides of its anchor, but must not be
-        // mistaken for QQNT's conversation-level unread anchor.
-        const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
-        await this._data.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
-        await this._data.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
-      } else {
-        await this._data.syncHistory(peerId, {
-          limit: fetchLimit,
-          before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
-        })
+      const syncHistoryWindow = async () => {
+        if (isAroundUnread()) {
+          // Telegram Desktop opens an unread dialog with
+          // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
+          // perform their initial unread-aware fetch (QQNT uses firstUnreadSeq).
+          await this._data!.syncHistory(peerId, { limit: fetchLimit })
+        } else if (negativeOffset && anchor) {
+          // A generic jump also needs both sides of its anchor, but must not be
+          // mistaken for QQNT's conversation-level unread anchor.
+          const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
+          await this._data!.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
+          await this._data!.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
+        } else {
+          await this._data!.syncHistory(peerId, {
+            limit: fetchLimit,
+            before: anchor ? { id: anchor.source.id, timestamp: anchor.source.timestamp } : undefined,
+          })
+        }
       }
+      const readStoredWindow = async () => {
+        const usersAt = performance.now()
+        await this._syncStoredUsers()
+        const usersMs = performance.now() - usersAt
+        const projectAt = performance.now()
+        const projectionRevision = this._store!.revision
+        // Telegram Android paginates channels with add_offset=-1 so the anchor
+        // can overlap the next page. Read that window at the anchor instead of
+        // reading the globally newest rows; otherwise a deep anchor falls near
+        // or beyond the end of the materialized window and returns only a few
+        // newer messages. Larger negative offsets are around-message/unread
+        // windows and still need rows from both sides of the anchor.
+        const backwardPageMaxTimestamp = negativeOffset
+          && request.addOffset === -1
+          && !isAroundUnread()
+          ? anchor?.source.timestamp
+          : undefined
+        const projectionQuery = {
+          limit: fetchLimit,
+          beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
+        }
+        let projected: ProjectedMessage[]
+        if (negativeOffset && request.addOffset !== -1 && anchor) {
+          const [newer, older] = await Promise.all([
+            this._store!.readProjectedHistory(this._session.platformSessionId, peerId, {
+              ...projectionQuery,
+              minTimestamp: anchor.source.timestamp,
+              order: 'asc',
+            }),
+            this._store!.readProjectedHistory(this._session.platformSessionId, peerId, {
+              ...projectionQuery,
+              maxTimestamp: anchor.source.timestamp,
+            }),
+          ])
+          projected = uniqueProjectedMessages([...newer, ...older])
+        } else {
+          projected = await this._store!.readProjectedHistory(this._session.platformSessionId, peerId, {
+            ...projectionQuery,
+            maxTimestamp: !negativeOffset ? anchor?.source.timestamp : backwardPageMaxTimestamp,
+          })
+        }
+        const projectionReadMs = performance.now() - projectAt
+        const materializeAt = performance.now()
+        const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
+          const item: MaterializedMessage = {
+            source,
+            tlId: part.tlMessageId,
+            ordinal: part.ordinal,
+            groupedId: part.groupedId ?? undefined,
+            media: media.find((entry) => entry.id === part.mediaId),
+          }
+          this._rememberMessage(item)
+          return item
+        })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+        const materializeMs = performance.now() - materializeAt
+        const repliesAt = performance.now()
+        await this._rememberReplyTargets(history.map((item) => item.source))
+        const repliesMs = performance.now() - repliesAt
+        return {
+          history, projected: projected.length, projectionRevision,
+          usersMs, projectionReadMs, materializeMs, repliesMs,
+        }
+      }
+      const cacheStoredWindow = (stored: Awaited<ReturnType<typeof readStoredWindow>>) => {
+        this._historyCache.set(peerId, stored.history)
+        if (stored.projectionRevision === this._store!.revision) {
+          this._historyCacheMetadata.set(peerId, {
+            requestKey,
+            storeRevision: stored.projectionRevision,
+            freshUntil: performance.now() + PlatformDataService.HISTORY_SYNC_FRESH_MS,
+          })
+        } else {
+          this._historyCacheMetadata.delete(peerId)
+        }
+      }
+      const traceStoredWindow = (
+        stored: Awaited<ReturnType<typeof readStoredWindow>>,
+        upstreamMs: number,
+        storeHit: boolean,
+      ) => this._onTrace?.(
+        'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s storeHit=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
+        peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(isAroundUnread()), storeHit,
+        stored.projected, stored.history.length,
+        profileMilliseconds(anchorMs), profileMilliseconds(upstreamMs), profileMilliseconds(stored.usersMs),
+        profileMilliseconds(stored.projectionReadMs), profileMilliseconds(stored.materializeMs),
+        profileMilliseconds(stored.repliesMs), profileMilliseconds(performance.now() - startedAt),
+      )
+
+      if (!anchorId || anchor) {
+        const stored = await readStoredWindow()
+        if (selectHistoryWindow(stored.history, request).page.length >= clampLimit(request.limit)) {
+          cacheStoredWindow(stored)
+          traceStoredWindow(stored, 0, true)
+          void syncHistoryWindow().catch((error) => this._onTrace?.(
+            'history background sync failed peer=%s error=%s', peerId, String(error),
+          ))
+          return stored.history
+        }
+      }
+
+      const upstreamAt = performance.now()
+      await syncHistoryWindow()
       const upstreamMs = performance.now() - upstreamAt
       if (anchorId && !anchor) {
         anchor = await this._store.findProjectedByTlId(
           this._session.platformSessionId, anchorId, peerId,
         )
       }
-      const usersAt = performance.now()
-      await this._syncStoredUsers()
-      const usersMs = performance.now() - usersAt
-      const projectAt = performance.now()
-      const projectionRevision = this._store.revision
-      // Telegram Android paginates channels with add_offset=-1 so the anchor
-      // can overlap the next page. Read that window at the anchor instead of
-      // reading the globally newest rows; otherwise a deep anchor falls near
-      // or beyond the end of the materialized window and returns only a few
-      // newer messages. Larger negative offsets are around-message/unread
-      // windows and still need rows from both sides of the anchor.
-      const backwardPageMaxTimestamp = negativeOffset
-        && request.addOffset === -1
-        && !aroundUnread
-        ? anchor?.source.timestamp
-        : undefined
-      const projectionQuery = {
-        limit: fetchLimit,
-        beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
-      }
-      let projected: ProjectedMessage[]
-      if (negativeOffset && request.addOffset !== -1 && anchor) {
-        const [newer, older] = await Promise.all([
-          this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
-            ...projectionQuery,
-            minTimestamp: anchor.source.timestamp,
-            order: 'asc',
-          }),
-          this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
-            ...projectionQuery,
-            maxTimestamp: anchor.source.timestamp,
-          }),
-        ])
-        projected = uniqueProjectedMessages([...newer, ...older])
-      } else {
-        projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
-          ...projectionQuery,
-          maxTimestamp: !negativeOffset ? anchor?.source.timestamp : backwardPageMaxTimestamp,
-        })
-      }
-      const projectionReadMs = performance.now() - projectAt
-      const materializeAt = performance.now()
-      const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
-        const item: MaterializedMessage = {
-          source,
-          tlId: part.tlMessageId,
-          ordinal: part.ordinal,
-          groupedId: part.groupedId ?? undefined,
-          media: media.find((entry) => entry.id === part.mediaId),
-        }
-        this._rememberMessage(item)
-        return item
-      })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
-      const materializeMs = performance.now() - materializeAt
-      const repliesAt = performance.now()
-      await this._rememberReplyTargets(history.map((item) => item.source))
-      const repliesMs = performance.now() - repliesAt
-      this._historyCache.set(peerId, history)
-      if (projectionRevision === this._store.revision) {
-        this._historyCacheMetadata.set(peerId, {
-          requestKey,
-          storeRevision: projectionRevision,
-          freshUntil: performance.now() + PlatformDataService.HISTORY_SYNC_FRESH_MS,
-        })
-      } else {
-        this._historyCacheMetadata.delete(peerId)
-      }
-      this._onTrace?.(
-        'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
-        peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(aroundUnread), projected.length, history.length,
-        profileMilliseconds(anchorMs), profileMilliseconds(upstreamMs), profileMilliseconds(usersMs),
-        profileMilliseconds(projectionReadMs), profileMilliseconds(materializeMs), profileMilliseconds(repliesMs),
-        profileMilliseconds(performance.now() - startedAt),
-      )
-      return history
+      const stored = await readStoredWindow()
+      cacheStoredWindow(stored)
+      traceStoredWindow(stored, upstreamMs, false)
+      return stored.history
     }
 
     const history = (await this._requireHistory(this._platform.getHistory).call(
@@ -2272,7 +2289,8 @@ export class DialogRpc {
     ) return
     if (this._peerHydration) return this._peerHydration
 
-    const pending = this._loadDialogs().then(async (dialogs) => {
+    const pending = (async () => {
+      const dialogs = this._store ? [] : await this._loadDialogs()
       const storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
       const directUsers = dialogs
         .filter((dialog) => dialog.conversation.kind === 'direct')
@@ -2293,7 +2311,7 @@ export class DialogRpc {
       await this._syncStoredUsers()
       this._peersHydratedAt = Date.now()
       this._peersHydratedStoreRevision = this._store?.revision ?? -1
-    })
+    })()
     this._peerHydration = pending
     try {
       await pending
@@ -3434,6 +3452,38 @@ function historyWindowKey(request: HistoryWindow): string {
     request.maxId ?? 0,
     request.minId ?? 0,
   ])
+}
+
+function selectHistoryWindow(
+  all: readonly MaterializedMessage[],
+  request: HistoryWindow,
+): { filtered: MaterializedMessage[], start: number, page: MaterializedMessage[] } {
+  const offsetId = request.offsetId ?? 0
+  const offsetDate = request.offsetDate ?? 0
+  const addOffset = request.addOffset ?? 0
+  const maxId = request.maxId ?? 0
+  const minId = request.minId ?? 0
+  const filtered = all.filter((item) => {
+    // A negative add_offset asks for a window which starts before (newer
+    // than) offset_id. Keep both sides of the anchor until the window has
+    // been selected below; filtering here used to make every unread-window
+    // request empty.
+    if (addOffset >= 0 && offsetId > 0 && item.tlId >= offsetId) return false
+    if (offsetDate > 0 && item.source.timestamp >= offsetDate) return false
+    if (maxId > 0 && item.tlId >= maxId) return false
+    if (minId > 0 && item.tlId <= minId) return false
+    return true
+  })
+  const anchorIndex = addOffset < 0 && offsetId > 0
+    ? filtered.findIndex((item) => item.tlId === offsetId)
+    : -1
+  const offsetIndex = anchorIndex >= 0
+    ? anchorIndex + 1
+    : addOffset < 0 && offsetId > 0
+      ? filtered.findIndex((item) => item.tlId < offsetId)
+      : 0
+  const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + addOffset)
+  return { filtered, start, page: filtered.slice(start, start + clampLimit(request.limit)) }
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {

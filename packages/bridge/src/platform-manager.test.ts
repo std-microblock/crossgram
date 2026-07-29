@@ -244,6 +244,31 @@ describe('PlatformSubscriptionManager', () => {
 })
 
 describe('PlatformDataService', () => {
+  it('opens a persisted peer dialog without waiting for an upstream dialog refresh', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    platform.getDialogs = vi.fn(async () => { throw new Error('slow upstream dialogs must not be used') })
+    const conversation: IMConversation = { id: 'stored-peer-room', kind: 'group', title: 'Stored peer' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('stored-latest', conversation.id))
+    const rpc = new DialogRpc(platform, session, store)
+
+    const result = await rpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs',
+      peers: [{
+        _: 'inputDialogPeer',
+        peer: { _: 'inputPeerChannel', channelId: rpc.peerTlId(conversation.id), accessHash: Long.ONE },
+      }],
+    })
+
+    expect(result).toMatchObject({
+      dialogs: [{ peer: { _: 'peerChannel' } }],
+      messages: [{ _: 'message', message: 'message-stored-latest' }],
+    })
+    expect(platform.getDialogs).not.toHaveBeenCalled()
+  })
+
   it('materializes a deep Android channel page at its add_offset=-1 anchor', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

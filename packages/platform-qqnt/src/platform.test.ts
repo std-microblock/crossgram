@@ -1691,6 +1691,26 @@ describe('QQNTPlatform dialogs polling', () => {
     await unsubscribe()
   })
 
+  it('serves the foreground dialog list from the prepared polling cache', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('cached-first')], total: 1,
+    }))
+
+    const unsubscribe = await platform.subscribe(session, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(platform.client.getDialogs).toHaveBeenCalledOnce()
+
+    await expect(platform.getDialogs(session, { limit: 101 })).resolves.toMatchObject({
+      total: 1,
+      dialogs: [{ conversation: { id: 'cached-first' }, lastMessage: { id: 'cached-first-message' } }],
+    })
+    expect(platform.client.getDialogs).toHaveBeenCalledOnce()
+    await unsubscribe()
+  })
+
   it('forwards opaque dialog offsets to the bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))

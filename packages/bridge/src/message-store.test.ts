@@ -42,6 +42,32 @@ async function createStore() {
 }
 
 describe('MessageStore', () => {
+  it('reads only requested dialogs in caller order with their latest stored message', async () => {
+    const { store } = await createStore()
+    const first = { id: 'first-dialog', kind: 'group' as const, title: 'First' }
+    const second = { id: 'second-dialog', kind: 'group' as const, title: 'Second' }
+    await store.ingestMany(session, first, [
+      {
+        id: 'first-old', conversationId: first.id, senderId: 'alice', timestamp: 1,
+        content: { parts: [{ type: 'text', text: 'old' }] },
+      },
+      {
+        id: 'first-latest', conversationId: first.id, senderId: 'alice', timestamp: 2,
+        content: { parts: [{ type: 'text', text: 'latest' }] },
+      },
+    ])
+    await store.ingest(session, second, {
+      id: 'second-only', conversationId: second.id, senderId: 'bob', timestamp: 3,
+      content: { parts: [{ type: 'text', text: 'second' }] },
+    })
+
+    await expect(store.readDialogs(session.platformSessionId, [second.id, 'missing', first.id]))
+      .resolves.toMatchObject([
+        { conversation: { id: second.id }, lastMessage: { id: 'second-only' } },
+        { conversation: { id: first.id }, lastMessage: { id: 'first-latest' } },
+      ])
+  })
+
   it('persists a direct peer before projecting an outgoing first event', async () => {
     const { store } = await createStore()
     const conversation = {
