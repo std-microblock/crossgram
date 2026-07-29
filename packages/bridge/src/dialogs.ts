@@ -2748,18 +2748,18 @@ export class DialogRpc {
       throw new RpcError(400, 'PEER_ID_INVALID')
     }
     const tlId = inputPeerId(peer)
-    let id = peer._ === 'inputPeerUser'
-      ? this._tlToUser.get(tlId)
-      : this._tlToPeer.get(tlId)
-    if (!id && peer._ === 'inputPeerChat') {
+    if (peer._ === 'inputPeerChat') {
       const virtual = virtualConversation(this._session.platformSessionId, tlId)
       if (virtual) {
         this._conversations.set(virtual.id, virtual)
         this._peerToTl.set(virtual.id, tlId)
         this._tlToPeer.set(tlId, virtual.id)
-        id = virtual.id
+        return virtual.id
       }
     }
+    let id = peer._ === 'inputPeerUser'
+      ? this._tlToUser.get(tlId)
+      : this._tlToPeer.get(tlId)
     if (!id) throw new RpcError(400, 'PEER_ID_INVALID')
     const conversation = this._conversation(id)
     if (peer._ === 'inputPeerUser' && conversation.kind !== 'direct') throw new RpcError(400, 'PEER_ID_INVALID')
@@ -2769,16 +2769,14 @@ export class DialogRpc {
   }
 
   private _resolveChat(chatId: number): import('./platform.js').IMConversation {
-    let peerId = this._tlToPeer.get(chatId)
-    if (!peerId) {
-      const virtual = virtualConversation(this._session.platformSessionId, chatId)
-      if (virtual) {
-        this._conversations.set(virtual.id, virtual)
-        this._peerToTl.set(virtual.id, chatId)
-        this._tlToPeer.set(chatId, virtual.id)
-        peerId = virtual.id
-      }
+    const virtual = virtualConversation(this._session.platformSessionId, chatId)
+    if (virtual) {
+      this._conversations.set(virtual.id, virtual)
+      this._peerToTl.set(virtual.id, chatId)
+      this._tlToPeer.set(chatId, virtual.id)
+      return virtual
     }
+    const peerId = this._tlToPeer.get(chatId)
     const conversation = peerId ? this._conversation(peerId) : undefined
     if (!conversation || !this._isVirtualConversation(conversation)) throw new RpcError(400, 'CHAT_ID_INVALID')
     return conversation

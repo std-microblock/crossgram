@@ -1424,7 +1424,7 @@ describe('bridge login e2e', () => {
         },
       }, 59)
       expect(stagedSent).toMatchObject({
-        _: 'updatesCombined',
+        _: 'updates',
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(803) },
           {
@@ -1690,7 +1690,7 @@ describe('bridge login e2e', () => {
           title: 'Static Plugin Stickers', installedDate: undefined,
           thumbs: [expect.objectContaining({ _: 'photoSize' })],
           thumbDcId: 1,
-          thumbVersion: 5,
+          thumbVersion: 6,
           thumbDocumentId: expect.any(Long),
         },
         documents: expect.arrayContaining([expect.objectContaining({ _: 'document', mimeType: 'image/webp' })]),
@@ -2732,7 +2732,7 @@ describe('bridge login e2e', () => {
         id: sentMedia.updates[1].message.id, message: 'replacement after recall',
       }, 26)
       expect(editResult).toMatchObject({
-        _: 'updates',
+        _: 'updatesCombined', seqStart: 4, seq: 5,
         updates: [
           {
             _: 'updateDeleteChannelMessages', messages: [sentMedia.updates[1].message.id], ptsCount: 1,
