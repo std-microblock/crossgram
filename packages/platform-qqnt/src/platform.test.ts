@@ -18,6 +18,7 @@ const temporaryDirectories: string[] = []
 
 afterEach(async () => {
   vi.useRealTimers()
+  vi.unstubAllEnvs()
   sharp.cache(false)
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, {
     recursive: true, force: true, maxRetries: 20, retryDelay: 25,
@@ -25,6 +26,20 @@ afterEach(async () => {
 })
 
 describe('QQNTPlatform mapping', () => {
+  it('uses the service environment token unless configuration overrides it', async () => {
+    vi.stubEnv('QQNT_BRIDGE_TOKEN', 'service-token')
+    const authorizations: Array<string | null> = []
+    const fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      authorizations.push(new Headers(init?.headers).get('authorization'))
+      return Response.json({ ready: false, protocolVersion: 19 })
+    }) as typeof globalThis.fetch
+
+    await new QQNTPlatform({ fetch }).client.status()
+    await new QQNTPlatform({ fetch, token: 'configured-token' }).client.status()
+
+    expect(authorizations).toEqual(['Bearer service-token', 'Bearer configured-token'])
+  })
+
   it('does not wait indefinitely for reaction resources before returning history', async () => {
     const platform = new QQNTPlatform()
     let releaseCatalog!: () => void

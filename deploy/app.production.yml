@@ -1,0 +1,47 @@
+- id: timer
+  name: '@cordisjs/plugin-timer'
+- id: http
+  name: '@cordisjs/plugin-http'
+- id: mtproto
+  name: '@mtproto-relay/mtproto'
+  config:
+    port: __CROSSGRAM_PORT__
+    host: 0.0.0.0
+    rsaKeyPath: /var/lib/crossgram/data/rsa-key.json
+    authKeyStorePath: /var/lib/crossgram/data/auth-keys.json
+- id: bridge
+  name: '@mtproto-relay/bridge'
+  config:
+    serverHost: __CROSSGRAM_PUBLIC_HOST__
+    serverPort: __CROSSGRAM_PORT__
+    uploadPath: /var/lib/crossgram/data/bridge-uploads
+- id: telegram-resources
+  name: '@mtproto-relay/telegram-resources'
+  config: {}
+- id: qqnt
+  name: '@mtproto-relay/platform-qqnt'
+  config:
+    endpoint: http://127.0.0.1:18767/v1
+    webSocketEndpoint: ws://127.0.0.1:18767/v1/events/ws
+    mediaCachePath: /var/lib/crossgram/data/qqnt-media-cache
+    generatePreviews: true
+    grayTipFilters:
+      - 回应了你的
+- id: server
+  name: '@cordisjs/plugin-server'
+  config:
+    host: 127.0.0.1
+    port: 3140
+- id: database
+  name: '@cordisjs/plugin-group'
+  config:
+    - id: database-core
+      name: '@cordisjs/plugin-database'
+    - id: database-sqlite
+      name: '@cordisjs/plugin-database-sqlite'
+      config:
+        path: /var/lib/crossgram/data/cordis.db
+        journalMode: wal
+        busyTimeout: 5000
+- id: webui
+  name: '@cordisjs/plugin-webui'
