@@ -49,6 +49,34 @@ describe('AbridgedPacketCodec (server side)', () => {
       expect(decoded).toEqual(frame)
     }
   })
+
+  it('masks the quick-ack bit on short frame lengths', async () => {
+    const frame = crypto.randomBytes(74 * 4)
+    const raw = new Uint8Array(1 + frame.length)
+    raw[0] = 0x80 | 74
+    raw.set(frame, 1)
+
+    const [decoded] = await serverDecodeAll(new AbridgedPacketCodec(), raw)
+    expect(decoded).toEqual(frame)
+  })
+
+  it('accepts the quick-ack bit on a fragmented long frame marker', () => {
+    const codec = new AbridgedPacketCodec()
+    const frame = crypto.randomBytes(0x7f * 4 + 40)
+    const words = frame.length / 4
+    const raw = new Uint8Array(4 + frame.length)
+    raw[0] = 0xff
+    raw[1] = words & 0xff
+    raw[2] = (words >> 8) & 0xff
+    raw[3] = (words >> 16) & 0xff
+    raw.set(frame, 4)
+
+    const reader = Bytes.alloc(raw.length)
+    reader.writeSync(3).set(raw.subarray(0, 3))
+    expect(codec.decode(reader, false)).toBeNull()
+    reader.writeSync(raw.length - 3).set(raw.subarray(3))
+    expect(codec.decode(reader, false)).toEqual(frame)
+  })
 })
 
 describe('createServerObfuscation', () => {
