@@ -114,9 +114,17 @@ describe('ServerSession decrypted RPC queue', () => {
     }
 
     try {
-      const first = internal._enqueueRpcCall(authImportMessage, undefined as never, authImportSession)
+      const first = internal._enqueueRpcCall(
+        authImportMessage,
+        { _: 'auth.importAuthorization' } as never,
+        authImportSession,
+      )
       await startedAuthImport
-      const second = internal._enqueueRpcCall(dependentRpcMessage, undefined as never, dependentRpcSession)
+      const second = internal._enqueueRpcCall(
+        dependentRpcMessage,
+        { _: 'help.getConfig' } as never,
+        dependentRpcSession,
+      )
 
       await Promise.resolve()
       expect(dependentStarted).toBe(false)
@@ -133,6 +141,52 @@ describe('ServerSession decrypted RPC queue', () => {
     }
   })
 
+  it('does not hold an independent RPC behind a slow ordinary handler', async () => {
+    const { session } = createSession()
+    const internal = session as unknown as QueuedSession
+    const slowMessage = Long.fromInt(10)
+    const fastMessage = Long.fromInt(11)
+    let releaseSlow!: () => void
+    const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+    let markSlowStarted!: () => void
+    const slowStarted = new Promise<void>(resolve => { markSlowStarted = resolve })
+    let markFastCompleted!: () => void
+    const fastCompleted = new Promise<void>(resolve => { markFastCompleted = resolve })
+
+    internal._handleRpcCall = async (msgId) => {
+      if (msgId.eq(slowMessage)) {
+        markSlowStarted()
+        await slowGate
+      } else if (msgId.eq(fastMessage)) {
+        markFastCompleted()
+      }
+    }
+
+    try {
+      const slow = internal._enqueueRpcCall(
+        slowMessage,
+        { _: 'messages.getHistory' } as never,
+        Long.fromInt(1),
+      )
+      await slowStarted
+      const fast = internal._enqueueRpcCall(
+        fastMessage,
+        { _: 'messages.sendMessage' } as never,
+        Long.fromInt(1),
+      )
+
+      await expect(Promise.race([
+        fastCompleted.then(() => 'completed'),
+        new Promise<string>(resolve => setTimeout(() => resolve('blocked'), 100)),
+      ])).resolves.toBe('completed')
+
+      releaseSlow()
+      await Promise.all([slow, fast])
+    } finally {
+      releaseSlow()
+    }
+  })
+
   it('keeps raw MTProto service frames out of the RPC queue', async () => {
     const { session } = createSession()
     const internal = session as unknown as QueuedSession
@@ -145,7 +199,11 @@ describe('ServerSession decrypted RPC queue', () => {
       await rpcBlocked
     }
 
-    const queued = internal._enqueueRpcCall(Long.fromInt(1), undefined as never, Long.fromInt(1))
+    const queued = internal._enqueueRpcCall(
+      Long.fromInt(1),
+      { _: 'messages.getHistory' } as never,
+      Long.fromInt(1),
+    )
     await startedRpc
     const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
       _: 'mt_ping', pingId: Long.ONE,
@@ -174,8 +232,16 @@ describe('ServerSession decrypted RPC queue', () => {
       completeNext()
     }
 
-    const failed = internal._enqueueRpcCall(failedMessage, undefined as never, Long.fromInt(3))
-    const next = internal._enqueueRpcCall(Long.fromInt(4), undefined as never, Long.fromInt(4))
+    const failed = internal._enqueueRpcCall(
+      failedMessage,
+      { _: 'auth.importAuthorization' } as never,
+      Long.fromInt(3),
+    )
+    const next = internal._enqueueRpcCall(
+      Long.fromInt(4),
+      { _: 'help.getConfig' } as never,
+      Long.fromInt(4),
+    )
 
     await expect(failed).rejects.toThrow('state write failed')
     await nextCompleted
