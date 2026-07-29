@@ -333,7 +333,12 @@ export interface IMMessageTarget {
   conversationId: string
   messageId: string
   targetId: string
+  /** Stable platform-native sequence used when opaque message IDs change between account views. */
+  nativeSequence?: string
 }
+
+/** The platform permanently cannot resolve the requested stored message target. */
+export class IMMessageTargetUnavailableError extends Error {}
 
 export interface IMReadTarget {
   conversationId: string
@@ -422,6 +427,20 @@ export interface IMTransferProgress {
 export interface IMTransferOptions {
   signal?: AbortSignal
   onProgress?: (progress: IMTransferProgress) => void | Promise<void>
+}
+
+export type IMMessageSendRejectionReason = 'permission-denied'
+
+/** A platform permanently rejected a send that must not be retried unchanged. */
+export class IMMessageSendRejectedError extends Error {
+  constructor(
+    readonly reason: IMMessageSendRejectionReason,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'IMMessageSendRejectedError'
+  }
 }
 
 export interface IMDownloadOptions extends IMTransferOptions {

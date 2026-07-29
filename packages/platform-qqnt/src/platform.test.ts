@@ -3,8 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
-import type { IMMedia, PlatformSession } from '@mtproto-relay/bridge'
-import { PlatformMessageActions } from '@mtproto-relay/bridge'
+import {
+  IMMessageSendRejectedError, IMMessageTargetUnavailableError, PlatformMessageActions,
+  type IMMedia, type PlatformSession,
+} from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
 import { QQMediaCache } from './media-cache.js'
 import type { QQMediaLocator } from './protocol.js'
@@ -38,6 +40,40 @@ describe('QQNTPlatform mapping', () => {
     await new QQNTPlatform({ fetch, token: 'configured-token' }).client.status()
 
     expect(authorizations).toEqual(['Bearer service-token', 'Bearer configured-token'])
+  })
+
+  it('maps only the QQNT message endpoint permanent rejection to a platform send rejection', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        error: 'QQ message send rejected: 发送失败，请先添加对方为好友 (16)', result: 16,
+      }, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({
+        error: 'QQ transport temporarily unavailable',
+      }, { status: 500 })) as typeof globalThis.fetch
+    const platform = new QQNTPlatform({ fetch })
+    const send = () => platform.sendMessage(session, { id: 'u_non_friend' }, {
+      parts: [{ type: 'text', text: 'hello' }],
+    })
+
+    try {
+      await send()
+      throw new Error('expected permanent QQ send rejection')
+    } catch (error) {
+      expect(error).toBeInstanceOf(IMMessageSendRejectedError)
+      expect(error).toMatchObject({
+        reason: 'permission-denied',
+        message: 'QQNT bridge 403: QQ message send rejected: 发送失败，请先添加对方为好友 (16)',
+      })
+    }
+    try {
+      await send()
+      throw new Error('expected transient QQ send failure')
+    } catch (error) {
+      expect(error).not.toBeInstanceOf(IMMessageSendRejectedError)
+      expect(error).toMatchObject({
+        message: 'QQNT bridge 500: QQ transport temporarily unavailable',
+      })
+    }
   })
 
   it('does not wait indefinitely for reaction resources before returning history', async () => {
@@ -1503,14 +1539,28 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.downloadFile).not.toHaveBeenCalled()
     expect(platform.client.downloadReactionResource).toHaveBeenCalledTimes(2)
     await expect(platform.getMessageReactions(session, {
-      conversationId: '2:g', messageId: 'm', targetId: 'm',
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
     })).resolves.toMatchObject({ reactions: [{
       key: '2:128522', selected: true,
       recentActors: [{ userId: 'actor-a' }, { userId: 'actor-b' }],
     }] })
     await expect(platform.setMessageReactions(session, {
-      conversationId: '2:g', messageId: 'm', targetId: 'm',
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
     }, ['1:14'])).resolves.toMatchObject({ reactions: [{ key: '1:14', selected: true }] })
+    expect(platform.client.getMessageReactions).toHaveBeenCalledWith('2:g', 'm', '571')
+    expect(platform.client.setMessageReactions).toHaveBeenCalledWith('2:g', 'm', ['1:14'], '571')
+    platform.client.setMessageReactions = vi.fn(async () => {
+      throw new Error('QQNT bridge 500: QQ database is temporarily busy')
+    })
+    await expect(platform.setMessageReactions(session, {
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
+    }, ['1:14'])).rejects.toThrow('QQNT bridge 500: QQ database is temporarily busy')
+    platform.client.setMessageReactions = vi.fn(async () => {
+      throw new Error('QQNT bridge 404: QQ reaction target not found: m')
+    })
+    await expect(platform.setMessageReactions(session, {
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
+    }, ['1:14'])).rejects.toBeInstanceOf(IMMessageTargetUnavailableError)
     await expect(platform.getAvailableReactions(session, { conversationId: '1:u' }))
       .resolves.toEqual({ available: [], reactions: [], maxSelected: 0 })
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(1)
