@@ -2206,6 +2206,7 @@ export class DialogRpc {
   }
 
   private async _hydrateAllMessages(): Promise<void> {
+    await this._hydrateUsers()
     const dialogs = await this._loadDialogs()
     await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
   }
@@ -2297,8 +2298,13 @@ export class DialogRpc {
     if (this._peerHydration) return this._peerHydration
 
     const pending = (async () => {
-      const dialogs = this._store ? [] : await this._loadDialogs()
-      const storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
+      let storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
+      const dialogs = !this._store || force || !storedConversations.length
+        ? await this._loadDialogs()
+        : []
+      if (this._store && dialogs.length) {
+        storedConversations = await this._store.listConversations(this._session.platformSessionId)
+      }
       const directUsers = dialogs
         .filter((dialog) => dialog.conversation.kind === 'direct')
         .map((dialog) => ({
