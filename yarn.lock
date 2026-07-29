@@ -245,7 +245,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@cordisjs/plugin-database-sqlite@npm:^5.0.0, @cordisjs/plugin-database-sqlite@npm:^5.0.5":
+"@cordisjs/plugin-database-sqlite@npm:5.1.1":
   version: 5.1.1
   resolution: "@cordisjs/plugin-database-sqlite@npm:5.1.1"
   dependencies:
@@ -256,6 +256,20 @@ __metadata:
     "@cordisjs/plugin-database": ^4.1.1
     cordis: ^4.0.0-rc.7
   checksum: 10c0/eeaa009cbed49b9f4316466904c2d1abf9c7750ae7f012f44924ca77e17ba457d46e0de22648653bfd194282136c6bbed5f2d44c8c1fed2551dc854b3fee3205
+  languageName: node
+  linkType: hard
+
+"@cordisjs/plugin-database-sqlite@patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch":
+  version: 5.1.1
+  resolution: "@cordisjs/plugin-database-sqlite@patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch::version=5.1.1&hash=501919"
+  dependencies:
+    "@cordisjs/sql-utils": "npm:^6.1.1"
+    cosmokit: "npm:^1.8.1"
+    schemastery: "npm:^3.18.0"
+  peerDependencies:
+    "@cordisjs/plugin-database": ^4.1.1
+    cordis: ^4.0.0-rc.7
+  checksum: 10c0/10023b4eb84167a967c3ce5eb908c63493764bc5a8899c2c729543c54d93ec5077bfc03097feab5f5405edbc6e1deda1a40b2a87dbf5b3027519ef38c7210fa6
   languageName: node
   linkType: hard
 
@@ -1950,7 +1964,7 @@ __metadata:
   resolution: "@mtproto-relay/test-suite@workspace:packages/test-suite"
   dependencies:
     "@cordisjs/plugin-database": "npm:^4.0.0"
-    "@cordisjs/plugin-database-sqlite": "npm:^5.0.0"
+    "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch"
     "@cordisjs/plugin-http": "npm:^1.5.0"
     "@cordisjs/plugin-loader": "npm:^1.0.0-rc.4"
     "@cordisjs/plugin-server": "npm:^1.6.0"
@@ -5431,7 +5445,7 @@ __metadata:
     "@cordisjs/plugin-cli": "npm:^1.1.2"
     "@cordisjs/plugin-cli-cordis": "npm:^1.0.5"
     "@cordisjs/plugin-database": "npm:^4.0.2"
-    "@cordisjs/plugin-database-sqlite": "npm:^5.0.5"
+    "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch"
     "@cordisjs/plugin-database-webui": "npm:^0.5.0"
     "@cordisjs/plugin-env": "npm:^1.0.1"
     "@cordisjs/plugin-group": "npm:^1.0.0"

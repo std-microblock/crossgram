@@ -51,7 +51,7 @@
     "@cordisjs/plugin-cli": "^1.1.2",
     "@cordisjs/plugin-cli-cordis": "^1.0.5",
     "@cordisjs/plugin-database": "^4.0.2",
-    "@cordisjs/plugin-database-sqlite": "^5.0.5",
+    "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch",
     "@cordisjs/plugin-database-webui": "^0.5.0",
     "@cordisjs/plugin-env": "^1.0.1",
     "@cordisjs/plugin-group": "^1.0.0",

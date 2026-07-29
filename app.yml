@@ -73,6 +73,8 @@
       name: '@cordisjs/plugin-database-sqlite'
       config:
         path: ./data/cordis.db
+        journalMode: wal
+        busyTimeout: 5000
     - id: 0cb55d6c
       name: '@cordisjs/plugin-database-mysql'
       disabled: true

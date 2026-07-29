@@ -1,0 +1,62 @@
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index bd3867e5f467ffb06f3375b59d1572485b2cf1b7..7598050b21b58968eefaa249eee509e30b765975 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -49,6 +49,8 @@ export declare class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ export declare namespace SQLiteDriver {
+     interface Config {
+         path: string;
++        journalMode?: 'delete' | 'wal';
++        busyTimeout?: number;
+     }
+     const Config: z<Config>;
+ }
+diff --git a/lib/index.js b/lib/index.js
+index 450ab3d3e1fcb10350757a7dbd6d140ac226b7ae..2983aa1c975452bc7018bb687071639cfd4b6028 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -7,10 +7,18 @@ import { bufferToUuid, Driver as Driver2, Eval, executeUpdate, Field as Field2,
+ import { escapeId as escapeId2 } from "@cordisjs/sql-utils";
+ 
+ // src/locales/en-US.yml
+-var en_US_default = { path: "Database path." };
++var en_US_default = {
++  path: "Database path.",
++  journalMode: "SQLite journal mode.",
++  busyTimeout: "How long SQLite waits for a concurrent writer (milliseconds)."
++};
+ 
+ // src/locales/zh-CN.yml
+-var zh_CN_default = { path: "数据库路径。" };
++var zh_CN_default = {
++  path: "数据库路径。",
++  journalMode: "SQLite 日志模式。",
++  busyTimeout: "SQLite 等待并发写入者的时间（毫秒）。"
++};
+ 
+ // src/builder.ts
+ import { Builder, escapeId } from "@cordisjs/sql-utils";
+@@ -287,6 +295,12 @@ var SQLiteDriver = class extends Driver2 {
+     }
+     const { DatabaseSync } = await import("node:sqlite");
+     this.db = new DatabaseSync(this.path);
++    const busyTimeout = Number.isInteger(this.config.busyTimeout) ? this.config.busyTimeout : 5 * 1e3;
++    this.db.exec(`PRAGMA busy_timeout = ${busyTimeout}`);
++    if (this.path !== ":memory:") {
++      const journalMode = this.config.journalMode === "delete" ? "DELETE" : "WAL";
++      this.db.exec(`PRAGMA journal_mode = ${journalMode}`);
++    }
+     this.db.function("regexp", (pattern, str) => +new RegExp(pattern).test(str));
+     this.db.function("regexp2", (pattern, str, flags) => +new RegExp(pattern, flags).test(str));
+     this.db.function("json_array_contains", (array, value) => +JSON.parse(array).includes(JSON.parse(value)));
+@@ -583,7 +597,9 @@ var SQLiteDriver = class extends Driver2 {
+ };
+ ((SQLiteDriver2) => {
+   SQLiteDriver2.Config = z.object({
+-    path: z.string().role("path").required()
++    path: z.string().role("path").required(),
++    journalMode: z.union(["delete", "wal"]).default("wal"),
++    busyTimeout: z.number().min(0).max(60 * 1e3).default(5 * 1e3)
+   }).i18n({
+     "en-US": en_US_default,
+     "zh-CN": zh_CN_default
