@@ -878,6 +878,69 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('resumes an invokeAfterMsg wrapper whose dependency predates a server restart', async () => {
+    await crypto.initialize?.()
+    const rsaKey = generateRsaKeyPair()
+    const storePath = join(mkdtempSync(join(tmpdir(), 'mtproto-invoke-after-restart-')), 'auth-keys.json')
+    const dependencyMessageId = Long.fromBits(45, nowSec() - 10)
+    let perm!: ClientKey
+
+    const first = await startServer(undefined, {
+      rsaKey, authKeyStore: new FileAuthKeyStore(storePath),
+    })
+    try {
+      const client = await TestClient.connect(first.port)
+      perm = await doClientHandshake(client, first.pubKey, false)
+      const sessionId = new Long(0x58585858, 0x58585858)
+      await client.send(clientEncryptWithMessageId(
+        perm,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        perm.salt,
+        sessionId,
+        dependencyMessageId,
+      ))
+      expect(await readRpcResult(client, perm)).toMatchObject({ _: 'config', thisDc: 1 })
+      client.close()
+    } finally {
+      await first.stop()
+    }
+
+    const second = await startServer(undefined, {
+      rsaKey, authKeyStore: new FileAuthKeyStore(storePath),
+    })
+    try {
+      const client = await TestClient.connect(second.port)
+      const sessionId = new Long(0x59595959, 0x59595959)
+      const requestMessageId = makeMsgId(49)
+      const request = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'invokeAfterMsg',
+        msgId: dependencyMessageId,
+        query: {
+          _: 'invokeWithLayer', layer: CURRENT_API_LAYER,
+          query: {
+            _: 'initConnection', apiId: 1, deviceModel: 'Android', systemVersion: 'test',
+            appVersion: 'test', systemLangCode: 'en', langPack: 'android', langCode: 'en',
+            query: { _: 'help.getConfig' },
+          },
+        },
+      } as { _: string })
+      await client.send(clientEncryptWithMessageId(
+        perm,
+        request,
+        perm.salt,
+        sessionId,
+        requestMessageId,
+      ))
+
+      const response = await readRpcResultEnvelope(client, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({ _: 'config', thisDc: 1 })
+      client.close()
+    } finally {
+      await second.stop()
+    }
+  })
+
   it('returns an explicit rpc_error for an unhandled content-related TL message', async () => {
     await crypto.initialize?.()
     const debugEvents: MtprotoDebugEvent[] = []

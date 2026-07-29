@@ -35,6 +35,7 @@ const MAX_SHARED_COMPLETED_MESSAGE_IDS = 16_384
 export class RpcDependencyRegistry {
   private readonly _processing = new Map<string, Promise<void>>()
   private readonly _completed = new Map<string, true>()
+  private readonly _startedAtSeconds = Math.floor(Date.now() / 1000)
 
   register(authKeyId: Uint8Array, msgId: Long, processing: Promise<void>): void {
     this._processing.set(this._key(authKeyId, msgId), processing)
@@ -57,7 +58,12 @@ export class RpcDependencyRegistry {
   }
 
   completed(authKeyId: Uint8Array, msgId: Long): boolean {
-    return this._completed.has(this._key(authKeyId, msgId))
+    if (this._completed.has(this._key(authKeyId, msgId))) return true
+    // No request from before this process started can still be running here.
+    // Android keeps invokeAfterMsg wrappers in its resend queue across relay
+    // restarts, so treating those historical dependencies as satisfied lets
+    // the actual request resume without weakening checks for current ids.
+    return (msgId.high >>> 0) < this._startedAtSeconds
   }
 
   private _key(authKeyId: Uint8Array, msgId: Long): string {
