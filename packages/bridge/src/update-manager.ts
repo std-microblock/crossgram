@@ -19,6 +19,7 @@ import type {
 } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
 import { registerVirtualConversation } from './virtual-conversations.js'
+import type { BlockedPeerStore } from './blocked-peers.js'
 
 /** Converts committed platform events to account-scoped MTProto updates. */
 export class UpdateManager {
@@ -33,7 +34,109 @@ export class UpdateManager {
       session: PlatformSession,
       sticker: IMSticker,
     ) => tl.TypeMessageMedia | undefined,
+    private readonly _blockedPeers?: BlockedPeerStore,
   ) {}
+
+  async publishPeerBlocked(
+    session: PlatformSession,
+    userId: number,
+    blocked: boolean,
+    changedAt: Date,
+  ): Promise<void> {
+    await this._blockedPeers?.ensureLoaded(session.platformSessionId)
+    const state = await this._store.getUpdateState(session.platformSessionId)
+    await this._send(session.platformSessionId, {
+      _: 'updates',
+      updates: [{
+        _: 'updatePeerBlocked', blocked: blocked || undefined,
+        peerId: { _: 'peerUser', userId },
+      }],
+      users: [], chats: [], date: Math.floor(changedAt.getTime() / 1000), seq: state.seq,
+    })
+    if (!blocked || !this._blockedPeers || this._blockedPeers.mode === 'show') return
+
+    const groups = new Map<string, {
+      conversation: IMConversation
+      deletedMessageIds: number[]
+      reactionMessages: Array<{ message: IMMessage, messageIds: number[] }>
+    }>()
+    for (const projected of await this._store.listProjectedMessages(session.platformSessionId)) {
+      const hidden = await this._blockedPeers.hidesMessage(
+        session.platformSessionId, projected.source, this._store,
+      )
+      const visibleMessage = hidden
+        ? projected.source
+        : this._blockedPeers.filterMessageReactions(session.platformSessionId, projected.source)
+      if (!hidden && visibleMessage === projected.source) continue
+      let conversation = await this._store.getConversation(
+        session.platformSessionId, projected.source.conversationId,
+      ) ?? {
+        id: projected.source.conversationId,
+        kind: 'direct' as const,
+        title: projected.source.conversationId,
+      }
+      if (conversation.kind === 'channel' && conversation.parentId) {
+        conversation = await this._store.getConversation(session.platformSessionId, conversation.parentId)
+          ?? { id: conversation.parentId, kind: 'channel', title: conversation.parentId }
+      }
+      const key = conversation.kind === 'direct' ? `direct:${conversation.id}` : `channel:${conversation.id}`
+      const group = groups.get(key) ?? { conversation, deletedMessageIds: [], reactionMessages: [] }
+      const messageIds = projected.parts.map((part) => part.tlMessageId)
+      if (hidden) group.deletedMessageIds.push(...messageIds)
+      else group.reactionMessages.push({ message: visibleMessage, messageIds })
+      groups.set(key, group)
+    }
+
+    for (const [scope, group] of groups) {
+      const messageIds = [...new Set(group.deletedMessageIds)].sort((left, right) => left - right)
+      const channelId = group.conversation.kind === 'direct'
+        ? undefined
+        : stableId(`peer:${group.conversation.id}`)
+      const eventKey = [
+        session.platformSessionId, 'block-delete', userId, changedAt.getTime(), scope,
+      ].join(':')
+      const delivery = await this._store.prepareUpdateDelivery(
+        eventKey, session.platformSessionId, messageIds.length,
+        Math.floor(changedAt.getTime() / 1000), channelId,
+      )
+      const directPeerId = group.conversation.kind === 'direct'
+        ? (await this._store.getUser(session.platformId, group.conversation.id)
+          ?? await this._store.upsertUser(
+            session,
+            await this._registry.require(session.platformId).getUser?.(session, group.conversation.id)
+              ?? { id: group.conversation.id, firstName: group.conversation.title },
+          )).id
+        : undefined
+      const peer = conversationPeer(group.conversation, directPeerId)
+      const updates: tl.TypeUpdate[] = []
+      if (messageIds.length) {
+        updates.push(channelId === undefined
+          ? {
+              _: 'updateDeleteMessages', messages: messageIds,
+              pts: delivery.pts, ptsCount: delivery.ptsCount,
+            }
+          : {
+              _: 'updateDeleteChannelMessages', channelId, messages: messageIds,
+              pts: delivery.pts, ptsCount: delivery.ptsCount,
+            })
+      }
+      for (const item of group.reactionMessages) {
+        const reactions = makeMessageReactions(item.message, session.platformSessionId)
+        updates.push(...item.messageIds.map((msgId): tl.RawUpdateMessageReactions => ({
+          _: 'updateMessageReactions', peer, msgId, reactions,
+        })))
+      }
+      const payload: tl.RawUpdates = {
+        _: 'updates', updates, users: [],
+        chats: channelId === undefined ? [] : [makeUpdateChat(group.conversation, false, this._dcId)],
+        date: delivery.date, seq: delivery.seq,
+      }
+      await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+      if (await this._send(session.platformSessionId, payload)) {
+        await this._store.markUpdatePublished(eventKey)
+      }
+    }
+  }
 
   async publishDraft(
     session: PlatformSession,
@@ -103,6 +206,8 @@ export class UpdateManager {
     committed: Extract<CommittedPlatformEvent, { event: { type: 'message-reactions' } }>,
   ): Promise<void> {
     const { event, result } = committed
+    await this._blockedPeers?.ensureLoaded(session.platformSessionId)
+    if (await this._blockedPeers?.hidesMessage(session.platformSessionId, result.message, this._store)) return
     const eventKey = `${session.platformSessionId}:reaction:${event.eventId}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
     if (!delivery && !result.changed) return
@@ -118,7 +223,10 @@ export class UpdateManager {
       eventKey, session.platformSessionId, 0, event.timestamp, channelId,
     )
     if (delivery.published) return
-    const reactions = makeMessageReactions(result.message, session.platformSessionId)
+    const visibleMessage = this._blockedPeers?.filterMessageReactions(
+      session.platformSessionId, result.message,
+    ) ?? result.message
+    const reactions = makeMessageReactions(visibleMessage, session.platformSessionId)
     const directPeerId = displayConversation.kind === 'direct'
       ? (await this._store.getUser(session.platformId, displayConversation.id)
         ?? await this._store.upsertUser(session,
@@ -200,6 +308,17 @@ export class UpdateManager {
     options: PlatformEventDeliveryOptions,
   ): Promise<PlatformEventPublishResult> {
     const { event, result } = committed
+    await this._blockedPeers?.ensureLoaded(session.platformSessionId)
+    if (await this._blockedPeers?.hidesMessage(session.platformSessionId, event.message, this._store)) {
+      this._onTrace?.(
+        'update publish skipped session=%s message=%s reason=blocked-content',
+        session.platformSessionId, event.message.id,
+      )
+      return
+    }
+    const visibleMessage = this._blockedPeers?.filterMessageReactions(
+      session.platformSessionId, event.message,
+    ) ?? event.message
     const isEdit = event.type === 'message-edit'
     const eventKey = isEdit
       ? `${session.platformSessionId}:edit:${event.eventId}`
@@ -319,8 +438,12 @@ export class UpdateManager {
               ? makeTlCardPreview(card.card, this._dcId)
               : makeConversationPreviewMedia(projected.source, session.platformSessionId),
         entities: makeMessageEntities(projected.source, session.platformSessionId, userIds),
-        reactions: projected.source.reactionContext?.reactions.length
-          ? makeMessageReactions(projected.source, session.platformSessionId)
+        reactions: visibleMessage.reactionContext?.reactions.length
+          ? makeMessageReactions(
+              this._blockedPeers?.filterMessageReactions(session.platformSessionId, projected.source)
+                ?? projected.source,
+              session.platformSessionId,
+            )
           : undefined,
         topicId,
         replyToTlId: nativeReplyTo ?? replied?.parts[0]?.tlMessageId,

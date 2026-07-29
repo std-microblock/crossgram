@@ -4,3 +4,4 @@ serverPort: 向 Telegram 客户端公布的 MTProto 端口。
 apiPrefix: 平台账户资源使用的 HTTP 路径前缀。
 uploadPath: 用于存储 Telegram 客户端上传文件的目录。
 autoMuteGroupChats: 默认关闭群聊通知；可在 Telegram 中为单个群聊单独开启。
+blockedContentMode: 拉黑用户内容显示策略：show 保留 Telegram 默认群聊显示；hide-user 隐藏其消息和 reaction；hide-related 还会隐藏回复或 @ 该用户的消息。

@@ -220,6 +220,13 @@ export interface NotificationSettingsRow {
   updatedAt: Date
 }
 
+export interface BlockedPeerRow {
+  id: number
+  platformSessionId: string
+  platformUserId: string
+  blockedAt: Date
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
@@ -243,6 +250,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_sticker_set_install: StickerSetInstallRow
     mtproto_draft: DraftRow
     mtproto_notification_settings: NotificationSettingsRow
+    mtproto_blocked_peer: BlockedPeerRow
   }
 }
 
@@ -425,5 +433,13 @@ export function defineModels(ctx: Context): void {
     primary: 'id',
     unique: [['platformSessionId', 'scope']],
     indexes: ['platformSessionId'],
+  })
+
+  ctx.model.extend('mtproto_blocked_peer', {
+    id: 'unsigned', platformSessionId: 'string', platformUserId: 'text', blockedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'platformUserId']],
+    indexes: [['platformSessionId', 'blockedAt']],
   })
 }

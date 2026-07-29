@@ -29,6 +29,7 @@ import { registerVirtualConversation, virtualConversation } from './virtual-conv
 import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from './card-thumbnail.js'
 import type { DraftStore, StoredDraft } from './draft-store.js'
 import type { NotificationSettingsStore, NotificationTarget } from './notification-settings.js'
+import type { BlockedPeerChange, BlockedPeerStore } from './blocked-peers.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -83,6 +84,10 @@ export interface LegacyGetForumTopicsByIdRequest {
   _: 'channels.getForumTopicsByID'
   channel: tl.TypeInputChannel
   topics: number[]
+}
+
+export interface BlockedPeerRpcChange extends BlockedPeerChange {
+  userId: number
 }
 
 /**
@@ -158,6 +163,7 @@ export class DialogRpc {
     private readonly _notificationSettings?: NotificationSettingsStore,
     /** Canonical persisted Telegram ID for this authorized platform user. */
     private readonly _authenticatedSelfId?: number,
+    private readonly _blockedPeers?: BlockedPeerStore,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -408,7 +414,8 @@ export class DialogRpc {
     const all = await this._loadHistory(peerId, req)
     const loadMs = performance.now() - loadAt
     const selectAt = performance.now()
-    const { filtered, start, page } = selectHistoryWindow(all, req)
+    const visible = await this._visibleMessages(all)
+    const { filtered, start, page } = selectHistoryWindow(visible, req)
     const selectMs = performance.now() - selectAt
     const conversation = this._conversation(peerId)
     const sendersAt = performance.now()
@@ -451,7 +458,8 @@ export class DialogRpc {
       limit: req.limit, maxId: req.maxId, minId: req.minId,
     })
     const query = req.q.toLocaleLowerCase()
-    const filtered = all.filter((item) => {
+    const visible = await this._visibleMessages(all)
+    const filtered = visible.filter((item) => {
       if (req.offsetId > 0 && item.tlId >= req.offsetId) return false
       if (req.minDate > 0 && item.source.timestamp <= req.minDate) return false
       if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
@@ -520,7 +528,8 @@ export class DialogRpc {
       : await this._platform.searchMessages!(this._session, { id: peerId }, query)
     const materialized = await this._materializeSearchMessages(peerId, upstream.messages)
     const normalizedQuery = req.q.toLocaleLowerCase()
-    const filtered = materialized.filter((item) => {
+    const visible = await this._visibleMessages(materialized)
+    const filtered = visible.filter((item) => {
       if (req.offsetId > 0 && !cursor && item.tlId >= req.offsetId) return false
       if (req.minDate > 0 && item.source.timestamp <= req.minDate) return false
       if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
@@ -679,7 +688,7 @@ export class DialogRpc {
             limit: this._isVirtualConversation(this._conversation(ref.peerId)) ? 200 : 1,
           })
       const found = history.find((item) => item.tlId === requestedId)
-      if (!found) {
+      if (!found || await this._messageHidden(found.source)) {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
         continue
       }
@@ -759,6 +768,48 @@ export class DialogRpc {
     }
   }
 
+  async blockPeer(req: tl.contacts.RawBlockRequest): Promise<BlockedPeerRpcChange | undefined> {
+    if (req.myStoriesFrom) return
+    if (!this._blockedPeers) throw new RpcError(500, 'BLOCKLIST_UNAVAILABLE')
+    await this._hydratePeers()
+    const platformUserId = this._resolveBlockedUser(req.id)
+    const change = await this._blockedPeers.block(this._session.platformSessionId, platformUserId)
+    return { ...change, userId: this._userId(platformUserId) }
+  }
+
+  async unblockPeer(req: tl.contacts.RawUnblockRequest): Promise<BlockedPeerRpcChange | undefined> {
+    if (req.myStoriesFrom) return
+    if (!this._blockedPeers) throw new RpcError(500, 'BLOCKLIST_UNAVAILABLE')
+    await this._hydratePeers()
+    const platformUserId = this._resolveBlockedUser(req.id)
+    const change = await this._blockedPeers.unblock(this._session.platformSessionId, platformUserId)
+    return { ...change, userId: this._userId(platformUserId) }
+  }
+
+  async getBlocked(req: tl.contacts.RawGetBlockedRequest): Promise<tl.contacts.TypeBlocked> {
+    if (req.myStoriesFrom || !this._blockedPeers) {
+      return { _: 'contacts.blocked', blocked: [], chats: [], users: [] }
+    }
+    await this._hydratePeers()
+    const all = await this._blockedPeers.list(this._session.platformSessionId)
+    const offset = Math.max(0, req.offset)
+    const limit = Math.max(0, Math.min(req.limit, 500))
+    const page = all.slice(offset, offset + limit)
+    const users = await Promise.all(page.map((row) => this._getPeerUser(row.platformUserId)))
+    const result = {
+      blocked: page.map((row) => ({
+        _: 'peerBlocked' as const,
+        peerId: { _: 'peerUser' as const, userId: this._userId(row.platformUserId) },
+        date: Math.floor(row.blockedAt.getTime() / 1000),
+      })),
+      chats: [],
+      users: uniqueUsers(users),
+    }
+    return offset > 0 || offset + page.length < all.length
+      ? { _: 'contacts.blockedSlice', count: all.length, ...result }
+      : { _: 'contacts.blocked', ...result }
+  }
+
   resolveUsername(req: tl.contacts.RawResolveUsernameRequest): tl.contacts.RawResolvedPeer {
     const match = /^bridgechat_(\d+)$/.exec(req.username)
     const tlId = match ? Number(match[1]) : 0
@@ -802,6 +853,9 @@ export class DialogRpc {
       _: 'users.userFull',
       fullUser: {
         _: 'userFull',
+        blocked: peerId
+          ? this._blockedPeers?.isBlocked(this._session.platformSessionId, peerId) || undefined
+          : undefined,
         id: user.id,
         ...(about !== undefined ? { about } : {}),
         settings: { _: 'peerSettings' },
@@ -818,7 +872,12 @@ export class DialogRpc {
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
     return {
-      _: 'messages.peerSettings', settings: { _: 'peerSettings' },
+      _: 'messages.peerSettings', settings: {
+        _: 'peerSettings',
+        blockContact: conversation.kind === 'direct'
+          ? !this._blockedPeers?.isBlocked(this._session.platformSessionId, peerId) || undefined
+          : undefined,
+      },
       chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
       users: conversation.kind === 'direct' ? [await this._getPeerUser(peerId)] : [],
     }
@@ -952,7 +1011,8 @@ export class DialogRpc {
       offsetId: req.offsetId, offsetDate: req.offsetDate, addOffset: req.addOffset,
       limit: req.limit, maxId: req.maxId, minId: req.minId,
     })
-    const filtered = all.filter((item) => {
+    const visible = await this._visibleMessages(all)
+    const filtered = visible.filter((item) => {
       if (req.offsetId > 0 && item.tlId >= req.offsetId) return false
       if (req.offsetDate > 0 && item.source.timestamp >= req.offsetDate) return false
       if (req.maxId > 0 && item.tlId >= req.maxId) return false
@@ -1611,7 +1671,7 @@ export class DialogRpc {
     const projected = await this._store?.findProjectedByTlId(
       this._session.platformSessionId, req.msgId, peerId,
     )
-    if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+    if (!projected || await this._messageHidden(projected.source)) throw new RpcError(400, 'MSG_ID_INVALID')
     const target = {
       conversationId: peerId,
       messageId: projected.source.id,
@@ -1649,7 +1709,12 @@ export class DialogRpc {
       _: 'updateMessageReactions',
       peer: this._conversationPeer(conversation),
       msgId: req.msgId,
-      reactions: this._reactions!.messageReactions(peerId, result.message, (id) => this._userId(id)),
+      reactions: this._reactions!.messageReactions(
+        peerId,
+        this._blockedPeers?.filterMessageReactions(this._session.platformSessionId, result.message)
+          ?? result.message,
+        (id) => this._userId(id),
+      ),
     }
     const recentUpdate: tl.TypeUpdate[] = newlySelected.length
       ? [{ _: 'updateRecentReactions' }]
@@ -1669,11 +1734,16 @@ export class DialogRpc {
     const updates: tl.TypeUpdate[] = []
     for (const id of req.id) {
       const projected = await this._store?.findProjectedByTlId(this._session.platformSessionId, id, peerId)
-      if (!projected) continue
+      if (!projected || await this._messageHidden(projected.source)) continue
       updates.push({
         _: 'updateMessageReactions', peer: this._conversationPeer(conversation),
         msgId: id,
-        reactions: this._reactions!.messageReactions(peerId, projected.source, (userId) => this._userId(userId)),
+        reactions: this._reactions!.messageReactions(
+          peerId,
+          this._blockedPeers?.filterMessageReactions(this._session.platformSessionId, projected.source)
+            ?? projected.source,
+          (userId) => this._userId(userId),
+        ),
       } as tl.RawUpdateMessageReactions)
     }
     return {
@@ -1689,7 +1759,7 @@ export class DialogRpc {
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
     const projected = await this._store?.findProjectedByTlId(this._session.platformSessionId, req.id, peerId)
-    if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+    if (!projected || await this._messageHidden(projected.source)) throw new RpcError(400, 'MSG_ID_INVALID')
     const target = {
       conversationId: peerId,
       messageId: projected.source.id,
@@ -1700,11 +1770,14 @@ export class DialogRpc {
         : String(projected.parts[0].nativeSequence),
     }
     const refreshed = await this._platform.getMessageReactions?.(this._session, target)
-    const context = refreshed
+    const unfilteredContext = refreshed
       ? (await this._store!.setReactions(
           this._session, this._conversation(peerId), target, refreshed,
         )).message.reactionContext
       : projected.source.reactionContext
+    const context = this._blockedPeers?.filterReactionContext(
+      this._session.platformSessionId, unfilteredContext,
+    ) ?? unfilteredContext
     const filter = req.reaction && context
       ? this._reactions!.resolveInput(peerId, req.reaction, context).key
       : undefined
@@ -2027,6 +2100,7 @@ export class DialogRpc {
   }
 
   private async _materializeDialog(source: IMDialog, storedDraft?: StoredDraft) {
+    source = await this._visibleDialog(source)
     const platformPeerId = source.conversation.id
     this._conversations.set(platformPeerId, source.conversation)
     const peer = this._conversationPeer(source.conversation)
@@ -2398,6 +2472,7 @@ export class DialogRpc {
 
   private async _hydratePeers(force = false): Promise<void> {
     await this._hydrateUsers()
+    await this._blockedPeers?.ensureLoaded(this._session.platformSessionId)
     if (
       !force
       && Date.now() - this._peersHydratedAt < DialogRpc.PEER_HYDRATION_TTL_MS
@@ -2508,8 +2583,44 @@ export class DialogRpc {
     return this._getPeerUser(peerId)
   }
 
+  private async _messageHidden(source: IMMessage): Promise<boolean> {
+    return this._blockedPeers?.hidesMessage(
+      this._session.platformSessionId, source, this._store,
+    ) ?? false
+  }
+
+  private async _visibleMessages(items: readonly MaterializedMessage[]): Promise<MaterializedMessage[]> {
+    if (!this._blockedPeers || this._blockedPeers.mode === 'show') return [...items]
+    const visibility = new Map<string, boolean>()
+    const output: MaterializedMessage[] = []
+    for (const item of items) {
+      const key = `${item.source.conversationId}\u0000${item.source.id}`
+      let hidden = visibility.get(key)
+      if (hidden === undefined) {
+        hidden = await this._messageHidden(item.source)
+        visibility.set(key, hidden)
+      }
+      if (!hidden) output.push(item)
+    }
+    return output
+  }
+
+  private async _visibleDialog(source: IMDialog): Promise<IMDialog> {
+    if (!source.lastMessage || !await this._messageHidden(source.lastMessage)) return source
+    const visible = await this._visibleMessages(await this._loadHistory(source.conversation.id, { limit: 100 }))
+    return {
+      ...source,
+      lastMessage: visible[0]?.source,
+      readInboxMaxMessage: undefined,
+      unreadCount: 0,
+    }
+  }
+
   private _makeMessage(item: MaterializedMessage): tl.TypeMessage {
-    const { source, tlId } = item
+    const source = this._blockedPeers?.filterMessageReactions(
+      this._session.platformSessionId, item.source,
+    ) ?? item.source
+    const { tlId } = item
     const conversation = this._conversation(source.conversationId)
     const sticker = source.content.parts.find((part) => part.type === 'sticker')
     const card = source.content.parts.find((part) => part.type === 'card')
@@ -2978,6 +3089,15 @@ export class DialogRpc {
     if (peer._ === 'inputPeerChat' && !this._isVirtualConversation(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
     if (peer._ === 'inputPeerChannel' && !this._isTelegramChannel(conversation)) throw new RpcError(400, 'PEER_ID_INVALID')
     return id
+  }
+
+  private _resolveBlockedUser(peer: tl.TypeInputPeer): string {
+    if (peer._ !== 'inputPeerUser') throw new RpcError(400, 'USER_ID_INVALID')
+    const platformUserId = this._tlToUser.get(peer.userId)
+    if (!platformUserId || platformUserId === this._session.userId) {
+      throw new RpcError(400, 'USER_ID_INVALID')
+    }
+    return platformUserId
   }
 
   private _resolveChat(chatId: number): import('./platform.js').IMConversation {
