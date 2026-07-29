@@ -244,6 +244,76 @@ describe('PlatformSubscriptionManager', () => {
 })
 
 describe('PlatformDataService', () => {
+  it('serves persisted dialogs when the upstream bridge is temporarily unavailable', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'offline-dialog-room', kind: 'group', title: 'Offline dialog' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('stored-latest', conversation.id))
+    platform.getDialogs = vi.fn(async () => { throw new Error('upstream kernel is not ready') })
+    const data = new PlatformDataService(platform, session, store)
+
+    await expect(data.getDialogsPage({ limit: 100 })).resolves.toMatchObject({
+      total: 1,
+      dialogs: [{
+        conversation: { id: conversation.id, title: conversation.title },
+        lastMessage: { id: 'stored-latest' },
+      }],
+    })
+  })
+
+  it('returns a persisted first page before a slow upstream refresh finishes', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'slow-dialog-room', kind: 'group', title: 'Slow dialog' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('stored-latest', conversation.id))
+    const release = Promise.withResolvers<void>()
+    platform.getDialogs = vi.fn(async () => {
+      await release.promise
+      return { dialogs: [{ conversation, unreadCount: 0, lastMessage: incoming('fresh-latest', conversation.id) }] }
+    })
+    const data = new PlatformDataService(platform, session, store)
+
+    const page = await Promise.race([
+      data.getDialogsPage({ limit: 100 }),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('persisted dialog page exceeded 100ms')),
+        100,
+      )),
+    ])
+    expect(page.dialogs).toMatchObject([{ lastMessage: { id: 'stored-latest' } }])
+    release.resolve()
+    await vi.waitFor(() => expect(platform.getDialogs).toHaveBeenCalledOnce())
+  })
+
+  it('opens a persisted peer dialog without waiting for an upstream dialog refresh', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    platform.getDialogs = vi.fn(async () => { throw new Error('slow upstream dialogs must not be used') })
+    const conversation: IMConversation = { id: 'stored-peer-room', kind: 'group', title: 'Stored peer' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('stored-latest', conversation.id))
+    const rpc = new DialogRpc(platform, session, store)
+
+    const result = await rpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs',
+      peers: [{
+        _: 'inputDialogPeer',
+        peer: { _: 'inputPeerChannel', channelId: rpc.peerTlId(conversation.id), accessHash: Long.ONE },
+      }],
+    })
+
+    expect(result).toMatchObject({
+      dialogs: [{ peer: { _: 'peerChannel' } }],
+      messages: [{ _: 'message', message: 'message-stored-latest' }],
+    })
+    expect(platform.getDialogs).not.toHaveBeenCalled()
+  })
+
   it('materializes a deep Android channel page at its add_offset=-1 anchor', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

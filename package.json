@@ -31,6 +31,8 @@
     "test:e2e": "yarn build && vitest run --config vitest.mtproto-e2e.config.mts",
     "test:e2e:mtproto": "yarn test:e2e",
     "profile:history": "tsx packages/test-suite/src/profile-history.ts",
+    "profile:dialogs": "tsx packages/test-suite/src/profile-history.ts --operation dialogs",
+    "profile:conversation": "tsx packages/test-suite/src/profile-history.ts --operation conversation",
     "typecheck": "tsc --project tsconfig.test.json --pretty false",
     "prepare": "husky"
   },

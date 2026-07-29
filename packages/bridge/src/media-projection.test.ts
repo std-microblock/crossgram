@@ -91,6 +91,27 @@ it('projects platform service actions as Telegram MessageService records', () =>
   })
 })
 
+it('keeps forum topic metadata when a topic message also replies to another message', () => {
+  const topicConversation: IMConversation = {
+    id: 'support-thread', kind: 'channel', title: 'Support', parentId: 'general',
+  }
+  const source: IMMessage = {
+    id: 'topic-reply', conversationId: topicConversation.id, senderId: 'alice', timestamp: 2,
+    replyToId: 'another-message', content: { parts: [{ type: 'text', text: 'nested reply' }] },
+  }
+
+  expect(projectTlMessage({
+    conversation: topicConversation, source, tlId: 30, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 }, replyToTlId: 20, topicId: 10,
+  })).toMatchObject({
+    _: 'message',
+    replyTo: {
+      _: 'messageReplyHeader', forumTopic: true,
+      replyToMsgId: 20, replyToTopId: 10,
+    },
+  })
+})
+
 afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
@@ -502,6 +523,40 @@ describe('rich-media projection', () => {
     expect(second.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual(['998', '997'])
     expect((await store.readHistory(session.platformSessionId, conversation.id, { limit: 100 })).length)
       .toBeLessThanOrEqual(6)
+  })
+
+  it('serves a complete stored first screen before a slow upstream refresh finishes', async () => {
+    const { store, peerId } = await createStore()
+    const messages = Array.from({ length: 60 }, (_, index): IMMessage => ({
+      id: `stored-${60 - index}`,
+      conversationId: conversation.id,
+      senderId: 'alice',
+      sender: { id: 'alice', firstName: 'Alice' },
+      timestamp: 60 - index,
+      content: { parts: [{ type: 'text', text: `stored ${60 - index}` }] },
+    }))
+    await store.ingestMany(session, conversation, messages, { allocation: 'history' })
+    const releaseUpstream = Promise.withResolvers<void>()
+    const getHistory = vi.fn(async () => {
+      await releaseUpstream.promise
+      return { messages: messages.slice(0, 51) }
+    })
+    const rpc = new DialogRpc({ ...platform, getHistory }, session, store)
+    const revisionBeforeRefresh = store.revision
+
+    const result = await Promise.race([
+      rpc.getHistory({ ...historyRequest(peerId), limit: 50 }),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('stored first screen exceeded 100ms')),
+        100,
+      )),
+    ]) as tl.messages.RawMessages
+
+    expect(result.messages).toHaveLength(50)
+    expect(result.messages[0]).toMatchObject({ _: 'message', message: 'stored 60' })
+    expect(getHistory).toHaveBeenCalledOnce()
+    releaseUpstream.resolve()
+    await vi.waitFor(() => expect(store.revision).toBeGreaterThan(revisionBeforeRefresh))
   })
 
   it('lets an adapter fetch around unread state for a persisted negative-offset window', async () => {
