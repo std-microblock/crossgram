@@ -263,6 +263,32 @@ describe('PlatformDataService', () => {
     })
   })
 
+  it('returns a persisted first page before a slow upstream refresh finishes', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'slow-dialog-room', kind: 'group', title: 'Slow dialog' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('stored-latest', conversation.id))
+    const release = Promise.withResolvers<void>()
+    platform.getDialogs = vi.fn(async () => {
+      await release.promise
+      return { dialogs: [{ conversation, unreadCount: 0, lastMessage: incoming('fresh-latest', conversation.id) }] }
+    })
+    const data = new PlatformDataService(platform, session, store)
+
+    const page = await Promise.race([
+      data.getDialogsPage({ limit: 100 }),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('persisted dialog page exceeded 100ms')),
+        100,
+      )),
+    ])
+    expect(page.dialogs).toMatchObject([{ lastMessage: { id: 'stored-latest' } }])
+    release.resolve()
+    await vi.waitFor(() => expect(platform.getDialogs).toHaveBeenCalledOnce())
+  })
+
   it('opens a persisted peer dialog without waiting for an upstream dialog refresh', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

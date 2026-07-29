@@ -372,41 +372,49 @@ export class PlatformDataService {
       limit: query.limit,
       afterConversationId: query.afterId,
     })
-    let upstream: IMDialog[] = []
-    let upstreamPage: IMDialogPage | undefined
     const hasUpstream = Boolean(this._platform.capabilities.history && this._platform.getDialogs)
-    if (hasUpstream) {
-      try {
-        upstreamPage = await this._platform.getDialogs(this._session, query)
-        upstream = upstreamPage.dialogs
-      } catch (error) {
-        const stored = await storedPromise
-        if (!stored.length) throw error
-        this._onTrace?.(
-          'dialog upstream refresh failed; serving stored page session=%s dialogs=%d error=%s',
-          this._session.platformSessionId, stored.length, String(error),
-        )
-        return { dialogs: stored, total: stored.length }
-      }
+    if (!hasUpstream) {
+      const stored = await storedPromise
+      return { dialogs: stored, total: stored.length }
+    }
+    const upstreamPromise = this._platform.getDialogs(this._session, query)
+    const first = await Promise.race([
+      upstreamPromise.then((page) => ({ kind: 'upstream' as const, page }))
+        .catch((error: unknown) => ({ kind: 'error' as const, error })),
+      storedPromise.then((stored) => stored.length
+        ? { kind: 'stored' as const, stored }
+        : new Promise<never>(() => {})),
+    ])
+    if (first.kind === 'stored') {
+      void upstreamPromise.then((page) => this._ingestChangedDialogs(page.dialogs, first.stored))
+        .catch((error) => this._onTrace?.(
+          'dialog background refresh failed session=%s error=%s',
+          this._session.platformSessionId, String(error),
+        ))
+      return { dialogs: first.stored, total: first.stored.length }
     }
     const stored = await storedPromise
-    if (!hasUpstream) return { dialogs: stored, total: stored.length }
+    if (first.kind === 'error') {
+      if (!stored.length) throw first.error
+      this._onTrace?.(
+        'dialog upstream refresh failed; serving stored page session=%s dialogs=%d error=%s',
+        this._session.platformSessionId, stored.length, String(first.error),
+      )
+      return { dialogs: stored, total: stored.length }
+    }
+    const upstreamPage = first.page
+    const upstream = upstreamPage.dialogs
     // A history-capable adapter's current page is authoritative. Returning all
     // previously stored rows leaks removed dialogs and legacy conversation IDs
     // forever (for example after an adapter fixes its opaque-ID mapping).
     const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
-    const changed = upstream.filter((dialog) => dialogNeedsPersistence(
-      dialog, persisted.get(dialog.conversation.id),
-    ))
-    if (changed.length) {
-      if (stored.length) {
-        void this._ingestDialogs(changed).catch((error) => this._onTrace?.(
+    if (stored.length) {
+      void this._ingestChangedDialogs(upstream, stored).catch((error) => this._onTrace?.(
           'dialog background persistence failed session=%s error=%s',
           this._session.platformSessionId, String(error),
-        ))
-      } else {
-        await this._ingestDialogs(changed)
-      }
+      ))
+    } else {
+      await this._ingestChangedDialogs(upstream, stored)
     }
     const dialogs = upstream.map((dialog) => {
       const cached = persisted.get(dialog.conversation.id)
@@ -418,6 +426,14 @@ export class PlatformDataService {
       }
     })
     return { dialogs, nextCursor: upstreamPage?.nextCursor, total: upstreamPage?.total }
+  }
+
+  private async _ingestChangedDialogs(upstream: readonly IMDialog[], stored: readonly IMDialog[]): Promise<void> {
+    const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
+    const changed = upstream.filter((dialog) => dialogNeedsPersistence(
+      dialog, persisted.get(dialog.conversation.id),
+    ))
+    if (changed.length) await this._ingestDialogs(changed)
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {
