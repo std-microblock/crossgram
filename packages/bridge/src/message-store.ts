@@ -72,7 +72,9 @@ interface ProjectionAllocationCache {
 export interface StoredHistoryQuery {
   limit: number
   beforeTimestamp?: number
+  minTimestamp?: number
   maxTimestamp?: number
+  order?: 'asc' | 'desc'
 }
 
 const TIMESTAMP_ALLOCATION_VERSION = 1
@@ -538,9 +540,8 @@ export class MessageStore {
     const rows = await this._database.select('mtproto_im_message', {
       conversationId: conversation.id,
       deleted: false,
-      ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
-      ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
-    }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
+      ...storedHistoryTimestampFilter(query),
+    }).orderBy('timestamp', query.order ?? 'desc').limit(clampDatabaseLimit(query.limit)).execute()
     return Promise.all(rows.map((row) => this._hydrateMessage(row)))
   }
 
@@ -556,9 +557,8 @@ export class MessageStore {
     const rows = await this._database.select('mtproto_im_message', {
       conversationId: conversation.id,
       deleted: false,
-      ...(query.beforeTimestamp === undefined ? {} : { timestamp: { $lt: query.beforeTimestamp } }),
-      ...(query.maxTimestamp === undefined ? {} : { timestamp: { $lte: query.maxTimestamp } }),
-    }).orderBy('timestamp', 'desc').limit(clampDatabaseLimit(query.limit)).execute()
+      ...storedHistoryTimestampFilter(query),
+    }).orderBy('timestamp', query.order ?? 'desc').limit(clampDatabaseLimit(query.limit)).execute()
     if (!rows.length) return []
     const messageIds = rows.map((row) => row.id)
     const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
@@ -1580,6 +1580,17 @@ function referencedUserIds(message: IMMessage): Set<string> {
     for (const actor of reaction.recentActors ?? []) ids.add(actor.userId)
   }
   return ids
+}
+
+function storedHistoryTimestampFilter(query: StoredHistoryQuery): {
+  timestamp?: { $lt?: number, $gte?: number, $lte?: number }
+} {
+  const timestamp = {
+    ...(query.beforeTimestamp === undefined ? {} : { $lt: query.beforeTimestamp }),
+    ...(query.minTimestamp === undefined ? {} : { $gte: query.minTimestamp }),
+    ...(query.maxTimestamp === undefined ? {} : { $lte: query.maxTimestamp }),
+  }
+  return Object.keys(timestamp).length ? { timestamp } : {}
 }
 
 function clampDatabaseLimit(limit: number): number {

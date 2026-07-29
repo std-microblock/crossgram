@@ -14,7 +14,7 @@ import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
 } from './message-actions.js'
 import { makeUser } from './synthetic.js'
-import { toUser, type MessageStore } from './message-store.js'
+import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
 import type { PlatformEventDeliveryOptions, PlatformEventPublishResult } from './platform-manager.js'
 import type { IMMediaRow, IMUserRow } from './models.js'
@@ -2007,7 +2007,7 @@ export class DialogRpc {
       }
       const anchorId = request.offsetId || request.maxId || undefined
       const anchorAt = performance.now()
-      const anchor = anchorId
+      let anchor = anchorId
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, anchorId, peerId)
         : undefined
       const anchorMs = performance.now() - anchorAt
@@ -2040,6 +2040,11 @@ export class DialogRpc {
         })
       }
       const upstreamMs = performance.now() - upstreamAt
+      if (anchorId && !anchor) {
+        anchor = await this._store.findProjectedByTlId(
+          this._session.platformSessionId, anchorId, peerId,
+        )
+      }
       const usersAt = performance.now()
       await this._syncStoredUsers()
       const usersMs = performance.now() - usersAt
@@ -2056,11 +2061,30 @@ export class DialogRpc {
         && !aroundUnread
         ? anchor?.source.timestamp
         : undefined
-      const projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
+      const projectionQuery = {
         limit: fetchLimit,
         beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
-        maxTimestamp: !negativeOffset ? anchor?.source.timestamp : backwardPageMaxTimestamp,
-      })
+      }
+      let projected: ProjectedMessage[]
+      if (negativeOffset && request.addOffset !== -1 && anchor) {
+        const [newer, older] = await Promise.all([
+          this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
+            ...projectionQuery,
+            minTimestamp: anchor.source.timestamp,
+            order: 'asc',
+          }),
+          this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
+            ...projectionQuery,
+            maxTimestamp: anchor.source.timestamp,
+          }),
+        ])
+        projected = uniqueProjectedMessages([...newer, ...older])
+      } else {
+        projected = await this._store.readProjectedHistory(this._session.platformSessionId, peerId, {
+          ...projectionQuery,
+          maxTimestamp: !negativeOffset ? anchor?.source.timestamp : backwardPageMaxTimestamp,
+        })
+      }
       const projectionReadMs = performance.now() - projectAt
       const materializeAt = performance.now()
       const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
@@ -3322,6 +3346,10 @@ export function projectTlMessage(options: {
 
 function uniqueUsers(users: tl.RawUser[]): tl.RawUser[] {
   return [...new Map(users.map((user) => [user.id, user])).values()]
+}
+
+function uniqueProjectedMessages(messages: ProjectedMessage[]): ProjectedMessage[] {
+  return [...new Map(messages.map((message) => [message.source.id, message])).values()]
 }
 
 function uniqueChats(chats: tl.TypeChat[]): tl.TypeChat[] {
