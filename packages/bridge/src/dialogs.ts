@@ -1162,6 +1162,7 @@ export class DialogRpc {
     if (
       editPolicy?.maxAgeSeconds !== undefined
       && Math.floor(Date.now() / 1000) - projected.source.timestamp > editPolicy.maxAgeSeconds
+      && !(await this._canEditAnyMessage(conversationId))
     ) {
       throw new RpcError(400, 'MESSAGE_EDIT_TIME_EXPIRED')
     }
@@ -2673,6 +2674,17 @@ export class DialogRpc {
     } while (cursor && members.length < 10_000)
     await this._persistUsers(members.map((member) => member.user))
     return members
+  }
+
+  private async _canEditAnyMessage(conversationId: string): Promise<boolean> {
+    const conversation = this._conversation(conversationId)
+    if (conversation.kind === 'direct') return false
+    const member = this._platform.getConversationMember
+      ? await this._platform.getConversationMember(
+          this._session, { id: conversationId }, this._session.userId,
+        )
+      : (await this._allMembers(conversationId)).find((item) => item.user.id === this._session.userId)
+    return member?.permissions?.editAnyMessage === true
   }
 
   private async _memberPage(

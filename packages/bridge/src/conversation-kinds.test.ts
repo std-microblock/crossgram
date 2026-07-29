@@ -613,7 +613,7 @@ describe('conversation kinds', () => {
     }
   })
 
-  it('enforces own-message delete and edit windows while leaving administrator deletion unlimited', async () => {
+  it('lets administrators edit beyond the member window while keeping regular members time-limited', async () => {
     const actions = platform.capabilities.messageActions!
     const originalEditLimit = actions.edit.maxAgeSeconds
     actions.edit.maxAgeSeconds = 1
@@ -626,7 +626,31 @@ describe('conversation kinds', () => {
       const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
       const incomingId = (history.messages[0] as tl.RawMessage).id
       await expect(rpc.editMessage({
-        _: 'messages.editMessage', peer: groupPeer, id: incomingId, message: 'too late',
+        _: 'messages.editMessage', peer: groupPeer, id: incomingId, message: 'admin edit',
+      })).resolves.toMatchObject({
+        updates: [{ message: { message: 'admin edit' } }],
+      })
+
+      const memberPlatform: IMPlatform = {
+        ...platform,
+        async getConversationMember(_session, _conversation, userId) {
+          return {
+            user: { id: userId, firstName: 'Regular member' },
+            role: 'member',
+            permissions: {
+              manageConversation: false, manageMembers: false,
+              deleteAnyMessage: false, editAnyMessage: false,
+              pinMessages: false, inviteMembers: true,
+            },
+          }
+        },
+      }
+      const { rpc: memberRpc } = await createRpc(memberPlatform)
+      await memberRpc.getDialogs(dialogsRequest())
+      const memberHistory = await memberRpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+      const memberIncomingId = (memberHistory.messages[0] as tl.RawMessage).id
+      await expect(memberRpc.editMessage({
+        _: 'messages.editMessage', peer: groupPeer, id: memberIncomingId, message: 'too late',
       })).rejects.toMatchObject({ text: 'MESSAGE_EDIT_TIME_EXPIRED' })
 
       const sent = await rpc.sendMessage({
