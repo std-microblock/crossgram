@@ -7,7 +7,7 @@ describe('history profiler', () => {
       '--conversation', '54404627', '--offset-id', '1', '--add-offset', '-25',
       '--limit', '50', '--repeat', '7',
     ])).toMatchObject({
-      host: '127.0.0.1', port: 4430, conversation: '54404627',
+      operation: 'history', host: '127.0.0.1', port: 4430, conversation: '54404627',
       rsaKey: expect.stringMatching(/[\\/]data[\\/]rsa-key\.json$/),
       authKeyStore: expect.stringMatching(/[\\/]data[\\/]auth-keys\.json$/),
       offsetId: 1, addOffset: -25, limit: 50, warmup: 1, repeat: 7,
@@ -24,5 +24,14 @@ describe('history profiler', () => {
   it('rejects ambiguous and malformed targets', () => {
     expect(() => parseHistoryProfileOptions([])).toThrow(/conversation.*peer/)
     expect(() => parseHistoryProfileOptions(['--peer', 'channel:1', '--repeat', '0'])).toThrow(/repeat/)
+    expect(() => parseHistoryProfileOptions(['--operation', 'unknown'])).toThrow(/operation/)
+  })
+
+  it('allows dialog-list profiling without a peer target', () => {
+    expect(parseHistoryProfileOptions(['--operation', 'dialogs'])).toMatchObject({
+      operation: 'dialogs', conversation: undefined, peer: undefined,
+    })
+    expect(() => parseHistoryProfileOptions(['--operation', 'conversation']))
+      .toThrow(/conversation.*peer/)
   })
 })
