@@ -75,6 +75,7 @@ async function createStore(): Promise<MessageStore> {
     timestamp: 1_000 + index,
     content: { parts: [{ type: 'text', text: `dialog preview ${index + 1}` }] },
   })))
+  await store.prepareDialogCache()
   return store
 }
 
