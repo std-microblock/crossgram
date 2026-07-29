@@ -97,9 +97,11 @@ export class BlockedPeerStore {
     context: IMReactionContext | undefined,
   ): IMReactionContext | undefined {
     if (!context || this.mode === 'show') return context
+    let changed = false
     const reactions = context.reactions.flatMap((summary) => {
       const actors = summary.recentActors ?? []
       const blockedActors = actors.filter((actor) => this.isBlocked(platformSessionId, actor.userId)).length
+      if (blockedActors) changed = true
       const count = Math.max(0, summary.count - blockedActors)
       if (!count) return []
       return [{
@@ -110,7 +112,7 @@ export class BlockedPeerStore {
           : summary.recentActors,
       }]
     })
-    return { ...context, reactions }
+    return changed ? { ...context, reactions } : context
   }
 
   filterMessageReactions(platformSessionId: string, message: IMMessage): IMMessage {

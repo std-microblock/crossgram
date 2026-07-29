@@ -57,12 +57,17 @@ export class UpdateManager {
 
     const groups = new Map<string, {
       conversation: IMConversation
-      messageIds: number[]
+      deletedMessageIds: number[]
+      reactionMessages: Array<{ message: IMMessage, messageIds: number[] }>
     }>()
     for (const projected of await this._store.listProjectedMessages(session.platformSessionId)) {
-      if (!await this._blockedPeers.hidesMessage(
+      const hidden = await this._blockedPeers.hidesMessage(
         session.platformSessionId, projected.source, this._store,
-      )) continue
+      )
+      const visibleMessage = hidden
+        ? projected.source
+        : this._blockedPeers.filterMessageReactions(session.platformSessionId, projected.source)
+      if (!hidden && visibleMessage === projected.source) continue
       let conversation = await this._store.getConversation(
         session.platformSessionId, projected.source.conversationId,
       ) ?? {
@@ -74,15 +79,16 @@ export class UpdateManager {
         conversation = await this._store.getConversation(session.platformSessionId, conversation.parentId)
           ?? { id: conversation.parentId, kind: 'channel', title: conversation.parentId }
       }
-      const key = conversation.kind === 'direct' ? 'account' : `channel:${conversation.id}`
-      const group = groups.get(key) ?? { conversation, messageIds: [] }
-      group.messageIds.push(...projected.parts.map((part) => part.tlMessageId))
+      const key = conversation.kind === 'direct' ? `direct:${conversation.id}` : `channel:${conversation.id}`
+      const group = groups.get(key) ?? { conversation, deletedMessageIds: [], reactionMessages: [] }
+      const messageIds = projected.parts.map((part) => part.tlMessageId)
+      if (hidden) group.deletedMessageIds.push(...messageIds)
+      else group.reactionMessages.push({ message: visibleMessage, messageIds })
       groups.set(key, group)
     }
 
     for (const [scope, group] of groups) {
-      const messageIds = [...new Set(group.messageIds)].sort((left, right) => left - right)
-      if (!messageIds.length) continue
+      const messageIds = [...new Set(group.deletedMessageIds)].sort((left, right) => left - right)
       const channelId = group.conversation.kind === 'direct'
         ? undefined
         : stableId(`peer:${group.conversation.id}`)
@@ -93,17 +99,35 @@ export class UpdateManager {
         eventKey, session.platformSessionId, messageIds.length,
         Math.floor(changedAt.getTime() / 1000), channelId,
       )
-      const update: tl.TypeUpdate = channelId === undefined
-        ? {
-            _: 'updateDeleteMessages', messages: messageIds,
-            pts: delivery.pts, ptsCount: delivery.ptsCount,
-          }
-        : {
-            _: 'updateDeleteChannelMessages', channelId, messages: messageIds,
-            pts: delivery.pts, ptsCount: delivery.ptsCount,
-          }
+      const directPeerId = group.conversation.kind === 'direct'
+        ? (await this._store.getUser(session.platformId, group.conversation.id)
+          ?? await this._store.upsertUser(
+            session,
+            await this._registry.require(session.platformId).getUser?.(session, group.conversation.id)
+              ?? { id: group.conversation.id, firstName: group.conversation.title },
+          )).id
+        : undefined
+      const peer = conversationPeer(group.conversation, directPeerId)
+      const updates: tl.TypeUpdate[] = []
+      if (messageIds.length) {
+        updates.push(channelId === undefined
+          ? {
+              _: 'updateDeleteMessages', messages: messageIds,
+              pts: delivery.pts, ptsCount: delivery.ptsCount,
+            }
+          : {
+              _: 'updateDeleteChannelMessages', channelId, messages: messageIds,
+              pts: delivery.pts, ptsCount: delivery.ptsCount,
+            })
+      }
+      for (const item of group.reactionMessages) {
+        const reactions = makeMessageReactions(item.message, session.platformSessionId)
+        updates.push(...item.messageIds.map((msgId): tl.RawUpdateMessageReactions => ({
+          _: 'updateMessageReactions', peer, msgId, reactions,
+        })))
+      }
       const payload: tl.RawUpdates = {
-        _: 'updates', updates: [update], users: [],
+        _: 'updates', updates, users: [],
         chats: channelId === undefined ? [] : [makeUpdateChat(group.conversation, false, this._dcId)],
         date: delivery.date, seq: delivery.seq,
       }
