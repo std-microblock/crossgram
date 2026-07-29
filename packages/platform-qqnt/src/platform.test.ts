@@ -426,6 +426,35 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getMessage).toHaveBeenCalledTimes(2)
   })
 
+  it('copies authorized stored content when QQ rejects its native forward API', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.forwardMessages = vi.fn(async () => {
+      throw new Error('QQNT bridge 500: forwardMsg: forward failed (2004004)')
+    })
+    platform.client.getMessage = vi.fn()
+    platform.client.sendMessage = vi.fn(async (_conversation, text) => ({
+      id: `resent-${text}`, conversationId: 'to', senderId: 'self', timestamp: 2, outgoing: true,
+      parts: [{ type: 'text' as const, text: text! }],
+    }))
+
+    const outputs = await platform.forwardMessages(
+      session,
+      { id: 'from' },
+      ['native-a'],
+      { id: 'to' },
+      {
+        sourceMessages: [{
+          id: 'stored-a', conversationId: 'from', senderId: 'alice', timestamp: 1,
+          content: { parts: [{ type: 'text', text: 'copy from relay store' }] },
+        }],
+      },
+    )
+
+    expect(outputs).toMatchObject([{ id: 'resent-copy from relay store' }])
+    expect(platform.client.getMessage).not.toHaveBeenCalled()
+    expect(platform.client.forwardMessages).toHaveBeenCalledWith('from', ['native-a'], 'to', false)
+  })
+
   it('projects inline QQ faces as Telegram custom emoji data and restores their face index', async () => {
     const platform = new QQNTPlatform()
     const png = await sharp({
