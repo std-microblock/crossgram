@@ -61,6 +61,34 @@ describe('QQNTPlatform mapping', () => {
     expect(performance.now() - started).toBeLessThan(250)
   })
 
+  it('reuses prepared dialog previews when a stale page refresh returns unchanged messages', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    const text = { type: 'text' as const, text: 'unchanged preview' }
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: '2:cached-group', kind: 'group' as const, title: 'Cached group',
+      peerUid: 'cached-group', peerUin: 'cached-group', chatType: 2 as const,
+      lastMessage: {
+        id: 'preview-1', conversationId: '2:cached-group', senderId: 'alice',
+        timestamp: 1, outgoing: false, parts: [text],
+      },
+    }] }))
+    const prepare = vi.spyOn(platform as any, 'prepareRequestedMessage')
+
+    await platform.getDialogs(session)
+    expect(prepare).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(15_001)
+    await platform.getDialogs(session)
+    const refresh = [...(platform as any).dialogPageRefreshes.values()][0] as Promise<unknown>
+    await refresh
+
+    expect(platform.client.getDialogs).toHaveBeenCalledTimes(2)
+    expect(prepare).toHaveBeenCalledTimes(1)
+  })
+
   it('preserves QQ group msgSeq and replayMsgSeq as Telegram message IDs', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))

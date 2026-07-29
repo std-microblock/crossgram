@@ -160,6 +160,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly mediaUpgradeJobs = new Map<string, Promise<void>>()
   private readonly preparedDialogPages = new Map<string, {
     page: IMDialogPage<QQMediaLocator>
+    rawPage: IMDialogPage<QQMediaLocator>
     cachedAt: number
     firstPage: boolean
     platformSessionId: string
@@ -496,18 +497,41 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private async prepareDialogPage(
     session: PlatformSession,
     page: IMDialogPage<QQMediaLocator>,
+    previous?: {
+      page: IMDialogPage<QQMediaLocator>
+      rawPage: IMDialogPage<QQMediaLocator>
+    },
   ): Promise<IMDialogPage<QQMediaLocator>> {
+    const previousRaw = new Map(previous?.rawPage.dialogs.map((dialog) => [dialog.conversation.id, dialog]))
+    const previousPrepared = new Map(previous?.page.dialogs.map((dialog) => [dialog.conversation.id, dialog]))
+    const preparePreview = async (
+      message: IMMessage<QQMediaLocator> | undefined,
+      raw: IMMessage<QQMediaLocator> | undefined,
+      prepared: IMMessage<QQMediaLocator> | undefined,
+      conversation: IMConversation<QQMediaLocator>,
+    ) => message && rawDialogPreviewEqual(message, raw) && prepared
+      ? prepared
+      : message
+        ? this.prepareRequestedMessage(session, conversation, message)
+        : undefined
     return {
       ...page,
-      dialogs: await Promise.all(page.dialogs.map(async (dialog) => ({
-        ...dialog,
-        lastMessage: dialog.lastMessage
-          ? await this.prepareRequestedMessage(session, dialog.conversation, dialog.lastMessage)
-          : undefined,
-        readInboxMaxMessage: dialog.readInboxMaxMessage
-          ? await this.prepareRequestedMessage(session, dialog.conversation, dialog.readInboxMaxMessage)
-          : undefined,
-      }))),
+      dialogs: await Promise.all(page.dialogs.map(async (dialog) => {
+        const raw = previousRaw.get(dialog.conversation.id)
+        const prepared = previousPrepared.get(dialog.conversation.id)
+        return {
+          ...dialog,
+          lastMessage: await preparePreview(
+            dialog.lastMessage, raw?.lastMessage, prepared?.lastMessage, dialog.conversation,
+          ),
+          readInboxMaxMessage: await preparePreview(
+            dialog.readInboxMaxMessage,
+            raw?.readInboxMaxMessage,
+            prepared?.readInboxMaxMessage,
+            dialog.conversation,
+          ),
+        }
+      })),
     }
   }
 
@@ -516,9 +540,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     query: IMPageQuery,
     page: IMDialogPage<QQMediaLocator>,
   ): Promise<IMDialogPage<QQMediaLocator>> {
-    const prepared = await this.prepareDialogPage(session, page)
-    this.preparedDialogPages.set(dialogPageCacheKey(session.platformSessionId, query), {
-      page: prepared,
+    const key = dialogPageCacheKey(session.platformSessionId, query)
+    const previous = this.preparedDialogPages.get(key)
+    const prepared = await this.prepareDialogPage(session, page, previous)
+    this.preparedDialogPages.set(key, {
+      page: prepared, rawPage: page,
       cachedAt: Date.now(),
       firstPage: !query.cursor && !query.afterId,
       platformSessionId: session.platformSessionId,
@@ -1702,6 +1728,14 @@ function dialogPageCacheKey(platformSessionId: string, query: IMPageQuery): stri
     query.afterId ?? '',
     query.limit ?? 100,
   ])
+}
+
+function rawDialogPreviewEqual(
+  current: IMMessage<QQMediaLocator>,
+  previous: IMMessage<QQMediaLocator> | undefined,
+): boolean {
+  if (!previous || current.id !== previous.id || current.timestamp !== previous.timestamp) return false
+  return JSON.stringify(current) === JSON.stringify(previous)
 }
 
 async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
