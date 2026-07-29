@@ -150,7 +150,7 @@ describe('rich-media projection', () => {
       peer: { _: 'inputPeerUser', userId: peerId, accessHash: Long.ZERO },
       replyTo: { _: 'inputReplyToMessage', replyToMsgId: target!.id },
       message: 'native reply', randomId: Long.fromNumber(9123),
-    })
+    }) as tl.RawUpdateShortSentMessage
 
     expect(sendMessage).toHaveBeenCalledWith(
       session,

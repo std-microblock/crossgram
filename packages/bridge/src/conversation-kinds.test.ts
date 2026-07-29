@@ -441,16 +441,42 @@ describe('conversation kinds', () => {
     expect(group.users).toMatchObject([{ _: 'user', firstName: 'sender-group' }, { _: 'user' }])
     expect(channel.chats).toMatchObject([{ _: 'channel', title: 'Discord / general' }])
 
-    await rpc.sendMessage({
+    const sentToGroup = await rpc.sendMessage({
       _: 'messages.sendMessage',
       peer: { _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO },
       message: 'to group', randomId: Long.ONE,
-    })
-    await rpc.sendMessage({
+    }) as tl.RawUpdates
+    const sentToChannel = await rpc.sendMessage({
       _: 'messages.sendMessage', peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ZERO },
       message: 'to channel', randomId: Long.fromNumber(2),
-    })
+    }) as tl.RawUpdates
     expect(sentTargets).toEqual(['group', 'parent-channel'])
+    for (const [result, expectedPeerId, expectedText, randomId] of [
+      [sentToGroup, groupId, 'to group', Long.ONE],
+      [sentToChannel, channelId, 'to channel', Long.fromNumber(2)],
+    ] as const) {
+      expect(result).toMatchObject({
+        _: 'updates',
+        updates: [
+          { _: 'updateMessageID', randomId },
+          {
+            _: 'updateNewChannelMessage',
+            message: {
+              _: 'message', out: true, message: expectedText,
+              fromId: { _: 'peerUser' },
+              peerId: { _: 'peerChannel', channelId: expectedPeerId },
+            },
+            ptsCount: 1,
+          },
+        ],
+        users: [{ _: 'user', self: true }],
+        chats: [{ _: 'channel', id: expectedPeerId }],
+      })
+      const full = result as tl.RawUpdates
+      const message = (full.updates[1] as tl.RawUpdateNewChannelMessage).message as tl.RawMessage
+      expect(message.fromId).toEqual({ _: 'peerUser', userId: (full.users[0] as tl.RawUser).id })
+      expect(() => roundTrip(result)).not.toThrow()
+    }
     await expect(rpc.getHistory(historyRequest({
       _: 'inputPeerUser', userId: groupId, accessHash: Long.ZERO,
     }))).rejects.toMatchObject({ text: 'PEER_ID_INVALID' })
@@ -605,9 +631,10 @@ describe('conversation kinds', () => {
 
       const sent = await rpc.sendMessage({
         _: 'messages.sendMessage', peer: groupPeer, message: 'old own message', randomId: Long.fromNumber(101),
-      })
+      }) as tl.RawUpdates
+      const sentId = (sent.updates.find((update) => update._ === 'updateMessageID') as tl.RawUpdateMessageID).id
       await expect(rpc.deleteMessages({
-        _: 'channels.deleteMessages', channel: groupChannel, id: [sent.id],
+        _: 'channels.deleteMessages', channel: groupChannel, id: [sentId],
       }, groupChannel)).rejects.toMatchObject({ text: 'MESSAGE_DELETE_FORBIDDEN' })
 
       await expect(rpc.deleteMessages({
