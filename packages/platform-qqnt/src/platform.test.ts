@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
-import type { PlatformSession } from '@mtproto-relay/bridge'
+import type { IMMedia, PlatformSession } from '@mtproto-relay/bridge'
 import { PlatformMessageActions } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
 import { QQMediaCache } from './media-cache.js'
+import type { QQMediaLocator } from './protocol.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
@@ -1037,6 +1038,30 @@ describe('QQNTPlatform mapping', () => {
         },
       },
     })
+  })
+
+  it('does not resolve a generated preview to the original QQ image URL', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.resolveFileUrl = vi.fn(async () => ({
+      url: 'https://cdn.example.test/original.png', expiresAt: Date.now() + 60_000,
+    }))
+    const original: IMMedia<QQMediaLocator> = {
+      id: 'image', kind: 'image', mimeType: 'image/png', size: 6_705_675,
+      locator: {
+        messageId: 'message', elementId: 'element', chatType: 2, peerUid: 'group',
+        kind: 'image', fileName: 'original.png', fileUuid: 'uuid',
+      },
+    }
+    const preview: IMMedia<QQMediaLocator> = {
+      ...original, id: 'image:preview', mimeType: 'image/webp', size: 13_906,
+      locator: { ...original.locator!, previewKey: 'generated-preview' },
+    }
+
+    await expect(platform.resolveMediaUrl(session, original)).resolves.toMatchObject({
+      url: 'https://cdn.example.test/original.png', supportsRange: true,
+    })
+    await expect(platform.resolveMediaUrl(session, preview)).resolves.toBeUndefined()
+    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(1)
   })
 
   it('returns uncached history images as same-size empty placeholders and edits them when ready', async () => {
