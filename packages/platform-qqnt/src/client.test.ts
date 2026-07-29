@@ -603,11 +603,18 @@ describe('QQNTClient streaming transport', () => {
       order.push(`${event.type === 'message-delete' ? event.eventId : '?'}:${eventId}:end`)
     }, new AbortController().signal, {
       lastEventId: '9',
-      onEventId: (eventId) => acknowledged.push(eventId),
+      onEventId: async (eventId) => {
+        acknowledged.push(`${eventId}:start`)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        acknowledged.push(`${eventId}:end`)
+      },
     })
     expect(requestUrl).toBe('/custom/events?stream=qqnt&lastEventId=9')
-    expect(order).toEqual(['a:10:start', 'a:10:end', 'b:11:start', 'b:11:end'])
-    expect(acknowledged).toEqual(['10', '11'])
+    expect(acknowledged).toEqual(['10:start', '10:end', '11:start', '11:end'])
+    expect(order).toEqual([
+      'a:10:start', 'a:10:end',
+      'b:11:start', 'b:11:end',
+    ])
   })
 
   it('derives the WebSocket endpoint from the HTTP endpoint when no override is configured', () => {

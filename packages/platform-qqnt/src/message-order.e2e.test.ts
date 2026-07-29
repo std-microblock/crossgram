@@ -13,6 +13,7 @@ import {
   MessageStore, StickerRpc, type IngestResult, type PlatformSession, type Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { defineModels } from '../../bridge/src/models.js'
+import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { QQNTPlatform } from './index.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import { QQStickerProvider } from './sticker-provider.js'
@@ -225,6 +226,105 @@ describe('QQNT same-second message ordering E2E', () => {
 
       await unsubscribeSecond()
       await vi.waitFor(() => expect(activeConnections).toBe(0))
+    } finally {
+      await unsubscribeSecond?.()
+      await unsubscribeFirst?.()
+    }
+  })
+})
+
+describe('QQNT durable event checkpoint E2E', () => {
+  it('resumes after the last committed event and never skips a failed event', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineQQNTEventCheckpointModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    let server: Server | undefined
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    const connectionUrls: string[] = []
+    webSocketServer.on('connection', (webSocket, request) => {
+      connectionUrls.push(request.url ?? '')
+      const eventId = connectionUrls.length === 1 ? '7' : connectionUrls.length === 2 ? '8' : undefined
+      if (!eventId) return
+      webSocket.send(JSON.stringify({
+        id: eventId,
+        event: {
+          type: 'message-delete', eventId: `delete-${eventId}`,
+          conversation: {
+            id: 'checkpoint-group', kind: 'group', title: 'Checkpoint group',
+            peerUid: 'checkpoint-group', peerUin: '7', chatType: 2,
+          },
+          messageIds: [`message-${eventId}`], timestamp: Number(eventId),
+        },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing checkpoint test server address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const checkpointSession = { ...session, platformSessionId: 'qqnt-event-checkpoint-e2e' }
+    const endpoint = `ws://127.0.0.1:${address.port}/events`
+    const createPlatform = () => {
+      const platform = new QQNTPlatform(
+        { endpoint: 'http://127.0.0.1:1/v1', webSocketEndpoint: endpoint },
+        'qqnt:stickers', undefined, undefined, ctx.database,
+      )
+      platform.client.getReactionCatalog = vi.fn(async () => ({
+        available: [], reactions: [], maxSelected: 20,
+      }))
+      platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+      return platform
+    }
+
+    let unsubscribeFirst: Unsubscribe | undefined
+    let unsubscribeSecond: Unsubscribe | undefined
+    try {
+      const first = createPlatform()
+      unsubscribeFirst = await first.subscribe(checkpointSession, () => {})
+      await vi.waitFor(async () => expect(await ctx.database.get(
+        'mtproto_qqnt_event_checkpoint', { platformSessionId: checkpointSession.platformSessionId },
+      )).toMatchObject([{ lastEventId: '7' }]))
+      await unsubscribeFirst()
+      unsubscribeFirst = undefined
+
+      const second = createPlatform()
+      unsubscribeSecond = await second.subscribe(checkpointSession, () => {
+        throw new Error('intentional event handler failure')
+      })
+      await vi.waitFor(() => expect(connectionUrls).toHaveLength(3), { timeout: 5_000 })
+
+      expect(new URL(connectionUrls[0]!, endpoint).searchParams.get('lastEventId')).toBeNull()
+      expect(new URL(connectionUrls[1]!, endpoint).searchParams.get('lastEventId')).toBe('7')
+      expect(new URL(connectionUrls[2]!, endpoint).searchParams.get('lastEventId')).toBe('7')
+      await expect(ctx.database.get(
+        'mtproto_qqnt_event_checkpoint', { platformSessionId: checkpointSession.platformSessionId },
+      )).resolves.toMatchObject([{ lastEventId: '7' }])
     } finally {
       await unsubscribeSecond?.()
       await unsubscribeFirst?.()

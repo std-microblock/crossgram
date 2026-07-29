@@ -17,7 +17,7 @@ export interface QQNTClientOptions {
 
 export interface QQNTSubscribeOptions {
   lastEventId?: string
-  onEventId?(eventId: string): void
+  onEventId?(eventId: string): void | Promise<void>
 }
 
 export interface DirectUrl {
@@ -489,7 +489,7 @@ export class QQNTClient {
         const frame = JSON.parse(rawDataText(value)) as { id?: string, event?: WireEvent }
         if (!frame.event) throw new Error('QQNT WebSocket frame has no event')
         await handler(frame.event, frame.id)
-        if (frame.id) options.onEventId?.(frame.id)
+        if (frame.id) await options.onEventId?.(frame.id)
       }
     } catch (error) {
       if (!signal.aborted) throw error
