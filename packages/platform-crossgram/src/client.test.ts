@@ -54,6 +54,36 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
+  it('sends the stable native sequence with reaction reads and writes', async () => {
+    const requests: Array<{ url: string, method?: string, body?: unknown }> = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async (input, init) => {
+        requests.push({
+          url: String(input), method: init?.method,
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        })
+        return Response.json({ reactions: [], maxSelected: 20 })
+      }),
+    })
+
+    await client.getMessageReactions('group/1', 'account-scoped-id', '571')
+    await client.setMessageReactions('group/1', 'account-scoped-id', ['2:128522'], '571')
+
+    expect(requests).toEqual([{
+      url: 'http://bridge.invalid/v1/messages/reactions?conversationId=group%2F1&messageId=account-scoped-id&messageSequence=571',
+      method: undefined,
+      body: undefined,
+    }, {
+      url: 'http://bridge.invalid/v1/messages/reactions',
+      method: 'POST',
+      body: {
+        conversationId: 'group/1', messageId: 'account-scoped-id',
+        messageSequence: '571', reactionKeys: ['2:128522'],
+      },
+    }])
+  })
+
   it('forwards message search filters and opaque cursors', async () => {
     let requestUrl = ''
     server = createServer((request, response) => {

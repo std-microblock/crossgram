@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  cardUrl, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
+  cardUrl, IMMessageTargetUnavailableError, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
@@ -1564,6 +1564,10 @@ export class DialogRpc {
       conversationId: peerId,
       messageId: projected.source.id,
       targetId: projected.source.sourceIds?.[0] ?? projected.source.id,
+      nativeSequence: projected.parts[0]?.nativeSequence === null
+        || projected.parts[0]?.nativeSequence === undefined
+        ? undefined
+        : String(projected.parts[0].nativeSequence),
     }
     const context = await this._platform.getAvailableReactions?.(this._session, target)
       ?? projected.source.reactionContext
@@ -1575,9 +1579,17 @@ export class DialogRpc {
       .filter((reaction) => reaction.selected)
       .map((reaction) => reaction.key))
     const newlySelected = selected.filter((definition) => !previouslySelected.has(definition.key))
-    const updated = await this._platform.setMessageReactions(
-      this._session, target, selected.map((item) => item.key),
-    )
+    let updated
+    try {
+      updated = await this._platform.setMessageReactions(
+        this._session, target, selected.map((item) => item.key),
+      )
+    } catch (error) {
+      if (error instanceof IMMessageTargetUnavailableError) {
+        throw new RpcError(400, 'REACTION_INVALID')
+      }
+      throw error
+    }
     const conversation = this._conversation(peerId)
     const result = await this._store!.setReactions(this._session, conversation, target, updated)
     await this._reactions!.markUsed(peerId, newlySelected)
@@ -1630,6 +1642,10 @@ export class DialogRpc {
       conversationId: peerId,
       messageId: projected.source.id,
       targetId: projected.source.sourceIds?.[0] ?? projected.source.id,
+      nativeSequence: projected.parts[0]?.nativeSequence === null
+        || projected.parts[0]?.nativeSequence === undefined
+        ? undefined
+        : String(projected.parts[0].nativeSequence),
     }
     const refreshed = await this._platform.getMessageReactions?.(this._session, target)
     const context = refreshed

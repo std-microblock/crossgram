@@ -299,19 +299,24 @@ export class QQNTClient {
     return this.json('/reactions/catalog')
   }
 
-  getMessageReactions(conversationId: string, messageId: string): Promise<WireReactionState> {
-    return this.json(`/messages/reactions${queryString({ conversationId, messageId })}`)
+  getMessageReactions(
+    conversationId: string,
+    messageId: string,
+    messageSequence?: string,
+  ): Promise<WireReactionState> {
+    return this.json(`/messages/reactions${queryString({ conversationId, messageId, messageSequence })}`)
   }
 
   setMessageReactions(
     conversationId: string,
     messageId: string,
     reactionKeys: readonly string[],
+    messageSequence?: string,
   ): Promise<WireReactionState> {
     return this.json('/messages/reactions', false, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ conversationId, messageId, reactionKeys }),
+      body: JSON.stringify({ conversationId, messageId, messageSequence, reactionKeys }),
     })
   }
 
