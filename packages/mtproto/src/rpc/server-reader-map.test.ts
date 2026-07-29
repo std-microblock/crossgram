@@ -60,6 +60,27 @@ describe('historical server reader map', () => {
       _: 'account.registerDevice', tokenType: 7, token: 'internal-push-token',
     })
   })
+
+  it('decodes the stable Crossgram direct-download request constructor', () => {
+    const location = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'inputDocumentFileLocation',
+      id: Long.fromNumber(42),
+      accessHash: Long.fromNumber(42),
+      fileReference: new TextEncoder().encode('bridge-media:42'),
+      thumbSize: '',
+    } as any)
+    const request = TlBinaryWriter.manual(4 + location.length)
+    request.uint(0x7520f6ea)
+    request.raw(location)
+
+    expect(new TlBinaryReader(getServerReaderMap(), request.result()).object()).toMatchObject({
+      _: 'crossgram.getFileUrl',
+      location: {
+        _: 'inputDocumentFileLocation', id: Long.fromNumber(42),
+        accessHash: Long.fromNumber(42), thumbSize: '',
+      },
+    })
+  })
 })
 
 function tlString(value: string): Uint8Array {

@@ -20,7 +20,7 @@ export interface QQNTSubscribeOptions {
   onEventId?(eventId: string): void
 }
 
-interface DirectUrl {
+export interface DirectUrl {
   url: string
   expiresAt: number
 }
@@ -333,7 +333,7 @@ export class QQNTClient {
     const avatarUrl = qqAvatarUrl(locator)
     let response: Response
     if (avatarUrl || hasDirectUrlIdentity(locator)) {
-      const directUrl = avatarUrl ?? await this.resolveDirectUrl(locator, options.signal)
+      const directUrl = avatarUrl ?? (await this.resolveFileUrl(locator, options.signal)).url
       response = await this.fetchImpl(directUrl, {
         headers: rangeHeaders,
         signal: options.signal,
@@ -434,11 +434,12 @@ export class QQNTClient {
     }
   }
 
-  private async resolveDirectUrl(locator: QQMediaLocator, signal?: AbortSignal): Promise<string> {
+  async resolveFileUrl(locator: QQMediaLocator, signal?: AbortSignal): Promise<DirectUrl> {
     if (signal?.aborted) throw signal.reason ?? new Error('download aborted')
+    if (!hasDirectUrlIdentity(locator)) throw new Error('QQNT media locator has no remote direct-link identity')
     const key = directUrlIdentity(locator)
     const cached = this.directUrls.get(key)
-    if (cached && Date.now() < cached.expiresAt) return cached.url
+    if (cached && Date.now() < cached.expiresAt) return cached
     const active = this.directUrlRefreshes.get(key)
     const refresh = active ?? this.fetchDirectUrl(locator).then((value) => {
       this.rememberDirectUrl(key, value)
@@ -447,7 +448,7 @@ export class QQNTClient {
     if (!active) this.directUrlRefreshes.set(key, refresh)
     const resolved = await refresh
     if (signal?.aborted) throw signal.reason ?? new Error('download aborted')
-    return resolved.url
+    return resolved
   }
 
   private fetchDirectUrl(locator: QQMediaLocator): Promise<DirectUrl> {
