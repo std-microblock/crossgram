@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { bigint, typed, u8 } from '@fuman/utils'
-import { Bytes } from '@fuman/io'
+import { Bytes, write, type ISyncWritable } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -83,9 +83,23 @@ function rsaPad(data: Uint8Array, key: { modulus: string, exponent: string }): U
   }
 }
 
+/** Abridged client codec that can reproduce Android's reportAck length bit. */
+class TestAbridgedPacketCodec extends AbridgedPacketCodec {
+  requestQuickAck = false
+
+  override encode(frame: Uint8Array, into: ISyncWritable): void {
+    const temporary = Bytes.alloc(frame.length + 4)
+    super.encode(frame, temporary)
+    const encoded = new Uint8Array(temporary.result())
+    if (this.requestQuickAck) encoded[0] |= 0x80
+    write.bytes(into, encoded)
+  }
+}
+
 /** A test client speaking obfuscated + abridged transport over a real socket. */
 class TestClient {
-  private _codec = new ObfuscatedPacketCodec(new AbridgedPacketCodec())
+  private _abridged = new TestAbridgedPacketCodec()
+  private _codec = new ObfuscatedPacketCodec(this._abridged)
   private _recv = Bytes.alloc(65536)
   private _frames: Uint8Array[] = []
   private _waiter: ((f: Uint8Array) => void) | null = null
@@ -123,10 +137,15 @@ class TestClient {
     this._recv.reclaim()
   }
 
-  async send(frame: Uint8Array): Promise<void> {
+  async send(frame: Uint8Array, requestQuickAck = false): Promise<void> {
     const into = Bytes.alloc(frame.length + 64)
-    await this._codec.encode(frame, into)
-    this._sock.write(into.result())
+    this._abridged.requestQuickAck = requestQuickAck
+    try {
+      await this._codec.encode(frame, into)
+      this._sock.write(into.result())
+    } finally {
+      this._abridged.requestQuickAck = false
+    }
   }
 
   async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
@@ -1329,6 +1348,37 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       )).map((event) => event.connectionId)).toEqual(['conn-1'])
       main.close()
       media.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('decodes an Android short abridged RPC with the quick-ack bit over TCP', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x17171717, 0x17171717)
+
+      await client.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }),
+        perm.salt,
+        sessionId,
+        4,
+      ))
+      expect(await readRpcResult(client, perm)).toMatchObject({ _: 'help.appConfig', hash: 1 })
+
+      const request = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'help.getAppConfig', hash: 0,
+      } as { _: string })
+      const frame = clientEncrypt(perm, request, perm.salt, sessionId, 8)
+      expect(frame.length / 4).toBeLessThan(0x7f)
+      await client.send(frame, true)
+      expect(await within(readRpcResult(client, perm), 1_000, 'quick-ack RPC response'))
+        .toMatchObject({ _: 'help.appConfig', hash: 2 })
+      client.close()
     } finally {
       await stop()
     }

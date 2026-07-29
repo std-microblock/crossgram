@@ -38,10 +38,17 @@ export class AbridgedPacketCodec implements IPacketCodec {
     if (reader.available < 1) return null
 
     const firstByte = reader.readSync(1)[0]
+    // Telegram clients set bit 7 on the abridged length marker when they ask
+    // for a transport-level quick acknowledgement. It is not part of the
+    // packet length. In particular, a short 74-word frame is encoded as 0xca,
+    // not as the four-byte-length marker. Treating the unmasked value as the
+    // marker makes the following three ciphertext bytes look like a huge
+    // length and stalls the connection until the client reconnects.
+    const lengthMarker = firstByte & 0x7f
     let length: number
     let headerSize: number
-    if (firstByte < 0x7f) {
-      length = firstByte * 4
+    if (lengthMarker < 0x7f) {
+      length = lengthMarker * 4
       headerSize = 1
     } else {
       if (reader.available < 3) {
