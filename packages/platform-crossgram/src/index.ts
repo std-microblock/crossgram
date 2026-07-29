@@ -5,16 +5,14 @@ import { resolve } from 'node:path'
 import z from 'schemastery'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
-import type {
-  IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
-  IMDirectDownload, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
-  IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
-  IMSticker, IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
-} from '@mtproto-relay/bridge'
 import {
-  IMMessageTargetUnavailableError, messagePartText, resolvePlatformPluginId,
+  IMMessageSendRejectedError, IMMessageTargetUnavailableError, messagePartText, resolvePlatformPluginId,
+  type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage,
+  type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput,
+  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMTransferOptions,
+  type IMSticker, type IMStickerAsset, type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { QQNTClient, type QQNTClientOptions } from './client.js'
+import { QQNTClient, QQNTMessageSendRejectedError, type QQNTClientOptions } from './client.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
@@ -708,12 +706,19 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const originRequestId = randomUUID()
     this.originSessions.set(originRequestId, session.platformSessionId)
     try {
-      return this.prepareInitialMessage(this.mapMessage(
-        await this.client.sendMessage(
+      let sent: WireMessage
+      try {
+        sent = await this.client.sendMessage(
           conversation.id, text, media.length ? media : undefined,
           options, originRequestId, sticker, textParts, content.replyToId,
-        ),
-      ))
+        )
+      } catch (error) {
+        if (error instanceof QQNTMessageSendRejectedError) {
+          throw new IMMessageSendRejectedError('permission-denied', error.message, { cause: error })
+        }
+        throw error
+      }
+      return this.prepareInitialMessage(this.mapMessage(sent))
     } finally {
       const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
       timer.unref()
