@@ -10,6 +10,7 @@ import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
+import { IMMessageTargetUnavailableError } from './platform.js'
 import type { IMConversation, IMEvent, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
@@ -261,6 +262,7 @@ describe('conversation kinds', () => {
       { key: 'fire', presentation: { type: 'emoji' as const, emoticon: '🔥' } },
     ]
     let reactionContext = { available, reactions: [], maxSelected: 1 } as import('./platform.js').IMReactionContext
+    const reactionTargets: import('./platform.js').IMMessageTarget[] = []
     const selectedPlatform: IMPlatform = {
       ...platform,
       capabilities: {
@@ -270,13 +272,14 @@ describe('conversation kinds', () => {
       async getDialogs() {
         return { dialogs: [{
           conversation: group, unreadCount: 0,
-          lastMessage: { ...source(group), reactionContext },
+          lastMessage: { ...source(group), metadata: { qqMsgSeq: '571' }, reactionContext },
         }] }
       },
       async getAvailableReactions() {
         return reactionContext
       },
-      async setMessageReactions(_session, _target, keys) {
+      async setMessageReactions(_session, target, keys) {
+        reactionTargets.push(target)
         reactionContext = {
           available,
           reactions: keys.map((key) => ({ key, count: 1, selected: true })),
@@ -319,6 +322,43 @@ describe('conversation kinds', () => {
       { _: 'reactionEmoji', emoticon: '🔥' },
       { _: 'reactionEmoji', emoticon: '👍' },
     ] })
+    expect(reactionTargets).toHaveLength(3)
+    expect(reactionTargets).toEqual(reactionTargets.map((target) => ({
+      ...target, nativeSequence: '571',
+    })))
+  })
+
+  it('maps a permanently unavailable reaction target to a non-retryable RPC error', async () => {
+    const group = conversations.find((item) => item.id === 'group')!
+    const available = [{ key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }]
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: true, events: false, actorList: false, maxSelected: 1 },
+      },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation: group, unreadCount: 0,
+          lastMessage: {
+            ...source(group), metadata: { qqMsgSeq: '571' },
+            reactionContext: { available, reactions: [], maxSelected: 1 },
+          },
+        }] }
+      },
+      async setMessageReactions() {
+        throw new IMMessageTargetUnavailableError('gone')
+      },
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+    const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
+
+    await expect(rpc.sendReaction({
+      _: 'messages.sendReaction', peer, msgId: message.id,
+      reaction: [{ _: 'reactionEmoji', emoticon: '👍' }],
+    })).rejects.toMatchObject({ code: 400, text: 'REACTION_INVALID' })
   })
 
   it('refreshes and returns the platform users behind message reactions', async () => {
@@ -348,7 +388,7 @@ describe('conversation kinds', () => {
         return { dialogs: [{
           conversation,
           unreadCount: 0,
-          lastMessage: { ...source(conversation), reactionContext },
+          lastMessage: { ...source(conversation), metadata: { qqMsgSeq: '571' }, reactionContext },
         }] }
       },
       getMessageReactions,
@@ -374,7 +414,7 @@ describe('conversation kinds', () => {
       ]),
     })
     expect(getMessageReactions).toHaveBeenCalledWith(session, {
-      conversationId: 'group', messageId: 'message-group', targetId: 'message-group',
+      conversationId: 'group', messageId: 'message-group', targetId: 'message-group', nativeSequence: '571',
     })
   })
 

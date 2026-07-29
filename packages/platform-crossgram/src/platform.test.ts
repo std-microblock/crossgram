@@ -1475,14 +1475,16 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.downloadFile).not.toHaveBeenCalled()
     expect(platform.client.downloadReactionResource).toHaveBeenCalledTimes(2)
     await expect(platform.getMessageReactions(session, {
-      conversationId: '2:g', messageId: 'm', targetId: 'm',
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
     })).resolves.toMatchObject({ reactions: [{
       key: '2:128522', selected: true,
       recentActors: [{ userId: 'actor-a' }, { userId: 'actor-b' }],
     }] })
     await expect(platform.setMessageReactions(session, {
-      conversationId: '2:g', messageId: 'm', targetId: 'm',
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
     }, ['1:14'])).resolves.toMatchObject({ reactions: [{ key: '1:14', selected: true }] })
+    expect(platform.client.getMessageReactions).toHaveBeenCalledWith('2:g', 'm', '571')
+    expect(platform.client.setMessageReactions).toHaveBeenCalledWith('2:g', 'm', ['1:14'], '571')
     await expect(platform.getAvailableReactions(session, { conversationId: '1:u' }))
       .resolves.toEqual({ available: [], reactions: [], maxSelected: 0 })
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(1)
