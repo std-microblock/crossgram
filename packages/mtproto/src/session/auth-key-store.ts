@@ -8,6 +8,8 @@ export interface StoredAuthKey {
   permanentKeyId?: Uint8Array
   /** Unix timestamp after which a temporary key must be rejected. */
   expiresAt?: number
+  /** Last API layer negotiated by the permanent key. */
+  apiLayer?: number
 }
 
 /** Persistent store for permanent keys and their bound temporary PFS keys. */
@@ -52,6 +54,7 @@ interface SerializedAuthKey {
   key: string
   permanentKeyId?: string
   expiresAt?: number
+  apiLayer?: number
 }
 
 /**
@@ -88,6 +91,7 @@ export class FileAuthKeyStore implements AuthKeyStore {
       key: fromHex(value.key),
       permanentKeyId: value.permanentKeyId ? fromHex(value.permanentKeyId) : undefined,
       expiresAt: value.expiresAt,
+      apiLayer: value.apiLayer,
     }
   }
 
@@ -96,6 +100,7 @@ export class FileAuthKeyStore implements AuthKeyStore {
       key: toHex(record.key),
       permanentKeyId: record.permanentKeyId ? toHex(record.permanentKeyId) : undefined,
       expiresAt: record.expiresAt,
+      apiLayer: record.apiLayer,
     })
     mkdirSync(dirname(this._path), { recursive: true })
     const temporaryPath = `${this._path}.tmp`

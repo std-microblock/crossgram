@@ -463,10 +463,12 @@ export class ServerSession {
   }
 
   private async _adoptStoredAuthKey(record: StoredAuthKey): Promise<boolean> {
+    let apiLayer = record.apiLayer
     if (record.permanentKeyId) {
       const permanent = await this._keyStore?.get(record.permanentKeyId)
       if (!permanent || permanent.permanentKeyId) return false
       this._permAuthKey.setup(permanent.key)
+      apiLayer = permanent.apiLayer
       this._tempAuthKey = new ServerAuthKey(this._crypto, this._log, this._readerMap)
       this._tempAuthKey.setup(record.key)
       this._tempAuthKeyExpiresAt = record.expiresAt ?? null
@@ -481,6 +483,7 @@ export class ServerSession {
     }
     this._generateFutureSalts()
     this._authorized = true
+    if (apiLayer !== undefined) this._setApiLayer(apiLayer, false)
     return true
   }
 
@@ -820,6 +823,7 @@ export class ServerSession {
       if (permanent && !permanent.permanentKeyId) {
         const replacedFreshKey = this._permAuthKey.ready
         this._permAuthKey.setup(permanent.key)
+        if (permanent.apiLayer !== undefined) this._setApiLayer(permanent.apiLayer, false)
         this._log.info(
           replacedFreshKey
             ? 'replaced fresh permanent key with requested key %h for temp-key binding'

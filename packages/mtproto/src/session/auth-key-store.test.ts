@@ -41,14 +41,20 @@ describe('FileAuthKeyStore', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
 
     const store1 = new FileAuthKeyStore(path)
-    store1.save(id(7), { key: key(0x42) })
+    store1.save(id(7), { key: key(0x42), apiLayer: 227 })
     store1.save(id(8), { key: key(0x43), permanentKeyId: id(7), expiresAt: 4_000_000_000 })
-    expect(store1.get(id(7))).toEqual({ key: key(0x42), permanentKeyId: undefined, expiresAt: undefined })
+    expect(store1.get(id(7))).toEqual({
+      key: key(0x42), permanentKeyId: undefined, expiresAt: undefined, apiLayer: 227,
+    })
 
     // A fresh instance reading the same file sees the persisted key.
     const store2 = new FileAuthKeyStore(path)
-    expect(store2.get(id(7))).toEqual({ key: key(0x42), permanentKeyId: undefined, expiresAt: undefined })
-    expect(store2.get(id(8))).toEqual({ key: key(0x43), permanentKeyId: id(7), expiresAt: 4_000_000_000 })
+    expect(store2.get(id(7))).toEqual({
+      key: key(0x42), permanentKeyId: undefined, expiresAt: undefined, apiLayer: 227,
+    })
+    expect(store2.get(id(8))).toEqual({
+      key: key(0x43), permanentKeyId: id(7), expiresAt: 4_000_000_000, apiLayer: undefined,
+    })
     expect(store2.get(id(9))).toBeUndefined()
   })
 
@@ -56,7 +62,9 @@ describe('FileAuthKeyStore', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
     writeFileSync(path, JSON.stringify({ '0707070707070707': Buffer.from(key(0x42)).toString('hex') }))
     const store = new FileAuthKeyStore(path)
-    expect(store.get(id(7))).toEqual({ key: key(0x42), permanentKeyId: undefined, expiresAt: undefined })
+    expect(store.get(id(7))).toEqual({
+      key: key(0x42), permanentKeyId: undefined, expiresAt: undefined, apiLayer: undefined,
+    })
   })
 
   it('starts empty when the file does not exist', () => {

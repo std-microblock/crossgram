@@ -190,7 +190,7 @@ export class Mtproto extends Service {
       this._authKeyData,
       this._authKeyStore,
       (event) => this.onDebug.emit({ ...event, connectionId }),
-      (authKeyId, layer) => this._rememberApiLayer(authKeyId, layer),
+      (authKeyId, layer) => { void this._rememberApiLayer(authKeyId, layer) },
       (authKeyId) => this._authApiLayers.get(bytesHex(authKeyId)),
     )
     this._sessions.add(session)
@@ -206,11 +206,19 @@ export class Mtproto extends Service {
     connection.start()
   }
 
-  private _rememberApiLayer(authKeyId: Uint8Array, layer: number): void {
+  private async _rememberApiLayer(authKeyId: Uint8Array, layer: number): Promise<void> {
     const key = bytesHex(authKeyId)
     this._authApiLayers.set(key, layer)
     for (const session of this._sessions) {
       if (equalBytes(session.authKeyId, authKeyId)) session.applyApiLayer(layer)
+    }
+    try {
+      const stored = await this._authKeyStore.get(authKeyId)
+      if (stored && !stored.permanentKeyId && stored.apiLayer !== layer) {
+        await this._authKeyStore.save(authKeyId, { ...stored, apiLayer: layer })
+      }
+    } catch (error) {
+      this._log.warn('failed to persist API layer for auth key %h: %s', authKeyId, error)
     }
   }
 
