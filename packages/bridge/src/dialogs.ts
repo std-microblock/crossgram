@@ -127,6 +127,7 @@ export class DialogRpc {
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peersHydratedStoreRevision = -1
+  private _dialogProjectionStoreRevision = -1
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
 
@@ -208,29 +209,39 @@ export class DialogRpc {
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
     const projectionsAt = performance.now()
     if (this._store) {
-      const projected = await this._store.readProjectedByPlatformIds(
-        this._session.platformSessionId,
-        all.flatMap((dialog) => [dialog.lastMessage, dialog.readInboxMaxMessage]
-          .flatMap((message) => message ? [{
-            conversationId: dialog.conversation.id,
-            platformMessageId: message.id,
-          }] : [])),
-      )
-      for (const stored of projected) {
-        const additions = stored.parts.map((part): MaterializedMessage => ({
-          source: stored.source,
-          tlId: part.tlMessageId,
-          ordinal: part.ordinal,
-          groupedId: part.groupedId ?? undefined,
-          media: stored.media.find((entry) => entry.id === part.mediaId),
-        }))
-        const existing = this._historyCache.get(stored.source.conversationId) ?? []
-        const additionIds = new Set(additions.map((item) => item.tlId))
-        this._historyCache.set(stored.source.conversationId, [
-          ...existing.filter((item) => !additionIds.has(item.tlId)),
-          ...additions,
-        ].sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId))
-        for (const item of additions) this._rememberMessage(item)
+      const targets = all.flatMap((dialog) => [dialog.lastMessage, dialog.readInboxMaxMessage]
+        .flatMap((message) => message ? [{
+          conversationId: dialog.conversation.id,
+          platformMessageId: message.id,
+        }] : []))
+      const revisionBefore = this._store.revision
+      const cached = revisionBefore === this._dialogProjectionStoreRevision
+        && targets.every((target) => this._historyCache.get(target.conversationId)?.some((item) =>
+          item.source.id === target.platformMessageId
+          || item.source.sourceIds?.includes(target.platformMessageId)))
+      if (!cached) {
+        const projected = await this._store.readProjectedByPlatformIds(
+          this._session.platformSessionId,
+          targets,
+        )
+        for (const stored of projected) {
+          const additions = stored.parts.map((part): MaterializedMessage => ({
+            source: stored.source,
+            tlId: part.tlMessageId,
+            ordinal: part.ordinal,
+            groupedId: part.groupedId ?? undefined,
+            media: stored.media.find((entry) => entry.id === part.mediaId),
+          }))
+          const existing = this._historyCache.get(stored.source.conversationId) ?? []
+          const additionIds = new Set(additions.map((item) => item.tlId))
+          this._historyCache.set(stored.source.conversationId, [
+            ...existing.filter((item) => !additionIds.has(item.tlId)),
+            ...additions,
+          ].sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId))
+          for (const item of additions) this._rememberMessage(item)
+        }
+        const revisionAfter = this._store.revision
+        this._dialogProjectionStoreRevision = revisionBefore === revisionAfter ? revisionAfter : -1
       }
     }
     const projectionsMs = performance.now() - projectionsAt

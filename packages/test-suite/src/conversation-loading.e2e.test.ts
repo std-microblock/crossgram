@@ -132,6 +132,7 @@ describe('conversation loading performance', () => {
     await vi.waitFor(() => expect(platform.client.getDialogs).toHaveBeenCalled())
 
     const upsertUsers = vi.spyOn(store, 'upsertUsers')
+    const readProjected = vi.spyOn(store, 'readProjectedByPlatformIds')
     const dialogsRpc = new DialogRpc(platform, session, store)
     const dialogsStarted = performance.now()
     const dialogs = await dialogsRpc.getDialogs({
@@ -140,6 +141,13 @@ describe('conversation loading performance', () => {
       limit: 100, hash: Long.ZERO,
     })
     const dialogsMs = performance.now() - dialogsStarted
+    const repeatedDialogsStarted = performance.now()
+    const repeatedDialogs = await dialogsRpc.getDialogs({
+      _: 'messages.getDialogs', excludePinned: false,
+      offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' },
+      limit: 100, hash: Long.ZERO,
+    })
+    const repeatedDialogsMs = performance.now() - repeatedDialogsStarted
 
     const peerRpc = new DialogRpc(platform, session, store)
     const peerStarted = performance.now()
@@ -154,12 +162,15 @@ describe('conversation loading performance', () => {
     const historyMs = performance.now() - historyStarted
 
     expect(dialogs._ === 'messages.dialogsNotModified' ? [] : dialogs.dialogs).toHaveLength(100)
+    expect(repeatedDialogs._ === 'messages.dialogsNotModified' ? [] : repeatedDialogs.dialogs).toHaveLength(100)
     expect(peerDialogs.dialogs).toHaveLength(1)
     expect(history._ === 'messages.messagesNotModified' ? [] : history.messages).toHaveLength(50)
     expect(dialogsMs).toBeLessThan(100)
+    expect(repeatedDialogsMs).toBeLessThan(100)
     expect(peerMs).toBeLessThan(100)
     expect(historyMs).toBeLessThan(100)
     expect(upsertUsers).not.toHaveBeenCalled()
+    expect(readProjected).toHaveBeenCalledOnce()
 
     releaseHistory.resolve()
     await historyReturned.promise
