@@ -26,12 +26,12 @@ const dialogConversations: IMConversation[] = [
   conversation,
   ...Array.from({ length: 99 }, (_, index) => ({
     id: `performance-dialog-${index + 1}`,
-    kind: 'group' as const,
+    kind: index < 54 ? 'direct' as const : 'group' as const,
     title: `Performance dialog ${index + 1}`,
     metadata: {
       qqPeerUid: `performance-dialog-${index + 1}`,
       qq: `performance-dialog-${index + 1}`,
-      chatType: 2,
+      chatType: index < 54 ? 1 : 2,
     },
   })),
 ]
@@ -102,11 +102,11 @@ describe('conversation loading performance', () => {
     platform.client.getDialogs = vi.fn(async () => ({
       conversations: dialogConversations.map((dialog, index) => ({
         id: dialog.id,
-        kind: 'group' as const,
+        kind: dialog.kind === 'direct' ? 'direct' as const : 'group' as const,
         title: dialog.title,
         peerUid: dialog.id,
         peerUin: dialog.id,
-        chatType: 2 as const,
+        chatType: dialog.kind === 'direct' ? 1 as const : 2 as const,
         unreadCount: 0,
         lastMessage: index === 0 ? {
           id: 'stored-120', conversationId: dialog.id,
@@ -131,6 +131,7 @@ describe('conversation loading performance', () => {
     disposals.push(async () => { await unsubscribe() })
     await vi.waitFor(() => expect(platform.client.getDialogs).toHaveBeenCalled())
 
+    const upsertUsers = vi.spyOn(store, 'upsertUsers')
     const dialogsRpc = new DialogRpc(platform, session, store)
     const dialogsStarted = performance.now()
     const dialogs = await dialogsRpc.getDialogs({
@@ -158,6 +159,7 @@ describe('conversation loading performance', () => {
     expect(dialogsMs).toBeLessThan(100)
     expect(peerMs).toBeLessThan(100)
     expect(historyMs).toBeLessThan(100)
+    expect(upsertUsers).not.toHaveBeenCalled()
 
     releaseHistory.resolve()
     await historyReturned.promise

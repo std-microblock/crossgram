@@ -2308,7 +2308,14 @@ export class DialogRpc {
       for (const user of users) this._userId(user.id)
       return
     }
-    for (const row of await this._store.upsertUsers(this._session, users)) this._registerUser(row)
+    const unique = [...new Map(users.map((user) => [user.id, user])).values()]
+    const missing = unique.filter((user) => !this._storedUsers.has(user.id)).map((user) => user.id)
+    if (missing.length) {
+      for (const row of await this._store.readUsers(this._session.platformId, missing)) this._registerUser(row)
+    }
+    const changed = unique.filter((user) => storedUserNeedsUpdate(this._storedUsers.get(user.id), user))
+    if (!changed.length) return
+    for (const row of await this._store.upsertUsers(this._session, changed)) this._registerUser(row)
   }
 
   private _registerUser(row: IMUserRow): void {
@@ -3529,6 +3536,19 @@ function hasDraftContent(request: tl.messages.RawSaveDraftRequest): boolean {
 
 function profileMilliseconds(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): boolean {
+  if (!existing || existing.firstName !== incoming.firstName) return true
+  if (incoming.lastName !== undefined && existing.lastName !== incoming.lastName) return true
+  if (incoming.username !== undefined && existing.username !== incoming.username) return true
+  if (incoming.avatar !== undefined && JSON.stringify(existing.avatar) !== JSON.stringify(incoming.avatar)) return true
+  if (incoming.metadata !== undefined) {
+    for (const [key, value] of Object.entries(incoming.metadata)) {
+      if (JSON.stringify(existing.metadata?.[key]) !== JSON.stringify(value)) return true
+    }
+  }
+  return false
 }
 
 function historyWindowKey(request: HistoryWindow): string {
