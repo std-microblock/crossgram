@@ -684,6 +684,12 @@ describe('MessageStore', () => {
     expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, {
       limit: 2, beforeTimestamp: 90,
     })).map((item) => item.source.id)).toEqual(['oldest'])
+    expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, {
+      limit: 2, minTimestamp: 90, order: 'asc',
+    })).map((item) => item.source.id)).toEqual(['older', 'latest'])
+    expect((await store.readProjectedHistory(session.platformSessionId, conversation.id, {
+      limit: 2, beforeTimestamp: 95, minTimestamp: 85, maxTimestamp: 100,
+    })).map((item) => item.source.id)).toEqual(['older'])
   })
 
   it('ingests a history page as one ordered batch', async () => {
