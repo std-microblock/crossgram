@@ -928,7 +928,15 @@ describe('conversation kinds', () => {
       replyTo: { _: 'inputReplyToMessage', replyToMsgId: topic.id, topMsgId: topic.id },
     })
     expect(sentTargets.at(-1)).toBe('subchannel')
-    for (const result of [topics, byId, legacyTopics, legacyById, replies]) {
+    const updated = await rpc.getReplies({
+      _: 'messages.getReplies', peer, msgId: topic.id,
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 1, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawChannelMessages
+    expect(updated.messages[0]).toMatchObject({
+      _: 'message', message: 'to topic',
+      replyTo: { _: 'messageReplyHeader', forumTopic: true, replyToTopId: topic.id },
+    })
+    for (const result of [topics, byId, legacyTopics, legacyById, replies, updated]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
   })
