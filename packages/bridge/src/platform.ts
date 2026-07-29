@@ -349,6 +349,8 @@ export interface IMDeleteMessagesOptions {
 export interface IMForwardMessagesOptions {
   dropAuthor?: boolean
   replyToId?: string
+  /** Authorized stored sources used when an adapter must copy instead of natively forward. */
+  sourceMessages?: readonly IMMessage<any>[]
 }
 
 export interface IMReactionTarget {
