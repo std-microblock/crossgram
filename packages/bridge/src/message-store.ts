@@ -53,6 +53,11 @@ export interface StoredMedia {
   timestamp: number
 }
 
+export interface StoredMessageLookup {
+  conversationId: string
+  platformMessageId: string
+}
+
 export interface IngestOptions {
   allocation?: 'live' | 'history'
 }
@@ -109,11 +114,37 @@ export class MessageStore {
     if (!users.length) return []
     return this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
-      const rows: IMUserRow[] = []
-      for (const user of uniquePlatformUsers(users)) {
-        rows.push(await this._upsertUser(database, session.platformId, user, now))
-      }
-      return rows
+      const inputs = uniquePlatformUsers(users)
+      const platformUserIds = inputs.map((user) => user.id)
+      const existing = await database.get('mtproto_im_user', {
+        platformId: session.platformId,
+        platformUserId: { $in: platformUserIds },
+      })
+      const merged = new Map(existing.map((row) => [row.platformUserId, toUser(row)]))
+      for (const input of inputs) merged.set(input.id, mergePlatformUser(merged.get(input.id), input))
+      await database.upsert('mtproto_im_user', inputs.map((input) => {
+        const user = merged.get(input.id)!
+        return {
+          platformId: session.platformId,
+          platformUserId: user.id,
+          firstName: user.firstName,
+          lastName: user.lastName ?? null,
+          username: user.username ?? null,
+          avatar: (user.avatar ?? null) as unknown as JsonValue | null,
+          metadata: user.metadata ?? {},
+          updatedAt: now,
+        }
+      }), ['platformId', 'platformUserId'])
+      const rows = await database.get('mtproto_im_user', {
+        platformId: session.platformId,
+        platformUserId: { $in: platformUserIds },
+      })
+      const byPlatformId = new Map(rows.map((row) => [row.platformUserId, row]))
+      return inputs.map((input) => {
+        const row = byPlatformId.get(input.id)
+        if (!row) throw new Error(`failed to persist platform user ${session.platformId}:${input.id}`)
+        return row
+      })
     }))
   }
 
@@ -607,6 +638,51 @@ export class MessageStore {
         media: mediaByMessage.get(row.id) ?? [],
       }
     })
+  }
+
+  async readProjectedByPlatformIds(
+    platformSessionId: string,
+    targets: readonly StoredMessageLookup[],
+  ): Promise<ProjectedMessage[]> {
+    if (!targets.length) return []
+    const platformConversationIds = [...new Set(targets.map((target) => target.conversationId))]
+    const conversations = await this._database.get('mtproto_im_conversation', {
+      platformSessionId,
+      platformConversationId: { $in: platformConversationIds },
+    })
+    if (!conversations.length) return []
+    const conversationsByPlatformId = new Map(conversations.map((conversation) => [
+      conversation.platformConversationId, conversation,
+    ]))
+    const targetKeys = new Set(targets.flatMap((target) => {
+      const conversation = conversationsByPlatformId.get(target.conversationId)
+      return conversation ? [storedMessageLookupKey(conversation.id, target.platformMessageId)] : []
+    }))
+    const aliases = await this._database.get('mtproto_im_message_alias', {
+      platformSessionId,
+      conversationId: { $in: conversations.map((conversation) => conversation.id) },
+      platformMessageId: { $in: [...new Set(targets.map((target) => target.platformMessageId))] },
+    })
+    const messageIds = [...new Set(aliases
+      .filter((alias) => targetKeys.has(storedMessageLookupKey(alias.conversationId, alias.platformMessageId)))
+      .map((alias) => alias.messageId))]
+    if (!messageIds.length) return []
+    const rows = await this._database.get('mtproto_im_message', { id: { $in: messageIds }, deleted: false })
+    const knownConversationIds = new Map(conversations.map((conversation) => [
+      conversation.id, conversation.platformConversationId,
+    ]))
+    const [sources, parts, media] = await Promise.all([
+      this._hydrateMessages(rows, knownConversationIds),
+      this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_media', { messageId: { $in: messageIds } }),
+    ])
+    const partsByMessage = groupByMessageId(parts, (left, right) => left.ordinal - right.ordinal)
+    const mediaByMessage = groupByMessageId(media, (left, right) => left.ordinal - right.ordinal)
+    return rows.map((row, index) => ({
+      source: sources[index],
+      parts: partsByMessage.get(row.id) ?? [],
+      media: mediaByMessage.get(row.id) ?? [],
+    }))
   }
 
   async findProjectedByTlId(
@@ -1482,6 +1558,10 @@ function groupByMessageId<T extends { messageId: number }>(
   }
   for (const values of grouped.values()) values.sort(compare)
   return grouped
+}
+
+function storedMessageLookupKey(conversationId: number, platformMessageId: string): string {
+  return `${conversationId}\u0000${platformMessageId}`
 }
 
 function hydrateMessage(
