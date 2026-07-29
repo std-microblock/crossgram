@@ -53,6 +53,11 @@ export interface StoredMedia {
   timestamp: number
 }
 
+export interface StoredMessageLookup {
+  conversationId: string
+  platformMessageId: string
+}
+
 export interface IngestOptions {
   allocation?: 'live' | 'history'
 }
@@ -87,6 +92,8 @@ export class MessageStore {
   /** Serialize writes across every store facade sharing the same database. */
   private static readonly _writeTails = new WeakMap<Database, Promise<void>>()
   private _revision = 0
+  private readonly _latestMessages = new Map<number, IMMessageRow | undefined>()
+  private _dialogCachePreparation?: Promise<void>
 
   constructor(
     private readonly _database: Database,
@@ -100,6 +107,32 @@ export class MessageStore {
     return this._revision
   }
 
+  async prepareDialogCache(): Promise<void> {
+    if (this._dialogCachePreparation) return this._dialogCachePreparation
+    const pending = (async () => {
+      const conversations = await this._database.get('mtproto_im_conversation', {})
+      const latestRows = await Promise.all(conversations.map(async (conversation) => {
+        const [latest] = await this._database.select('mtproto_im_message', {
+          conversationId: conversation.id, deleted: false,
+        }).orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(1).execute()
+        return latest
+      }))
+      for (const [index, conversation] of conversations.entries()) {
+        this._latestMessages.set(conversation.id, latestRows[index])
+      }
+      this._onTrace?.(
+        'dialog cache prepared conversations=%d messages=%d',
+        conversations.length, latestRows.filter(Boolean).length,
+      )
+    })()
+    this._dialogCachePreparation = pending
+    try {
+      await pending
+    } finally {
+      if (this._dialogCachePreparation === pending) this._dialogCachePreparation = undefined
+    }
+  }
+
   async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
     return this._write(() => this._database.withTransaction(async (database) =>
       this._upsertUser(database, session.platformId, user, new Date())))
@@ -109,11 +142,37 @@ export class MessageStore {
     if (!users.length) return []
     return this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
-      const rows: IMUserRow[] = []
-      for (const user of uniquePlatformUsers(users)) {
-        rows.push(await this._upsertUser(database, session.platformId, user, now))
-      }
-      return rows
+      const inputs = uniquePlatformUsers(users)
+      const platformUserIds = inputs.map((user) => user.id)
+      const existing = await database.get('mtproto_im_user', {
+        platformId: session.platformId,
+        platformUserId: { $in: platformUserIds },
+      })
+      const merged = new Map(existing.map((row) => [row.platformUserId, toUser(row)]))
+      for (const input of inputs) merged.set(input.id, mergePlatformUser(merged.get(input.id), input))
+      await database.upsert('mtproto_im_user', inputs.map((input) => {
+        const user = merged.get(input.id)!
+        return {
+          platformId: session.platformId,
+          platformUserId: user.id,
+          firstName: user.firstName,
+          lastName: user.lastName ?? null,
+          username: user.username ?? null,
+          avatar: (user.avatar ?? null) as unknown as JsonValue | null,
+          metadata: user.metadata ?? {},
+          updatedAt: now,
+        }
+      }), ['platformId', 'platformUserId'])
+      const rows = await database.get('mtproto_im_user', {
+        platformId: session.platformId,
+        platformUserId: { $in: platformUserIds },
+      })
+      const byPlatformId = new Map(rows.map((row) => [row.platformUserId, row]))
+      return inputs.map((input) => {
+        const row = byPlatformId.get(input.id)
+        if (!row) throw new Error(`failed to persist platform user ${session.platformId}:${input.id}`)
+        return row
+      })
     }))
   }
 
@@ -129,6 +188,14 @@ export class MessageStore {
 
   async listUsers(platformId: string): Promise<IMUserRow[]> {
     return this._database.select('mtproto_im_user', { platformId }).orderBy('id').execute()
+  }
+
+  async readUsers(platformId: string, platformUserIds: readonly string[]): Promise<IMUserRow[]> {
+    if (!platformUserIds.length) return []
+    return this._database.get('mtproto_im_user', {
+      platformId,
+      platformUserId: { $in: [...new Set(platformUserIds)] },
+    })
   }
 
   async ingest(
@@ -152,7 +219,7 @@ export class MessageStore {
       }
     }
     if (!sources.length) return []
-    return this._write(() => this._database.withTransaction(async (database) => {
+    const results = await this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
       const allocationCache: ProjectionAllocationCache = { epochs: new Map() }
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
@@ -168,6 +235,8 @@ export class MessageStore {
       }
       return results
     }), options.allocation === 'history' ? 'history-ingest' : 'ingest', true)
+    this._rememberLatestMessages(results.map((result) => result.message))
+    return results
   }
 
   async ingestDialogs(session: PlatformSession, dialogs: readonly IMDialog[]): Promise<void> {
@@ -179,9 +248,10 @@ export class MessageStore {
       }
     }
     if (!dialogs.length) return
-    await this._write(() => this._database.withTransaction(async (database) => {
+    const messages = await this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
       const allocationCache: ProjectionAllocationCache = { epochs: new Map() }
+      const messages: IMMessageRow[] = []
       const existingConversations = new Map((await database.get('mtproto_im_conversation', {
         platformSessionId: session.platformSessionId,
       })).map((row) => [row.platformConversationId, row]))
@@ -204,15 +274,16 @@ export class MessageStore {
           ?? existingConversations.get(dialog.conversation.id)
         if (!conversationRow) throw new Error('failed to persist conversation')
         if (dialog.lastMessage) {
-          await this._ingestMessage(
+          const result = await this._ingestMessage(
             database, session, conversationRow, dialog.lastMessage, {}, now, allocationCache,
           )
+          messages.push(result.message)
         }
         if (
           dialog.readInboxMaxMessage
           && dialog.readInboxMaxMessage.id !== dialog.lastMessage?.id
         ) {
-          await this._ingestMessage(
+          const result = await this._ingestMessage(
             database,
             session,
             conversationRow,
@@ -221,9 +292,12 @@ export class MessageStore {
             now,
             allocationCache,
           )
+          messages.push(result.message)
         }
       }
+      return messages
     }), 'dialog-ingest', true)
+    this._rememberLatestMessages(messages)
   }
 
   private async _ingestMessage(
@@ -385,7 +459,7 @@ export class MessageStore {
     conversation: IMConversation,
     platformMessageIds: readonly string[],
   ): Promise<DeleteResult> {
-    return this._write(() => this._database.withTransaction(async (database) => {
+    const deleted = await this._write(() => this._database.withTransaction(async (database) => {
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, new Date())
       const messageIds = new Set<number>()
       for (const platformMessageId of new Set(platformMessageIds)) {
@@ -411,11 +485,18 @@ export class MessageStore {
         tlMessageIds.push(...parts.map((part) => part.tlMessageId))
       }
       return {
+        conversationRowId: conversationRow.id,
         changed: deletedMessageIds.length > 0,
         messageIds: deletedMessageIds,
         tlMessageIds,
       }
     }), 'message-delete', true)
+    if (deleted.changed) this._latestMessages.delete(deleted.conversationRowId)
+    return {
+      changed: deleted.changed,
+      messageIds: deleted.messageIds,
+      tlMessageIds: deleted.tlMessageIds,
+    }
   }
 
   async setReactions(
@@ -515,17 +596,27 @@ export class MessageStore {
     }).orderBy('updatedAt', 'desc').limit(limit + (anchor ? 1 : 0)).execute()
     if (anchor) conversations = conversations.filter((item) => item.id !== anchor.id)
     conversations = conversations.slice(0, limit)
-    return Promise.all(conversations.map(async (conversation) => {
-      const [latest] = await this._database.select('mtproto_im_message', {
-        conversationId: conversation.id, deleted: false,
-      })
-        .orderBy('timestamp', 'desc').limit(1).execute()
-      return {
-        conversation: toConversation(conversation),
-        unreadCount: conversation.unreadCount,
-        lastMessage: latest ? await this._hydrateMessage(latest) : undefined,
-      }
-    }))
+    return this._hydrateDialogs(conversations)
+  }
+
+  async readDialogs(
+    platformSessionId: string,
+    platformConversationIds: readonly string[],
+  ): Promise<IMDialog[]> {
+    if (!platformConversationIds.length) return []
+    const conversations = await this._database.get('mtproto_im_conversation', {
+      platformSessionId,
+      platformConversationId: { $in: [...new Set(platformConversationIds)] },
+    })
+    const byPlatformId = new Map(conversations.map((conversation) => [
+      conversation.platformConversationId,
+      conversation,
+    ]))
+    const ordered = platformConversationIds.flatMap((platformConversationId) => {
+      const conversation = byPlatformId.get(platformConversationId)
+      return conversation ? [conversation] : []
+    })
+    return this._hydrateDialogs(ordered)
   }
 
   async readHistory(
@@ -542,7 +633,7 @@ export class MessageStore {
       deleted: false,
       ...storedHistoryTimestampFilter(query),
     }).orderBy('timestamp', query.order ?? 'desc').limit(clampDatabaseLimit(query.limit)).execute()
-    return Promise.all(rows.map((row) => this._hydrateMessage(row)))
+    return this._hydrateMessages(rows, new Map([[conversation.id, conversation.platformConversationId]]))
   }
 
   async readProjectedHistory(
@@ -589,6 +680,51 @@ export class MessageStore {
         media: mediaByMessage.get(row.id) ?? [],
       }
     })
+  }
+
+  async readProjectedByPlatformIds(
+    platformSessionId: string,
+    targets: readonly StoredMessageLookup[],
+  ): Promise<ProjectedMessage[]> {
+    if (!targets.length) return []
+    const platformConversationIds = [...new Set(targets.map((target) => target.conversationId))]
+    const conversations = await this._database.get('mtproto_im_conversation', {
+      platformSessionId,
+      platformConversationId: { $in: platformConversationIds },
+    })
+    if (!conversations.length) return []
+    const conversationsByPlatformId = new Map(conversations.map((conversation) => [
+      conversation.platformConversationId, conversation,
+    ]))
+    const targetKeys = new Set(targets.flatMap((target) => {
+      const conversation = conversationsByPlatformId.get(target.conversationId)
+      return conversation ? [storedMessageLookupKey(conversation.id, target.platformMessageId)] : []
+    }))
+    const aliases = await this._database.get('mtproto_im_message_alias', {
+      platformSessionId,
+      conversationId: { $in: conversations.map((conversation) => conversation.id) },
+      platformMessageId: { $in: [...new Set(targets.map((target) => target.platformMessageId))] },
+    })
+    const messageIds = [...new Set(aliases
+      .filter((alias) => targetKeys.has(storedMessageLookupKey(alias.conversationId, alias.platformMessageId)))
+      .map((alias) => alias.messageId))]
+    if (!messageIds.length) return []
+    const rows = await this._database.get('mtproto_im_message', { id: { $in: messageIds }, deleted: false })
+    const knownConversationIds = new Map(conversations.map((conversation) => [
+      conversation.id, conversation.platformConversationId,
+    ]))
+    const [sources, parts, media] = await Promise.all([
+      this._hydrateMessages(rows, knownConversationIds),
+      this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_media', { messageId: { $in: messageIds } }),
+    ])
+    const partsByMessage = groupByMessageId(parts, (left, right) => left.ordinal - right.ordinal)
+    const mediaByMessage = groupByMessageId(media, (left, right) => left.ordinal - right.ordinal)
+    return rows.map((row, index) => ({
+      source: sources[index],
+      parts: partsByMessage.get(row.id) ?? [],
+      media: mediaByMessage.get(row.id) ?? [],
+    }))
   }
 
   async findProjectedByTlId(
@@ -1309,14 +1445,98 @@ export class MessageStore {
     }
   }
 
+  private async _hydrateDialogs(conversations: readonly IMConversationRow[]): Promise<IMDialog[]> {
+    const latestRows = await this._latestMessagesForConversations(conversations.map((conversation) => conversation.id))
+    const rows = latestRows.flatMap((row) => row ? [row] : [])
+    const hydrated = await this._hydrateMessages(rows, new Map(conversations.map((conversation) => [
+      conversation.id, conversation.platformConversationId,
+    ])))
+    const hydratedById = new Map(rows.map((row, index) => [row.id, hydrated[index]]))
+    return conversations.map((conversation, index) => {
+      const latest = latestRows[index]
+      return {
+        conversation: toConversation(conversation),
+        unreadCount: conversation.unreadCount,
+        lastMessage: latest ? hydratedById.get(latest.id) : undefined,
+      }
+    })
+  }
+
+  private async _latestMessagesForConversations(
+    conversationIds: readonly number[],
+  ): Promise<Array<IMMessageRow | undefined>> {
+    if (!conversationIds.length) return []
+    const missing = [...new Set(conversationIds.filter((conversationId) =>
+      !this._latestMessages.has(conversationId)))]
+    const loaded = await Promise.all(missing.map(async (conversationId) => {
+      const [latest] = await this._database.select('mtproto_im_message', {
+        conversationId, deleted: false,
+      }).orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(1).execute()
+      return latest
+    }))
+    for (const [index, conversationId] of missing.entries()) {
+      this._latestMessages.set(conversationId, loaded[index])
+    }
+    return conversationIds.map((conversationId) => this._latestMessages.get(conversationId))
+  }
+
+  private _rememberLatestMessages(rows: readonly IMMessageRow[]): void {
+    for (const row of rows) {
+      const current = this._latestMessages.get(row.conversationId)
+      if (
+        !this._latestMessages.has(row.conversationId)
+        || !current
+        || current.id === row.id
+        || row.timestamp > current.timestamp
+        || (row.timestamp === current.timestamp && row.id > current.id)
+      ) {
+        this._latestMessages.set(row.conversationId, row)
+      }
+    }
+  }
+
+  private async _hydrateMessages(
+    rows: readonly IMMessageRow[],
+    knownConversationIds: ReadonlyMap<number, string> = new Map(),
+  ): Promise<IMMessage[]> {
+    if (!rows.length) return []
+    const messageIds = [...new Set(rows.map((row) => row.id))]
+    const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
+    const missingConversationRowIds = [...new Set(rows
+      .map((row) => row.conversationId)
+      .filter((id) => !knownConversationIds.has(id)))]
+    const [aliases, reactions, senders, conversations] = await Promise.all([
+      this._database.get('mtproto_im_message_alias', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_message_reaction', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_user', { id: { $in: senderUserIds } }),
+      missingConversationRowIds.length
+        ? this._database.get('mtproto_im_conversation', { id: { $in: missingConversationRowIds } })
+        : Promise.resolve([]),
+    ])
+    const aliasesByMessage = groupByMessageId(aliases, (left, right) => left.ordinal - right.ordinal)
+    const reactionsByMessage = groupByMessageId(reactions, (left, right) => left.id - right.id)
+    const sendersById = new Map(senders.map((sender) => [sender.id, sender]))
+    const conversationIds = new Map(knownConversationIds)
+    for (const conversation of conversations) {
+      conversationIds.set(conversation.id, conversation.platformConversationId)
+    }
+    return rows.map((row) => {
+      const sender = sendersById.get(row.senderUserId)
+      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
+      const conversationId = conversationIds.get(row.conversationId)
+      if (!conversationId) throw new Error(`message references missing conversation ${row.conversationId}`)
+      return hydrateMessage(
+        row,
+        aliasesByMessage.get(row.id) ?? [],
+        reactionsByMessage.get(row.id) ?? [],
+        sender,
+        conversationId,
+      )
+    })
+  }
+
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
-    const aliases = await this._database.select('mtproto_im_message_alias', { messageId: row.id })
-      .orderBy('ordinal').execute()
-    const reactions = await this._database.select('mtproto_im_message_reaction', { messageId: row.id })
-      .orderBy('id').execute()
-    const [senderRow] = await this._database.get('mtproto_im_user', { id: row.senderUserId })
-    if (!senderRow) throw new Error(`message references missing user ${row.senderUserId}`)
-    return hydrateMessage(row, aliases, reactions, senderRow, await this._conversationId(row.conversationId))
+    return (await this._hydrateMessages([row]))[0]
   }
 
   private async _replaceReactions(
@@ -1348,12 +1568,6 @@ export class MessageStore {
       definition: definition as unknown as Record<string, unknown>, updatedAt: now,
     }
     }), ['messageId', 'nativeReactionKey'])
-  }
-
-  private async _conversationId(id: number): Promise<string> {
-    const [conversation] = await this._database.get('mtproto_im_conversation', { id })
-    if (!conversation) throw new Error(`message references missing conversation ${id}`)
-    return conversation.platformConversationId
   }
 
   async pruneUpdateDeliveries(platformSessionId: string): Promise<void> {
@@ -1414,6 +1628,10 @@ function groupByMessageId<T extends { messageId: number }>(
   }
   for (const values of grouped.values()) values.sort(compare)
   return grouped
+}
+
+function storedMessageLookupKey(conversationId: number, platformMessageId: string): string {
+  return `${conversationId}\u0000${platformMessageId}`
 }
 
 function hydrateMessage(
