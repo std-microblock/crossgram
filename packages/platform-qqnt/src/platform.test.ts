@@ -3,8 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
-import type { IMMedia, PlatformSession } from '@mtproto-relay/bridge'
-import { IMMessageTargetUnavailableError, PlatformMessageActions } from '@mtproto-relay/bridge'
+import {
+  IMMessageSendRejectedError, IMMessageTargetUnavailableError, PlatformMessageActions,
+  type IMMedia, type PlatformSession,
+} from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
 import { QQMediaCache } from './media-cache.js'
 import type { QQMediaLocator } from './protocol.js'
@@ -38,6 +40,40 @@ describe('QQNTPlatform mapping', () => {
     await new QQNTPlatform({ fetch, token: 'configured-token' }).client.status()
 
     expect(authorizations).toEqual(['Bearer service-token', 'Bearer configured-token'])
+  })
+
+  it('maps only the QQNT message endpoint permanent rejection to a platform send rejection', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(Response.json({
+        error: 'QQ message send rejected: 发送失败，请先添加对方为好友 (16)', result: 16,
+      }, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({
+        error: 'QQ transport temporarily unavailable',
+      }, { status: 500 })) as typeof globalThis.fetch
+    const platform = new QQNTPlatform({ fetch })
+    const send = () => platform.sendMessage(session, { id: 'u_non_friend' }, {
+      parts: [{ type: 'text', text: 'hello' }],
+    })
+
+    try {
+      await send()
+      throw new Error('expected permanent QQ send rejection')
+    } catch (error) {
+      expect(error).toBeInstanceOf(IMMessageSendRejectedError)
+      expect(error).toMatchObject({
+        reason: 'permission-denied',
+        message: 'QQNT bridge 403: QQ message send rejected: 发送失败，请先添加对方为好友 (16)',
+      })
+    }
+    try {
+      await send()
+      throw new Error('expected transient QQ send failure')
+    } catch (error) {
+      expect(error).not.toBeInstanceOf(IMMessageSendRejectedError)
+      expect(error).toMatchObject({
+        message: 'QQNT bridge 500: QQ transport temporarily unavailable',
+      })
+    }
   })
 
   it('does not wait indefinitely for reaction resources before returning history', async () => {

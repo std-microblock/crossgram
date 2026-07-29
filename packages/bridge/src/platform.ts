@@ -429,6 +429,20 @@ export interface IMTransferOptions {
   onProgress?: (progress: IMTransferProgress) => void | Promise<void>
 }
 
+export type IMMessageSendRejectionReason = 'permission-denied'
+
+/** A platform permanently rejected a send that must not be retried unchanged. */
+export class IMMessageSendRejectedError extends Error {
+  constructor(
+    readonly reason: IMMessageSendRejectionReason,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'IMMessageSendRejectedError'
+  }
+}
+
 export interface IMDownloadOptions extends IMTransferOptions {
   offset?: number
   limit?: number
