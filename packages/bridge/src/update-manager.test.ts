@@ -91,6 +91,19 @@ describe('UpdateManager', () => {
       content: { parts: [{ type: 'text', text: 'hide me' }] },
     }
     await harness.store.ingest(session, conversation, first)
+    const reacted: IMMessage = {
+      id: 'visible-reaction', conversationId: conversation.id, senderId: 'bob', timestamp: 1_800_000_001,
+      content: { parts: [{ type: 'text', text: 'keep me' }] },
+      reactionContext: {
+        available: [{ key: 'like', presentation: { type: 'emoji', emoticon: '👍' } }],
+        reactions: [{
+          key: 'like', count: 2,
+          recentActors: [{ userId: 'alice' }, { userId: 'bob' }],
+        }],
+        maxSelected: 1,
+      },
+    }
+    const reactedResult = await harness.store.ingest(session, conversation, reacted)
     const alice = await harness.store.getUser(session.platformId, 'alice')
     await harness.blockedPeers!.block(session.platformSessionId, 'alice')
 
@@ -100,6 +113,13 @@ describe('UpdateManager', () => {
       { _: 'updatePeerBlocked', blocked: true, peerId: { _: 'peerUser', userId: alice!.id } },
       { _: 'updateDeleteChannelMessages', messages: expect.any(Array) },
     ])
+    expect((harness.sent[1]!.update as tl.RawUpdates).updates).toContainEqual(expect.objectContaining({
+      _: 'updateMessageReactions',
+      msgId: reactedResult.projection[0]!.tlMessageId,
+      reactions: expect.objectContaining({
+        results: [expect.objectContaining({ count: 1 })],
+      }),
+    }))
 
     const second: IMMessage = {
       ...first, id: 'blocked-second', timestamp: first.timestamp + 1,
