@@ -1,0 +1,28 @@
+[Unit]
+Description=Crossgram MTProto relay
+Wants=network-online.target
+After=network-online.target qqnt-bridge.service
+
+[Service]
+Type=simple
+User=crossgram
+Group=crossgram
+WorkingDirectory=/opt/crossgram
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/crossgram
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/qqnt-bridge.env
+EnvironmentFile=-/etc/crossgram.env
+ExecStart=/usr/bin/env corepack yarn cordis run /etc/crossgram/app.yml --no-daemon
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/crossgram
+
+[Install]
+WantedBy=multi-user.target
