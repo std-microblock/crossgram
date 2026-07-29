@@ -264,11 +264,12 @@ export class DialogRpc {
       chats: uniqueChats(page.flatMap((item) => item.chat ? [item.chat] : [])),
       users: uniqueUsers(page.flatMap((item) => item.users)),
     }
+    const totalMs = performance.now() - startedAt
     this._onTrace?.(
-      'dialogs rpc profile loaded=%d returned=%d hydrateMs=%d loadMs=%d usersMs=%d projectionsMs=%d materializeMs=%d totalMs=%d',
+      `${totalMs > 100 ? 'slow ' : ''}dialogs rpc profile loaded=%d returned=%d hydrateMs=%d loadMs=%d usersMs=%d projectionsMs=%d materializeMs=%d totalMs=%d`,
       all.length, page.length, profileMilliseconds(hydrateMs), profileMilliseconds(loadMs),
       profileMilliseconds(usersMs), profileMilliseconds(projectionsMs), profileMilliseconds(materializeMs),
-      profileMilliseconds(performance.now() - startedAt),
+      profileMilliseconds(totalMs),
     )
     return result as unknown as tl.messages.TypeDialogs
   }
