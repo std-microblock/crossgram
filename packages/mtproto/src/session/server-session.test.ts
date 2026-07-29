@@ -74,6 +74,37 @@ describe('ServerSession msg_container isolation', () => {
       '64', '0xdeadbeef', 1, expect.stringContaining('Unknown object id'),
     )
   })
+
+  it('uses the inner ping message id in a pong emitted from a container', async () => {
+    const { session } = createSession()
+    const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'mt_ping', pingId: Long.fromInt(41),
+    } as { _: string })
+    const container = TlBinaryWriter.manual(8 + 16 + ping.length)
+    const innerMessageId = Long.fromInt(104)
+    container.uint(0x73f1f8dc)
+    container.uint(1)
+    container.long(innerMessageId)
+    container.uint(0)
+    container.uint(ping.length)
+    container.raw(ping)
+
+    await (session as unknown as QueuedSession)._processDecryptedMessage(
+      Long.fromInt(96),
+      0,
+      new TlBinaryReader(getServerReaderMap(), container.result()),
+      Long.fromInt(1),
+    )
+
+    const send = (session as unknown as {
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    })._sendEncryptedMessage
+    const pong = send.mock.calls.find((call) => call[2]?._ === 'mt_pong')?.[2]
+    expect(pong?._).toBe('mt_pong')
+    expect(pong?.msgId.eq(innerMessageId)).toBe(true)
+    expect(pong?.pingId.eq(Long.fromInt(41))).toBe(true)
+    expect(send.mock.calls.find((call) => call[2]?._ === 'mt_pong')?.[3].eq(Long.fromInt(1))).toBe(true)
+  })
 })
 
 type QueuedSession = {
@@ -208,16 +239,41 @@ describe('ServerSession decrypted RPC queue', () => {
     const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
       _: 'mt_ping', pingId: Long.ONE,
     } as { _: string })
+    const pingMessageId = Long.fromInt(2)
     await internal._processDecryptedMessage(
-      Long.fromInt(2), 0, new TlBinaryReader(getServerReaderMap(), ping), Long.fromInt(2),
+      pingMessageId, 0, new TlBinaryReader(getServerReaderMap(), ping), Long.fromInt(2),
     )
     expect((session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage)
       .toHaveBeenCalledWith(
-        expect.any(Uint8Array), true, expect.objectContaining({ _: 'mt_pong' }), Long.fromInt(2),
+        expect.any(Uint8Array),
+        true,
+        expect.objectContaining({ _: 'mt_pong', msgId: pingMessageId, pingId: Long.ONE }),
+        Long.fromInt(2),
       )
 
     releaseRpc()
     await queued
+  })
+
+  it('echoes ping_delay_disconnect message id without entering the RPC queue', async () => {
+    const { session } = createSession()
+    const internal = session as unknown as QueuedSession
+    const ping = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'mt_ping_delay_disconnect', pingId: Long.fromInt(42), disconnectDelay: 10,
+    } as { _: string })
+    const pingMessageId = Long.fromInt(8)
+
+    await internal._processDecryptedMessage(
+      pingMessageId, 0, new TlBinaryReader(getServerReaderMap(), ping), Long.fromInt(3),
+    )
+
+    expect((session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage)
+      .toHaveBeenCalledWith(
+        expect.any(Uint8Array),
+        true,
+        expect.objectContaining({ _: 'mt_pong', msgId: pingMessageId, pingId: Long.fromInt(42) }),
+        Long.fromInt(3),
+      )
   })
 
   it('continues processing after an RPC handler throws', async () => {
