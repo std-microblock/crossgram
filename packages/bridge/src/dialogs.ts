@@ -165,18 +165,23 @@ export class DialogRpc {
   }
 
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
+    const startedAt = performance.now()
     await this._hydrateUsers()
+    const hydrateMs = performance.now() - startedAt
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._resolveKnownInputPeer(req.offsetPeer)
+    const loadAt = performance.now()
     const loaded = await this._loadDialogPage({
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
     })
+    const loadMs = performance.now() - loadAt
     // Preserve the platform's authoritative order. Re-sorting each page makes
     // Telegram's last offset peer point into the middle of the upstream page,
     // causing the next request to overlap or repeat the first page.
     const all = loaded.dialogs.slice()
+    const usersAt = performance.now()
     await this._persistUsers(all
       .filter((dialog) => dialog.conversation.kind === 'direct')
       .map((dialog) => ({
@@ -189,6 +194,7 @@ export class DialogRpc {
       ...[dialog.lastMessage, dialog.readInboxMaxMessage]
         .flatMap((message) => message ? messageReferencedUserIds(message) : []),
     ]))
+    const usersMs = performance.now() - usersAt
     for (const dialog of all) {
       this._conversations.set(dialog.conversation.id, dialog.conversation)
       this._peerId(dialog.conversation.id)
@@ -200,9 +206,39 @@ export class DialogRpc {
     // absent during cold start. The no-store path still allocates Telegram IDs
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
+    const projectionsAt = performance.now()
+    if (this._store) {
+      const projected = await this._store.readProjectedByPlatformIds(
+        this._session.platformSessionId,
+        all.flatMap((dialog) => [dialog.lastMessage, dialog.readInboxMaxMessage]
+          .flatMap((message) => message ? [{
+            conversationId: dialog.conversation.id,
+            platformMessageId: message.id,
+          }] : [])),
+      )
+      for (const stored of projected) {
+        const additions = stored.parts.map((part): MaterializedMessage => ({
+          source: stored.source,
+          tlId: part.tlMessageId,
+          ordinal: part.ordinal,
+          groupedId: part.groupedId ?? undefined,
+          media: stored.media.find((entry) => entry.id === part.mediaId),
+        }))
+        const existing = this._historyCache.get(stored.source.conversationId) ?? []
+        const additionIds = new Set(additions.map((item) => item.tlId))
+        this._historyCache.set(stored.source.conversationId, [
+          ...existing.filter((item) => !additionIds.has(item.tlId)),
+          ...additions,
+        ].sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId))
+        for (const item of additions) this._rememberMessage(item)
+      }
+    }
+    const projectionsMs = performance.now() - projectionsAt
+    const materializeAt = performance.now()
     const drafts = await this._mainDrafts()
     const materialized = await Promise.all(all.map((dialog) =>
       this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))
+    const materializeMs = performance.now() - materializeAt
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
       const offsetPeer = this._resolveKnownInputPeer(req.offsetPeer)
@@ -228,6 +264,12 @@ export class DialogRpc {
       chats: uniqueChats(page.flatMap((item) => item.chat ? [item.chat] : [])),
       users: uniqueUsers(page.flatMap((item) => item.users)),
     }
+    this._onTrace?.(
+      'dialogs rpc profile loaded=%d returned=%d hydrateMs=%d loadMs=%d usersMs=%d projectionsMs=%d materializeMs=%d totalMs=%d',
+      all.length, page.length, profileMilliseconds(hydrateMs), profileMilliseconds(loadMs),
+      profileMilliseconds(usersMs), profileMilliseconds(projectionsMs), profileMilliseconds(materializeMs),
+      profileMilliseconds(performance.now() - startedAt),
+    )
     return result as unknown as tl.messages.TypeDialogs
   }
 

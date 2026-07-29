@@ -117,6 +117,33 @@ describe('MessageStore', () => {
       'mtproto_im_message_reaction',
       'mtproto_im_user',
     ])
+
+    get.mockClear()
+    const projectedStartedAt = performance.now()
+    const projected = await Promise.race([
+      store.readProjectedByPlatformIds(session.platformSessionId, conversations.map((conversation, index) => ({
+        conversationId: conversation.id,
+        platformMessageId: `bulk-message-${index}`,
+      }))),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('100-dialog projection prefetch exceeded 100ms')),
+        100,
+      )),
+    ])
+    expect(projected).toHaveLength(100)
+    expect(projected[0]).toMatchObject({
+      source: { sourceIds: [expect.stringMatching(/^bulk-message-/), expect.stringMatching(/^bulk-alias-/)] },
+      parts: [{ ordinal: 0 }],
+    })
+    expect(performance.now() - projectedStartedAt).toBeLessThan(100)
+    const projectionTables = get.mock.calls.map(([table]) => table)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_conversation')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_message_alias')).toHaveLength(2)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_message')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_message_reaction')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_user')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_tl_message_part')).toHaveLength(1)
+    expect(projectionTables.filter((table) => table === 'mtproto_im_media')).toHaveLength(1)
   })
 
   it('persists a direct peer before projecting an outgoing first event', async () => {
