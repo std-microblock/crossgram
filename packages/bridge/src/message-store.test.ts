@@ -118,7 +118,7 @@ describe('MessageStore', () => {
       'mtproto_im_message_reaction',
       'mtproto_im_user',
     ])
-    expect(select.mock.calls.filter(([table]) => table === 'mtproto_im_message').length).toBeLessThan(5)
+    expect(select.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toHaveLength(0)
 
     get.mockClear()
     const projectedStartedAt = performance.now()

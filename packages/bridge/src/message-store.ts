@@ -1,4 +1,3 @@
-import { $ } from '@cordisjs/plugin-database'
 import type { Database } from '@cordisjs/plugin-database'
 import type {
   IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMUserRow,
@@ -93,6 +92,8 @@ export class MessageStore {
   /** Serialize writes across every store facade sharing the same database. */
   private static readonly _writeTails = new WeakMap<Database, Promise<void>>()
   private _revision = 0
+  private readonly _latestMessages = new Map<number, IMMessageRow | undefined>()
+  private _dialogCachePreparation?: Promise<void>
 
   constructor(
     private readonly _database: Database,
@@ -104,6 +105,32 @@ export class MessageStore {
   /** Monotonic process-local version used to invalidate materialized read caches. */
   get revision(): number {
     return this._revision
+  }
+
+  async prepareDialogCache(): Promise<void> {
+    if (this._dialogCachePreparation) return this._dialogCachePreparation
+    const pending = (async () => {
+      const conversations = await this._database.get('mtproto_im_conversation', {})
+      const latestRows = await Promise.all(conversations.map(async (conversation) => {
+        const [latest] = await this._database.select('mtproto_im_message', {
+          conversationId: conversation.id, deleted: false,
+        }).orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(1).execute()
+        return latest
+      }))
+      for (const [index, conversation] of conversations.entries()) {
+        this._latestMessages.set(conversation.id, latestRows[index])
+      }
+      this._onTrace?.(
+        'dialog cache prepared conversations=%d messages=%d',
+        conversations.length, latestRows.filter(Boolean).length,
+      )
+    })()
+    this._dialogCachePreparation = pending
+    try {
+      await pending
+    } finally {
+      if (this._dialogCachePreparation === pending) this._dialogCachePreparation = undefined
+    }
   }
 
   async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
@@ -192,7 +219,7 @@ export class MessageStore {
       }
     }
     if (!sources.length) return []
-    return this._write(() => this._database.withTransaction(async (database) => {
+    const results = await this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
       const allocationCache: ProjectionAllocationCache = { epochs: new Map() }
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
@@ -208,6 +235,8 @@ export class MessageStore {
       }
       return results
     }), options.allocation === 'history' ? 'history-ingest' : 'ingest', true)
+    this._rememberLatestMessages(results.map((result) => result.message))
+    return results
   }
 
   async ingestDialogs(session: PlatformSession, dialogs: readonly IMDialog[]): Promise<void> {
@@ -219,9 +248,10 @@ export class MessageStore {
       }
     }
     if (!dialogs.length) return
-    await this._write(() => this._database.withTransaction(async (database) => {
+    const messages = await this._write(() => this._database.withTransaction(async (database) => {
       const now = new Date()
       const allocationCache: ProjectionAllocationCache = { epochs: new Map() }
+      const messages: IMMessageRow[] = []
       const existingConversations = new Map((await database.get('mtproto_im_conversation', {
         platformSessionId: session.platformSessionId,
       })).map((row) => [row.platformConversationId, row]))
@@ -244,15 +274,16 @@ export class MessageStore {
           ?? existingConversations.get(dialog.conversation.id)
         if (!conversationRow) throw new Error('failed to persist conversation')
         if (dialog.lastMessage) {
-          await this._ingestMessage(
+          const result = await this._ingestMessage(
             database, session, conversationRow, dialog.lastMessage, {}, now, allocationCache,
           )
+          messages.push(result.message)
         }
         if (
           dialog.readInboxMaxMessage
           && dialog.readInboxMaxMessage.id !== dialog.lastMessage?.id
         ) {
-          await this._ingestMessage(
+          const result = await this._ingestMessage(
             database,
             session,
             conversationRow,
@@ -261,9 +292,12 @@ export class MessageStore {
             now,
             allocationCache,
           )
+          messages.push(result.message)
         }
       }
+      return messages
     }), 'dialog-ingest', true)
+    this._rememberLatestMessages(messages)
   }
 
   private async _ingestMessage(
@@ -425,7 +459,7 @@ export class MessageStore {
     conversation: IMConversation,
     platformMessageIds: readonly string[],
   ): Promise<DeleteResult> {
-    return this._write(() => this._database.withTransaction(async (database) => {
+    const deleted = await this._write(() => this._database.withTransaction(async (database) => {
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, new Date())
       const messageIds = new Set<number>()
       for (const platformMessageId of new Set(platformMessageIds)) {
@@ -451,11 +485,18 @@ export class MessageStore {
         tlMessageIds.push(...parts.map((part) => part.tlMessageId))
       }
       return {
+        conversationRowId: conversationRow.id,
         changed: deletedMessageIds.length > 0,
         messageIds: deletedMessageIds,
         tlMessageIds,
       }
     }), 'message-delete', true)
+    if (deleted.changed) this._latestMessages.delete(deleted.conversationRowId)
+    return {
+      changed: deleted.changed,
+      messageIds: deleted.messageIds,
+      tlMessageIds: deleted.tlMessageIds,
+    }
   }
 
   async setReactions(
@@ -1425,24 +1466,33 @@ export class MessageStore {
     conversationIds: readonly number[],
   ): Promise<Array<IMMessageRow | undefined>> {
     if (!conversationIds.length) return []
-    const latestTimestamps = this._database.select('mtproto_im_message', {
-      conversationId: { $in: [...new Set(conversationIds)] },
-      deleted: false,
-    }).groupBy('conversationId', (row) => ({ timestamp: $.max(row.timestamp) }))
-    const candidates = this._database.join({
-      message: 'mtproto_im_message',
-      latest: latestTimestamps,
-    }, ({ message, latest }) => $.and(
-      $.eq(message.conversationId, latest.conversationId),
-      $.eq(message.timestamp, latest.timestamp),
-      $.eq(message.deleted, false),
-    )).project(({ message }) => ({ id: message.id, conversationId: message.conversationId }))
-    const latestIds = await candidates.groupBy('conversationId', (row) => ({ id: $.max(row.id) })).execute()
-    const rows = latestIds.length
-      ? await this._database.get('mtproto_im_message', { id: { $in: latestIds.map((row) => row.id) } })
-      : []
-    const byConversationId = new Map(rows.map((row) => [row.conversationId, row]))
-    return conversationIds.map((conversationId) => byConversationId.get(conversationId))
+    const missing = [...new Set(conversationIds.filter((conversationId) =>
+      !this._latestMessages.has(conversationId)))]
+    const loaded = await Promise.all(missing.map(async (conversationId) => {
+      const [latest] = await this._database.select('mtproto_im_message', {
+        conversationId, deleted: false,
+      }).orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(1).execute()
+      return latest
+    }))
+    for (const [index, conversationId] of missing.entries()) {
+      this._latestMessages.set(conversationId, loaded[index])
+    }
+    return conversationIds.map((conversationId) => this._latestMessages.get(conversationId))
+  }
+
+  private _rememberLatestMessages(rows: readonly IMMessageRow[]): void {
+    for (const row of rows) {
+      const current = this._latestMessages.get(row.conversationId)
+      if (
+        !this._latestMessages.has(row.conversationId)
+        || !current
+        || current.id === row.id
+        || row.timestamp > current.timestamp
+        || (row.timestamp === current.timestamp && row.id > current.id)
+      ) {
+        this._latestMessages.set(row.conversationId, row)
+      }
+    }
   }
 
   private async _hydrateMessages(
