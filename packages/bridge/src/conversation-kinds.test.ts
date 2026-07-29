@@ -41,6 +41,7 @@ function source(conversation: IMConversation): IMMessage {
 const sentTargets: string[] = []
 const sentInputs: Array<import('./platform.js').IMMessageInput> = []
 const actionCalls: string[] = []
+const forwardOptions: import('./platform.js').IMForwardMessagesOptions[] = []
 const subdialogCalls: Array<{ parentId: string, limit?: number, afterId?: string }> = []
 const platform: IMPlatform = {
   capabilities: {
@@ -106,8 +107,9 @@ const platform: IMPlatform = {
       content: { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) },
     }
   },
-  async forwardMessages(_session, from, ids, to) {
+  async forwardMessages(_session, from, ids, to, options) {
     actionCalls.push(`forward:${from.id}:${ids.join(',')}:${to.id}`)
+    forwardOptions.push(options ?? {})
     return ids.map((id, index) => ({
       id: `forwarded-${index}`, conversationId: to.id, senderId: 'self', outgoing: true,
       timestamp: 200 + index, content: { parts: [{ type: 'text' as const, text: `forwarded ${id}` }] },
@@ -121,6 +123,7 @@ afterEach(async () => {
   sentTargets.length = 0
   sentInputs.length = 0
   actionCalls.length = 0
+  forwardOptions.length = 0
   subdialogCalls.length = 0
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
@@ -585,6 +588,9 @@ describe('conversation kinds', () => {
       { _: 'updateNewMessage', message: { message: 'forwarded message-direct' } },
     ])
     expect(actionCalls).toContain('forward:direct:message-direct:direct')
+    expect(forwardOptions).toMatchObject([{
+      sourceMessages: [{ id: 'message-direct', conversationId: 'direct' }],
+    }])
   })
 
   it('projects delete-and-resend editing as delete plus new-message updates', async () => {
