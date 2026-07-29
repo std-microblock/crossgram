@@ -244,6 +244,25 @@ describe('PlatformSubscriptionManager', () => {
 })
 
 describe('PlatformDataService', () => {
+  it('serves persisted dialogs when the upstream bridge is temporarily unavailable', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'offline-dialog-room', kind: 'group', title: 'Offline dialog' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('stored-latest', conversation.id))
+    platform.getDialogs = vi.fn(async () => { throw new Error('upstream kernel is not ready') })
+    const data = new PlatformDataService(platform, session, store)
+
+    await expect(data.getDialogsPage({ limit: 100 })).resolves.toMatchObject({
+      total: 1,
+      dialogs: [{
+        conversation: { id: conversation.id, title: conversation.title },
+        lastMessage: { id: 'stored-latest' },
+      }],
+    })
+  })
+
   it('opens a persisted peer dialog without waiting for an upstream dialog refresh', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
