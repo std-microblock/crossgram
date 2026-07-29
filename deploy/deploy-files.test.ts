@@ -13,13 +13,20 @@ describe('Crossgram Linux deployment', () => {
     for (const file of ['install.sh', 'update.sh']) {
       expect(() => execFileSync('sh', ['-n', join(root, 'deploy', file)]), file).not.toThrow()
     }
+    const stages = execFileSync('git', [
+      'ls-files', '--stage', 'deploy/install.sh', 'deploy/update.sh', 'deploy/generate-client-config.mjs',
+    ], { cwd: root, encoding: 'utf8' }).trim().split('\n')
+    expect(stages).toHaveLength(3)
+    expect(stages.every((stage) => stage.startsWith('100755 '))).toBe(true)
   })
 
   it('runs as an unprivileged hardened systemd service with persistent state', () => {
     const unit = readFileSync(join(root, 'deploy', 'crossgram.service'), 'utf8')
     expect(unit).toContain('User=crossgram')
+    expect(unit).toContain('NODE_OPTIONS=--import tsx --import @cordisjs/unyaml')
     expect(unit).toContain('EnvironmentFile=-/etc/qqnt-bridge.env')
-    expect(unit).toContain('/etc/crossgram/app.yml --no-daemon')
+    expect(unit).toContain('cordis run /opt/crossgram/.runtime/app.yml')
+    expect(unit).not.toContain('--no-daemon')
     expect(unit).toContain('NoNewPrivileges=true')
     expect(unit).toContain('ProtectSystem=full')
     expect(unit).toContain('ReadWritePaths=/var/lib/crossgram')
@@ -29,6 +36,10 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain('serverHost: __CROSSGRAM_PUBLIC_HOST__')
     expect(config).toContain('/var/lib/crossgram/data/rsa-key.json')
     expect(config).not.toMatch(/^\s*token:/m)
+    const installer = readFileSync(join(root, 'deploy', 'install.sh'), 'utf8')
+    expect(installer).toContain('$install_dir/.runtime/app.yml')
+    expect(installer).toContain('chown root:"$service_user" "$install_dir/.runtime/app.yml"')
+    expect(installer).toContain('chmod 0640 "$install_dir/.runtime/app.yml"')
   })
 
   it('fast-forwards, installs immutably, builds, and restarts during an update', () => {
@@ -45,7 +56,7 @@ describe('Crossgram Linux deployment', () => {
       }
       const runAs = fake('run-as', 'exec "$@"')
       const git = fake('git', 'printf \'git %s\\n\' "$*" >> "$CROSSGRAM_TEST_CALLS"; case "$*" in *rev-parse*) printf \'abc123\\n\';; esac')
-      const corepack = fake('corepack', 'printf \'corepack %s\\n\' "$*" >> "$CROSSGRAM_TEST_CALLS"')
+      const corepack = fake('corepack', 'printf \'corepack %s scripts=%s\\n\' "$*" "${YARN_ENABLE_SCRIPTS:-}" >> "$CROSSGRAM_TEST_CALLS"')
       const systemctl = fake('systemctl', 'printf \'systemctl %s\\n\' "$*" >> "$CROSSGRAM_TEST_CALLS"')
 
       execFileSync('sh', [join(root, 'deploy', 'update.sh')], {
@@ -64,8 +75,8 @@ describe('Crossgram Linux deployment', () => {
       expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
         'git fetch --prune origin main',
         'git merge --ff-only origin/main',
-        'corepack yarn install --immutable',
-        'corepack yarn build',
+        'corepack yarn install --immutable scripts=true',
+        'corepack yarn build scripts=',
         'systemctl restart crossgram.service',
         'git rev-parse --short HEAD',
       ])
