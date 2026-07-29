@@ -11,7 +11,9 @@ import type {
   IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
   IMSticker, IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { messagePartText, resolvePlatformPluginId } from '@mtproto-relay/bridge'
+import {
+  IMMessageTargetUnavailableError, messagePartText, resolvePlatformPluginId,
+} from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { QQStickerProvider } from './sticker-provider.js'
@@ -856,7 +858,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       return { available: [], reactions: [], maxSelected: 0 }
     }
     return this.withReactionCatalog(
-      await this.client.getMessageReactions(target.conversationId, target.targetId),
+      await this.client.getMessageReactions(
+        target.conversationId, target.targetId, target.nativeSequence,
+      ),
     )
   }
 
@@ -868,9 +872,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (!this.isGroupConversation(target.conversationId)) {
       throw new Error('QQ reactions are unavailable in direct conversations')
     }
-    return this.withReactionCatalog(await this.client.setMessageReactions(
-      target.conversationId, target.targetId, reactionKeys,
-    ))
+    try {
+      return this.withReactionCatalog(await this.client.setMessageReactions(
+        target.conversationId, target.targetId, reactionKeys, target.nativeSequence,
+      ))
+    } catch (error) {
+      if (error instanceof Error && /^QQNT bridge 404: QQ reaction target not found:/.test(error.message)) {
+        throw new IMMessageTargetUnavailableError(error.message, { cause: error })
+      }
+      throw error
+    }
   }
 
   async *downloadReactionResource(
