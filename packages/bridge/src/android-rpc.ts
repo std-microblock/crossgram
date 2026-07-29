@@ -11,6 +11,7 @@ type AndroidRpcHandler = (request: tl.RpcMethod) => RpcResult
  * responses instead of making the client retry METHOD_NOT_IMPLEMENTED errors.
  */
 export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
+  'account.getAutoDownloadSettings': () => makeAutoDownloadSettings(),
   'account.getDefaultProfilePhotoEmojis': () => ({
     _: 'emojiList', hash: Long.ZERO, documentId: [],
   } as unknown as tl.TlObject),
@@ -162,6 +163,47 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'photos.getUserPhotos': () => ({
     _: 'photos.photos', photos: [], users: [],
   } as unknown as tl.TlObject),
+}
+
+/** Telegram Android's own fallback presets, returned in layer-228 wire shape. */
+function makeAutoDownloadSettings(): tl.account.RawAutoDownloadSettings {
+  return {
+    _: 'account.autoDownloadSettings',
+    low: {
+      _: 'autoDownloadSettings',
+      phonecallsLessData: true,
+      photoSizeMax: 1_048_576,
+      videoSizeMax: 512_000,
+      fileSizeMax: 512_000,
+      videoUploadMaxbitrate: 50,
+      smallQueueActiveOperationsMax: 2,
+      largeQueueActiveOperationsMax: 1,
+    },
+    medium: {
+      _: 'autoDownloadSettings',
+      videoPreloadLarge: true,
+      audioPreloadNext: true,
+      storiesPreload: true,
+      photoSizeMax: 1_048_576,
+      videoSizeMax: 10_485_760,
+      fileSizeMax: 1_048_576,
+      videoUploadMaxbitrate: 100,
+      smallQueueActiveOperationsMax: 3,
+      largeQueueActiveOperationsMax: 2,
+    },
+    high: {
+      _: 'autoDownloadSettings',
+      videoPreloadLarge: true,
+      audioPreloadNext: true,
+      storiesPreload: true,
+      photoSizeMax: 1_048_576,
+      videoSizeMax: 15_728_640,
+      fileSizeMax: 3_145_728,
+      videoUploadMaxbitrate: 100,
+      smallQueueActiveOperationsMax: 3,
+      largeQueueActiveOperationsMax: 2,
+    },
+  }
 }
 
 function emptyMessages(): tl.messages.RawMessages {
