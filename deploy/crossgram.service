@@ -9,11 +9,12 @@ User=crossgram
 Group=crossgram
 WorkingDirectory=/opt/crossgram
 Environment=NODE_ENV=production
+Environment="NODE_OPTIONS=--import tsx --import @cordisjs/unyaml"
 Environment=HOME=/var/lib/crossgram
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=-/etc/qqnt-bridge.env
 EnvironmentFile=-/etc/crossgram.env
-ExecStart=/usr/bin/env corepack yarn cordis run /etc/crossgram/app.yml --no-daemon
+ExecStart=/usr/bin/env corepack yarn cordis run /opt/crossgram/.runtime/app.yml
 Restart=always
 RestartSec=5s
 TimeoutStopSec=30s
