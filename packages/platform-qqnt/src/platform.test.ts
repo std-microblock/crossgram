@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import type { IMMedia, PlatformSession } from '@mtproto-relay/bridge'
-import { PlatformMessageActions } from '@mtproto-relay/bridge'
+import { IMMessageTargetUnavailableError, PlatformMessageActions } from '@mtproto-relay/bridge'
 import { QQNTPlatform } from './index.js'
 import { QQMediaCache } from './media-cache.js'
 import type { QQMediaLocator } from './protocol.js'
@@ -1485,6 +1485,18 @@ describe('QQNTPlatform mapping', () => {
     }, ['1:14'])).resolves.toMatchObject({ reactions: [{ key: '1:14', selected: true }] })
     expect(platform.client.getMessageReactions).toHaveBeenCalledWith('2:g', 'm', '571')
     expect(platform.client.setMessageReactions).toHaveBeenCalledWith('2:g', 'm', ['1:14'], '571')
+    platform.client.setMessageReactions = vi.fn(async () => {
+      throw new Error('QQNT bridge 500: QQ database is temporarily busy')
+    })
+    await expect(platform.setMessageReactions(session, {
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
+    }, ['1:14'])).rejects.toThrow('QQNT bridge 500: QQ database is temporarily busy')
+    platform.client.setMessageReactions = vi.fn(async () => {
+      throw new Error('QQNT bridge 404: QQ reaction target not found: m')
+    })
+    await expect(platform.setMessageReactions(session, {
+      conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
+    }, ['1:14'])).rejects.toBeInstanceOf(IMMessageTargetUnavailableError)
     await expect(platform.getAvailableReactions(session, { conversationId: '1:u' }))
       .resolves.toEqual({ available: [], reactions: [], maxSelected: 0 })
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(1)
