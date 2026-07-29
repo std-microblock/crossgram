@@ -2494,7 +2494,10 @@ export class DialogRpc {
     conversationId: string,
     replyTo?: tl.TypeInputReplyTo,
   ): Promise<string | undefined> {
-    if (replyTo?._ !== 'inputReplyToMessage' || !this._store) return
+    if (replyTo?._ !== 'inputReplyToMessage') return
+    const remembered = this._tlToMessage.get(replyTo.replyToMsgId)
+    if (remembered?.peerId === conversationId) return remembered.platformMessageId
+    if (!this._store) return
     const projected = await this._store.findProjectedByTlId(
       this._session.platformSessionId, replyTo.replyToMsgId, conversationId,
     )
