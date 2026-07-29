@@ -114,6 +114,7 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
+  private readonly _storedUsers = new Map<string, IMUser<any>>()
   private readonly _platformUsers = new Map<string, IMUser<any>>()
   private readonly _pendingPlatformUsers = new Map<string, Promise<IMUser<any> | null>>()
   /** Platform user IDs from the latest authoritative contacts snapshot. */
@@ -2276,6 +2277,7 @@ export class DialogRpc {
     this._userToTl.set(row.platformUserId, row.id)
     this._tlToUser.set(row.id, row.platformUserId)
     const user = toUser(row)
+    this._storedUsers.set(row.platformUserId, user)
     if (row.platformUserId === this._session.userId) {
       this._selfId = row.id
       this._selfUser = user
@@ -2674,11 +2676,22 @@ export class DialogRpc {
     if (cached) return cached
     const pending = this._pendingPeerUsers.get(peerId)
     if (pending) return pending
-    const lookup = this._getPlatformUser(peerId)
-      .then(async (upstream) => {
-        const stored = upstream ? undefined : await this._store?.getUser(this._session.platformId, peerId)
-        const user = upstream ?? (stored ? toUser(stored) : { id: peerId, firstName: fallbackName ?? peerId })
-        await this._persistUsers([user])
+    const lookup = Promise.resolve()
+      .then(async () => {
+        const local = this._storedUsers.get(peerId)
+          ?? await this._store?.getUser(this._session.platformId, peerId).then((row) => {
+            if (!row) return
+            this._registerUser(row)
+            return toUser(row)
+          })
+        // Message ingestion can create a sender row whose only name is the
+        // opaque platform ID. Treat that as a placeholder so a later profile
+        // lookup can still replace it, while complete persisted identities
+        // remain available without a network request.
+        const stored = local && !isPlaceholderUser(local) ? local : undefined
+        const upstream = stored ? undefined : await this._getPlatformUser(peerId)
+        const user = stored ?? upstream ?? local ?? { id: peerId, firstName: fallbackName ?? peerId }
+        if (upstream || !local) await this._persistUsers([user])
         return this._makePeerUser(user)
       })
       .then((user) => {
@@ -3408,6 +3421,14 @@ export function projectTlMessage(options: {
     groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
   } = options
   const conversationId = stableId(`peer:${conversation.id}`)
+  const replyTo: tl.RawMessageReplyHeader | undefined = topicId && topicId !== tlId
+    ? {
+        _: 'messageReplyHeader', forumTopic: true,
+        replyToMsgId: replyToTlId ?? topicId, replyToTopId: topicId,
+      }
+    : replyToTlId
+      ? { _: 'messageReplyHeader', replyToMsgId: replyToTlId }
+      : undefined
   if (ordinal === 0 && source.content.serviceAction) {
     return {
       _: 'messageService', out: source.outgoing || undefined, id: tlId,
@@ -3415,11 +3436,7 @@ export function projectTlMessage(options: {
       peerId: peerId ?? (conversation.kind === 'direct'
         ? { _: 'peerUser', userId: conversationId }
         : { _: 'peerChannel', channelId: conversationId }),
-      replyTo: replyToTlId ? {
-        _: 'messageReplyHeader', replyToMsgId: replyToTlId,
-      } : topicId && topicId !== tlId ? {
-        _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
-      } : undefined,
+      replyTo,
       date: source.timestamp,
       action: { _: 'messageActionCustomAction', message: source.content.serviceAction.text },
     } as tl.RawMessageService
@@ -3431,11 +3448,7 @@ export function projectTlMessage(options: {
     peerId: peerId ?? (conversation.kind === 'direct'
       ? { _: 'peerUser', userId: conversationId }
       : { _: 'peerChannel', channelId: conversationId }),
-    replyTo: replyToTlId ? {
-      _: 'messageReplyHeader', replyToMsgId: replyToTlId,
-    } : topicId && topicId !== tlId ? {
-      _: 'messageReplyHeader', forumTopic: true, replyToMsgId: topicId, replyToTopId: topicId,
-    } : undefined,
+    replyTo,
     date: source.timestamp,
     message: text,
     entities: ordinal === 0 ? withAutoLinkEntities(text, entities) : undefined,
@@ -3532,6 +3545,15 @@ function messageReferencedUserIds(message: IMMessage): string[] {
     for (const actor of reaction.recentActors ?? []) ids.add(actor.userId)
   }
   return [...ids]
+}
+
+function isPlaceholderUser(user: IMUser<any>): boolean {
+  return user.firstName === user.id
+    && !user.lastName
+    && !user.username
+    && !user.avatar
+    && !user.about
+    && Object.keys(user.metadata ?? {}).length === 0
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {

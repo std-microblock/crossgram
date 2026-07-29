@@ -91,6 +91,27 @@ it('projects platform service actions as Telegram MessageService records', () =>
   })
 })
 
+it('keeps forum topic metadata when a topic message also replies to another message', () => {
+  const topicConversation: IMConversation = {
+    id: 'support-thread', kind: 'channel', title: 'Support', parentId: 'general',
+  }
+  const source: IMMessage = {
+    id: 'topic-reply', conversationId: topicConversation.id, senderId: 'alice', timestamp: 2,
+    replyToId: 'another-message', content: { parts: [{ type: 'text', text: 'nested reply' }] },
+  }
+
+  expect(projectTlMessage({
+    conversation: topicConversation, source, tlId: 30, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 }, replyToTlId: 20, topicId: 10,
+  })).toMatchObject({
+    _: 'message',
+    replyTo: {
+      _: 'messageReplyHeader', forumTopic: true,
+      replyToMsgId: 20, replyToTopId: 10,
+    },
+  })
+})
+
 afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
