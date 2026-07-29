@@ -738,6 +738,87 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('echoes every ping message id and keeps accepting RPCs on the same socket', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, register, stop } = await startServer()
+    register('help.getNearestDc', async () => ({
+      _: 'nearestDc', country: 'test', thisDc: 1, nearestDc: 1,
+    } as unknown as tl.TlObject))
+    let client: TestClient | undefined
+    try {
+      client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x60606060, 0x10101010)
+
+      const ordinaryMessageId = makeMsgId(60)
+      const ordinaryPingId = Long.fromInt(701)
+      const ordinaryPing = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_ping', pingId: ordinaryPingId,
+      } as { _: string })
+      await client.send(clientEncryptWithMessageId(
+        perm, ordinaryPing, perm.salt, sessionId, ordinaryMessageId,
+      ))
+      const ordinaryPong = await within(
+        readEncryptedObject(client, perm, 'mt_pong'), 3_000, 'ordinary pong',
+      )
+      expect(ordinaryPong.msgId.eq(ordinaryMessageId)).toBe(true)
+      expect(ordinaryPong.pingId.eq(ordinaryPingId)).toBe(true)
+
+      const delayedMessageId = ordinaryMessageId.add(4)
+      const delayedPingId = Long.fromInt(702)
+      const delayedPing = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_ping_delay_disconnect', pingId: delayedPingId, disconnectDelay: 10,
+      } as { _: string })
+      await client.send(clientEncryptWithMessageId(
+        perm, delayedPing, perm.salt, sessionId, delayedMessageId,
+      ))
+      const delayedPong = await within(
+        readEncryptedObject(client, perm, 'mt_pong'), 3_000, 'delayed pong',
+      )
+      expect(delayedPong.msgId.eq(delayedMessageId)).toBe(true)
+      expect(delayedPong.pingId.eq(delayedPingId)).toBe(true)
+
+      const innerMessageId = delayedMessageId.add(4)
+      const containerMessageId = innerMessageId.add(4)
+      const containerPingId = Long.fromInt(703)
+      const containerPing = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'mt_ping', pingId: containerPingId,
+      } as { _: string })
+      const container = TlBinaryWriter.manual(8 + 16 + containerPing.length)
+      container.uint(0x73f1f8dc)
+      container.uint(1)
+      container.long(innerMessageId)
+      container.uint(0)
+      container.uint(containerPing.length)
+      container.raw(containerPing)
+      await client.send(clientEncryptWithMessageId(
+        perm, container.result(), perm.salt, sessionId, containerMessageId,
+      ))
+      const containerPong = await within(
+        readEncryptedObject(client, perm, 'mt_pong'), 3_000, 'container pong',
+      )
+      expect(containerPong.msgId.eq(innerMessageId)).toBe(true)
+      expect(containerPong.pingId.eq(containerPingId)).toBe(true)
+
+      const rpcMessageId = containerMessageId.add(4)
+      await client.send(clientEncryptWithMessageId(
+        perm,
+        serializeInitializedRpc({ _: 'help.getNearestDc' }),
+        perm.salt,
+        sessionId,
+        rpcMessageId,
+      ))
+      const response = await within(
+        readRpcResultEnvelope(client, perm), 3_000, 'RPC after pings',
+      )
+      expect(response.requestMessageId.eq(rpcMessageId)).toBe(true)
+      expect(response.result).toMatchObject({ _: 'nearestDc', thisDc: 1 })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  })
+
   it('keeps a queued RPC response on its request session after a later ping', async () => {
     await crypto.initialize?.()
     const { port, pubKey, register, stop } = await startServer()
