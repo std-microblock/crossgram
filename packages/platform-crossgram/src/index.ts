@@ -6,7 +6,7 @@ import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialogPage,
-  IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
+  IMDirectDownload, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMessage, IMMessageInput,
   IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
   IMSticker, IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
@@ -775,6 +775,18 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       })
       yield chunk
     }
+  }
+
+  async resolveMediaUrl(
+    _session: PlatformSession,
+    media: IMMedia<QQMediaLocator>,
+  ): Promise<IMDirectDownload | undefined> {
+    const locator = media.locator
+    // These assets live in relay-side cache, are generated locally, or have
+    // not received a downloadable QQ identity yet.
+    if (!locator || locator.deferred || locator.cachedPath) return
+    const resolved = await this.client.resolveFileUrl(locator)
+    return { ...resolved, supportsRange: true }
   }
 
   async getAvailableReactions(

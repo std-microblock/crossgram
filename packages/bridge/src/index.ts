@@ -471,6 +471,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   })
   rpc.register('upload.getFile', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFile(req as tl.upload.RawGetFileRequest))
+  rpc.register('crossgram.getFileUrl', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getFileUrl(
+      (req as unknown as { location: tl.TypeInputFileLocation }).location,
+    ))
   rpc.register('upload.getFileHashes', async () => bareVector([]))
 
   rpc.register('messages.getAllStickers', async (rpc, req) =>
