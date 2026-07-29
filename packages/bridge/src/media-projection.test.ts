@@ -544,4 +544,43 @@ describe('rich-media projection', () => {
       'unread', 'read', 'old',
     ])
   })
+
+  it('keeps a deep persisted unread anchor inside a negative-offset history window', async () => {
+    const { store, peerId } = await createStore()
+    const messages = Array.from({ length: 200 }, (_, index): IMMessage => ({
+      id: String(index + 1),
+      conversationId: conversation.id,
+      senderId: 'alice',
+      timestamp: index + 1,
+      content: { parts: [{ type: 'text', text: String(index + 1) }] },
+    }))
+    await store.ingestMany(session, conversation, messages, { allocation: 'history' })
+    const unreadPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: [{
+          conversation,
+          unreadCount: 150,
+          lastMessage: messages[199],
+          readInboxMaxMessage: messages[49],
+        }] }
+      },
+      async getHistory() {
+        return { messages: messages.slice(24, 100) }
+      },
+    }
+    const rpc = new DialogRpc(unreadPlatform, session, store)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const dialog = dialogs.dialogs[0] as tl.RawDialog
+    const history = await rpc.getHistory({
+      ...historyRequest(peerId),
+      offsetId: dialog.readInboxMaxId,
+      addOffset: -25,
+      limit: 50,
+    }) as tl.messages.RawMessages
+
+    expect(history.messages.map((message) => message._ === 'message' ? message.message : '')).toEqual(
+      Array.from({ length: 50 }, (_, index) => String(74 - index)),
+    )
+  })
 })
