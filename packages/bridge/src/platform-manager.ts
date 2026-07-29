@@ -384,9 +384,19 @@ export class PlatformDataService {
     // previously stored rows leaks removed dialogs and legacy conversation IDs
     // forever (for example after an adapter fixes its opaque-ID mapping).
     const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
-    await this._ingestDialogs(upstream.filter((dialog) => dialogNeedsPersistence(
+    const changed = upstream.filter((dialog) => dialogNeedsPersistence(
       dialog, persisted.get(dialog.conversation.id),
-    )))
+    ))
+    if (changed.length) {
+      if (stored.length) {
+        void this._ingestDialogs(changed).catch((error) => this._onTrace?.(
+          'dialog background persistence failed session=%s error=%s',
+          this._session.platformSessionId, String(error),
+        ))
+      } else {
+        await this._ingestDialogs(changed)
+      }
+    }
     const dialogs = upstream.map((dialog) => {
       const cached = persisted.get(dialog.conversation.id)
       return {
