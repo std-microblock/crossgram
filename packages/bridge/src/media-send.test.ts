@@ -109,6 +109,15 @@ async function createHarness(failSends = 0) {
         yield chunk
       }
     },
+    async resolveMediaUrl(_session, media) {
+      const locator = media.locator as { remote?: number } | undefined
+      if (locator?.remote === undefined) return
+      return {
+        url: `https://cdn.example.test/media/${locator.remote}`,
+        expiresAt: Date.now() + 60_000,
+        supportsRange: true,
+      }
+    },
   }
   const progress: Array<{ mediaIndex: number, transferredBytes: number }> = []
   const store = new MessageStore(ctx.database)
@@ -187,6 +196,20 @@ describe('media send streaming', () => {
       { mediaIndex: 0, transferredBytes: 6 },
     ])
     expect(() => wireRoundTrip(downloaded)).not.toThrow()
+
+    const direct = await rpc.getFileUrl({
+      _: 'inputDocumentFileLocation', id: document.id, accessHash: document.accessHash,
+      fileReference: document.fileReference, thumbSize: '',
+    })
+    expect(JSON.parse(direct.data)).toMatchObject({
+      url: 'https://cdn.example.test/media/0', supportsRange: true,
+    })
+    expect(() => wireRoundTrip(direct)).not.toThrow()
+
+    await expect(rpc.getFileUrl({
+      _: 'inputDocumentFileLocation', id: document.id, accessHash: document.accessHash,
+      fileReference: new TextEncoder().encode('bridge-media:999'), thumbSize: '',
+    })).rejects.toThrow('FILE_REFERENCE_INVALID')
   })
 
   it('sends mixed image and file content through one platform call with independent streams', async () => {
