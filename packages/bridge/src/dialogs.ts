@@ -126,6 +126,7 @@ export class DialogRpc {
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peersHydratedStoreRevision = -1
+  private _storedUsersHydrated = false
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
 
@@ -2067,9 +2068,6 @@ export class DialogRpc {
         }
       }
       const readStoredWindow = async () => {
-        const usersAt = performance.now()
-        await this._syncStoredUsers()
-        const usersMs = performance.now() - usersAt
         const projectAt = performance.now()
         const projectionRevision = this._store!.revision
         // Telegram Android paginates channels with add_offset=-1 so the anchor
@@ -2108,6 +2106,9 @@ export class DialogRpc {
           })
         }
         const projectionReadMs = performance.now() - projectAt
+        const usersAt = performance.now()
+        await this._syncStoredUsers(projected.flatMap(({ source }) => messageReferencedUserIds(source)))
+        const usersMs = performance.now() - usersAt
         const materializeAt = performance.now()
         const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
           const item: MaterializedMessage = {
@@ -2226,6 +2227,7 @@ export class DialogRpc {
         rows = [...rows, self]
       }
       for (const row of rows) this._registerUser(row)
+      this._storedUsersHydrated = true
       this._selfId = self.id
     })()
     this._userHydration = pending
@@ -2236,9 +2238,17 @@ export class DialogRpc {
     }
   }
 
-  private async _syncStoredUsers(): Promise<void> {
+  private async _syncStoredUsers(platformUserIds?: readonly string[]): Promise<void> {
     if (!this._store) return
+    if (platformUserIds) {
+      const missing = [...new Set(platformUserIds)].filter((id) => !this._userToTl.has(id))
+      if (!missing.length) return
+      for (const row of await this._store.readUsers(this._session.platformId, missing)) this._registerUser(row)
+      return
+    }
+    if (this._storedUsersHydrated) return
     for (const row of await this._store.listUsers(this._session.platformId)) this._registerUser(row)
+    this._storedUsersHydrated = true
   }
 
   private async _persistUsers(users: readonly IMUser[]): Promise<void> {
@@ -3484,6 +3494,21 @@ function selectHistoryWindow(
       : 0
   const start = Math.max(0, (offsetIndex < 0 ? filtered.length : offsetIndex) + addOffset)
   return { filtered, start, page: filtered.slice(start, start + clampLimit(request.limit)) }
+}
+
+function messageReferencedUserIds(message: IMMessage): string[] {
+  const ids = new Set([message.senderId])
+  if (message.sender) ids.add(message.sender.id)
+  for (const part of message.content.parts) {
+    if (part.type !== 'text') continue
+    for (const entity of part.entities ?? []) {
+      if (entity.type === 'mention') ids.add(entity.userId)
+    }
+  }
+  for (const reaction of message.reactionContext?.reactions ?? []) {
+    for (const actor of reaction.recentActors ?? []) ids.add(actor.userId)
+  }
+  return [...ids]
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {

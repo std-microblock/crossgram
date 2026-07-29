@@ -125,7 +125,7 @@ describe('conversation loading performance', () => {
     const history = await historyRpc.getHistory(historyRequest(inputPeer(historyRpc)))
     const historyMs = performance.now() - historyStarted
 
-    expect(dialogs.dialogs).toHaveLength(1)
+    expect(dialogs._ === 'messages.dialogsNotModified' ? [] : dialogs.dialogs).toHaveLength(1)
     expect(peerDialogs.dialogs).toHaveLength(1)
     expect(history._ === 'messages.messagesNotModified' ? [] : history.messages).toHaveLength(50)
     expect(dialogsMs).toBeLessThan(100)

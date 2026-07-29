@@ -131,6 +131,14 @@ export class MessageStore {
     return this._database.select('mtproto_im_user', { platformId }).orderBy('id').execute()
   }
 
+  async readUsers(platformId: string, platformUserIds: readonly string[]): Promise<IMUserRow[]> {
+    if (!platformUserIds.length) return []
+    return this._database.get('mtproto_im_user', {
+      platformId,
+      platformUserId: { $in: [...new Set(platformUserIds)] },
+    })
+  }
+
   async ingest(
     session: PlatformSession,
     conversation: IMConversation,
@@ -553,7 +561,7 @@ export class MessageStore {
         lastMessage: latest ? await this._hydrateMessage(latest) : undefined,
       }
     }))
-    return dialogs.filter((dialog): dialog is IMDialog => dialog !== undefined)
+    return dialogs.flatMap((dialog) => dialog === undefined ? [] : [dialog])
   }
 
   async readHistory(
