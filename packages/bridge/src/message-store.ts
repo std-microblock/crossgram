@@ -4,14 +4,14 @@ import type {
   TlMessagePartRow,
 } from './models.js'
 import {
-  messageMedia, messageText,
+  messageMedia, messageText, telegramReplyToMessageId,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
   type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
   type IMUser, type JsonObject, type JsonValue, type PlatformSession,
 } from './platform.js'
 import {
   clampedTimestampMessageIdBucket, initialTimestampMessageIdEpoch, messageIdBucketStart,
-  qqMessageSequenceFromMetadata,
+  qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata,
   TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS,
 } from './message-id.js'
 import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
@@ -682,6 +682,47 @@ export class MessageStore {
     })
   }
 
+  async listProjectedMessages(platformSessionId: string): Promise<ProjectedMessage[]> {
+    const rows = await this._database.select('mtproto_im_message', {
+      platformSessionId, deleted: false,
+    }).orderBy('timestamp', 'desc').execute()
+    if (!rows.length) return []
+    const messageIds = rows.map((row) => row.id)
+    const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
+    const conversationIds = [...new Set(rows.map((row) => row.conversationId))]
+    const [aliases, reactions, senders, conversations, parts, media] = await Promise.all([
+      this._database.get('mtproto_im_message_alias', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_message_reaction', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_user', { id: { $in: senderUserIds } }),
+      this._database.get('mtproto_im_conversation', { id: { $in: conversationIds } }),
+      this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_media', { messageId: { $in: messageIds } }),
+    ])
+    const aliasesByMessage = groupByMessageId(aliases, (left, right) => left.ordinal - right.ordinal)
+    const reactionsByMessage = groupByMessageId(reactions, (left, right) => left.id - right.id)
+    const partsByMessage = groupByMessageId(parts, (left, right) => left.ordinal - right.ordinal)
+    const mediaByMessage = groupByMessageId(media, (left, right) => left.ordinal - right.ordinal)
+    const sendersById = new Map(senders.map((sender) => [sender.id, sender]))
+    const conversationsById = new Map(conversations.map((conversation) => [conversation.id, conversation]))
+    return rows.map((row) => {
+      const sender = sendersById.get(row.senderUserId)
+      const conversation = conversationsById.get(row.conversationId)
+      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
+      if (!conversation) throw new Error(`message references missing conversation ${row.conversationId}`)
+      return {
+        source: hydrateMessage(
+          row,
+          aliasesByMessage.get(row.id) ?? [],
+          reactionsByMessage.get(row.id) ?? [],
+          sender,
+          conversation.platformConversationId,
+        ),
+        parts: partsByMessage.get(row.id) ?? [],
+        media: mediaByMessage.get(row.id) ?? [],
+      }
+    })
+  }
+
   async readProjectedByPlatformIds(
     platformSessionId: string,
     targets: readonly StoredMessageLookup[],
@@ -819,6 +860,29 @@ export class MessageStore {
       media: await this._database.select('mtproto_im_media', { messageId: row.id })
         .orderBy('ordinal').execute(),
     }
+  }
+
+  async findReplyTarget(
+    platformSessionId: string,
+    source: IMMessage,
+  ): Promise<ProjectedMessage | undefined> {
+    const nativeSequence = qqReplySequenceFromMetadata(source.metadata)
+    if (nativeSequence !== undefined) {
+      const projected = await this.findProjectedByNativeSequence(
+        platformSessionId, source.conversationId, nativeSequence,
+      )
+      if (projected) return projected
+    }
+    const telegramId = telegramReplyToMessageId(source)
+    if (telegramId !== undefined) {
+      const projected = await this.findProjectedByTlId(
+        platformSessionId, telegramId, source.conversationId,
+      )
+      if (projected) return projected
+    }
+    return source.replyToId
+      ? this.findProjectedByPlatformId(platformSessionId, source.conversationId, source.replyToId)
+      : undefined
   }
 
   async getOldestTlMessageId(

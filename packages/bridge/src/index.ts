@@ -36,6 +36,7 @@ import {
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
 import { AuthTransferStore } from './auth-transfer.js'
+import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -53,6 +54,7 @@ export * from './draft-store.js'
 export * from './platform-account.js'
 export * from './account-dashboard.js'
 export * from './auth-transfer.js'
+export * from './blocked-peers.js'
 export * from './stripped-thumbnail.js'
 export * from './sticker-outline.js'
 
@@ -68,6 +70,8 @@ export interface BridgeConfig {
   uploadPath?: string
   /** Mute group chats by default unless the Telegram user explicitly enables them. */
   autoMuteGroupChats?: boolean
+  /** Visibility policy for users blocked through Telegram. */
+  blockedContentMode?: BlockedContentMode
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
@@ -78,6 +82,9 @@ export const Config = z.object({
   apiPrefix: z.string().default('/api'),
   uploadPath: z.string().default('data/bridge-uploads'),
   autoMuteGroupChats: z.boolean().default(true),
+  blockedContentMode: z.union([
+    z.const('show'), z.const('hide-user'), z.const('hide-related'),
+  ]).default('hide-user'),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -118,6 +125,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const notificationSettings = new NotificationSettingsStore(
     ctx.database, config.autoMuteGroupChats ?? true,
   )
+  const blockedPeers = new BlockedPeerStore(
+    ctx.database, config.blockedContentMode ?? 'hide-user',
+  )
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
   const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
@@ -135,6 +145,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (format, ...args) => bridgeLogger.debug(format, ...args),
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
       .makeMessageMedia(sticker),
+    blockedPeers,
   )
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
@@ -149,7 +160,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (format, ...args) => bridgeLogger.debug(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, stickerRpcFor, resources, store, drafts, notificationSettings,
+    ctx, registry, stickerRpcFor, resources, store, drafts, notificationSettings, blockedPeers,
     subscriptions, uploads, generation,
     (localSession, update, excludeAuthKeyId) => updates.publishDraft(
       localSession, update, excludeAuthKeyId,
@@ -344,6 +355,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       ),
       notificationSettings,
       selfRow.id,
+      blockedPeers,
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -545,6 +557,28 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ))
 
   // ── Contacts / users ──
+  rpc.register('contacts.block', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const change = await state.dialogs.blockPeer(req as tl.contacts.RawBlockRequest)
+    if (change?.changed) {
+      await updates.publishPeerBlocked(
+        state.session, change.userId, true, change.row?.blockedAt ?? new Date(),
+      )
+    }
+    return { _: 'boolTrue' }
+  })
+  rpc.register('contacts.unblock', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const change = await state.dialogs.unblockPeer(req as tl.contacts.RawUnblockRequest)
+    if (change?.changed) {
+      await updates.publishPeerBlocked(
+        state.session, change.userId, false, change.row?.blockedAt ?? new Date(),
+      )
+    }
+    return { _: 'boolTrue' }
+  })
+  rpc.register('contacts.getBlocked', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getBlocked(req as tl.contacts.RawGetBlockedRequest))
   rpc.register('contacts.getContacts', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getContacts())
   rpc.register('contacts.resolveUsername', async (rpc, req) =>
@@ -693,6 +727,7 @@ function createSessionResolver(
   store: MessageStore,
   drafts: DraftStore,
   notificationSettings: NotificationSettingsStore,
+  blockedPeers: BlockedPeerStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
   generation: object,
@@ -755,6 +790,7 @@ function createSessionResolver(
             onDraftUpdate,
             notificationSettings,
             selfRow.id,
+            blockedPeers,
           )
           return state
         })()
