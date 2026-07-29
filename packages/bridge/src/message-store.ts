@@ -523,17 +523,7 @@ export class MessageStore {
     }).orderBy('updatedAt', 'desc').limit(limit + (anchor ? 1 : 0)).execute()
     if (anchor) conversations = conversations.filter((item) => item.id !== anchor.id)
     conversations = conversations.slice(0, limit)
-    return Promise.all(conversations.map(async (conversation) => {
-      const [latest] = await this._database.select('mtproto_im_message', {
-        conversationId: conversation.id, deleted: false,
-      })
-        .orderBy('timestamp', 'desc').limit(1).execute()
-      return {
-        conversation: toConversation(conversation),
-        unreadCount: conversation.unreadCount,
-        lastMessage: latest ? await this._hydrateMessage(latest) : undefined,
-      }
-    }))
+    return this._hydrateDialogs(conversations)
   }
 
   async readDialogs(
@@ -549,19 +539,11 @@ export class MessageStore {
       conversation.platformConversationId,
       conversation,
     ]))
-    const dialogs = await Promise.all(platformConversationIds.map(async (platformConversationId) => {
+    const ordered = platformConversationIds.flatMap((platformConversationId) => {
       const conversation = byPlatformId.get(platformConversationId)
-      if (!conversation) return
-      const [latest] = await this._database.select('mtproto_im_message', {
-        conversationId: conversation.id, deleted: false,
-      }).orderBy('timestamp', 'desc').limit(1).execute()
-      return {
-        conversation: toConversation(conversation),
-        unreadCount: conversation.unreadCount,
-        lastMessage: latest ? await this._hydrateMessage(latest) : undefined,
-      }
-    }))
-    return dialogs.flatMap((dialog) => dialog === undefined ? [] : [dialog])
+      return conversation ? [conversation] : []
+    })
+    return this._hydrateDialogs(ordered)
   }
 
   async readHistory(
@@ -578,7 +560,7 @@ export class MessageStore {
       deleted: false,
       ...storedHistoryTimestampFilter(query),
     }).orderBy('timestamp', query.order ?? 'desc').limit(clampDatabaseLimit(query.limit)).execute()
-    return Promise.all(rows.map((row) => this._hydrateMessage(row)))
+    return this._hydrateMessages(rows, new Map([[conversation.id, conversation.platformConversationId]]))
   }
 
   async readProjectedHistory(
@@ -1345,14 +1327,70 @@ export class MessageStore {
     }
   }
 
+  private async _hydrateDialogs(conversations: readonly IMConversationRow[]): Promise<IMDialog[]> {
+    const latestRows = await Promise.all(conversations.map(async (conversation) => {
+      const [latest] = await this._database.select('mtproto_im_message', {
+        conversationId: conversation.id, deleted: false,
+      }).orderBy('timestamp', 'desc').limit(1).execute()
+      return latest
+    }))
+    const rows = latestRows.flatMap((row) => row ? [row] : [])
+    const hydrated = await this._hydrateMessages(rows, new Map(conversations.map((conversation) => [
+      conversation.id, conversation.platformConversationId,
+    ])))
+    const hydratedById = new Map(rows.map((row, index) => [row.id, hydrated[index]]))
+    return conversations.map((conversation, index) => {
+      const latest = latestRows[index]
+      return {
+        conversation: toConversation(conversation),
+        unreadCount: conversation.unreadCount,
+        lastMessage: latest ? hydratedById.get(latest.id) : undefined,
+      }
+    })
+  }
+
+  private async _hydrateMessages(
+    rows: readonly IMMessageRow[],
+    knownConversationIds: ReadonlyMap<number, string> = new Map(),
+  ): Promise<IMMessage[]> {
+    if (!rows.length) return []
+    const messageIds = [...new Set(rows.map((row) => row.id))]
+    const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
+    const missingConversationRowIds = [...new Set(rows
+      .map((row) => row.conversationId)
+      .filter((id) => !knownConversationIds.has(id)))]
+    const [aliases, reactions, senders, conversations] = await Promise.all([
+      this._database.get('mtproto_im_message_alias', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_message_reaction', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_user', { id: { $in: senderUserIds } }),
+      missingConversationRowIds.length
+        ? this._database.get('mtproto_im_conversation', { id: { $in: missingConversationRowIds } })
+        : Promise.resolve([]),
+    ])
+    const aliasesByMessage = groupByMessageId(aliases, (left, right) => left.ordinal - right.ordinal)
+    const reactionsByMessage = groupByMessageId(reactions, (left, right) => left.id - right.id)
+    const sendersById = new Map(senders.map((sender) => [sender.id, sender]))
+    const conversationIds = new Map(knownConversationIds)
+    for (const conversation of conversations) {
+      conversationIds.set(conversation.id, conversation.platformConversationId)
+    }
+    return rows.map((row) => {
+      const sender = sendersById.get(row.senderUserId)
+      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
+      const conversationId = conversationIds.get(row.conversationId)
+      if (!conversationId) throw new Error(`message references missing conversation ${row.conversationId}`)
+      return hydrateMessage(
+        row,
+        aliasesByMessage.get(row.id) ?? [],
+        reactionsByMessage.get(row.id) ?? [],
+        sender,
+        conversationId,
+      )
+    })
+  }
+
   private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
-    const aliases = await this._database.select('mtproto_im_message_alias', { messageId: row.id })
-      .orderBy('ordinal').execute()
-    const reactions = await this._database.select('mtproto_im_message_reaction', { messageId: row.id })
-      .orderBy('id').execute()
-    const [senderRow] = await this._database.get('mtproto_im_user', { id: row.senderUserId })
-    if (!senderRow) throw new Error(`message references missing user ${row.senderUserId}`)
-    return hydrateMessage(row, aliases, reactions, senderRow, await this._conversationId(row.conversationId))
+    return (await this._hydrateMessages([row]))[0]
   }
 
   private async _replaceReactions(
@@ -1384,12 +1422,6 @@ export class MessageStore {
       definition: definition as unknown as Record<string, unknown>, updatedAt: now,
     }
     }), ['messageId', 'nativeReactionKey'])
-  }
-
-  private async _conversationId(id: number): Promise<string> {
-    const [conversation] = await this._database.get('mtproto_im_conversation', { id })
-    if (!conversation) throw new Error(`message references missing conversation ${id}`)
-    return conversation.platformConversationId
   }
 
   async pruneUpdateDeliveries(platformSessionId: string): Promise<void> {

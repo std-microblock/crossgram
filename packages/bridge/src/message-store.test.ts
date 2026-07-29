@@ -68,6 +68,57 @@ describe('MessageStore', () => {
       ])
   })
 
+  it('hydrates a 100-dialog first screen with one bulk query per related table', async () => {
+    const { ctx, store } = await createStore()
+    const conversations = Array.from({ length: 100 }, (_, index) => ({
+      id: `bulk-dialog-${index}`, kind: 'group' as const, title: `Bulk ${index}`,
+    }))
+    await Promise.all(conversations.map((conversation, index) => store.ingest(session, conversation, {
+      id: `bulk-message-${index}`,
+      sourceIds: [`bulk-alias-${index}`],
+      conversationId: conversation.id,
+      senderId: `bulk-sender-${index % 5}`,
+      timestamp: index + 1,
+      content: { parts: [{ type: 'text', text: `message ${index}` }] },
+      reactionContext: {
+        available: [{ key: 'like', presentation: { type: 'emoji', emoticon: '👍' } }],
+        reactions: [{ key: 'like', count: 1 }],
+        maxSelected: 1,
+      },
+    })))
+    const get = vi.spyOn(ctx.database, 'get')
+
+    const startedAt = performance.now()
+    const dialogs = await Promise.race([
+      store.listDialogs(session.platformSessionId, { limit: 100 }),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('100-dialog first screen exceeded 100ms')),
+        100,
+      )),
+    ])
+    const elapsed = performance.now() - startedAt
+
+    expect(dialogs).toHaveLength(100)
+    expect(dialogs[0]).toMatchObject({
+      conversation: { id: 'bulk-dialog-99' },
+      lastMessage: {
+        id: 'bulk-message-99', sourceIds: ['bulk-message-99', 'bulk-alias-99'],
+        sender: { id: 'bulk-sender-4' },
+        reactionContext: { reactions: [{ key: 'like', count: 1 }] },
+      },
+    })
+    expect(elapsed).toBeLessThan(100)
+    const relatedTables = get.mock.calls.map(([table]) => table).filter((table) =>
+      table === 'mtproto_im_message_alias'
+      || table === 'mtproto_im_message_reaction'
+      || table === 'mtproto_im_user')
+    expect(relatedTables).toEqual([
+      'mtproto_im_message_alias',
+      'mtproto_im_message_reaction',
+      'mtproto_im_user',
+    ])
+  })
+
   it('persists a direct peer before projecting an outgoing first event', async () => {
     const { store } = await createStore()
     const conversation = {
