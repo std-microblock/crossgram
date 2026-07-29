@@ -2,6 +2,9 @@ import { describe, it, expect } from 'vitest'
 import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter, type TlReaderMap } from '@mtcute/tl-runtime'
 import { __tlReaderMap, __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
@@ -23,9 +26,10 @@ import { Mtproto } from '../service.js'
 import { CURRENT_API_LAYER } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
-import { generateRsaKeyPair } from '../crypto/rsa-keygen.js'
+import { generateRsaKeyPair, type ServerRsaKey } from '../crypto/rsa-keygen.js'
 import { bareVector } from '../rpc/dispatcher.js'
 import { getApiLayerReaderMap } from '../rpc/api-layer.js'
+import { FileAuthKeyStore, type AuthKeyStore } from './auth-key-store.js'
 
 /**
  * Full-stack e2e test: drives a real MtprotoServer over a real TCP socket using
@@ -387,7 +391,10 @@ function serverSessionId(key: ClientKey, data: Uint8Array): Long {
   return new TlBinaryReader(__tlReaderMap, plain, 8).long(true)
 }
 
-async function startServer(onDebug?: MtprotoDebugListener): Promise<{
+async function startServer(
+  onDebug?: MtprotoDebugListener,
+  options: { rsaKey?: ServerRsaKey, authKeyStore?: AuthKeyStore } = {},
+): Promise<{
   port: number
   pubKey: any
   uploadedParts: Uint8Array[]
@@ -398,11 +405,13 @@ async function startServer(onDebug?: MtprotoDebugListener): Promise<{
   sendUpdateToAuthKey: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number
   stop: () => Promise<void>
 }> {
-  const rsaKey = generateRsaKeyPair()
+  const rsaKey = options.rsaKey ?? generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
 
   const ctx = new Context()
-  const fiber = ctx.plugin(Mtproto, { port: 0, host: '127.0.0.1', rsaKey, log })
+  const fiber = ctx.plugin(Mtproto, {
+    port: 0, host: '127.0.0.1', rsaKey, log, authKeyStore: options.authKeyStore,
+  })
   await fiber
   if (onDebug) ctx.mtproto.onDebug.add(onDebug)
 
@@ -1085,6 +1094,49 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       c2.close()
     } finally {
       await stop()
+    }
+  })
+
+  it('restores a negotiated API layer for an Android temporary key after a full server restart', async () => {
+    await crypto.initialize?.()
+    const rsaKey = generateRsaKeyPair()
+    const storePath = join(mkdtempSync(join(tmpdir(), 'mtproto-restart-')), 'auth-keys.json')
+    let temp!: ClientKey
+
+    const first = await startServer(undefined, {
+      rsaKey, authKeyStore: new FileAuthKeyStore(storePath),
+    })
+    try {
+      const client = await TestClient.connect(first.port)
+      const perm = await doClientHandshake(client, first.pubKey, false)
+      temp = await doClientHandshake(client, first.pubKey, true)
+      const sessionId = new Long(0x31313131, 0x31313131)
+      await bindTempAuthKey(client, perm, temp, sessionId)
+      await client.send(clientEncrypt(
+        temp,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        temp.salt,
+        sessionId,
+        8,
+      ))
+      expect(await readRpcResult(client, temp)).toMatchObject({ _: 'config', thisDc: 1 })
+      client.close()
+    } finally {
+      await first.stop()
+    }
+
+    const second = await startServer(undefined, {
+      rsaKey, authKeyStore: new FileAuthKeyStore(storePath),
+    })
+    try {
+      const client = await TestClient.connect(second.port)
+      const sessionId = new Long(0x32323232, 0x32323232)
+      const bareRequest = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' } as { _: string })
+      await client.send(clientEncrypt(temp, bareRequest, temp.salt, sessionId, 4))
+      expect(await readRpcResult(client, temp)).toMatchObject({ _: 'config', thisDc: 1 })
+      client.close()
+    } finally {
+      await second.stop()
     }
   })
 
