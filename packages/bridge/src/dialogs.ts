@@ -2070,7 +2070,7 @@ export class DialogRpc {
           })
         }
       }
-      const readStoredWindow = async () => {
+      const readStoredWindow = async (loadMissingReplyTargets: boolean) => {
         const projectAt = performance.now()
         const projectionRevision = this._store!.revision
         // Telegram Android paginates channels with add_offset=-1 so the anchor
@@ -2129,7 +2129,10 @@ export class DialogRpc {
         })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
         const materializeMs = performance.now() - materializeAt
         const repliesAt = performance.now()
-        await this._rememberReplyTargets(history.map((item) => item.source))
+        await this._rememberReplyTargets(
+          history.map((item) => item.source),
+          loadMissingReplyTargets,
+        )
         const repliesMs = performance.now() - repliesAt
         return {
           history, projected: projected.length, projectionRevision,
@@ -2162,7 +2165,11 @@ export class DialogRpc {
       )
 
       if (!anchorId || anchor) {
-        const stored = await readStoredWindow()
+        // This is a speculative local read. Missing reply targets may be part
+        // of the history page we are about to synchronize, so do not issue an
+        // extra foreground getMessage request before deciding whether the
+        // stored window is complete.
+        const stored = await readStoredWindow(false)
         if (selectHistoryWindow(stored.history, request).page.length >= clampLimit(request.limit)) {
           cacheStoredWindow(stored)
           traceStoredWindow(stored, 0, true)
@@ -2181,7 +2188,10 @@ export class DialogRpc {
           this._session.platformSessionId, anchorId, peerId,
         )
       }
-      const stored = await readStoredWindow()
+      // The upstream history page has already been synchronized. A reply
+      // target still missing now is genuinely outside that page and needs the
+      // targeted fallback to preserve Telegram reply headers.
+      const stored = await readStoredWindow(true)
       cacheStoredWindow(stored)
       traceStoredWindow(stored, upstreamMs, false)
       return stored.history
@@ -2449,7 +2459,10 @@ export class DialogRpc {
     })
   }
 
-  private async _rememberReplyTargets(messages: readonly IMMessage[]): Promise<void> {
+  private async _rememberReplyTargets(
+    messages: readonly IMMessage[],
+    loadMissing = true,
+  ): Promise<void> {
     if (!this._store) return
     const targets = new Map<string, { conversationId: string, targetId: string }>()
     for (const message of messages) {
@@ -2484,7 +2497,7 @@ export class DialogRpc {
       let projected = await this._store!.findProjectedByPlatformId(
         this._session.platformSessionId, conversationId, targetId,
       )
-      if (!projected && this._data) {
+      if (!projected && loadMissing && this._data) {
         await this._data.getMessage(conversationId, targetId).catch(() => null)
         projected = await this._store!.findProjectedByPlatformId(
           this._session.platformSessionId, conversationId, targetId,
