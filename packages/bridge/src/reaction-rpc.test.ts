@@ -5,7 +5,7 @@ import Long from 'long'
 import { afterEach, describe, expect, it } from 'vitest'
 import { defineModels } from './models.js'
 import type {
-  IMPlatform, IMReactionContext, IMReactionResource, PlatformSession,
+  IMPlatform, IMReactionContext, IMReactionDefinition, IMReactionResource, PlatformSession,
 } from './platform.js'
 import { ReactionRpc } from './reaction-rpc.js'
 
@@ -142,5 +142,62 @@ describe('ReactionRpc', () => {
     await expect(rpc.getFile(Long.fromValue(documentId).toNumber(), 1, 2)).resolves.toEqual({
       bytes: bytes.subarray(1, 3), mimeType: resource.mimeType,
     })
+  })
+
+  it('deduplicates the same platform reaction registered through many conversations', () => {
+    const platform = { capabilities: {} } as IMPlatform
+    const rpc = new ReactionRpc(platform, session)
+    const definition: IMReactionContext['available'][number] = {
+      key: 'platform:shared',
+      presentation: {
+        type: 'custom', alt: 'shared',
+        resource: {
+          version: 7, format: 'static', mimeType: 'image/webp',
+          width: 100, height: 100, size: 4, locator: { catalogKey: 'platform:shared' },
+        },
+      },
+    }
+    const documentIds = Array.from({ length: 40 }, (_, index) => {
+      const conversationId = `conversation-${index}`
+      rpc.registerContext(conversationId, {
+        available: [definition], reactions: [], maxSelected: 20,
+      })
+      const reaction = rpc.toTlReaction(conversationId, definition)
+      if (reaction._ !== 'reactionCustomEmoji') throw new Error('expected custom reaction')
+      return reaction.documentId.toString()
+    })
+
+    expect(new Set(documentIds)).toEqual(new Set([documentIds[0]]))
+    expect(rpc.getEmojiStickers()).toMatchObject({
+      _: 'messages.allStickers',
+      sets: [expect.objectContaining({ title: 'Platform Reactions', count: 1 })],
+    })
+    const set = rpc.getEmojiStickers()
+    if (set._ !== 'messages.allStickers') throw new Error('expected platform reaction set')
+    const pack = rpc.getStickerSet({
+      _: 'messages.getStickerSet',
+      stickerset: {
+        _: 'inputStickerSetID', id: set.sets[0]!.id, accessHash: set.sets[0]!.accessHash,
+      },
+      hash: 0,
+    })
+    expect(pack).toMatchObject({ _: 'messages.stickerSet', documents: { length: 1 } })
+  })
+
+  it('keeps distinct platform reaction keys and resource versions separate', () => {
+    const platform = { capabilities: {} } as IMPlatform
+    const rpc = new ReactionRpc(platform, session)
+    const custom = (key: string, version: number): IMReactionDefinition => ({
+      key,
+      presentation: {
+        type: 'custom', alt: key,
+        resource: { version, format: 'static', mimeType: 'image/webp', width: 100, height: 100 },
+      },
+    })
+
+    const ids = [custom('first', 1), custom('second', 1), custom('first', 2)]
+      .map((definition) => rpc.customDocumentId(definition))
+
+    expect(new Set(ids).size).toBe(3)
   })
 })
