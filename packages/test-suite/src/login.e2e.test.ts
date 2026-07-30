@@ -1022,6 +1022,7 @@ describe('bridge login e2e', () => {
       expect(contacts.users.every((user: any) => user.contact && user.mutualContact)).toBe(true)
       expect(contacts.users.every((user: any) => user.accessHash.equals(Long.ONE))).toBe(true)
       const alice = contacts.users.find((user: any) => user.firstName === 'Alice')
+      const bob = contacts.users.find((user: any) => user.firstName === 'Bob')
       const platformUsers = await ctx.database.get('mtproto_im_user', { platformId: 'static' })
       const selfRow = platformUsers.find(user => user.platformUserId === 'self')
       const aliceRow = platformUsers.find(user => user.platformUserId === 'alice')
@@ -1355,6 +1356,44 @@ describe('bridge login e2e', () => {
         users: [{ _: 'user', id: selfRow!.id, self: true }],
         chats: [{ _: 'channel', id: group.id }],
       })
+
+      const mentionText = 'hello @BoB and @missing'
+      const sentMention = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        message: mentionText, randomId: Long.fromNumber(987654323),
+        entities: [
+          { _: 'messageEntityMention', offset: mentionText.indexOf('@BoB'), length: '@BoB'.length },
+          {
+            _: 'messageEntityMention', offset: mentionText.indexOf('@missing'),
+            length: '@missing'.length,
+          },
+        ],
+      }, 10_039)
+      const sentMentionMessage = sentMention.updates.find(
+        (update: any) => update._ === 'updateNewChannelMessage',
+      ).message
+      expect(sentMentionMessage).toMatchObject({
+        _: 'message', out: true, message: mentionText,
+        entities: [{
+          _: 'messageEntityMentionName', offset: mentionText.indexOf('@BoB'),
+          length: '@BoB'.length, userId: bob.id,
+        }],
+      })
+
+      const mentionHistory = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 20,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 10_040)
+      expect(mentionHistory.messages).toContainEqual(expect.objectContaining({
+        _: 'message', id: sentMentionMessage.id, message: mentionText,
+        entities: [{
+          _: 'messageEntityMentionName', offset: mentionText.indexOf('@BoB'),
+          length: '@BoB'.length, userId: bob.id,
+        }],
+      }))
 
       const updatedHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
