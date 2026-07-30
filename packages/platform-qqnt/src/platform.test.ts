@@ -499,6 +499,46 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('hydrates a generic merged-forward counter from the archived messages', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.forwardMessages = vi.fn(async () => [{
+      id: 'merged-generic', conversationId: 'to', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{
+        type: 'multi-forward' as const, title: '聊天记录', preview: '2条消息的合并转发',
+        locator: { conversationId: 'to', rootMessageId: 'merged-generic' },
+      }],
+    }])
+    platform.client.getMultiForwardMessages = vi.fn(async () => [{
+      id: 'inside-a', conversationId: 'archived', senderId: 'alice', timestamp: 8, outgoing: false,
+      sender: { id: 'alice', name: 'Alice' },
+      parts: [{ type: 'text' as const, text: '第一条具体内容' }],
+    }, {
+      id: 'inside-b', conversationId: 'archived', senderId: 'bob', timestamp: 9, outgoing: false,
+      sender: { id: 'bob', name: 'Bob' },
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'photo', kind: 'image' as const, size: 10,
+          locator: {
+            messageId: 'inside-b', elementId: 'photo', chatType: 2 as const,
+            peerUid: 'archived', kind: 'image' as const, fileName: 'photo.jpg',
+          },
+        },
+      }],
+    }])
+
+    const [merged] = await platform.forwardMessages(
+      session, { id: 'from' }, ['a', 'b'], { id: 'to' },
+    )
+    const link = merged.content.parts[0]
+    if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+    expect(link.entities[0].conversation.metadata?.qqMultiForwardPreview)
+      .toBe('Alice: 第一条具体内容\nBob: [图片]')
+    expect(platform.client.getMultiForwardMessages).toHaveBeenCalledOnce()
+  })
+
   it('re-sends content instead of retaining QQ source attribution when dropAuthor is requested', async () => {
     const platform = new QQNTPlatform()
     platform.client.getMessage = vi.fn(async (_conversation, messageId) => ({
