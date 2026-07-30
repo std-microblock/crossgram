@@ -121,6 +121,8 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
+  private readonly _usernameByPeer = new Map<string, string>()
+  private readonly _peersByUsername = new Map<string, Set<string>>()
   private readonly _pendingConversationBackfills = new Map<
     string,
     Promise<import('./platform.js').IMConversation | null>
@@ -2482,7 +2484,10 @@ export class DialogRpc {
   private async _persistUsers(users: readonly IMUser[]): Promise<void> {
     if (!users.length) return
     if (!this._store) {
-      for (const user of users) this._userId(user.id)
+      for (const user of users) {
+        this._userId(user.id)
+        this._rememberUsername(user.id, user.username)
+      }
       return
     }
     const unique = [...new Map(users.map((user) => [user.id, user])).values()]
@@ -2504,6 +2509,7 @@ export class DialogRpc {
     this._tlToUser.set(row.id, row.platformUserId)
     const user = toUser(row)
     this._storedUsers.set(row.platformUserId, user)
+    this._rememberUsername(user.id, user.username)
     if (row.platformUserId === this._session.userId) {
       this._selfId = row.id
       this._selfUser = user
@@ -2886,6 +2892,11 @@ export class DialogRpc {
         }
         continue
       }
+      if (entity._ === 'messageEntityMention') {
+        const userId = this._mentionedUserId(text, input.offset, input.length)
+        if (userId) mapped.push({ type: 'mention', offset: input.offset, length: input.length, userId })
+        continue
+      }
       if (entity._ !== 'inputMessageEntityMentionName' && entity._ !== 'messageEntityMentionName') continue
       let userId: string | undefined
       if (input.userId?._ === 'inputUserSelf') userId = this._session.userId
@@ -2894,7 +2905,40 @@ export class DialogRpc {
       if (!userId || input.offset < 0 || input.length <= 0 || input.offset + input.length > text.length) continue
       mapped.push({ type: 'mention', offset: input.offset, length: input.length, userId })
     }
+    for (const inferred of plainUsernameMentions(text)) {
+      if (mapped.some((entity) => rangesOverlap(entity, inferred))) continue
+      const userId = this._mentionedUserId(text, inferred.offset, inferred.length)
+      if (userId) mapped.push({ ...inferred, type: 'mention', userId })
+    }
+    mapped.sort((left, right) => left.offset - right.offset || left.length - right.length)
     return { type: 'text', text, entities: mapped.length ? mapped : undefined }
+  }
+
+  private _mentionedUserId(text: string, offset: number, length: number): string | undefined {
+    if (offset < 0 || length <= 1 || offset + length > text.length || text[offset] !== '@') return
+    const peers = this._peersByUsername.get(normalizeUsername(text.slice(offset + 1, offset + length)))
+    return peers?.size === 1 ? peers.values().next().value : undefined
+  }
+
+  private _rememberUsername(peerId: string, username: string | undefined): void {
+    // Partial projections such as direct-dialog titles omit usernames. Keep
+    // the last authoritative value instead of erasing the reverse lookup.
+    if (!username) return
+    const previous = this._usernameByPeer.get(peerId)
+    if (previous) {
+      const peers = this._peersByUsername.get(previous)
+      peers?.delete(peerId)
+      if (!peers?.size) this._peersByUsername.delete(previous)
+    }
+    const normalized = normalizeUsername(username)
+    if (!normalized) {
+      this._usernameByPeer.delete(peerId)
+      return
+    }
+    this._usernameByPeer.set(peerId, normalized)
+    let peers = this._peersByUsername.get(normalized)
+    if (!peers) this._peersByUsername.set(normalized, peers = new Set())
+    peers.add(peerId)
   }
 
   private _multiMediaCaption(items: SendMultiMediaRequest['multiMedia']): IMMessageInput['parts'][number] {
@@ -3613,6 +3657,35 @@ function makeAdminRights(permissions?: IMConversationPermissions): tl.RawChatAdm
 
 function clampLimit(limit: number): number {
   return Math.max(0, Math.min(Math.trunc(limit), 100))
+}
+
+function normalizeUsername(username: string): string {
+  return username.normalize('NFKC').toLocaleLowerCase('en-US')
+}
+
+function plainUsernameMentions(text: string): Array<{ offset: number, length: number }> {
+  const mentions: Array<{ offset: number, length: number }> = []
+  const pattern = /@[A-Za-z0-9_]{1,32}/g
+  for (const match of text.matchAll(pattern)) {
+    const offset = match.index
+    if (offset === undefined) continue
+    const length = match[0].length
+    const before = text[offset - 1]
+    const after = text[offset + length]
+    // Avoid email addresses and partial matches inside a longer Telegram
+    // username. Non-ASCII prose may directly precede an @mention.
+    if (before && /[A-Za-z0-9_@]/.test(before)) continue
+    if (after && /[A-Za-z0-9_]/.test(after)) continue
+    mentions.push({ offset, length })
+  }
+  return mentions
+}
+
+function rangesOverlap(
+  left: { offset: number, length: number },
+  right: { offset: number, length: number },
+): boolean {
+  return left.offset < right.offset + right.length && right.offset < left.offset + left.length
 }
 
 function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessagesFilter): boolean {

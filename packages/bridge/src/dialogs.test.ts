@@ -799,6 +799,51 @@ describe('DialogRpc', () => {
     })
   })
 
+  it('resolves Telegram username mention entities to opaque platform users', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getContacts()
+    const aliceId = rpc.peerTlId('alice')
+    const bobId = rpc.peerTlId('bob')
+    const text = 'hello @BoB and @missing'
+    const sent = await rpc.sendMessage(sendMessageRequest(aliceId, {
+      message: text, randomId: Long.fromNumber(999),
+      entities: [
+        { _: 'messageEntityMention', offset: text.indexOf('@BoB'), length: '@BoB'.length },
+        { _: 'messageEntityMention', offset: text.indexOf('@missing'), length: '@missing'.length },
+      ],
+    })) as tl.RawUpdateShortSentMessage
+
+    expect(platform.lastInput).toEqual({ parts: [{
+      type: 'text', text,
+      entities: [{ type: 'mention', offset: text.indexOf('@BoB'), length: '@BoB'.length, userId: 'bob' }],
+    }], replyToId: undefined })
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const message = history.messages.find((item) => item._ === 'message' && item.id === sent.id)
+    expect(message).toMatchObject({
+      _: 'message',
+      entities: [{
+        _: 'messageEntityMentionName', offset: text.indexOf('@BoB'), length: '@BoB'.length, userId: bobId,
+      }],
+    })
+  })
+
+  it('infers known @username text without mistaking email addresses or unknown users for mentions', async () => {
+    const platform = new DialogTestPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getContacts()
+    const aliceId = rpc.peerTlId('alice')
+    const text = 'hi @BoB, email a@bob.test and ping @missing'
+    await rpc.sendMessage(sendMessageRequest(aliceId, {
+      message: text, randomId: Long.fromNumber(1_000), entities: [],
+    }))
+
+    expect(platform.lastInput).toEqual({ parts: [{
+      type: 'text', text,
+      entities: [{ type: 'mention', offset: text.indexOf('@BoB'), length: '@BoB'.length, userId: 'bob' }],
+    }], replyToId: undefined })
+  })
+
   it('exposes plain platform links as clickable Telegram entities through serialized history', async () => {
     const platform = new DialogTestPlatform()
     const first = '😀 docs: https://example.com/a_(b).'
