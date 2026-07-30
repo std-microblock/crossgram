@@ -1356,7 +1356,6 @@ describe('bridge login e2e', () => {
         users: [{ _: 'user', id: selfRow!.id, self: true }],
         chats: [{ _: 'channel', id: group.id }],
       })
-
       const mentionText = 'hello @BoB and @missing'
       const sentMention = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMessage',
@@ -1394,7 +1393,6 @@ describe('bridge login e2e', () => {
           length: '@BoB'.length, userId: bob.id,
         }],
       }))
-
       const updatedHistory = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
@@ -2636,6 +2634,8 @@ describe('bridge login e2e', () => {
 
   it('persists a push-only platform event and delivers it only after commit', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    let currentConversation: bridge.IMConversation | undefined
+    let currentMessage: bridge.IMMessage | undefined
     let remoteBytes = new Uint8Array()
     let sentSequence = 0
     const deletedMessageIds: string[] = []
@@ -2643,7 +2643,7 @@ describe('bridge login e2e', () => {
     const platformId = 'push-e2e'
     const platform: bridge.IMPlatform = {
       capabilities: {
-        history: false,
+        history: true,
         send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
         conversations: { groups: true, channels: true, subchannels: true },
         messageActions: {
@@ -2655,6 +2655,18 @@ describe('bridge login e2e', () => {
       async subscribe(_session, next) {
         handler = next
         return () => { handler = undefined }
+      },
+      async getDialogs() {
+        return {
+          dialogs: currentConversation && currentMessage
+            ? [{ conversation: currentConversation, unreadCount: 1, lastMessage: currentMessage }]
+            : [],
+        }
+      },
+      async getHistory(_session, conversation) {
+        return {
+          messages: currentMessage?.conversationId === conversation.id ? [currentMessage] : [],
+        }
       },
       async sendMessage(_session, target, content, options) {
         const output: bridge.IMMessagePart[] = []
@@ -2750,6 +2762,8 @@ describe('bridge login e2e', () => {
         timestamp: 1_800_000_100, metadata: { qqMsgSeq: '250000', telegramMessageId: 250_000 },
         content: { parts: [{ type: 'text', text: 'arrived by subscribe' }] },
       }
+      currentConversation = conversation
+      currentMessage = message
       await handler!({ type: 'message', conversation, message })
 
       const pushed = await readPush(client, key)
@@ -2771,6 +2785,7 @@ describe('bridge login e2e', () => {
         content: { parts: [{ type: 'text', text: 'edited by subscribe' }] },
         metadata: { revision: 2 },
       }
+      currentMessage = editedMessage
       await handler!({
         type: 'message-edit', eventId: 'push-edit-2', conversation, message: editedMessage,
       })
@@ -2784,6 +2799,29 @@ describe('bridge login e2e', () => {
       })
       const [editedStored] = await ctx.database.get('mtproto_im_message', { id: stored.id })
       expect(editedStored).toMatchObject({ text: 'edited by subscribe', deleted: false })
+      const chatId = pushed.chats[0].id
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 10_009)
+      expect(dialogs.dialogs).toMatchObject([{
+        _: 'dialog', peer: { _: 'peerChannel', channelId: chatId },
+        topMessage: pushed.updates[0].message.id, pts: editedPush.updates[0].pts,
+      }])
+      expect(await callRpc(client, key, sid, {
+        _: 'channels.getFullChannel',
+        channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
+      }, 10_010)).toMatchObject({
+        _: 'messages.chatFull', fullChat: { _: 'channelFull', id: chatId, pts: editedPush.updates[0].pts },
+      })
+      expect(await callRpc(client, key, sid, {
+        _: 'channels.getMessages',
+        channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
+        id: [{ _: 'inputMessageID', id: pushed.updates[0].message.id }],
+      }, 10_011)).toMatchObject({
+        _: 'messages.channelMessages', pts: editedPush.updates[0].pts,
+        messages: [{ _: 'message', id: pushed.updates[0].message.id, message: 'edited by subscribe' }],
+      })
 
       await handler!({
         type: 'message-delete', eventId: 'push-delete-1', conversation,
@@ -2803,7 +2841,6 @@ describe('bridge login e2e', () => {
       expect(await callRpc(client, key, sid, {
         _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
       }, 11)).toMatchObject({ _: 'updates.differenceEmpty', seq: 3 })
-      const chatId = pushed.chats[0].id
       const channelDifference = await callRpc(client, key, sid, {
         _: 'updates.getChannelDifference', force: true,
         channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
