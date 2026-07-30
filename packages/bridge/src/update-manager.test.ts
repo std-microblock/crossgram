@@ -624,6 +624,62 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('does not create a channel pts gap between a reaction update and the next message', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'reaction-pts', kind: 'group', title: 'Reaction Pts' }
+    const first: IMMessage = {
+      id: 'reaction-target', conversationId: conversation.id, senderId: 'alice', timestamp: 20,
+      content: { parts: [{ type: 'text', text: 'target' }] },
+    }
+    const created = await store.ingest(session, conversation, first)
+    await manager.publish(session, { event: { type: 'message', conversation, message: first }, result: created })
+    const channelId = stableId(`peer:${conversation.id}`)
+    expect(await store.getChannelUpdateState(session.platformSessionId, channelId)).toMatchObject({ pts: 2 })
+
+    const target = {
+      conversationId: conversation.id,
+      messageId: first.id,
+      targetId: first.id,
+    }
+    const context = {
+      available: [{ key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }],
+      reactions: [{ key: 'like', count: 1, selected: true, selectedOrder: 1 }],
+      maxSelected: 1,
+    }
+    const reacted = await store.setReactions(session, conversation, target, context)
+    await manager.publish(session, {
+      event: {
+        type: 'message-reactions', eventId: 'reaction-pts-update', conversation,
+        target, context, timestamp: 21,
+      },
+      result: reacted,
+    })
+
+    expect((sent[1]!.update as tl.RawUpdates).updates).toMatchObject([{ _: 'updateMessageReactions' }])
+    expect(await store.getChannelUpdateState(session.platformSessionId, channelId)).toMatchObject({ pts: 2 })
+
+    const second: IMMessage = {
+      id: 'after-reaction', conversationId: conversation.id, senderId: 'bob', timestamp: 22,
+      content: { parts: [{ type: 'text', text: 'after reaction' }] },
+    }
+    const next = await store.ingest(session, conversation, second)
+    await manager.publish(session, { event: { type: 'message', conversation, message: second }, result: next })
+
+    expect((sent[2]!.update as tl.RawUpdates).updates).toMatchObject([{
+      _: 'updateNewChannelMessage', pts: 3, ptsCount: 1,
+      message: { message: 'after reaction' },
+    }])
+    await expect(manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: { _: 'inputChannel', channelId, accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 2, limit: 100,
+    })).resolves.toMatchObject({
+      _: 'updates.channelDifference', final: true, pts: 3,
+      newMessages: [{ message: 'after reaction' }],
+      otherUpdates: [],
+    })
+  })
+
   it('projects platform read events into direct and channel inbox updates', async () => {
     const { store, manager, sent } = await createHarness()
     const direct: IMConversation = { id: 'alice', kind: 'direct', title: 'Alice' }
