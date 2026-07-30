@@ -1632,6 +1632,7 @@ export class MessageStore {
       return {
       messageId, nativeReactionKey: key, count: reaction?.count ?? 0,
       selected: reaction?.selected ?? false,
+      selectedOrder: reaction?.selectedOrder ?? 0,
       recentActors: (reaction?.recentActors ?? []) as unknown as Record<string, unknown>[],
       definition: definition as unknown as Record<string, unknown>, updatedAt: now,
     }
@@ -1728,6 +1729,7 @@ function hydrateMessage(
       reactions: reactions.filter((reaction) => reaction.count > 0 || reaction.selected).map((reaction) => ({
         key: reaction.nativeReactionKey, count: reaction.count,
         selected: reaction.selected,
+        selectedOrder: reaction.selectedOrder || undefined,
         recentActors: reaction.recentActors as unknown as IMReactionActor[],
       })),
       maxSelected: Number(row.metadata.reactionMaxSelected ?? 1),
@@ -1942,6 +1944,7 @@ function reactionComparable(reaction: import('./models.js').IMMessageReactionRow
     key: reaction.nativeReactionKey,
     count: reaction.count,
     selected: reaction.selected,
+    selectedOrder: reaction.selectedOrder,
     recentActors: reaction.recentActors,
     definition: reaction.definition,
   }

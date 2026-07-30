@@ -127,6 +127,29 @@ describe('ReactionRpc', () => {
     ] })
   })
 
+  it('preserves the selected reaction order used by Android bubble sorting', () => {
+    const platform = { capabilities: { reactions: { actorList: false } } } as IMPlatform
+    const rpc = new ReactionRpc(platform, session)
+    const context: IMReactionContext = {
+      available: [
+        { key: 'old', presentation: { type: 'emoji', emoticon: '👍' } },
+        { key: 'new', presentation: { type: 'emoji', emoticon: '😂' } },
+      ],
+      reactions: [
+        { key: 'old', count: 1, selected: true, selectedOrder: 1 },
+        { key: 'new', count: 1, selected: true, selectedOrder: 2 },
+      ],
+      maxSelected: 20,
+    }
+    expect(rpc.messageReactions('group', {
+      id: 'message', conversationId: 'group', senderId: 'alice', timestamp: 1,
+      content: { parts: [{ type: 'text', text: 'ordered' }] }, reactionContext: context,
+    }).results).toMatchObject([
+      { chosenOrder: 1, reaction: { _: 'reactionEmoji', emoticon: '👍' } },
+      { chosenOrder: 2, reaction: { _: 'reactionEmoji', emoticon: '😂' } },
+    ])
+  })
+
   it.each(['static', 'video'] as const)('describes and serves %s custom reaction resources', async (format) => {
     const { rpc, documentId, resource, bytes } = fixture(format)
     const [document] = rpc.getCustomEmojiDocuments([documentId])

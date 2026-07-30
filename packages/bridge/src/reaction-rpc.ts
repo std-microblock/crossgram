@@ -133,7 +133,7 @@ export class ReactionRpc {
         const definition = definitions.get(summary.key)
         return definition ? [{
           _: 'reactionCount',
-          chosenOrder: summary.selected ? 0 : undefined,
+          chosenOrder: summary.selected ? summary.selectedOrder ?? 0 : undefined,
           reaction: this.toTlReaction(conversationId, definition),
           count: summary.count,
         } as tl.RawReactionCount] : []
@@ -189,11 +189,7 @@ export class ReactionRpc {
   }
 
   customDocumentId(definition: IMReactionDefinition): number {
-    if (definition.presentation.type !== 'custom') throw new Error('not a custom reaction')
-    return stableId([
-      'reaction-resource', CATALOG_VERSION, this._session.platformSessionId,
-      definition.key, definition.presentation.resource.version,
-    ].join(':'))
+    return customReactionDocumentId(this._session.platformSessionId, definition)
   }
 
   resolveCustomEmoji(documentId: number): IMReactionDefinition | undefined {
@@ -296,6 +292,17 @@ export class ReactionRpc {
   private _customSetId(): number {
     return stableId(`platform-reaction-set:v${CATALOG_VERSION}:${this._session.platformSessionId}`)
   }
+}
+
+export function customReactionDocumentId(
+  platformSessionId: string,
+  definition: IMReactionDefinition,
+): number {
+  if (definition.presentation.type !== 'custom') throw new Error('not a custom reaction')
+  return stableId([
+    'reaction-resource', CATALOG_VERSION, platformSessionId,
+    definition.key, definition.presentation.resource.version,
+  ].join(':'))
 }
 
 function reactionKey(reaction: tl.TypeReaction): string {

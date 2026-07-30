@@ -14,6 +14,7 @@ import { PlatformRegistry } from './platform-manager.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
+import { ReactionRpc } from './reaction-rpc.js'
 
 const session: PlatformSession = {
   platformSessionId: 'updates-session', platformId: 'updates-platform', userId: 'self',
@@ -48,6 +49,7 @@ async function createHarness(
   projectSticker?: ConstructorParameters<typeof UpdateManager>[6],
   deliveredConnections = 1,
   blockedMode?: BlockedContentMode,
+  registerReactions?: ConstructorParameters<typeof UpdateManager>[8],
 ) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
@@ -74,7 +76,7 @@ async function createHarness(
       sent.push({ authKeyId, update, excludeConnection })
       return deliveredConnections
     },
-    1, undefined, projectSticker, blockedPeers,
+    1, undefined, projectSticker, blockedPeers, registerReactions,
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -168,6 +170,94 @@ describe('UpdateManager', () => {
     await manager.publish(session, { event: { type: 'message', conversation: lowerConversation, message: lowerMessage }, result })
     const nextUpdate = (sent.at(-1)!.update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
     expect(nextUpdate).toMatchObject({ _: 'updateNewChannelMessage', pts: lowerDialog.pts! + 1, ptsCount: 1 })
+  })
+
+  it('registers live custom reactions with the same document ID used by history RPCs', async () => {
+    const reactionRpc = new ReactionRpc({
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 20 },
+      },
+    }, session)
+    const harness = await createHarness(
+      undefined, platform, undefined, 1, undefined,
+      (_session, message) => reactionRpc.registerContext(message.conversationId, message.reactionContext),
+    )
+    const conversation: IMConversation = { id: 'custom-reaction-group', kind: 'group', title: 'Custom' }
+    const definition = {
+      key: 'custom:wave',
+      presentation: {
+        type: 'custom' as const, alt: '👋',
+        resource: {
+          version: 7, format: 'static' as const, mimeType: 'image/webp' as const,
+          width: 100, height: 100, size: 4,
+        },
+      },
+    }
+    const message: IMMessage = {
+      id: 'custom-message', conversationId: conversation.id, senderId: 'alice', timestamp: 200,
+      content: { parts: [{ type: 'text', text: 'custom reaction' }] },
+      reactionContext: {
+        available: [definition],
+        reactions: [{ key: definition.key, count: 1 }],
+        maxSelected: 20,
+      },
+    }
+    const result = await harness.store.ingest(session, conversation, message)
+
+    await harness.manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const pushed = ((harness.sent[0]!.update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage)
+      .message as tl.RawMessage
+    const pushedReaction = pushed.reactions!.results[0]!.reaction
+    const historyReaction = reactionRpc.toTlReaction(conversation.id, definition)
+    expect(pushedReaction).toEqual(historyReaction)
+    if (pushedReaction._ !== 'reactionCustomEmoji') throw new Error('expected custom reaction')
+    expect(reactionRpc.getCustomEmojiDocuments([pushedReaction.documentId])).toHaveLength(1)
+  })
+
+  it('hydrates every referenced user before channels.getMessages projection', async () => {
+    const conversation: IMConversation = { id: 'reaction-users-group', kind: 'group', title: 'Reaction Users' }
+    const message: IMMessage = {
+      id: 'reaction-users-message', conversationId: conversation.id, senderId: 'alice', timestamp: 300,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: { parts: [{
+        type: 'text', text: '@Bob hello',
+        entities: [{ type: 'mention', offset: 0, length: 4, userId: 'bob' }],
+      }] },
+      reactionContext: {
+        available: [{ key: 'like', presentation: { type: 'emoji', emoticon: '👍' } }],
+        reactions: [{ key: 'like', count: 1, recentActors: [{ userId: 'carol' }] }],
+        maxSelected: 20,
+      },
+    }
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        history: true,
+        conversations: { groups: true, channels: true, subchannels: false },
+        reactions: { read: true, write: false, events: true, actorList: true, maxSelected: 20 },
+      },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: message }] } },
+      async getHistory() { return { messages: [message] } },
+    }
+    const harness = await createHarness(undefined, targetPlatform)
+    const ingested = await harness.store.ingest(session, conversation, message)
+    const reactions = new ReactionRpc(targetPlatform, session)
+    const rpc = new DialogRpc(targetPlatform, session, harness.store, undefined, undefined, 1, undefined, reactions)
+
+    const response = await rpc.getChannelMessages({
+      _: 'channels.getMessages',
+      channel: { _: 'inputChannel', channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ONE },
+      id: [{ _: 'inputMessageID', id: ingested.projection[0]!.tlMessageId }],
+    }) as tl.messages.RawChannelMessages
+
+    expect(response.messages).toMatchObject([{ _: 'message', message: '@Bob hello' }])
+    expect(response.users.filter((user): user is tl.RawUser => user._ === 'user').map((user) => user.firstName))
+      .toEqual(expect.arrayContaining(['Alice', 'User bob', 'User carol', 'User self']))
+    expect(() => roundTrip(response)).not.toThrow()
   })
 
   it('deletes cached blocked content and suppresses later live messages from that user', async () => {
@@ -531,6 +621,62 @@ describe('UpdateManager', () => {
     expect(accountDifference).toMatchObject({
       _: 'updates.difference', newMessages: [{ message: 'direct-1' }],
       state: { pts: 2, seq: 4 },
+    })
+  })
+
+  it('does not create a channel pts gap between a reaction update and the next message', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'reaction-pts', kind: 'group', title: 'Reaction Pts' }
+    const first: IMMessage = {
+      id: 'reaction-target', conversationId: conversation.id, senderId: 'alice', timestamp: 20,
+      content: { parts: [{ type: 'text', text: 'target' }] },
+    }
+    const created = await store.ingest(session, conversation, first)
+    await manager.publish(session, { event: { type: 'message', conversation, message: first }, result: created })
+    const channelId = stableId(`peer:${conversation.id}`)
+    expect(await store.getChannelUpdateState(session.platformSessionId, channelId)).toMatchObject({ pts: 2 })
+
+    const target = {
+      conversationId: conversation.id,
+      messageId: first.id,
+      targetId: first.id,
+    }
+    const context = {
+      available: [{ key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }],
+      reactions: [{ key: 'like', count: 1, selected: true, selectedOrder: 1 }],
+      maxSelected: 1,
+    }
+    const reacted = await store.setReactions(session, conversation, target, context)
+    await manager.publish(session, {
+      event: {
+        type: 'message-reactions', eventId: 'reaction-pts-update', conversation,
+        target, context, timestamp: 21,
+      },
+      result: reacted,
+    })
+
+    expect((sent[1]!.update as tl.RawUpdates).updates).toMatchObject([{ _: 'updateMessageReactions' }])
+    expect(await store.getChannelUpdateState(session.platformSessionId, channelId)).toMatchObject({ pts: 2 })
+
+    const second: IMMessage = {
+      id: 'after-reaction', conversationId: conversation.id, senderId: 'bob', timestamp: 22,
+      content: { parts: [{ type: 'text', text: 'after reaction' }] },
+    }
+    const next = await store.ingest(session, conversation, second)
+    await manager.publish(session, { event: { type: 'message', conversation, message: second }, result: next })
+
+    expect((sent[2]!.update as tl.RawUpdates).updates).toMatchObject([{
+      _: 'updateNewChannelMessage', pts: 3, ptsCount: 1,
+      message: { message: 'after reaction' },
+    }])
+    await expect(manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: { _: 'inputChannel', channelId, accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 2, limit: 100,
+    })).resolves.toMatchObject({
+      _: 'updates.channelDifference', final: true, pts: 3,
+      newMessages: [{ message: 'after reaction' }],
+      otherUpdates: [],
     })
   })
 
