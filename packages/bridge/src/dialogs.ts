@@ -822,10 +822,10 @@ export class DialogRpc {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
         continue
       }
+      const referencedUsers = await this._messageUsers(found.source)
       messages.push(this._makeMessage(found))
       linkedSources.push(found.source)
-      const sender = await this._getMessageSender(found.source)
-      users.set(sender.id, sender)
+      for (const user of referencedUsers) users.set(user.id, user)
     }
 
     const self = this._makeSelfUser()
@@ -890,8 +890,12 @@ export class DialogRpc {
       this._contactUserIds.clear()
       for (const dialog of directDialogs) this._contactUserIds.add(dialog.conversation.id)
       this._peerUsers.clear()
-      users = await Promise.all(directDialogs.map((dialog) =>
-        this._getPeerUser(dialog.conversation.id, dialog.conversation.title)))
+      users = await Promise.all(directDialogs.map(async (dialog) => {
+        const profile = await this._getPlatformUser(dialog.conversation.id)
+        if (!profile) return this._getPeerUser(dialog.conversation.id, dialog.conversation.title)
+        await this._persistUsers([profile])
+        return this._makePeerUser(profile)
+      }))
     }
     return {
       _: 'contacts.contacts',
@@ -1874,11 +1878,34 @@ export class DialogRpc {
       .filter((reaction) => reaction.selected)
       .map((reaction) => reaction.key))
     const newlySelected = selected.filter((definition) => !previouslySelected.has(definition.key))
+    const persistedSelected = projected.source.reactionContext?.reactions
+      .filter((reaction) => reaction.selected) ?? []
+    const selectedOrder = new Map<string, number>()
+    let nextSelectedOrder = 0
+    for (const [index, reaction] of persistedSelected.entries()) {
+      const order = reaction.selectedOrder ?? index + 1
+      selectedOrder.set(reaction.key, order)
+      nextSelectedOrder = Math.max(nextSelectedOrder, order)
+    }
+    for (const definition of selected) {
+      if (!selectedOrder.has(definition.key) && previouslySelected.has(definition.key)) {
+        selectedOrder.set(definition.key, ++nextSelectedOrder)
+      }
+    }
+    for (const definition of newlySelected) {
+      selectedOrder.set(definition.key, ++nextSelectedOrder)
+    }
     let updated
     try {
       updated = await this._platform.setMessageReactions(
         this._session, target, selected.map((item) => item.key),
       )
+      updated = {
+        ...updated,
+        reactions: updated.reactions.map((summary) => selectedOrder.has(summary.key)
+          ? { ...summary, selected: true, selectedOrder: selectedOrder.get(summary.key) }
+          : { ...summary, selectedOrder: undefined }),
+      }
     } catch (error) {
       if (error instanceof IMMessageTargetUnavailableError) {
         throw new RpcError(400, 'REACTION_INVALID')
@@ -2022,11 +2049,13 @@ export class DialogRpc {
     const peerId = this._resolveMessageTarget(req.peer, req.replyTo)
     const replyTarget = await this._resolveReplyTarget(peerId, req.replyTo)
     const replyToId = replyTarget?.id
+    await this._hydrateMentionUsernames(req.message, req.entities)
+    const inputPart = this._inputTextPart(req.message, req.entities)
     const sent = await this._sendToPlatform(() => this._platform.sendMessage(
       this._session,
       { id: peerId },
       {
-        parts: [this._inputTextPart(req.message, req.entities)],
+        parts: [inputPart],
         replyToId,
         ...(replyTarget?.nativeSequence
           ? { replyToNativeSequence: replyTarget.nativeSequence }
@@ -3194,6 +3223,24 @@ export class DialogRpc {
     return { type: 'text', text, entities: mapped.length ? mapped : undefined }
   }
 
+  private async _hydrateMentionUsernames(text: string, entities?: tl.TypeMessageEntity[]): Promise<void> {
+    const ranges = [
+      ...(entities ?? []).flatMap((entity) => entity._ === 'messageEntityMention'
+        ? [{ offset: entity.offset, length: entity.length }]
+        : []),
+      ...plainUsernameMentions(text),
+    ]
+    if (!ranges.length) return
+    if (ranges.some((range) => this._mentionedUserId(text, range.offset, range.length))) return
+    if (this._store) {
+      for (const row of await this._store.listUsers(this._session.platformId)) this._registerUser(row)
+    }
+    for (const user of this._storedUsers.values()) this._rememberUsername(user.id, user.username)
+    if (ranges.some((range) => this._mentionedUserId(text, range.offset, range.length))) return
+    await this.getContacts()
+    for (const user of this._storedUsers.values()) this._rememberUsername(user.id, user.username)
+  }
+
   private _mentionedUserId(text: string, offset: number, length: number): string | undefined {
     if (offset < 0 || length <= 1 || offset + length > text.length || text[offset] !== '@') return
     const peers = this._peersByUsername.get(normalizeUsername(text.slice(offset + 1, offset + length)))
@@ -3342,6 +3389,20 @@ export class DialogRpc {
     return Promise.all([...senders.values()].map((message) => this._getMessageSender(message)))
   }
 
+  private async _messageUsers(message: IMMessage<any>): Promise<tl.RawUser[]> {
+    const users = new Map<number, tl.RawUser>()
+    const sender = await this._getMessageSender(message)
+    users.set(sender.id, sender)
+    for (const platformUserId of messageReferencedUserIds(message)) {
+      if (platformUserId === message.senderId) continue
+      const user = platformUserId === this._session.userId
+        ? this._makeSelfUser()
+        : await this._getPeerUser(platformUserId)
+      users.set(user.id, user)
+    }
+    return [...users.values()]
+  }
+
   private async _allMembers(conversationId: string): Promise<IMConversationMember<any>[]> {
     if (!this._platform.capabilities.members?.list || !this._platform.getConversationMembers) return []
     const page = await this._loadMemberPage(conversationId, 10_000)
@@ -3466,6 +3527,7 @@ export class DialogRpc {
   }
 
   private _makePeerUser(user: IMUser): tl.RawUser {
+    this._rememberUsername(user.id, user.username)
     const contact = this._contactUserIds.has(user.id)
     return makeUser({
       id: this._userId(user.id), firstName: user.firstName,
