@@ -121,6 +121,10 @@ export class DialogRpc {
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
+  private readonly _pendingConversationBackfills = new Map<
+    string,
+    Promise<import('./platform.js').IMConversation | null>
+  >()
   private readonly _storedUsers = new Map<string, IMUser<any>>()
   private readonly _platformUsers = new Map<string, IMUser<any>>()
   private readonly _pendingPlatformUsers = new Map<string, Promise<IMUser<any> | null>>()
@@ -1589,11 +1593,45 @@ export class DialogRpc {
       }
     } else if (peer._ === 'inputPeerChat' || peer._ === 'inputPeerChannel') {
       const conversationId = this._tlToPeer.get(inputPeerId(peer))
-      if (conversationId) media = this._conversation(conversationId).avatar
+      if (conversationId) {
+        const stored = this._conversation(conversationId)
+        media = stored.avatar
+        if (!media && this._platform.getConversation) {
+          try {
+            media = (await this._backfillConversation(conversationId))?.avatar
+          } catch {
+            // A missing or temporarily unavailable upstream avatar remains a
+            // normal LOCATION_INVALID response and may be retried later.
+          }
+        }
+      }
     }
     if (!media || stableId(`avatar:${media.id}`) !== photoId.toNumber()) return
     this._avatarMedia.set(photoId.toString(), media)
     return media
+  }
+
+  private async _backfillConversation(
+    conversationId: string,
+  ): Promise<import('./platform.js').IMConversation | undefined> {
+    const existing = this._pendingConversationBackfills.get(conversationId)
+    if (existing) return (await existing) ?? undefined
+    const pending = (async () => {
+      const upstream = await this._platform.getConversation?.(this._session, conversationId)
+      if (!upstream || upstream.id !== conversationId) return null
+      await this._store?.upsertConversation(this._session, upstream)
+      this._conversations.set(upstream.id, upstream)
+      this._peerId(upstream.id)
+      return upstream
+    })()
+    this._pendingConversationBackfills.set(conversationId, pending)
+    try {
+      return (await pending) ?? undefined
+    } finally {
+      if (this._pendingConversationBackfills.get(conversationId) === pending) {
+        this._pendingConversationBackfills.delete(conversationId)
+      }
+    }
   }
 
   private async _downloadMediaRange(media: IMMedia<any>, offset: number, limit: number): Promise<Uint8Array> {

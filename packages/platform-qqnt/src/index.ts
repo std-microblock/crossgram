@@ -466,6 +466,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return this.refreshPreparedDialogPage(session, query)
   }
 
+  async getConversation(
+    _session: PlatformSession,
+    conversationId: string,
+  ): Promise<IMConversation<QQMediaLocator> | null> {
+    return this.mapConversation(await this.client.getConversation(conversationId))
+  }
+
   private async fetchDialogsPage(
     query: IMPageQuery = {},
     signal?: AbortSignal,

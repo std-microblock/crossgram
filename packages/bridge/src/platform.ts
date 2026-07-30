@@ -493,6 +493,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMMessage<TMediaLocator>>
 
   getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage<TMediaLocator>>
+  /** Resolve one opaque platform conversation, used for targeted metadata backfill. */
+  getConversation?(
+    session: PlatformSession,
+    conversationId: string,
+  ): Promise<IMConversation<TMediaLocator> | null>
   /** Child conversations exposed lazily beneath one parent dialog, such as Discord guild channels. */
   getSubdialogs?(
     session: PlatformSession,

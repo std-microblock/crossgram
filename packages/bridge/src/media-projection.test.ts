@@ -9,7 +9,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, projectTlMessage } from './dialogs.js'
+import { DialogRpc, projectTlMessage, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { UploadManager } from './upload-manager.js'
@@ -396,6 +396,63 @@ describe('rich-media projection', () => {
     if (file._ === 'upload.file') {
       expect(new TextDecoder().decode(file.bytes)).toBe('group-avatar-bytes')
     }
+  })
+
+  it('backfills and persists a legacy group avatar on its first file request', async () => {
+    const { store } = await createStore()
+    const avatar = {
+      id: 'avatar:group:legacy', kind: 'image' as const, mimeType: 'image/jpeg',
+      locator: { remote: 'legacy-group-avatar-bytes' },
+    }
+    const legacy: IMConversation = {
+      id: 'legacy-avatar-group', kind: 'group', title: 'Legacy avatar group',
+    }
+    await store.ingestDialogs(session, [{ conversation: legacy, unreadCount: 0 }])
+    const getDialogs = vi.fn(async () => {
+      throw new Error('legacy avatar backfill must not reload dialogs')
+    })
+    const getConversation = vi.fn(async (_session, conversationId: string) => (
+      conversationId === legacy.id ? { ...legacy, avatar } : null
+    ))
+    const resumed = new DialogRpc({ ...platform, getDialogs, getConversation }, session, store)
+    const channelId = resumed.peerTlId(legacy.id)
+    const location = {
+      _: 'inputPeerPhotoFileLocation' as const,
+      peer: { _: 'inputPeerChannel' as const, channelId, accessHash: Long.ONE },
+      photoId: Long.fromNumber(stableId(`avatar:${avatar.id}`)),
+      big: false,
+    }
+
+    const [first, concurrent] = await Promise.all([
+      resumed.getFile({
+        _: 'upload.getFile', precise: false, cdnSupported: false,
+        location, offset: 0, limit: 1024,
+      }),
+      resumed.getFile({
+        _: 'upload.getFile', precise: false, cdnSupported: false,
+        location, offset: 1, limit: 1024,
+      }),
+    ])
+    expect(first._).toBe('upload.file')
+    if (first._ === 'upload.file') {
+      expect(new TextDecoder().decode(first.bytes)).toBe('legacy-group-avatar-bytes')
+    }
+    expect(concurrent._).toBe('upload.file')
+    expect(getConversation).toHaveBeenCalledOnce()
+    expect(getDialogs).not.toHaveBeenCalled()
+
+    const persisted = await store.getConversation(session.platformSessionId, legacy.id)
+    expect(persisted?.avatar).toEqual(avatar)
+    const coldGetConversation = vi.fn(async () => {
+      throw new Error('persisted avatar must survive another restart')
+    })
+    const cold = new DialogRpc({ ...platform, getDialogs, getConversation: coldGetConversation }, session, store)
+    const second = await cold.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location, offset: 0, limit: 1024,
+    })
+    expect(second._).toBe('upload.file')
+    expect(coldGetConversation).not.toHaveBeenCalled()
   })
 
   it('restores persisted identities and inline thumbnails when getMessages is the first RPC', async () => {

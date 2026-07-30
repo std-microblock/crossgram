@@ -76,6 +76,35 @@ describe('QQNTPlatform mapping', () => {
     }
   })
 
+  it('resolves one conversation with its downloadable avatar for targeted bridge backfill', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getConversation = vi.fn(async () => ({
+      id: '2:legacy-group', kind: 'group' as const, title: 'Legacy group',
+      peerUid: 'legacy-group', peerUin: '123456', chatType: 2 as const,
+      avatar: {
+        id: 'legacy-avatar', kind: 'image' as const, mimeType: 'image/jpeg', size: 128,
+        locator: {
+          messageId: 'legacy-avatar-message', elementId: 'legacy-avatar-element',
+          chatType: 2 as const, peerUid: 'legacy-group', kind: 'image' as const,
+          fileName: 'legacy-avatar.jpg', fileUuid: 'legacy-avatar-uuid',
+        },
+      },
+    }))
+
+    await expect(platform.getConversation(session, '2:legacy-group')).resolves.toMatchObject({
+      id: '2:legacy-group', kind: 'group', title: 'Legacy group',
+      avatar: {
+        id: 'legacy-avatar:original-v1', kind: 'image', mimeType: 'image/jpeg', size: 128,
+        locator: {
+          messageId: 'legacy-avatar-message', elementId: 'legacy-avatar-element',
+          chatType: 2, peerUid: 'legacy-group', kind: 'image',
+          fileName: 'legacy-avatar.jpg', fileUuid: 'legacy-avatar-uuid',
+        },
+      },
+    })
+    expect(platform.client.getConversation).toHaveBeenCalledWith('2:legacy-group')
+  })
+
   it('does not wait indefinitely for reaction resources before returning history', async () => {
     const platform = new QQNTPlatform()
     let releaseCatalog!: () => void
