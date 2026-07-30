@@ -1,5 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
+import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
@@ -295,6 +296,8 @@ export type CommittedPlatformEvent =
 export interface PlatformEventDeliveryOptions {
   /** Do not push an update to the auth key receiving the same payload via RPC. */
   excludeAuthKeyId?: string
+  /** Do not push the update back through the connection receiving it via RPC. */
+  excludeConnection?: ServerConnection
   /** Treat the durable delivery as published even when no socket push was sent. */
   deliveredViaRpc?: boolean
 }

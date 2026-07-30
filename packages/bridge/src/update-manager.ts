@@ -1,5 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
+import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
@@ -27,7 +28,11 @@ export class UpdateManager {
     private readonly _database: Database,
     private readonly _registry: PlatformRegistry,
     private readonly _store: MessageStore,
-    private readonly _sendUpdate: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number,
+    private readonly _sendUpdate: (
+      authKeyId: Uint8Array,
+      update: tl.TypeUpdates,
+      excludeConnection?: ServerConnection,
+    ) => number,
     private readonly _dcId = 1,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
     private readonly _projectSticker?: (
@@ -340,7 +345,7 @@ export class UpdateManager {
     )
     if (delivery.published) {
       this._onTrace?.('update publish skipped eventKey=%s reason=already-published', eventKey)
-      return
+      return delivery.payload ? decodeUpdate(delivery.payload) : undefined
     }
     this._onTrace?.(
       'update delivery prepared eventKey=%s pts=%d ptsCount=%d seq=%d projection=%d created=%s changed=%s',
@@ -493,7 +498,9 @@ export class UpdateManager {
       'update payload stored eventKey=%s updates=%d types=%s pts=%d seq=%d',
       eventKey, updates.length, updates.map((update) => update._).join(','), delivery.pts, delivery.seq,
     )
-    if (await this._send(session.platformSessionId, payload, options.excludeAuthKeyId) || options.deliveredViaRpc) {
+    if (await this._send(
+      session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
+    ) || options.deliveredViaRpc) {
       await this._store.markUpdatePublished(eventKey)
       this._onTrace?.('update published eventKey=%s session=%s', eventKey, session.platformSessionId)
     } else {
@@ -525,7 +532,7 @@ export class UpdateManager {
     delivery ??= await this._store.prepareUpdateDelivery(
       eventKey, session.platformSessionId, result.tlMessageIds.length, event.timestamp, channelId,
     )
-    if (delivery.published) return
+    if (delivery.published) return delivery.payload ? decodeUpdate(delivery.payload) : undefined
     const update = event.conversation.kind !== 'direct'
       ? {
           _: 'updateDeleteChannelMessages',
@@ -550,7 +557,9 @@ export class UpdateManager {
       seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
-    if (await this._send(session.platformSessionId, payload, options.excludeAuthKeyId) || options.deliveredViaRpc) {
+    if (await this._send(
+      session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
+    ) || options.deliveredViaRpc) {
       await this._store.markUpdatePublished(eventKey)
     }
     return payload
@@ -560,6 +569,7 @@ export class UpdateManager {
     platformSessionId: string,
     payload: tl.RawUpdates,
     excludeAuthKeyId?: string,
+    excludeConnection?: ServerConnection,
   ): Promise<boolean> {
     const bindings = await this._database.get('mtproto_auth_binding', { platformSessionId })
     let delivered = 0
@@ -569,8 +579,8 @@ export class UpdateManager {
       payload.updates.map((update) => update._).join(','),
     )
     for (const binding of bindings) {
-      if (binding.authKeyId === excludeAuthKeyId) continue
-      const connections = this._sendUpdate(hexBytes(binding.authKeyId), payload)
+      if (!excludeConnection && binding.authKeyId === excludeAuthKeyId) continue
+      const connections = this._sendUpdate(hexBytes(binding.authKeyId), payload, excludeConnection)
       delivered += connections
       this._onTrace?.(
         'update send binding session=%s authKey=%s connections=%d',
