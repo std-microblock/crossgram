@@ -162,6 +162,18 @@ export class UpdateManager {
     }, excludeAuthKeyId)
   }
 
+  async publishAccountUpdates(
+    session: PlatformSession,
+    accountUpdates: tl.TypeUpdate[],
+    excludeAuthKeyId?: string,
+  ): Promise<void> {
+    const state = await this._store.getUpdateState(session.platformSessionId)
+    await this._send(session.platformSessionId, {
+      _: 'updates', updates: accountUpdates, users: [], chats: [],
+      date: Math.floor(Date.now() / 1000), seq: state.seq,
+    }, excludeAuthKeyId)
+  }
+
   async publish(
     session: PlatformSession,
     committed: CommittedPlatformEvent,

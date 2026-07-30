@@ -30,6 +30,10 @@ import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from '.
 import type { DraftStore, StoredDraft } from './draft-store.js'
 import type { NotificationSettingsStore, NotificationTarget } from './notification-settings.js'
 import type { BlockedPeerChange, BlockedPeerStore } from './blocked-peers.js'
+import {
+  decodeDialogFilterTitle, encodeDialogFilterTitle,
+  type DialogFolderStore, type StoredDialogFilter,
+} from './dialog-folders.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -171,6 +175,7 @@ export class DialogRpc {
     /** Canonical persisted Telegram ID for this authorized platform user. */
     private readonly _authenticatedSelfId?: number,
     private readonly _blockedPeers?: BlockedPeerStore,
+    private readonly _dialogFolders?: DialogFolderStore,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -186,11 +191,21 @@ export class DialogRpc {
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._resolveKnownInputPeer(req.offsetPeer)
+    const folderId = req.folderId ?? 0
+    if (folderId !== 0 && folderId !== 1) throw new RpcError(400, 'FOLDER_ID_INVALID')
+    const archivedPeerIds = await this._dialogFolders?.archivedPeerIds(
+      this._session.platformSessionId,
+    ) ?? new Set<string>()
     const loadAt = performance.now()
-    const loaded = await this._loadDialogPage({
+    const query = {
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
-    })
+    }
+    const loaded = archivedPeerIds.size
+      ? await this._loadDialogFolderPage(query, folderId, archivedPeerIds)
+      : folderId === 0
+        ? await this._loadDialogPage(query)
+        : { dialogs: [], total: 0 }
     const loadMs = performance.now() - loadAt
     // Preserve the platform's authoritative order. Re-sorting each page makes
     // Telegram's last offset peer point into the middle of the upstream page,
@@ -262,7 +277,10 @@ export class DialogRpc {
     const materializeAt = performance.now()
     const drafts = await this._mainDrafts()
     const materialized = await Promise.all(all.map((dialog) =>
-      this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))
+      this._materializeDialog(
+        dialog, drafts.get(dialog.conversation.id),
+        archivedPeerIds.has(dialog.conversation.id) ? 1 : undefined,
+      )))
     const materializeMs = performance.now() - materializeAt
     let start = 0
     if (req.offsetPeer._ !== 'inputPeerEmpty') {
@@ -302,6 +320,10 @@ export class DialogRpc {
   async getPeerDialogs(req: GetPeerDialogsRequest): Promise<tl.messages.RawPeerDialogs> {
     await this._hydratePeers()
     let loaded = [...this._dialogCache.values()]
+    if (req.peers.some((peer) => peer._ === 'inputDialogPeerFolder')) {
+      await this._loadAllDialogs()
+      loaded = [...this._dialogCache.values()]
+    }
     const requestedPeerIds = req.peers.flatMap((requested) => {
       if (requested._ === 'inputDialogPeerFolder') return []
       const peerId = this._resolveKnownInputPeer(requested.peer)
@@ -321,13 +343,15 @@ export class DialogRpc {
     }))
     const selected: IMDialog[] = []
     const seen = new Set<string>()
+    const archivedPeerIds = await this._dialogFolders?.archivedPeerIds(
+      this._session.platformSessionId,
+    ) ?? new Set<string>()
 
     for (const requested of req.peers) {
       if (requested._ === 'inputDialogPeerFolder') {
-        // The bridge currently exposes one unarchived folder. Telegram clients
-        // may use this constructor to request every dialog in that folder.
-        if (requested.folderId === 0) {
+        if (requested.folderId === 0 || requested.folderId === 1) {
           for (const dialog of loaded) {
+            if (archivedPeerIds.has(dialog.conversation.id) !== (requested.folderId === 1)) continue
             if (!seen.has(dialog.conversation.id)) selected.push(dialog)
             seen.add(dialog.conversation.id)
           }
@@ -351,7 +375,10 @@ export class DialogRpc {
     ]))
     const drafts = await this._mainDrafts()
     const materialized = await Promise.all(selected.map((dialog) =>
-      this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))
+      this._materializeDialog(
+        dialog, drafts.get(dialog.conversation.id),
+        archivedPeerIds.has(dialog.conversation.id) ? 1 : undefined,
+      )))
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return {
       _: 'messages.peerDialogs',
@@ -363,6 +390,73 @@ export class DialogRpc {
         _: 'updates.state', pts: state?.pts ?? this._pts, qts: state?.qts ?? 0,
         date: state?.date ?? Math.floor(Date.now() / 1000), seq: state?.seq ?? 0, unreadCount: 0,
       },
+    }
+  }
+
+  async getDialogFilters(): Promise<tl.messages.RawDialogFilters> {
+    await this._hydratePeers()
+    const filters = await this._dialogFolders?.listFilters(this._session.platformSessionId)
+      ?? [{ filterId: 0 }]
+    return {
+      _: 'messages.dialogFilters',
+      filters: filters.map((entry): tl.TypeDialogFilter => entry.filter
+        ? this._makeDialogFilter(entry.filterId, entry.filter)
+        : { _: 'dialogFilterDefault' }),
+    }
+  }
+
+  async updateDialogFilter(
+    req: tl.messages.RawUpdateDialogFilterRequest,
+  ): Promise<tl.RawUpdateDialogFilter> {
+    if (!this._dialogFolders) throw new RpcError(500, 'FOLDER_STORE_UNAVAILABLE')
+    await this._hydratePeers()
+    validateCustomFilterId(req.id)
+    if (!req.filter) {
+      await this._dialogFolders.removeFilter(this._session.platformSessionId, req.id)
+      return { _: 'updateDialogFilter', id: req.id }
+    }
+    if (req.filter._ === 'dialogFilterDefault' || req.filter.id !== req.id) {
+      throw new RpcError(400, 'FILTER_ID_INVALID')
+    }
+    const stored = this._storeDialogFilter(req.filter)
+    await this._dialogFolders.putFilter(this._session.platformSessionId, req.id, stored)
+    return { _: 'updateDialogFilter', id: req.id, filter: this._makeDialogFilter(req.id, stored) }
+  }
+
+  async updateDialogFiltersOrder(
+    req: tl.messages.RawUpdateDialogFiltersOrderRequest,
+  ): Promise<tl.RawUpdateDialogFilterOrder> {
+    if (!this._dialogFolders) throw new RpcError(500, 'FOLDER_STORE_UNAVAILABLE')
+    const order = await this._dialogFolders.reorderFilters(this._session.platformSessionId, req.order)
+    return { _: 'updateDialogFilterOrder', order }
+  }
+
+  async editPeerFolders(req: tl.folders.RawEditPeerFoldersRequest): Promise<tl.RawUpdates> {
+    if (!this._dialogFolders) throw new RpcError(500, 'FOLDER_STORE_UNAVAILABLE')
+    await this._hydratePeers()
+    const peers = req.folderPeers.map((entry) => {
+      if (entry.folderId !== 0 && entry.folderId !== 1) throw new RpcError(400, 'FOLDER_ID_INVALID')
+      const peerId = this._resolveFolderInputPeer(entry.peer)
+      if (peerId === '\u0000self') throw new RpcError(400, 'PEER_ID_INVALID')
+      return { peerId, folderId: entry.folderId as 0 | 1 }
+    })
+    const changed = await this._dialogFolders.setPeerFolders(this._session.platformSessionId, peers)
+    const date = Math.floor(Date.now() / 1000)
+    const state = await this._store?.getUpdateState(this._session.platformSessionId)
+    const pts = changed.size
+      ? await this._reservePts(changed.size, date)
+      : state?.pts ?? this._pts
+    return {
+      _: 'updates',
+      updates: [{
+        _: 'updateFolderPeers',
+        folderPeers: peers.map((entry) => ({
+          _: 'folderPeer', peer: this._conversationPeer(this._conversation(entry.peerId)),
+          folderId: entry.folderId,
+        })),
+        pts, ptsCount: changed.size,
+      }],
+      users: [], chats: [], date, seq: state?.seq ?? 0,
     }
   }
 
@@ -2157,7 +2251,7 @@ export class DialogRpc {
     return this._pts
   }
 
-  private async _materializeDialog(source: IMDialog, storedDraft?: StoredDraft) {
+  private async _materializeDialog(source: IMDialog, storedDraft?: StoredDraft, folderId?: number) {
     source = await this._visibleDialog(source)
     const platformPeerId = source.conversation.id
     this._conversations.set(platformPeerId, source.conversation)
@@ -2234,6 +2328,7 @@ export class DialogRpc {
       unreadPollVotesCount: 0,
       notifySettings: await this._peerNotifySettings(platformPeerId),
       draft: storedDraft?.draft,
+      folderId,
     }
     return { source, dialog, message, users, chat }
   }
@@ -2602,6 +2697,67 @@ export class DialogRpc {
       }
     }
     return { ...page, dialogs: dialogs.filter((dialog) => !this._isSubchannel(dialog.conversation)) }
+  }
+
+  private async _loadDialogFolderPage(
+    query: { limit?: number, afterId?: string },
+    folderId: 0 | 1,
+    archivedPeerIds: ReadonlySet<string>,
+  ): Promise<IMDialogPage> {
+    const limit = Math.max(1, query.limit ?? 100)
+    const selected: IMDialog[] = []
+    let afterId = query.afterId
+    let scanned = 0
+    let exhausted = false
+    const visitedOffsets = new Set<string | undefined>()
+    while (selected.length < limit && scanned < 100_000) {
+      if (visitedOffsets.has(afterId)) break
+      visitedOffsets.add(afterId)
+      const batchLimit = Math.max(100, limit)
+      const page = await this._loadDialogPage({ limit: batchLimit, afterId })
+      if (!page.dialogs.length) {
+        exhausted = true
+        break
+      }
+      scanned += page.dialogs.length
+      selected.push(...page.dialogs.filter((dialog) =>
+        archivedPeerIds.has(dialog.conversation.id) === (folderId === 1)))
+      const lastId = page.dialogs.at(-1)!.conversation.id
+      const hasMore = Boolean(page.nextCursor)
+        || (page.total !== undefined && scanned < page.total)
+        || page.dialogs.length >= batchLimit
+      if (!hasMore || lastId === afterId) {
+        exhausted = true
+        break
+      }
+      afterId = lastId
+    }
+    return {
+      dialogs: selected.slice(0, limit),
+      ...(selected.length > limit || !exhausted
+        ? { nextCursor: afterId ?? selected.at(-1)?.conversation.id }
+        : {}),
+      ...(exhausted && !query.afterId ? { total: selected.length } : {}),
+    }
+  }
+
+  private async _loadAllDialogs(): Promise<void> {
+    let afterId: string | undefined
+    let scanned = 0
+    const visitedOffsets = new Set<string | undefined>()
+    while (scanned < 100_000) {
+      if (visitedOffsets.has(afterId)) break
+      visitedOffsets.add(afterId)
+      const page = await this._loadDialogPage({ limit: 500, afterId })
+      if (!page.dialogs.length) break
+      scanned += page.dialogs.length
+      const lastId = page.dialogs.at(-1)!.conversation.id
+      const hasMore = Boolean(page.nextCursor)
+        || (page.total !== undefined && scanned < page.total)
+        || page.dialogs.length >= 500
+      if (!hasMore || lastId === afterId) break
+      afterId = lastId
+    }
   }
 
   private async _loadSubdialogPage(
@@ -3206,6 +3362,77 @@ export class DialogRpc {
     return id
   }
 
+  private _resolveFolderInputPeer(peer: tl.TypeInputPeer): string {
+    if (peer._ === 'inputPeerSelf') return '\u0000self'
+    return this._resolvePeer(peer)
+  }
+
+  private _folderInputPeer(peerId: string): tl.TypeInputPeer {
+    if (peerId === '\u0000self') return { _: 'inputPeerSelf' }
+    const conversation = this._conversation(peerId)
+    if (this._isVirtualConversation(conversation)) {
+      return { _: 'inputPeerChat', chatId: this._peerId(peerId) }
+    }
+    if (conversation.kind === 'direct') {
+      return { _: 'inputPeerUser', userId: this._userId(peerId), accessHash: Long.ZERO }
+    }
+    return { _: 'inputPeerChannel', channelId: this._peerId(peerId), accessHash: Long.ONE }
+  }
+
+  private _storeDialogFilter(filter: tl.RawDialogFilter | tl.RawDialogFilterChatlist): StoredDialogFilter {
+    return {
+      kind: filter._,
+      ...('contacts' in filter && filter.contacts ? { contacts: true } : {}),
+      ...('nonContacts' in filter && filter.nonContacts ? { nonContacts: true } : {}),
+      ...('groups' in filter && filter.groups ? { groups: true } : {}),
+      ...('broadcasts' in filter && filter.broadcasts ? { broadcasts: true } : {}),
+      ...('bots' in filter && filter.bots ? { bots: true } : {}),
+      ...('excludeMuted' in filter && filter.excludeMuted ? { excludeMuted: true } : {}),
+      ...('excludeRead' in filter && filter.excludeRead ? { excludeRead: true } : {}),
+      ...('excludeArchived' in filter && filter.excludeArchived ? { excludeArchived: true } : {}),
+      ...(filter.titleNoanimate ? { titleNoanimate: true } : {}),
+      ...('hasMyInvites' in filter && filter.hasMyInvites ? { hasMyInvites: true } : {}),
+      title: encodeDialogFilterTitle(filter.title),
+      ...(filter.emoticon !== undefined ? { emoticon: filter.emoticon } : {}),
+      ...(filter.color !== undefined ? { color: filter.color } : {}),
+      pinnedPeerIds: filter.pinnedPeers.map((peer) => this._resolveFolderInputPeer(peer)),
+      includePeerIds: filter.includePeers.map((peer) => this._resolveFolderInputPeer(peer)),
+      excludePeerIds: 'excludePeers' in filter
+        ? filter.excludePeers.map((peer) => this._resolveFolderInputPeer(peer))
+        : [],
+    }
+  }
+
+  private _makeDialogFilter(filterId: number, stored: StoredDialogFilter): tl.TypeDialogFilter {
+    const common = {
+      id: filterId,
+      title: decodeDialogFilterTitle(stored.title),
+      ...(stored.titleNoanimate ? { titleNoanimate: true } : {}),
+      ...(stored.emoticon !== undefined ? { emoticon: stored.emoticon } : {}),
+      ...(stored.color !== undefined ? { color: stored.color } : {}),
+      pinnedPeers: stored.pinnedPeerIds.map((peerId) => this._folderInputPeer(peerId)),
+      includePeers: stored.includePeerIds.map((peerId) => this._folderInputPeer(peerId)),
+    }
+    if (stored.kind === 'dialogFilterChatlist') {
+      return {
+        _: 'dialogFilterChatlist', ...common,
+        ...(stored.hasMyInvites ? { hasMyInvites: true } : {}),
+      }
+    }
+    return {
+      _: 'dialogFilter', ...common,
+      ...(stored.contacts ? { contacts: true } : {}),
+      ...(stored.nonContacts ? { nonContacts: true } : {}),
+      ...(stored.groups ? { groups: true } : {}),
+      ...(stored.broadcasts ? { broadcasts: true } : {}),
+      ...(stored.bots ? { bots: true } : {}),
+      ...(stored.excludeMuted ? { excludeMuted: true } : {}),
+      ...(stored.excludeRead ? { excludeRead: true } : {}),
+      ...(stored.excludeArchived ? { excludeArchived: true } : {}),
+      excludePeers: stored.excludePeerIds.map((peerId) => this._folderInputPeer(peerId)),
+    }
+  }
+
   private _resolveBlockedUser(peer: tl.TypeInputPeer): string {
     if (peer._ !== 'inputPeerUser') throw new RpcError(400, 'USER_ID_INVALID')
     const platformUserId = this._tlToUser.get(peer.userId)
@@ -3657,6 +3884,12 @@ function makeAdminRights(permissions?: IMConversationPermissions): tl.RawChatAdm
 
 function clampLimit(limit: number): number {
   return Math.max(0, Math.min(Math.trunc(limit), 100))
+}
+
+function validateCustomFilterId(filterId: number): void {
+  if (!Number.isInteger(filterId) || filterId < 2 || filterId > 255) {
+    throw new RpcError(400, 'FILTER_ID_INVALID')
+  }
 }
 
 function normalizeUsername(username: string): string {
