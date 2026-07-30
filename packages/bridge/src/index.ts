@@ -143,7 +143,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   }
   const updates = new UpdateManager(
     ctx.database, registry, store,
-    (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
+    (authKeyId, update, excludeConnection) =>
+      ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection),
     dcId,
     (format, ...args) => bridgeLogger.debug(format, ...args),
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
@@ -458,11 +459,17 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   rpc.register('messages.getPinnedDialogs', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getPinnedDialogs())
   rpc.register('messages.sendMessage', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.sendMessage(req as tl.messages.RawSendMessageRequest))
+    (await requireBridgeSession(rpc)).dialogs.sendMessage(
+      req as tl.messages.RawSendMessageRequest, rpc.connection,
+    ))
   rpc.register('messages.sendMedia', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.sendMedia(req as tl.messages.RawSendMediaRequest))
+    (await requireBridgeSession(rpc)).dialogs.sendMedia(
+      req as tl.messages.RawSendMediaRequest, rpc.connection,
+    ))
   rpc.register('messages.sendMultiMedia', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.sendMultiMedia(req as tl.messages.RawSendMultiMediaRequest))
+    (await requireBridgeSession(rpc)).dialogs.sendMultiMedia(
+      req as tl.messages.RawSendMultiMediaRequest, rpc.connection,
+    ))
   rpc.register('messages.deleteMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.deleteMessages(req as tl.messages.RawDeleteMessagesRequest))
   rpc.register('channels.deleteMessages', async (rpc, req) => {
@@ -470,7 +477,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     return (await requireBridgeSession(rpc)).dialogs.deleteMessages(request, request.channel)
   })
   rpc.register('messages.editMessage', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.editMessage(req as tl.messages.RawEditMessageRequest))
+    (await requireBridgeSession(rpc)).dialogs.editMessage(
+      req as tl.messages.RawEditMessageRequest, rpc.connection,
+    ))
   rpc.register('messages.forwardMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.forwardMessages(req as tl.messages.RawForwardMessagesRequest))
   rpc.register('messages.setTyping', async (rpc) => {

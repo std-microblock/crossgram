@@ -127,9 +127,14 @@ export class Mtproto extends Service {
     }
   }
 
-  /** Send an update only to connections authenticated with the given permanent auth key. */
-  sendUpdateToAuthKey(authKeyId: Uint8Array, update: tl.TypeUpdates): number {
-    const candidates = [...this._sessions].filter((session) => equalBytes(session.authKeyId, authKeyId))
+  /** Send an update to connections authenticated with the given permanent auth key. */
+  sendUpdateToAuthKey(
+    authKeyId: Uint8Array,
+    update: tl.TypeUpdates,
+    excludeConnection?: ServerConnection,
+  ): number {
+    const candidates = [...this._sessions].filter((session) =>
+      equalBytes(session.authKeyId, authKeyId) && session.connection !== excludeConnection)
     const updateSessions = candidates.filter((session) => session.acceptsUpdates)
     const targets = updateSessions.length ? updateSessions : candidates.slice(0, 1)
     for (const session of targets) {
