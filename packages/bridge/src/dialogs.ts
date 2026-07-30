@@ -333,7 +333,19 @@ export class DialogRpc {
         continue
       }
       const peerId = this._resolvePeer(requested.peer)
-      const dialog = byId.get(peerId)
+      let dialog = byId.get(peerId)
+      if (!dialog) {
+        const conversation = this._conversation(peerId)
+        if (this._isVirtualConversation(conversation)) {
+          const history = await this._visibleMessages(await this._loadHistory(peerId, { limit: 1 }))
+          dialog = {
+            conversation,
+            lastMessage: history[0]?.source,
+            readInboxMaxMessage: history[0]?.source,
+            unreadCount: 0,
+          }
+        }
+      }
       if (!dialog || seen.has(peerId)) continue
       selected.push(dialog)
       seen.add(peerId)
