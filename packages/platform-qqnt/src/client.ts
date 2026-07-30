@@ -191,6 +191,7 @@ export class QQNTClient {
     sticker?: QQStickerReference,
     textParts?: WireTextPart[],
     replyToId?: string,
+    replyToSequence?: string,
   ): Promise<WireMessage> {
     const preparedMedia = media && await Promise.all(media.map(async (item) => ({
       item,
@@ -236,6 +237,7 @@ export class QQNTClient {
       text,
       textParts,
       replyToId,
+      replyToSequence,
       originRequestId,
       sticker,
       media: preparedMedia?.map(({ item, hashes }) => ({

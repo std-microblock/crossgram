@@ -153,7 +153,8 @@ describe('QQNTClient streaming transport', () => {
     const message = await client.sendMessage('1:uid', 'caption', [{
       kind: 'file', name: 'x.mp4', mimeType: 'video/mp4', width: 320, height: 200, duration: 9,
       source: { size: 5, async *stream() { streamCalls++; yield* chunks } },
-    }], { onProgress: (item) => { progress.push(item.transferredBytes) } }, 'origin-1')
+    }], { onProgress: (item) => { progress.push(item.transferredBytes) } },
+    'origin-1', undefined, undefined, 'old-account-view-id', '571')
     expect(message.id).toBe('sent')
     expect(Buffer.concat(highwayFrames.map(highwayBody))).toEqual(Buffer.from([1, 2, 3, 4, 5]))
     expect(highwayFrames.map((frame) => frame.readUInt32BE(5))).toEqual([2, 2, 1])
@@ -162,6 +163,7 @@ describe('QQNTClient streaming transport', () => {
     expect(localMessageBodies).toEqual([Buffer.alloc(0)])
     expect(manifest).toMatchObject({
       conversationId: '1:uid', originRequestId: 'origin-1',
+      replyToId: 'old-account-view-id', replyToSequence: '571',
       media: [{
         mimeType: 'video/mp4', width: 320, height: 200, duration: 9, size: 5,
         md5: '7cfdd07889b3295d6a550914ab35e068',

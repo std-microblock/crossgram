@@ -251,6 +251,8 @@ export interface IMMessageContent<TMediaLocator = unknown> {
 export interface IMMessageInput {
   parts: IMMessageInputPart[]
   replyToId?: string
+  /** Stable platform-native sequence used when the reply target's opaque ID changes between account views. */
+  replyToNativeSequence?: string
 }
 
 export interface IMMessage<TMediaLocator = unknown> {

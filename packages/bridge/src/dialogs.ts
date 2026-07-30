@@ -49,6 +49,7 @@ interface MessageRef {
   peerId: string
   platformMessageId: string
   ordinal: number
+  nativeSequence?: string
 }
 
 interface MaterializedMessage {
@@ -1834,11 +1835,18 @@ export class DialogRpc {
 
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(req.peer, req.replyTo)
-    const replyToId = await this._resolveReplyToId(peerId, req.replyTo)
+    const replyTarget = await this._resolveReplyTarget(peerId, req.replyTo)
+    const replyToId = replyTarget?.id
     const sent = await this._sendToPlatform(() => this._platform.sendMessage(
       this._session,
       { id: peerId },
-      { parts: [this._inputTextPart(req.message, req.entities)], replyToId },
+      {
+        parts: [this._inputTextPart(req.message, req.entities)],
+        replyToId,
+        ...(replyTarget?.nativeSequence
+          ? { replyToNativeSequence: replyTarget.nativeSequence }
+          : {}),
+      },
     ))
     const source: IMMessage = {
       ...sent,
@@ -2002,9 +2010,14 @@ export class DialogRpc {
 
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(inputPeer, replyTo)
-    const replyToId = await this._resolveReplyToId(peerId, replyTo)
+    const replyTarget = await this._resolveReplyTarget(peerId, replyTo)
+    const replyToId = replyTarget?.id
     const sent = await this._sendToPlatform(() => this._platform.sendMessage(this._session, { id: peerId }, {
-      ...content, replyToId,
+      ...content,
+      replyToId,
+      ...(replyTarget?.nativeSequence
+        ? { replyToNativeSequence: replyTarget.nativeSequence }
+        : {}),
     }, {
       onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
     }))
@@ -2663,8 +2676,11 @@ export class DialogRpc {
     }
     this._tlToMessage.set(item.tlId, {
       peerId: item.source.conversationId,
-      platformMessageId: item.source.id,
+      platformMessageId: sourceId ?? item.source.id,
       ordinal: item.ordinal,
+      ...(nativeSequence !== undefined && item.ordinal === 0
+        ? { nativeSequence: String(nativeSequence) }
+        : {}),
     })
   }
 
@@ -2853,20 +2869,32 @@ export class DialogRpc {
     return { type: 'text', text, entities: entities.length ? entities : undefined }
   }
 
-  private async _resolveReplyToId(
+  private async _resolveReplyTarget(
     conversationId: string,
     replyTo?: tl.TypeInputReplyTo,
-  ): Promise<string | undefined> {
+  ): Promise<{ id: string, nativeSequence?: string } | undefined> {
     if (replyTo?._ !== 'inputReplyToMessage') return
     const remembered = this._tlToMessage.get(replyTo.replyToMsgId)
-    if (remembered?.peerId === conversationId) return remembered.platformMessageId
+    if (remembered?.peerId === conversationId) {
+      return {
+        id: remembered.platformMessageId,
+        ...(remembered.nativeSequence ? { nativeSequence: remembered.nativeSequence } : {}),
+      }
+    }
     if (!this._store) return
     const projected = await this._store.findProjectedByTlId(
       this._session.platformSessionId, replyTo.replyToMsgId, conversationId,
     )
     if (!projected) return
-    const ordinal = projected.parts.find((part) => part.tlMessageId === replyTo.replyToMsgId)?.ordinal ?? 0
-    return projected.source.sourceIds?.[ordinal] ?? projected.source.id
+    const part = projected.parts.find((item) => item.tlMessageId === replyTo.replyToMsgId)
+    const ordinal = part?.ordinal ?? 0
+    const nativeSequence = part?.nativeSequence ?? qqMessageSequenceFromMetadata(projected.source.metadata)
+    return {
+      id: projected.source.sourceIds?.[ordinal] ?? projected.source.id,
+      ...(nativeSequence === null || nativeSequence === undefined
+        ? {}
+        : { nativeSequence: String(nativeSequence) }),
+    }
   }
 
   private _emptyMessages(conversation: import('./platform.js').IMConversation): tl.messages.RawMessages {
