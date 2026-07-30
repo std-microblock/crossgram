@@ -1880,9 +1880,13 @@ describe('bridge login e2e', () => {
         _: 'channels.getFullChannel',
         channel: { _: 'inputChannel', channelId: reactionStickerLab.id, accessHash: Long.ZERO },
       }, 178)
+      await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getFullChannel',
+        channel: { _: 'inputChannel', channelId: longHistoryGroup.id, accessHash: Long.ZERO },
+      }, 179)
       const emojiStickerSets = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getEmojiStickers', hash: Long.ZERO,
-      }, 179)
+      }, 180)
       expect(emojiStickerSets).toMatchObject({
         _: 'messages.allStickers',
         sets: [expect.objectContaining({ emojis: true, title: 'Platform Reactions', count: 2 })],
@@ -1895,7 +1899,7 @@ describe('bridge login e2e', () => {
           accessHash: emojiStickerSets.sets[0].accessHash,
         },
         hash: 0,
-      }, 180)
+      }, 181)
       expect(customReactionPack).toMatchObject({
         _: 'messages.stickerSet',
         documents: expect.arrayContaining([
