@@ -1,6 +1,6 @@
 import type { Context, Logger } from 'cordis'
 import type { Database } from '@cordisjs/plugin-database'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import z from 'schemastery'
 import enUS from './locales/en-US.yml'
@@ -17,13 +17,14 @@ import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
-  QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMedia, WireMessage, WireMultiForwardLocator,
-  WireReactionState, WireTextPart,
+  QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
+  WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireTextPart,
 } from './protocol.js'
 
 export type MemberNameMode = 'nickname' | 'groupAlias'
 
 const MIN_PROTOCOL_VERSION = 19
+const MAX_PROTOCOL_VERSION = 20
 
 export interface Config extends QQNTClientOptions {
   /**
@@ -190,8 +191,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const status = await this.client.status()
     const userId = status.selfUid ?? status.selfUin
     if (!status.ready || !userId) throw new Error('QQNT account is not ready')
-    if (status.protocolVersion < MIN_PROTOCOL_VERSION) {
-      throw new Error(`QQNT bridge protocol ${status.protocolVersion} is unsupported; platform features require ${MIN_PROTOCOL_VERSION}`)
+    if (!Number.isInteger(status.protocolVersion)
+      || (status.protocolVersion !== MIN_PROTOCOL_VERSION && status.protocolVersion !== MAX_PROTOCOL_VERSION)) {
+      throw new Error(`QQNT bridge protocol ${status.protocolVersion} is unsupported; supported range is ${MIN_PROTOCOL_VERSION}-${MAX_PROTOCOL_VERSION}`)
     }
     const user = await this.client.getUser(userId)
     if (!user) throw new Error(`QQNT current user is unavailable: ${userId}`)
@@ -291,9 +293,19 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       try {
         await this.client.subscribe(async (event, eventId) => {
           try {
+            if (event.type === 'native-avsdk') {
+              if (event.version !== 1
+                || typeof event.callback !== 'string'
+                || !event.callback.length
+                || event.callback.length > 256
+                || !Array.isArray(event.args)) return
+              return
+            }
+            if (event.type === 'call-signal' && !isWireCallSignalEvent(event)) return
+            const eventSummary = wireEventSummary(event)
             this.logger?.debug(
               'WebSocket event received session=%s streamEventId=%s %s',
-              platformSessionId, eventId ?? '<none>', wireEventSummary(event),
+              platformSessionId, eventId ?? '<none>', eventSummary,
             )
             if (event.type === 'message' && this.isFilteredGrayTip(event.message)) {
               knownConversationIds.add(event.conversation.id)
@@ -316,7 +328,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             const mapped = this.mapEvent(event)
             this.logger?.debug(
               'WebSocket event mapped session=%s streamEventId=%s %s',
-              platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
+              platformSessionId, eventId ?? '<none>', event.type === 'call-signal' ? eventSummary : imEventSummary(mapped),
             )
             if (mapped.type === 'message') {
               const delivered = await this.dispatchMessage(handler, mapped, inFlightMessageKeys)
@@ -326,7 +338,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             }
             this.logger?.debug(
               'WebSocket event handled session=%s streamEventId=%s %s',
-              platformSessionId, eventId ?? '<none>', imEventSummary(mapped),
+              platformSessionId, eventId ?? '<none>', event.type === 'call-signal' ? eventSummary : imEventSummary(mapped),
             )
             failedEventId = undefined
             consecutiveEventFailures = 0
@@ -1226,13 +1238,44 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return conversation
   }
 
-  private mapEvent(input: WireEvent): IMEvent<QQMediaLocator> {
-    const conversation = this.mapConversation(input.conversation)
+  private mapEvent(input: Exclude<WireEvent, WireNativeAvsdkEvent>): IMEvent<QQMediaLocator> {
+    const wireConversation = input.type === 'call-signal'
+      ? {
+          id: input.conversation.id,
+          kind: 'direct' as const,
+          title: input.conversation.title,
+          peerUid: input.conversation.peerUid,
+          peerUin: input.conversation.peerUin,
+          chatType: 1 as const,
+        }
+      : input.conversation
+    const conversation = this.mapConversation(wireConversation)
     if (input.type === 'message') {
       return {
         type: 'message',
         conversation,
         message: this.mapMessage(input.message),
+      }
+    }
+    if (input.type === 'call-signal') {
+      const text = input.signal === 'incoming'
+        ? input.media === 'voice' ? 'QQ 语音通话呼入' : 'QQ 通话呼入'
+        : input.signal === 'accept-requested' ? '已请求接听 QQ 通话'
+          : input.signal === 'refuse-requested' ? '已拒绝 QQ 通话'
+            : input.signal === 'logout-requested' ? '已请求挂断 QQ 通话'
+              : 'QQ 通话已结束'
+      return {
+        type: 'message',
+        conversation,
+        message: {
+          id: `qq-call:${createHash('sha256').update(input.callId).digest('hex').slice(0, 32)}:${input.signal}`,
+          conversationId: input.conversation.id,
+          senderId: input.conversation.id,
+          timestamp: input.timestamp,
+          outgoing: input.signal !== 'incoming',
+          metadata: { qqCallSignal: input.signal, qqCallMedia: input.media },
+          content: { serviceAction: { type: 'custom', text }, parts: [] },
+        },
       }
     }
     if (input.type === 'message-delete') return {
@@ -1529,7 +1572,36 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 }
 
+function isWireCallSignalEvent(event: unknown): event is WireCallSignalEvent {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return false
+  const input = event as Record<string, unknown>
+  if (input.type !== 'call-signal'
+    || input.version !== 1
+    || (input.signal !== 'incoming' && input.signal !== 'accept-requested'
+      && input.signal !== 'refuse-requested' && input.signal !== 'logout-requested' && input.signal !== 'ended')
+    || (input.media !== 'voice' && input.media !== 'unknown')
+    || typeof input.callId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.callId)
+    || typeof input.timestamp !== 'number' || !Number.isSafeInteger(input.timestamp)
+    || input.timestamp < 1 || input.timestamp > 0x7fffffff) return false
+
+  const conversation = input.conversation
+  if (!conversation || typeof conversation !== 'object' || Array.isArray(conversation)) return false
+  const wireConversation = conversation as Record<string, unknown>
+  return wireConversation.kind === 'direct'
+    && wireConversation.chatType === 1
+    && typeof wireConversation.id === 'string' && /^[A-Za-z0-9:_-]{1,256}$/.test(wireConversation.id)
+    && typeof wireConversation.peerUid === 'string' && /^[A-Za-z0-9:_-]{1,256}$/.test(wireConversation.peerUid)
+    && typeof wireConversation.peerUin === 'string' && /^\d{1,32}$/.test(wireConversation.peerUin)
+    && typeof wireConversation.title === 'string'
+    && wireConversation.title.length >= 1 && wireConversation.title.length <= 256
+    && !/[\x00-\x1f\x7f]/.test(wireConversation.title)
+}
+
 function wireEventSummary(event: WireEvent): string {
+  if (event.type === 'native-avsdk') return 'type=native-avsdk'
+  if (event.type === 'call-signal') {
+    return `type=call-signal version=${event.version} signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`
+  }
   if (event.type === 'message') {
     return `type=message conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.parts.length}`
   }
