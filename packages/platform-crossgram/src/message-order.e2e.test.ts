@@ -12,6 +12,7 @@ import sharp from 'sharp'
 import {
   MessageStore, StickerRpc, type IngestResult, type PlatformSession, type Unsubscribe,
 } from '@mtproto-relay/bridge'
+import { makeTlMessageMedia } from '../../bridge/src/dialogs.js'
 import { defineModels } from '../../bridge/src/models.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { QQNTPlatform } from './index.js'
@@ -328,6 +329,157 @@ describe('QQNT durable event checkpoint E2E', () => {
     } finally {
       await unsubscribeSecond?.()
       await unsubscribeFirst?.()
+    }
+  })
+})
+
+describe('QQNT file-sent video E2E', () => {
+  it('projects an extension-only file element as a streamable Telegram video and serves byte ranges', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const file = Buffer.from('abcdefgh')
+    const directUrlLocators: Array<Record<string, unknown>> = []
+    const ranges: Array<string | undefined> = []
+    let server: Server | undefined
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    server = createServer(async (request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        directUrlLocators.push(JSON.parse(Buffer.concat(chunks).toString()))
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing test server address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/cdn/FILE-SENT.MP4`,
+          expiresAt: Date.now() + 60_000,
+        }))
+        return
+      }
+      if (request.method === 'GET' && request.url === '/cdn/FILE-SENT.MP4') {
+        ranges.push(request.headers.range)
+        const match = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range ?? '')
+        if (!match) {
+          response.writeHead(416).end()
+          return
+        }
+        const start = Number(match[1])
+        const end = Math.min(Number(match[2]), file.length - 1)
+        const body = file.subarray(start, end + 1)
+        response.writeHead(206, {
+          'accept-ranges': 'bytes',
+          'content-range': `bytes ${start}-${end}/${file.length}`,
+          'content-length': body.length,
+          'content-type': 'video/mp4',
+        })
+        response.end(body)
+        return
+      }
+      response.writeHead(404).end('not found')
+    })
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    webSocketServer.on('connection', (webSocket) => {
+      webSocket.send(JSON.stringify({
+        id: 'file-video-event',
+        event: {
+          type: 'message',
+          conversation: {
+            id: 'file-video-group', kind: 'group', title: 'File video group',
+            peerUid: 'file-video-group', peerUin: '10000', chatType: 2,
+          },
+          message: {
+            id: 'file-video-message', conversationId: 'file-video-group', senderId: 'alice',
+            timestamp: 1_800_000_150, outgoing: false,
+            parts: [{
+              type: 'media',
+              media: {
+                id: 'file-video', kind: 'file', name: 'FILE-SENT.MP4', size: file.length,
+                locator: {
+                  messageId: 'file-video-message', elementId: 'file-video', chatType: 2,
+                  peerUid: 'file-video-group', kind: 'file', fileName: 'FILE-SENT.MP4',
+                  fileUuid: 'file-video-uuid', file10MMd5: 'file-video-prefix-md5',
+                },
+              },
+            }],
+          },
+        },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing test server address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server?.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server!.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({
+      endpoint: `http://127.0.0.1:${address.port}/v1`,
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    })
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const store = new MessageStore(ctx.database)
+    const ingested = Promise.withResolvers<IngestResult>()
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (event.type !== 'message') return
+      ingested.resolve(await store.ingest(session, event.conversation, event.message))
+    })
+    try {
+      const result = await Promise.race([
+        ingested.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('file video E2E timed out')), 5_000)),
+      ])
+      const mediaId = result.projection[0].mediaId!
+      const [row] = await ctx.database.get('mtproto_im_media', { id: mediaId })
+      expect(row).toMatchObject({
+        kind: 'file', name: 'FILE-SENT.MP4', mimeType: 'video/mp4', size: file.length,
+      })
+      expect(makeTlMessageMedia(row!, 1_800_000_150)).toMatchObject({
+        _: 'messageMediaDocument', video: true,
+        document: {
+          _: 'document', mimeType: 'video/mp4', size: file.length,
+          attributes: expect.arrayContaining([
+            { _: 'documentAttributeFilename', fileName: 'FILE-SENT.MP4' },
+            expect.objectContaining({
+              _: 'documentAttributeVideo', supportsStreaming: true, duration: 0, w: 1, h: 1,
+            }),
+          ]),
+        },
+      })
+
+      const stored = await store.getMedia(session.platformSessionId, mediaId)
+      expect(await collect(platform.downloadMedia(
+        session, stored!.media as any, { offset: 2, limit: 4 },
+      ))).toEqual(Buffer.from('cdef'))
+      expect(directUrlLocators).toMatchObject([{
+        fileName: 'FILE-SENT.MP4', fileUuid: 'file-video-uuid', file10MMd5: 'file-video-prefix-md5',
+      }])
+      expect(ranges).toEqual(['bytes=2-5'])
+    } finally {
+      await unsubscribe()
     }
   })
 })
