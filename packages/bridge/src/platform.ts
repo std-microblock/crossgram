@@ -318,6 +318,7 @@ export interface IMReactionResource {
 }
 
 export interface IMReactionDefinition {
+  /** Stable platform-session-wide identity; reuse it when the same reaction is exposed in multiple conversations. */
   key: string
   title?: string
   presentation:
