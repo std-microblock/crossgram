@@ -1662,7 +1662,8 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = req.location.thumbSize === 'm' && stored.media.preview
+    const media = req.location._ === 'inputDocumentFileLocation'
+      && req.location.thumbSize === 'm' && stored.media.preview
       ? previewMedia(stored.media)
       : stored.media
     return {
@@ -1686,7 +1687,8 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = location.thumbSize === 'm' && stored.media.preview
+    const media = location._ === 'inputDocumentFileLocation'
+      && location.thumbSize === 'm' && stored.media.preview
       ? previewMedia(stored.media)
       : stored.media
     let resolved: import('./platform.js').IMDirectDownload | undefined
@@ -4371,7 +4373,6 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   const accessHash = Long.fromNumber(media.id)
   const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
   if (media.kind === 'image') {
-    const preview = media.preview
     return {
       _: 'messageMediaPhoto',
       photo: {
@@ -4379,10 +4380,6 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
         sizes: [
           ...(media.strippedThumbnail?.byteLength ? [{
             _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
-          }] : []),
-          ...(preview ? [{
-            _: 'photoSize' as const, type: 'm', w: preview.width, h: preview.height,
-            size: Math.min(preview.size, 0x7fffffff),
           }] : []),
           {
             _: 'photoSize', type: 'x', w: media.width ?? 1, h: media.height ?? 1,
