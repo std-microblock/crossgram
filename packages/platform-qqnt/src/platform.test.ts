@@ -1720,6 +1720,41 @@ describe('QQNTPlatform mapping', () => {
     expect(progress).toEqual([1, 2])
   })
 
+  it('infers video MIME types for QQ file elements without changing ordinary documents', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'file-video-message', conversationId: '2:group', senderId: 'alice', timestamp: 10, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'file-video', kind: 'file' as const, name: 'FILE-SENT.MP4', size: 2_097_152,
+          locator: {
+            messageId: 'file-video-message', elementId: 'file-video', chatType: 2 as const,
+            peerUid: 'group', kind: 'file' as const, fileName: 'FILE-SENT.MP4',
+          },
+        },
+      }, {
+        type: 'media' as const,
+        media: {
+          id: 'document', kind: 'file' as const, name: 'report.pdf', size: 4096,
+          locator: {
+            messageId: 'file-video-message', elementId: 'document', chatType: 2 as const,
+            peerUid: 'group', kind: 'file' as const, fileName: 'report.pdf',
+          },
+        },
+      }],
+    }] }))
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    expect(history.messages[0].content.parts).toMatchObject([
+      { type: 'media', media: { name: 'FILE-SENT.MP4', mimeType: 'video/mp4' } },
+      { type: 'media', media: { name: 'report.pdf' } },
+    ])
+    const document = history.messages[0].content.parts[1]
+    if (document.type !== 'media') throw new Error('ordinary document was not mapped')
+    expect(document.media.mimeType).toBeUndefined()
+  })
+
   it('keeps multiple image parts in one QQ send plan', async () => {
     const platform = new QQNTPlatform()
     platform.client.sendMessage = vi.fn(async () => ({
