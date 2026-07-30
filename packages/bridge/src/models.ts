@@ -202,6 +202,8 @@ export interface StickerSetInstallRow {
   installedAt: Date
   sortOrder: number
   archived: boolean
+  /** Persisted tombstone for provider packs removed from Telegram's installed catalog. */
+  uninstalled: boolean
 }
 
 export interface DraftRow {
@@ -432,7 +434,7 @@ export function defineModels(ctx: Context): void {
 
   ctx.model.extend('mtproto_sticker_set_install', {
     id: 'unsigned', platformSessionId: 'string', providerId: 'string', providerPackId: 'text',
-    installedAt: 'timestamp', sortOrder: 'integer', archived: 'boolean',
+    installedAt: 'timestamp', sortOrder: 'integer', archived: 'boolean', uninstalled: 'boolean',
   }, {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'providerId', 'providerPackId']],

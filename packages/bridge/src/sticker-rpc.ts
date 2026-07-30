@@ -48,7 +48,10 @@ export class StickerRpc {
       this._sets.set(this._setId(providerId, pack.packId), { providerId, packId: pack.packId })
     }
     const installed = await this._installedPacks()
-    packs.sort((left, right) => {
+    const visible = packs.filter(({ pack }) => !installed.get(packKey(
+      pack.providerId, pack.packId,
+    ))?.uninstalled)
+    visible.sort((left, right) => {
       const a = installed.get(packKey(left.pack.providerId, left.pack.packId))
       const b = installed.get(packKey(right.pack.providerId, right.pack.packId))
       if (!!a !== !!b) return a ? -1 : 1
@@ -56,13 +59,13 @@ export class StickerRpc {
       return 0
     })
     const hash = Long.fromNumber(catalogHash(
-      packs.map(({ pack }) => `${pack.providerId}:${pack.packId}:${pack.version ?? 0}`),
+      visible.map(({ pack }) => `${pack.providerId}:${pack.packId}:${pack.version ?? 0}`),
     ))
     if (hashMatches(req.hash, hash)) return { _: 'messages.allStickersNotModified' }
     return {
       _: 'messages.allStickers',
       hash,
-      sets: packs.map(({ pack }) => this._makeSet(pack, installed.get(packKey(pack.providerId, pack.packId)))),
+      sets: visible.map(({ pack }) => this._makeSet(pack, installed.get(packKey(pack.providerId, pack.packId)))),
     }
   }
 
@@ -176,7 +179,9 @@ export class StickerRpc {
   async faveSticker(req: tl.messages.RawFaveStickerRequest): Promise<tl.TlObject> {
     const resolved = await this._resolveInputDocument(req.id)
     await resolved.provider.setSavedSticker?.(this._context(), resolved.sticker, !req.unfave)
-    this._providerCache.delete('saved')
+    // A provider may also expose its native saved collection as a synthetic
+    // sticker set, so both the saved list and pack catalog must refresh now.
+    this._providerCache.clear()
     const query = {
       platformSessionId: this._session.platformSessionId,
       providerId: resolved.providerId,
@@ -204,17 +209,26 @@ export class StickerRpc {
       installedAt: new Date(),
       sortOrder: maxOrder + 1,
       archived: req.archived,
+      uninstalled: false,
     }], ['platformSessionId', 'providerId', 'providerPackId'])
     return { _: 'messages.stickerSetInstallResultSuccess' }
   }
 
   async uninstallStickerSet(req: tl.messages.RawUninstallStickerSetRequest): Promise<tl.TlObject> {
     const ref = await this._resolveSet(req.stickerset)
-    await this._database.remove('mtproto_sticker_set_install', {
+    const query = {
       platformSessionId: this._session.platformSessionId,
       providerId: ref.providerId,
       providerPackId: ref.packId,
-    })
+    }
+    const [existing] = await this._database.get('mtproto_sticker_set_install', query)
+    await this._database.upsert('mtproto_sticker_set_install', [{
+      ...query,
+      installedAt: existing?.installedAt ?? new Date(),
+      sortOrder: existing?.sortOrder ?? 0,
+      archived: false,
+      uninstalled: true,
+    }], ['platformSessionId', 'providerId', 'providerPackId'])
     return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
@@ -241,7 +255,14 @@ export class StickerRpc {
         providerPackId: ref.packId,
       }
       if (req.uninstall) {
-        await this._database.remove('mtproto_sticker_set_install', query)
+        const [existing] = await this._database.get('mtproto_sticker_set_install', query)
+        await this._database.upsert('mtproto_sticker_set_install', [{
+          ...query,
+          installedAt: existing?.installedAt ?? new Date(),
+          sortOrder: existing?.sortOrder ?? 0,
+          archived: false,
+          uninstalled: true,
+        }], ['platformSessionId', 'providerId', 'providerPackId'])
       } else {
         const [existing] = await this._database.get('mtproto_sticker_set_install', query)
         await this._database.upsert('mtproto_sticker_set_install', [{
@@ -249,6 +270,7 @@ export class StickerRpc {
           installedAt: existing?.installedAt ?? new Date(),
           sortOrder: existing?.sortOrder ?? 0,
           archived: req.archive ? true : req.unarchive ? false : existing?.archived ?? false,
+          uninstalled: false,
         }], ['platformSessionId', 'providerId', 'providerPackId'])
       }
     }
@@ -531,10 +553,10 @@ export class StickerRpc {
     this._sets.set(id, { providerId: pack.providerId, packId: pack.packId })
     return {
       _: 'stickerSet',
-      installedDate: installed && !installed.archived
+      installedDate: installed && !installed.archived && !installed.uninstalled
         ? Math.floor(installed.installedAt.getTime() / 1000)
         : undefined,
-      archived: installed?.archived || undefined,
+      archived: installed && !installed.uninstalled && installed.archived || undefined,
       id: Long.fromNumber(id), accessHash: Long.fromNumber(id),
       title: pack.title, shortName: this._shortName(pack), count: pack.count ?? stickers.length,
       thumbs: cover && coverMetadata ? [{

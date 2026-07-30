@@ -175,6 +175,8 @@ describe('StickerRpc', () => {
 
   it('invalidates saved stickers immediately after a favorite mutation', async () => {
     const { rpc, provider, sticker } = stickerHarness()
+    await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
     await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
     await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
     expect(provider.listSavedStickers).toHaveBeenCalledTimes(1)
@@ -189,9 +191,53 @@ describe('StickerRpc', () => {
       },
     })
     await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
+    await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
 
     expect(provider.setSavedSticker).toHaveBeenCalledTimes(1)
     expect(provider.listSavedStickers).toHaveBeenCalledTimes(2)
+    expect(provider.listPacks).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps an uninstall tombstone until the sticker set is installed again', async () => {
+    const { rpc, database } = stickerHarness()
+    const rows: Array<Record<string, any>> = []
+    database.get.mockImplementation((async (_table: string, query: Record<string, unknown>) => rows.filter((row) =>
+      Object.entries(query).every(([key, value]) => row[key] === value))) as never)
+    database.upsert.mockImplementation((async (_table: string, values: Array<Record<string, any>>) => {
+      for (const value of values) {
+        const existing = rows.find((row) => row.platformSessionId === value.platformSessionId
+          && row.providerId === value.providerId && row.providerPackId === value.providerPackId)
+        if (existing) Object.assign(existing, value)
+        else rows.push({ id: rows.length + 1, ...value })
+      }
+    }) as never)
+
+    const initial = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    if (initial._ !== 'messages.allStickers') throw new Error('expected full sticker catalog')
+    const input = {
+      _: 'inputStickerSetID' as const,
+      id: initial.sets[0]!.id,
+      accessHash: initial.sets[0]!.accessHash,
+    }
+
+    await expect(rpc.uninstallStickerSet({
+      _: 'messages.uninstallStickerSet', stickerset: input,
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(rows).toMatchObject([{ providerPackId: '11690', archived: false, uninstalled: true }])
+    await expect(rpc.getAllStickers({
+      _: 'messages.getAllStickers', hash: Long.ZERO,
+    })).resolves.toMatchObject({ _: 'messages.allStickers', sets: [] })
+
+    await expect(rpc.installStickerSet({
+      _: 'messages.installStickerSet', stickerset: input, archived: false,
+    })).resolves.toEqual({ _: 'messages.stickerSetInstallResultSuccess' })
+    expect(rows).toMatchObject([{ providerPackId: '11690', archived: false, uninstalled: false }])
+    await expect(rpc.getAllStickers({
+      _: 'messages.getAllStickers', hash: Long.ZERO,
+    })).resolves.toMatchObject({
+      _: 'messages.allStickers',
+      sets: [expect.objectContaining({ title: 'QQ Pack', installedDate: expect.any(Number) })],
+    })
   })
 
   it('restores local favorite document mappings before returning not-modified', async () => {
@@ -328,5 +374,5 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     1,
     cacheTtlMs,
   )
-  return { rpc, provider, sticker, query }
+  return { rpc, provider, sticker, query, database }
 }
