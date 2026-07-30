@@ -14,7 +14,7 @@
 - id: bridge01
   name: '@mtproto-relay/bridge'
   config:
-    serverHost: 192.168.8.101
+    serverHost: 127.0.0.1
 - id: satori-core
   name: '@satorijs/core'
   disabled: true
