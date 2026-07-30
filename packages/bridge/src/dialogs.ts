@@ -729,10 +729,13 @@ export class DialogRpc {
     })
   }
 
-  async readHistory(req: tl.messages.RawReadHistoryRequest): Promise<tl.messages.RawAffectedMessages> {
+  async readHistory(
+    req: tl.messages.RawReadHistoryRequest,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.messages.RawAffectedMessages> {
     await this._hydratePeers()
     const conversationId = this._resolvePeer(req.peer)
-    await this._markRead(conversationId, req.maxId)
+    await this._markRead(conversationId, req.maxId, excludeConnection)
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
   }
@@ -1062,10 +1065,13 @@ export class DialogRpc {
     }
   }
 
-  async readChannelHistory(req: tl.channels.RawReadHistoryRequest): Promise<tl.TlObject> {
+  async readChannelHistory(
+    req: tl.channels.RawReadHistoryRequest,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.TlObject> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
-    await this._markRead(conversation.id, req.maxId)
+    await this._markRead(conversation.id, req.maxId, excludeConnection)
     return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
@@ -3981,7 +3987,11 @@ export class DialogRpc {
     return method
   }
 
-  private async _markRead(displayConversationId: string, tlMessageId: number): Promise<void> {
+  private async _markRead(
+    displayConversationId: string,
+    tlMessageId: number,
+    excludeConnection?: ServerConnection,
+  ): Promise<void> {
     if (!this._platform.capabilities.readState?.markRead || !this._platform.markRead || tlMessageId <= 0) return
     const projected = this._store
       ? await this._store.findProjectedByTlId(this._session.platformSessionId, tlMessageId)
@@ -3998,6 +4008,11 @@ export class DialogRpc {
       conversationId: target.id,
       messageId: ref.id,
     })
+    await this._onLocalEvent?.(this._session, {
+      type: 'read',
+      conversationId: target.id,
+      upToMessageId: ref.id,
+    }, this._localDelivery(excludeConnection))
     const cached = this._dialogCache.get(target.id)
     if (cached) {
       this._dialogCache.set(target.id, {

@@ -571,6 +571,66 @@ describe('UpdateManager', () => {
     for (const item of sent) expect(() => roundTrip(item.update)).not.toThrow()
   })
 
+  it('fans a local read update out through every bound auth key except the requesting connection', async () => {
+    const { ctx, store, manager, sent } = await createHarness()
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '1021324354657687',
+      platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+    })
+    const conversation: IMConversation = { id: 'read-fanout', kind: 'group', title: 'Read Fanout' }
+    const message: IMMessage = {
+      id: 'read-fanout-message', conversationId: conversation.id, senderId: 'alice', timestamp: 42,
+      content: { parts: [{ type: 'text', text: 'read me everywhere' }] },
+    }
+    await store.ingest(session, conversation, message)
+    const result = await store.markRead(session, conversation.id, message.id)
+    if (!result) throw new Error('missing read projection')
+    const requester = {} as ServerConnection
+
+    await manager.publish(session, {
+      event: { type: 'read', conversationId: conversation.id, upToMessageId: message.id },
+      result,
+    }, { excludeConnection: requester, deliveredViaRpc: true })
+
+    expect(sent.map(({ authKeyId }) => Buffer.from(authKeyId).toString('hex')).sort()).toEqual([
+      '0011223344556677', '1021324354657687',
+    ])
+    expect(sent.every(({ excludeConnection }) => excludeConnection === requester)).toBe(true)
+    expect(sent.map(({ update }) => (update as tl.RawUpdates).updates[0])).toMatchObject([
+      { _: 'updateReadChannelInbox', maxId: result.tlMessageId, stillUnreadCount: 0 },
+      { _: 'updateReadChannelInbox', maxId: result.tlMessageId, stillUnreadCount: 0 },
+    ])
+  })
+
+  it('keeps a locally acknowledged read update available for an offline device difference', async () => {
+    const { store, manager, sent } = await createHarness(undefined, platform, undefined, 0)
+    const conversation: IMConversation = { id: 'offline-read', kind: 'direct', title: 'Offline Read' }
+    const message: IMMessage = {
+      id: 'offline-read-message', conversationId: conversation.id, senderId: conversation.id, timestamp: 43,
+      content: { parts: [{ type: 'text', text: 'catch up later' }] },
+    }
+    await store.ingest(session, conversation, message)
+    const result = await store.markRead(session, conversation.id, message.id)
+    if (!result) throw new Error('missing read projection')
+
+    await manager.publish(session, {
+      event: { type: 'read', conversationId: conversation.id, upToMessageId: message.id },
+      result,
+    }, { excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true })
+
+    expect(sent).toEqual([])
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toMatchObject({
+      _: 'updates.difference',
+      otherUpdates: [{
+        _: 'updateReadHistoryInbox', maxId: result.tlMessageId, stillUnreadCount: 0,
+      }],
+      state: { pts: 2 },
+    })
+  })
+
   it('emits one update per mixed-media projection without an invalid Telegram album', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'channel', kind: 'channel', title: 'Channel' }
