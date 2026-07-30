@@ -338,6 +338,11 @@ export class DialogRpc {
     if (!this._store) {
       await Promise.all(selected.map((dialog) => this._loadHistory(dialog.conversation.id)))
     }
+    await this._syncStoredUsers(selected.flatMap((dialog) => [
+      ...(dialog.conversation.kind === 'direct' ? [dialog.conversation.id] : []),
+      ...[dialog.lastMessage, dialog.readInboxMaxMessage]
+        .flatMap((message) => message ? messageReferencedUserIds(message) : []),
+    ]))
     const drafts = await this._mainDrafts()
     const materialized = await Promise.all(selected.map((dialog) =>
       this._materializeDialog(dialog, drafts.get(dialog.conversation.id))))

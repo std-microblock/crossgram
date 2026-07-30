@@ -491,6 +491,38 @@ describe('rich-media projection', () => {
     expect(pick(second)).toEqual(pick(first))
   })
 
+  it('hydrates persisted group message users before serving peer dialogs after restart', async () => {
+    const { store } = await createStore()
+    const group: IMConversation = { id: 'cold-group', kind: 'group', title: 'Cold group' }
+    const lastMessage: IMMessage = {
+      id: 'cold-last', conversationId: group.id, senderId: 'alice',
+      sender: { id: 'alice', firstName: 'Alice' }, timestamp: 1_800_000_300,
+      content: { parts: [{ type: 'text', text: 'persisted group message' }] },
+    }
+    await store.ingestMany(session, group, [lastMessage], { allocation: 'history' })
+    const getDialogs = vi.fn(async () => {
+      throw new Error('persisted peer dialogs must not reload the upstream dialog list')
+    })
+    const resumed = new DialogRpc({ ...platform, getDialogs }, session, store)
+    const channelId = resumed.peerTlId(group.id)
+
+    const result = await resumed.getPeerDialogs({
+      _: 'messages.getPeerDialogs',
+      peers: [{
+        _: 'inputDialogPeer',
+        peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ONE },
+      }],
+    })
+
+    expect(getDialogs).not.toHaveBeenCalled()
+    expect(result.messages).toMatchObject([{
+      _: 'message', message: 'persisted group message',
+      fromId: { _: 'peerUser' },
+    }])
+    expect(result.users).toMatchObject([{ _: 'user', firstName: 'Alice' }])
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('requests and materializes bounded history windows instead of loading the full conversation', async () => {
     const { store, peerId } = await createStore()
     const messages = Array.from({ length: 1_000 }, (_, index): IMMessage => ({
