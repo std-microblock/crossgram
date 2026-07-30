@@ -75,6 +75,14 @@ interface ResolvedStickerInput {
   stickerId: string
 }
 
+interface MemberPageState {
+  members: IMConversationMember<any>[]
+  nextCursor?: string
+  total?: number
+  complete: boolean
+  seenCursors: Set<string>
+}
+
 export interface LegacyGetForumTopicsRequest {
   _: 'channels.getForumTopics'
   channel: tl.TypeInputChannel
@@ -139,7 +147,8 @@ export class DialogRpc {
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
-  private readonly _memberCursors = new Map<string, Map<number, string | null>>()
+  private readonly _memberPages = new Map<string, MemberPageState>()
+  private readonly _pendingMemberPages = new Map<string, Promise<void>>()
   private readonly _searchCursors = new Map<string, string>()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
@@ -1182,7 +1191,11 @@ export class DialogRpc {
     const conversation = this._resolveChannel(req.channel)
     const offset = Math.max(0, req.offset)
     const limit = Math.max(0, req.limit)
-    if (req.filter._ === 'channelParticipantsRecent') {
+    const mentionQuery = req.filter._ === 'channelParticipantsMentions'
+      ? req.filter.q?.trim()
+      : undefined
+    if (req.filter._ === 'channelParticipantsRecent'
+      || (req.filter._ === 'channelParticipantsMentions' && !mentionQuery)) {
       const page = await this._memberPage(conversation.id, offset, limit)
       const count = page.total
         ?? (Number(conversation.metadata?.participantsCount ?? 0)
@@ -1194,24 +1207,22 @@ export class DialogRpc {
         users: page.members.map((member) => this._makeMemberUser(member)),
       }
     }
-    // The platform member API is cursor-paged and has no filtered-list
-    // primitive. Do not turn Telegram's eager admin/search probes into a full
-    // upstream scan: filter only the requested member window. The returned
-    // count deliberately describes this bounded result so clients do not
-    // automatically chase every remaining unfiltered page.
-    const page = await this._memberPage(conversation.id, offset, limit)
-    let members = page.members
+    // Telegram applies offset/limit after filtering. Since the platform API is
+    // cursor-paged and has no filtered-list primitive, scan the bounded member
+    // snapshot before slicing so Android can find mention/search candidates
+    // beyond QQNT's first native page.
+    let members = await this._allMembers(conversation.id)
     if (req.filter._ === 'channelParticipantsAdmins') {
       members = members.filter((member) => member.role === 'owner' || member.role === 'administrator')
-    } else if (req.filter._ === 'channelParticipantsSearch') {
-      const query = req.filter.q.toLocaleLowerCase()
-      members = members.filter((member) =>
-        `${member.user.firstName} ${member.user.lastName ?? ''} ${member.user.username ?? ''}`
-          .toLocaleLowerCase().includes(query))
+    } else if (req.filter._ === 'channelParticipantsSearch'
+      || req.filter._ === 'channelParticipantsMentions') {
+      const query = (req.filter.q ?? '').trim().replace(/^@/, '').toLocaleLowerCase()
+      members = members.filter((member) => memberSearchText(member).includes(query))
     } else {
       members = []
     }
-    const total = offset + members.length
+    const total = members.length
+    members = members.slice(offset, offset + limit)
     return {
       _: 'channels.channelParticipants', count: total,
       participants: members.map((member) => this._makeChannelParticipant(member)),
@@ -3325,20 +3336,8 @@ export class DialogRpc {
 
   private async _allMembers(conversationId: string): Promise<IMConversationMember<any>[]> {
     if (!this._platform.capabilities.members?.list || !this._platform.getConversationMembers) return []
-    const members: IMConversationMember<any>[] = []
-    let cursor: string | undefined
-    const seenCursors = new Set<string>()
-    do {
-      const page = await this._platform.getConversationMembers(
-        this._session, { id: conversationId }, { cursor, limit: 100 },
-      )
-      members.push(...page.members)
-      cursor = page.nextCursor
-      if (cursor && seenCursors.has(cursor)) break
-      if (cursor) seenCursors.add(cursor)
-    } while (cursor && members.length < 10_000)
-    await this._persistUsers(members.map((member) => member.user))
-    return members
+    const page = await this._loadMemberPage(conversationId, 10_000)
+    return [...page.members]
   }
 
   private async _canEditAnyMessage(conversationId: string): Promise<boolean> {
@@ -3360,31 +3359,71 @@ export class DialogRpc {
     if (!this._platform.capabilities.members?.list || !this._platform.getConversationMembers || limit <= 0) {
       return { members: [] }
     }
-    let cursors = this._memberCursors.get(conversationId)
-    if (!cursors) {
-      cursors = new Map([[0, null]])
-      this._memberCursors.set(conversationId, cursors)
+    const page = await this._loadMemberPage(conversationId, Math.min(10_000, offset + limit))
+    const members = page.members.slice(offset, offset + limit)
+    const nextOffset = offset + members.length
+    return {
+      members,
+      total: page.total ?? (page.complete ? page.members.length : undefined),
+      nextCursor: nextOffset < page.members.length || !page.complete ? String(nextOffset) : undefined,
     }
-    let start = [...cursors.keys()].filter((known) => known <= offset).sort((a, b) => b - a)[0] ?? 0
-    let cursor = cursors.get(start) ?? undefined
-    let knownTotal: number | undefined
-    while (start < offset) {
-      const skipped = await this._platform.getConversationMembers(
-        this._session, { id: conversationId }, { cursor, limit: offset - start },
-      )
-      knownTotal = skipped.total ?? knownTotal
-      start += skipped.members.length
-      cursor = skipped.nextCursor
-      if (cursor) cursors.set(start, cursor)
-      if (!cursor || !skipped.members.length) return { members: [], total: knownTotal ?? start }
+  }
+
+  private async _loadMemberPage(conversationId: string, endOffset: number) {
+    let state = this._memberPages.get(conversationId)
+    if (!state) {
+      state = { members: [], complete: false, seenCursors: new Set() }
+      this._memberPages.set(conversationId, state)
     }
+    const requestedEnd = Math.min(10_000, Math.max(0, endOffset))
+    while (!state.complete && state.members.length < requestedEnd) {
+      const pending = this._pendingMemberPages.get(conversationId)
+      if (pending) {
+        await pending
+        continue
+      }
+      let loading!: Promise<void>
+      loading = this._loadNextMemberPage(conversationId, state, requestedEnd)
+        .finally(() => {
+          if (this._pendingMemberPages.get(conversationId) === loading) {
+            this._pendingMemberPages.delete(conversationId)
+          }
+        })
+      this._pendingMemberPages.set(conversationId, loading)
+      await loading
+    }
+    return state
+  }
+
+  private async _loadNextMemberPage(
+    conversationId: string,
+    state: MemberPageState,
+    requestedEnd: number,
+  ): Promise<void> {
+    const cursor = state.nextCursor
+    // QQNT currently emits native member chunks of about 30 even when
+    // Telegram asks for 100-200. Request at least 100 and retain any spill so
+    // a short upstream page cannot make Android treat page one as terminal.
+    const requestLimit = Math.min(500, Math.max(100, requestedEnd - state.members.length))
     const page = await this._platform.getConversationMembers(
-      this._session, { id: conversationId }, { cursor, limit },
+      this._session, { id: conversationId }, { cursor, limit: requestLimit },
     )
+    state.members.push(...page.members)
+    state.total = page.total ?? state.total
+
+    const nextCursor = page.nextCursor
+    const repeatedCursor = Boolean(nextCursor && (
+      nextCursor === cursor || state.seenCursors.has(nextCursor)
+    ))
+    if (!nextCursor || !page.members.length || repeatedCursor
+      || (state.total !== undefined && state.members.length >= state.total)) {
+      state.complete = true
+      state.nextCursor = undefined
+    } else {
+      state.nextCursor = nextCursor
+      state.seenCursors.add(nextCursor)
+    }
     await this._persistUsers(page.members.map((member) => member.user))
-    const nextOffset = offset + page.members.length
-    if (page.nextCursor) cursors.set(nextOffset, page.nextCursor)
-    return page
   }
 
   private _makeMemberUser(member: IMConversationMember<any>): tl.RawUser {
@@ -4273,6 +4312,20 @@ function isPlaceholderUser(user: IMUser<any>): boolean {
     && !user.avatar
     && !user.about
     && Object.keys(user.metadata ?? {}).length === 0
+}
+
+function memberSearchText(member: IMConversationMember<any>): string {
+  const metadata = member.user.metadata ?? {}
+  return [
+    member.user.firstName,
+    member.user.lastName,
+    member.user.username,
+    metadata.qq,
+    metadata.qqName,
+    metadata.qqGroupAlias,
+  ].filter((value): value is string | number => typeof value === 'string' || typeof value === 'number')
+    .join(' ')
+    .toLocaleLowerCase()
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {
