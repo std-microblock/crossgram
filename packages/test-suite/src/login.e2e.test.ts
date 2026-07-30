@@ -2789,7 +2789,7 @@ describe('bridge login e2e', () => {
         },
       }, 18)
       expect(sentMedia).toMatchObject({
-        _: 'updates',
+        _: 'updates', seq: 4,
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(700) },
           {
@@ -2831,7 +2831,7 @@ describe('bridge login e2e', () => {
         id: sentMedia.updates[1].message.id, message: 'replacement after recall',
       }, 26)
       expect(editResult).toMatchObject({
-        _: 'updatesCombined', seqStart: 4, seq: 5,
+        _: 'updatesCombined', seqStart: 5, seq: 6,
         updates: [
           {
             _: 'updateDeleteChannelMessages', messages: [sentMedia.updates[1].message.id], ptsCount: 1,
