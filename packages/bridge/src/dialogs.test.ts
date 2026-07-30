@@ -4,7 +4,7 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
-import { DialogRpc, stableId } from './dialogs.js'
+import { DialogRpc, makeTlConversationPreview, stableId } from './dialogs.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
 import type {
@@ -139,6 +139,16 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('DialogRpc', () => {
+  it('does not expose a generic merged-forward counter as the card description', () => {
+    const media = makeTlConversationPreview({
+      id: 'generic-forward', kind: 'group', title: '聊天记录',
+      metadata: { virtual: true, qqMultiForwardPreview: '3条消息的合并转发' },
+    }, 'https://t.me/bridgechat_123')
+    expect(media.webpage).toMatchObject({
+      _: 'webPage', description: '点击查看合并转发消息',
+    })
+  })
+
   it('builds serializable dialogs, users, and top messages in newest-first order', async () => {
     const platform = new DialogTestPlatform()
     const getUser = vi.spyOn(platform, 'getUser')
@@ -985,6 +995,15 @@ describe('DialogRpc', () => {
       _: 'contacts.resolveUsername', username: `bridgechat_${temporaryId}`,
     })).toMatchObject({
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: temporaryId },
+      chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
+    })
+    await expect(freshRpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs', peers: [{
+        _: 'inputDialogPeer', peer,
+      }],
+    })).resolves.toMatchObject({
+      dialogs: [{ peer: { _: 'peerChat', chatId: temporaryId }, topMessage: expect.any(Number) }],
+      messages: [{ _: 'message', message: 'work' }],
       chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
     })
     await expect(freshRpc.getScheduledHistory({

@@ -26,6 +26,7 @@ import { Mtproto } from '../service.js'
 import { CURRENT_API_LAYER } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
+import type { ServerConnection } from '../transport/server-connection.js'
 import { generateRsaKeyPair, type ServerRsaKey } from '../crypto/rsa-keygen.js'
 import { bareVector } from '../rpc/dispatcher.js'
 import { getApiLayerReaderMap } from '../rpc/api-layer.js'
@@ -435,7 +436,11 @@ async function startServer(
   downloadBytes: Uint8Array
   register: Mtproto['register']
   broadcastUpdate: (update: tl.TypeUpdates) => void
-  sendUpdateToAuthKey: (authKeyId: Uint8Array, update: tl.TypeUpdates) => number
+  sendUpdateToAuthKey: (
+    authKeyId: Uint8Array,
+    update: tl.TypeUpdates,
+    excludeConnection?: ServerConnection,
+  ) => number
   stop: () => Promise<void>
 }> {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
@@ -535,7 +540,8 @@ async function startServer(
     port: ctx.mtproto.port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes,
     register: ctx.mtproto.register.bind(ctx.mtproto),
     broadcastUpdate: (update) => ctx.mtproto.broadcastUpdate(update),
-    sendUpdateToAuthKey: (authKeyId, update) => ctx.mtproto.sendUpdateToAuthKey(authKeyId, update),
+    sendUpdateToAuthKey: (authKeyId, update, excludeConnection) =>
+      ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection),
     stop: () => Promise.resolve(fiber.dispose()),
   }
 }
@@ -1348,6 +1354,92 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       )).map((event) => event.connectionId)).toEqual(['conn-1'])
       main.close()
       media.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('fans a local RPC update out to another connection using the same auth key', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop, register, sendUpdateToAuthKey } = await startServer(
+      (event) => debugEvents.push(event),
+    )
+    try {
+      const sender = await TestClient.connect(port)
+      const perm = await doClientHandshake(sender, pubKey, false)
+      const senderSession = new Long(0x41414141, 0x41414141)
+      await sender.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'updates.getState' }),
+        perm.salt,
+        senderSession,
+        4,
+      ))
+      expect(await readRpcResult(sender, perm)).toMatchObject({ _: 'updates.state', pts: 1 })
+
+      const observer = await TestClient.connect(port)
+      const observerSession = new Long(0x42424242, 0x42424242)
+      await observer.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'updates.getState' }),
+        perm.salt,
+        observerSession,
+        8,
+      ))
+      expect(await readRpcResult(observer, perm)).toMatchObject({ _: 'updates.state', pts: 1 })
+
+      let delivered = 0
+      register('help.getNearestDc', async (rpc) => {
+        delivered = sendUpdateToAuthKey(rpc.authKeyId!, {
+          _: 'updates',
+          updates: [{
+            _: 'updateNewMessage',
+            message: {
+              _: 'message', id: 2026,
+              fromId: { _: 'peerUser', userId: 42 },
+              peerId: { _: 'peerUser', userId: 42 },
+              date: nowSec(), message: 'visible on B',
+            },
+            pts: 2, ptsCount: 1,
+          }],
+          users: [], chats: [], date: nowSec(), seq: 1,
+        } as unknown as tl.TypeUpdates, rpc.connection)
+        return { _: 'nearestDc', country: 'US', thisDc: 1, nearestDc: 1 }
+      })
+
+      debugEvents.length = 0
+      await sender.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'help.getNearestDc' }),
+        perm.salt,
+        senderSession,
+        12,
+      ))
+      expect(await readRpcResult(sender, perm)).toMatchObject({ _: 'nearestDc', thisDc: 1 })
+
+      let pushed: any
+      for (let i = 0; i < 10; i++) {
+        const frame = await within(observer.read(), 2_000, 'observer update')
+        const reader = clientDecrypt(perm, frame)
+        try {
+          const update = reader.object() as { _: string }
+          if (update._ === 'updates') {
+            pushed = update
+            break
+          }
+        } catch { /* Ignore acknowledgements from updates.getState. */ }
+      }
+      expect(delivered).toBe(1)
+      expect(pushed).toMatchObject({
+        updates: [{ _: 'updateNewMessage', message: { id: 2026, message: 'visible on B' } }],
+      })
+      expect(debugEvents.filter((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'updates'
+      )).map((event) => event.connectionId)).toEqual(['conn-2'])
+      sender.close()
+      observer.close()
     } finally {
       await stop()
     }

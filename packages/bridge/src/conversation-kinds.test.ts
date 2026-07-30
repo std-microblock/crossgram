@@ -6,6 +6,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
+import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
@@ -640,6 +641,49 @@ describe('conversation kinds', () => {
     }])
   })
 
+  it('returns one confirmation when a platform merges multiple Android forwards into one message', async () => {
+    const mergedPlatform: IMPlatform = {
+      ...platform,
+      async getHistory(_session, target) {
+        const conversation = conversations.find((item) => item.id === target.id)!
+        return { messages: [0, 1].map((index) => ({
+          ...source(conversation), id: `merge-source-${index}`, timestamp: 10 + index,
+        })) }
+      },
+      async forwardMessages(_session, _from, _ids, to) {
+        const virtual: IMConversation = {
+          id: 'virtual-merged', kind: 'group', title: '聊天记录',
+          metadata: { virtual: true, qqMultiForwardPreview: 'Alice: one\nBob: two' },
+        }
+        return [{
+          id: 'merged-output', conversationId: to.id, senderId: 'self', outgoing: true, timestamp: 20,
+          content: { parts: [{
+            type: 'text', text: '查看聊天记录', entities: [{
+              type: 'conversation-link', offset: 0, length: 6, conversation: virtual,
+            }],
+          }] },
+        }]
+      },
+    }
+    const { rpc } = await createRpc(mergedPlatform)
+    await rpc.getDialogs(dialogsRequest())
+    const directId = await rpc.userTlId('direct')
+    const directPeer = { _: 'inputPeerUser' as const, userId: directId, accessHash: Long.ZERO }
+    const history = await rpc.getHistory(historyRequest(directPeer)) as tl.messages.RawMessages
+    const ids = history.messages.slice(0, 2).map((message) => (message as tl.RawMessage).id)
+    expect(ids).toHaveLength(2)
+
+    const forwarded = await rpc.forwardMessages({
+      _: 'messages.forwardMessages', fromPeer: { _: 'inputPeerEmpty' }, id: ids,
+      randomId: [Long.fromNumber(201), Long.fromNumber(202)], toPeer: directPeer,
+    }) as tl.RawUpdates
+
+    expect(forwarded.updates.filter((update) => update._ === 'updateMessageID')).toEqual([{
+      _: 'updateMessageID', id: expect.any(Number), randomId: Long.fromNumber(201),
+    }])
+    expect(forwarded.updates.filter((update) => update._ === 'updateNewMessage')).toHaveLength(1)
+  })
+
   it('projects delete-and-resend editing as delete plus new-message updates', async () => {
     const actions = platform.capabilities.messageActions!
     const originalMode = actions.edit.mode
@@ -684,6 +728,39 @@ describe('conversation kinds', () => {
     } finally {
       actions.edit.mode = originalMode
     }
+  })
+
+  it('publishes a locally sent message to observer connections', async () => {
+    const { rpc, store, localEvents, localDeliveryOptions } = await createRpc(
+      platform, { publishLocalEvents: true },
+    )
+    await rpc.getDialogs(dialogsRequest())
+    const groupId = stableId('peer:group')
+    const requester = {} as ServerConnection
+
+    const result = await rpc.sendMessage({
+      _: 'messages.sendMessage',
+      peer: { _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO },
+      message: 'fan out to B', randomId: Long.fromNumber(2026),
+    }, requester) as tl.RawUpdates
+
+    expect(localEvents).toMatchObject([{
+      type: 'message', conversation: { id: 'group' },
+      message: { conversationId: 'group', outgoing: true, content: { parts: [{ text: 'fan out to B' }] } },
+    }])
+    expect(localDeliveryOptions).toEqual([{
+      excludeConnection: requester, deliveredViaRpc: true,
+    }])
+    expect(result).toMatchObject({
+      _: 'updates', seq: 2,
+      updates: [
+        { _: 'updateMessageID', randomId: Long.fromNumber(2026) },
+        { _: 'updateNewChannelMessage', pts: 12, ptsCount: 1 },
+      ],
+    })
+    expect((await store.readHistory(session.platformSessionId, 'group'))[0]).toMatchObject({
+      content: { parts: [{ type: 'text', text: 'fan out to B' }] },
+    })
   })
 
   it('lets administrators edit beyond the member window while keeping regular members time-limited', async () => {

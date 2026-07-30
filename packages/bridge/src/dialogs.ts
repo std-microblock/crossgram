@@ -1,6 +1,6 @@
 import type { tl } from '@mtcute/core'
 import Long from 'long'
-import { RpcError } from '@mtproto-relay/mtproto'
+import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import {
   cardUrl, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
   messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
@@ -359,7 +359,19 @@ export class DialogRpc {
         continue
       }
       const peerId = this._resolvePeer(requested.peer)
-      const dialog = byId.get(peerId)
+      let dialog = byId.get(peerId)
+      if (!dialog) {
+        const conversation = this._conversation(peerId)
+        if (this._isVirtualConversation(conversation)) {
+          const history = await this._visibleMessages(await this._loadHistory(peerId, { limit: 1 }))
+          dialog = {
+            conversation,
+            lastMessage: history[0]?.source,
+            readInboxMaxMessage: history[0]?.source,
+            unreadCount: 0,
+          }
+        }
+      }
       if (!dialog || seen.has(peerId)) continue
       selected.push(dialog)
       seen.add(peerId)
@@ -1210,12 +1222,12 @@ export class DialogRpc {
     }
   }
 
-  async sendMessage(req: SendMessageRequest): Promise<tl.TypeUpdates> {
+  async sendMessage(req: SendMessageRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     const randomId = req.randomId.toString()
     const existing = this._sentByRandomId.get(randomId)
     if (existing) return existing
 
-    const pending = this._sendMessage(req).then(async (result) => {
+    const pending = this._sendMessage(req, excludeConnection).then(async (result) => {
       if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
       return result
     })
@@ -1228,28 +1240,30 @@ export class DialogRpc {
     }
   }
 
-  async sendMedia(req: SendMediaRequest): Promise<tl.TypeUpdates> {
+  async sendMedia(req: SendMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     return this._sendMediaOnce(req.randomId.toString(), async () => {
       const resolved = await this._resolveSendMedia(req.media)
       const parts: IMMessageInput['parts'] = []
       if (req.message) parts.push(this._inputTextPart(req.message, req.entities))
       if ('sticker' in resolved) {
         parts.push({ type: 'sticker', sticker: resolved.sticker })
-        const updates = await this._sendRichContent(req.peer, { parts }, [], [req.randomId], req.replyTo)
+        const updates = await this._sendRichContent(
+          req.peer, { parts }, [], [req.randomId], req.replyTo, excludeConnection,
+        )
         await this._stickers?.markUsedByRef(resolved.providerId, resolved.stickerId)
         if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
         return updates
       }
       parts.push({ type: 'media', media: resolved.media })
       const updates = await this._sendRichContent(
-        req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo,
+        req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo, excludeConnection,
       )
       if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
       return updates
     })
   }
 
-  async sendMultiMedia(req: SendMultiMediaRequest): Promise<tl.TypeUpdates> {
+  async sendMultiMedia(req: SendMultiMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     const randomId = req.multiMedia.map((item) => item.randomId.toString()).join(':')
     return this._sendMediaOnce(randomId, async () => {
       if (!req.multiMedia.length) throw new RpcError(400, 'MEDIA_EMPTY')
@@ -1266,6 +1280,7 @@ export class DialogRpc {
         mediaResolved.map((item) => item.upload),
         req.multiMedia.map((item) => item.randomId),
         req.replyTo,
+        excludeConnection,
       )
       if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
       return updates
@@ -1355,7 +1370,10 @@ export class DialogRpc {
     return { _: 'messages.affectedMessages', pts, ptsCount: 0 }
   }
 
-  async editMessage(req: tl.messages.RawEditMessageRequest): Promise<tl.TypeUpdates> {
+  async editMessage(
+    req: tl.messages.RawEditMessageRequest,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.TypeUpdates> {
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
     if (req.media || req.richMessage || req.message === undefined) throw new RpcError(400, 'MESSAGE_EDIT_UNSUPPORTED')
@@ -1399,7 +1417,7 @@ export class DialogRpc {
     const now = source.timestamp || Math.floor(Date.now() / 1000)
     if (edited!.replacedMessageId && this._onLocalEvent) {
       const replacementKey = `${edited!.replacedMessageId}:${source.id}`
-      const delivery = { excludeAuthKeyId: this._authKeyId, deliveredViaRpc: true }
+      const delivery = this._localDelivery(excludeConnection)
       const deleted = await this._onLocalEvent(this._session, {
         type: 'message-delete',
         eventId: `local-edit-replace:${replacementKey}`,
@@ -1964,7 +1982,10 @@ export class DialogRpc {
     return this._userId(platformUserId)
   }
 
-  private async _sendMessage(req: SendMessageRequest): Promise<tl.TypeUpdates> {
+  private async _sendMessage(
+    req: SendMessageRequest,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.TypeUpdates> {
     if (!this._platform.capabilities.send.text) throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
     if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
     if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
@@ -1992,6 +2013,24 @@ export class DialogRpc {
       conversationId: peerId,
       outgoing: true,
       replyToId: sent.replyToId ?? replyToId,
+    }
+    const published = await this._publishLocalMessage(peerId, source, excludeConnection)
+    if (published) {
+      const update = published.updates.find((item) =>
+        item._ === 'updateNewMessage' || item._ === 'updateNewChannelMessage') as
+        | tl.RawUpdateNewMessage
+        | tl.RawUpdateNewChannelMessage
+        | undefined
+      if (!update) throw new RpcError(500, 'MESSAGE_UPDATE_NOT_FOUND')
+      const id = update.message.id
+      const target = this._conversation(peerId)
+      if (this._isTelegramChannel(target)) {
+        return this._withMessageIds(published, [req.randomId])
+      }
+      return {
+        _: 'updateShortSentMessage', out: true, id,
+        pts: update.pts, ptsCount: update.ptsCount, date: source.timestamp,
+      }
     }
     let persisted: Awaited<ReturnType<MessageStore['ingest']>> | undefined
     if (this._store) {
@@ -2122,6 +2161,7 @@ export class DialogRpc {
     uploads: UploadedFile[],
     randomIds: Long[],
     replyTo?: tl.TypeInputReplyTo,
+    excludeConnection?: ServerConnection,
   ): Promise<tl.TypeUpdates> {
     const media = content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
     const stickers = content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
@@ -2162,10 +2202,12 @@ export class DialogRpc {
     }))
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
+    const published = await this._publishLocalMessage(peerId, source, excludeConnection)
+    if (published) return this._withMessageIds(published, randomIds)
     const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
       ?? { id: peerId, kind: 'direct' as const, title: peerId }
     const persisted = await this._store.ingest(this._session, conversation, source)
-    await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
 
     const updates: tl.TypeUpdate[] = []
     let pts = await this._reservePts(persisted.projection.length, source.timestamp, conversation)
@@ -2200,6 +2242,47 @@ export class DialogRpc {
         : [this._makeSelfUser()],
       chats: target.kind === 'direct' ? [] : [this._makeChat(target)],
       date: source.timestamp, seq: 0,
+    }
+  }
+
+  private async _publishLocalMessage(
+    conversationId: string,
+    message: IMMessage,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.RawUpdates | undefined> {
+    if (!this._store || !this._onLocalEvent) return
+    const conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
+      ?? this._conversation(conversationId)
+    const published = await this._onLocalEvent(
+      this._session,
+      { type: 'message', conversation, message },
+      this._localDelivery(excludeConnection),
+    ) as tl.RawUpdates | undefined
+    if (published === undefined || published._ !== 'updates') return
+    this._historyCache.delete(conversationId)
+    return published
+  }
+
+  private _withMessageIds(payload: tl.RawUpdates, randomIds: Long[]): tl.RawUpdates {
+    let index = 0
+    const updates: tl.TypeUpdate[] = []
+    for (const update of payload.updates) {
+      if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
+        const randomId = randomIds[index++]
+        if (randomId) updates.push({ _: 'updateMessageID', id: update.message.id, randomId })
+      }
+      updates.push(update)
+    }
+    return {
+      ...payload,
+      updates,
+    }
+  }
+
+  private _localDelivery(excludeConnection?: ServerConnection): PlatformEventDeliveryOptions {
+    return {
+      ...(excludeConnection ? { excludeConnection } : this._authKeyId ? { excludeAuthKeyId: this._authKeyId } : {}),
+      deliveredViaRpc: true,
     }
   }
 
@@ -3980,6 +4063,9 @@ export function makeTlConversationPreview(
   url: string,
 ): tl.RawMessageMediaWebPage {
   const preview = conversation.metadata?.qqMultiForwardPreview
+  const detailedPreview = typeof preview === 'string' && isDetailedConversationPreview(preview)
+    ? preview.trim()
+    : undefined
   return {
     _: 'messageMediaWebPage', manual: true, safe: true,
     webpage: {
@@ -3988,11 +4074,16 @@ export function makeTlConversationPreview(
       url, displayUrl: conversation.title, hash: 0,
       type: 'telegram_message',
       title: conversation.title,
-      description: typeof preview === 'string' && preview.trim()
-        ? preview.trim()
-        : '点击查看合并转发消息',
+      description: detailedPreview ?? '点击查看合并转发消息',
     },
   }
+}
+
+function isDetailedConversationPreview(value: string): boolean {
+  const compact = value.replace(/\s+/g, '')
+  return !(/^(?:点击)?查看(?:[xX×\d]+条)?(?:消息的)?(?:合并)?转发(?:消息)?$/.test(compact)
+    || /^(?:共)?[xX×\d]+条消息的合并转发$/.test(compact)
+    || /^(?:合并转发|聊天记录)$/.test(compact))
 }
 
 export function projectTlMessage(options: {

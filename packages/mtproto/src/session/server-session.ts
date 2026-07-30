@@ -249,6 +249,10 @@ export class ServerSession {
     return this._acceptsUpdates
   }
 
+  get connection(): ServerConnection {
+    return this._connection
+  }
+
   /** Apply an API layer learned by another connection using the same auth key. */
   applyApiLayer(layer: number): void {
     this._setApiLayer(layer, false)

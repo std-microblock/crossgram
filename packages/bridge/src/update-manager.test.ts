@@ -6,6 +6,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
+import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
@@ -60,13 +61,17 @@ async function createHarness(
   await ctx.database.create('mtproto_auth_binding', {
     authKeyId: '8899aabbccddeeff', platformId: session.platformId, platformSessionId: 'other-session',
   })
-  const sent: Array<{ authKeyId: Uint8Array, update: tl.TypeUpdates }> = []
+  const sent: Array<{
+    authKeyId: Uint8Array
+    update: tl.TypeUpdates
+    excludeConnection?: ServerConnection
+  }> = []
   const store = new MessageStore(ctx.database, updateDeliveryRetention)
   const blockedPeers = blockedMode ? new BlockedPeerStore(ctx.database, blockedMode) : undefined
   const manager = new UpdateManager(
     ctx.database, new PlatformRegistry([[session.platformId, targetPlatform]]), store,
-    (authKeyId, update) => {
-      sent.push({ authKeyId, update })
+    (authKeyId, update, excludeConnection) => {
+      sent.push({ authKeyId, update, excludeConnection })
       return deliveredConnections
     },
     1, undefined, projectSticker, blockedPeers,
@@ -239,7 +244,7 @@ describe('UpdateManager', () => {
     })
   })
 
-  it('returns RPC-delivered replacements while pushing only to observer auth keys', async () => {
+  it('returns RPC-delivered replacements while excluding only the requester connection', async () => {
     const { ctx, store, manager, sent } = await createHarness(undefined, platform, undefined, 0)
     await ctx.database.create('mtproto_auth_binding', {
       authKeyId: '1122334455667788',
@@ -254,7 +259,10 @@ describe('UpdateManager', () => {
     }
     const created = await store.ingest(session, conversation, original)
     const deleted = await store.deleteMessages(session, conversation, [original.id])
-    const options = { excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true }
+    const requester = {} as ServerConnection
+    const options = {
+      excludeAuthKeyId: '0011223344556677', excludeConnection: requester, deliveredViaRpc: true,
+    }
     const deletePayload = await manager.publish(session, {
       event: {
         type: 'message-delete', eventId: 'local-edit:original:replacement', conversation,
@@ -273,9 +281,13 @@ describe('UpdateManager', () => {
       result: replacementResult,
     }, options) as tl.RawUpdates
 
-    expect(sent).toHaveLength(2)
+    expect(sent).toHaveLength(4)
     expect(sent.map(({ authKeyId }) => Buffer.from(authKeyId).toString('hex')))
-      .toEqual(['1122334455667788', '1122334455667788'])
+      .toEqual([
+        '0011223344556677', '1122334455667788',
+        '0011223344556677', '1122334455667788',
+      ])
+    expect(sent.every(({ excludeConnection }) => excludeConnection === requester)).toBe(true)
     expect(deletePayload.updates).toMatchObject([{
       _: 'updateDeleteChannelMessages', messages: [created.projection[0].tlMessageId], ptsCount: 1,
     }])
@@ -285,8 +297,8 @@ describe('UpdateManager', () => {
     expect(replacementPayload.updates[0]).toMatchObject({
       pts: (deletePayload.updates[0] as tl.RawUpdateDeleteChannelMessages).pts + 1,
     })
-    expect(sent[0].update).toEqual(deletePayload)
-    expect(sent[1].update).toEqual(replacementPayload)
+    expect(sent.slice(0, 2).every(({ update }) => update === deletePayload)).toBe(true)
+    expect(sent.slice(2).every(({ update }) => update === replacementPayload)).toBe(true)
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
   })
 
