@@ -952,6 +952,15 @@ describe('DialogRpc', () => {
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: temporaryId },
       chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
     })
+    await expect(freshRpc.getPeerDialogs({
+      _: 'messages.getPeerDialogs', peers: [{
+        _: 'inputDialogPeer', peer,
+      }],
+    })).resolves.toMatchObject({
+      dialogs: [{ peer: { _: 'peerChat', chatId: temporaryId }, topMessage: expect.any(Number) }],
+      messages: [{ _: 'message', message: 'work' }],
+      chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
+    })
     await expect(freshRpc.getScheduledHistory({
       _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,
     })).resolves.toMatchObject({ _: 'messages.messages', messages: [] })
