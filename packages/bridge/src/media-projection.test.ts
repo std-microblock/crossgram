@@ -507,7 +507,7 @@ describe('rich-media projection', () => {
       && message.media.document.mimeType === 'video/webm')
     expect(projected).toMatchObject({
       _: 'message', media: {
-        _: 'messageMediaDocument',
+        _: 'messageMediaDocument', video: true,
         document: {
           _: 'document', mimeType: 'video/webm',
           thumbs: [
@@ -543,7 +543,7 @@ describe('rich-media projection', () => {
     const message = result.messages.find((item) => item._ === 'message') as tl.RawMessage
 
     expect(message.media).toMatchObject({
-      _: 'messageMediaDocument',
+      _: 'messageMediaDocument', video: true,
       document: {
         _: 'document', mimeType: 'video/mp4', size: 1_048_576,
         attributes: expect.arrayContaining([expect.objectContaining({

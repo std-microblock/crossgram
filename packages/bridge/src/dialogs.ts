@@ -3898,6 +3898,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   })
   return {
     _: 'messageMediaDocument',
+    video: media.mimeType?.startsWith('video/') ? true : undefined,
     document: {
       _: 'document', id, accessHash, fileReference, date: timestamp,
       mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId,
@@ -3964,6 +3965,7 @@ function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessa
   }
   return {
     _: 'messageMediaDocument',
+    video: staged.media.mimeType?.startsWith('video/') ? true : undefined,
     document: {
       _: 'document', id, accessHash, fileReference, date: staged.timestamp,
       mimeType: staged.media.mimeType ?? 'application/octet-stream',
