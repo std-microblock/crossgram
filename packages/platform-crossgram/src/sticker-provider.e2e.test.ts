@@ -55,7 +55,7 @@ describe('QQStickerProvider saved-sticker pipeline', () => {
 
     expect(result.stickers).toMatchObject([{
       providerId: 'qq:stickers', stickerId: 'favorite:good',
-      format: 'static', mimeType: 'image/webp', width: 16, height: 12,
+      packId: 'qq-favorites', format: 'static', mimeType: 'image/webp', width: 16, height: 12,
     }])
     expect(result.stickers[0]!.size).toBeGreaterThan(0)
     expect(logger.warn).toHaveBeenCalledWith(
@@ -69,6 +69,7 @@ describe('QQStickerProvider saved-sticker pipeline', () => {
 function favorite(id: string): WireSticker {
   return {
     stickerId: `favorite:${id}`,
+    packId: 'qq-favorites',
     title: id,
     format: 'static',
     mimeType: 'image/png',
