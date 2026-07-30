@@ -148,9 +148,10 @@ class QQPlatform implements IMPlatform<QQMediaLocator> {
 }
 ```
 
-图片可以携带 adapter 已提取的 `preview: { mimeType, size, width, height, locator }`。
-bridge 会把它投影为 Telegram 的 `photoSize(type='m')`，完整图片使用 `type='x'`；客户端请求
-`thumb_size=m` 时，bridge 仍调用同一个 `downloadMedia()`，但传入 preview 的 locator。
+图片可以携带 adapter 已提取的 `preview: { mimeType, size, width, height, locator }`，供 bridge
+缓存和非图片文档预览复用。普通图片只投影最小的内联 `photoStrippedSize(type='i')` 和完整图片
+`photoSize(type='x')`，不再暴露中间档 `type='m'`。兼容旧消息缓存的 `thumb_size=m` 请求也会
+返回完整图片，避免客户端把可下载 preview 当成最终图片。
 adapter 还可以提供 `strippedThumbnail: Uint8Array`。它必须是 Telegram stripped JPEG 格式
 （版本字节、单字节高宽、quality-20 baseline JPEG scan data）；bridge 会将其作为
 `photoStrippedSize(type='i')` 直接内联在消息中并持久化，客户端显示占位图时不需要下载文件。

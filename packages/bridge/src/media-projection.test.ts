@@ -73,6 +73,13 @@ const platform: IMPlatform = {
     const bytes = new TextEncoder().encode((media.locator as { remote: string }).remote)
     yield bytes.subarray(options?.offset ?? 0, (options?.offset ?? 0) + (options?.limit ?? bytes.length))
   },
+  async resolveMediaUrl(_session, media) {
+    return {
+      url: `https://cdn.example.test/${(media.locator as { remote: string }).remote}`,
+      expiresAt: Date.now() + 60_000,
+      supportsRange: true,
+    }
+  },
 }
 
 const disposals: Array<() => Promise<void>> = []
@@ -290,14 +297,15 @@ describe('rich-media projection', () => {
     expect((messages[1].media as tl.RawMessageMediaPhoto).photo).toMatchObject({
       _: 'photo', accessHash: Long.fromNumber(1), sizes: [
         { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
-        { _: 'photoSize', type: 'm', w: 320, h: 240, size: 7 },
         { _: 'photoSize', type: 'x', w: 800, h: 600, size: 1234 },
       ],
     })
+    const photo = (messages[1].media as tl.RawMessageMediaPhoto).photo as tl.RawPhoto
+    expect(photo.sizes.map((size) => size.type)).toEqual(['i', 'x'])
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
-  it('serves an extracted photo preview through Telegram thumb_size m', async () => {
+  it('serves the original photo for stale Telegram thumb_size m requests', async () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
     disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
@@ -314,7 +322,15 @@ describe('rich-media projection', () => {
       offset: 0, limit: 1024,
     })
     if (file._ !== 'upload.file') throw new Error('expected file')
-    expect(new TextDecoder().decode(file.bytes)).toBe('photo-preview')
+    expect(new TextDecoder().decode(file.bytes)).toBe('photo')
+
+    const direct = await rpc.getFileUrl({
+      _: 'inputPhotoFileLocation', id: media.photo.id, accessHash: media.photo.accessHash,
+      fileReference: media.photo.fileReference, thumbSize: 'm',
+    })
+    expect(JSON.parse(direct.data)).toMatchObject({
+      url: 'https://cdn.example.test/photo', supportsRange: true,
+    })
   })
 
   it('restores a persisted user ID and avatar locator in a fresh DialogRpc instance', async () => {
@@ -470,7 +486,6 @@ describe('rich-media projection', () => {
       _: 'message', fromId: { _: 'peerUser', userId: sender!.id },
       media: { _: 'messageMediaPhoto', photo: { _: 'photo', sizes: [
         { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
-        { _: 'photoSize', type: 'm' },
         { _: 'photoSize', type: 'x' },
       ] } },
     })
@@ -482,6 +497,8 @@ describe('rich-media projection', () => {
 
   it('projects converted animated images as WebM documents with a preview', async () => {
     const { store, peerId } = await createStore()
+    const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-document-preview-'))
+    disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
     const animated: IMMessage = {
       ...album,
       id: 'animated-image',
@@ -498,9 +515,10 @@ describe('rich-media projection', () => {
         },
       }] },
     }
-    const result = await new DialogRpc({
+    const rpc = new DialogRpc({
       ...platform, async getHistory() { return { messages: [animated] } },
-    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    }, session, store, new UploadManager(uploadPath))
+    const result = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const projected = result.messages.find((message) => message._ === 'message'
       && message.media?._ === 'messageMediaDocument'
       && message.media.document?._ === 'document'
@@ -521,6 +539,20 @@ describe('rich-media projection', () => {
       },
     })
     expect(() => wireRoundTrip(result)).not.toThrow()
+
+    const document = (projected as tl.RawMessage).media as tl.RawMessageMediaDocument
+    if (document.document?._ !== 'document') throw new Error('expected animated document')
+    const previewFile = await rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputDocumentFileLocation', id: document.document.id,
+        accessHash: document.document.accessHash, fileReference: document.document.fileReference,
+        thumbSize: 'm',
+      },
+      offset: 0, limit: 1024,
+    })
+    if (previewFile._ !== 'upload.file') throw new Error('expected preview file')
+    expect(new TextDecoder().decode(previewFile.bytes)).toBe('animated-preview')
   })
 
   it('projects native MP4 media as a seekable Telegram video with duration', async () => {
