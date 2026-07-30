@@ -935,6 +935,42 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('scopes read boundaries when direct and channel message IDs collide', async () => {
+    const readTargets: Array<{ conversationId: string, messageId: string }> = []
+    const readPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        readState: { markRead: true, events: true },
+      },
+      async markRead(_session, target) { readTargets.push(target) },
+    }
+    const { rpc } = await createRpc(readPlatform)
+    await rpc.getDialogs(dialogsRequest())
+    const directPeer = {
+      _: 'inputPeerUser' as const, userId: await rpc.userTlId('direct'), accessHash: Long.ZERO,
+    }
+    const groupId = stableId('peer:group')
+    const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
+    const directHistory = await rpc.getHistory(historyRequest(directPeer)) as tl.messages.RawMessages
+    const groupHistory = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+    const directMessage = directHistory.messages[0] as tl.RawMessage
+    const groupMessage = groupHistory.messages[0] as tl.RawMessage
+    expect(groupMessage.id).toBe(directMessage.id)
+
+    await rpc.readHistory({ _: 'messages.readHistory', peer: directPeer, maxId: directMessage.id })
+    await rpc.readChannelHistory({
+      _: 'channels.readHistory',
+      channel: { _: 'inputChannel', channelId: groupId, accessHash: Long.ZERO },
+      maxId: groupMessage.id,
+    })
+
+    expect(readTargets).toEqual([
+      { conversationId: 'direct', messageId: 'message-direct' },
+      { conversationId: 'group', messageId: 'message-group' },
+    ])
+  })
+
   it('projects every group as a megagroup and reuses its cached member snapshot', async () => {
     const calls: Array<{ cursor?: string, limit?: number }> = []
     const allMembers = ['self', 'alice', 'bob', 'carol', 'dave'].map((id, index) => ({
