@@ -2267,9 +2267,20 @@ describe('bridge login e2e', () => {
       }, 216)
       expect(installedPluginPack.set.installedDate).toBeGreaterThan(0)
       expect(await callRpc(resumed, key, resumedSid, {
+        _: 'messages.uninstallStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: pluginSet.id, accessHash: pluginSet.accessHash },
+      }, 217)).toEqual({ _: 'boolTrue' })
+      const catalogAfterUninstall = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getAllStickers', hash: Long.ZERO,
+      }, 218)
+      expect(catalogAfterUninstall).toMatchObject({ _: 'messages.allStickers' })
+      expect(catalogAfterUninstall.sets).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: pluginSet.id }),
+      ]))
+      expect(await callRpc(resumed, key, resumedSid, {
         _: 'messages.reorderStickerSets',
         order: [pluginSet.id],
-      }, 218)).toEqual({ _: 'boolTrue' })
+      }, 219)).toEqual({ _: 'boolTrue' })
 
       const edited = await callRpc(resumed, key, resumedSid, {
         _: 'messages.editMessage',
