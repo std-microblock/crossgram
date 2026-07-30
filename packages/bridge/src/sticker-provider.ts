@@ -46,6 +46,8 @@ export interface IMStickerPackSummary {
   count?: number
   cover?: IMStickerRef
   version?: number
+  /** Bridge-owned assignment policy; providers only describe pack ownership. */
+  automaticAssociation?: 'provider-account'
 }
 
 export interface IMStickerPack extends IMStickerPackSummary {
@@ -104,6 +106,8 @@ export type IMStickerSendPlan =
 
 export interface StickerProviderCapabilities {
   platformKinds?: string[]
+  /** Platform entry that owns this provider's native account-scoped data. */
+  ownerPlatformId?: string
   sessionScoped?: boolean
   conversationScoped?: boolean
   search?: boolean

@@ -110,7 +110,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   const logger = ctx.logger('platform-qqnt')
   const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger, ctx.database)
   ctx.imPlatform.register(platform, id)
-  ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId, mediaCache, logger), stickerProviderId)
+  ctx.imSticker.register(
+    new QQStickerProvider(platform.client, stickerProviderId, mediaCache, logger, id),
+    stickerProviderId,
+  )
 }
 
 export class QQNTPlatform implements IMPlatform<QQMediaLocator> {

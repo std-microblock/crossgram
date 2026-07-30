@@ -11,6 +11,26 @@ const context: StickerProviderContext = {
 }
 
 describe('QQStickerProvider saved stickers', () => {
+  it('declares the synthetic QQ favorites pack as owned by its QQNT account', async () => {
+    const client = {
+      getStickerPacks: vi.fn(async () => ({
+        packs: [
+          { packId: 'qq-favorites', title: 'QQ 收藏表情', version: 1 },
+          { packId: 'market-1', title: '商店表情', version: 1 },
+        ],
+      })),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers', undefined, undefined, 'qq/primary')
+
+    await expect(provider.listPacks(context)).resolves.toMatchObject({
+      packs: [
+        { packId: 'qq-favorites', automaticAssociation: 'provider-account' },
+        { packId: 'market-1', automaticAssociation: undefined },
+      ],
+    })
+    expect(provider.capabilities.ownerPlatformId).toBe('qq/primary')
+  })
+
   it('skips only corrupt saved sticker assets and preserves healthy prepared stickers', async () => {
     const saved = [
       favorite('corrupt'),
