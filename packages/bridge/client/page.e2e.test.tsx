@@ -6,7 +6,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PlatformAccountDashboardData } from '../src/account-dashboard.js'
 import type { StickerPackDashboardData } from '../src/sticker-dashboard.js'
 
-const rpcState = vi.hoisted(() => ({ data: undefined as unknown }))
+type DashboardData = PlatformAccountDashboardData & StickerPackDashboardData
+
+const rpcState = vi.hoisted(() => ({ data: undefined as unknown as DashboardData }))
 
 vi.mock('@cordisjs/client', async () => {
   const { ref } = await import('vue')
@@ -68,7 +70,7 @@ function mountPage() {
   })
 }
 
-function dashboardData(): PlatformAccountDashboardData & StickerPackDashboardData {
+function dashboardData(): DashboardData {
   return {
     accounts: [], updatedAt: 0, refresh: vi.fn(async () => undefined),
     stickerUpdatedAt: 0,
