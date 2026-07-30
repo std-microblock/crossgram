@@ -6,6 +6,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
+import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
@@ -684,6 +685,39 @@ describe('conversation kinds', () => {
     } finally {
       actions.edit.mode = originalMode
     }
+  })
+
+  it('publishes a locally sent message to observer connections', async () => {
+    const { rpc, store, localEvents, localDeliveryOptions } = await createRpc(
+      platform, { publishLocalEvents: true },
+    )
+    await rpc.getDialogs(dialogsRequest())
+    const groupId = stableId('peer:group')
+    const requester = {} as ServerConnection
+
+    const result = await rpc.sendMessage({
+      _: 'messages.sendMessage',
+      peer: { _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO },
+      message: 'fan out to B', randomId: Long.fromNumber(2026),
+    }, requester) as tl.RawUpdates
+
+    expect(localEvents).toMatchObject([{
+      type: 'message', conversation: { id: 'group' },
+      message: { conversationId: 'group', outgoing: true, content: { parts: [{ text: 'fan out to B' }] } },
+    }])
+    expect(localDeliveryOptions).toEqual([{
+      excludeConnection: requester, deliveredViaRpc: true,
+    }])
+    expect(result).toMatchObject({
+      _: 'updates', seq: 2,
+      updates: [
+        { _: 'updateMessageID', randomId: Long.fromNumber(2026) },
+        { _: 'updateNewChannelMessage', pts: 12, ptsCount: 1 },
+      ],
+    })
+    expect(await store.readHistory(session.platformSessionId, 'group')).toMatchObject([{
+      content: { parts: [{ type: 'text', text: 'fan out to B' }] },
+    }])
   })
 
   it('lets administrators edit beyond the member window while keeping regular members time-limited', async () => {
