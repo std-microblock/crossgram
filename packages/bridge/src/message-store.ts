@@ -262,6 +262,9 @@ export class MessageStore {
         title: dialog.conversation.title,
         parentPlatformConversationId: dialog.conversation.parentId ?? null,
         spacePlatformId: dialog.conversation.spaceId ?? null,
+        avatar: (dialog.conversation.avatar
+          ?? existingConversations.get(dialog.conversation.id)?.avatar
+          ?? null) as JsonValue | null,
         metadata: dialog.conversation.metadata ?? {},
         unreadCount: dialog.unreadCount,
         updatedAt: now,
@@ -1230,6 +1233,7 @@ export class MessageStore {
       title: conversation.title,
       parentPlatformConversationId: conversation.parentId ?? null,
       spacePlatformId: conversation.spaceId ?? null,
+      avatar: (conversation.avatar ?? existing?.avatar ?? null) as JsonValue | null,
       metadata: conversation.metadata ?? {},
       unreadCount: unreadCount ?? existing?.unreadCount ?? 0,
       updatedAt: now,
@@ -1754,6 +1758,7 @@ function toConversation(row: IMConversationRow): IMConversation {
     title: row.title,
     parentId: row.parentPlatformConversationId ?? undefined,
     spaceId: row.spacePlatformId ?? undefined,
+    avatar: row.avatar === null ? undefined : row.avatar as unknown as IMConversation['avatar'],
     metadata: row.metadata,
   }
 }
