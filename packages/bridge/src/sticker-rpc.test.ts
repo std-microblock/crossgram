@@ -280,7 +280,7 @@ describe('StickerRpc', () => {
       platformKinds: ['qq'], ownerPlatformId: 'qq/source', sessionScoped: true,
     }
     provider.prepareSend = vi.fn(async () => ({
-      type: 'native', providerId: sticker.providerId, stickerId: sticker.stickerId,
+      type: 'native' as const, providerId: sticker.providerId, stickerId: sticker.stickerId,
       reference: { native: true },
     }))
     const bytes = new Uint8Array([1, 2, 3])
