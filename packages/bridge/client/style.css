@@ -5,6 +5,233 @@
   color: var(--fg0);
 }
 
+.sticker-packs-page {
+  --sticker-accent: #6f5bd3;
+  --sticker-accent-soft: color-mix(in srgb, var(--sticker-accent) 12%, var(--bg0));
+  color: var(--fg0);
+}
+
+.sticker-toolbar p {
+  margin: 2px 0 0;
+  color: var(--fg2);
+  font-size: 12px;
+}
+
+.sticker-content {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+  box-sizing: border-box;
+}
+
+.sticker-account-picker,
+.sticker-catalog {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg0);
+}
+
+.sticker-account-picker {
+  margin-bottom: 18px;
+  padding: 16px;
+}
+
+.picker-label {
+  margin-bottom: 10px;
+  color: var(--fg2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.account-tabs {
+  display: flex;
+  gap: 9px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.account-tab {
+  display: grid;
+  flex: 0 0 auto;
+  min-width: 180px;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg1);
+  color: var(--fg0);
+  cursor: pointer;
+  text-align: left;
+}
+
+.account-tab:hover,
+.account-tab.active {
+  border-color: var(--sticker-accent);
+  background: var(--sticker-accent-soft);
+}
+
+.account-tab strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-tab span {
+  color: var(--fg2);
+  font-size: 10px;
+}
+
+.sticker-catalog {
+  padding: 18px;
+}
+
+.catalog-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 16px;
+}
+
+.catalog-heading h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.catalog-heading > div > span {
+  color: var(--fg2);
+  font-size: 11px;
+}
+
+.sticker-search input {
+  width: min(330px, 42vw);
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  background: var(--bg1);
+  color: var(--fg0);
+  box-sizing: border-box;
+}
+
+.sticker-search input:focus {
+  border-color: var(--sticker-accent);
+}
+
+.sticker-pack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr));
+  gap: 11px;
+}
+
+.sticker-pack-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 78px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg1);
+}
+
+.sticker-pack-card.assigned {
+  border-color: color-mix(in srgb, var(--sticker-accent) 50%, var(--border));
+  background: var(--sticker-accent-soft);
+}
+
+.pack-symbol {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--sticker-accent) 16%, var(--bg0));
+  color: var(--sticker-accent);
+  font-size: 21px;
+  font-weight: 750;
+}
+
+.pack-details {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.pack-details h3,
+.pack-details p {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pack-details h3 {
+  font-size: 13px;
+}
+
+.pack-details p,
+.pack-source {
+  color: var(--fg2);
+  font-size: 10px;
+}
+
+.pack-details code {
+  overflow: hidden;
+  color: var(--fg2);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assignment-button {
+  min-width: 66px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--sticker-accent);
+  border-radius: 7px;
+  background: var(--sticker-accent);
+  color: white;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.assignment-button.assigned {
+  background: transparent;
+  color: var(--sticker-accent);
+}
+
+.assignment-button.automatic {
+  border-color: var(--border);
+  background: var(--bg0);
+  color: var(--fg2);
+}
+
+.assignment-button:disabled {
+  cursor: default;
+  opacity: .72;
+}
+
+.sticker-empty {
+  padding: 60px 20px;
+  color: var(--fg2);
+  text-align: center;
+}
+
+.sr-only {
+  position: absolute;
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .accounts-toolbar {
   display: flex;
   align-items: center;
@@ -409,6 +636,29 @@
 @media (max-width: 620px) {
   .accounts-content {
     padding: 16px 10px 32px;
+  }
+
+  .sticker-content {
+    padding: 16px 10px 32px;
+  }
+
+  .catalog-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sticker-search input {
+    width: 100%;
+  }
+
+  .sticker-pack-card {
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+    padding: 11px;
+  }
+
+  .pack-symbol {
+    width: 42px;
+    height: 42px;
   }
 
   .accounts-intro {

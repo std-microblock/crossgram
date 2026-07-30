@@ -81,8 +81,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     providerIdPrefix: id,
   })
   ctx.imPlatform.register(platform, id)
-  ctx.imSticker.register(new StaticStickerProvider(`${id}:native`, true), `${id}:native`)
-  ctx.imSticker.register(new StaticStickerProvider(`${id}:plugin`, false), `${id}:plugin`)
+  ctx.imSticker.register(new StaticStickerProvider(`${id}:native`, true, id), `${id}:native`)
+  ctx.imSticker.register(new StaticStickerProvider(`${id}:plugin`, false, id), `${id}:plugin`)
 }
 
 /** Complete in-memory reference adapter used for development and conformance tests. */
@@ -911,11 +911,16 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
 }
 
 export class StaticStickerProvider implements IMStickerProvider {
-  readonly capabilities = { platformKinds: ['static'], search: true }
+  readonly capabilities
   private readonly _pack: IMStickerPack
   private readonly _loose?: IMSticker
 
-  constructor(private readonly _providerId: string, private readonly _native: boolean) {
+  constructor(
+    private readonly _providerId: string,
+    private readonly _native: boolean,
+    ownerPlatformId?: string,
+  ) {
+    this.capabilities = { platformKinds: ['static'], search: true, ownerPlatformId }
     const kind = _native ? 'native' : 'plugin'
     this._pack = {
       providerId: _providerId,

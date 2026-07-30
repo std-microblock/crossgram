@@ -8,19 +8,26 @@ import type { QQStickerReference, WireSticker, WireStickerPack } from './protoco
 
 /** Exposes QQ market packs and the account's QQ favorite collection. */
 export class QQStickerProvider implements IMStickerProvider {
-  readonly capabilities = { platformKinds: ['qq'], sessionScoped: true }
+  readonly capabilities
 
   constructor(
     private readonly client: QQNTClient,
     private readonly providerId: string,
     private readonly mediaCache?: QQMediaCache,
     private readonly logger?: QQStickerLogger,
-  ) {}
+    ownerPlatformId?: string,
+  ) {
+    this.capabilities = { platformKinds: ['qq'], sessionScoped: true, ownerPlatformId }
+  }
 
   async listPacks(_context: StickerProviderContext, query: StickerPageQuery = {}) {
     const page = await this.client.getStickerPacks(query)
     return {
-      packs: page.packs.map((pack) => ({ ...pack, providerId: this.providerId })),
+      packs: page.packs.map((pack) => ({
+        ...pack,
+        providerId: this.providerId,
+        automaticAssociation: pack.packId === 'qq-favorites' ? 'provider-account' as const : undefined,
+      })),
       nextCursor: page.nextCursor,
     }
   }
@@ -95,6 +102,7 @@ export class QQStickerProvider implements IMStickerProvider {
       count: pack.count,
       cover: stickers[0] && { providerId: this.providerId, stickerId: stickers[0].stickerId },
       version: pack.version,
+      automaticAssociation: pack.packId === 'qq-favorites' ? 'provider-account' : undefined,
       stickers,
     }
   }
