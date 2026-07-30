@@ -748,6 +748,31 @@ describe('DialogRpc', () => {
     expect(platform.lastInput).toMatchObject({ replyToId: '1' })
   })
 
+  it('passes a stable native sequence with replies whose opaque platform ID may change', async () => {
+    const platform = new DialogTestPlatform()
+    platform.addMessage('alice', {
+      id: 'old-account-view-id', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_010,
+      content: { parts: [{ type: 'text', text: 'stable reply target' }] },
+      metadata: { qqMsgSeq: '571' },
+    })
+    const rpc = new DialogRpc(platform, session)
+    const aliceId = rpc.peerTlId('alice')
+    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
+    const target = history.messages.find((message) =>
+      message._ === 'message' && message.message === 'stable reply target')
+    expect(target).toMatchObject({ _: 'message' })
+
+    await rpc.sendMessage(sendMessageRequest(aliceId, {
+      randomId: Long.fromNumber(1236),
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId: target!.id },
+    }))
+
+    expect(platform.lastInput).toMatchObject({
+      replyToId: 'old-account-view-id',
+      replyToNativeSequence: '571',
+    })
+  })
+
   it('maps Telegram mention-name entities to opaque platform users and back', async () => {
     const platform = new DialogTestPlatform()
     const rpc = new DialogRpc(platform, session)

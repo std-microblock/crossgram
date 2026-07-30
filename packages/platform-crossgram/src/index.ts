@@ -815,7 +815,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       try {
         sent = await this.client.sendMessage(
           conversation.id, text, media.length ? media : undefined,
-          options, originRequestId, sticker, textParts, content.replyToId,
+          options, originRequestId, sticker, textParts,
+          content.replyToId, content.replyToNativeSequence,
         )
       } catch (error) {
         if (error instanceof QQNTMessageSendRejectedError) {

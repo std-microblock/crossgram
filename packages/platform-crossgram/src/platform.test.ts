@@ -582,6 +582,7 @@ describe('QQNTPlatform mapping', () => {
 
     const sent = await platform.sendMessage(session, { id: '2:group' }, {
       replyToId: 'opaque-original',
+      replyToNativeSequence: '571',
       parts: [{
         type: 'text', text: 'hello @Alice',
         entities: [{ type: 'mention', offset: 6, length: 6, userId: 'u_alice' }],
@@ -594,6 +595,7 @@ describe('QQNTPlatform mapping', () => {
       entities: [{ type: 'mention', offset: 6, length: 6, userId: 'u_alice', numericId: '12345' }],
     }])
     expect(call[7]).toBe('opaque-original')
+    expect(call[8]).toBe('571')
     expect(platform.client.getUser).toHaveBeenCalledWith('u_alice')
     expect(sent).toMatchObject({
       replyToId: 'opaque-original',
