@@ -57,6 +57,20 @@ describe('QQStickerProvider saved stickers', () => {
 
     await expect(provider.listSavedStickers(context)).rejects.toThrow('QQNT unavailable')
   })
+
+  it('preserves the synthetic QQ favorites pack identity on saved stickers', async () => {
+    const sticker = { ...favorite('packed'), packId: 'qq-favorites' }
+    const client = {
+      getSavedStickers: vi.fn(async () => ({ stickers: [sticker] })),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
+
+    await expect(provider.listSavedStickers(context)).resolves.toMatchObject({
+      stickers: [{
+        providerId: 'qq:stickers', stickerId: 'favorite:packed', packId: 'qq-favorites',
+      }],
+    })
+  })
 })
 
 function favorite(id: string): WireSticker {
