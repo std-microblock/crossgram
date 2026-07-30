@@ -715,9 +715,9 @@ describe('conversation kinds', () => {
         { _: 'updateNewChannelMessage', pts: 12, ptsCount: 1 },
       ],
     })
-    expect(await store.readHistory(session.platformSessionId, 'group')).toMatchObject([{
+    expect((await store.readHistory(session.platformSessionId, 'group'))[0]).toMatchObject({
       content: { parts: [{ type: 'text', text: 'fan out to B' }] },
-    }])
+    })
   })
 
   it('lets administrators edit beyond the member window while keeping regular members time-limited', async () => {

@@ -2149,23 +2149,25 @@ export class DialogRpc {
       this._session,
       { type: 'message', conversation, message },
       this._localDelivery(excludeConnection),
-    )
-    if (published?._ !== 'updates') return
+    ) as tl.RawUpdates | undefined
+    if (published === undefined || published._ !== 'updates') return
     this._historyCache.delete(conversationId)
     return published
   }
 
   private _withMessageIds(payload: tl.RawUpdates, randomIds: Long[]): tl.RawUpdates {
     let index = 0
+    const updates: tl.TypeUpdate[] = []
+    for (const update of payload.updates) {
+      if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
+        const randomId = randomIds[index++]
+        if (randomId) updates.push({ _: 'updateMessageID', id: update.message.id, randomId })
+      }
+      updates.push(update)
+    }
     return {
       ...payload,
-      updates: payload.updates.flatMap((update) => {
-        if (update._ !== 'updateNewMessage' && update._ !== 'updateNewChannelMessage') return [update]
-        const randomId = randomIds[index++]
-        return randomId
-          ? [{ _: 'updateMessageID' as const, id: update.message.id, randomId }, update]
-          : [update]
-      }),
+      updates,
     }
   }
 
