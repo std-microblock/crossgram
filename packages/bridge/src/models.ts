@@ -35,6 +35,7 @@ export interface IMConversationRow {
   title: string
   parentPlatformConversationId: string | null
   spacePlatformId: string | null
+  avatar: JsonValue | null
   metadata: JsonObject
   unreadCount: number
   updatedAt: Date
@@ -273,7 +274,8 @@ export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_im_conversation', {
     id: 'unsigned', platformSessionId: 'string', platformConversationId: 'text', kind: 'string', title: 'text',
     parentPlatformConversationId: { type: 'text', nullable: true },
-    spacePlatformId: { type: 'text', nullable: true }, metadata: 'json', updatedAt: 'timestamp',
+    spacePlatformId: { type: 'text', nullable: true }, avatar: { type: 'json', nullable: true },
+    metadata: 'json', updatedAt: 'timestamp',
     unreadCount: 'unsigned',
   }, {
     primary: 'id', autoInc: true,

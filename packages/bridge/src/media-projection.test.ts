@@ -353,6 +353,51 @@ describe('rich-media projection', () => {
     expect(await freshRpc.userTlId('alice')).toBe(alice.id)
   })
 
+  it('restores a persisted group avatar without reloading dialogs after restart', async () => {
+    const { store } = await createStore()
+    const avatar = {
+      id: 'avatar:group:cold', kind: 'image' as const, mimeType: 'image/jpeg',
+      locator: { remote: 'group-avatar-bytes' },
+    }
+    const group: IMConversation = {
+      id: 'cold-avatar-group', kind: 'group', title: 'Cold avatar group', avatar,
+    }
+    await store.ingestDialogs(session, [{ conversation: group, unreadCount: 0 }])
+    const getDialogs = vi.fn(async () => {
+      throw new Error('persisted group avatars must not reload dialogs')
+    })
+    const resumed = new DialogRpc({ ...platform, getDialogs }, session, store)
+    const channelId = resumed.peerTlId(group.id)
+    const dialogs = await resumed.getPeerDialogs({
+      _: 'messages.getPeerDialogs',
+      peers: [{
+        _: 'inputDialogPeer',
+        peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ONE },
+      }],
+    })
+    const chat = dialogs.chats[0]
+    if (chat?._ !== 'channel' || chat.photo._ !== 'chatPhoto') {
+      throw new Error('expected persisted group avatar')
+    }
+
+    const freshRpc = new DialogRpc({ ...platform, getDialogs }, session, store)
+    const file = await freshRpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPeerPhotoFileLocation',
+        peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ONE },
+        photoId: chat.photo.photoId, big: false,
+      },
+      offset: 0, limit: 1024,
+    })
+
+    expect(getDialogs).not.toHaveBeenCalled()
+    expect(file._).toBe('upload.file')
+    if (file._ === 'upload.file') {
+      expect(new TextDecoder().decode(file.bytes)).toBe('group-avatar-bytes')
+    }
+  })
+
   it('restores persisted identities and inline thumbnails when getMessages is the first RPC', async () => {
     const { store } = await createStore()
     const self = await store.upsertUser(session, { id: session.userId, firstName: 'Current' })
