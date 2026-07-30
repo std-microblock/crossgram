@@ -228,6 +228,23 @@ export interface BlockedPeerRow {
   blockedAt: Date
 }
 
+export interface DialogFilterRow {
+  id: string
+  platformSessionId: string
+  filterId: number
+  sortOrder: number
+  payload: JsonObject | null
+  updatedAt: Date
+}
+
+export interface DialogFolderPeerRow {
+  id: string
+  platformSessionId: string
+  platformConversationId: string
+  folderId: number
+  updatedAt: Date
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_auth_session: AuthSessionRow
@@ -252,6 +269,8 @@ declare module '@cordisjs/plugin-database' {
     mtproto_draft: DraftRow
     mtproto_notification_settings: NotificationSettingsRow
     mtproto_blocked_peer: BlockedPeerRow
+    mtproto_dialog_filter: DialogFilterRow
+    mtproto_dialog_folder_peer: DialogFolderPeerRow
   }
 }
 
@@ -443,5 +462,23 @@ export function defineModels(ctx: Context): void {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'platformUserId']],
     indexes: [['platformSessionId', 'blockedAt']],
+  })
+
+  ctx.model.extend('mtproto_dialog_filter', {
+    id: 'string', platformSessionId: 'string', filterId: 'unsigned', sortOrder: 'integer',
+    payload: { type: 'json', nullable: true }, updatedAt: 'timestamp',
+  }, {
+    primary: 'id',
+    unique: [['platformSessionId', 'filterId']],
+    indexes: [['platformSessionId', 'sortOrder']],
+  })
+
+  ctx.model.extend('mtproto_dialog_folder_peer', {
+    id: 'string', platformSessionId: 'string', platformConversationId: 'text',
+    folderId: 'unsigned', updatedAt: 'timestamp',
+  }, {
+    primary: 'id',
+    unique: [['platformSessionId', 'platformConversationId']],
+    indexes: [['platformSessionId', 'folderId']],
   })
 }

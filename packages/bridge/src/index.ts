@@ -37,6 +37,7 @@ import {
 } from './account-dashboard.js'
 import { AuthTransferStore } from './auth-transfer.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
+import { DialogFolderStore } from './dialog-folders.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -55,6 +56,7 @@ export * from './platform-account.js'
 export * from './account-dashboard.js'
 export * from './auth-transfer.js'
 export * from './blocked-peers.js'
+export * from './dialog-folders.js'
 export * from './stripped-thumbnail.js'
 export * from './sticker-outline.js'
 
@@ -128,6 +130,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const blockedPeers = new BlockedPeerStore(
     ctx.database, config.blockedContentMode ?? 'hide-user',
   )
+  const dialogFolders = new DialogFolderStore(ctx.database)
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
   const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
@@ -162,6 +165,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   )
   const requireBridgeSession = createSessionResolver(
     ctx, registry, stickerRpcFor, resources, store, drafts, notificationSettings, blockedPeers,
+    dialogFolders,
     subscriptions, uploads, generation,
     (localSession, update, excludeAuthKeyId) => updates.publishDraft(
       localSession, update, excludeAuthKeyId,
@@ -357,6 +361,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       notificationSettings,
       selfRow.id,
       blockedPeers,
+      dialogFolders,
     )
     rpc.setPlatformData(state)
     await subscriptions.ensure(session)
@@ -686,9 +691,40 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   rpc.register('help.getCountriesList', async () => ({
     _: 'help.countriesList', countries: [], hash: 0,
   } as unknown as tl.TlObject))
-  rpc.register('messages.getDialogFilters', async () => ({
-    _: 'messages.dialogFilters', flags: 0, filters: [],
-  } as unknown as tl.TlObject))
+  rpc.register('messages.getDialogFilters', async (rpc) =>
+    (await requireBridgeSession(rpc)).dialogs.getDialogFilters())
+  rpc.register('messages.getSuggestedDialogFilters', async (rpc) => {
+    await requireBridgeSession(rpc)
+    return bareVector([])
+  })
+  rpc.register('messages.updateDialogFilter', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const update = await state.dialogs.updateDialogFilter(
+      req as tl.messages.RawUpdateDialogFilterRequest,
+    )
+    await updates.publishAccountUpdates(
+      state.session, [update], rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+    return { _: 'boolTrue' }
+  })
+  rpc.register('messages.updateDialogFiltersOrder', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const update = await state.dialogs.updateDialogFiltersOrder(
+      req as tl.messages.RawUpdateDialogFiltersOrderRequest,
+    )
+    await updates.publishAccountUpdates(
+      state.session, [update], rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+    return { _: 'boolTrue' }
+  })
+  rpc.register('folders.editPeerFolders', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const result = await state.dialogs.editPeerFolders(req as tl.folders.RawEditPeerFoldersRequest)
+    await updates.publishAccountUpdates(
+      state.session, result.updates, rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+    return result
+  })
   rpc.register('auth.resendCode', async (_rpc, req) => {
     const phone = normPhone((req as unknown as { phoneNumber: string }).phoneNumber)
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
@@ -737,6 +773,7 @@ function createSessionResolver(
   drafts: DraftStore,
   notificationSettings: NotificationSettingsStore,
   blockedPeers: BlockedPeerStore,
+  dialogFolders: DialogFolderStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
   generation: object,
@@ -800,6 +837,7 @@ function createSessionResolver(
             notificationSettings,
             selfRow.id,
             blockedPeers,
+            dialogFolders,
           )
           return state
         })()
