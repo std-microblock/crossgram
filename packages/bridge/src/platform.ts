@@ -304,6 +304,8 @@ export interface IMReactionSummary {
   key: string
   count: number
   selected?: boolean
+  /** Telegram chosen_order; larger values are more recently selected. */
+  selectedOrder?: number
   recentActors?: IMReactionActor[]
 }
 

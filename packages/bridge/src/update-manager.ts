@@ -21,6 +21,7 @@ import type {
 import { makeUser } from './synthetic.js'
 import { registerVirtualConversation } from './virtual-conversations.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
+import { customReactionDocumentId } from './reaction-rpc.js'
 
 /** Converts committed platform events to account-scoped MTProto updates. */
 export class UpdateManager {
@@ -40,6 +41,7 @@ export class UpdateManager {
       sticker: IMSticker,
     ) => tl.TypeMessageMedia | undefined,
     private readonly _blockedPeers?: BlockedPeerStore,
+    private readonly _registerReactions?: (session: PlatformSession, message: IMMessage) => void,
   ) {}
 
   async publishPeerBlocked(
@@ -126,6 +128,7 @@ export class UpdateManager {
             })
       }
       for (const item of group.reactionMessages) {
+        this._registerReactions?.(session, item.message)
         const reactions = makeMessageReactions(item.message, session.platformSessionId)
         updates.push(...item.messageIds.map((msgId): tl.RawUpdateMessageReactions => ({
           _: 'updateMessageReactions', peer, msgId, reactions,
@@ -244,6 +247,7 @@ export class UpdateManager {
     const visibleMessage = this._blockedPeers?.filterMessageReactions(
       session.platformSessionId, result.message,
     ) ?? result.message
+    this._registerReactions?.(session, visibleMessage)
     const reactions = makeMessageReactions(visibleMessage, session.platformSessionId)
     const directPeerId = displayConversation.kind === 'direct'
       ? (await this._store.getUser(session.platformId, displayConversation.id)
@@ -342,6 +346,7 @@ export class UpdateManager {
     const visibleMessage = this._blockedPeers?.filterMessageReactions(
       session.platformSessionId, event.message,
     ) ?? event.message
+    this._registerReactions?.(session, visibleMessage)
     const isEdit = event.type === 'message-edit'
     const eventKey = isEdit
       ? `${session.platformSessionId}:edit:${event.eventId}`
@@ -881,13 +886,12 @@ function makeMessageReactions(
       if (!definition) return []
       const reaction: tl.TypeReaction = definition.presentation.type === 'emoji'
         ? { _: 'reactionEmoji', emoticon: definition.presentation.emoticon }
-        : { _: 'reactionCustomEmoji', documentId: Long.fromNumber(stableId([
-            'reaction-resource', 1, platformSessionId, message.conversationId,
-            definition.key, definition.presentation.resource.version,
-          ].join(':'))) }
+        : { _: 'reactionCustomEmoji', documentId: Long.fromNumber(
+            customReactionDocumentId(platformSessionId, definition),
+          ) }
       return [{
         _: 'reactionCount', reaction, count: summary.count,
-        chosenOrder: summary.selected ? 0 : undefined,
+        chosenOrder: summary.selected ? summary.selectedOrder ?? 0 : undefined,
       } as tl.RawReactionCount]
     }),
   }

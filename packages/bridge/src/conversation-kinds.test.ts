@@ -329,6 +329,128 @@ describe('conversation kinds', () => {
     })))
   })
 
+  it('persists request order as Telegram chosen order for selected reactions', async () => {
+    const group = conversations.find((item) => item.id === 'group')!
+    const available = [
+      { key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } },
+      { key: 'fire', presentation: { type: 'emoji' as const, emoticon: '🔥' } },
+    ]
+    let reactionContext = { available, reactions: [], maxSelected: 2 } as import('./platform.js').IMReactionContext
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: true, events: false, actorList: false, maxSelected: 2 },
+      },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation: group, unreadCount: 0,
+          lastMessage: { ...source(group), metadata: { qqMsgSeq: '572' }, reactionContext },
+        }] }
+      },
+      async getAvailableReactions() {
+        return reactionContext
+      },
+      async setMessageReactions(_session, _target, keys) {
+        reactionContext = {
+          available,
+          reactions: keys.map((key) => ({ key, count: 1, selected: true })),
+          maxSelected: 2,
+        }
+        return reactionContext
+      },
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+    const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
+
+    const response = await rpc.sendReaction({
+      _: 'messages.sendReaction', peer, msgId: message.id,
+      reaction: [
+        { _: 'reactionEmoji', emoticon: '👍' },
+        { _: 'reactionEmoji', emoticon: '🔥' },
+      ],
+    }) as tl.RawUpdates
+    const reactionUpdate = response.updates.find(
+      (update): update is tl.RawUpdateMessageReactions => update._ === 'updateMessageReactions',
+    )!
+    expect(reactionUpdate.reactions.results).toMatchObject([
+      { reaction: { _: 'reactionEmoji', emoticon: '👍' }, chosenOrder: 1 },
+      { reaction: { _: 'reactionEmoji', emoticon: '🔥' }, chosenOrder: 2 },
+    ])
+
+    const reloaded = await rpc.getChannelMessages({
+      _: 'channels.getMessages',
+      channel: { _: 'inputChannel', channelId: rpc.peerTlId('group'), accessHash: Long.ZERO },
+      id: [{ _: 'inputMessageID', id: message.id }],
+    }) as tl.messages.RawChannelMessages
+    const stored = reloaded.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+    expect(stored.reactions?.results).toMatchObject([
+      { reaction: { _: 'reactionEmoji', emoticon: '👍' }, chosenOrder: 1 },
+      { reaction: { _: 'reactionEmoji', emoticon: '🔥' }, chosenOrder: 2 },
+    ])
+  })
+
+  it('assigns a newer chosen order when an existing unselected reaction is clicked', async () => {
+    const group = conversations.find((item) => item.id === 'group')!
+    const available = [
+      { key: 'fire', presentation: { type: 'emoji' as const, emoticon: '🔥' } },
+      { key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } },
+    ]
+    let reactionContext = {
+      available,
+      reactions: [
+        { key: 'fire', count: 3, selected: false },
+        { key: 'like', count: 2, selected: true, selectedOrder: 4 },
+      ],
+      maxSelected: 2,
+    } as import('./platform.js').IMReactionContext
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: true, events: false, actorList: false, maxSelected: 2 },
+      },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation: group, unreadCount: 0,
+          lastMessage: { ...source(group), metadata: { qqMsgSeq: '573' }, reactionContext },
+        }] }
+      },
+      async getAvailableReactions() {
+        return reactionContext
+      },
+      async setMessageReactions(_session, _target, keys) {
+        reactionContext = {
+          available,
+          reactions: keys.map((key) => ({ key, count: key === 'fire' ? 4 : 2, selected: true })),
+          maxSelected: 2,
+        }
+        return reactionContext
+      },
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+    const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
+
+    const response = await rpc.sendReaction({
+      _: 'messages.sendReaction', peer, msgId: message.id,
+      reaction: [
+        { _: 'reactionEmoji', emoticon: '🔥' },
+        { _: 'reactionEmoji', emoticon: '👍' },
+      ],
+    }) as tl.RawUpdates
+    const reactionUpdate = response.updates.find(
+      (update): update is tl.RawUpdateMessageReactions => update._ === 'updateMessageReactions',
+    )!
+    expect(reactionUpdate.reactions.results).toMatchObject([
+      { reaction: { _: 'reactionEmoji', emoticon: '🔥' }, chosenOrder: 5 },
+      { reaction: { _: 'reactionEmoji', emoticon: '👍' }, chosenOrder: 4 },
+    ])
+  })
+
   it('maps a permanently unavailable reaction target to a non-retryable RPC error', async () => {
     const group = conversations.find((item) => item.id === 'group')!
     const available = [{ key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }]

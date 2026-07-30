@@ -849,6 +849,33 @@ describe('DialogRpc', () => {
     })
   })
 
+  it('refreshes contacts before resolving a username absent from loaded dialogs', async () => {
+    class ContactsOnlyMentionPlatform extends DialogTestPlatform {
+      override async getDialogs(): Promise<IMDialogPage> {
+        const page = await super.getDialogs()
+        return { dialogs: page.dialogs.filter((dialog) => dialog.conversation.id === 'alice') }
+      }
+    }
+    const platform = new ContactsOnlyMentionPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+    const aliceId = rpc.peerTlId('alice')
+    const text = 'hello @BoB and @missing'
+
+    await rpc.sendMessage(sendMessageRequest(aliceId, {
+      message: text, randomId: Long.fromNumber(1_001),
+      entities: [
+        { _: 'messageEntityMention', offset: text.indexOf('@BoB'), length: '@BoB'.length },
+        { _: 'messageEntityMention', offset: text.indexOf('@missing'), length: '@missing'.length },
+      ],
+    }))
+
+    expect(platform.lastInput).toMatchObject({ parts: [{
+      type: 'text', text,
+      entities: [{ type: 'mention', offset: text.indexOf('@BoB'), length: '@BoB'.length, userId: 'bob' }],
+    }] })
+  })
+
   it('infers known @username text without mistaking email addresses or unknown users for mentions', async () => {
     const platform = new DialogTestPlatform()
     const rpc = new DialogRpc(platform, session)
