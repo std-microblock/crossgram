@@ -3,7 +3,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { RpcError } from '@mtproto-relay/mtproto'
+import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import { DialogRpc, makeTlConversationPreview, stableId } from './dialogs.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
@@ -499,17 +499,28 @@ describe('DialogRpc', () => {
 
   it('maps Telegram read boundaries back to opaque platform messages', async () => {
     const platform = new DialogTestPlatform()
-    const rpc = new DialogRpc(platform, session)
+    const localEvents: Array<{ event: import('./platform.js').IMEvent, options: unknown }> = []
+    const rpc = new DialogRpc(
+      platform, session, undefined, undefined, undefined, 1, undefined, undefined, undefined,
+      async (_session, event, options) => { localEvents.push({ event, options }) },
+      'source-auth-key',
+    )
     const peer = { _: 'inputPeerUser' as const, userId: stableId('peer:alice'), accessHash: Long.ZERO }
     const history = await rpc.getHistory(getHistoryRequest(peer.userId)) as tl.messages.RawMessages
     const newest = history.messages[0] as tl.RawMessage
+    const requester = {} as ServerConnection
 
-    await expect(rpc.readHistory({ _: 'messages.readHistory', peer, maxId: newest.id }))
+    await expect(rpc.readHistory({ _: 'messages.readHistory', peer, maxId: newest.id }, requester))
       .resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
     expect(platform.readTargets).toEqual([{ conversationId: 'alice', messageId: '2' }])
+    expect(localEvents).toEqual([{
+      event: { type: 'read', conversationId: 'alice', upToMessageId: '2' },
+      options: { excludeConnection: requester, deliveredViaRpc: true },
+    }])
 
     await rpc.readHistory({ _: 'messages.readHistory', peer, maxId: 0x7fffffff })
     expect(platform.readTargets).toHaveLength(1)
+    expect(localEvents).toHaveLength(1)
   })
 
   it('uses platform search filters and carries its opaque cursor across Telegram pages', async () => {

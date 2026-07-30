@@ -206,6 +206,7 @@ export class UpdateManager {
       await this._publishRead(
         session,
         committed as Extract<CommittedPlatformEvent, { event: { type: 'read' } }>,
+        options,
       )
       return
     }
@@ -273,6 +274,7 @@ export class UpdateManager {
   private async _publishRead(
     session: PlatformSession,
     committed: Extract<CommittedPlatformEvent, { event: { type: 'read' } }>,
+    options: PlatformEventDeliveryOptions,
   ): Promise<void> {
     const { event, result } = committed
     const displayConversation = result.conversation.kind === 'channel' && result.conversation.parentId
@@ -314,7 +316,11 @@ export class UpdateManager {
       date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
-    if (await this._send(session.platformSessionId, payload)) await this._store.markUpdatePublished(eventKey)
+    if (await this._send(
+      session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
+    ) || options.deliveredViaRpc) {
+      await this._store.markUpdatePublished(eventKey)
+    }
   }
 
   private async _publishMessage(
