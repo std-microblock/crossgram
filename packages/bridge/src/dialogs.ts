@@ -335,7 +335,19 @@ export class DialogRpc {
         continue
       }
       const peerId = this._resolvePeer(requested.peer)
-      const dialog = byId.get(peerId)
+      let dialog = byId.get(peerId)
+      if (!dialog) {
+        const conversation = this._conversation(peerId)
+        if (this._isVirtualConversation(conversation)) {
+          const history = await this._visibleMessages(await this._loadHistory(peerId, { limit: 1 }))
+          dialog = {
+            conversation,
+            lastMessage: history[0]?.source,
+            readInboxMaxMessage: history[0]?.source,
+            unreadCount: 0,
+          }
+        }
+      }
       if (!dialog || seen.has(peerId)) continue
       selected.push(dialog)
       seen.add(peerId)
@@ -3818,6 +3830,9 @@ export function makeTlConversationPreview(
   url: string,
 ): tl.RawMessageMediaWebPage {
   const preview = conversation.metadata?.qqMultiForwardPreview
+  const detailedPreview = typeof preview === 'string' && isDetailedConversationPreview(preview)
+    ? preview.trim()
+    : undefined
   return {
     _: 'messageMediaWebPage', manual: true, safe: true,
     webpage: {
@@ -3826,11 +3841,16 @@ export function makeTlConversationPreview(
       url, displayUrl: conversation.title, hash: 0,
       type: 'telegram_message',
       title: conversation.title,
-      description: typeof preview === 'string' && preview.trim()
-        ? preview.trim()
-        : '点击查看合并转发消息',
+      description: detailedPreview ?? '点击查看合并转发消息',
     },
   }
+}
+
+function isDetailedConversationPreview(value: string): boolean {
+  const compact = value.replace(/\s+/g, '')
+  return !(/^(?:点击)?查看(?:[xX×\d]+条)?(?:消息的)?(?:合并)?转发(?:消息)?$/.test(compact)
+    || /^(?:共)?[xX×\d]+条消息的合并转发$/.test(compact)
+    || /^(?:合并转发|聊天记录)$/.test(compact))
 }
 
 export function projectTlMessage(options: {
