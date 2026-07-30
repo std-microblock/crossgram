@@ -3993,9 +3993,7 @@ export class DialogRpc {
     excludeConnection?: ServerConnection,
   ): Promise<void> {
     if (!this._platform.capabilities.readState?.markRead || !this._platform.markRead || tlMessageId <= 0) return
-    const projected = this._store
-      ? await this._store.findProjectedByTlId(this._session.platformSessionId, tlMessageId)
-      : undefined
+    const projected = await this._findReadProjection(displayConversationId, tlMessageId)
     const ref = projected?.source ?? (() => {
       const known = this._tlToMessage.get(tlMessageId)
       if (!known) return
@@ -4021,6 +4019,27 @@ export class DialogRpc {
         readInboxMaxMessage: projected?.source,
       })
     }
+  }
+
+  private async _findReadProjection(
+    displayConversationId: string,
+    tlMessageId: number,
+  ): Promise<ProjectedMessage | undefined> {
+    if (!this._store) return
+    const exact = await this._store.findProjectedByTlId(
+      this._session.platformSessionId, tlMessageId, displayConversationId,
+    )
+    if (exact) return exact
+    for (const conversation of this._conversations.values()) {
+      if (conversation.parentId !== displayConversationId) continue
+      const child = await this._store.findProjectedByTlId(
+        this._session.platformSessionId, tlMessageId, conversation.id,
+      )
+      if (child) return child
+    }
+    // Preserve compatibility with partially hydrated parent-channel views;
+    // the caller still validates that this result belongs to the display peer.
+    return this._store.findProjectedByTlId(this._session.platformSessionId, tlMessageId)
   }
 }
 
