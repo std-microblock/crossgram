@@ -189,6 +189,7 @@ export interface IMMessageReactionRow {
   nativeReactionKey: string
   count: number
   selected: boolean
+  selectedOrder: number
   recentActors: Record<string, unknown>[]
   definition: Record<string, unknown>
   updatedAt: Date
@@ -425,7 +426,7 @@ export function defineModels(ctx: Context): void {
 
   ctx.model.extend('mtproto_im_message_reaction', {
     id: 'unsigned', messageId: 'unsigned', nativeReactionKey: 'text', count: 'unsigned',
-    selected: 'boolean', recentActors: 'json', definition: 'json', updatedAt: 'timestamp',
+    selected: 'boolean', selectedOrder: 'unsigned', recentActors: 'json', definition: 'json', updatedAt: 'timestamp',
   }, {
     primary: 'id', autoInc: true,
     unique: [['messageId', 'nativeReactionKey']],

@@ -138,12 +138,21 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const dialogFolders = new DialogFolderStore(ctx.database)
   const uploads = new UploadManager(resolve(config.uploadPath ?? 'data/bridge-uploads'))
   const stickerRpcs = new Map<string, { platform: IMPlatform, rpc: StickerRpc }>()
+  const reactionRpcs = new Map<string, { platform: IMPlatform, rpc: ReactionRpc }>()
   const stickerRpcFor = (platform: IMPlatform, session: PlatformSession): StickerRpc => {
     const key = `${session.platformId}\u0000${session.platformSessionId}`
     const cached = stickerRpcs.get(key)
     if (cached?.platform === platform) return cached.rpc
     const rpc = new StickerRpc(ctx.database, stickerProviders.registry, platform, session, dcId)
     stickerRpcs.set(key, { platform, rpc })
+    return rpc
+  }
+  const reactionRpcFor = (platform: IMPlatform, session: PlatformSession): ReactionRpc => {
+    const key = `${session.platformId}\u0000${session.platformSessionId}`
+    const cached = reactionRpcs.get(key)
+    if (cached?.platform === platform) return cached.rpc
+    const rpc = new ReactionRpc(platform, session, dcId, ctx.database)
+    reactionRpcs.set(key, { platform, rpc })
     return rpc
   }
   const updates = new UpdateManager(
@@ -155,6 +164,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
       .makeMessageMedia(sticker),
     blockedPeers,
+    (session, message) => reactionRpcFor(registry.require(session.platformId), session)
+      .registerContext(message.conversationId, message.reactionContext),
   )
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
@@ -169,7 +180,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (format, ...args) => bridgeLogger.debug(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
-    ctx, registry, stickerRpcFor, resources, store, drafts, notificationSettings, blockedPeers,
+    ctx, registry, stickerRpcFor, reactionRpcFor, resources, store, drafts, notificationSettings, blockedPeers,
     dialogFolders,
     subscriptions, uploads, generation,
     (localSession, update, excludeAuthKeyId) => updates.publishDraft(
@@ -407,7 +418,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     state.dialogs = new DialogRpc(
       platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
-      new ReactionRpc(platform, session, dcId, ctx.database),
+      reactionRpcFor(platform, session),
       resources,
       (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
       authKeyHex(rpc.authKeyId),
@@ -830,6 +841,7 @@ function createSessionResolver(
   ctx: Context,
   registry: PlatformRegistry,
   stickerRpcFor: (platform: IMPlatform, session: PlatformSession) => StickerRpc,
+  reactionRpcFor: (platform: IMPlatform, session: PlatformSession) => ReactionRpc,
   resources: TelegramResourceService,
   store: MessageStore,
   drafts: DraftStore,
@@ -889,7 +901,7 @@ function createSessionResolver(
           }
           state.dialogs = new DialogRpc(
             platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
-            new ReactionRpc(platform, session, dcId, ctx.database),
+            reactionRpcFor(platform, session),
             resources,
             (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
             authKeyId,

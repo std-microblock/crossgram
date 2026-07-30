@@ -1381,6 +1381,17 @@ describe('bridge login e2e', () => {
           },
         ],
       }, 10_039)
+      const mentionPlatformHistory = await readStateAdapter.getHistory(
+        bridge.sessionFromRow(platformLogin.session),
+        { id: 'qq-group' },
+        { limit: 20 },
+      )
+      expect(mentionPlatformHistory.messages.find((message) => message.content.parts.some(
+        (part) => part.type === 'text' && part.text === mentionText,
+      ))).toMatchObject({ content: { parts: [{
+        type: 'text', text: mentionText,
+        entities: [{ type: 'mention', offset: mentionText.indexOf('@BoB'), length: '@BoB'.length, userId: 'bob' }],
+      }] } })
       const sentMentionMessage = sentMention.updates.find(
         (update: any) => update._ === 'updateNewChannelMessage',
       ).message
@@ -2228,7 +2239,7 @@ describe('bridge login e2e', () => {
             msgId: labHistory.messages[1].id,
             reactions: {
               results: expect.arrayContaining([
-                expect.objectContaining({ reaction: customLabReaction, chosenOrder: 0 }),
+                expect.objectContaining({ reaction: customLabReaction, chosenOrder: 1 }),
               ]),
             },
           },
