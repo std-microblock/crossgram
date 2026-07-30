@@ -152,6 +152,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
   private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
+  private readonly multiForwardPreviewJobs = new Map<string, Promise<string | undefined>>()
   private readonly eventHandlers = new Map<
     string,
     (event: IMEvent<QQMediaLocator>) => void | Promise<void>
@@ -861,7 +862,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const merged = messageIds.length > 1
     try {
       const messages = await this.client.forwardMessages(from.id, messageIds, to.id, merged)
-      return messages.map((message) => this.mapMessage(message))
+      return Promise.all(messages.map((message) => this.prepareInitialMessage(this.mapMessage(message))))
     } catch (error) {
       if (!isNativeForwardRejection(error)
         || options.sourceMessages?.length !== messageIds.length) throw error
@@ -1301,6 +1302,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private async prepareInitialMessage(
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
+    message = await this.prepareMultiForwardPreviews(message)
     if (!this.mediaCache) return message
     const parts = await Promise.all(message.content.parts.map(async (part) => {
       if (part.type === 'sticker') {
@@ -1333,6 +1335,60 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
     }))
     return { ...message, content: { ...message.content, parts } }
+  }
+
+  private async prepareMultiForwardPreviews(
+    message: IMMessage<QQMediaLocator>,
+  ): Promise<IMMessage<QQMediaLocator>> {
+    let changed = false
+    const parts = await Promise.all(message.content.parts.map(async (part) => {
+      if (part.type !== 'text' || !part.entities?.some((entity) => entity.type === 'conversation-link')) {
+        return part
+      }
+      const entities = await Promise.all(part.entities.map(async (entity) => {
+        if (entity.type !== 'conversation-link') return entity
+        const existing = entity.conversation.metadata?.qqMultiForwardPreview
+        if (typeof existing === 'string' && isDetailedMultiForwardPreview(existing)) return entity
+        const preview = await this.resolveMultiForwardPreview(entity.conversation)
+        if (!preview) return entity
+        changed = true
+        const conversation = {
+          ...entity.conversation,
+          metadata: { ...entity.conversation.metadata, qqMultiForwardPreview: preview },
+        } as IMConversation<QQMediaLocator>
+        this.conversations.set(conversation.id, conversation)
+        return { ...entity, conversation }
+      }))
+      return entities.some((entity, index) => entity !== part.entities![index])
+        ? { ...part, entities }
+        : part
+    }))
+    return changed ? { ...message, content: { ...message.content, parts } } : message
+  }
+
+  private resolveMultiForwardPreview(
+    conversation: IMConversation<unknown>,
+  ): Promise<string | undefined> {
+    const locator = this.multiForwardLocators.get(conversation.id)
+    if (!locator) return Promise.resolve(undefined)
+    const existing = this.multiForwardPreviewJobs.get(conversation.id)
+    if (existing) return existing
+    const pending = this.client.getMultiForwardMessages(locator)
+      .then((messages) => wireMultiForwardPreview(messages))
+      .catch((error) => {
+        this.logger?.warn(
+          'merged-forward preview lookup failed conversation=%s error=%s',
+          conversation.id, formatError(error),
+        )
+        return undefined
+      })
+      .finally(() => {
+        if (this.multiForwardPreviewJobs.get(conversation.id) === pending) {
+          this.multiForwardPreviewJobs.delete(conversation.id)
+        }
+      })
+    this.multiForwardPreviewJobs.set(conversation.id, pending)
+    return pending
   }
 
   private scheduleMediaPreparation(
@@ -1478,6 +1534,29 @@ function wireEventSummary(event: WireEvent): string {
     return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} messages=${event.messageIds.join(',')}`
   }
   return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} message=${event.target.messageId} reactions=${event.context.reactions.length}`
+}
+
+function isDetailedMultiForwardPreview(value: string): boolean {
+  const compact = value.replace(/\s+/g, '')
+  return !(/^(?:点击)?查看(?:[xX×\d]+条)?(?:消息的)?(?:合并)?转发(?:消息)?$/.test(compact)
+    || /^(?:共)?[xX×\d]+条消息的合并转发$/.test(compact)
+    || /^(?:合并转发|聊天记录)$/.test(compact))
+}
+
+function wireMultiForwardPreview(messages: readonly WireMessage[]): string | undefined {
+  const lines = messages.slice(0, 4).map((message) => {
+    const sender = message.sender?.alias?.trim() || message.sender?.name?.trim() || message.senderId
+    const content = message.parts.map((part) => {
+      if (part.type === 'text') return part.text.trim()
+      if (part.type === 'media') return part.media.name?.trim()
+        || (part.media.kind === 'image' ? '[图片]' : '[文件]')
+      if (part.type === 'sticker') return part.sticker.title?.trim() || '[表情]'
+      if (part.type === 'multi-forward') return `查看${part.title || '聊天记录'}`
+      return part.card.title?.trim() || part.card.description?.trim() || '[卡片消息]'
+    }).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+    return content ? `${sender}: ${content}` : ''
+  }).filter(Boolean)
+  return lines.join('\n') || undefined
 }
 
 function imEventSummary(event: IMEvent<QQMediaLocator>): string {
