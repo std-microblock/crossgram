@@ -1356,6 +1356,35 @@ describe('bridge login e2e', () => {
         users: [{ _: 'user', id: selfRow!.id, self: true }],
         chats: [{ _: 'channel', id: group.id }],
       })
+      const sentGroupUpdate = sentGroupMessage.updates.find(
+        (update: any) => update._ === 'updateNewChannelMessage',
+      )
+      const dialogsAfterGroupSend = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 10_036)
+      const groupDialog = dialogsAfterGroupSend.dialogs.find(
+        (dialog: any) => dialog.peer._ === 'peerChannel' && dialog.peer.channelId === group.id,
+      )
+      expect(groupDialog).toMatchObject({
+        _: 'dialog', topMessage: sentGroupUpdate.message.id, pts: sentGroupUpdate.pts,
+      })
+      const groupFull = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getFullChannel',
+        channel: { _: 'inputChannel', channelId: group.id, accessHash: Long.ZERO },
+      }, 10_037)
+      expect(groupFull.fullChat).toMatchObject({
+        _: 'channelFull', id: group.id, pts: sentGroupUpdate.pts,
+      })
+      const groupMessages = await callRpc(resumed, key, resumedSid, {
+        _: 'channels.getMessages',
+        channel: { _: 'inputChannel', channelId: group.id, accessHash: Long.ZERO },
+        id: [{ _: 'inputMessageID', id: sentGroupUpdate.message.id }],
+      }, 10_038)
+      expect(groupMessages).toMatchObject({
+        _: 'messages.channelMessages', pts: sentGroupUpdate.pts,
+        messages: [{ _: 'message', id: sentGroupUpdate.message.id }],
+      })
 
       const mentionText = 'hello @BoB and @missing'
       const sentMention = await callRpc(resumed, key, resumedSid, {
