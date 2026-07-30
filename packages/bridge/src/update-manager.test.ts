@@ -7,7 +7,7 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import type { ServerConnection } from '@mtproto-relay/mtproto'
-import { stableId } from './dialogs.js'
+import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
@@ -88,6 +88,88 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
+  it('gives a paginated channel dialog the durable pts baseline for its next live update', async () => {
+    const upperConversation: IMConversation = { id: 'upper-group', kind: 'group', title: 'Upper Group' }
+    const lowerConversation: IMConversation = { id: 'lower-group', kind: 'group', title: 'Lower Group' }
+    const upperMessage: IMMessage = {
+      id: 'upper-message', conversationId: upperConversation.id, senderId: 'alice', timestamp: 200,
+      content: { parts: [{ type: 'text', text: 'upper' }] },
+    }
+    let lowerMessage: IMMessage = {
+      id: 'lower-first', conversationId: lowerConversation.id, senderId: 'bob', timestamp: 100,
+      content: { parts: [{ type: 'text', text: 'lower first' }] },
+    }
+    const paginatedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: { ...platform.capabilities, history: true },
+      async getDialogs(_session, query) {
+        const dialogs = [
+          { conversation: upperConversation, unreadCount: 0, lastMessage: upperMessage },
+          { conversation: lowerConversation, unreadCount: 1, lastMessage: lowerMessage },
+        ]
+        const start = query.afterId
+          ? Math.max(0, dialogs.findIndex((dialog) => dialog.conversation.id === query.afterId) + 1)
+          : 0
+        const limit = query.limit ?? 100
+        return {
+          dialogs: dialogs.slice(start, start + limit), total: dialogs.length,
+          nextCursor: start + limit < dialogs.length ? String(start + limit) : undefined,
+        }
+      },
+      async getHistory(_session, conversation) {
+        return { messages: conversation.id === upperConversation.id ? [upperMessage] : [lowerMessage] }
+      },
+    }
+    const { store, manager, sent } = await createHarness(undefined, paginatedPlatform)
+    for (const [id, text, timestamp] of [
+      ['lower-first', 'lower first', 100],
+      ['lower-second', 'lower second', 101],
+    ] as const) {
+      lowerMessage = {
+        id, conversationId: lowerConversation.id, senderId: 'bob', timestamp,
+        content: { parts: [{ type: 'text', text }] },
+      }
+      const result = await store.ingest(session, lowerConversation, lowerMessage)
+      await manager.publish(session, { event: { type: 'message', conversation: lowerConversation, message: lowerMessage }, result })
+    }
+
+    const rpc = new DialogRpc(paginatedPlatform, session, store)
+    const firstPage = await rpc.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 1, hash: Long.ZERO,
+    }) as tl.messages.RawDialogsSlice
+    const upperChannelId = stableId(`peer:${upperConversation.id}`)
+    const lowerChannelId = stableId(`peer:${lowerConversation.id}`)
+    expect(firstPage.dialogs).toMatchObject([{ peer: { _: 'peerChannel', channelId: upperChannelId } }])
+
+    const secondPage = await rpc.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerChannel', channelId: upperChannelId, accessHash: Long.ONE },
+      limit: 1, hash: Long.ZERO,
+    }) as tl.messages.RawDialogsSlice
+    const lowerDialog = secondPage.dialogs[0] as tl.RawDialog
+    expect(lowerDialog).toMatchObject({
+      peer: { _: 'peerChannel', channelId: lowerChannelId },
+      pts: 3,
+    })
+    expect(roundTrip(secondPage)).toMatchObject({ dialogs: [{ pts: 3 }] })
+
+    const full = await rpc.getFullChannel({
+      _: 'channels.getFullChannel',
+      channel: { _: 'inputChannel', channelId: lowerChannelId, accessHash: Long.ONE },
+    })
+    expect(full.fullChat).toMatchObject({ _: 'channelFull', pts: lowerDialog.pts })
+
+    lowerMessage = {
+      id: 'lower-third', conversationId: lowerConversation.id, senderId: 'bob', timestamp: 102,
+      content: { parts: [{ type: 'text', text: 'lower third' }] },
+    }
+    const result = await store.ingest(session, lowerConversation, lowerMessage)
+    await manager.publish(session, { event: { type: 'message', conversation: lowerConversation, message: lowerMessage }, result })
+    const nextUpdate = (sent.at(-1)!.update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
+    expect(nextUpdate).toMatchObject({ _: 'updateNewChannelMessage', pts: lowerDialog.pts! + 1, ptsCount: 1 })
+  })
+
   it('deletes cached blocked content and suppresses later live messages from that user', async () => {
     const harness = await createHarness(undefined, platform, undefined, 1, 'hide-user')
     const conversation: IMConversation = { id: 'blocked-group', kind: 'group', title: 'Blocked Group' }

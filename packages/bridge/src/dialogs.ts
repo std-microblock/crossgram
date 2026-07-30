@@ -819,9 +819,12 @@ export class DialogRpc {
     const self = this._makeSelfUser()
     users.set(self.id, self)
     const expectedConversation = expectedPeerId ? this._conversation(expectedPeerId) : undefined
+    const channelPts = expectedConversation
+      ? await this._channelPts(expectedConversation)
+      : undefined
     return {
       _: expectedConversation ? 'messages.channelMessages' : 'messages.messages',
-      ...(expectedConversation ? { pts: this._pts, count: messages.length } : {}),
+      ...(expectedConversation ? { pts: channelPts!, count: messages.length } : {}),
       messages, topics: [],
       chats: uniqueChats([
         ...(expectedConversation ? [this._makeChat(expectedConversation)] : []),
@@ -1023,6 +1026,7 @@ export class DialogRpc {
   async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
+    const pts = await this._channelPts(conversation)
     const reactionContext = await this._platform.getAvailableReactions?.(
       this._session, { conversationId: conversation.id },
     )
@@ -1034,7 +1038,7 @@ export class DialogRpc {
         participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
         readInboxMaxId: 0, readOutboxMaxId: 0, unreadCount: 0,
         chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
-        notifySettings: await this._peerNotifySettings(conversation.id), botInfo: [], pts: this._pts,
+        notifySettings: await this._peerNotifySettings(conversation.id), botInfo: [], pts,
         availableReactions: this._reactions?.chatReactions(conversation.id, reactionContext),
       },
       chats: [this._makeChat(conversation)], users: [this._makeSelfUser()],
@@ -1094,11 +1098,12 @@ export class DialogRpc {
       count = materialized.length
     }
     const users = await this._messageSenders(page.map((item) => item.top.source))
+    const pts = await this._channelPts(parent)
     return {
       _: 'messages.forumTopics', count,
       topics: page.map((item) => item.topic),
       messages: page.map((item) => this._makeMessage(item.top)),
-      chats: [this._makeChat(parent)], users: uniqueUsers([...users, this._makeSelfUser()]), pts: this._pts,
+      chats: [this._makeChat(parent)], users: uniqueUsers([...users, this._makeSelfUser()]), pts,
     }
   }
 
@@ -1140,8 +1145,9 @@ export class DialogRpc {
     const page = filtered.slice(Math.max(0, req.addOffset), Math.max(0, req.addOffset) + clampLimit(req.limit))
     const topic = (await this._materializeTopic(this._conversation(parentId), child)).topic
     const users = await this._messageSenders(page.map((item) => item.source))
+    const pts = await this._channelPts(this._conversation(parentId))
     return {
-      _: 'messages.channelMessages', pts: this._pts, count: filtered.length,
+      _: 'messages.channelMessages', pts, count: filtered.length,
       messages: page.map((item) => this._makeMessage(item)), topics: [topic],
       chats: [this._makeChat(this._conversation(parentId))],
       users: uniqueUsers([...users, this._makeSelfUser()]),
@@ -2334,6 +2340,18 @@ export class DialogRpc {
     return this._pts
   }
 
+  /** Return the durable PTS baseline clients must use for this Telegram channel. */
+  private async _channelPts(conversation: import('./platform.js').IMConversation): Promise<number> {
+    const target = this._isSubchannel(conversation)
+      ? this._conversation(conversation.parentId!)
+      : conversation
+    if (!this._store || !this._isTelegramChannel(target)) return this._pts
+    return (await this._store.getChannelUpdateState(
+      this._session.platformSessionId,
+      this._peerId(target.id),
+    )).pts
+  }
+
   private async _materializeDialog(source: IMDialog, storedDraft?: StoredDraft, folderId?: number) {
     source = await this._visibleDialog(source)
     const platformPeerId = source.conversation.id
@@ -2399,6 +2417,9 @@ export class DialogRpc {
     const message = source.lastMessage
       ? this._makeMessage(top ?? { source: source.lastMessage, tlId: topMessage, ordinal: 0 })
       : undefined
+    const pts = this._isTelegramChannel(source.conversation)
+      ? await this._channelPts(source.conversation)
+      : undefined
     const dialog: tl.RawDialog = {
       _: 'dialog',
       peer,
@@ -2411,6 +2432,7 @@ export class DialogRpc {
       unreadPollVotesCount: 0,
       notifySettings: await this._peerNotifySettings(platformPeerId),
       draft: storedDraft?.draft,
+      pts,
       folderId,
     }
     return { source, dialog, message, users, chat }
