@@ -453,7 +453,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   rpc.register('messages.search', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
   rpc.register('messages.readHistory', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.readHistory(req as tl.messages.RawReadHistoryRequest))
+    (await requireBridgeSession(rpc)).dialogs.readHistory(
+      req as tl.messages.RawReadHistoryRequest, rpc.connection,
+    ))
   rpc.register('messages.getScheduledHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getScheduledHistory(req as tl.messages.RawGetScheduledHistoryRequest))
   rpc.register('messages.getPinnedDialogs', async (rpc) =>
@@ -610,7 +612,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   rpc.register('channels.getChannels', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getChannels(req as tl.channels.RawGetChannelsRequest))
   rpc.register('channels.readHistory', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.readChannelHistory(req as tl.channels.RawReadHistoryRequest))
+    (await requireBridgeSession(rpc)).dialogs.readChannelHistory(
+      req as tl.channels.RawReadHistoryRequest, rpc.connection,
+    ))
   rpc.register('channels.readMessageContents', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.readChannelMessageContents(
       req as tl.channels.RawReadMessageContentsRequest,

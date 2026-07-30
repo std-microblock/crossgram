@@ -3214,6 +3214,157 @@ describe('bridge login e2e', () => {
     }
   }, 15000)
 
+  it('synchronizes local read boundaries between two authorized devices', async () => {
+    const platformId = 'read-device-sync-e2e'
+    const direct: bridge.IMConversation = { id: 'read-direct', kind: 'direct', title: 'Direct Peer' }
+    const group: bridge.IMConversation = { id: 'read-group', kind: 'group', title: 'Read Group' }
+    const messages: Record<string, bridge.IMMessage> = {
+      [direct.id]: {
+        id: 'direct-message', conversationId: direct.id, senderId: direct.id, timestamp: 1_800_000_401,
+        content: { parts: [{ type: 'text', text: 'direct unread' }] },
+      },
+      [group.id]: {
+        id: 'group-message', conversationId: group.id, senderId: 'alice', timestamp: 1_800_000_402,
+        content: { parts: [{ type: 'text', text: 'group unread' }] },
+      },
+    }
+    const unread = new Set([direct.id, group.id])
+    const readTargets: Array<{ conversationId: string, messageId: string }> = []
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        readState: { markRead: true, events: true },
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async getDialogs() {
+        return {
+          dialogs: [direct, group].map((conversation) => ({
+            conversation,
+            unreadCount: unread.has(conversation.id) ? 1 : 0,
+            lastMessage: messages[conversation.id],
+            readInboxMaxMessage: unread.has(conversation.id) ? undefined : messages[conversation.id],
+          })),
+        }
+      },
+      async getHistory(_session, conversation) {
+        return { messages: [messages[conversation.id]!] }
+      },
+      async getUser(_session, id) { return { id, firstName: id === direct.id ? direct.title : id } },
+      async markRead(_session, target) {
+        readTargets.push(target)
+        unread.delete(target.conversationId)
+      },
+      async sendMessage() { throw new Error('send is disabled') },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({
+      platform: { id: platformId, adapter: platform },
+    })
+    let requester: TestClient | undefined
+    let observer: TestClient | undefined
+    try {
+      const platformSessionId = 'read-device-sync-ps'
+      const phone = '99900887'
+      const totpSecret = '44'.repeat(20)
+      await ctx.database.create('mtproto_platform_session', {
+        id: platformSessionId, platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Read User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'read-device-sync-auth', virtualPhone: phone, totpSecret,
+        platformId, platformSessionId,
+      })
+
+      requester = await TestClient.connect(port)
+      const requesterKey = await doClientHandshake(requester, pubKey)
+      const requesterSid = new Long(0x3456cdef, 0x7cde, false)
+      const requesterCode = await callRpc(requester, requesterKey, requesterSid, {
+        _: 'auth.sendCode', phoneNumber: `+${phone}`, apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(requester, requesterKey, requesterSid, {
+        _: 'auth.signIn', phoneNumber: phone, phoneCodeHash: requesterCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(totpSecret),
+      }, 4)
+
+      observer = await TestClient.connect(port)
+      const observerKey = await doClientHandshake(observer, pubKey)
+      const observerSid = new Long(0x4567def0, 0x7def, false)
+      const observerCode = await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.sendCode', phoneNumber: `+${phone}`, apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 6)
+      await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.signIn', phoneNumber: phone, phoneCodeHash: observerCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(totpSecret),
+      }, 8)
+
+      const dialogs = await callRpc(requester, requesterKey, requesterSid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 10)
+      const directUser = dialogs.users.find((user: any) => user._ === 'user' && user.firstName === direct.title)
+      const groupChat = dialogs.chats.find((chat: any) => chat._ === 'channel' && chat.title === group.title)
+      expect(directUser).toMatchObject({ _: 'user' })
+      expect(groupChat).toMatchObject({ _: 'channel' })
+      const directPeer = { _: 'inputPeerUser' as const, userId: directUser.id, accessHash: Long.ZERO }
+      const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupChat.id, accessHash: Long.ZERO }
+      const directHistory = await callRpc(requester, requesterKey, requesterSid, {
+        _: 'messages.getHistory', peer: directPeer, offsetId: 0, offsetDate: 0, addOffset: 0,
+        limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 12)
+      const groupHistory = await callRpc(requester, requesterKey, requesterSid, {
+        _: 'messages.getHistory', peer: groupPeer, offsetId: 0, offsetDate: 0, addOffset: 0,
+        limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 14)
+
+      await expect(callRpc(requester, requesterKey, requesterSid, {
+        _: 'messages.readHistory', peer: directPeer, maxId: directHistory.messages[0].id,
+      }, 16)).resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 0 })
+      await expect(readPush(observer, observerKey)).resolves.toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateReadHistoryInbox', peer: { _: 'peerUser', userId: directUser.id },
+          maxId: directHistory.messages[0].id, stillUnreadCount: 0, ptsCount: 1,
+        }],
+      })
+
+      await expect(callRpc(requester, requesterKey, requesterSid, {
+        _: 'channels.readHistory',
+        channel: { _: 'inputChannel', channelId: groupChat.id, accessHash: Long.ZERO },
+        maxId: groupHistory.messages[0].id,
+      }, 18)).resolves.toEqual({ _: 'boolTrue' })
+      await expect(readPush(observer, observerKey)).resolves.toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateReadChannelInbox', channelId: groupChat.id,
+          maxId: groupHistory.messages[0].id, stillUnreadCount: 0,
+        }],
+      })
+      expect(readTargets).toEqual([
+        { conversationId: direct.id, messageId: messages[direct.id].id },
+        { conversationId: group.id, messageId: messages[group.id].id },
+      ])
+
+      await expect(callRpc(observer, observerKey, observerSid, {
+        _: 'messages.getPeerDialogs',
+        peers: [
+          { _: 'inputDialogPeer', peer: directPeer },
+          { _: 'inputDialogPeer', peer: groupPeer },
+        ],
+      }, 20)).resolves.toMatchObject({
+        _: 'messages.peerDialogs',
+        dialogs: expect.arrayContaining([
+          expect.objectContaining({ unreadCount: 0, peer: { _: 'peerUser', userId: directUser.id } }),
+          expect.objectContaining({ unreadCount: 0, peer: { _: 'peerChannel', channelId: groupChat.id } }),
+        ]),
+      })
+    } finally {
+      observer?.close()
+      requester?.close()
+      await stop()
+    }
+  }, 15000)
+
   it('restores the platform binding from the database after a full service restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mtproto-bridge-e2e-'))
     const databasePath = pathToFileURL(join(directory, 'bridge.db')).href
