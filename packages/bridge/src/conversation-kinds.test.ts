@@ -935,7 +935,7 @@ describe('conversation kinds', () => {
     }
   })
 
-  it('projects every group as a megagroup and only requests the Telegram member window', async () => {
+  it('projects every group as a megagroup and reuses its cached member snapshot', async () => {
     const calls: Array<{ cursor?: string, limit?: number }> = []
     const allMembers = ['self', 'alice', 'bob', 'carol', 'dave'].map((id, index) => ({
       user: { id, firstName: id },
@@ -986,11 +986,7 @@ describe('conversation kinds', () => {
       _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsAdmins' },
       offset: 0, limit: 2, hash: Long.ZERO,
     })
-    expect(calls).toEqual([
-      { cursor: undefined, limit: 2 },
-      { cursor: 'cursor-2', limit: 2 },
-      { cursor: undefined, limit: 2 },
-    ])
+    expect(calls).toEqual([{ cursor: undefined, limit: 100 }])
     expect(first).toMatchObject({
       _: 'channels.channelParticipants', count: 5,
       users: [{ firstName: 'self' }, { firstName: 'alice' }],
@@ -1005,6 +1001,101 @@ describe('conversation kinds', () => {
     })
     expect(() => roundTrip(first)).not.toThrow()
     expect(() => roundTrip(second)).not.toThrow()
+  })
+
+  it('fills Android member windows from short QQNT pages and searches all mention candidates', async () => {
+    const calls: Array<{ cursor?: string, limit?: number }> = []
+    const permissions = {
+      manageConversation: false, manageMembers: false, deleteAnyMessage: false,
+      editAnyMessage: false, pinMessages: false, inviteMembers: true,
+    }
+    const allMembers = Array.from({ length: 125 }, (_, index) => ({
+      user: {
+        id: `member-${index}`,
+        firstName: index === 87 ? 'Needle User' : `Member ${index}`,
+        username: String(10_000 + index),
+        metadata: index === 112 ? { qqGroupAlias: 'Target Alias' } : {},
+      },
+      role: 'member' as const,
+      permissions,
+    }))
+    const shortPagePlatform: IMPlatform = {
+      ...platform,
+      async getConversationMembers(_session, _target, query = {}) {
+        calls.push(query)
+        const start = Number(query.cursor?.replace('cursor-', '') ?? 0)
+        const emitted = Math.min(query.limit ?? 100, 30)
+        const members = allMembers.slice(start, start + emitted)
+        const next = start + members.length
+        return {
+          members,
+          total: allMembers.length,
+          nextCursor: next < allMembers.length ? `cursor-${next}` : undefined,
+        }
+      },
+    }
+    const { rpc } = await createRpc(shortPagePlatform)
+    await rpc.getDialogs(dialogsRequest())
+    const group = {
+      _: 'inputChannel' as const,
+      channelId: stableId('peer:group'),
+      accessHash: Long.ZERO,
+    }
+
+    const first = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsRecent' },
+      offset: 0, limit: 100, hash: Long.ZERO,
+    })
+    const second = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsRecent' },
+      offset: 100, limit: 25, hash: Long.ZERO,
+    })
+    const mentions = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group, filter: { _: 'channelParticipantsMentions' },
+      offset: 0, limit: 100, hash: Long.ZERO,
+    })
+    const searchedMention = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group,
+      filter: { _: 'channelParticipantsMentions', q: 'needle' },
+      offset: 0, limit: 100, hash: Long.ZERO,
+    })
+    const aliasMention = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group,
+      filter: { _: 'channelParticipantsMentions', q: '@target alias' },
+      offset: 0, limit: 100, hash: Long.ZERO,
+    })
+
+    expect(calls).toEqual([0, 30, 60, 90, 120].map((offset) => ({
+      cursor: offset ? `cursor-${offset}` : undefined,
+      limit: 100,
+    })))
+    expect(first).toMatchObject({
+      _: 'channels.channelParticipants', count: 125,
+      users: [
+        { firstName: 'Member 0' },
+        ...Array.from({ length: 98 }, () => expect.any(Object)),
+        { firstName: 'Member 99' },
+      ],
+    })
+    expect(second).toMatchObject({
+      _: 'channels.channelParticipants', count: 125,
+      users: [
+        { firstName: 'Member 100' },
+        ...Array.from({ length: 23 }, () => expect.any(Object)),
+        { firstName: 'Member 124' },
+      ],
+    })
+    expect(mentions).toMatchObject({ _: 'channels.channelParticipants', count: 125 })
+    expect(mentions.users).toHaveLength(100)
+    expect(searchedMention).toMatchObject({
+      _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Needle User' }],
+    })
+    expect(aliasMention).toMatchObject({
+      _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Member 112' }],
+    })
+    for (const result of [first, second, mentions, searchedMention, aliasMention]) {
+      expect(() => roundTrip(result)).not.toThrow()
+    }
   })
 
   it('projects known child channels as forum topics and routes topic sends to the child', async () => {
