@@ -200,7 +200,10 @@ describe('StickerRpc', () => {
 
   it('keeps an uninstall tombstone until the sticker set is installed again', async () => {
     const { rpc, database } = stickerHarness()
-    const rows: Array<Record<string, any>> = []
+    const rows: Array<Record<string, any>> = [{
+      id: 1, platformSessionId: 'session', providerId: 'qq:stickers', providerPackId: '11690',
+      installedAt: new Date('2025-01-01T00:00:00Z'), sortOrder: 0, archived: false, uninstalled: false,
+    }]
     database.get.mockImplementation((async (_table: string, query: Record<string, unknown>) => rows.filter((row) =>
       Object.entries(query).every(([key, value]) => row[key] === value))) as never)
     database.upsert.mockImplementation((async (_table: string, values: Array<Record<string, any>>) => {
@@ -238,6 +241,65 @@ describe('StickerRpc', () => {
       _: 'messages.allStickers',
       sets: [expect.objectContaining({ title: 'QQ Pack', installedDate: expect.any(Number) })],
     })
+  })
+
+  it('always associates an account-native favorite pack and ignores uninstall attempts', async () => {
+    const { rpc, provider, database } = stickerHarness()
+    database.get.mockResolvedValue([] as never)
+    vi.mocked(provider.listPacks).mockResolvedValue({
+      packs: [{
+        providerId: 'ignored', packId: 'qq-favorites', title: 'QQ 收藏表情', count: 1,
+        automaticAssociation: 'provider-account',
+      }],
+    })
+    vi.mocked(provider.getPack).mockResolvedValue({
+      providerId: 'ignored', packId: 'qq-favorites', title: 'QQ 收藏表情',
+      automaticAssociation: 'provider-account', stickers: [],
+    })
+
+    const all = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    if (all._ !== 'messages.allStickers') throw new Error('expected full sticker catalog')
+    expect(all.sets).toMatchObject([{
+      title: 'QQ 收藏表情', installedDate: expect.any(Number), archived: undefined,
+    }])
+    await expect(rpc.uninstallStickerSet({
+      _: 'messages.uninstallStickerSet',
+      stickerset: {
+        _: 'inputStickerSetID', id: all.sets[0]!.id, accessHash: all.sets[0]!.accessHash,
+      },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(database.upsert).not.toHaveBeenCalled()
+    await expect(rpc.getAllStickers({
+      _: 'messages.getAllStickers', hash: Long.ZERO,
+    })).resolves.toMatchObject({ _: 'messages.allStickers', sets: [{ title: 'QQ 收藏表情' }] })
+  })
+
+  it('uses an upload plan and bridge-local favorite state for a pack assigned across accounts', async () => {
+    const { rpc, provider, sticker, database } = stickerHarness()
+    ;(provider as { capabilities: IMStickerProvider['capabilities'] }).capabilities = {
+      platformKinds: ['qq'], ownerPlatformId: 'qq/source', sessionScoped: true,
+    }
+    provider.prepareSend = vi.fn(async () => ({
+      type: 'native' as const, providerId: sticker.providerId, stickerId: sticker.stickerId,
+      reference: { native: true },
+    }))
+    const bytes = new Uint8Array([1, 2, 3])
+    vi.mocked(provider.openAsset).mockResolvedValue({
+      mimeType: 'image/png', size: bytes.length,
+      source: { size: bytes.length, async *stream() { yield bytes } },
+    })
+    const media = rpc.makeMessageMedia(sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+    const input = {
+      _: 'inputDocument' as const,
+      id: media.document.id, accessHash: media.document.accessHash, fileReference: media.document.fileReference,
+    }
+
+    await expect(rpc.resolveSend(input)).resolves.toMatchObject({ plan: { type: 'upload' } })
+    expect(provider.prepareSend).not.toHaveBeenCalled()
+    await rpc.faveSticker({ _: 'messages.faveSticker', id: input, unfave: false })
+    expect(provider.setSavedSticker).not.toHaveBeenCalled()
+    expect(database.upsert).toHaveBeenCalled()
   })
 
   it('restores local favorite document mappings before returning not-modified', async () => {
@@ -334,7 +396,7 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     title: 'Wave', format: 'static', mimeType: 'image/png', size: 321, version: 3,
   }
   const provider: IMStickerProvider = {
-    capabilities: { platformKinds: ['qq'], sessionScoped: true },
+    capabilities: { platformKinds: ['qq'], ownerPlatformId: 'qq', sessionScoped: true },
     listPacks: vi.fn(async () => ({
       packs: [{ providerId: 'ignored', packId: '11690', title: 'QQ Pack', count: 1, version: 7 }],
     })),
@@ -360,8 +422,14 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     limit: vi.fn(() => query),
     execute: vi.fn(async () => []),
   }
+  const installed = [{
+    id: 1, platformSessionId: 'session', providerId: 'qq:stickers', providerPackId: '11690',
+    installedAt: new Date('2025-01-01T00:00:00Z'), sortOrder: 0, archived: false, uninstalled: false,
+  }]
   const database = {
-    get: vi.fn(async () => []),
+    get: vi.fn(async (table: string, query: Record<string, unknown>) => table === 'mtproto_sticker_set_install'
+      ? installed.filter((row) => Object.entries(query).every(([key, value]) => (row as any)[key] === value))
+      : []),
     select: vi.fn(() => query),
     upsert: vi.fn(async () => undefined),
     remove: vi.fn(async () => undefined),

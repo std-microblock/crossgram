@@ -5,6 +5,9 @@ import type { Context } from 'cordis'
 import { computed, defineComponent, onBeforeUnmount, onMounted, ref, resolveComponent } from 'vue'
 import { useRpc } from '@cordisjs/client'
 import type { PlatformAccountDashboardData, PlatformAccountView } from '../src/account-dashboard.js'
+import type {
+  StickerDashboardPack, StickerPackDashboardData,
+} from '../src/sticker-dashboard.js'
 import './style.css'
 
 export const PlatformAccountCard = defineComponent({
@@ -162,6 +165,156 @@ export const PlatformAccountsPage = defineComponent({
   },
 })
 
+export const StickerPacksPage = defineComponent({
+  name: 'StickerPacksPage',
+  setup() {
+    const data = useRpc<PlatformAccountDashboardData & StickerPackDashboardData>()
+    const selectedAccount = ref<string>()
+    const query = ref('')
+    const refreshing = ref(false)
+    const pending = ref<string>()
+    const error = ref<string>()
+    const currentAccount = computed(() => {
+      const accounts = data.value.stickerAccounts
+      return accounts.find(account => account.platformSessionId === selectedAccount.value) ?? accounts[0]
+    })
+    const visiblePacks = computed(() => {
+      const needle = query.value.trim().toLocaleLowerCase()
+      if (!needle) return data.value.stickerPacks
+      return data.value.stickerPacks.filter(pack => [pack.title, pack.providerId, pack.packId]
+        .some(value => value.toLocaleLowerCase().includes(needle)))
+    })
+    const refresh = async () => {
+      refreshing.value = true
+      error.value = undefined
+      try {
+        await data.value.refreshStickerPacks()
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : String(cause)
+      } finally {
+        refreshing.value = false
+      }
+    }
+    const toggle = async (pack: StickerDashboardPack) => {
+      const account = currentAccount.value
+      if (!account) return
+      const assignment = pack.assignments.find(item => item.platformSessionId === account.platformSessionId)
+      if (assignment?.automatic) return
+      const key = `${account.platformSessionId}\0${pack.providerId}\0${pack.packId}`
+      pending.value = key
+      error.value = undefined
+      try {
+        await data.value.setStickerPackAssigned(
+          account.platformSessionId, pack.providerId, pack.packId, !assignment?.assigned,
+        )
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : String(cause)
+      } finally {
+        if (pending.value === key) pending.value = undefined
+      }
+    }
+
+    return () => {
+      const Layout = resolveComponent('k-layout') as any
+      const Icon = resolveComponent('k-icon') as any
+      const accounts = data.value.stickerAccounts
+      const account = currentAccount.value
+      return <Layout class="sticker-packs-page">{{
+        header: () => <div class="accounts-toolbar sticker-toolbar">
+          <div>
+            <h1>表情包管理</h1>
+            <p>由 Bridge 统一决定每个账号可用的表情包集合。</p>
+          </div>
+          <button type="button" class="refresh-button" disabled={refreshing.value} onClick={refresh}>
+            <Icon name="refresh" />
+            <span>{refreshing.value ? '正在刷新' : '刷新目录'}</span>
+          </button>
+        </div>,
+        default: () => <main class="sticker-content">
+          {error.value && <div class="dashboard-error" role="alert">操作失败：{error.value}</div>}
+          {accounts.length
+            ? <>
+              <section class="sticker-account-picker" aria-label="目标账号">
+                <div class="picker-label">添加到账号</div>
+                <div class="account-tabs">
+                  {accounts.map(item => <button
+                    key={item.platformSessionId}
+                    type="button"
+                    class={['account-tab', { active: item.platformSessionId === account?.platformSessionId }]}
+                    aria-pressed={item.platformSessionId === account?.platformSessionId}
+                    onClick={() => { selectedAccount.value = item.platformSessionId }}
+                  >
+                    <strong>{item.displayName}</strong>
+                    <span>{item.platformKind} · {item.userId}</span>
+                  </button>)}
+                </div>
+              </section>
+              <section class="sticker-catalog">
+                <div class="catalog-heading">
+                  <div>
+                    <h2>可用集合</h2>
+                    <span>{visiblePacks.value.length} 个表情包</span>
+                  </div>
+                  <label class="sticker-search">
+                    <span class="sr-only">搜索表情包</span>
+                    <input
+                      value={query.value}
+                      placeholder="搜索名称、Provider 或 Pack ID"
+                      onInput={(event) => { query.value = (event.target as HTMLInputElement).value }}
+                    />
+                  </label>
+                </div>
+                {visiblePacks.value.length
+                  ? <div class="sticker-pack-grid">
+                    {visiblePacks.value.map(pack => {
+                      const assignment = pack.assignments.find(item =>
+                        item.platformSessionId === account?.platformSessionId)
+                      const key = account
+                        ? `${account.platformSessionId}\0${pack.providerId}\0${pack.packId}`
+                        : ''
+                      const source = accounts.find(item =>
+                        item.platformSessionId === pack.sourcePlatformSessionId)
+                      return <article class={['sticker-pack-card', { assigned: assignment?.assigned }]}
+                        data-provider={pack.providerId} data-pack={pack.packId}>
+                        <div class="pack-symbol" aria-hidden="true">{pack.title.trim()[0] ?? '☺'}</div>
+                        <div class="pack-details">
+                          <h3>{pack.title}</h3>
+                          <p>{pack.count == null ? '数量未知' : `${pack.count} 个表情`}</p>
+                          <code>{pack.providerId} / {pack.packId}</code>
+                          {source && <span class="pack-source">来源：{source.displayName}</span>}
+                        </div>
+                        <button
+                          type="button"
+                          class={['assignment-button', {
+                            automatic: assignment?.automatic,
+                            assigned: assignment?.assigned,
+                          }]}
+                          disabled={!account || assignment?.automatic || pending.value === key}
+                          onClick={() => toggle(pack)}
+                        >
+                          {pending.value === key
+                            ? '处理中'
+                            : assignment?.automatic
+                              ? '自动关联'
+                              : assignment?.assigned ? '已添加' : '添加'}
+                        </button>
+                      </article>
+                    })}
+                  </div>
+                  : <div class="sticker-empty">没有匹配的表情包集合。</div>}
+              </section>
+            </>
+            : <div class="accounts-empty">
+              <Icon name="account:default" />
+              <h2>还没有可管理的账号</h2>
+              <p>Bridge 获取到平台账号后，才能为它分配表情包。</p>
+            </div>}
+        </main>,
+      }}</Layout>
+    }
+  },
+})
+
 export async function copyText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value)
@@ -184,6 +337,13 @@ export default function apply(ctx: Context): void {
     icon: 'activity:default',
     order: 110,
     component: PlatformAccountsPage,
+  })
+  ctx.client.router.page({
+    path: '/sticker-packs',
+    name: '表情包管理',
+    icon: 'activity:default',
+    order: 111,
+    component: StickerPacksPage,
   })
 }
 

@@ -4,6 +4,7 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
 import { telegramStickerPlaceholder } from './sticker-outline.js'
+import { isAutomaticallyAssociated, providerBelongsToAccount } from './sticker-dashboard.js'
 import type { IMPlatform, PlatformSession } from './platform.js'
 import type {
   IMSticker, IMStickerAsset, IMStickerPack, IMStickerPackSummary, IMStickerProvider, IMStickerSendPlan,
@@ -48,24 +49,37 @@ export class StickerRpc {
       this._sets.set(this._setId(providerId, pack.packId), { providerId, packId: pack.packId })
     }
     const installed = await this._installedPacks()
-    const visible = packs.filter(({ pack }) => !installed.get(packKey(
-      pack.providerId, pack.packId,
-    ))?.uninstalled)
+    const visible = packs.filter(({ provider, pack }) => {
+      const row = installed.get(packKey(pack.providerId, pack.packId))
+      return isAutomaticallyAssociated(provider, pack, this._session.platformId)
+        || !!row && !row.uninstalled
+    })
     visible.sort((left, right) => {
       const a = installed.get(packKey(left.pack.providerId, left.pack.packId))
       const b = installed.get(packKey(right.pack.providerId, right.pack.packId))
+      const automaticA = isAutomaticallyAssociated(left.provider, left.pack, this._session.platformId)
+      const automaticB = isAutomaticallyAssociated(right.provider, right.pack, this._session.platformId)
+      if (automaticA !== automaticB) return automaticA ? -1 : 1
       if (!!a !== !!b) return a ? -1 : 1
       if (a && b) return a.sortOrder - b.sortOrder
       return 0
     })
     const hash = Long.fromNumber(catalogHash(
-      visible.map(({ pack }) => `${pack.providerId}:${pack.packId}:${pack.version ?? 0}`),
+      visible.map(({ provider, pack }) => {
+        const row = installed.get(packKey(pack.providerId, pack.packId))
+        const automatic = isAutomaticallyAssociated(provider, pack, this._session.platformId)
+        return `${pack.providerId}:${pack.packId}:${pack.version ?? 0}:${automatic ? 'a' : row?.sortOrder ?? '-'}:${row?.archived ? 1 : 0}`
+      }),
     ))
     if (hashMatches(req.hash, hash)) return { _: 'messages.allStickersNotModified' }
     return {
       _: 'messages.allStickers',
       hash,
-      sets: visible.map(({ pack }) => this._makeSet(pack, installed.get(packKey(pack.providerId, pack.packId)))),
+      sets: visible.map(({ provider, pack }) => this._makeSet(
+        pack,
+        installed.get(packKey(pack.providerId, pack.packId)),
+        isAutomaticallyAssociated(provider, pack, this._session.platformId),
+      )),
     }
   }
 
@@ -88,6 +102,7 @@ export class StickerRpc {
     const hash = catalogHash(normalized.stickers.map((sticker) => `${sticker.stickerId}:${sticker.version ?? 0}`))
     if (hashMatches(req.hash, hash)) return { _: 'messages.stickerSetNotModified' }
     const installed = (await this._installedPacks()).get(packKey(ref.providerId, ref.packId))
+    const automatic = isAutomaticallyAssociated(provider, normalized, this._session.platformId)
     const documents = normalized.stickers.map((sticker) => this._makeDocument({
       providerId: ref.providerId, provider, sticker,
     }))
@@ -101,7 +116,7 @@ export class StickerRpc {
     }
     return {
       _: 'messages.stickerSet',
-      set: this._makeSet(normalized, installed),
+      set: this._makeSet(normalized, installed, automatic),
       packs: [...byEmoji].map(([emoticon, documents]) => ({ _: 'stickerPack', emoticon, documents })),
       keywords: [],
       documents,
@@ -178,7 +193,9 @@ export class StickerRpc {
 
   async faveSticker(req: tl.messages.RawFaveStickerRequest): Promise<tl.TlObject> {
     const resolved = await this._resolveInputDocument(req.id)
-    await resolved.provider.setSavedSticker?.(this._context(), resolved.sticker, !req.unfave)
+    if (this._providerBelongsToCurrentAccount(resolved.provider)) {
+      await resolved.provider.setSavedSticker?.(this._context(), resolved.sticker, !req.unfave)
+    }
     // A provider may also expose its native saved collection as a synthetic
     // sticker set, so both the saved list and pack catalog must refresh now.
     this._providerCache.clear()
@@ -198,6 +215,11 @@ export class StickerRpc {
     req: tl.messages.RawInstallStickerSetRequest,
   ): Promise<tl.messages.RawStickerSetInstallResultSuccess> {
     const ref = await this._resolveSet(req.stickerset)
+    const provider = this._registry.require(ref.providerId)
+    const pack = await this._getPack(ref.providerId, provider, ref.packId)
+    if (pack && isAutomaticallyAssociated(provider, pack, this._session.platformId)) {
+      return { _: 'messages.stickerSetInstallResultSuccess' }
+    }
     const rows = await this._database.get('mtproto_sticker_set_install', {
       platformSessionId: this._session.platformSessionId,
     })
@@ -216,6 +238,11 @@ export class StickerRpc {
 
   async uninstallStickerSet(req: tl.messages.RawUninstallStickerSetRequest): Promise<tl.TlObject> {
     const ref = await this._resolveSet(req.stickerset)
+    const provider = this._registry.require(ref.providerId)
+    const pack = await this._getPack(ref.providerId, provider, ref.packId)
+    if (pack && isAutomaticallyAssociated(provider, pack, this._session.platformId)) {
+      return { _: 'boolTrue' } as unknown as tl.TlObject
+    }
     const query = {
       platformSessionId: this._session.platformSessionId,
       providerId: ref.providerId,
@@ -286,7 +313,9 @@ export class StickerRpc {
     const resolved = await this._resolveInputDocument(id).catch(() => undefined)
     if (!resolved) return
     const context = this._context()
-    let plan = await resolved.provider.prepareSend?.(context, resolved.sticker)
+    let plan = this._providerBelongsToCurrentAccount(resolved.provider)
+      ? await resolved.provider.prepareSend?.(context, resolved.sticker)
+      : undefined
     if (!plan) {
       const asset = await resolved.provider.openAsset(context, resolved.sticker)
       plan = uploadPlan(resolved, asset)
@@ -387,29 +416,53 @@ export class StickerRpc {
         provider: IMStickerProvider
         pack: IMStickerPackSummary
       }> = []
-      for (const [providerId, provider] of this._activeProviders()) {
-        const page = await provider.listPacks(this._context(), { limit: 200 })
-        result.push(...page.packs.map((pack) => ({
-          providerId,
-          provider,
-          pack: { ...pack, providerId },
-        })))
+      for (const [providerId, provider] of this._registry.entries) {
+        let cursor: string | undefined
+        const seen = new Set<string>()
+        for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
+          const page = await provider.listPacks(this._context(), { cursor, limit: 200 })
+          result.push(...page.packs.map((pack) => ({
+            providerId,
+            provider,
+            pack: { ...pack, providerId },
+          })))
+          if (!page.nextCursor) break
+          if (seen.has(page.nextCursor)) throw new Error(`sticker pack pagination repeated cursor: ${page.nextCursor}`)
+          seen.add(page.nextCursor)
+          cursor = page.nextCursor
+          if (pageIndex === 99) throw new Error('sticker pack pagination exceeded 100 pages')
+        }
       }
       return result
     })
   }
 
   private async _listPacks(): Promise<Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }>> {
-    return this._cached('catalog', async () => {
+    const all = await this._cached('catalog', async () => {
       const result: Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }> = []
-      for (const [providerId, provider] of this._activeProviders()) {
-        const page = await provider.listPacks(this._context(), { limit: 200 })
-        for (const summary of page.packs) {
-          const pack = await this._getPack(providerId, provider, summary.packId)
-          if (pack) result.push({ providerId, provider, pack })
+      for (const [providerId, provider] of this._registry.entries) {
+        let cursor: string | undefined
+        const seen = new Set<string>()
+        for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
+          const page = await provider.listPacks(this._context(), { cursor, limit: 200 })
+          for (const summary of page.packs) {
+            const pack = await this._getPack(providerId, provider, summary.packId)
+            if (pack) result.push({ providerId, provider, pack })
+          }
+          if (!page.nextCursor) break
+          if (seen.has(page.nextCursor)) throw new Error(`sticker pack pagination repeated cursor: ${page.nextCursor}`)
+          seen.add(page.nextCursor)
+          cursor = page.nextCursor
+          if (pageIndex === 99) throw new Error('sticker pack pagination exceeded 100 pages')
         }
       }
       return result
+    })
+    const installed = await this._installedPacks()
+    return all.filter(({ providerId, provider, pack }) => {
+      const row = installed.get(packKey(providerId, pack.packId))
+      return isAutomaticallyAssociated(provider, pack, this._session.platformId)
+        || !!row && !row.uninstalled
     })
   }
 
@@ -451,21 +504,10 @@ export class StickerRpc {
 
   private async _search(emoji: string): Promise<ResolvedSticker[]> {
     const result: ResolvedSticker[] = []
-    for (const [providerId, provider] of this._activeProviders()) {
-      if (provider.search) {
-        const page = await provider.search(this._context(), { emoji, limit: 100 })
-        result.push(...page.stickers.map((sticker) => ({
-          providerId, provider, sticker: { ...sticker, providerId },
-        })))
-        continue
-      }
-      const packs = await this._listPacks()
-      for (const item of packs) {
-        if (item.providerId !== providerId) continue
-        for (const sticker of item.pack.stickers) {
-          if (!emoji || sticker.emoji?.includes(emoji)) {
-            result.push({ providerId, provider, sticker: { ...sticker, providerId } })
-          }
+    for (const { providerId, provider, pack } of await this._listPacks()) {
+      for (const sticker of pack.stickers) {
+        if (!emoji || sticker.emoji?.includes(emoji)) {
+          result.push({ providerId, provider, sticker: { ...sticker, providerId } })
         }
       }
     }
@@ -479,7 +521,7 @@ export class StickerRpc {
     const result: ResolvedSticker[] = []
     for (const row of rows) {
       const provider = this._registry.get(row.providerId)
-      if (!provider || !this._isActive(provider)) continue
+      if (!provider) continue
       const sticker = await provider.getSticker(this._context(), row.providerStickerId)
       if (sticker) result.push({ providerId: row.providerId, provider, sticker: { ...sticker, providerId: row.providerId } })
     }
@@ -524,7 +566,7 @@ export class StickerRpc {
     const prefix = 'bridge-sticker:'
     if (!reference.startsWith(prefix)) return
     const body = reference.slice(prefix.length)
-    for (const [providerId, provider] of [...this._activeProviders()]
+    for (const [providerId, provider] of [...this._registry.entries]
       .sort(([left], [right]) => right.length - left.length)) {
       const providerPrefix = `${providerId}:`
       if (!body.startsWith(providerPrefix)) continue
@@ -545,6 +587,7 @@ export class StickerRpc {
   private _makeSet(
     pack: IMStickerPackSummary | IMStickerPack,
     installed?: import('./models.js').StickerSetInstallRow,
+    automaticallyAssigned = false,
   ): tl.RawStickerSet {
     const id = this._setId(pack.providerId, pack.packId)
     const stickers = 'stickers' in pack ? pack.stickers : []
@@ -553,10 +596,12 @@ export class StickerRpc {
     this._sets.set(id, { providerId: pack.providerId, packId: pack.packId })
     return {
       _: 'stickerSet',
-      installedDate: installed && !installed.archived && !installed.uninstalled
-        ? Math.floor(installed.installedAt.getTime() / 1000)
-        : undefined,
-      archived: installed && !installed.uninstalled && installed.archived || undefined,
+      installedDate: automaticallyAssigned
+        ? STICKER_DOCUMENT_DATE
+        : installed && !installed.archived && !installed.uninstalled
+          ? Math.floor(installed.installedAt.getTime() / 1000)
+          : undefined,
+      archived: !automaticallyAssigned && installed && !installed.uninstalled && installed.archived || undefined,
       id: Long.fromNumber(id), accessHash: Long.fromNumber(id),
       title: pack.title, shortName: this._shortName(pack), count: pack.count ?? stickers.length,
       thumbs: cover && coverMetadata ? [{
@@ -623,13 +668,16 @@ export class StickerRpc {
     }
   }
 
-  private _activeProviders(): Array<[string, IMStickerProvider]> {
-    return this._registry.entries.filter(([, provider]) => this._isActive(provider))
+  private _nativeProviders(): Array<[string, IMStickerProvider]> {
+    return this._registry.entries.filter(([, provider]) => this._providerBelongsToCurrentAccount(provider))
   }
 
-  private _isActive(provider: IMStickerProvider): boolean {
-    const kinds = provider.capabilities?.platformKinds
-    return !kinds?.length || kinds.includes(this._platform.platformKind ?? this._session.platformId)
+  private _providerBelongsToCurrentAccount(provider: IMStickerProvider): boolean {
+    return providerBelongsToAccount(
+      provider,
+      this._session.platformId,
+      this._platform.platformKind ?? this._session.platformId,
+    )
   }
 
   private _context(): StickerProviderContext {
@@ -677,7 +725,7 @@ export class StickerRpc {
   private async _providerSavedStickers(): Promise<ResolvedSticker[]> {
     return this._cached('saved', async () => {
       const result: ResolvedSticker[] = []
-      for (const [providerId, provider] of this._activeProviders()) {
+      for (const [providerId, provider] of this._nativeProviders()) {
         if (!provider.listSavedStickers) continue
         const page = await provider.listSavedStickers(this._context(), { limit: 200 })
         for (const sticker of page.stickers) {
