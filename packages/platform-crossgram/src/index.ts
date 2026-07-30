@@ -1522,13 +1522,31 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
     id: `${input.id}:original-v1`,
     kind: input.kind,
     name: input.name,
-    mimeType: input.mimeType,
+    mimeType: input.mimeType ?? (input.kind === 'file' ? fileVideoMimeType(input.name) : undefined),
     size: input.size,
     width: input.width,
     height: input.height,
     duration: input.duration,
     locator: input.locator,
   }
+}
+
+function fileVideoMimeType(name: string | undefined): string | undefined {
+  const extension = /(?:^|\.)([^./\\]+)$/.exec(name ?? '')?.[1]?.toLowerCase()
+  if (extension === 'mp4' || extension === 'm4v' || extension === 'f4v') return 'video/mp4'
+  if (extension === 'avi') return 'video/x-msvideo'
+  if (extension === 'wmv') return 'video/x-ms-wmv'
+  if (extension === 'mkv') return 'video/x-matroska'
+  if (extension === 'mov') return 'video/quicktime'
+  if (extension === 'ts' || extension === 'mts' || extension === 'm2ts') return 'video/mp2t'
+  if (extension === 'webm') return 'video/webm'
+  if (extension === 'mpeg' || extension === 'mpg' || extension === 'mpe') return 'video/mpeg'
+  if (extension === 'ogv') return 'video/ogg'
+  if (extension === '3gp') return 'video/3gpp'
+  if (extension === '3g2') return 'video/3gpp2'
+  if (extension === 'flv') return 'video/x-flv'
+  if (extension === 'asf') return 'video/x-ms-asf'
+  if (extension === 'mod') return 'video/mod'
 }
 
 function mapMessage(
