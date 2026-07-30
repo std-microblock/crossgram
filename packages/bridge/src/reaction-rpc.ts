@@ -7,11 +7,10 @@ import type {
   IMMessage, IMPlatform, IMReactionContext, IMReactionDefinition, IMReactionResource, PlatformSession,
 } from './platform.js'
 
-const CATALOG_VERSION = 1
+const CATALOG_VERSION = 2
 const STANDARD_REACTIONS = ['👍', '❤️', '😂', '😢', '🔥', '🎉', '👏', '🤔', '🤯'] as const
 
 interface CustomEntry {
-  conversationId: string
   definition: IMReactionDefinition & { presentation: { type: 'custom', alt: string, resource: IMReactionResource } }
 }
 
@@ -101,11 +100,10 @@ export class ReactionRpc {
     return await query.execute()
   }
 
-  registerContext(conversationId: string, context?: IMReactionContext): void {
+  registerContext(_conversationId: string, context?: IMReactionContext): void {
     for (const definition of context?.available ?? []) {
       if (definition.presentation.type !== 'custom') continue
-      this._custom.set(this.customDocumentId(conversationId, definition), {
-        conversationId,
+      this._custom.set(this.customDocumentId(definition), {
         definition: definition as CustomEntry['definition'],
       })
     }
@@ -162,7 +160,7 @@ export class ReactionRpc {
     if (definition.presentation.type === 'emoji') {
       return { _: 'reactionEmoji', emoticon: definition.presentation.emoticon }
     }
-    const id = this.customDocumentId(conversationId, definition)
+    const id = this.customDocumentId(definition)
     this.registerContext(conversationId, {
       available: [definition], reactions: [], maxSelected: 1,
     })
@@ -182,7 +180,7 @@ export class ReactionRpc {
       }
       if (reaction._ === 'reactionCustomEmoji') {
         return definition.presentation.type === 'custom'
-          && this.customDocumentId(conversationId, definition) === reaction.documentId.toNumber()
+          && this.customDocumentId(definition) === reaction.documentId.toNumber()
       }
       return false
     })
@@ -190,11 +188,11 @@ export class ReactionRpc {
     return found
   }
 
-  customDocumentId(conversationId: string, definition: IMReactionDefinition): number {
+  customDocumentId(definition: IMReactionDefinition): number {
     if (definition.presentation.type !== 'custom') throw new Error('not a custom reaction')
     return stableId([
       'reaction-resource', CATALOG_VERSION, this._session.platformSessionId,
-      conversationId, definition.key, definition.presentation.resource.version,
+      definition.key, definition.presentation.resource.version,
     ].join(':'))
   }
 

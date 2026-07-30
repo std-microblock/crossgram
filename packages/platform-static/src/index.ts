@@ -1060,6 +1060,9 @@ function reactionDefinitions(conversationId: string, messageId?: string): IMReac
   if (conversationId === 'reaction-sticker-lab') {
     return clone([...emojiReactionDefinitions, ...customReactionDefinitions])
   }
+  if (conversationId === 'group-d') {
+    return clone([...emojiReactionDefinitions.slice(0, 2), ...customReactionDefinitions])
+  }
   if (conversationId === 'group-a') {
     return clone(emojiReactionDefinitions.filter((item) => item.key === 'like' || item.key === 'fire'))
   }
