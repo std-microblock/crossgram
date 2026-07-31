@@ -2064,6 +2064,7 @@ export class DialogRpc {
 
   private async _hydrateAllMessages(): Promise<void> {
     const dialogs = await this._loadDialogs()
+    await this._persistDirectDialogUsers(dialogs)
     await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
   }
 
@@ -2114,6 +2115,16 @@ export class DialogRpc {
     for (const row of await this._store.upsertUsers(this._session, users)) this._registerUser(row)
   }
 
+  private async _persistDirectDialogUsers(dialogs: readonly IMDialog[]): Promise<void> {
+    await this._persistUsers(dialogs
+      .filter((dialog) => dialog.conversation.kind === 'direct')
+      .map((dialog) => ({
+        id: dialog.conversation.id,
+        firstName: dialog.conversation.title,
+        avatar: dialog.conversation.avatar,
+      })))
+  }
+
   private _registerUser(row: IMUserRow): void {
     const existingPlatformId = this._tlToUser.get(row.id)
     if (existingPlatformId && existingPlatformId !== row.platformUserId) {
@@ -2155,14 +2166,7 @@ export class DialogRpc {
 
     const pending = this._loadDialogs().then(async (dialogs) => {
       const storedConversations = await this._store?.listConversations(this._session.platformSessionId) ?? []
-      const directUsers = dialogs
-        .filter((dialog) => dialog.conversation.kind === 'direct')
-        .map((dialog) => ({
-          id: dialog.conversation.id,
-          firstName: dialog.conversation.title,
-          avatar: dialog.conversation.avatar,
-        }))
-      await this._persistUsers(directUsers)
+      await this._persistDirectDialogUsers(dialogs)
       for (const conversation of storedConversations) {
         this._conversations.set(conversation.id, conversation)
         this._peerId(conversation.id)
