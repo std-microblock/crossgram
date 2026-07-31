@@ -1,3 +1,4 @@
+import type { VoiceWorkerMediaEndpoint } from '@mtproto-relay/bridge'
 import type { QQVoiceMediaStartOptions } from './voice-media.js'
 import { describe, expect, it, vi } from 'vitest'
 import { QQNTPlatform } from './index.js'
@@ -11,6 +12,11 @@ const call = {
 }
 const session = {
   platformSessionId: 'voice-session', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
+}
+const endpoint: VoiceWorkerMediaEndpoint = {
+  async send() {},
+  async *receive() {},
+  async close() {},
 }
 
 function mediaService(start: ReturnType<typeof vi.fn>) {
@@ -32,12 +38,21 @@ describe('QQ voice media composition', () => {
       version: 1, socketPath: '/run/qq-bridge/media.sock', leaseId: '0123456789abcdef0123456789abcdef', token, expiry: 1,
     })
 
-    await platform.voiceMedia!.start(call, session)
+    await platform.voiceMedia!.start(call, session, endpoint)
 
     expect(start).toHaveBeenCalledOnce()
     expect(options?.callId).toBe(call.callId)
     expect(options?.token).toBe(token)
     expect(token).toEqual(new Uint8Array(32))
+  })
+
+  it('fails closed before requesting a lease for an invalid worker endpoint', async () => {
+    const start = vi.fn()
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, mediaService(start))
+    const lease = vi.spyOn(platform.client, 'mediaLease')
+
+    await expect(platform.voiceMedia!.start(call, session, {} as VoiceWorkerMediaEndpoint)).rejects.toThrow('worker PCM endpoint')
+    expect(lease).not.toHaveBeenCalled()
   })
 
   it('does not expose a media provider when no QQVoiceMedia service was installed', () => {
