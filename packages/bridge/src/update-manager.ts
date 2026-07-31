@@ -59,6 +59,38 @@ export class UpdateManager {
     }, excludeAuthKeyId)
   }
 
+  /** Sends an ephemeral phone update without adding call data to the update journal. */
+  async publishPhoneCall(
+    session: PlatformSession,
+    update: tl.RawUpdatePhoneCall,
+    excludeAuthKeyId?: string,
+  ): Promise<number> {
+    const payload: tl.TypeUpdates = {
+      _: 'updateShort', update, date: Math.floor(Date.now() / 1_000),
+    }
+    const bindings = await this._database.get('mtproto_auth_binding', {
+      platformSessionId: session.platformSessionId,
+    })
+    let delivered = 0
+    for (const binding of bindings) {
+      if (binding.authKeyId !== excludeAuthKeyId) delivered += this._sendUpdate(hexBytes(binding.authKeyId), payload)
+    }
+    return delivered
+  }
+
+  /** Replays only a current in-memory call snapshot to its already-authorized binding. */
+  async replayPhoneCall(
+    session: PlatformSession,
+    update: tl.RawUpdatePhoneCall,
+    authKeyId: string,
+  ): Promise<number> {
+    const [binding] = await this._database.get('mtproto_auth_binding', {
+      authKeyId, platformSessionId: session.platformSessionId,
+    })
+    if (!binding) return 0
+    return this._sendUpdate(hexBytes(authKeyId), { _: 'updateShort', update, date: Math.floor(Date.now() / 1_000) })
+  }
+
   async publish(
     session: PlatformSession,
     committed: CommittedPlatformEvent,

@@ -1,3 +1,5 @@
+import type { VoiceCallMediaProvider } from './voice/media.js'
+
 /** Platform-neutral IM contract used by the bridge domain layer. */
 
 export type JsonValue = boolean | number | string | null | JsonObject | JsonValue[]
@@ -444,6 +446,8 @@ export type Unsubscribe = () => void | Promise<void>
 export interface IMPlatform<TMediaLocator = unknown> {
   readonly platformKind?: string
   readonly capabilities: PlatformCapabilities
+  /** Optional one-call media composition for platforms that supply PCM transport. */
+  readonly voiceMedia?: VoiceCallMediaProvider
 
   /** Resolve the platform's current user; bridge never invents profile fields. */
   getAccount?(): Promise<IMPlatformAccount<TMediaLocator>>
