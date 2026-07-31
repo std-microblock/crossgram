@@ -12,6 +12,7 @@ import { Config as resourcesConfig } from '../../telegram-resources/src/index.js
 const cases = [
   ['bridge', bridgeConfig, [
     'dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
+    'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
@@ -51,6 +52,8 @@ describe('plugin config schemas', () => {
       apiPrefix: '/api',
       uploadPath: 'data/bridge-uploads',
       autoMuteGroupChats: true,
+      voiceWorkerSocketPath: '',
+      voiceWorkerTimeoutMs: 5_000,
     })
     expect(debugConfig({})).toEqual({
       maxEvents: 2_000,

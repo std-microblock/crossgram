@@ -36,6 +36,10 @@ import {
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
 import { AuthTransferStore } from './auth-transfer.js'
+import { CallRegistry, type VoiceWorkerClient } from './voice/call-registry.js'
+import type { VoiceCallMediaProvider } from './voice/media.js'
+import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
+import { VoiceRpc } from './voice/voice-rpc.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -53,6 +57,10 @@ export * from './draft-store.js'
 export * from './platform-account.js'
 export * from './account-dashboard.js'
 export * from './auth-transfer.js'
+export * from './voice/call-registry.js'
+export * from './voice/media.js'
+export * from './voice/voice-worker-client.js'
+export * from './voice/voice-rpc.js'
 export * from './stripped-thumbnail.js'
 export * from './sticker-outline.js'
 
@@ -68,6 +76,12 @@ export interface BridgeConfig {
   uploadPath?: string
   /** Mute group chats by default unless the Telegram user explicitly enables them. */
   autoMuteGroupChats?: boolean
+  /** Optional native worker; it must expose public status/material only. */
+  voiceWorker?: VoiceWorkerClient
+  /** Local Rust voice-worker Unix socket; an empty path leaves calls unavailable. */
+  voiceWorkerSocketPath?: string
+  /** Per-request Unix socket timeout for the voice worker. */
+  voiceWorkerTimeoutMs?: number
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
@@ -78,6 +92,8 @@ export const Config = z.object({
   apiPrefix: z.string().default('/api'),
   uploadPath: z.string().default('data/bridge-uploads'),
   autoMuteGroupChats: z.boolean().default(true),
+  voiceWorkerSocketPath: z.string().default(''),
+  voiceWorkerTimeoutMs: z.natural().min(1).max(60_000).default(5_000),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -133,6 +149,36 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
       .makeMessageMedia(sticker),
   )
+  const socketWorker = !config.voiceWorker && config.voiceWorkerSocketPath
+    ? new VoiceWorkerSocketClient({
+        socketPath: config.voiceWorkerSocketPath,
+        timeoutMs: config.voiceWorkerTimeoutMs,
+      })
+    : undefined
+  const voiceWorker = config.voiceWorker ?? socketWorker
+  const voiceMedia: VoiceCallMediaProvider = {
+    async start(call, session) {
+      const platform = registry.get(session.platformId)
+      if (!platform?.voiceMedia) throw new Error('platform voice media is unavailable')
+      return platform.voiceMedia.start(call, session)
+    },
+  }
+  const calls = new CallRegistry({
+    worker: voiceWorker,
+    media: voiceMedia,
+    publish: ({ session, update, excludeAuthKeyId }) => updates.publishPhoneCall(session, update, excludeAuthKeyId),
+    replay: (session, update, authKeyId) => updates.replayPhoneCall(session, update, authKeyId),
+  })
+  const voice = new VoiceRpc(calls, store)
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      void calls.expire().catch(() => bridgeLogger.warn('voice call expiry failed'))
+    }, 1_000)
+    return () => {
+      clearInterval(timer)
+      socketWorker?.close()
+    }
+  }, 'mtproto-bridge.voice-calls')
   const subscriptions = new PlatformSubscriptionManager(
     ctx.database,
     registry,
@@ -142,7 +188,21 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       session?.platformId ?? 'unknown', session?.platformSessionId ?? 'unknown',
       error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error),
     ),
-    (session, event, options) => updates.publish(session, event, options),
+    async (session, event, options) => {
+      const signal = event.event.type === 'message' ? event.event.message.metadata?.qqCallSignal : undefined
+      if (
+        voiceWorker
+        && registry.get(session.platformId)?.platformKind === 'qq'
+        && signal === 'incoming'
+        && event.event.type === 'message'
+        && event.event.message.metadata?.qqCallMedia === 'voice'
+      ) {
+        // The correlation is opaque and retained only by the transient registry
+        // to suppress retries of this same QQ source event.
+        await voice.receiveIncoming(session, event.event.conversation.id, event.event.message.id)
+      }
+      return updates.publish(session, event, options)
+    },
     (format, ...args) => bridgeLogger.debug(format, ...args),
   )
   const requireBridgeSession = createSessionResolver(
@@ -152,6 +212,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       localSession, update, excludeAuthKeyId,
     ),
     config.onTransferProgress, dcId, historyTrace,
+    (session, authKeyId) => calls.replay(session, authKeyId),
   )
 
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
@@ -578,6 +639,51 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     _: 'updates', updates: [], users: [], chats: [], date: Math.floor(Date.now() / 1000), seq: 0,
   } as tl.RawUpdates))
 
+  // ── Voice calls (transient; never journaled) ──
+  rpc.register('phone.getCallConfig', async (rpc) => {
+    await requireBridgeSession(rpc)
+    return voice.getCallConfig()
+  })
+  rpc.register('phone.requestCall', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return voice.request(
+      state.platform, state.session, req as tl.phone.RawRequestCallRequest,
+      rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+  })
+  rpc.register('phone.receivedCall', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return voice.received(
+      state.session, req as tl.phone.RawReceivedCallRequest,
+      rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+  })
+  rpc.register('phone.acceptCall', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return voice.accept(
+      state.session, req as tl.phone.RawAcceptCallRequest,
+      rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+  })
+  rpc.register('phone.confirmCall', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return voice.confirm(
+      state.session, req as tl.phone.RawConfirmCallRequest,
+      rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+  })
+  rpc.register('phone.discardCall', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return voice.discard(
+      state.session, req as tl.phone.RawDiscardCallRequest,
+      rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+    )
+  })
+  rpc.register('phone.sendSignalingData', async (rpc, req) =>
+    voice.sendSignalingData((await requireBridgeSession(rpc)).session, req as tl.phone.RawSendSignalingDataRequest))
+  rpc.register('phone.saveCallDebug', async (rpc, req) =>
+    voice.saveCallDebug((await requireBridgeSession(rpc)).session, req as tl.phone.RawSaveCallDebugRequest))
+
   // ── Updates ──
   rpc.register('updates.getState', async (rpc) =>
     updates.getState((await requireBridgeSession(rpc)).session.platformSessionId))
@@ -695,6 +801,7 @@ function createSessionResolver(
   onTransferProgress?: BridgeConfig['onTransferProgress'],
   dcId = 1,
   historyTrace?: (format: string, ...args: unknown[]) => void,
+  onAuthorizedSession?: (session: PlatformSession, authKeyId: string) => void | Promise<void>,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
@@ -730,6 +837,7 @@ function createSessionResolver(
               metadata: row.metadata,
             })
           await subscriptions.ensure(session)
+          await onAuthorizedSession?.(session, authKeyId)
           const state: BridgeSessionState = {
             generation, platform, session,
             stickers: stickerRpcFor(platform, session),

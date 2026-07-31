@@ -105,6 +105,31 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('replays an in-memory phone snapshot only to its reconnecting authorized binding', async () => {
+    const { ctx, manager, sent, store } = await createHarness()
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '1021324354657687', platformId: session.platformId, platformSessionId: session.platformSessionId,
+    })
+    const update: tl.RawUpdatePhoneCall = {
+      _: 'updatePhoneCall', phoneCall: {
+        _: 'phoneCallRequested', id: Long.ONE, accessHash: Long.fromInt(2), date: 1,
+        adminId: 1, participantId: 2, gAHash: Uint8Array.of(1), protocol: {
+          _: 'phoneCallProtocol', udpP2p: false, udpReflector: false, minLayer: 100, maxLayer: 100, libraryVersions: [],
+        },
+      },
+    }
+
+    expect(await manager.replayPhoneCall(session, update, '1021324354657687')).toBe(1)
+    expect(await manager.replayPhoneCall(session, update, '8899aabbccddeeff')).toBe(0)
+
+    expect(sent).toHaveLength(1)
+    expect(Buffer.from(sent[0]!.authKeyId).toString('hex')).toBe('1021324354657687')
+    expect(roundTrip(sent[0]!.update)).toMatchObject({ _: 'updateShort', update })
+    expect(await manager.publishPhoneCall(session, update, '0011223344556677')).toBe(1)
+    expect(sent).toHaveLength(2)
+    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
+  })
+
   it('advances persisted state and targets only auth keys bound to the source platform session', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = {
