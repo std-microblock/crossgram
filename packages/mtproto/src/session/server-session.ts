@@ -10,7 +10,7 @@ import { ServerAuthKey } from './server-auth-key.js'
 import type { AuthKeyStore, StoredAuthKey } from './auth-key-store.js'
 import type { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
-import { doServerAuthorization } from './server-authorization.js'
+import { doServerAuthorization, PqChallengeStore } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector, isRpcRequestObject, unwrapRpcRequest } from '../rpc/dispatcher.js'
 import type { RpcDispatch, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
@@ -178,6 +178,7 @@ export class ServerSession {
     private readonly _onApiLayer?: (authKeyId: Uint8Array, layer: number) => void,
     private readonly _getApiLayer?: (authKeyId: Uint8Array) => number | undefined,
     private readonly _dependencyRegistry?: RpcDependencyRegistry,
+    private readonly _pqChallenges = new PqChallengeStore(),
   ) {
     this._permAuthKey = new ServerAuthKey(_crypto, _log, _readerMap)
     this._msgIdGen = new ServerMessageIdGenerator()
@@ -455,6 +456,7 @@ export class ServerSession {
         this._rsaKeyFingerprint,
         sendPlain,
         recvPlain,
+        this._pqChallenges,
       )
 
       this._msgIdGen.updateTimeOffset(result.timeOffset)

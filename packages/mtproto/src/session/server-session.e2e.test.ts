@@ -235,6 +235,10 @@ async function readPlainMessage(client: TestClient): Promise<{ messageId: Long, 
 }
 
 interface ClientKey { authKey: Uint8Array, authKeyId: Uint8Array, salt: Long }
+interface PqHandshakeStart {
+  nonce: Uint8Array
+  resPqMessage: { messageId: Long, object: any }
+}
 
 /** Run a full client DH handshake (perm or temp) and return the resulting key. */
 async function doClientHandshake(
@@ -245,10 +249,13 @@ async function doClientHandshake(
   acknowledgePlaintextResponses = false,
   batchFirstAcknowledgement = false,
   extraPqProbes = 0,
+  initialPq?: PqHandshakeStart,
 ): Promise<ClientKey> {
-  let nonce = crypto.randomBytes(16)
+  let nonce = initialPq?.nonce ?? crypto.randomBytes(16)
   let resPqMessage: { messageId: Long, object: any }
-  if (extraPqProbes > 0) {
+  if (initialPq) {
+    resPqMessage = initialPq.resPqMessage
+  } else if (extraPqProbes > 0) {
     await sendLegacyReqPq(client, nonce, 3)
     resPqMessage = await readPlainMessage(client)
     expect(resPqMessage.object._).toBe('mt_resPQ')
@@ -561,6 +568,43 @@ async function startServer(
 }
 
 describe('e2e: obfuscated transport + PFS + RPC', () => {
+  it('continues req_DH_params on a different TCP connection than req_pq', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      const probe = await TestClient.connect(port)
+      const nonce = crypto.randomBytes(16)
+      await sendLegacyReqPq(probe, nonce, 3)
+      const resPqMessage = await readPlainMessage(probe)
+      expect(resPqMessage.object._).toBe('mt_resPQ')
+      probe.close()
+
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(
+        client,
+        pubKey,
+        false,
+        3600,
+        false,
+        false,
+        0,
+        { nonce, resPqMessage },
+      )
+      const sessionId = new Long(0x72727272, 0x72727272)
+      await client.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        perm.salt,
+        sessionId,
+        16,
+      ))
+      expect(await readRpcResult(client, perm)).toMatchObject({ _: 'config', thisDc: 1 })
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
   it('continues a TDLib handshake from the first resPQ after many later probes', async () => {
     await crypto.initialize?.()
     const { port, pubKey, stop } = await startServer()

@@ -19,47 +19,60 @@ interface PendingPqChallenge {
   clientNonce: Uint8Array
   serverNonce: Uint8Array
   pq: bigint
+  createdAt: number
 }
 
-const MAX_PENDING_PQ_CHALLENGES = 64
+const DEFAULT_MAX_PENDING_PQ_CHALLENGES = 4096
+const DEFAULT_PQ_CHALLENGE_TTL_MS = 60_000
 
-export function rememberPendingPqChallenge(
-  challenges: PendingPqChallenge[],
-  clientNonce: Uint8Array,
-  serverNonce: Uint8Array,
-  pq: bigint,
-): PendingPqChallenge {
-  if (challenges.length >= MAX_PENDING_PQ_CHALLENGES) {
-    throw new Error(`Step 1: too many pending PQ challenges (${MAX_PENDING_PQ_CHALLENGES})`)
+export class PqChallengeStore {
+  private readonly _challenges: PendingPqChallenge[] = []
+
+  constructor(
+    private readonly _maxSize = DEFAULT_MAX_PENDING_PQ_CHALLENGES,
+    private readonly _ttlMs = DEFAULT_PQ_CHALLENGE_TTL_MS,
+    private readonly _now: () => number = Date.now,
+  ) {}
+
+  remember(clientNonce: Uint8Array, serverNonce: Uint8Array, pq: bigint): PendingPqChallenge {
+    const now = this._now()
+    this._prune(now)
+    while (this._challenges.length >= this._maxSize) {
+      this._challenges.shift()
+    }
+
+    // TL readers may return views into a transport receive buffer. The buffer
+    // is reclaimed after message dispatch, so retain owned copies across later
+    // frames and across the TCP connection switch performed by TDLib.
+    const challenge = {
+      clientNonce: new Uint8Array(clientNonce),
+      serverNonce: new Uint8Array(serverNonce),
+      pq,
+      createdAt: now,
+    }
+    this._challenges.push(challenge)
+    return challenge
   }
 
-  // TL readers may return views into a transport receive buffer. The buffer is
-  // reclaimed after message dispatch, so retain owned copies across subsequent
-  // req_pq/req_pq_multi frames.
-  const challenge = {
-    clientNonce: new Uint8Array(clientNonce),
-    serverNonce: new Uint8Array(serverNonce),
-    pq,
-  }
-  challenges.push(challenge)
-  return challenge
-}
+  select(clientNonce: Uint8Array, serverNonce: Uint8Array): PendingPqChallenge {
+    this._prune(this._now())
+    const matchingNonce = this._challenges.filter((challenge) => typed.equal(challenge.clientNonce, clientNonce))
+    if (matchingNonce.length === 0) {
+      throw new Error('Step 2: invalid nonce from client')
+    }
 
-export function selectPendingPqChallenge(
-  challenges: readonly PendingPqChallenge[],
-  clientNonce: Uint8Array,
-  serverNonce: Uint8Array,
-): PendingPqChallenge {
-  const matchingNonce = challenges.filter((challenge) => typed.equal(challenge.clientNonce, clientNonce))
-  if (matchingNonce.length === 0) {
-    throw new Error('Step 2: invalid nonce from client')
+    const challenge = matchingNonce.find((candidate) => typed.equal(candidate.serverNonce, serverNonce))
+    if (!challenge) {
+      throw new Error('Step 2: invalid server nonce from client')
+    }
+    return challenge
   }
 
-  const challenge = matchingNonce.find((candidate) => typed.equal(candidate.serverNonce, serverNonce))
-  if (!challenge) {
-    throw new Error('Step 2: invalid server nonce from client')
+  private _prune(now: number): void {
+    while (this._challenges.length > 0 && now - this._challenges[0].createdAt > this._ttlMs) {
+      this._challenges.shift()
+    }
   }
-  return challenge
 }
 
 export async function receivePlainHandshakeObject(
@@ -126,23 +139,20 @@ export async function doServerAuthorization(
   keyFingerprint: Long,
   sendPlain: (message: mtp.TlObject) => Promise<void>,
   recvPlain: () => Promise<Uint8Array>,
+  pqChallenges = new PqChallengeStore(),
 ): Promise<AuthorizationResult> {
   const authLog = log.create('auth')
 
   // ── Step 1: Answer PQ requests until the client sends req_DH_params ──
   //
-  // mtcute sends a single req_pq_multi. Telegram Desktop / TDLib clients open
-  // with the legacy req_pq and then send req_pq_multi on the *same* connection,
-  // so we keep (re)issuing resPQ — each with a fresh server nonce and pq — until
-  // the client proceeds to req_DH_params. TDLib may continue with an earlier
-  // response after sending a later probe, so every outstanding challenge must
-  // remain selectable by its client/server nonce pair.
+  // mtcute sends a single req_pq_multi. Telegram Desktop / TDLib clients can
+  // send multiple probes and can continue req_DH_params on another TCP
+  // connection, so the owning MTProto service shares this challenge store
+  // across sessions.
 
   let clientNonce!: Uint8Array
   let serverNonce!: Uint8Array
   let pq!: bigint
-  const pendingPqChallenges: PendingPqChallenge[] = []
-
   let reqDh: mtp.RawMt_req_DH_params
   for (;;) {
     const obj = await receivePlainHandshakeObject(readerMap, authLog, recvPlain)
@@ -155,8 +165,7 @@ export async function doServerAuthorization(
       throw new Error(`Expected req_pq(_multi) or req_DH_params, got ${obj._}`)
     }
 
-    const challenge = rememberPendingPqChallenge(
-      pendingPqChallenges,
+    const challenge = pqChallenges.remember(
       obj.nonce,
       crypto.randomBytes(16),
       generatePq().pq,
@@ -180,7 +189,7 @@ export async function doServerAuthorization(
 
   // ── Step 2: req_DH_params — decrypt inner data, return server_DH_params_ok ──
 
-  const selectedChallenge = selectPendingPqChallenge(pendingPqChallenges, reqDh.nonce, reqDh.serverNonce)
+  const selectedChallenge = pqChallenges.select(reqDh.nonce, reqDh.serverNonce)
   clientNonce = selectedChallenge.clientNonce
   serverNonce = selectedChallenge.serverNonce
   pq = selectedChallenge.pq
