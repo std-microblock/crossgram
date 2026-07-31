@@ -11,19 +11,42 @@ use nix::unistd::Uid;
 
 use crossgram_voice_worker::serve_connection;
 #[cfg(feature = "test-fake")]
+use crossgram_voice_worker::serve_fake_connection;
+#[cfg(feature = "native-tgcalls-shim")]
+use crossgram_voice_worker::tgcalls_backend::{
+    ShimTgcallsMediaBackend, native_tgcalls_media_backend,
+};
+#[cfg(feature = "test-fake")]
 use crossgram_voice_worker::worker::FakeMediaBackend;
-use crossgram_voice_worker::worker::{MediaBackend, UnavailableMediaBackend, VoiceWorker};
+#[cfg(any(not(feature = "native-tgcalls-shim"), test))]
+use crossgram_voice_worker::worker::UnavailableMediaBackend;
+use crossgram_voice_worker::worker::{MediaBackend, VoiceWorker};
 
 const SOCKET_MODE: u32 = 0o600;
 const PARENT_MODE: u32 = 0o700;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(feature = "native-tgcalls-shim")]
+type ProductionMediaBackend = ShimTgcallsMediaBackend;
+#[cfg(not(feature = "native-tgcalls-shim"))]
+type ProductionMediaBackend = UnavailableMediaBackend;
+
+#[cfg(feature = "native-tgcalls-shim")]
+fn production_backend() -> ProductionMediaBackend {
+    native_tgcalls_media_backend()
+}
+
+#[cfg(not(feature = "native-tgcalls-shim"))]
+const fn production_backend() -> ProductionMediaBackend {
+    UnavailableMediaBackend
+}
 
 fn main() -> io::Result<()> {
     let mut arguments = env::args_os();
     let _program = arguments.next();
     match (arguments.next(), arguments.next()) {
         (None, None) => {
-            let mut worker = VoiceWorker::new(UnavailableMediaBackend);
+            let mut worker = VoiceWorker::new(production_backend());
             let mut input = BufReader::new(io::stdin().lock());
             let mut output = BufWriter::new(io::stdout().lock());
             serve_connection(&mut worker, &mut input, &mut output)
@@ -33,7 +56,7 @@ fn main() -> io::Result<()> {
         }
         #[cfg(feature = "test-fake")]
         (Some(flag), Some(path)) if flag == "--unix-fake" && arguments.next().is_none() => {
-            serve_unix_with_backend(Path::new(&path), FakeMediaBackend::default())
+            serve_unix_fake(Path::new(&path))
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -43,7 +66,16 @@ fn main() -> io::Result<()> {
 }
 
 fn serve_unix(path: &Path) -> io::Result<()> {
-    serve_unix_with_backend(path, UnavailableMediaBackend)
+    serve_unix_with_backend(path, production_backend())
+}
+
+#[cfg(feature = "test-fake")]
+fn serve_unix_fake(path: &Path) -> io::Result<()> {
+    let listener = bind_unix(path)?;
+    let mut worker = VoiceWorker::new(FakeMediaBackend::default());
+    loop {
+        serve_unix_fake_connection(&listener, &mut worker, CONNECTION_TIMEOUT)?;
+    }
 }
 
 fn serve_unix_with_backend<B: MediaBackend>(path: &Path, backend: B) -> io::Result<()> {
@@ -62,11 +94,46 @@ fn serve_unix_connection<B: MediaBackend>(
     serve_unix_connection_with_verifier(listener, worker, timeout, verify_peer_uid)
 }
 
+#[cfg(feature = "test-fake")]
+fn serve_unix_fake_connection(
+    listener: &UnixListener,
+    worker: &mut VoiceWorker<FakeMediaBackend>,
+    timeout: Duration,
+) -> io::Result<()> {
+    serve_unix_connection_with_verifier_and_handler(
+        listener,
+        worker,
+        timeout,
+        verify_peer_uid,
+        serve_fake_connection,
+    )
+}
+
 fn serve_unix_connection_with_verifier<B: MediaBackend>(
     listener: &UnixListener,
     worker: &mut VoiceWorker<B>,
     timeout: Duration,
     verify: impl FnOnce(&UnixStream) -> io::Result<()>,
+) -> io::Result<()> {
+    serve_unix_connection_with_verifier_and_handler(
+        listener,
+        worker,
+        timeout,
+        verify,
+        serve_connection,
+    )
+}
+
+fn serve_unix_connection_with_verifier_and_handler<B: MediaBackend>(
+    listener: &UnixListener,
+    worker: &mut VoiceWorker<B>,
+    timeout: Duration,
+    verify: impl FnOnce(&UnixStream) -> io::Result<()>,
+    serve: impl FnOnce(
+        &mut VoiceWorker<B>,
+        &mut BufReader<UnixStream>,
+        &mut BufWriter<UnixStream>,
+    ) -> io::Result<()>,
 ) -> io::Result<()> {
     let (stream, _) = listener.accept()?;
     if !accept_verified_peer(verify(&stream))? {
@@ -76,7 +143,7 @@ fn serve_unix_connection_with_verifier<B: MediaBackend>(
     let read_stream = stream.try_clone()?;
     let mut reader = BufReader::new(read_stream);
     let mut writer = BufWriter::new(stream);
-    match serve_connection(worker, &mut reader, &mut writer) {
+    match serve(worker, &mut reader, &mut writer) {
         Ok(()) => Ok(()),
         Err(error) if is_client_connection_error(error.kind()) => Ok(()),
         Err(error) => Err(error),
@@ -163,10 +230,10 @@ mod tests {
 
     use super::*;
     use crossgram_voice_worker::ipc::{
-        IpcError, PCM_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, decode_response,
-        encode_request, read_frame, write_frame,
+        EndpointKind, IpcError, MediaEndpoint, MediaStartConfig, PCM_FRAME_BYTES, PROTOCOL_VERSION,
+        Request, Response, decode_response, encode_request, read_frame, write_frame,
     };
-    use crossgram_voice_worker::worker::MediaError;
+    use crossgram_voice_worker::worker::{MediaError, MediaStartConfig as WorkerMediaStartConfig};
 
     struct CountingMediaBackend(Arc<AtomicUsize>);
 
@@ -174,7 +241,7 @@ mod tests {
         type Handle = ();
         type Pcm = ();
 
-        fn start(&mut self, _call_id: u64) -> Result<Self::Handle, MediaError> {
+        fn start(&mut self, _config: WorkerMediaStartConfig) -> Result<Self::Handle, MediaError> {
             Ok(())
         }
 
@@ -206,6 +273,28 @@ mod tests {
         }
         fn close_pcm(&mut self, _pcm: Self::Pcm) {}
         fn stop(&mut self, _handle: Self::Handle) {}
+    }
+
+    fn config() -> MediaStartConfig {
+        MediaStartConfig {
+            is_outgoing: true,
+            initialization_timeout_ms: 1,
+            receive_timeout_ms: 1,
+            enable_p2p: false,
+            allow_tcp: true,
+            protocol_v1: true,
+            enable_aec: true,
+            enable_ns: true,
+            enable_agc: true,
+            endpoints: vec![MediaEndpoint {
+                id: 1,
+                ipv4: "127.0.0.1".into(),
+                ipv6: String::new(),
+                port: 443,
+                kind: EndpointKind::UdpRelay,
+                peer_tag: [1; 16],
+            }],
+        }
     }
 
     fn umask_lock() -> &'static Mutex<()> {
@@ -312,7 +401,11 @@ mod tests {
             panic!("recipient must prepare");
         };
         assert!(matches!(
-            worker.handle(Request::CompleteCaller { call_id: 1, gb }),
+            worker.handle(Request::CompleteCaller {
+                call_id: 1,
+                gb,
+                config: config(),
+            }),
             Response::CallerCompleted { .. }
         ));
         let server = thread::spawn(move || {
@@ -366,7 +459,11 @@ mod tests {
             panic!("recipient must prepare");
         };
         assert!(matches!(
-            worker.handle(Request::CompleteCaller { call_id: 1, gb }),
+            worker.handle(Request::CompleteCaller {
+                call_id: 1,
+                gb,
+                config: config(),
+            }),
             Response::CallerCompleted { .. }
         ));
         let server = thread::spawn(move || {

@@ -29,9 +29,13 @@ export interface VoiceWorkerMediaEndpoint {
   close(): Promise<void> | void
 }
 
-/** Platform seam which obtains and consumes a one-use platform media lease. */
+/** Platform seam which consumes a one-use media lease after worker endpoint confirmation. */
 export interface VoiceCallMediaProvider {
-  start(call: VoiceWorkerCall, session: PlatformSession): Promise<VoiceMediaSession>
+  start(
+    call: VoiceWorkerCall,
+    session: PlatformSession,
+    endpoint: VoiceWorkerMediaEndpoint,
+  ): Promise<VoiceMediaSession>
 }
 
 /**

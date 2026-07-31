@@ -47,7 +47,21 @@ function createVoiceRpc(signalingFailure?: Error): VoiceRpc {
       return { id: 2 }
     },
   } as unknown as MessageStore
-  return new VoiceRpc(new CallRegistry({ worker }), store)
+  return new VoiceRpc(new CallRegistry({
+    worker,
+    mediaStartProvider: {
+      async get() {
+        return {
+          initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+          enableP2p: false, allowTcp: true, protocolV1: true,
+          enableAec: true, enableNs: true, enableAgc: true,
+          endpoints: [{
+            id: Long.ONE, ipv4: '127.0.0.1', ipv6: '', port: 443, kind: 'tcp-relay' as const, peerTag: new Uint8Array(16),
+          }],
+        }
+      },
+    },
+  }), store)
 }
 
 describe('VoiceRpc incoming calls', () => {

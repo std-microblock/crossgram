@@ -4,15 +4,66 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::crypto::{
     DhPrivate, SecretBytes, derive_shared_key, ga_hash, key_fingerprint, public_value,
     verify_ga_hash,
 };
 use crate::ipc::{
-    ErrorCode, MAX_SIGNAL_BYTES, PCM_CAPABILITY_BYTES, PCM_FRAME_BYTES, Request, Response,
+    ErrorCode, MAX_SIGNAL_BYTES, MediaStartConfig as IpcMediaStartConfig, PCM_CAPABILITY_BYTES,
+    PCM_FRAME_BYTES, Request, Response, WorkerEvent,
 };
-use zeroize::Zeroize;
+
+pub const AUTH_KEY_BYTES: usize = 256;
+pub const MAX_OUTBOUND_EVENTS: usize = 16;
+
+/// Worker-private configuration consumed by a backend only after a successful
+/// Telegram DH completion. The key is never serialized back to the bridge.
+pub struct MediaStartConfig {
+    pub call_id: u64,
+    pub server: IpcMediaStartConfig,
+    pub auth_key: [u8; AUTH_KEY_BYTES],
+}
+
+impl Drop for MediaStartConfig {
+    fn drop(&mut self) {
+        self.auth_key.zeroize();
+        for endpoint in &mut self.server.endpoints {
+            endpoint.ipv4.zeroize();
+            endpoint.ipv6.zeroize();
+            endpoint.peer_tag.zeroize();
+        }
+        self.server.endpoints.clear();
+    }
+}
+
+pub enum MediaEvent {
+    OutboundSignal(Vec<u8>),
+    NativeError,
+}
+
+impl Drop for MediaEvent {
+    fn drop(&mut self) {
+        if let Self::OutboundSignal(signal) = self {
+            signal.zeroize();
+        }
+    }
+}
+
+struct PendingEvent {
+    call_id: u64,
+    id: u64,
+    event: MediaEvent,
+}
+
+impl Drop for PendingEvent {
+    fn drop(&mut self) {
+        if let MediaEvent::OutboundSignal(signal) = &mut self.event {
+            signal.zeroize();
+        }
+    }
+}
 
 pub const CALL_TTL: Duration = Duration::from_secs(30);
 const MAX_SIGNAL_REPLAY_ENTRIES: usize = 16;
@@ -23,7 +74,12 @@ pub trait MediaBackend {
     type Handle;
     type Pcm;
 
-    fn start(&mut self, call_id: u64) -> Result<Self::Handle, MediaError>;
+    fn start(&mut self, config: MediaStartConfig) -> Result<Self::Handle, MediaError>;
+    /// Returns one copied native event. Implementations must retain no secret
+    /// callback memory after this call returns.
+    fn poll_event(&mut self) -> Result<Option<MediaEvent>, MediaError> {
+        Ok(None)
+    }
     fn forward_signal(
         &mut self,
         handle: &mut Self::Handle,
@@ -55,7 +111,7 @@ impl MediaBackend for UnavailableMediaBackend {
     type Handle = ();
     type Pcm = ();
 
-    fn start(&mut self, _call_id: u64) -> Result<Self::Handle, MediaError> {
+    fn start(&mut self, _config: MediaStartConfig) -> Result<Self::Handle, MediaError> {
         Err(MediaError)
     }
     fn forward_signal(
@@ -97,6 +153,9 @@ pub struct VoiceWorker<B: MediaBackend> {
     media: Option<B::Handle>,
     endpoint: Option<MediaEndpoint<B::Pcm>>,
     recent: Option<Replay>,
+    events: VecDeque<PendingEvent>,
+    next_event_id: u64,
+    last_acked_event: Option<(u64, u64)>,
     ttl: Duration,
 }
 
@@ -118,7 +177,7 @@ enum CallState {
     },
     Active {
         call_id: u64,
-        shared_key: SecretBytes,
+        endpoint_key: SecretBytes,
         completed_request: Box<Request>,
         completed_response: Box<Response>,
         signal_replays: VecDeque<SignalReplay>,
@@ -156,6 +215,9 @@ impl<B: MediaBackend> VoiceWorker<B> {
             media: None,
             endpoint: None,
             recent: None,
+            events: VecDeque::with_capacity(MAX_OUTBOUND_EVENTS),
+            next_event_id: 1,
+            last_acked_event: None,
             ttl,
         }
     }
@@ -163,6 +225,7 @@ impl<B: MediaBackend> VoiceWorker<B> {
     /// Handles one local IPC request. All returned variants are public-only.
     pub fn handle(&mut self, request: Request) -> Response {
         self.expire();
+        self.collect_native_events();
         if let Some(replay) = &self.recent {
             if replay.request == request {
                 return replay.response.clone();
@@ -176,12 +239,17 @@ impl<B: MediaBackend> VoiceWorker<B> {
             Request::PrepareRecipient { call_id, ga_hash } => {
                 self.prepare_recipient(call_id, ga_hash)
             }
-            Request::CompleteCaller { call_id, gb } => self.complete_caller(call_id, gb),
+            Request::CompleteCaller {
+                call_id,
+                gb,
+                config,
+            } => self.complete_caller(call_id, gb, config),
             Request::CompleteRecipient {
                 call_id,
                 ga,
                 expected_fingerprint,
-            } => self.complete_recipient(call_id, ga, expected_fingerprint),
+                config,
+            } => self.complete_recipient(call_id, ga, expected_fingerprint, config),
             Request::Signal {
                 call_id,
                 request_id,
@@ -209,6 +277,17 @@ impl<B: MediaBackend> VoiceWorker<B> {
                 call_id,
                 capability,
             } => self.close_media(call_id, capability),
+            Request::PollEvent { call_id } => self.poll_event(call_id),
+            Request::AckEvent { call_id, event_id } => self.ack_event(call_id, event_id),
+            #[cfg(feature = "test-fake")]
+            Request::TestTakeCapture { .. } => invalid_state(),
+            #[cfg(feature = "test-fake")]
+            Request::TestInjectPlayout { mut frame, .. } => {
+                frame.zeroize();
+                invalid_state()
+            }
+            #[cfg(feature = "test-fake")]
+            Request::TestStats { .. } => invalid_state(),
         }
     }
 
@@ -225,14 +304,14 @@ impl<B: MediaBackend> VoiceWorker<B> {
     #[must_use]
     pub fn active_fingerprint(&self) -> Option<i64> {
         let CallState::Active {
-            shared_key,
+            endpoint_key,
             completed_response,
             ..
         } = &self.state
         else {
             return None;
         };
-        if shared_key.as_slice().is_empty() {
+        if endpoint_key.as_slice().is_empty() {
             return None;
         }
         match completed_response.as_ref() {
@@ -247,12 +326,23 @@ impl<B: MediaBackend> VoiceWorker<B> {
             | Response::PcmReceived { .. }
             | Response::PcmPending
             | Response::MediaClosed
+            | Response::Event { .. }
+            | Response::EventPending
+            | Response::EventAcknowledged { .. }
             | Response::Error { .. } => None,
+            #[cfg(feature = "test-fake")]
+            Response::TestStats { .. } => None,
         }
     }
 
     /// Stops the active backend handle exactly once and drops all call secrets.
     pub fn teardown(&mut self) {
+        self.events.clear();
+        self.last_acked_event = None;
+        self.teardown_media();
+    }
+
+    fn teardown_media(&mut self) {
         let old_state = core::mem::replace(&mut self.state, CallState::Idle);
         if let Some(mut endpoint) = self.endpoint.take() {
             endpoint.capability.zeroize();
@@ -322,8 +412,42 @@ impl<B: MediaBackend> VoiceWorker<B> {
         Response::RecipientPrepared { gb }
     }
 
-    fn complete_caller(&mut self, call_id: u64, gb: [u8; 256]) -> Response {
-        let request = Request::CompleteCaller { call_id, gb };
+    fn start_backend(
+        &mut self,
+        call_id: u64,
+        shared_key: &SecretBytes,
+        config: IpcMediaStartConfig,
+        is_outgoing: bool,
+    ) -> Result<(B::Handle, SecretBytes), MediaError> {
+        if config.validate().is_err() || config.is_outgoing != is_outgoing {
+            return Err(MediaError);
+        }
+        let mut endpoint_digest = Sha256::new();
+        endpoint_digest.update(b"crossgram-voice-worker-pcm-v2");
+        endpoint_digest.update(shared_key.as_slice());
+        let endpoint_key = SecretBytes::new(endpoint_digest.finalize().to_vec());
+        let mut auth_key = [0_u8; AUTH_KEY_BYTES];
+        auth_key.copy_from_slice(shared_key.as_slice());
+        self.backend
+            .start(MediaStartConfig {
+                call_id,
+                server: config,
+                auth_key,
+            })
+            .map(|handle| (handle, endpoint_key))
+    }
+
+    fn complete_caller(
+        &mut self,
+        call_id: u64,
+        gb: [u8; 256],
+        config: IpcMediaStartConfig,
+    ) -> Response {
+        let request = Request::CompleteCaller {
+            call_id,
+            gb,
+            config: config.clone(),
+        };
         if let CallState::Active {
             call_id: active_id,
             completed_request,
@@ -350,14 +474,15 @@ impl<B: MediaBackend> VoiceWorker<B> {
             return self.remember(request, crypto_error());
         };
         let fingerprint = key_fingerprint(shared_key.as_slice());
-        let Ok(handle) = self.backend.start(call_id) else {
+        let Ok((handle, endpoint_key)) = self.start_backend(call_id, &shared_key, config, true)
+        else {
             return self.remember(request, media_unavailable());
         };
         let response = Response::CallerCompleted { ga, fingerprint };
         self.media = Some(handle);
         self.state = CallState::Active {
             call_id,
-            shared_key,
+            endpoint_key,
             completed_request: Box::new(request),
             completed_response: Box::new(response.clone()),
             signal_replays: VecDeque::with_capacity(MAX_SIGNAL_REPLAY_ENTRIES),
@@ -371,11 +496,13 @@ impl<B: MediaBackend> VoiceWorker<B> {
         call_id: u64,
         ga: [u8; 256],
         expected_fingerprint: i64,
+        config: IpcMediaStartConfig,
     ) -> Response {
         let request = Request::CompleteRecipient {
             call_id,
             ga,
             expected_fingerprint,
+            config: config.clone(),
         };
         if let CallState::Active {
             call_id: active_id,
@@ -412,14 +539,15 @@ impl<B: MediaBackend> VoiceWorker<B> {
         if fingerprint != expected_fingerprint {
             return self.remember(request, crypto_error());
         }
-        let Ok(handle) = self.backend.start(call_id) else {
+        let Ok((handle, endpoint_key)) = self.start_backend(call_id, &shared_key, config, false)
+        else {
             return self.remember(request, media_unavailable());
         };
         let response = Response::RecipientCompleted { fingerprint };
         self.media = Some(handle);
         self.state = CallState::Active {
             call_id,
-            shared_key,
+            endpoint_key,
             completed_request: Box::new(request),
             completed_response: Box::new(response.clone()),
             signal_replays: VecDeque::with_capacity(MAX_SIGNAL_REPLAY_ENTRIES),
@@ -481,13 +609,79 @@ impl<B: MediaBackend> VoiceWorker<B> {
         response
     }
 
+    fn collect_native_events(&mut self) {
+        let Some(_handle) = self.media.as_mut() else {
+            return;
+        };
+        let event = match self.backend.poll_event() {
+            Ok(event) => event,
+            Err(_) => Some(MediaEvent::NativeError),
+        };
+        let Some(event) = event else {
+            return;
+        };
+        let call_id = match &self.state {
+            CallState::Active { call_id, .. } => *call_id,
+            _ => return,
+        };
+        let is_error = matches!(&event, MediaEvent::NativeError);
+        if is_error {
+            // A terminal native failure must not be lost behind queued signaling.
+            // Clearing the queue drops and zeroizes every evicted signal.
+            self.events.clear();
+            self.last_acked_event = None;
+        } else if self.events.len() == MAX_OUTBOUND_EVENTS {
+            // Dropping `event` zeroizes the rejected native signal.
+            return;
+        }
+        let event_id = self.next_event_id;
+        self.next_event_id = self.next_event_id.saturating_add(1);
+        self.events.push_back(PendingEvent {
+            call_id,
+            id: event_id,
+            event,
+        });
+        if is_error {
+            // Preserve only the terminal error until its explicit acknowledgement.
+            self.teardown_media();
+        }
+    }
+
+    fn poll_event(&mut self, call_id: u64) -> Response {
+        self.collect_native_events();
+        let Some(event) = self.events.iter().find(|event| event.call_id == call_id) else {
+            return Response::EventPending;
+        };
+        let event_id = event.id;
+        let event = match &event.event {
+            MediaEvent::OutboundSignal(signal) => WorkerEvent::OutboundSignal(signal.clone()),
+            MediaEvent::NativeError => WorkerEvent::NativeError,
+        };
+        Response::Event { event_id, event }
+    }
+
+    fn ack_event(&mut self, call_id: u64, event_id: u64) -> Response {
+        if self.last_acked_event == Some((call_id, event_id)) {
+            return Response::EventAcknowledged { event_id };
+        }
+        let Some(event) = self.events.front() else {
+            return invalid_state();
+        };
+        if event.call_id != call_id || event.id != event_id {
+            return invalid_state();
+        }
+        self.events.pop_front();
+        self.last_acked_event = Some((call_id, event_id));
+        Response::EventAcknowledged { event_id }
+    }
+
     fn attach_media(&mut self, call_id: u64, request_id: u64) -> Response {
         let capability = match &self.state {
             CallState::Active {
                 call_id: active_id,
-                shared_key,
+                endpoint_key,
                 ..
-            } if *active_id == call_id => endpoint_capability(shared_key, call_id, request_id),
+            } if *active_id == call_id => endpoint_capability(endpoint_key, call_id, request_id),
             _ => return invalid_state(),
         };
         if let Some(endpoint) = &self.endpoint {
@@ -672,6 +866,61 @@ impl<B: MediaBackend> Drop for VoiceWorker<B> {
     }
 }
 
+#[cfg(feature = "test-fake")]
+impl VoiceWorker<FakeMediaBackend> {
+    pub fn take_fake_capture(&mut self, call_id: u64) -> Response {
+        if !matches!(&self.state, CallState::Active { call_id: active_id, .. } if *active_id == call_id)
+        {
+            return invalid_state();
+        }
+        match self.endpoint.as_mut() {
+            Some(endpoint) => match endpoint.pcm.take_captured() {
+                Some(frame) => Response::PcmReceived {
+                    frame: Box::new(frame),
+                },
+                None => Response::PcmPending,
+            },
+            None => invalid_state(),
+        }
+    }
+
+    #[must_use]
+    pub fn fake_stats(&self, call_id: u64) -> Response {
+        if !matches!(&self.state, CallState::Active { call_id: active_id, .. } if *active_id == call_id)
+            || self.endpoint.is_none()
+        {
+            return invalid_state();
+        }
+        Response::TestStats {
+            captured_dropped: u32::try_from(self.backend.dropped_capture_frames)
+                .unwrap_or(u32::MAX),
+            playout_dropped: u32::try_from(self.backend.dropped_playout_frames).unwrap_or(u32::MAX),
+        }
+    }
+
+    pub fn inject_fake_playout(
+        &mut self,
+        call_id: u64,
+        mut frame: Box<[u8; PCM_FRAME_BYTES]>,
+    ) -> Response {
+        if !matches!(&self.state, CallState::Active { call_id: active_id, .. } if *active_id == call_id)
+        {
+            frame.zeroize();
+            return invalid_state();
+        }
+        let response = if let Some(endpoint) = self.endpoint.as_mut() {
+            endpoint
+                .pcm
+                .inject_playout(frame.as_ref(), &mut self.backend.dropped_playout_frames);
+            Response::PcmSent
+        } else {
+            invalid_state()
+        };
+        frame.zeroize();
+        response
+    }
+}
+
 fn endpoint_capability(
     shared_key: &SecretBytes,
     call_id: u64,
@@ -708,7 +957,40 @@ pub struct FakeMediaBackend {
     stopped: Vec<u64>,
     forwarded_signals: usize,
     attached: usize,
-    dropped_pcm_frames: usize,
+    dropped_capture_frames: usize,
+    dropped_playout_frames: usize,
+    events: VecDeque<MediaEvent>,
+}
+
+#[cfg(any(test, feature = "test-fake"))]
+#[derive(Default)]
+pub struct FakePcm {
+    captured: VecDeque<[u8; PCM_FRAME_BYTES]>,
+    playout: VecDeque<[u8; PCM_FRAME_BYTES]>,
+}
+
+#[cfg(any(test, feature = "test-fake"))]
+impl FakePcm {
+    fn take_captured(&mut self) -> Option<[u8; PCM_FRAME_BYTES]> {
+        self.captured.pop_front()
+    }
+
+    #[cfg(feature = "test-fake")]
+    fn inject_playout(
+        &mut self,
+        frame: &[u8; PCM_FRAME_BYTES],
+        dropped_playout_frames: &mut usize,
+    ) {
+        push_fake_frame(&mut self.playout, frame, dropped_playout_frames);
+    }
+
+    fn zeroize(&mut self) {
+        for frame in self.captured.iter_mut().chain(self.playout.iter_mut()) {
+            frame.zeroize();
+        }
+        self.captured.clear();
+        self.playout.clear();
+    }
 }
 
 #[cfg(any(test, feature = "test-fake"))]
@@ -730,19 +1012,26 @@ impl FakeMediaBackend {
         self.attached
     }
     #[must_use]
-    pub const fn dropped_pcm_frames(&self) -> usize {
-        self.dropped_pcm_frames
+    pub const fn dropped_capture_frames(&self) -> usize {
+        self.dropped_capture_frames
+    }
+    #[must_use]
+    pub const fn dropped_playout_frames(&self) -> usize {
+        self.dropped_playout_frames
     }
 }
 
 #[cfg(any(test, feature = "test-fake"))]
 impl MediaBackend for FakeMediaBackend {
     type Handle = u64;
-    type Pcm = VecDeque<[u8; PCM_FRAME_BYTES]>;
+    type Pcm = FakePcm;
 
-    fn start(&mut self, call_id: u64) -> Result<Self::Handle, MediaError> {
-        self.started.push(call_id);
-        Ok(call_id)
+    fn start(&mut self, config: MediaStartConfig) -> Result<Self::Handle, MediaError> {
+        self.started.push(config.call_id);
+        Ok(config.call_id)
+    }
+    fn poll_event(&mut self) -> Result<Option<MediaEvent>, MediaError> {
+        Ok(self.events.pop_front())
     }
     fn forward_signal(
         &mut self,
@@ -754,40 +1043,69 @@ impl MediaBackend for FakeMediaBackend {
     }
     fn attach_pcm(&mut self, _handle: &mut Self::Handle) -> Result<Self::Pcm, MediaError> {
         self.attached += 1;
-        Ok(VecDeque::with_capacity(MAX_FAKE_PCM_QUEUE_FRAMES))
+        Ok(FakePcm::default())
     }
     fn send_pcm(
         &mut self,
         pcm: &mut Self::Pcm,
         frame: &[u8; PCM_FRAME_BYTES],
     ) -> Result<(), MediaError> {
-        while pcm.len() >= MAX_FAKE_PCM_QUEUE_FRAMES {
-            let mut dropped = pcm.pop_front().expect("queue length was checked");
-            dropped.zeroize();
-            self.dropped_pcm_frames += 1;
-        }
-        pcm.push_back(*frame);
+        push_fake_frame(&mut pcm.captured, frame, &mut self.dropped_capture_frames);
         Ok(())
     }
     fn receive_pcm(
         &mut self,
         pcm: &mut Self::Pcm,
     ) -> Result<Option<[u8; PCM_FRAME_BYTES]>, MediaError> {
-        Ok(pcm.pop_front())
+        Ok(pcm.playout.pop_front())
     }
     fn close_pcm(&mut self, mut pcm: Self::Pcm) {
-        for frame in &mut pcm {
-            frame.zeroize();
-        }
+        pcm.zeroize();
     }
     fn stop(&mut self, handle: Self::Handle) {
         self.stopped.push(handle);
     }
 }
 
+#[cfg(any(test, feature = "test-fake"))]
+fn push_fake_frame(
+    queue: &mut VecDeque<[u8; PCM_FRAME_BYTES]>,
+    frame: &[u8; PCM_FRAME_BYTES],
+    dropped_frames: &mut usize,
+) {
+    if queue.len() == MAX_FAKE_PCM_QUEUE_FRAMES {
+        let mut dropped = queue.pop_front().expect("queue length was checked");
+        dropped.zeroize();
+        *dropped_frames += 1;
+    }
+    queue.push_back(*frame);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config(is_outgoing: bool) -> IpcMediaStartConfig {
+        IpcMediaStartConfig {
+            is_outgoing,
+            initialization_timeout_ms: 1,
+            receive_timeout_ms: 1,
+            enable_p2p: false,
+            allow_tcp: true,
+            protocol_v1: true,
+            enable_aec: true,
+            enable_ns: true,
+            enable_agc: true,
+            endpoints: vec![crate::ipc::MediaEndpoint {
+                id: 1,
+                ipv4: "127.0.0.1".into(),
+                ipv6: String::new(),
+                port: 443,
+                kind: crate::ipc::EndpointKind::UdpRelay,
+                peer_tag: [1; 16],
+            }],
+        }
+    }
 
     fn prepared_pair() -> (
         VoiceWorker<FakeMediaBackend>,
@@ -810,7 +1128,11 @@ mod tests {
             panic!("recipient must prepare")
         };
         let Response::CallerCompleted { ga, fingerprint } =
-            caller.handle(Request::CompleteCaller { call_id: 44, gb })
+            caller.handle(Request::CompleteCaller {
+                call_id: 44,
+                gb,
+                config: config(true),
+            })
         else {
             panic!("caller must complete")
         };
@@ -824,7 +1146,8 @@ mod tests {
             recipient.handle(Request::CompleteRecipient {
                 call_id: 44,
                 ga,
-                expected_fingerprint: fingerprint
+                expected_fingerprint: fingerprint,
+                config: config(false),
             }),
             Response::RecipientCompleted { fingerprint }
         );
@@ -850,7 +1173,11 @@ mod tests {
             panic!("recipient must prepare")
         };
         let Response::CallerCompleted { ga, fingerprint } =
-            caller.handle(Request::CompleteCaller { call_id: 1, gb })
+            caller.handle(Request::CompleteCaller {
+                call_id: 1,
+                gb,
+                config: config(true),
+            })
         else {
             panic!("caller must complete")
         };
@@ -858,7 +1185,8 @@ mod tests {
             recipient.handle(Request::CompleteRecipient {
                 call_id: 1,
                 ga,
-                expected_fingerprint: fingerprint
+                expected_fingerprint: fingerprint,
+                config: config(false),
             }),
             crypto_error()
         );
@@ -870,7 +1198,8 @@ mod tests {
             recipient.handle(Request::CompleteRecipient {
                 call_id: 44,
                 ga,
-                expected_fingerprint: fingerprint + 1
+                expected_fingerprint: fingerprint + 1,
+                config: config(false),
             }),
             crypto_error()
         );
@@ -919,9 +1248,17 @@ mod tests {
     #[test]
     fn completion_replay_and_conflict_are_fail_closed() {
         let (mut caller, _, _, gb, _) = prepared_pair();
-        let response = caller.handle(Request::CompleteCaller { call_id: 44, gb });
+        let response = caller.handle(Request::CompleteCaller {
+            call_id: 44,
+            gb,
+            config: config(true),
+        });
         assert_eq!(
-            caller.handle(Request::CompleteCaller { call_id: 44, gb }),
+            caller.handle(Request::CompleteCaller {
+                call_id: 44,
+                gb,
+                config: config(true),
+            }),
             response
         );
         let mut conflicting_gb = gb;
@@ -929,7 +1266,8 @@ mod tests {
         assert_eq!(
             caller.handle(Request::CompleteCaller {
                 call_id: 44,
-                gb: conflicting_gb
+                gb: conflicting_gb,
+                config: config(true),
             }),
             invalid_state()
         );
@@ -972,7 +1310,11 @@ mod tests {
             panic!("recipient must prepare")
         };
         assert_eq!(
-            caller.handle(Request::CompleteCaller { call_id: 1, gb }),
+            caller.handle(Request::CompleteCaller {
+                call_id: 1,
+                gb,
+                config: config(true),
+            }),
             media_unavailable()
         );
         assert!(!caller.is_active());
@@ -1021,12 +1363,28 @@ mod tests {
             Response::PcmSent
         );
         assert_eq!(
+            caller
+                .endpoint
+                .as_mut()
+                .expect("attached endpoint must exist")
+                .pcm
+                .take_captured(),
+            Some([9; PCM_FRAME_BYTES])
+        );
+        caller
+            .endpoint
+            .as_mut()
+            .expect("attached endpoint must exist")
+            .pcm
+            .playout
+            .push_back([8; PCM_FRAME_BYTES]);
+        assert_eq!(
             caller.handle(Request::ReceivePcm {
                 call_id: 44,
                 capability,
             }),
             Response::PcmReceived {
-                frame: Box::new([9; PCM_FRAME_BYTES])
+                frame: Box::new([8; PCM_FRAME_BYTES])
             }
         );
         assert_eq!(
@@ -1047,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn fake_pcm_queue_is_bounded_and_keeps_the_newest_frames() {
+    fn fake_pcm_queues_are_bounded_distinct_and_keep_the_newest_frames() {
         let (mut caller, _, _, _, _) = prepared_pair();
         let Response::MediaAttached { capability, .. } = caller.handle(Request::AttachMedia {
             call_id: 44,
@@ -1055,14 +1413,6 @@ mod tests {
         }) else {
             panic!("active media must attach PCM");
         };
-        let initial_capacity = caller
-            .endpoint
-            .as_ref()
-            .expect("attached endpoint must exist")
-            .pcm
-            .capacity();
-        assert!(initial_capacity >= MAX_FAKE_PCM_QUEUE_FRAMES);
-
         let frame_count = MAX_FAKE_PCM_QUEUE_FRAMES + 32;
         for value in 0..u8::try_from(frame_count).unwrap() {
             assert_eq!(
@@ -1075,14 +1425,31 @@ mod tests {
             );
         }
 
-        let endpoint = caller
-            .endpoint
-            .as_ref()
-            .expect("attached endpoint must exist");
-        assert_eq!(endpoint.pcm.len(), MAX_FAKE_PCM_QUEUE_FRAMES);
-        assert_eq!(endpoint.pcm.capacity(), initial_capacity);
+        let (endpoint, backend) = (&mut caller.endpoint, &mut caller.backend);
+        let pcm = &mut endpoint.as_mut().expect("attached endpoint must exist").pcm;
+        assert_eq!(pcm.captured.len(), MAX_FAKE_PCM_QUEUE_FRAMES);
+        assert!(pcm.playout.is_empty());
         assert_eq!(
-            caller.backend().dropped_pcm_frames(),
+            backend.dropped_capture_frames(),
+            frame_count - MAX_FAKE_PCM_QUEUE_FRAMES
+        );
+        assert_eq!(backend.dropped_playout_frames(), 0);
+        for value in u8::try_from(frame_count - MAX_FAKE_PCM_QUEUE_FRAMES).unwrap()
+            ..u8::try_from(frame_count).unwrap()
+        {
+            assert_eq!(pcm.take_captured(), Some([value; PCM_FRAME_BYTES]));
+        }
+        assert_eq!(pcm.take_captured(), None);
+        for value in 0..u8::try_from(frame_count).unwrap() {
+            push_fake_frame(
+                &mut pcm.playout,
+                &[value; PCM_FRAME_BYTES],
+                &mut backend.dropped_playout_frames,
+            );
+        }
+        assert_eq!(pcm.playout.len(), MAX_FAKE_PCM_QUEUE_FRAMES);
+        assert_eq!(
+            backend.dropped_playout_frames(),
             frame_count - MAX_FAKE_PCM_QUEUE_FRAMES
         );
 
@@ -1219,6 +1586,81 @@ mod tests {
         assert_eq!(caller.handle(request), invalid_state());
         assert_eq!(caller.backend().forwarded_signals(), 1);
         assert_eq!(caller.backend().stopped(), &[44]);
+    }
+
+    #[test]
+    fn outbound_events_replay_until_ack_and_native_error_aborts_once() {
+        let (mut caller, _, _, _, _) = prepared_pair();
+        caller
+            .backend
+            .events
+            .push_back(MediaEvent::OutboundSignal(vec![4, 5]));
+        let first = caller.handle(Request::PollEvent { call_id: 44 });
+        assert_eq!(
+            first,
+            Response::Event {
+                event_id: 1,
+                event: WorkerEvent::OutboundSignal(vec![4, 5]),
+            }
+        );
+        assert_eq!(caller.handle(Request::PollEvent { call_id: 44 }), first);
+        assert_eq!(
+            caller.handle(Request::AckEvent {
+                call_id: 44,
+                event_id: 1,
+            }),
+            Response::EventAcknowledged { event_id: 1 }
+        );
+        assert_eq!(
+            caller.handle(Request::AckEvent {
+                call_id: 44,
+                event_id: 1,
+            }),
+            Response::EventAcknowledged { event_id: 1 }
+        );
+        caller.backend.events.push_back(MediaEvent::NativeError);
+        assert_eq!(
+            caller.handle(Request::PollEvent { call_id: 44 }),
+            Response::Event {
+                event_id: 2,
+                event: WorkerEvent::NativeError,
+            }
+        );
+        assert!(!caller.is_active());
+        assert_eq!(caller.backend.stopped(), &[44]);
+        assert_eq!(
+            caller.handle(Request::PollEvent { call_id: 44 }),
+            Response::Event {
+                event_id: 2,
+                event: WorkerEvent::NativeError,
+            }
+        );
+    }
+
+    #[test]
+    fn native_error_evicts_full_signal_queue_and_is_the_only_terminal_event() {
+        let (mut caller, _, _, _, _) = prepared_pair();
+        for value in 0..u8::try_from(MAX_OUTBOUND_EVENTS).unwrap() {
+            caller
+                .backend
+                .events
+                .push_back(MediaEvent::OutboundSignal(vec![value]));
+            assert!(matches!(
+                caller.handle(Request::PollEvent { call_id: 44 }),
+                Response::Event { .. }
+            ));
+        }
+        assert_eq!(caller.events.len(), MAX_OUTBOUND_EVENTS);
+        caller.backend.events.push_back(MediaEvent::NativeError);
+        assert_eq!(
+            caller.handle(Request::PollEvent { call_id: 44 }),
+            Response::Event {
+                event_id: u64::try_from(MAX_OUTBOUND_EVENTS).unwrap() + 1,
+                event: WorkerEvent::NativeError,
+            }
+        );
+        assert_eq!(caller.events.len(), 1);
+        assert_eq!(caller.backend.stopped(), &[44]);
     }
 
     #[test]

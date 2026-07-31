@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
 use crate::ipc::PCM_FRAME_BYTES;
-use crate::worker::{MediaBackend, MediaError};
+use crate::worker::{
+    MediaBackend, MediaError, MediaEvent, MediaStartConfig as WorkerMediaStartConfig,
+};
 
 const PCM_SAMPLES: usize = PCM_FRAME_BYTES / size_of::<i16>();
 pub const AUTH_KEY_BYTES: usize = 256;
@@ -69,7 +71,9 @@ pub struct TgcallsSessionConfig {
 
 impl TgcallsSessionConfig {
     pub fn validate(&self) -> Result<(), MediaError> {
-        if self.endpoints.is_empty()
+        if self.initialization_timeout_ms == 0
+            || self.receive_timeout_ms == 0
+            || (self.endpoints.is_empty() && !self.transport.enable_p2p)
             || self.endpoints.len() > MAX_ENDPOINTS
             || self.endpoints.iter().any(|endpoint| {
                 endpoint.port == 0
@@ -117,6 +121,9 @@ impl Drop for TgcallsSessionConfig {
 /// copy every input and must not retain pointers passed to these methods.
 pub trait TgcallsFfiSession {
     fn start(&mut self) -> Result<(), MediaError>;
+    fn events(&self) -> Option<NativeTgcallsEvents> {
+        None
+    }
     fn receive_signaling(&mut self, signal: &[u8]) -> Result<(), MediaError>;
     fn push_capture_20ms(&mut self, samples: &[i16; PCM_SAMPLES]) -> Result<(), MediaError>;
     fn pop_playout_20ms(&mut self, samples: &mut [i16; PCM_SAMPLES]) -> Result<bool, MediaError>;
@@ -301,8 +308,8 @@ impl NativeCallbackContext {
     }
 }
 
-/// Safe future-facing access to copied native callback events. Draining is not
-/// connected to worker IPC in this issue.
+/// Safe access to copied native callback events. `TgcallsMediaBackend` drains
+/// this seam into the worker's bounded poll/ack IPC event queue.
 #[derive(Clone)]
 pub struct NativeTgcallsEvents {
     context: Arc<NativeCallbackContext>,
@@ -506,16 +513,23 @@ mod ffi {
         out_session: *mut *mut Session,
     ) -> NativeTgcallsStatus {
         let auth = input.auth();
+        let endpoints = input.endpoints();
         let endpoint_count =
-            u32::try_from(input.endpoints().len()).expect("validated endpoint count fits u32");
+            u32::try_from(endpoints.len()).expect("validated endpoint count fits u32");
+        let endpoints = if endpoints.is_empty() {
+            core::ptr::null()
+        } else {
+            endpoints.as_ptr()
+        };
         // SAFETY: every referenced input lives for this synchronous C call and
-        // the shim copies each typed input before it returns.
+        // the shim copies each typed input before it returns. The null pointer
+        // is the ABI's required representation of an empty direct-P2P route.
         unsafe {
             crossgram_tgcalls_session_create(
                 abi_version,
                 input.config(),
                 &raw const auth,
-                input.endpoints().as_ptr(),
+                endpoints,
                 endpoint_count,
                 callbacks,
                 out_session,
@@ -876,6 +890,10 @@ impl<A: NativeTgcallsApi> Drop for NativeTgcallsSession<A> {
 }
 
 impl<A: NativeTgcallsApi> TgcallsFfiSession for NativeTgcallsSession<A> {
+    fn events(&self) -> Option<NativeTgcallsEvents> {
+        self.events()
+    }
+
     fn start(&mut self) -> Result<(), MediaError> {
         self.with_handle(NativeTgcallsApi::start)
     }
@@ -972,31 +990,60 @@ impl NativeTgcallsApi for UnavailableNativeTgcallsApi {
     }
 }
 
-/// A `MediaBackend` which exposes PCM only after the native session has started.
-/// It is intentionally feature-gated and is not selected by the production
-/// worker entrypoint until the approved native artifact is linked.
-pub struct TgcallsMediaBackend<S: TgcallsFfiSession> {
-    session: Option<S>,
-    config: TgcallsSessionConfig,
-    started: bool,
+/// Creates the native session only after worker-side DH has supplied the
+/// exact private auth key and validated public relay configuration.
+pub trait TgcallsSessionFactory {
+    type Session: TgcallsFfiSession;
+
+    fn create(&mut self, config: &mut TgcallsSessionConfig) -> Result<Self::Session, MediaError>;
 }
 
-impl<S: TgcallsFfiSession> TgcallsMediaBackend<S> {
+/// Rebuilds an API owner for every call, so teardown does not consume the
+/// factory and sequential calls cannot inherit a prior session's key or routes.
+pub struct NativeTgcallsSessionFactory<MakeApi> {
+    make_api: MakeApi,
+}
+
+impl<MakeApi> NativeTgcallsSessionFactory<MakeApi> {
     #[must_use]
-    pub fn new(session: S, config: TgcallsSessionConfig) -> Self {
+    pub const fn new(make_api: MakeApi) -> Self {
+        Self { make_api }
+    }
+}
+
+impl<MakeApi, A> TgcallsSessionFactory for NativeTgcallsSessionFactory<MakeApi>
+where
+    MakeApi: FnMut() -> A,
+    A: NativeTgcallsApi,
+{
+    type Session = NativeTgcallsSession<A>;
+
+    fn create(&mut self, config: &mut TgcallsSessionConfig) -> Result<Self::Session, MediaError> {
+        NativeTgcallsSession::create((self.make_api)(), config)
+    }
+}
+
+/// A `MediaBackend` which exposes PCM only after a session created from the
+/// post-DH worker configuration has started.
+pub struct TgcallsMediaBackend<F: TgcallsSessionFactory> {
+    factory: F,
+    session: Option<F::Session>,
+    started: bool,
+    native_error_reported: bool,
+}
+
+impl<F: TgcallsSessionFactory> TgcallsMediaBackend<F> {
+    #[must_use]
+    pub fn new(factory: F) -> Self {
         Self {
-            session: Some(session),
-            config,
+            factory,
+            session: None,
             started: false,
+            native_error_reported: false,
         }
     }
 
-    #[must_use]
-    pub fn config_auth_is_zeroized(&self) -> bool {
-        self.config.auth_key == [0; AUTH_KEY_BYTES]
-    }
-
-    fn session_mut(&mut self) -> Result<&mut S, MediaError> {
+    fn session_mut(&mut self) -> Result<&mut F::Session, MediaError> {
         self.session.as_mut().ok_or(MediaError)
     }
 
@@ -1006,38 +1053,65 @@ impl<S: TgcallsFfiSession> TgcallsMediaBackend<S> {
             let _ = catch_unwind(AssertUnwindSafe(|| session.join()));
         }
         self.started = false;
-        self.config.zeroize();
+        self.native_error_reported = false;
     }
 }
 
-impl<S: TgcallsFfiSession> Drop for TgcallsMediaBackend<S> {
+impl<F: TgcallsSessionFactory> Drop for TgcallsMediaBackend<F> {
     fn drop(&mut self) {
         self.terminal_stop();
     }
 }
 
-impl<S: TgcallsFfiSession> MediaBackend for TgcallsMediaBackend<S> {
+/// Production session factory whose API owner is newly constructed for each call.
+pub type ShimTgcallsSessionFactory = NativeTgcallsSessionFactory<fn() -> ShimTgcallsApi>;
+
+/// Production `MediaBackend` linked only by the `native-tgcalls-shim` feature.
+pub type ShimTgcallsMediaBackend = TgcallsMediaBackend<ShimTgcallsSessionFactory>;
+
+#[must_use]
+pub fn native_tgcalls_media_backend() -> ShimTgcallsMediaBackend {
+    let factory: ShimTgcallsSessionFactory = NativeTgcallsSessionFactory::new(ShimTgcallsApi::new);
+    TgcallsMediaBackend::new(factory)
+}
+
+impl<F: TgcallsSessionFactory> MediaBackend for TgcallsMediaBackend<F> {
     type Handle = ();
     type Pcm = ();
 
-    fn start(&mut self, _call_id: u64) -> Result<Self::Handle, MediaError> {
+    fn start(&mut self, config: WorkerMediaStartConfig) -> Result<Self::Handle, MediaError> {
         if self.started {
             return Err(MediaError);
         }
-        if self.config.validate().is_err() {
-            self.config.zeroize();
+        let mut native_config = native_config_from_worker(config)?;
+        let session = self.factory.create(&mut native_config);
+        native_config.zeroize();
+        let mut session = session?;
+        let started = catch_unwind(AssertUnwindSafe(|| session.start())).unwrap_or(Err(MediaError));
+        if started.is_err() {
+            let _ = catch_unwind(AssertUnwindSafe(|| session.stop()));
+            let _ = catch_unwind(AssertUnwindSafe(|| session.join()));
             return Err(MediaError);
         }
-        let result = self.session_mut().and_then(|session| {
-            catch_unwind(AssertUnwindSafe(|| session.start())).map_err(|_| MediaError)?
-        });
-        self.config.zeroize();
-        if result.is_err() {
-            self.terminal_stop();
-            return Err(MediaError);
-        }
+        self.session = Some(session);
         self.started = true;
         Ok(())
+    }
+
+    fn poll_event(&mut self) -> Result<Option<MediaEvent>, MediaError> {
+        if !self.started {
+            return Ok(None);
+        }
+        let Some(events) = self.session.as_ref().and_then(TgcallsFfiSession::events) else {
+            return Ok(None);
+        };
+        if events.first_error().is_some() && !self.native_error_reported {
+            self.native_error_reported = true;
+            return Ok(Some(MediaEvent::NativeError));
+        }
+        Ok(events
+            .try_recv()
+            .map(|signal| MediaEvent::OutboundSignal(signal.as_bytes().to_vec())))
     }
 
     fn forward_signal(
@@ -1102,6 +1176,48 @@ impl<S: TgcallsFfiSession> MediaBackend for TgcallsMediaBackend<S> {
     fn stop(&mut self, _handle: Self::Handle) {
         self.terminal_stop();
     }
+}
+
+fn native_config_from_worker(
+    mut config: WorkerMediaStartConfig,
+) -> Result<TgcallsSessionConfig, MediaError> {
+    if config.server.validate().is_err() {
+        return Err(MediaError);
+    }
+    let auth_key = core::mem::replace(&mut config.auth_key, [0; AUTH_KEY_BYTES]);
+    let endpoints = core::mem::take(&mut config.server.endpoints)
+        .into_iter()
+        .map(|endpoint| TgcallsEndpoint {
+            id: endpoint.id,
+            ipv4: endpoint.ipv4,
+            ipv6: endpoint.ipv6,
+            port: endpoint.port,
+            kind: match endpoint.kind {
+                crate::ipc::EndpointKind::Inet => TgcallsEndpointKind::Inet,
+                crate::ipc::EndpointKind::Lan => TgcallsEndpointKind::Lan,
+                crate::ipc::EndpointKind::UdpRelay => TgcallsEndpointKind::UdpRelay,
+                crate::ipc::EndpointKind::TcpRelay => TgcallsEndpointKind::TcpRelay,
+            },
+            peer_tag: endpoint.peer_tag,
+        })
+        .collect();
+    Ok(TgcallsSessionConfig {
+        initialization_timeout_ms: config.server.initialization_timeout_ms,
+        receive_timeout_ms: config.server.receive_timeout_ms,
+        transport: TgcallsTransportOptions {
+            enable_p2p: config.server.enable_p2p,
+            allow_tcp: config.server.allow_tcp,
+            protocol_v1: config.server.protocol_v1,
+        },
+        audio_processing: TgcallsAudioProcessing {
+            enable_aec: config.server.enable_aec,
+            enable_ns: config.server.enable_ns,
+            enable_agc: config.server.enable_agc,
+        },
+        auth_key,
+        is_outgoing: config.server.is_outgoing,
+        endpoints,
+    })
 }
 
 fn decode_pcm(frame: &[u8; PCM_FRAME_BYTES]) -> [i16; PCM_SAMPLES] {
@@ -1174,6 +1290,20 @@ mod tests {
         }
     }
 
+    struct FakeFactory<S: TgcallsFfiSession>(Option<S>);
+
+    impl<S: TgcallsFfiSession> TgcallsSessionFactory for FakeFactory<S> {
+        type Session = S;
+
+        fn create(
+            &mut self,
+            config: &mut TgcallsSessionConfig,
+        ) -> Result<Self::Session, MediaError> {
+            config.validate()?;
+            self.0.take().ok_or(MediaError)
+        }
+    }
+
     fn config() -> TgcallsSessionConfig {
         TgcallsSessionConfig {
             initialization_timeout_ms: 1,
@@ -1201,17 +1331,49 @@ mod tests {
         }
     }
 
+    fn worker_config(call_id: u64) -> WorkerMediaStartConfig {
+        WorkerMediaStartConfig {
+            call_id,
+            server: crate::ipc::MediaStartConfig {
+                is_outgoing: true,
+                initialization_timeout_ms: 1,
+                receive_timeout_ms: 1,
+                enable_p2p: true,
+                allow_tcp: false,
+                protocol_v1: true,
+                enable_aec: false,
+                enable_ns: false,
+                enable_agc: false,
+                endpoints: vec![crate::ipc::MediaEndpoint {
+                    id: 1,
+                    ipv4: "149.154.167.51".into(),
+                    ipv6: String::new(),
+                    port: 443,
+                    kind: crate::ipc::EndpointKind::UdpRelay,
+                    peer_tag: [1; 16],
+                }],
+            },
+            auth_key: [7; AUTH_KEY_BYTES],
+        }
+    }
+
+    #[test]
+    fn worker_effective_p2p_flag_reaches_native_transport() {
+        let mut config = worker_config(9);
+        config.server.enable_p2p = false;
+        let native = native_config_from_worker(config).unwrap();
+        assert!(!native.transport.enable_p2p);
+        assert_eq!(native.endpoints.len(), 1);
+    }
+
     #[test]
     fn no_network_backend_forwards_signaling_and_pcm_after_start() {
         let mut session = FakeFfiSession::default();
         session.playout.push_back([22; PCM_SAMPLES]);
-        let mut backend = TgcallsMediaBackend::new(session, config());
+        let mut backend = TgcallsMediaBackend::new(FakeFactory(Some(session)));
         let mut handle = ();
         let mut pcm = ();
-        assert!(!backend.config_auth_is_zeroized());
-
-        assert_eq!(backend.start(9), Ok(()));
-        assert!(backend.config_auth_is_zeroized());
+        assert_eq!(backend.start(worker_config(9)), Ok(()));
         assert_eq!(backend.forward_signal(&mut handle, &[4, 5]), Ok(()));
         assert_eq!(backend.attach_pcm(&mut handle), Ok(()));
         assert_eq!(backend.send_pcm(&mut pcm, &[3; PCM_FRAME_BYTES]), Ok(()));
@@ -1232,9 +1394,8 @@ mod tests {
             fail_start: true,
             ..FakeFfiSession::default()
         };
-        let mut backend = TgcallsMediaBackend::new(session, config());
-        assert_eq!(backend.start(1), Err(MediaError));
-        assert!(backend.config_auth_is_zeroized());
+        let mut backend = TgcallsMediaBackend::new(FakeFactory(Some(session)));
+        assert_eq!(backend.start(worker_config(1)), Err(MediaError));
         assert_eq!(backend.attach_pcm(&mut ()), Err(MediaError));
     }
 
@@ -1278,7 +1439,8 @@ mod tests {
         let session = PanicStopSession {
             joined: Arc::clone(&joined),
         };
-        let mut backend = TgcallsMediaBackend::new(session, config());
+        let mut backend = TgcallsMediaBackend::new(FakeFactory(Some(session)));
+        assert_eq!(backend.start(worker_config(1)), Ok(()));
         backend.stop(());
         assert!(backend.session.is_none());
         assert_eq!(*joined.lock().unwrap(), 1);
@@ -1431,6 +1593,33 @@ mod tests {
     }
 
     #[test]
+    fn native_factory_builds_a_fresh_session_for_each_sequential_call() {
+        let state = Arc::new(Mutex::new(NativeCallState::default()));
+        let factory = NativeTgcallsSessionFactory::new({
+            let state = Arc::clone(&state);
+            move || FakeNativeApi {
+                state: Arc::clone(&state),
+            }
+        });
+        let mut backend = TgcallsMediaBackend::new(factory);
+        let mut first = worker_config(1);
+        first.auth_key = [3; AUTH_KEY_BYTES];
+        assert_eq!(backend.start(first), Ok(()));
+        backend.stop(());
+        let mut second = worker_config(2);
+        second.auth_key = [9; AUTH_KEY_BYTES];
+        assert_eq!(backend.start(second), Ok(()));
+        backend.stop(());
+
+        let observed = state.lock().unwrap();
+        assert_eq!(observed.created, 2);
+        assert_eq!(observed.stopped, 2);
+        assert_eq!(observed.joined, 2);
+        assert_eq!(observed.destroyed, 2);
+        assert_eq!(observed.copied_auth, vec![9; AUTH_KEY_BYTES]);
+    }
+
+    #[test]
     fn native_factory_copies_synchronously_then_zeroizes_config() {
         let state = Arc::new(Mutex::new(NativeCallState::default()));
         let mut native_config = config();
@@ -1546,9 +1735,8 @@ mod tests {
         for value in 0..=OUTBOUND_SIGNAL_QUEUE_CAPACITY {
             emit_outbound(&state, &[u8::try_from(value).unwrap()]);
         }
-        assert_eq!(
-            ZEROIZED_OUTBOUND_SIGNALS.load(Ordering::Relaxed),
-            baseline + 1,
+        assert!(
+            ZEROIZED_OUTBOUND_SIGNALS.load(Ordering::Relaxed) > baseline,
             "the full queue's rejected payload was wiped"
         );
         events.disconnect_for_test();

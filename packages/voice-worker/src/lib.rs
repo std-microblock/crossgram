@@ -8,7 +8,9 @@ pub mod worker;
 
 use std::io::{self, Read, Write};
 
-use ipc::{ErrorCode, Response, decode_request, encode_response, read_frame, write_frame};
+use ipc::{ErrorCode, Request, Response, decode_request, encode_response, read_frame, write_frame};
+#[cfg(feature = "test-fake")]
+use worker::FakeMediaBackend;
 use worker::{MediaBackend, VoiceWorker};
 use zeroize::Zeroize;
 
@@ -20,11 +22,33 @@ pub fn serve_connection<B: MediaBackend>(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    serve_connection_with(reader, writer, |request| worker.handle(request))
+}
+
+#[cfg(feature = "test-fake")]
+pub fn serve_fake_connection(
+    worker: &mut VoiceWorker<FakeMediaBackend>,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    serve_connection_with(reader, writer, |request| match request {
+        Request::TestTakeCapture { call_id } => worker.take_fake_capture(call_id),
+        Request::TestInjectPlayout { call_id, frame } => worker.inject_fake_playout(call_id, frame),
+        Request::TestStats { call_id } => worker.fake_stats(call_id),
+        request => worker.handle(request),
+    })
+}
+
+fn serve_connection_with(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    handle: impl FnOnce(Request) -> Response,
+) -> io::Result<()> {
     let Some(mut frame) = read_frame(reader).map_err(ipc_error)? else {
         return Ok(());
     };
     let mut response = match decode_request(&frame) {
-        Ok(request) => worker.handle(request),
+        Ok(request) => handle(request),
         Err(_) => Response::Error {
             code: ErrorCode::InvalidRequest,
         },
@@ -41,6 +65,10 @@ fn zero_response(response: &mut Response) {
     match response {
         Response::MediaAttached { capability, .. } => capability.zeroize(),
         Response::PcmReceived { frame } => frame.zeroize(),
+        Response::Event {
+            event: ipc::WorkerEvent::OutboundSignal(signal),
+            ..
+        } => signal.zeroize(),
         Response::CallerPrepared { .. }
         | Response::RecipientPrepared { .. }
         | Response::CallerCompleted { .. }
@@ -50,7 +78,15 @@ fn zero_response(response: &mut Response) {
         | Response::PcmSent
         | Response::PcmPending
         | Response::MediaClosed
+        | Response::Event {
+            event: ipc::WorkerEvent::NativeError,
+            ..
+        }
+        | Response::EventPending
+        | Response::EventAcknowledged { .. }
         | Response::Error { .. } => {}
+        #[cfg(feature = "test-fake")]
+        Response::TestStats { .. } => {}
     }
 }
 

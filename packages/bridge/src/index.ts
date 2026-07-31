@@ -1,6 +1,7 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
 import { randomBytes } from 'node:crypto'
+import { isIP } from 'node:net'
 import { resolve } from 'node:path'
 import Long from 'long'
 import z from 'schemastery'
@@ -36,7 +37,7 @@ import {
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
 import { AuthTransferStore } from './auth-transfer.js'
-import { CallRegistry, type VoiceWorkerClient } from './voice/call-registry.js'
+import { CallRegistry, type VoiceMediaStartProvider, type VoiceWorkerClient } from './voice/call-registry.js'
 import type { VoiceCallMediaProvider } from './voice/media.js'
 import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
@@ -82,6 +83,10 @@ export interface BridgeConfig {
   voiceWorkerSocketPath?: string
   /** Per-request Unix socket timeout for the voice worker. */
   voiceWorkerTimeoutMs?: number
+  /** Call-scoped real relay config source; without it voice media fails closed. */
+  voiceMediaStartProvider?: VoiceMediaStartProvider
+  /** Allow direct ICE only when the configured MTProto host is loopback. */
+  voiceDirectIce?: boolean
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
@@ -94,6 +99,7 @@ export const Config = z.object({
   autoMuteGroupChats: z.boolean().default(true),
   voiceWorkerSocketPath: z.string().default(''),
   voiceWorkerTimeoutMs: z.natural().min(1).max(60_000).default(5_000),
+  voiceDirectIce: z.boolean().default(true),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -149,6 +155,18 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
       .makeMessageMedia(sticker),
   )
+  const directIceProvider: VoiceMediaStartProvider | undefined = config.voiceDirectIce && isLoopbackHost(config.serverHost)
+    ? {
+        async get() {
+          return {
+            initializationTimeoutMs: config.voiceWorkerTimeoutMs,
+            receiveTimeoutMs: config.voiceWorkerTimeoutMs,
+            enableP2p: true, allowTcp: false, protocolV1: true,
+            enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
+          }
+        },
+      }
+    : undefined
   const socketWorker = !config.voiceWorker && config.voiceWorkerSocketPath
     ? new VoiceWorkerSocketClient({
         socketPath: config.voiceWorkerSocketPath,
@@ -157,19 +175,22 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     : undefined
   const voiceWorker = config.voiceWorker ?? socketWorker
   const voiceMedia: VoiceCallMediaProvider = {
-    async start(call, session) {
+    async start(call, session, endpoint) {
       const platform = registry.get(session.platformId)
       if (!platform?.voiceMedia) throw new Error('platform voice media is unavailable')
-      return platform.voiceMedia.start(call, session)
+      return platform.voiceMedia.start(call, session, endpoint)
     },
   }
   const calls = new CallRegistry({
     worker: voiceWorker,
     media: voiceMedia,
+    mediaStartProvider: config.voiceMediaStartProvider ?? directIceProvider,
     publish: ({ session, update, excludeAuthKeyId }) => updates.publishPhoneCall(session, update, excludeAuthKeyId),
+    publishSignaling: (session, update) => updates.publishPhoneSignaling(session, update),
     replay: (session, update, authKeyId) => updates.replayPhoneCall(session, update, authKeyId),
   })
   const voice = new VoiceRpc(calls, store)
+  socketWorker?.setEventHandler((call, event) => calls.handleWorkerEvent(call, event))
   ctx.effect(() => {
     const timer = setInterval(() => {
       void calls.expire().catch(() => bridgeLogger.warn('voice call expiry failed'))
@@ -778,6 +799,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 }
 
 /** Normalize a phone to digits only — clients send '+' for sendCode but not for signIn. */
+function isLoopbackHost(host: string): boolean {
+  if (host === 'localhost' || host === '::1') return true
+  const family = isIP(host)
+  return family === 4 && host.split('.')[0] === '127'
+}
+
 function normPhone(p: string): string {
   return p.replace(/\D/g, '')
 }

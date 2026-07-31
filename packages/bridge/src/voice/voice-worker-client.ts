@@ -24,22 +24,51 @@ const PCM_POLL_INTERVAL_MS = 10
 const MAX_U64 = (1n << 64n) - 1n
 const DEFAULT_TIMEOUT_MS = 5_000
 
+export interface VoiceWorkerEndpoint {
+  readonly id: Long
+  readonly ipv4: string
+  readonly ipv6: string
+  readonly port: number
+  readonly kind: 'inet' | 'lan' | 'udp-relay' | 'tcp-relay'
+  readonly peerTag: Uint8Array
+}
+
+/** Public relay settings copied into the worker only with its private auth key. */
+export interface VoiceWorkerMediaStartConfig {
+  readonly initializationTimeoutMs: number
+  readonly receiveTimeoutMs: number
+  readonly enableP2p: boolean
+  readonly allowTcp: boolean
+  readonly protocolV1: boolean
+  readonly enableAec: boolean
+  readonly enableNs: boolean
+  readonly enableAgc: boolean
+  readonly endpoints: readonly VoiceWorkerEndpoint[]
+}
+
+export type VoiceWorkerEvent =
+  | { readonly kind: 'outbound-signal', readonly data: Uint8Array }
+  | { readonly kind: 'native-error' }
+
 export interface VoiceWorkerSocketClientOptions {
   readonly socketPath: string
   readonly timeoutMs?: number
+  readonly onEvent?: (call: VoiceWorkerCall, event: VoiceWorkerEvent) => Promise<void> | void
 }
 
 export type VoiceWorkerIpcRequest =
   | { readonly tag: 0x01, readonly callId: bigint }
   | { readonly tag: 0x02, readonly callId: bigint, readonly gAHash: Uint8Array }
-  | { readonly tag: 0x03, readonly callId: bigint, readonly gB: Uint8Array }
-  | { readonly tag: 0x04, readonly callId: bigint, readonly gA: Uint8Array, readonly expectedFingerprint: Long }
+  | { readonly tag: 0x03, readonly callId: bigint, readonly gB: Uint8Array, readonly config: VoiceWorkerMediaStartConfig }
+  | { readonly tag: 0x04, readonly callId: bigint, readonly gA: Uint8Array, readonly expectedFingerprint: Long, readonly config: VoiceWorkerMediaStartConfig }
   | { readonly tag: 0x05, readonly callId: bigint, readonly requestId: bigint, readonly signal: Uint8Array }
   | { readonly tag: 0x06, readonly callId: bigint }
   | { readonly tag: 0x07, readonly callId: bigint, readonly requestId: bigint }
   | { readonly tag: 0x08, readonly callId: bigint, readonly capability: Uint8Array, readonly frame: Uint8Array }
   | { readonly tag: 0x09, readonly callId: bigint, readonly capability: Uint8Array }
   | { readonly tag: 0x0a, readonly callId: bigint, readonly capability: Uint8Array }
+  | { readonly tag: 0x0b, readonly callId: bigint }
+  | { readonly tag: 0x0c, readonly callId: bigint, readonly eventId: bigint }
 
 type VoiceWorkerIpcResponse =
   | { readonly tag: 0x81, readonly gAHash: Uint8Array }
@@ -53,6 +82,9 @@ type VoiceWorkerIpcResponse =
   | { readonly tag: 0x89, readonly frame: Uint8Array }
   | { readonly tag: 0x8a }
   | { readonly tag: 0x8b }
+  | { readonly tag: 0x8c, readonly eventId: bigint, readonly event: VoiceWorkerEvent }
+  | { readonly tag: 0x8d }
+  | { readonly tag: 0x8e, readonly eventId: bigint }
   | { readonly tag: 0xff, readonly errorCode: number }
 
 class VoiceWorkerTransportError extends Error {
@@ -70,10 +102,10 @@ export function encodeVoiceWorkerRequest(request: VoiceWorkerIpcRequest): Buffer
       payload.push(fixedBytes(request.gAHash, GA_HASH_BYTES))
       break
     case 0x03:
-      payload.push(fixedBytes(request.gB, DH_PUBLIC_BYTES))
+      payload.push(fixedBytes(request.gB, DH_PUBLIC_BYTES), mediaStartConfig(request.config, true))
       break
     case 0x04:
-      payload.push(fixedBytes(request.gA, DH_PUBLIC_BYTES), i64le(request.expectedFingerprint))
+      payload.push(fixedBytes(request.gA, DH_PUBLIC_BYTES), i64le(request.expectedFingerprint), mediaStartConfig(request.config, false))
       break
     case 0x05:
       if (request.signal.length > VOICE_WORKER_MAX_SIGNAL_BYTES) throw unavailable()
@@ -88,6 +120,9 @@ export function encodeVoiceWorkerRequest(request: VoiceWorkerIpcRequest): Buffer
     case 0x09:
     case 0x0a:
       payload.push(fixedBytes(request.capability, PCM_CAPABILITY_BYTES))
+      break
+    case 0x0c:
+      payload.push(u64(request.eventId))
       break
   }
   return frame(Buffer.concat(payload))
@@ -120,6 +155,15 @@ export function decodeVoiceWorkerResponse(payload: Uint8Array): VoiceWorkerIpcRe
       case 0x89: return { tag, frame: new Uint8Array(take(VOICE_WORKER_PCM_FRAME_BYTES)) }
       case 0x8a: return { tag }
       case 0x8b: return { tag }
+      case 0x8c: {
+        const eventId = readU64(take(8))
+        const kind = take(1)[0]
+        if (kind === 1) return { tag, eventId, event: { kind: 'outbound-signal', data: new Uint8Array(takeU16Bytes(take)) } }
+        if (kind === 2) return { tag, eventId, event: { kind: 'native-error' } }
+        throw unavailable()
+      }
+      case 0x8d: return { tag }
+      case 0x8e: return { tag, eventId: readU64(take(8)) }
       case 0xff: {
         const errorCode = take(1)[0]!
         if (errorCode < 1 || errorCode > 5) throw unavailable()
@@ -139,13 +183,19 @@ export function decodeVoiceWorkerResponse(payload: Uint8Array): VoiceWorkerIpcRe
  */
 export class VoiceWorkerSocketClient implements VoiceWorkerClient {
   readonly protocol: tl.TypePhoneCallProtocol = {
-    _: 'phoneCallProtocol', udpP2p: false, udpReflector: false,
+    _: 'phoneCallProtocol', udpP2p: true, udpReflector: false,
     minLayer: 100, maxLayer: 100, libraryVersions: ['crossgram-voice-worker-v2'],
   }
 
   private readonly _callIds = new Map<string, bigint>()
   private readonly _sockets = new Set<Socket>()
   private readonly _endpoints = new Set<VoiceWorkerPcmEndpoint>()
+  private readonly _deliveredEvents = new Map<bigint, Set<bigint>>()
+  private readonly _eventPumps = new Set<bigint>()
+  private readonly _eventAborts = new Map<bigint, AbortController>()
+  private readonly _eventPumpSettlements = new Map<bigint, Promise<void>>()
+  private readonly _deliveringEvents = new Set<bigint>()
+  private _onEvent: VoiceWorkerSocketClientOptions['onEvent']
   private readonly _timeoutMs: number
   private _nextCallId = 0n
   private _nextRequestId = 0n
@@ -155,6 +205,11 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
     if (!_options.socketPath || !Number.isSafeInteger(_options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
       || (_options.timeoutMs ?? DEFAULT_TIMEOUT_MS) <= 0) throw unavailable()
     this._timeoutMs = _options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    this._onEvent = _options.onEvent
+  }
+
+  setEventHandler(handler: VoiceWorkerSocketClientOptions['onEvent']): void {
+    this._onEvent = handler
   }
 
   async prepareTelegramCaller(call: VoiceWorkerCall): Promise<VoiceWorkerCallerPreparation> {
@@ -173,8 +228,10 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
   }
 
   async completeTelegramCaller(call: VoiceWorkerCall, gB: Uint8Array): Promise<VoiceWorkerCallerCompletion> {
-    const response = await this._request({ tag: 0x03, callId: this._callId(call), gB: gB.slice() })
+    const callId = this._callId(call)
+    const response = await this._request({ tag: 0x03, callId, gB: gB.slice(), config: this._mediaConfig(call) })
     if (response.tag !== 0x83) throw unavailable()
+    this._startEventPump(call, callId)
     return { state: 'media-active', gA: response.gA, keyFingerprint: response.fingerprint }
   }
 
@@ -183,10 +240,12 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
     gA: Uint8Array,
     keyFingerprint: Long,
   ): Promise<VoiceWorkerRecipientCompletion> {
+    const callId = this._callId(call)
     const response = await this._request({
-      tag: 0x04, callId: this._callId(call), gA: gA.slice(), expectedFingerprint: keyFingerprint,
+      tag: 0x04, callId, gA: gA.slice(), expectedFingerprint: keyFingerprint, config: this._mediaConfig(call),
     })
     if (response.tag !== 0x84) throw unavailable()
+    this._startEventPump(call, callId)
     return { state: 'media-active', keyFingerprint: response.fingerprint }
   }
 
@@ -212,11 +271,18 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
   async discardCall(call: VoiceWorkerCall): Promise<void> {
     const callId = this._callIds.get(call.callId)
     if (!callId) return
+    this._eventAborts.get(callId)?.abort()
+    const pump = this._eventPumpSettlements.get(callId)
+    // A native-error handler can discard its own call; waiting for that pump
+    // would deadlock because it is awaiting this handler's return.
+    if (pump && !this._deliveringEvents.has(callId)) await pump.catch(() => {})
     try {
       const response = await this._request({ tag: 0x06, callId })
       if (response.tag !== 0x86) throw unavailable()
     } finally {
       this._invalidateCallEndpoints(callId)
+      this._eventAborts.delete(callId)
+      this._deliveredEvents.delete(callId)
       this._callIds.delete(call.callId)
     }
   }
@@ -227,9 +293,75 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
     this._closed = true
     for (const socket of this._sockets) socket.destroy()
     this._sockets.clear()
+    for (const controller of this._eventAborts.values()) controller.abort()
+    this._eventAborts.clear()
     for (const endpoint of this._endpoints) endpoint.invalidate()
     this._endpoints.clear()
+    this._deliveredEvents.clear()
     this._callIds.clear()
+  }
+
+  private _mediaConfig(call: VoiceWorkerCall): VoiceWorkerMediaStartConfig {
+    if (!call.mediaStartConfig) throw unavailable()
+    return cloneMediaStartConfig(call.mediaStartConfig)
+  }
+
+  private _startEventPump(call: VoiceWorkerCall, callId: bigint): void {
+    if (!this._onEvent || this._eventPumps.has(callId)) return
+    const controller = new AbortController()
+    this._eventPumps.add(callId)
+    this._eventAborts.set(callId, controller)
+    const pump = this._drainEvents(call, callId, controller.signal)
+    this._eventPumpSettlements.set(callId, pump)
+    void pump.finally(() => {
+      if (this._eventPumpSettlements.get(callId) === pump) this._eventPumpSettlements.delete(callId)
+    }).catch(() => {})
+  }
+
+  private async _drainEvents(call: VoiceWorkerCall, callId: bigint, signal: AbortSignal): Promise<void> {
+    let failures = 0
+    try {
+      while (!this._closed && this._callIds.get(call.callId) === callId) {
+        try {
+          const response = await this._request({ tag: 0x0b, callId }, true, signal)
+          if (response.tag === 0x8d) {
+            failures = 0
+            await delay(PCM_POLL_INTERVAL_MS, signal)
+            continue
+          }
+          if (response.tag !== 0x8c) throw unavailable()
+          const delivered = this._deliveredEvents.get(callId) ?? new Set<bigint>()
+          this._deliveredEvents.set(callId, delivered)
+          if (!delivered.has(response.eventId)) {
+            this._deliveringEvents.add(callId)
+            try {
+              await this._onEvent?.(call, response.event)
+              delivered.add(response.eventId)
+            } finally {
+              this._deliveringEvents.delete(callId)
+            }
+          }
+          const ack = await this._request({ tag: 0x0c, callId, eventId: response.eventId }, true)
+          if (ack.tag !== 0x8e || ack.eventId !== response.eventId) throw unavailable()
+          delivered.delete(response.eventId)
+          if (!delivered.size) this._deliveredEvents.delete(callId)
+          failures = 0
+          if (response.event.kind === 'native-error') return
+        } catch {
+          if (signal.aborted || this._closed) return
+          failures++
+          const delayMs = Math.min(PCM_POLL_INTERVAL_MS * (2 ** Math.min(failures, 6)), 250)
+          try {
+            await delay(delayMs, signal)
+          } catch {
+            return
+          }
+        }
+      }
+    } finally {
+      this._eventPumps.delete(callId)
+      this._eventAborts.delete(callId)
+    }
   }
 
   async _requestPcm(request: VoiceWorkerIpcRequest): Promise<VoiceWorkerIpcResponse> {
@@ -262,11 +394,15 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
     return this[field]
   }
 
-  private async _request(request: VoiceWorkerIpcRequest, retryTransport = false): Promise<VoiceWorkerIpcResponse> {
-    if (this._closed) throw unavailable()
+  private async _request(
+    request: VoiceWorkerIpcRequest,
+    retryTransport = false,
+    signal?: AbortSignal,
+  ): Promise<VoiceWorkerIpcResponse> {
+    if (this._closed || signal?.aborted) throw unavailable()
     const encoded = encodeVoiceWorkerRequest(request)
     try {
-      return await this._requestEncoded(encoded, retryTransport)
+      return await this._requestEncoded(encoded, retryTransport, signal)
     } catch (error) {
       if (error instanceof VoiceCallError) throw error
       throw unavailable()
@@ -275,18 +411,22 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
     }
   }
 
-  private async _requestEncoded(request: Buffer, retryTransport: boolean): Promise<VoiceWorkerIpcResponse> {
+  private async _requestEncoded(
+    request: Buffer,
+    retryTransport: boolean,
+    signal?: AbortSignal,
+  ): Promise<VoiceWorkerIpcResponse> {
     try {
-      return await this._decodeExchange(request)
+      return await this._decodeExchange(request, signal)
     } catch (error) {
-      if (!retryTransport || this._closed
+      if (!retryTransport || this._closed || signal?.aborted
         || !(error instanceof VoiceWorkerTransportError) || !error.retryable) throw error
-      return this._decodeExchange(request)
+      return this._decodeExchange(request, signal)
     }
   }
 
-  private async _decodeExchange(request: Buffer): Promise<VoiceWorkerIpcResponse> {
-    const payload = await this._exchange(request)
+  private async _decodeExchange(request: Buffer, signal?: AbortSignal): Promise<VoiceWorkerIpcResponse> {
+    const payload = await this._exchange(request, signal)
     try {
       return this._decodeResponse(payload)
     } finally {
@@ -300,7 +440,7 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
     return response
   }
 
-  private _exchange(request: Buffer): Promise<Buffer> {
+  private _exchange(request: Buffer, signal?: AbortSignal): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       let settled = false
       let connected = false
@@ -311,16 +451,23 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
         this._sockets.delete(socket)
         socket.removeAllListeners()
+        // `destroy()` may asynchronously surface a reset after listeners were
+        // removed; keep this terminal listener so it cannot escape the exchange.
+        socket.once('error', () => {})
         socket.destroy()
         if (error) reject(error)
         else resolve(response!)
       }
       const transportFailure = (retryable = connected) => new VoiceWorkerTransportError(retryable)
+      const abort = () => finish(new VoiceWorkerTransportError(false))
       const timer = setTimeout(() => finish(transportFailure(connected && received.length === 0)), this._timeoutMs)
       timer.unref()
       this._sockets.add(socket)
+      if (signal?.aborted) abort()
+      else signal?.addEventListener('abort', abort, { once: true })
       socket.once('error', () => finish(transportFailure(connected && received.length === 0)))
       socket.once('connect', () => {
         connected = true
@@ -479,6 +626,70 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+function takeU16Bytes(take: (length: number) => Buffer): Buffer {
+  const length = take(2).readUInt16BE(0)
+  if (length > VOICE_WORKER_MAX_SIGNAL_BYTES) throw unavailable()
+  return take(length)
+}
+
+function mediaStartConfig(config: VoiceWorkerMediaStartConfig, isOutgoing: boolean): Buffer {
+  const normalized = cloneMediaStartConfig(config)
+  const flags = Number(normalized.enableP2p)
+    | (Number(normalized.allowTcp) << 1)
+    | (Number(normalized.protocolV1) << 2)
+    | (Number(normalized.enableAec) << 3)
+    | (Number(normalized.enableNs) << 4)
+    | (Number(normalized.enableAgc) << 5)
+  const header = Buffer.allocUnsafe(11)
+  header[0] = Number(isOutgoing)
+  header.writeUInt32BE(normalized.initializationTimeoutMs, 1)
+  header.writeUInt32BE(normalized.receiveTimeoutMs, 5)
+  header[9] = flags
+  header[10] = normalized.endpoints.length
+  const endpoints = normalized.endpoints.map((endpoint) => {
+    const kind = { inet: 0, lan: 1, 'udp-relay': 2, 'tcp-relay': 3 }[endpoint.kind]
+    const prefix = Buffer.allocUnsafe(27)
+    i64(endpoint.id).copy(prefix, 0)
+    prefix.writeUInt16BE(endpoint.port, 8)
+    prefix[10] = kind
+    fixedBytes(endpoint.peerTag, 16).copy(prefix, 11)
+    return Buffer.concat([prefix, boundedHost(endpoint.ipv4), boundedHost(endpoint.ipv6)])
+  })
+  return Buffer.concat([header, ...endpoints])
+}
+
+function cloneMediaStartConfig(config: VoiceWorkerMediaStartConfig): VoiceWorkerMediaStartConfig {
+  if (!Number.isSafeInteger(config.initializationTimeoutMs) || config.initializationTimeoutMs < 1 || config.initializationTimeoutMs > 0xffff_ffff
+    || !Number.isSafeInteger(config.receiveTimeoutMs) || config.receiveTimeoutMs < 1 || config.receiveTimeoutMs > 0xffff_ffff
+    || typeof config.enableP2p !== 'boolean' || typeof config.allowTcp !== 'boolean' || typeof config.protocolV1 !== 'boolean'
+    || typeof config.enableAec !== 'boolean' || typeof config.enableNs !== 'boolean' || typeof config.enableAgc !== 'boolean'
+    || !Array.isArray(config.endpoints) || (!config.endpoints.length && !config.enableP2p) || config.endpoints.length > 16) throw unavailable()
+  return {
+    initializationTimeoutMs: config.initializationTimeoutMs,
+    receiveTimeoutMs: config.receiveTimeoutMs,
+    enableP2p: config.enableP2p, allowTcp: config.allowTcp, protocolV1: config.protocolV1,
+    enableAec: config.enableAec, enableNs: config.enableNs, enableAgc: config.enableAgc,
+    endpoints: config.endpoints.map((endpoint) => {
+      if (!endpoint || !Long.isLong(endpoint.id) || typeof endpoint.ipv4 !== 'string' || typeof endpoint.ipv6 !== 'string'
+        || !Number.isSafeInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65_535
+        || !['inet', 'lan', 'udp-relay', 'tcp-relay'].includes(endpoint.kind)
+        || !(endpoint.peerTag instanceof Uint8Array) || !endpoint.ipv4.length && !endpoint.ipv6.length
+        || endpoint.ipv4.includes('\0') || endpoint.ipv6.includes('\0')
+        || Buffer.byteLength(endpoint.ipv4, 'utf8') > 255 || Buffer.byteLength(endpoint.ipv6, 'utf8') > 255
+        || endpoint.peerTag.length !== 16) throw unavailable()
+      return { ...endpoint, id: Long.fromBits(endpoint.id.low, endpoint.id.high, false), peerTag: endpoint.peerTag.slice() }
+    }),
+  }
+}
+
+function boundedHost(value: string): Buffer {
+  const bytes = Buffer.from(value, 'utf8')
+  if (bytes.length > 255) throw unavailable()
+  const length = Buffer.allocUnsafe(2)
+  length.writeUInt16BE(bytes.length)
+  return Buffer.concat([length, bytes])
+}
+
 function frame(payload: Buffer): Buffer {
   if (payload.length < 2 || payload.length > VOICE_WORKER_MAX_FRAME_BYTES) throw unavailable()
   const output = Buffer.allocUnsafe(4 + payload.length)
@@ -514,6 +725,12 @@ function i64le(value: Long): Buffer {
   const output = Buffer.allocUnsafe(8)
   output.writeInt32LE(value.low, 0)
   output.writeInt32LE(value.high, 4)
+  return output
+}
+
+function i64(value: Long): Buffer {
+  const output = Buffer.allocUnsafe(8)
+  output.writeBigInt64BE(BigInt.asIntN(64, BigInt(value.toString())))
   return output
 }
 

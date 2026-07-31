@@ -12,7 +12,7 @@ const session = {
   platformSessionId: 'qq-voice-session', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
 }
 const protocol: tl.RawPhoneCallProtocol = {
-  _: 'phoneCallProtocol', udpP2p: false, udpReflector: false,
+  _: 'phoneCallProtocol', udpP2p: true, udpReflector: false,
   minLayer: 100, maxLayer: 100, libraryVersions: ['bridge'],
 }
 const frame = (value: number): VoicePcmFrame => ({
@@ -119,7 +119,11 @@ function setup(options: { mediaFailure?: Error, deliveries?: () => number } = {}
   let random = 0
   const worker = new FakeWorker()
   const media: FakeMedia[] = []
-  const starts = vi.fn(async () => {
+  const starts = vi.fn(async (
+    _call: VoiceWorkerCall,
+    _session: typeof session,
+    _endpoint: VoiceWorkerMediaEndpoint,
+  ) => {
     if (options.mediaFailure) throw options.mediaFailure
     const value = new FakeMedia()
     media.push(value)
@@ -129,6 +133,15 @@ function setup(options: { mediaFailure?: Error, deliveries?: () => number } = {}
   const calls = new CallRegistry({
     worker,
     media: { start: starts } satisfies VoiceCallMediaProvider,
+    mediaStartProvider: {
+      async get() {
+        return {
+          initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+          enableP2p: true, allowTcp: false, protocolV1: true,
+          enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
+        }
+      },
+    },
     randomBytes: (size) => {
       const value = new Uint8Array(size)
       value[size - 1] = ++random
@@ -168,6 +181,7 @@ describe('CallRegistry QQ media composition', () => {
     expect(active.phoneCall._).toBe('phoneCall')
     expect(starts).toHaveBeenCalledOnce()
     expect(worker.attachMedia).toHaveBeenCalledOnce()
+    expect(starts.mock.calls[0]?.[2]).toBe(worker.endpoints[0])
     await vi.waitFor(() => {
       expect(media[0]?.sent[0]?.data[0]).toBe(1)
       expect(worker.endpoints[0]?.sent[0]?.data[0]).toBe(2)
@@ -194,6 +208,20 @@ describe('CallRegistry QQ media composition', () => {
     expect(starts).toHaveBeenCalledOnce()
     expect(worker.attachMedia).toHaveBeenCalledOnce()
     expect(worker.attachMedia.mock.calls[0]?.[0]).toMatchObject({ telegramRole: 'recipient' })
+  })
+
+  it('fails closed before acquiring a platform lease when the confirmed endpoint is invalid', async () => {
+    const { calls, worker, starts, updates } = setup()
+    worker.attachMedia.mockResolvedValueOnce({} as unknown as FakeEndpoint)
+    const peer = await request(calls)
+
+    const error = await calls.confirm(session, peer, new Uint8Array(256).fill(4), Long.fromInt(12), protocol)
+      .catch((value: unknown) => value)
+
+    expect(error).toMatchObject({ code: 'CALL_MEDIA_UNAVAILABLE' })
+    expect(starts).not.toHaveBeenCalled()
+    expect(updates.map((update) => update.phoneCall._)).toEqual(['phoneCallRequested', 'phoneCallDiscarded'])
+    expect(worker.discardCall).toHaveBeenCalledOnce()
   })
 
   it('sanitizes lease failures, closes the worker endpoint, and never publishes active media', async () => {
