@@ -115,6 +115,38 @@ type QueuedSession = {
 }
 
 describe('ServerSession decrypted RPC queue', () => {
+  it('routes a wrapped auth.bindTempAuthKey to MTProto key handling instead of RPC dispatch', async () => {
+    const dispatch = vi.fn()
+    const { session } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & {
+      _apiLayer: number
+      _handleBindTempAuthKey: ReturnType<typeof vi.fn>
+    }
+    internal._apiLayer = 227
+    internal._handleBindTempAuthKey = vi.fn().mockResolvedValue(undefined)
+    const messageId = Long.fromInt(12)
+    const sessionId = Long.fromInt(13)
+    const bindRequest = {
+      _: 'auth.bindTempAuthKey',
+      permAuthKeyId: Long.fromInt(1),
+      nonce: Long.fromInt(2),
+      expiresAt: 3,
+      encryptedMessage: new Uint8Array([4]),
+    }
+
+    await internal._handleRpcCall(messageId, {
+      _: 'invokeWithLayer',
+      layer: 227,
+      query: {
+        _: 'initConnection',
+        query: bindRequest,
+      },
+    } as never, sessionId)
+
+    expect(internal._handleBindTempAuthKey).toHaveBeenCalledWith(messageId, bindRequest, sessionId)
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
   it('commits asynchronous authorization state before a dependent RPC starts', async () => {
     const { session } = createSession()
     const internal = session as unknown as QueuedSession

@@ -1107,6 +1107,21 @@ export class ServerSession {
       return
     }
 
+    // TDLib sends auth.bindTempAuthKey through the same invokeWithLayer /
+    // initConnection / gzip_packed envelopes as ordinary API calls. The bare
+    // form is handled in _processDecryptedMessage, but a wrapped bind reaches
+    // this RPC path after its envelopes are removed. Keep it inside the
+    // session because it mutates MTProto key state and must never be delegated
+    // to an application-level RPC handler.
+    if (unwrapped.request._ === 'auth.bindTempAuthKey') {
+      await this._handleBindTempAuthKey(
+        msgId,
+        unwrapped.request as tl.auth.RawBindTempAuthKeyRequest,
+        clientSessionId,
+      )
+      return
+    }
+
     const ctx: ServerRpcContext = {
       connection: this._connection,
       apiLayer: this._apiLayer,
