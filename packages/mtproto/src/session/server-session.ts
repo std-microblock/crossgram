@@ -4,9 +4,9 @@ import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { typed, u8 } from '@fuman/utils'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
 import { createAesIgeForMessageOld } from '@mtcute/core/utils.js'
-import { gunzipSync } from 'node:zlib'
 import Long from 'long'
 import { ServerAuthKey } from './server-auth-key.js'
+import { unpackPackedData } from './packed-data.js'
 import type { AuthKeyStore, StoredAuthKey } from './auth-key-store.js'
 import type { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
@@ -24,7 +24,6 @@ const BOOL_FALSE_ID = 0xBC799737
 const GZIP_PACKED_ID = 0x3072CFA1
 // Bare Vector<X> prefix (https://core.telegram.org/type/Vector%20X)
 const VECTOR_ID = 0x1CB5C415
-const MAX_GZIP_UNPACKED_SIZE = 16 * 1024 * 1024
 const MAX_GZIP_NESTING = 4
 const MAX_SHARED_COMPLETED_MESSAGE_IDS = 16_384
 
@@ -632,7 +631,7 @@ export class ServerSession {
           throw new Error(`gzip_packed nesting exceeds ${MAX_GZIP_NESTING}`)
         }
         const packedData = reader.bytes()
-        const unpacked = gunzipSync(packedData, { maxOutputLength: MAX_GZIP_UNPACKED_SIZE })
+        const unpacked = unpackPackedData(packedData)
         reader = new TlBinaryReader(this._readerMap, unpacked)
         gzipNesting += 1
         continue
@@ -731,7 +730,7 @@ export class ServerSession {
         throw new Error(`gzip_packed nesting exceeds ${MAX_GZIP_NESTING}`)
       }
       const packedData = (obj as unknown as { packedData: Uint8Array }).packedData
-      const unpacked = gunzipSync(packedData, { maxOutputLength: MAX_GZIP_UNPACKED_SIZE })
+      const unpacked = unpackPackedData(packedData)
       const unpackedObject = new TlBinaryReader(this._readerMap, unpacked).object() as { _: string }
       return this._unwrapGzipQueries(unpackedObject, gzipNesting + 1)
     }

@@ -5,7 +5,7 @@ import { connect, type Socket } from 'node:net'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { gzipSync } from 'node:zlib'
+import { deflateRawSync, deflateSync, gzipSync } from 'node:zlib'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter, type TlReaderMap } from '@mtcute/tl-runtime'
 import { __tlReaderMap, __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
@@ -201,21 +201,33 @@ function serializeInitializedRpc(query: object, layer = CURRENT_API_LAYER): Uint
   } as { _: string })
 }
 
-function gzipPacked(body: Uint8Array): Uint8Array {
-  const packed = gzipSync(body)
+function packedObject(body: Uint8Array, compress: (data: Uint8Array) => Uint8Array): Uint8Array {
+  const packed = compress(body)
   const writer = TlBinaryWriter.manual(4 + TlSerializationCounter.countBytesOverhead(packed.length) + packed.length)
   writer.uint(GZIP_PACKED_ID)
   writer.bytes(packed)
   return writer.result()
 }
 
-function invokeWithLayerGzip(query: { _: string }, layer = CURRENT_API_LAYER): Uint8Array {
-  const packedQuery = gzipPacked(TlBinaryWriter.serializeObject(__tlWriterMap, query))
+function gzipPacked(body: Uint8Array): Uint8Array {
+  return packedObject(body, gzipSync)
+}
+
+function invokeWithLayerPacked(
+  query: { _: string },
+  compress: (data: Uint8Array) => Uint8Array,
+  layer = CURRENT_API_LAYER,
+): Uint8Array {
+  const packedQuery = packedObject(TlBinaryWriter.serializeObject(__tlWriterMap, query), compress)
   const writer = TlBinaryWriter.manual(8 + packedQuery.length)
   writer.uint(INVOKE_WITH_LAYER_ID)
   writer.uint(layer)
   writer.raw(packedQuery)
   return writer.result()
+}
+
+function invokeWithLayerGzip(query: { _: string }, layer = CURRENT_API_LAYER): Uint8Array {
+  return invokeWithLayerPacked(query, gzipSync, layer)
 }
 
 /** Telegram Desktop's TCP endpoint probe uses the legacy req_pq constructor. */
@@ -1284,6 +1296,46 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       container.raw(request)
 
       await client.send(clientEncrypt(perm, container.result(), perm.salt, sessionId, 72))
+
+      const response = await readRpcResultEnvelope(client, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({ _: 'config', thisDc: 1 })
+      expect(debugEvents.some((event) => (
+        event.direction === 'client->server'
+        && (event.payload as { _?: string })._ === 'invokeWithLayer'
+      ))).toBe(true)
+      expect(debugEvents.some((event) => (
+        (event.payload as { _?: string })._ === 'unparsed'
+        && (event.payload as { constructorId?: number }).constructorId === GZIP_PACKED_ID
+      ))).toBe(false)
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it.each([
+    ['zlib', deflateSync],
+    ['raw DEFLATE', deflateRawSync],
+  ])('unwraps a %s-packed invokeWithLayer query inside a message container', async (_format, compress) => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop } = await startServer((event) => debugEvents.push(event))
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x58585858, 0x58585858)
+      const request = invokeWithLayerPacked({ _: 'help.getConfig' }, compress)
+      const requestMessageId = makeMsgId(76)
+      const container = TlBinaryWriter.manual(8 + 16 + request.length)
+      container.uint(0x73f1f8dc)
+      container.uint(1)
+      container.long(requestMessageId)
+      container.uint(1)
+      container.uint(request.length)
+      container.raw(request)
+
+      await client.send(clientEncrypt(perm, container.result(), perm.salt, sessionId, 80))
 
       const response = await readRpcResultEnvelope(client, perm)
       expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
