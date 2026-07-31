@@ -496,6 +496,80 @@
       '';
     };
 
+    tgcallsShimShared = tgcallsShim.overrideAttrs (old: {
+      pname = "crossgram-tgcalls-shim-shared";
+      cmakeFlags = old.cmakeFlags ++ ["-DCROSSGRAM_TGCALLS_SHIM_BUILD_SHARED=ON"];
+      installCheckPhase = ''
+        runHook preInstallCheck
+        test -s "$out/lib/libcrossgram_tgcalls_shim.so"
+        printf '%s\n' \
+          crossgram_tgcalls_shim_abi_version \
+          crossgram_tgcalls_session_create \
+          crossgram_tgcalls_session_start \
+          crossgram_tgcalls_session_receive_signaling \
+          crossgram_tgcalls_session_push_capture_20ms \
+          crossgram_tgcalls_session_pop_playout_20ms \
+          crossgram_tgcalls_session_stop \
+          crossgram_tgcalls_session_join \
+          crossgram_tgcalls_session_destroy \
+          crossgram_tgcalls_pcm_bridge_create \
+          crossgram_tgcalls_pcm_bridge_push_capture_20ms \
+          crossgram_tgcalls_pcm_bridge_pop_capture_10ms \
+          crossgram_tgcalls_pcm_bridge_push_playout_10ms \
+          crossgram_tgcalls_pcm_bridge_pop_playout_20ms \
+          crossgram_tgcalls_pcm_bridge_stop \
+          crossgram_tgcalls_pcm_bridge_drain \
+          crossgram_tgcalls_pcm_bridge_join \
+          crossgram_tgcalls_pcm_bridge_destroy \
+          crossgram_tgcalls_pcm_bridge_dropped_playout_frames \
+          | LC_ALL=C sort > expected-exports
+        nm -D --defined-only "$out/lib/libcrossgram_tgcalls_shim.so" \
+          | awk '$3 ~ /^crossgram_/ {sub(/@.*/, "", $3); print $3}' \
+          | LC_ALL=C sort > actual-exports
+        diff -u expected-exports actual-exports
+        readelf --version-info "$out/lib/libcrossgram_tgcalls_shim.so" \
+          | grep -F 'CROSSGRAM_TGCALLS_SHIM_3' >/dev/null
+        test -s "$out/include/crossgram/tgcalls_shim.h"
+        test -s "$out/lib/cmake/CrossgramTgcallsShim/CrossgramTgcallsShimConfig.cmake"
+        mkdir consumer
+        printf '%s\n' \
+          'cmake_minimum_required(VERSION 3.20)' \
+          'project(crossgram_tgcalls_shim_consumer LANGUAGES CXX)' \
+          'find_package(CrossgramTgcallsShim CONFIG REQUIRED)' \
+          'add_executable(consumer main.cpp)' \
+          'target_link_libraries(consumer PRIVATE CrossgramTgcallsShim::crossgram_tgcalls_shim)' \
+          > consumer/CMakeLists.txt
+        printf '%s\n' \
+          '#include <crossgram/tgcalls_shim.h>' \
+          'int main(void) {' \
+          '  return crossgram_tgcalls_shim_abi_version() ==' \
+          '                 CROSSGRAM_TGCALLS_SHIM_ABI_VERSION ? 0 : 1;' \
+          '}' \
+          > consumer/main.cpp
+        cmake -S consumer -B consumer-build -G Ninja -DCMAKE_PREFIX_PATH="$out"
+        cmake --build consumer-build -j"$NIX_BUILD_CORES"
+        ./consumer-build/consumer
+        runHook postInstallCheck
+      '';
+    });
+
+    voiceWorker = pkgs.rustPlatform.buildRustPackage {
+      pname = "crossgram-voice-worker";
+      version = "0.1.0";
+      src = builtins.path {
+        path = ./packages/voice-worker;
+        name = "crossgram-voice-worker-source";
+      };
+      cargoLock.lockFile = ./packages/voice-worker/Cargo.lock;
+      strictDeps = true;
+      nativeBuildInputs = [pkgs.pkg-config];
+      buildInputs = [tgcallsShimShared];
+      CROSSGRAM_TGCALLS_SHIM_INCLUDE_DIR = "${tgcallsShimShared}/include";
+      CROSSGRAM_TGCALLS_SHIM_LIB_DIR = "${tgcallsShimShared}/lib";
+      cargoBuildFlags = ["--features" "native-tgcalls-shim"];
+      cargoTestFlags = ["--features" "native-tgcalls-shim"];
+    };
+
     tgcallsShimStrict = tgcallsShim.overrideAttrs (old: {
       pname = "crossgram-tgcalls-shim-strict";
       preConfigure =
@@ -537,6 +611,164 @@
       '';
       doInstallCheck = false;
     });
+
+    tgcallsShimSharedStrict = tgcallsShimShared.overrideAttrs (old: {
+      pname = "crossgram-tgcalls-shim-shared-strict";
+      preConfigure = (old.preConfigure or "") + ''
+        export CFLAGS="''${CFLAGS:-} -Wall -Wextra -Werror -Wpedantic"
+        export CXXFLAGS="''${CXXFLAGS:-} -Wall -Wextra -Werror -Wpedantic"
+      '';
+    });
+
+    tgcallsShimSharedAsan = tgcallsShimShared.overrideAttrs (old: {
+      pname = "crossgram-tgcalls-shim-shared-asan";
+      preConfigure = (old.preConfigure or "") + ''
+        export CXXFLAGS="''${CXXFLAGS:-} -fsanitize=address -fno-omit-frame-pointer"
+        export LDFLAGS="''${LDFLAGS:-} -fsanitize=address"
+      '';
+      checkPhase = ''
+        runHook preCheck
+        ASAN_OPTIONS=detect_leaks=1 ctest --output-on-failure
+        runHook postCheck
+      '';
+      doInstallCheck = false;
+    });
+
+    tgcallsShimSharedTsan = tgcallsShimShared.overrideAttrs (old: {
+      pname = "crossgram-tgcalls-shim-shared-tsan";
+      preConfigure = (old.preConfigure or "") + ''
+        export CXXFLAGS="''${CXXFLAGS:-} -fsanitize=thread -fno-omit-frame-pointer"
+        export LDFLAGS="''${LDFLAGS:-} -fsanitize=thread"
+      '';
+      checkPhase = ''
+        runHook preCheck
+        TSAN_OPTIONS=halt_on_error=1 ctest --output-on-failure
+        runHook postCheck
+      '';
+      doInstallCheck = false;
+    });
+
+    voiceWorkerUnixCheck = pkgs.runCommand "crossgram-voice-worker-unix-check" {
+      nativeBuildInputs = with pkgs; [coreutils python3 strace util-linux];
+    } ''
+      socket="$TMPDIR/voice-worker.sock"
+      trace="$TMPDIR/voice-worker.strace"
+      worker_pid_file="$TMPDIR/voice-worker.pid"
+      worker=""
+      tracer=""
+      cleanup() {
+        status=$?
+        trap - EXIT
+        if test -n "$worker" && kill -0 "$worker" 2>/dev/null; then
+          if ! kill -KILL -- "-$worker" 2>/dev/null; then
+            echo "cleanup: voice worker already exited" >&2
+          fi
+        fi
+        if test -n "$tracer" && kill -0 "$tracer" 2>/dev/null; then
+          if ! kill -KILL "$tracer" 2>/dev/null; then
+            echo "cleanup: strace already exited" >&2
+          fi
+          set +e
+          wait "$tracer"
+          set -e
+        fi
+        rm -f "$socket" "$worker_pid_file"
+        exit "$status"
+      }
+      trap cleanup EXIT
+      ${pkgs.strace}/bin/strace -f -o "$trace" -e trace=network \
+        ${pkgs.util-linux}/bin/setsid ${pkgs.bash}/bin/bash -c '
+          printf "%s\\n" "$$" > "$1"
+          exec "$2" --unix "$3"
+        ' bash "$worker_pid_file" ${voiceWorker}/bin/crossgram-voice-worker "$socket" &
+      tracer="$!"
+      for _ in $(seq 1 100); do
+        test -s "$worker_pid_file" && test -S "$socket" && break
+        sleep 0.01
+      done
+      test -s "$worker_pid_file"
+      worker="$(cat "$worker_pid_file")"
+      test -S "$socket"
+      ${pkgs.python3}/bin/python3 - "$socket" <<'PY'
+import socket
+import struct
+import sys
+
+path = sys.argv[1]
+
+def receive_exact(client, size):
+    chunks = []
+    while size:
+        chunk = client.recv(size)
+        assert chunk
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+def request(tag, expected_response_tag):
+    payload = bytes((2, tag)) + struct.pack(">Q", 1)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(path)
+        client.sendall(struct.pack(">I", len(payload)) + payload)
+        size = struct.unpack(">I", receive_exact(client, 4))[0]
+        response = receive_exact(client, size)
+    assert response[:2] == bytes((2, expected_response_tag)), response
+
+request(1, 0x81)   # PrepareCaller
+request(11, 0x8d)  # PollEvent
+request(6, 0x86)   # Hangup
+PY
+      if ! kill -0 "$worker" 2>/dev/null; then
+        echo "voice worker exited before test teardown" >&2
+        exit 1
+      fi
+      timeout_file="$TMPDIR/voice-worker-teardown-timeout"
+      (
+        sleep 5
+        if kill -0 "$worker" 2>/dev/null; then
+          printf 'voice worker did not stop within five seconds\\n' > "$timeout_file"
+          kill -KILL -- "-$worker"
+        fi
+        if kill -0 "$tracer" 2>/dev/null; then
+          printf 'strace did not complete within five seconds\\n' >> "$timeout_file"
+          kill -KILL "$tracer"
+        fi
+      ) &
+      watchdog="$!"
+      if ! kill -TERM -- "-$worker"; then
+        echo "failed to terminate voice worker process group" >&2
+        exit 1
+      fi
+      set +e
+      wait "$tracer"
+      tracer_status=$?
+      set -e
+      if kill -0 "$watchdog" 2>/dev/null; then
+        kill -TERM "$watchdog"
+      fi
+      set +e
+      wait "$watchdog"
+      set -e
+      if test -e "$timeout_file"; then
+        cat "$timeout_file" >&2
+        exit 1
+      fi
+      case "$tracer_status" in
+        0|143) ;;
+        *)
+          echo "strace exited unexpectedly with status $tracer_status" >&2
+          exit 1
+          ;;
+      esac
+      # Unix-socket IPC is expected; no internet socket is permitted before media start.
+      if grep -E 'AF_(INET|INET6)' "$trace"; then
+        echo "voice worker opened an internet socket before media start" >&2
+        exit 1
+      fi
+      trap - EXIT
+      rm -f "$socket" "$worker_pid_file"
+      touch "$out"
+    '';
 
     corepack = pkgs.writeShellScriptBin "corepack" ''
       exec ${pkgs.corepack}/bin/corepack "$@"
@@ -613,6 +845,8 @@
       tg-owt = tgOwt;
       tgcalls-artifact = tgcallsArtifact;
       crossgram-tgcalls-shim = tgcallsShim;
+      crossgram-tgcalls-shim-shared = tgcallsShimShared;
+      voice-worker = voiceWorker;
       tgcalls-artifact-licenses = tgcallsLicenses;
       tgcalls-artifact-sbom = tgcallsSbom;
     };
@@ -649,6 +883,12 @@
       crossgram-tgcalls-shim-strict = tgcallsShimStrict;
       crossgram-tgcalls-shim-asan = tgcallsShimAsan;
       crossgram-tgcalls-shim-tsan = tgcallsShimTsan;
+      crossgram-tgcalls-shim-shared = tgcallsShimShared;
+      crossgram-tgcalls-shim-shared-strict = tgcallsShimSharedStrict;
+      crossgram-tgcalls-shim-shared-asan = tgcallsShimSharedAsan;
+      crossgram-tgcalls-shim-shared-tsan = tgcallsShimSharedTsan;
+      voice-worker = voiceWorker;
+      voice-worker-unix = voiceWorkerUnixCheck;
     };
 
     formatter.${system} = pkgs.alejandra;

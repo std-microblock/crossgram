@@ -9,6 +9,9 @@ publish = false
 [features]
 test-fake = []
 tgcalls-backend = []
+# Links the reviewed, versioned C ABI shim. This is the only feature that
+# selects the native production media backend in the worker executable.
+native-tgcalls-shim = ["tgcalls-backend"]
 
 [dependencies]
 crypto-bigint = { version = "=0.7.5", default-features = false, features = ["zeroize"] }
