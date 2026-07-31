@@ -4,7 +4,11 @@ import { __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { getServerReaderMap } from '../rpc/server-reader-map.js'
-import { receivePlainHandshakeObject, selectPendingPqChallenge } from './server-authorization.js'
+import {
+  receivePlainHandshakeObject,
+  rememberPendingPqChallenge,
+  selectPendingPqChallenge,
+} from './server-authorization.js'
 
 describe('plain handshake message reader', () => {
   it('skips Android plaintext acknowledgements before the next handshake request', async () => {
@@ -25,6 +29,24 @@ describe('plain handshake message reader', () => {
 })
 
 describe('PQ challenge selection', () => {
+  it('owns nonce bytes after the transport receive buffer is reused', () => {
+    const challenges: Parameters<typeof rememberPendingPqChallenge>[0] = []
+    const receiveBuffer = new Uint8Array(32)
+    receiveBuffer.fill(1, 0, 16)
+    receiveBuffer.fill(2, 16)
+
+    const challenge = rememberPendingPqChallenge(
+      challenges,
+      receiveBuffer.subarray(0, 16),
+      receiveBuffer.subarray(16),
+      15n,
+    )
+    receiveBuffer.fill(9)
+
+    expect(challenge.clientNonce).toEqual(new Uint8Array(16).fill(1))
+    expect(challenge.serverNonce).toEqual(new Uint8Array(16).fill(2))
+  })
+
   it('keeps an earlier response valid after a later probe is answered', () => {
     const first = {
       clientNonce: new Uint8Array(16).fill(1),
@@ -38,6 +60,26 @@ describe('PQ challenge selection', () => {
     }
 
     expect(selectPendingPqChallenge([first, second], first.clientNonce, first.serverNonce)).toBe(first)
+  })
+
+  it('retains the first challenge across more than eight TDLib probes', () => {
+    const challenges: Parameters<typeof rememberPendingPqChallenge>[0] = []
+    const first = rememberPendingPqChallenge(
+      challenges,
+      new Uint8Array(16).fill(1),
+      new Uint8Array(16).fill(2),
+      15n,
+    )
+    for (let value = 3; value <= 12; value++) {
+      rememberPendingPqChallenge(
+        challenges,
+        new Uint8Array(16).fill(value),
+        new Uint8Array(16).fill(value + 16),
+        BigInt(value * 5),
+      )
+    }
+
+    expect(selectPendingPqChallenge(challenges, first.clientNonce, first.serverNonce)).toBe(first)
   })
 
   it('distinguishes unknown client and server nonces', () => {
