@@ -2,6 +2,7 @@ import type { Context } from 'cordis'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { serializeDebugEvent } from './serialize.js'
+import { appendChunkedEvents, flattenChunks, replaceChunks, resolveChunkSize } from './chunks.js'
 import { CaptureQueryError, parseCaptureQuery, queryCapture } from './capture-api.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 import enUS from './locales/en-US.yml'
@@ -27,6 +28,7 @@ export const Config = z.object({
 
 export function apply(ctx: Context, config: Config = {}): void {
   const maxEvents = config.maxEvents ?? 2_000
+  const chunkSize = resolveChunkSize(maxEvents)
   const apiPath = normalizeApiPath(config.apiPath ?? '/api/mtproto-debug/events')
   let nextId = 0
   let pending: CapturedMtprotoEvent[] = []
@@ -34,7 +36,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const data: MtprotoDebugData = {
     capturing: !(config.initiallyPaused ?? false),
-    events: [],
+    chunks: {},
     dropped: 0,
     maxEvents,
     async start() {
@@ -51,7 +53,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       flushTimer = undefined
       pending = []
       entry.mutate((value) => {
-        value.events.splice(0)
+        replaceChunks(value.chunks, [])
         value.dropped = 0
       })
     },
@@ -69,12 +71,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const batch = pending
     pending = []
     entry.mutate((value) => {
-      value.events.push(...batch)
-      const overflow = value.events.length - maxEvents
-      if (overflow > 0) {
-        value.events.splice(0, overflow)
-        value.dropped += overflow
-      }
+      value.dropped += appendChunkedEvents(value.chunks, batch, maxEvents, chunkSize)
     })
   }
   const scheduleFlush = () => {
@@ -89,7 +86,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       flush()
       res.headers.set('cache-control', 'no-store')
-      res.json(queryCapture(data, parseCaptureQuery(req.query)))
+      res.json(queryCapture({
+        capturing: data.capturing,
+        dropped: data.dropped,
+        maxEvents: data.maxEvents,
+        events: flattenChunks(data.chunks),
+      }, parseCaptureQuery(req.query)))
     } catch (error) {
       if (!(error instanceof CaptureQueryError)) throw error
       res.status = 400
@@ -114,8 +116,12 @@ export function apply(ctx: Context, config: Config = {}): void {
 export type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 export { serializeDebugEvent, toDebugJson } from './serialize.js'
 export {
+  appendChunkedEvents, chunkEvents, chunkKeys, countChunkedEvents, flattenChunks,
+  MAX_CHUNK_SIZE, replaceChunks, resolveChunkSize, type EventChunks,
+} from './chunks.js'
+export {
   CaptureQueryError, parseCaptureQuery, queryCapture,
-  type MtprotoCaptureFilters, type MtprotoCaptureSnapshot,
+  type CaptureSource, type MtprotoCaptureFilters, type MtprotoCaptureSnapshot,
 } from './capture-api.js'
 
 function normalizeApiPath(value: string): string {

@@ -17,7 +17,8 @@ export interface CapturedMtprotoEvent {
 
 export interface MtprotoDebugData {
   capturing: boolean
-  events: CapturedMtprotoEvent[]
+  /** Chunked ring buffer; see `chunks.ts` for why this is not a flat array. */
+  chunks: Record<number, CapturedMtprotoEvent[]>
   dropped: number
   maxEvents: number
   start(): Promise<void>

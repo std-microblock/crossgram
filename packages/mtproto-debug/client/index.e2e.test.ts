@@ -5,6 +5,7 @@ import { defineComponent, h, nextTick, ref } from 'vue'
 import type { Ref } from 'vue'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
+import { chunkEvents, flattenChunks, replaceChunks } from '../src/chunks.js'
 
 const rpcState = vi.hoisted(() => ({ data: undefined as unknown, current: undefined as unknown }))
 
@@ -226,16 +227,14 @@ describe('MTProto debug client', () => {
 
     viewport.scrollTop = 1_585
     viewport.dispatchEvent(new Event('scroll'))
-    debugRef().events.shift()
-    debugRef().events.push(event(51))
+    rotateEvent(debugRef(), event(51))
     await nextTick()
     await nextTick()
     expect(viewport.scrollTop).toBe(1_600)
 
     viewport.scrollTop = 1_200
     viewport.dispatchEvent(new Event('scroll'))
-    debugRef().events.shift()
-    debugRef().events.push(event(52))
+    rotateEvent(debugRef(), event(52))
     await nextTick()
     await nextTick()
     expect(viewport.scrollTop).toBe(1_200)
@@ -256,7 +255,7 @@ const iconStub = defineComponent({
 
 function debugData(events: CapturedMtprotoEvent[]): MtprotoDebugData {
   return {
-    events,
+    chunks: chunkEvents(events),
     dropped: 0,
     maxEvents: 2_000,
     capturing: true,
@@ -264,6 +263,14 @@ function debugData(events: CapturedMtprotoEvent[]): MtprotoDebugData {
     pause: vi.fn(async () => undefined),
     clear: vi.fn(async () => undefined),
   }
+}
+
+/** Drop the oldest event and append a new one, keeping the buffer length stable. */
+function rotateEvent(data: MtprotoDebugData, next: CapturedMtprotoEvent): void {
+  const events = flattenChunks(data.chunks)
+  events.shift()
+  events.push(next)
+  replaceChunks(data.chunks, events)
 }
 
 function debugRef(): MtprotoDebugData {

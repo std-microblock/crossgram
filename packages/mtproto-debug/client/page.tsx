@@ -6,6 +6,7 @@ import { computed, defineComponent, nextTick, onBeforeUnmount, onMounted, ref, r
 import { useRpc } from '@cordisjs/client'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import { countGroupedEvents, filterEventGroups, getRpcResultMetrics, groupRpcEvents } from '../src/event-groups.js'
+import { flattenChunks } from '../src/chunks.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
 import './style.css'
 
@@ -144,7 +145,11 @@ export const DebugPage = defineComponent({
     const autoScroll = ref(true)
     let lastScrollTop = 0
 
-    const groups = computed(() => groupRpcEvents(data.value.events))
+    // The buffer arrives chunked so that evicting old events stays a cheap
+    // delta; flattening only copies references, so event objects (and their
+    // reactive proxies) survive across updates instead of being rebuilt.
+    const events = computed(() => flattenChunks(data.value.chunks))
+    const groups = computed(() => groupRpcEvents(events.value))
     const visibleGroups = computed(() => filterEventGroups(groups.value, filter.value, typeFilter.value))
     const visibleEventCount = computed(() => countGroupedEvents(visibleGroups.value))
     const virtualizer = useVirtualizer(computed(() => ({
@@ -156,6 +161,12 @@ export const DebugPage = defineComponent({
       overscan: 12,
     })))
     const virtualRows = computed(() => virtualizer.value.getVirtualItems())
+    // Stable identity: an inline ref callback changes every render, which makes
+    // Vue tear down and re-attach the ref on every patch and re-measure every
+    // visible row (a forced synchronous layout per row, per update).
+    const measureRow = (element: unknown) => {
+      virtualizer.value.measureElement(element as HTMLElement | null)
+    }
 
     const toggle = (id: number) => {
       const next = new Set(expanded.value)
@@ -204,7 +215,7 @@ export const DebugPage = defineComponent({
       lastScrollTop = element?.scrollTop ?? 0
       autoScroll.value = isAtBottom()
     }, { flush: 'post' })
-    watch(() => data.value.events[data.value.events.length - 1]?.id, async () => {
+    watch(() => events.value[events.value.length - 1]?.id, async () => {
       await nextTick()
       scrollToBottom()
     }, { flush: 'post' })
@@ -238,7 +249,7 @@ export const DebugPage = defineComponent({
               const group = visibleGroups.value[row.index]
               return <div
                 key={String(row.key)}
-                ref={element => virtualizer.value.measureElement(element as HTMLElement | null)}
+                ref={measureRow}
                 class="debug-virtual-row"
                 data-index={row.index}
                 style={{ transform: `translateY(${row.start}px)` }}
@@ -292,13 +303,13 @@ export const DebugPage = defineComponent({
               <button
                 class="icon-button"
                 type="button"
-                disabled={busy.value || !data.value.events.length}
+                disabled={busy.value || !events.value.length}
                 title="Clear captured events"
                 aria-label="Clear captured events"
                 onClick={() => run('clear')}
               ><Icon name="trash" /></button>
               <div class="capture-stats">
-                <span>{visibleEventCount.value} / {data.value.events.length}</span>
+                <span>{visibleEventCount.value} / {events.value.length}</span>
                 {data.value.dropped > 0 && <span>{data.value.dropped} dropped</span>}
                 <span class={['capture-state', { active: data.value.capturing }]}>{data.value.capturing ? 'capturing' : 'paused'}</span>
               </div>

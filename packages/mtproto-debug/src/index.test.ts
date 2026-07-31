@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import { apply } from './index.js'
+import { flattenChunks } from './chunks.js'
 import type { MtprotoDebugData } from './types.js'
 
 describe('MTProto debug Cordis entry', () => {
@@ -65,21 +66,21 @@ describe('MTProto debug Cordis entry', () => {
     expect(response.body).toEqual({ error: 'Invalid direction: sideways' })
 
     await data.pause()
-    expect(data.events.map(event => event.name)).toEqual(['second.call', 'third.call'])
+    expect(flattenChunks(data.chunks).map(event => event.name)).toEqual(['second.call', 'third.call'])
     expect(data.dropped).toBe(1)
 
     emit('paused.call')
-    expect(data.events.map(event => event.name)).toEqual(['second.call', 'third.call'])
+    expect(flattenChunks(data.chunks).map(event => event.name)).toEqual(['second.call', 'third.call'])
     expect(data.capturing).toBe(false)
 
     await data.start()
     emit('resumed.call')
     await data.pause()
-    expect(data.events.map(event => event.name)).toEqual(['third.call', 'resumed.call'])
+    expect(flattenChunks(data.chunks).map(event => event.name)).toEqual(['third.call', 'resumed.call'])
     expect(data.dropped).toBe(2)
 
     await data.clear()
-    expect(data.events).toEqual([])
+    expect(flattenChunks(data.chunks)).toEqual([])
     expect(data.dropped).toBe(0)
 
     cleanups.forEach(cleanup => cleanup())
@@ -109,6 +110,6 @@ describe('MTProto debug Cordis entry', () => {
       })
     }
     expect(data.capturing).toBe(false)
-    expect(data.events).toEqual([])
+    expect(flattenChunks(data.chunks)).toEqual([])
   })
 })
