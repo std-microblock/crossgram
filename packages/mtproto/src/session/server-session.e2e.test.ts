@@ -244,11 +244,23 @@ async function doClientHandshake(
   tempExpiresIn = 3600,
   acknowledgePlaintextResponses = false,
   batchFirstAcknowledgement = false,
+  continueFromLegacyProbe = false,
 ): Promise<ClientKey> {
-  const nonce = crypto.randomBytes(16)
-  await sendPlain(client, { _: 'mt_req_pq_multi', nonce }, 4)
+  let nonce = crypto.randomBytes(16)
+  let resPqMessage: { messageId: Long, object: any }
+  if (continueFromLegacyProbe) {
+    await sendLegacyReqPq(client, nonce, 3)
+    resPqMessage = await readPlainMessage(client)
+    expect(resPqMessage.object._).toBe('mt_resPQ')
 
-  const resPqMessage = await readPlainMessage(client)
+    const laterNonce = crypto.randomBytes(16)
+    await sendPlain(client, { _: 'mt_req_pq_multi', nonce: laterNonce }, 4)
+    expect((await readPlainMessage(client)).object._).toBe('mt_resPQ')
+  } else {
+    await sendPlain(client, { _: 'mt_req_pq_multi', nonce }, 4)
+    resPqMessage = await readPlainMessage(client)
+  }
+
   const resPq = resPqMessage.object
   expect(resPq._).toBe('mt_resPQ')
   const serverNonce = resPq.serverNonce
@@ -547,6 +559,28 @@ async function startServer(
 }
 
 describe('e2e: obfuscated transport + PFS + RPC', () => {
+  it('continues a TDLib handshake from the first resPQ after a later probe', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false, 3600, false, false, true)
+      const sessionId = new Long(0x71717171, 0x71717171)
+
+      await client.send(clientEncrypt(
+        perm,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        perm.salt,
+        sessionId,
+        16,
+      ))
+      expect(await readRpcResult(client, perm)).toMatchObject({ _: 'config', thisDc: 1 })
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
   it('accepts a coalesced Android acknowledgement and next handshake frame', async () => {
     await crypto.initialize?.()
     const { port, pubKey, stop } = await startServer()

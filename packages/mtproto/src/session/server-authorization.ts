@@ -15,6 +15,31 @@ interface LegacyReqPq {
 
 type PlainHandshakeObject = mtp.TlObject | LegacyReqPq
 
+interface PendingPqChallenge {
+  clientNonce: Uint8Array
+  serverNonce: Uint8Array
+  pq: bigint
+}
+
+const MAX_PENDING_PQ_CHALLENGES = 8
+
+export function selectPendingPqChallenge(
+  challenges: readonly PendingPqChallenge[],
+  clientNonce: Uint8Array,
+  serverNonce: Uint8Array,
+): PendingPqChallenge {
+  const matchingNonce = challenges.filter((challenge) => typed.equal(challenge.clientNonce, clientNonce))
+  if (matchingNonce.length === 0) {
+    throw new Error('Step 2: invalid nonce from client')
+  }
+
+  const challenge = matchingNonce.find((candidate) => typed.equal(candidate.serverNonce, serverNonce))
+  if (!challenge) {
+    throw new Error('Step 2: invalid server nonce from client')
+  }
+  return challenge
+}
+
 export async function receivePlainHandshakeObject(
   readerMap: TlReaderMap,
   log: Logger,
@@ -87,11 +112,14 @@ export async function doServerAuthorization(
   // mtcute sends a single req_pq_multi. Telegram Desktop / TDLib clients open
   // with the legacy req_pq and then send req_pq_multi on the *same* connection,
   // so we keep (re)issuing resPQ — each with a fresh server nonce and pq — until
-  // the client proceeds to req_DH_params.
+  // the client proceeds to req_DH_params. TDLib may continue with an earlier
+  // response after sending a later probe, so every outstanding challenge must
+  // remain selectable by its client/server nonce pair.
 
   let clientNonce!: Uint8Array
   let serverNonce!: Uint8Array
   let pq!: bigint
+  const pendingPqChallenges: PendingPqChallenge[] = []
 
   let reqDh: mtp.RawMt_req_DH_params
   for (;;) {
@@ -105,29 +133,38 @@ export async function doServerAuthorization(
       throw new Error(`Expected req_pq(_multi) or req_DH_params, got ${obj._}`)
     }
 
-    clientNonce = obj.nonce
-    pq = generatePq().pq
-    serverNonce = crypto.randomBytes(16)
+    const challenge: PendingPqChallenge = {
+      clientNonce: obj.nonce,
+      pq: generatePq().pq,
+      serverNonce: crypto.randomBytes(16),
+    }
+    pendingPqChallenges.push(challenge)
+    if (pendingPqChallenges.length > MAX_PENDING_PQ_CHALLENGES) {
+      pendingPqChallenges.shift()
+    }
 
     const resPq: mtp.RawMt_resPQ = {
       _: 'mt_resPQ',
-      nonce: clientNonce,
-      serverNonce,
-      pq: bigintToBytes(pq),
+      nonce: challenge.clientNonce,
+      serverNonce: challenge.serverNonce,
+      pq: bigintToBytes(challenge.pq),
       serverPublicKeyFingerprints: [keyFingerprint],
     }
-    authLog.debug('step 1: received %s, nonce = %h → sending resPQ (pq = %h)', obj._, clientNonce, bigintToBytes(pq))
+    authLog.debug(
+      'step 1: received %s, nonce = %h → sending resPQ (pq = %h)',
+      obj._,
+      challenge.clientNonce,
+      bigintToBytes(challenge.pq),
+    )
     await sendPlain(resPq)
   }
 
   // ── Step 2: req_DH_params — decrypt inner data, return server_DH_params_ok ──
 
-  if (!typed.equal(reqDh.nonce, clientNonce)) {
-    throw new Error('Step 2: invalid nonce from client')
-  }
-  if (!typed.equal(reqDh.serverNonce, serverNonce)) {
-    throw new Error('Step 2: invalid server nonce from client')
-  }
+  const selectedChallenge = selectPendingPqChallenge(pendingPqChallenges, reqDh.nonce, reqDh.serverNonce)
+  clientNonce = selectedChallenge.clientNonce
+  serverNonce = selectedChallenge.serverNonce
+  pq = selectedChallenge.pq
 
   // Verify p * q == pq
   const clientP = bigint.fromBytes(reqDh.p)
