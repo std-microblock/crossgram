@@ -1,0 +1,106 @@
+# Upstream repository: https://github.com/TelegramMessenger/tgcalls.git
+# Pinned source revision: 2faee3b5524f54d56c91c2058c00e11c656a74b3
+#
+# ThreadLocalObject normally posts destruction and returns immediately. That
+# leaves Manager, NetworkManager, and MediaManager retaining EncryptionKey
+# after the caller has been told teardown completed. resetSync() moves the
+# holder to its owning thread and waits unless it is already on that thread.
+# Manager uses it to synchronously destroy media then network before releasing
+# its own encryption copy; Instance::stopAndWait exposes that barrier for every
+# pinned Instance implementation.
+--- a/tgcalls/ThreadLocalObject.h
++++ b/tgcalls/ThreadLocalObject.h
+@@ -27 +27,9 @@
+-		_thread->PostTask([valueHolder = std::move(_valueHolder)](){
++		resetAsync();
++	}
++
++	void resetSync() {
++		auto valueHolder = std::move(_valueHolder);
++		if (!valueHolder) {
++			return;
++		}
++		auto reset = [valueHolder = std::move(valueHolder)]() mutable {
+@@ -29 +37,6 @@
+-		});
++		};
++		if (_thread->IsCurrent()) {
++			reset();
++		} else {
++			_thread->BlockingCall(std::move(reset));
++		}
+@@ -46,0 +60,9 @@
++	void resetAsync() {
++		if (!_valueHolder) {
++			return;
++		}
++		_thread->PostTask([valueHolder = std::move(_valueHolder)]() {
++			valueHolder->_value.reset();
++		});
++	}
++
+--- a/tgcalls/Instance.h
++++ b/tgcalls/Instance.h
+@@ -215,0 +216 @@
++	virtual void stopAndWait() = 0;
+--- a/tgcalls/InstanceImpl.h
++++ b/tgcalls/InstanceImpl.h
+@@ -47,0 +48 @@
++	void stopAndWait() override;
+--- a/tgcalls/InstanceImpl.cpp
++++ b/tgcalls/InstanceImpl.cpp
+@@ -185,0 +186,6 @@
++void InstanceImpl::stopAndWait() {
++	if (_manager) {
++		_manager->resetSync();
++	}
++}
++
+--- a/tgcalls/Manager.cpp
++++ b/tgcalls/Manager.cpp
+@@ -126,0 +127,6 @@
++	if (_mediaManager) {
++		_mediaManager->resetSync();
++	}
++	if (_networkManager) {
++		_networkManager->resetSync();
++	}
+--- a/tgcalls/v2/InstanceV2Impl.h
++++ b/tgcalls/v2/InstanceV2Impl.h
+@@ -47,0 +48 @@
++	void stopAndWait() override;
+--- a/tgcalls/v2/InstanceV2Impl.cpp
++++ b/tgcalls/v2/InstanceV2Impl.cpp
+@@ -2420,0 +2421,6 @@
++void InstanceV2Impl::stopAndWait() {
++    if (_internal) {
++        _internal->resetSync();
++    }
++}
++
+--- a/tgcalls/v2/InstanceV2CompatImpl.h
++++ b/tgcalls/v2/InstanceV2CompatImpl.h
+@@ -49,0 +50 @@
++	void stopAndWait() override;
+--- a/tgcalls/v2/InstanceV2CompatImpl.cpp
++++ b/tgcalls/v2/InstanceV2CompatImpl.cpp
+@@ -1595,0 +1596,6 @@
++void InstanceV2CompatImpl::stopAndWait() {
++    if (_internal) {
++        _internal->resetSync();
++    }
++}
++
+--- a/tgcalls/v2/InstanceV2ReferenceImpl.h
++++ b/tgcalls/v2/InstanceV2ReferenceImpl.h
+@@ -47,0 +48 @@
++	void stopAndWait() override;
+--- a/tgcalls/v2/InstanceV2ReferenceImpl.cpp
++++ b/tgcalls/v2/InstanceV2ReferenceImpl.cpp
+@@ -1860,0 +1861,6 @@
++void InstanceV2ReferenceImpl::stopAndWait() {
++    if (_internal) {
++        _internal->resetSync();
++    }
++}
++

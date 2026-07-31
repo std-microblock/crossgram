@@ -99,6 +99,25 @@ int main(void) {
             &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_ABI_MISMATCH);
   CHECK(session == NULL);
   CHECK(crossgram_tgcalls_session_create(
+            CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &credentials, NULL, 0,
+            &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  CHECK(session != NULL);
+  CHECK(crossgram_tgcalls_session_stop(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  CHECK(crossgram_tgcalls_session_join(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  CHECK(crossgram_tgcalls_session_destroy(&session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  CHECK(session == NULL);
+  CHECK(crossgram_tgcalls_session_create(
+            CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &credentials, &endpoint, 0,
+            &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_INVALID_ARGUMENT);
+  config.enable_p2p = 0;
+  CHECK(crossgram_tgcalls_session_create(
+            CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &credentials, NULL, 0,
+            &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_INVALID_ARGUMENT);
+  config.enable_p2p = 1;
+  CHECK(crossgram_tgcalls_session_create(
+            CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &credentials, NULL, 1,
+            &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_INVALID_ARGUMENT);
+  CHECK(crossgram_tgcalls_session_create(
             CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &credentials, &endpoint, 1,
             &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   CHECK(session != NULL);

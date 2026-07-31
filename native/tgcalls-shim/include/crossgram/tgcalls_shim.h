@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 
+#if defined(_WIN32)
+#define CROSSGRAM_TGCALLS_SHIM_API __declspec(dllexport)
+#elif defined(__GNUC__)
+#define CROSSGRAM_TGCALLS_SHIM_API __attribute__((visibility("default")))
+#else
+#define CROSSGRAM_TGCALLS_SHIM_API
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -116,15 +124,18 @@ typedef struct crossgram_tgcalls_session_callbacks {
 } crossgram_tgcalls_session_callbacks;
 
 /** Returns the ABI version implemented by this library. */
-uint32_t crossgram_tgcalls_shim_abi_version(void);
+CROSSGRAM_TGCALLS_SHIM_API uint32_t crossgram_tgcalls_shim_abi_version(void);
 
 /**
  * Creates a session seam and its bounded native-PCM bridge. All typed inputs
- * are copied before this call returns. Creation does not open a socket or
- * start media. The installed production adapter is intentionally unavailable
- * until the separately approved tgcalls artifact is linked.
+ * are copied before this call returns. `endpoints` must be non-null when
+ * `endpoint_count` is non-zero. A null endpoint pointer with zero endpoints is
+ * accepted only when `config->enable_p2p` is exactly one; all other null/count
+ * combinations are rejected. Creation does not open a socket or start media.
+ * The installed production adapter is intentionally unavailable until the
+ * separately approved tgcalls artifact is linked.
  */
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_create(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_create(
     uint32_t abi_version,
     const crossgram_tgcalls_session_config* config,
     const crossgram_tgcalls_session_auth* auth,
@@ -134,11 +145,11 @@ crossgram_tgcalls_shim_status crossgram_tgcalls_session_create(
     crossgram_tgcalls_shim** out_session);
 
 /** Starts an already-created session. It does not claim media readiness on failure. */
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_start(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_start(
     crossgram_tgcalls_shim* session);
 
 /** Copies one bounded opaque inbound signaling payload into the native adapter. */
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_receive_signaling(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_receive_signaling(
     crossgram_tgcalls_shim* session,
     const uint8_t* data,
     uint32_t length);
@@ -148,9 +159,9 @@ crossgram_tgcalls_shim_status crossgram_tgcalls_session_receive_signaling(
  * copied before return; output is written to caller-owned storage. Every frame
  * is 20 ms, mono, 48 kHz native int16_t (960 samples / 1,920 bytes).
  */
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_push_capture_20ms(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_push_capture_20ms(
     crossgram_tgcalls_shim* session, const int16_t* samples);
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_pop_playout_20ms(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_pop_playout_20ms(
     crossgram_tgcalls_shim* session, int16_t* samples);
 
 /**
@@ -160,39 +171,39 @@ crossgram_tgcalls_shim_status crossgram_tgcalls_session_pop_playout_20ms(
  * Destroy takes the owning handle slot, clears it on success, and accepts an
  * already-null slot so it never dereferences a previously freed handle.
  */
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_stop(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_stop(
     crossgram_tgcalls_shim* session);
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_join(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_join(
     crossgram_tgcalls_shim* session);
-crossgram_tgcalls_shim_status crossgram_tgcalls_session_destroy(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_session_destroy(
     crossgram_tgcalls_shim** session);
 
 /** Creates a standalone bounded PCM bridge for the requested ABI version. */
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_create(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_create(
     uint32_t abi_version,
     crossgram_tgcalls_pcm_bridge** out_bridge);
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_push_capture_20ms(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_push_capture_20ms(
     crossgram_tgcalls_pcm_bridge* bridge,
     const int16_t* samples);
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_pop_capture_10ms(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_pop_capture_10ms(
     crossgram_tgcalls_pcm_bridge* bridge,
     int16_t* samples);
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_push_playout_10ms(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_push_playout_10ms(
     crossgram_tgcalls_pcm_bridge* bridge,
     const int16_t* samples);
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_pop_playout_20ms(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_pop_playout_20ms(
     crossgram_tgcalls_pcm_bridge* bridge,
     int16_t* samples);
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_stop(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_stop(
     crossgram_tgcalls_pcm_bridge* bridge);
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_drain(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_drain(
     crossgram_tgcalls_pcm_bridge* bridge);
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_join(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_join(
     crossgram_tgcalls_pcm_bridge* bridge);
 /** Clears the owning handle slot on success and accepts an already-null slot. */
-crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_destroy(
+CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_pcm_bridge_destroy(
     crossgram_tgcalls_pcm_bridge** bridge);
-uint64_t crossgram_tgcalls_pcm_bridge_dropped_playout_frames(
+CROSSGRAM_TGCALLS_SHIM_API uint64_t crossgram_tgcalls_pcm_bridge_dropped_playout_frames(
     const crossgram_tgcalls_pcm_bridge* bridge);
 
 #ifdef __cplusplus

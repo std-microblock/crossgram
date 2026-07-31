@@ -224,6 +224,10 @@
           "-DTG_OWT_BUILD_AUDIO_BACKENDS=OFF"
         ];
         noCallProbe = "links liblib_tgcalls.a through the upstream tgcalls::isGzip symbol address only; it never invokes that function or any call, network, or media operation";
+        localPatches = [
+          "fake-adm-stop-recording.patch: stops FakeAudioDeviceModule recording before destruction"
+          "synchronous-teardown.patch: synchronously tears down manager, network, and media before releasing EncryptionKey"
+        ];
       };
     });
 
@@ -371,6 +375,7 @@
           --replace-fail '@tgcallsSource@' "$PWD/source" \
           --replace-fail '@tdesktopHelpers@' '${tdesktopHelpers}'
         patch -d source/tgcalls -p1 < ${./third_party/tgcalls/patches/fake-adm-stop-recording.patch}
+        patch -d source/tgcalls -p1 < ${./third_party/tgcalls/patches/synchronous-teardown.patch}
         cmake -S source -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_PREFIX_PATH=${tgOwt}
@@ -434,6 +439,104 @@
         runHook postInstallCheck
       '';
     };
+
+    tgcallsShim = pkgs.stdenv.mkDerivation {
+      pname = "crossgram-tgcalls-shim";
+      version = sourcePins.tgcalls.rev;
+      src = builtins.path {
+        path = ./native/tgcalls-shim;
+        name = "crossgram-tgcalls-shim-source";
+      };
+      strictDeps = true;
+      nativeBuildInputs = with pkgs; [cmake ninja pkg-config];
+      buildInputs = tgcallsStaticInputs ++ [tgcallsArtifact];
+      propagatedBuildInputs = tgcallsStaticInputs ++ [tgcallsArtifact];
+      cmakeFlags = [
+        "-DCROSSGRAM_TGCALLS_SHIM_BUILD_TESTS=ON"
+        "-DCROSSGRAM_TGCALLS_SHIM_ENABLE_ARTIFACT=ON"
+        "-DCROSSGRAM_TGCALLS_ARTIFACT_ROOT=${tgcallsArtifact}"
+      ];
+      SOURCE_DATE_EPOCH = "1";
+      doCheck = true;
+      checkPhase = ''
+        runHook preCheck
+        ctest --output-on-failure
+        runHook postCheck
+      '';
+      installPhase = ''
+        runHook preInstall
+        cmake --install .
+        runHook postInstall
+      '';
+      doInstallCheck = true;
+      installCheckPhase = ''
+        runHook preInstallCheck
+        test -s "$out/lib/libcrossgram_tgcalls_shim.a"
+        test -s "$out/include/crossgram/tgcalls_shim.h"
+        test -s "$out/lib/cmake/CrossgramTgcallsShim/CrossgramTgcallsShimConfig.cmake"
+        mkdir consumer
+        printf '%s\n' \
+          'cmake_minimum_required(VERSION 3.20)' \
+          'project(crossgram_tgcalls_shim_consumer LANGUAGES CXX)' \
+          'find_package(CrossgramTgcallsShim CONFIG REQUIRED)' \
+          'add_executable(consumer main.cpp)' \
+          'target_link_libraries(consumer PRIVATE CrossgramTgcallsShim::crossgram_tgcalls_shim)' \
+          > consumer/CMakeLists.txt
+        printf '%s\n' \
+          '#include <crossgram/tgcalls_shim.h>' \
+          'int main(void) {' \
+          '  return crossgram_tgcalls_session_create(0, 0, 0, 0, 0, 0, 0) ==' \
+          '                 CROSSGRAM_TGCALLS_SHIM_STATUS_INVALID_ARGUMENT ? 0 : 1;' \
+          '}' \
+          > consumer/main.cpp
+        cmake -S consumer -B consumer-build -G Ninja -DCMAKE_PREFIX_PATH="$out"
+        cmake --build consumer-build -j"$NIX_BUILD_CORES"
+        ./consumer-build/consumer
+        runHook postInstallCheck
+      '';
+    };
+
+    tgcallsShimStrict = tgcallsShim.overrideAttrs (old: {
+      pname = "crossgram-tgcalls-shim-strict";
+      preConfigure =
+        (old.preConfigure or "")
+        + ''
+          export CFLAGS="''${CFLAGS:-} -Wall -Wextra -Werror -Wpedantic"
+          export CXXFLAGS="''${CXXFLAGS:-} -Wall -Wextra -Werror -Wpedantic"
+        '';
+    });
+
+    tgcallsShimAsan = tgcallsShim.overrideAttrs (old: {
+      pname = "crossgram-tgcalls-shim-asan";
+      preConfigure =
+        (old.preConfigure or "")
+        + ''
+          export CXXFLAGS="''${CXXFLAGS:-} -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="''${LDFLAGS:-} -fsanitize=address"
+        '';
+      checkPhase = ''
+        runHook preCheck
+        ASAN_OPTIONS=detect_leaks=1 ctest --output-on-failure
+        runHook postCheck
+      '';
+      doInstallCheck = false;
+    });
+
+    tgcallsShimTsan = tgcallsShim.overrideAttrs (old: {
+      pname = "crossgram-tgcalls-shim-tsan";
+      preConfigure =
+        (old.preConfigure or "")
+        + ''
+          export CXXFLAGS="''${CXXFLAGS:-} -fsanitize=thread -fno-omit-frame-pointer"
+          export LDFLAGS="''${LDFLAGS:-} -fsanitize=thread"
+        '';
+      checkPhase = ''
+        runHook preCheck
+        TSAN_OPTIONS=halt_on_error=1 ctest --output-on-failure
+        runHook postCheck
+      '';
+      doInstallCheck = false;
+    });
 
     corepack = pkgs.writeShellScriptBin "corepack" ''
       exec ${pkgs.corepack}/bin/corepack "$@"
@@ -509,6 +612,7 @@
       default = tgcallsArtifact;
       tg-owt = tgOwt;
       tgcalls-artifact = tgcallsArtifact;
+      crossgram-tgcalls-shim = tgcallsShim;
       tgcalls-artifact-licenses = tgcallsLicenses;
       tgcalls-artifact-sbom = tgcallsSbom;
     };
@@ -541,6 +645,10 @@
           touch $out
         '';
       tgcalls-artifact = tgcallsArtifact;
+      crossgram-tgcalls-shim = tgcallsShim;
+      crossgram-tgcalls-shim-strict = tgcallsShimStrict;
+      crossgram-tgcalls-shim-asan = tgcallsShimAsan;
+      crossgram-tgcalls-shim-tsan = tgcallsShimTsan;
     };
 
     formatter.${system} = pkgs.alejandra;

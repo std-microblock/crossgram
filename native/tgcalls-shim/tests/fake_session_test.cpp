@@ -79,6 +79,17 @@ using crossgram::tgcalls_shim::SessionParameters;
 
 class FakeSessionAdapter final : public SessionAdapter {
  public:
+  void Configure(const SessionParameters& parameters) noexcept override {
+    config = parameters.config;
+    is_outgoing = parameters.is_outgoing;
+    endpoint_count = parameters.endpoints.size();
+    first_endpoint_id = parameters.endpoints.empty() ? 0 : parameters.endpoints.front().id;
+    first_endpoint_port = parameters.endpoints.empty() ? 0 : parameters.endpoints.front().port;
+    first_endpoint_type = parameters.endpoints.empty() ? CROSSGRAM_TGCALLS_ENDPOINT_INET
+                                                        : parameters.endpoints.front().type;
+    auth_first_byte = parameters.auth_key.front();
+  }
+
   void Bind(Session* session) noexcept override { session_ = session; }
 
   crossgram_tgcalls_shim_status Start() override {
@@ -102,6 +113,13 @@ class FakeSessionAdapter final : public SessionAdapter {
   int starts = 0;
   int stops = 0;
   int joins = 0;
+  crossgram_tgcalls_session_config config{};
+  bool is_outgoing = false;
+  std::size_t endpoint_count = 0;
+  int64_t first_endpoint_id = 0;
+  uint16_t first_endpoint_port = 0;
+  crossgram_tgcalls_endpoint_type first_endpoint_type = CROSSGRAM_TGCALLS_ENDPOINT_INET;
+  uint8_t auth_first_byte = 0;
   std::vector<uint8_t> inbound;
 };
 
@@ -121,8 +139,17 @@ void OnError(void* context, crossgram_tgcalls_shim_status status) {
 
 SessionParameters Parameters() {
   SessionParameters result;
+  result.config.initialization_timeout_ms = 4000;
+  result.config.receive_timeout_ms = 5000;
+  result.config.enable_p2p = 1;
+  result.config.allow_tcp = 1;
+  result.config.enable_aec = 1;
+  result.config.enable_ns = 1;
+  result.config.enable_agc = 1;
+  result.config.protocol_version = CROSSGRAM_TGCALLS_PROTOCOL_V1;
   result.auth_key.fill(9);
   result.is_outgoing = true;
+  result.endpoints.push_back({42, "149.154.167.51", "", 443, CROSSGRAM_TGCALLS_ENDPOINT_UDP_RELAY, {}});
   return result;
 }
 
@@ -135,6 +162,14 @@ void TestFakeSessionSignalsAndPcm() {
 
   CHECK(session.Start() == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   CHECK(fake->starts == 1);
+  CHECK(fake->config.initialization_timeout_ms == 4000);
+  CHECK(fake->config.receive_timeout_ms == 5000);
+  CHECK(fake->config.enable_p2p == 1 && fake->config.allow_tcp == 1);
+  CHECK(fake->config.enable_aec == 1 && fake->config.enable_ns == 1 && fake->config.enable_agc == 1);
+  CHECK(fake->config.protocol_version == CROSSGRAM_TGCALLS_PROTOCOL_V1);
+  CHECK(fake->is_outgoing && fake->auth_first_byte == 9);
+  CHECK(fake->endpoint_count == 1 && fake->first_endpoint_id == 42 && fake->first_endpoint_port == 443);
+  CHECK(fake->first_endpoint_type == CROSSGRAM_TGCALLS_ENDPOINT_UDP_RELAY);
   CHECK(observed.outbound == std::vector<uint8_t>({1, 2, 3}));
 
   const std::array<uint8_t, 4> inbound = {4, 5, 6, 7};

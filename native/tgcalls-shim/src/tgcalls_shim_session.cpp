@@ -48,8 +48,9 @@ bool CopyParameters(const crossgram_tgcalls_session_config* config,
     return false;
   };
   if (config == nullptr || auth == nullptr || auth->key == nullptr ||
-      auth->key_length != CROSSGRAM_TGCALLS_SHIM_AUTH_KEY_BYTES || endpoint_count == 0 ||
-      endpoint_count > CROSSGRAM_TGCALLS_SHIM_MAX_ENDPOINTS || endpoints == nullptr ||
+      auth->key_length != CROSSGRAM_TGCALLS_SHIM_AUTH_KEY_BYTES ||
+      endpoint_count > CROSSGRAM_TGCALLS_SHIM_MAX_ENDPOINTS ||
+      (endpoint_count == 0 ? (!config->enable_p2p || endpoints != nullptr) : endpoints == nullptr) ||
       !IsBoolean(config->enable_p2p) || !IsBoolean(config->allow_tcp) || !IsBoolean(config->enable_aec) ||
       !IsBoolean(config->enable_ns) || !IsBoolean(config->enable_agc) || !IsBoolean(auth->is_outgoing) ||
       !IsProtocolVersion(config->protocol_version)) {
