@@ -643,7 +643,7 @@ export class ServerSession {
       break
     }
 
-    obj = reader.object() as { _: string }
+    obj = this._unwrapGzipQueries(reader.object() as { _: string }, gzipNesting)
     const objId = obj._
 
     this._capture('client->server', 'message', obj, { messageId: msgId, seqNo })
@@ -723,6 +723,27 @@ export class ServerSession {
     }
 
     this._flushAcks(clientSessionId)
+  }
+
+  private _unwrapGzipQueries(obj: { _: string }, gzipNesting: number): { _: string } {
+    if (obj._ === 'gzip_packed') {
+      if (gzipNesting >= MAX_GZIP_NESTING) {
+        throw new Error(`gzip_packed nesting exceeds ${MAX_GZIP_NESTING}`)
+      }
+      const packedData = (obj as unknown as { packedData: Uint8Array }).packedData
+      const unpacked = gunzipSync(packedData, { maxOutputLength: MAX_GZIP_UNPACKED_SIZE })
+      const unpackedObject = new TlBinaryReader(this._readerMap, unpacked).object() as { _: string }
+      return this._unwrapGzipQueries(unpackedObject, gzipNesting + 1)
+    }
+
+    const wrapper = obj as unknown as { query?: { _: string } }
+    if (wrapper.query && typeof wrapper.query === 'object' && typeof wrapper.query._ === 'string') {
+      return {
+        ...obj,
+        query: this._unwrapGzipQueries(wrapper.query, gzipNesting),
+      } as { _: string }
+    }
+    return obj
   }
 
   /**

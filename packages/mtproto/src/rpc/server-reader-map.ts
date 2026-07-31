@@ -32,6 +32,8 @@ req_pq#60469778 nonce:int128 = ResPQ;
  * route them to the canonical handlers after decoding.
  */
 const TELEGRAM_ANDROID_COMPAT_SCHEMA = `
+gzip_packed#3072cfa1 packed_data:bytes = Object;
+
 ---functions---
 channels.getMessages#93d7b347 channel:InputChannel id:Vector<int> = messages.Messages;
 langpack.getLanguages#800fd57d = Vector<LangPackLanguage>;
