@@ -207,6 +207,18 @@ export type IMTextEntity =
       numericId?: string
     }
   | {
+      type: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'code' | 'pre' | 'blockquote'
+      offset: number
+      length: number
+      language?: string
+    }
+  | {
+      type: 'text-link'
+      offset: number
+      length: number
+      url: string
+    }
+  | {
       type: 'custom-emoji'
       offset: number
       length: number
@@ -244,9 +256,24 @@ export type IMMessageInputPart =
 
 export interface IMMessageContent<TMediaLocator = unknown> {
   parts: IMMessagePart<TMediaLocator>[]
+  inlineKeyboard?: IMInlineKeyboard
   /** Platform service/system message rendered by Telegram as a MessageService. */
   serviceAction?: { type: 'custom', text: string }
 }
+
+export interface IMInlineKeyboard {
+  rows: Array<{ buttons: IMInlineKeyboardButton[] }>
+}
+
+export type IMInlineKeyboardButton =
+  | { type: 'url', text: string, url: string, style?: 'primary' | 'danger' | 'success' }
+  | {
+      type: 'callback'
+      text: string
+      data: string
+      style?: 'primary' | 'danger' | 'success'
+      metadata?: JsonObject
+    }
 
 export interface IMMessageInput {
   parts: IMMessageInputPart[]
@@ -525,6 +552,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     messageId: string,
   ): Promise<IMMessage<TMediaLocator> | null>
+  clickInlineButton?(
+    session: PlatformSession,
+    target: { conversationId: string, messageId: string, nativeSequence?: string },
+    button: Extract<IMInlineKeyboardButton, { type: 'callback' }>,
+  ): Promise<{ message?: string, alert?: boolean, url?: string }>
   markRead?(
     session: PlatformSession,
     target: IMReadTarget,

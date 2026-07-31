@@ -533,6 +533,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.sendMessage(
       req as tl.messages.RawSendMessageRequest, rpc.connection,
     ))
+  rpc.register('messages.getBotCallbackAnswer', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getBotCallbackAnswer(
+      req as tl.messages.RawGetBotCallbackAnswerRequest,
+    ))
   rpc.register('messages.sendMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMedia(
       req as tl.messages.RawSendMediaRequest, rpc.connection,

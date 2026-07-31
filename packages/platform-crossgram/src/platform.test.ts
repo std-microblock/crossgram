@@ -8,7 +8,7 @@ import {
   IMMessageSendRejectedError, IMMessageTargetUnavailableError, PlatformMessageActions,
   type IMMedia, type PlatformSession,
 } from '@mtproto-relay/bridge'
-import { QQNTPlatform } from './index.js'
+import { parseQQMarkdown, QQNTPlatform } from './index.js'
 import { QQMediaCache } from './media-cache.js'
 import type { QQMediaLocator } from './protocol.js'
 import { QQStickerProvider } from './sticker-provider.js'
@@ -29,6 +29,71 @@ afterEach(async () => {
 })
 
 describe('QQNTPlatform mapping', () => {
+  it('projects QQ bot markdown and native buttons into Telegram-compatible entities and markup', async () => {
+    expect(parseQQMarkdown(
+      '**粗体** *斜体* ~~删除~~ `代码` [文档](https://example.com/docs)',
+    )).toEqual({
+      type: 'text',
+      text: '粗体 斜体 删除 代码 文档',
+      entities: [
+        { type: 'bold', offset: 0, length: 2 },
+        { type: 'italic', offset: 3, length: 2 },
+        { type: 'strikethrough', offset: 6, length: 2 },
+        { type: 'code', offset: 9, length: 2 },
+        { type: 'text-link', offset: 12, length: 2, url: 'https://example.com/docs' },
+      ],
+    })
+
+    const platform = new QQNTPlatform()
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'bot-message', conversationId: 'group', senderId: 'bot', timestamp: 1, outgoing: false,
+        msgSeq: '7788',
+        parts: [
+          { type: 'markdown' as const, content: '**选择操作**' },
+          { type: 'inline-keyboard' as const, keyboard: {
+            botAppid: '1024',
+            rows: [{ buttons: [
+              {
+                id: 'open', label: '打开', visitedLabel: '已打开', style: 1, type: 0,
+                clickLimit: 0, unsupportTips: '', data: 'https://example.com',
+                atBotShowChannelList: false, permissionType: 2, specifyRoleIds: [], specifyTinyids: [],
+              },
+              {
+                id: 'confirm', label: '确认', visitedLabel: '已确认', style: 2, type: 1,
+                clickLimit: 1, unsupportTips: '', data: 'confirm:42',
+                atBotShowChannelList: false, permissionType: 2, specifyRoleIds: [], specifyTinyids: [],
+              },
+            ] }],
+          } },
+        ],
+      }],
+    }))
+    const [message] = (await platform.getHistory(session, { id: 'group' })).messages
+    expect(message.content).toMatchObject({
+      parts: [{ type: 'text', text: '选择操作', entities: [{ type: 'bold', offset: 0, length: 4 }] }],
+      inlineKeyboard: { rows: [{ buttons: [
+        { type: 'url', text: '打开', url: 'https://example.com', style: 'primary' },
+        {
+          type: 'callback', text: '确认', data: 'confirm:42', style: 'danger',
+          metadata: { qqnt: { id: 'confirm', botAppid: '1024' } },
+        },
+      ] }] },
+    })
+
+    platform.client.clickInlineKeyboard = vi.fn(async () => ({
+      status: 0, promptText: '操作成功', promptType: 0, promptIcon: 0,
+    }))
+    await expect(platform.clickInlineButton!(session, {
+      conversationId: 'group', messageId: 'bot-message', nativeSequence: '7788',
+    }, message.content.inlineKeyboard!.rows[0].buttons[1] as any)).resolves.toEqual({
+      message: '操作成功', alert: false,
+    })
+    expect(platform.client.clickInlineKeyboard).toHaveBeenCalledWith({
+      conversationId: 'group', messageId: 'bot-message', messageSequence: '7788',
+      buttonId: 'confirm', callbackData: 'confirm:42', botAppid: '1024',
+    })
+  })
   it('uses the service environment token unless configuration overrides it', async () => {
     vi.stubEnv('QQNT_BRIDGE_TOKEN', 'service-token')
     const authorizations: Array<string | null> = []
