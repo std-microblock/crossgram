@@ -21,7 +21,29 @@ interface PendingPqChallenge {
   pq: bigint
 }
 
-const MAX_PENDING_PQ_CHALLENGES = 8
+const MAX_PENDING_PQ_CHALLENGES = 64
+
+export function rememberPendingPqChallenge(
+  challenges: PendingPqChallenge[],
+  clientNonce: Uint8Array,
+  serverNonce: Uint8Array,
+  pq: bigint,
+): PendingPqChallenge {
+  if (challenges.length >= MAX_PENDING_PQ_CHALLENGES) {
+    throw new Error(`Step 1: too many pending PQ challenges (${MAX_PENDING_PQ_CHALLENGES})`)
+  }
+
+  // TL readers may return views into a transport receive buffer. The buffer is
+  // reclaimed after message dispatch, so retain owned copies across subsequent
+  // req_pq/req_pq_multi frames.
+  const challenge = {
+    clientNonce: new Uint8Array(clientNonce),
+    serverNonce: new Uint8Array(serverNonce),
+    pq,
+  }
+  challenges.push(challenge)
+  return challenge
+}
 
 export function selectPendingPqChallenge(
   challenges: readonly PendingPqChallenge[],
@@ -133,15 +155,12 @@ export async function doServerAuthorization(
       throw new Error(`Expected req_pq(_multi) or req_DH_params, got ${obj._}`)
     }
 
-    const challenge: PendingPqChallenge = {
-      clientNonce: obj.nonce,
-      pq: generatePq().pq,
-      serverNonce: crypto.randomBytes(16),
-    }
-    pendingPqChallenges.push(challenge)
-    if (pendingPqChallenges.length > MAX_PENDING_PQ_CHALLENGES) {
-      pendingPqChallenges.shift()
-    }
+    const challenge = rememberPendingPqChallenge(
+      pendingPqChallenges,
+      obj.nonce,
+      crypto.randomBytes(16),
+      generatePq().pq,
+    )
 
     const resPq: mtp.RawMt_resPQ = {
       _: 'mt_resPQ',
