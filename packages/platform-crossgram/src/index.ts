@@ -10,9 +10,11 @@ import type {
   IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
   IMSticker, IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { messagePartText, resolvePlatformPluginId } from '@mtproto-relay/bridge'
+import { messagePartText, resolvePlatformPluginId, type VoiceCallMediaProvider, type VoiceWorkerCall } from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
+import { QQVoiceMedia } from './voice-media.js'
+import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
   QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
@@ -95,6 +97,7 @@ class QQNTEventHandlingError extends Error {
 }
 
 export function apply(ctx: Context, config: Config = {}): void {
+  const voiceMedia = new QQVoiceMedia(ctx)
   const id = resolvePlatformPluginId(ctx, 'qqnt')
   const stickerProviderId = `${id}:stickers`
   defineQQMediaCacheModel(ctx)
@@ -106,7 +109,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     database: ctx.database,
   })
   const logger = ctx.logger('platform-qqnt')
-  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger)
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger, voiceMedia)
   ctx.imPlatform.register(platform, id)
   ctx.imSticker.register(new QQStickerProvider(platform.client, stickerProviderId, mediaCache, logger), stickerProviderId)
 }
@@ -141,6 +144,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   readonly client: QQNTClient
+  readonly voiceMedia?: VoiceCallMediaProvider
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
   private readonly firstUnreadSeq = new Map<string, string>()
   private readonly reactionResources = new Map<string, Uint8Array>()
@@ -162,10 +166,28 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     private readonly stickerProviderId = 'qqnt:stickers',
     private readonly mediaCache?: QQMediaCache,
     private readonly logger?: Logger,
+    private readonly qqVoiceMedia?: QQVoiceMedia,
   ) {
     this.client = new QQNTClient(options)
+    if (qqVoiceMedia) {
+      this.voiceMedia = { start: (call) => this.startVoiceMedia(call) }
+    }
     this.memberName = options.memberName ?? 'groupAlias'
     this.grayTipFilters = options.grayTipFilters ?? DEFAULT_GRAY_TIP_FILTERS
+  }
+
+  private async startVoiceMedia(call: VoiceWorkerCall) {
+    const lease = await this.client.mediaLease(call.callId)
+    try {
+      return await this.qqVoiceMedia!.start(new QQBridgePcmTransport(lease.socketPath), {
+        callId: call.callId,
+        leaseId: lease.leaseId,
+        token: lease.token,
+      })
+    } finally {
+      // The media service consumes the token; this also covers invalid transport setup.
+      lease.token.fill(0)
+    }
   }
 
   async getAccount() {
@@ -1664,5 +1686,17 @@ async function mapConcurrent<T, R>(
 }
 
 export type { QQMediaLocator } from './protocol.js'
-export { QQNTClient } from './client.js'
+export { QQNTClient, type QQNTMediaLease } from './client.js'
+export {
+  QQBridgePcmTransport, QQBridgePcmTransportError,
+  type QQBridgePcmTransportOptions,
+} from './qq-bridge-pcm-transport.js'
 export { QQStickerProvider } from './sticker-provider.js'
+export {
+  QQVoiceMedia, QQVoiceMediaClient, QQVoiceMediaClosedError, QQVoiceMediaSession, QQVoiceMediaTimeoutError,
+  QQVoiceMediaTransportError,
+  QQ_VOICE_PCM_FORMAT, QQ_VOICE_PCM_QUEUE_CAPACITY,
+  type QQVoiceMediaConnection, type QQVoiceMediaConnectOptions, type QQVoiceMediaOperationOptions,
+  type QQVoiceMediaSessionContext, type QQVoiceMediaStartOptions, type QQVoiceMediaStats,
+  type QQVoiceMediaTransport, type QQVoicePcmFrame,
+} from './voice-media.js'
