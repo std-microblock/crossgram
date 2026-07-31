@@ -32,6 +32,7 @@ class CallbackAdapter final : public SessionAdapter {
     if (worker_.joinable()) worker_.join();
   }
 
+  void Configure(const SessionParameters&) noexcept override {}
   void Bind(Session* session) noexcept override { session_ = session; }
 
   crossgram_tgcalls_shim_status Start() override {

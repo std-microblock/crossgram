@@ -38,6 +38,7 @@ class Session;
 class SessionAdapter {
  public:
   virtual ~SessionAdapter() = default;
+  virtual void Configure(const SessionParameters& parameters) noexcept = 0;
   virtual void Bind(Session* session) noexcept = 0;
   virtual crossgram_tgcalls_shim_status Start() = 0;
   virtual crossgram_tgcalls_shim_status ReceiveSignaling(const uint8_t* data, uint32_t length) = 0;
@@ -69,6 +70,7 @@ class Session final {
   bool parameters_wiped() const noexcept;
 
   void EmitOutboundSignaling(const uint8_t* data, uint32_t length) noexcept;
+  void EmitAsyncError(crossgram_tgcalls_shim_status status) noexcept;
   void EmitPlayout10ms(const int16_t* samples) noexcept;
   crossgram_tgcalls_shim_status PopCapture10ms(int16_t* samples) noexcept;
 

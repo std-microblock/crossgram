@@ -9,6 +9,7 @@ namespace {
 
 class UnavailableSessionAdapter final : public SessionAdapter {
  public:
+  void Configure(const SessionParameters&) noexcept override {}
   void Bind(Session*) noexcept override {}
 
   crossgram_tgcalls_shim_status Start() override {
@@ -53,7 +54,10 @@ Session::Session(SessionParameters parameters,
                  crossgram_tgcalls_session_callbacks callbacks,
                  std::unique_ptr<SessionAdapter> adapter) noexcept
     : parameters_(std::move(parameters)), callbacks_(callbacks), adapter_(std::move(adapter)) {
-  if (adapter_) adapter_->Bind(this);
+  if (adapter_) {
+    adapter_->Configure(parameters_);
+    adapter_->Bind(this);
+  }
 }
 
 Session::~Session() {
@@ -247,6 +251,10 @@ void Session::EmitOutboundSignaling(const uint8_t* data, uint32_t length) noexce
   LeaveCallback();
 }
 
+void Session::EmitAsyncError(crossgram_tgcalls_shim_status status) noexcept {
+  Report(status);
+}
+
 void Session::EmitPlayout10ms(const int16_t* samples) noexcept {
   static_cast<void>(pcm_.PushPlayout10ms(samples));
 }
@@ -303,8 +311,16 @@ void Session::Wipe() noexcept {
   parameters_.Wipe();
 }
 
+#if defined(CROSSGRAM_TGCALLS_SHIM_HAVE_TGCALLS)
+std::unique_ptr<SessionAdapter> CreateArtifactSessionAdapter(const SessionParameters& parameters);
+
+std::unique_ptr<SessionAdapter> CreateProductionSessionAdapter(const SessionParameters& parameters) {
+  return CreateArtifactSessionAdapter(parameters);
+}
+#else
 std::unique_ptr<SessionAdapter> CreateProductionSessionAdapter(const SessionParameters&) {
   return std::make_unique<UnavailableSessionAdapter>();
 }
+#endif
 
 }  // namespace crossgram::tgcalls_shim

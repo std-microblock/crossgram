@@ -1,0 +1,24 @@
+CROSSGRAM_TGCALLS_SHIM_3 {
+  global:
+    crossgram_tgcalls_shim_abi_version;
+    crossgram_tgcalls_session_create;
+    crossgram_tgcalls_session_start;
+    crossgram_tgcalls_session_receive_signaling;
+    crossgram_tgcalls_session_push_capture_20ms;
+    crossgram_tgcalls_session_pop_playout_20ms;
+    crossgram_tgcalls_session_stop;
+    crossgram_tgcalls_session_join;
+    crossgram_tgcalls_session_destroy;
+    crossgram_tgcalls_pcm_bridge_create;
+    crossgram_tgcalls_pcm_bridge_push_capture_20ms;
+    crossgram_tgcalls_pcm_bridge_pop_capture_10ms;
+    crossgram_tgcalls_pcm_bridge_push_playout_10ms;
+    crossgram_tgcalls_pcm_bridge_pop_playout_20ms;
+    crossgram_tgcalls_pcm_bridge_stop;
+    crossgram_tgcalls_pcm_bridge_drain;
+    crossgram_tgcalls_pcm_bridge_join;
+    crossgram_tgcalls_pcm_bridge_destroy;
+    crossgram_tgcalls_pcm_bridge_dropped_playout_frames;
+  local:
+    *;
+};
