@@ -142,12 +142,34 @@ export interface WireMessage {
   serviceAction?: { type: 'custom', text: string }
   parts: Array<
     | WireTextPart
+    | { type: 'markdown', content: string }
+    | { type: 'inline-keyboard', keyboard: WireInlineKeyboard }
     | { type: 'media', media: WireMedia }
     | { type: 'sticker', sticker: WireSticker }
     | { type: 'multi-forward', title: string, preview?: string, locator: WireMultiForwardLocator }
     | { type: 'card', card: WireCard }
   >
   reactionContext?: WireReactionState
+}
+
+export interface WireInlineKeyboard {
+  botAppid: string
+  rows: Array<{ buttons: WireInlineKeyboardButton[] }>
+}
+
+export interface WireInlineKeyboardButton {
+  id: string
+  label: string
+  visitedLabel: string
+  style: number
+  type: number
+  clickLimit: number
+  unsupportTips: string
+  data: string
+  atBotShowChannelList: boolean
+  permissionType: number
+  specifyRoleIds: string[]
+  specifyTinyids: string[]
 }
 
 export interface WireCard {

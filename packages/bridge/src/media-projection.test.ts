@@ -119,6 +119,39 @@ it('keeps forum topic metadata when a topic message also replies to another mess
   })
 })
 
+it('projects platform inline keyboards as Telegram URL and callback buttons', () => {
+  const source: IMMessage = {
+    id: 'bot-message', conversationId: conversation.id, senderId: 'bot', timestamp: 3,
+    content: {
+      parts: [{ type: 'text', text: 'Choose' }],
+      inlineKeyboard: { rows: [{ buttons: [
+        { type: 'url', text: 'Open', url: 'https://example.com', style: 'primary' },
+        { type: 'callback', text: 'Confirm', data: 'confirm:42', style: 'danger' },
+      ] }] },
+    },
+  }
+  expect(projectTlMessage({
+    conversation, source, tlId: 31, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 },
+  })).toMatchObject({
+    _: 'message',
+    replyMarkup: {
+      _: 'replyInlineMarkup',
+      rows: [{ buttons: [
+        {
+          _: 'keyboardButtonUrl', text: 'Open', url: 'https://example.com',
+          style: { _: 'keyboardButtonStyle', bgPrimary: true },
+        },
+        {
+          _: 'keyboardButtonCallback', text: 'Confirm',
+          data: Buffer.from('confirm:42'),
+          style: { _: 'keyboardButtonStyle', bgDanger: true },
+        },
+      ] }],
+    },
+  })
+})
+
 afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })

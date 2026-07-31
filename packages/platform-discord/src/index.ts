@@ -1254,6 +1254,7 @@ function encodeDiscordText(text: string, entities: readonly import('@mtproto-rel
       replacements.push({ offset: entity.offset, length: entity.length, value: `<#${entity.conversation.id}>` })
       continue
     }
+    if (entity.type !== 'custom-emoji') continue
     const match = /^custom:(\d+)$/.exec(entity.definition.key)
     if (!match) continue
     const alt = entity.definition.presentation.type === 'custom' ? entity.definition.presentation.alt : 'emoji'

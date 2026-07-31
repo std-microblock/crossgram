@@ -712,6 +712,27 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       : null
   }
 
+  async clickInlineButton(
+    _session: PlatformSession,
+    target: { conversationId: string, messageId: string, nativeSequence?: string },
+    button: Extract<import('@mtproto-relay/bridge').IMInlineKeyboardButton, { type: 'callback' }>,
+  ): Promise<{ message?: string, alert?: boolean, url?: string }> {
+    const metadata = button.metadata?.qqnt
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      throw new Error('QQNT callback button metadata is missing')
+    }
+    const native = metadata as Record<string, unknown>
+    const result = await this.client.clickInlineKeyboard({
+      conversationId: target.conversationId,
+      messageId: target.messageId,
+      messageSequence: target.nativeSequence,
+      buttonId: String(native.id ?? ''),
+      callbackData: button.data,
+      botAppid: String(native.botAppid ?? ''),
+    })
+    return { message: result.promptText || undefined, alert: result.promptType === 1 }
+  }
+
   async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
     await this.client.markRead(target.conversationId, target.messageId)
     this.firstUnreadSeq.delete(target.conversationId)
@@ -799,6 +820,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           continue
         }
         if (entity.type === 'conversation-link') continue
+        if (entity.type !== 'custom-emoji') continue
         const match = /^1:(\d+)$/.exec(entity.definition.key)
         if (match) entities.push({
           type: 'qq-face', offset: entity.offset, length: entity.length,
@@ -1627,6 +1649,9 @@ function wireMultiForwardPreview(messages: readonly WireMessage[]): string | und
         || (part.media.kind === 'image' ? '[图片]' : '[文件]')
       if (part.type === 'sticker') return part.sticker.title?.trim() || '[表情]'
       if (part.type === 'multi-forward') return `查看${part.title || '聊天记录'}`
+      if (part.type === 'markdown') return part.content.trim()
+      if (part.type === 'inline-keyboard') return part.keyboard.rows
+        .flatMap((row) => row.buttons.map((button) => button.label)).join(' ')
       return part.card.title?.trim() || part.card.description?.trim() || '[卡片消息]'
     }).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
     return content ? `${sender}: ${content}` : ''
@@ -1750,8 +1775,36 @@ function mapMessage(
     content: {
       serviceAction: input.serviceAction,
       parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward),
+      inlineKeyboard: mapInlineKeyboard(input),
     },
   }
+}
+
+function mapInlineKeyboard(
+  input: WireMessage,
+): import('@mtproto-relay/bridge').IMInlineKeyboard | undefined {
+  const keyboard = input.parts.find((part) => part.type === 'inline-keyboard')
+  if (!keyboard || keyboard.type !== 'inline-keyboard') return
+  const rows = keyboard.keyboard.rows.map((row) => {
+    const buttons: import('@mtproto-relay/bridge').IMInlineKeyboardButton[] = []
+    for (const button of row.buttons) {
+      const style = button.style === 1 ? 'primary' as const : button.style === 2 ? 'danger' as const : undefined
+      if (button.type === 0 || button.type === 3) {
+        buttons.push({ type: 'url', text: button.label, url: button.data, style })
+        continue
+      }
+      if (button.type !== 1) continue
+      buttons.push({
+        type: 'callback',
+        text: button.label,
+        data: button.data,
+        style,
+        metadata: { qqnt: { id: button.id, botAppid: keyboard.keyboard.botAppid } },
+      })
+    }
+    return { buttons }
+  }).filter((row) => row.buttons.length)
+  return rows.length ? { rows } : undefined
 }
 
 function mapParts(
@@ -1779,6 +1832,11 @@ function mapParts(
       } else {
         parts.push(normalized)
       }
+    } else if (part.type === 'markdown') {
+      const normalized = parseQQMarkdown(part.content)
+      if (normalized.text) parts.push(normalized)
+    } else if (part.type === 'inline-keyboard') {
+      continue
     } else if (part.type === 'multi-forward') {
       const conversation = registerMultiForward?.(part.title, part.preview, part.locator)
       const text = '查看聊天记录'
@@ -1812,6 +1870,50 @@ function mapParts(
     }
   }
   return parts
+}
+
+export function parseQQMarkdown(content: string): Extract<
+  IMMessage<QQMediaLocator>['content']['parts'][number],
+  { type: 'text' }
+> {
+  const text: string[] = []
+  const entities: import('@mtproto-relay/bridge').IMTextEntity[] = []
+  const append = (value: string) => {
+    const offset = text.join('').length
+    text.push(value)
+    return offset
+  }
+  const token = /```([^\n`]*)\n([\s\S]*?)```|`([^`\n]+)`|\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_|~~([^~\n]+)~~/g
+  let cursor = 0
+  for (const match of content.matchAll(token)) {
+    const index = match.index
+    append(content.slice(cursor, index))
+    if (match[2] !== undefined) {
+      const offset = append(match[2])
+      entities.push({ type: 'pre', offset, length: match[2].length, language: match[1] || undefined })
+    } else if (match[3] !== undefined) {
+      const offset = append(match[3])
+      entities.push({ type: 'code', offset, length: match[3].length })
+    } else if (match[4] !== undefined) {
+      const offset = append(match[4])
+      entities.push({ type: 'text-link', offset, length: match[4].length, url: match[5] })
+    } else if (match[6] !== undefined || match[7] !== undefined) {
+      const value = match[6] ?? match[7]
+      const offset = append(value)
+      entities.push({ type: 'bold', offset, length: value.length })
+    } else if (match[8] !== undefined || match[9] !== undefined) {
+      const value = match[8] ?? match[9]
+      const offset = append(value)
+      entities.push({ type: 'italic', offset, length: value.length })
+    } else if (match[10] !== undefined) {
+      const offset = append(match[10])
+      entities.push({ type: 'strikethrough', offset, length: match[10].length })
+    }
+    cursor = index + match[0].length
+  }
+  append(content.slice(cursor))
+  const rendered = text.join('')
+  return { type: 'text', text: rendered, entities: entities.length ? entities : undefined }
 }
 
 function isRemoteQQMediaLocator(value: unknown): value is QQMediaLocator {
