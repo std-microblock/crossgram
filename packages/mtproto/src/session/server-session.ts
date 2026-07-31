@@ -25,6 +25,7 @@ const GZIP_PACKED_ID = 0x3072CFA1
 // Bare Vector<X> prefix (https://core.telegram.org/type/Vector%20X)
 const VECTOR_ID = 0x1CB5C415
 const MAX_GZIP_UNPACKED_SIZE = 16 * 1024 * 1024
+const MAX_GZIP_NESTING = 4
 const MAX_SHARED_COMPLETED_MESSAGE_IDS = 16_384
 
 /**
@@ -592,45 +593,54 @@ export class ServerSession {
   ): Promise<void> {
     this._msgIdGen.observeClientMsgId(msgId)
 
-    // Read the object — msg_container (0x73f1f8dc) is not in the reader map,
-    // so we handle it manually.
-    const savedPos = reader.pos
-    const constructorId = reader.uint()
     let obj: { _: string }
+    let gzipNesting = 0
 
-    if (constructorId === 0x73f1f8dc) {
-      // msg_container: vector of { msg_id, seqno, length, body }
-      const count = reader.uint()
-      this._capture('client->server', 'message', { _: 'msg_container', count }, {
-        messageId: msgId,
-        seqNo,
-      })
-      for (let i = 0; i < count; i++) {
-        const innerMsgId = reader.long(true)
-        const innerSeqNo = reader.uint()
-        const innerLength = reader.uint()
-        const innerBody = reader.raw(innerLength)
-        const innerReader = new TlBinaryReader(this._readerMap, innerBody)
-        try {
-          await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader, clientSessionId)
-        } catch (error) {
-          this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error, clientSessionId)
+    // Both gzip_packed and msg_container are transport envelopes. TDLib can
+    // place compressed requests inside a container and can nest gzip_packed,
+    // so unwrap envelopes until an ordinary API/service object is reached.
+    for (;;) {
+      const savedPos = reader.pos
+      const constructorId = reader.uint()
+
+      if (constructorId === 0x73f1f8dc) {
+        // msg_container: vector of { msg_id, seqno, length, body }
+        const count = reader.uint()
+        this._capture('client->server', 'message', { _: 'msg_container', count }, {
+          messageId: msgId,
+          seqNo,
+        })
+        for (let i = 0; i < count; i++) {
+          const innerMsgId = reader.long(true)
+          const innerSeqNo = reader.uint()
+          const innerLength = reader.uint()
+          const innerBody = reader.raw(innerLength)
+          const innerReader = new TlBinaryReader(this._readerMap, innerBody)
+          try {
+            await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader, clientSessionId)
+          } catch (error) {
+            this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error, clientSessionId)
+          }
         }
+        return
       }
-      return
+
+      if (constructorId === GZIP_PACKED_ID) {
+        if (gzipNesting >= MAX_GZIP_NESTING) {
+          throw new Error(`gzip_packed nesting exceeds ${MAX_GZIP_NESTING}`)
+        }
+        const packedData = reader.bytes()
+        const unpacked = gunzipSync(packedData, { maxOutputLength: MAX_GZIP_UNPACKED_SIZE })
+        reader = new TlBinaryReader(this._readerMap, unpacked)
+        gzipNesting += 1
+        continue
+      }
+
+      // Not a transport envelope — restore position and read normally.
+      reader.pos = savedPos
+      break
     }
 
-    // gzip_packed is an MTProto envelope around one ordinary TL object. The
-    // upstream tl-runtime documents the constructor but does not currently
-    // inflate it, so unwrap it at the server boundary before normal dispatch.
-    if (constructorId === GZIP_PACKED_ID) {
-      const packedData = reader.bytes()
-      const unpacked = gunzipSync(packedData, { maxOutputLength: MAX_GZIP_UNPACKED_SIZE })
-      reader = new TlBinaryReader(this._readerMap, unpacked)
-    } else {
-      // Not a container or compressed envelope — restore position and read normally.
-      reader.pos = savedPos
-    }
     obj = reader.object() as { _: string }
     const objId = obj._
 
