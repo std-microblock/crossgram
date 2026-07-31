@@ -1,0 +1,23 @@
+# Upstream repository: https://github.com/TelegramMessenger/tgcalls.git
+# Pinned source revision: 2faee3b5524f54d56c91c2058c00e11c656a74b3
+# Pinned source blob: 1fcbdb3b631d319f039a7a86cd1a5bea80d7d12a
+#
+# Reproduce and validate without building tgcalls:
+#   git clone https://github.com/TelegramMessenger/tgcalls.git tgcalls-src
+#   git -C tgcalls-src checkout --detach 2faee3b5524f54d56c91c2058c00e11c656a74b3
+#   git -C tgcalls-src apply --check /path/to/fake-adm-stop-recording.patch
+#
+# The FakeAudioDeviceModule destructor must stop recording as well as playout,
+# so its recording scheduler cannot outlive the audio device module.
+diff --git a/tgcalls/FakeAudioDeviceModule.cpp b/tgcalls/FakeAudioDeviceModule.cpp
+index 1fcbdb3b631d319f039a7a86cd1a5bea80d7d12a..36373e22db1083896f397e33e4a57d5e81c79ca8 100644
+--- a/tgcalls/FakeAudioDeviceModule.cpp
++++ b/tgcalls/FakeAudioDeviceModule.cpp
+@@ -49,6 +49,7 @@ class FakeAudioDeviceModuleImpl : public webrtc::webrtc_impl::AudioDeviceModuleD
+
+   ~FakeAudioDeviceModuleImpl() override {
+     StopPlayout();
++    StopRecording();
+   }
+
+   int32_t PlayoutIsAvailable(bool* available) override {
