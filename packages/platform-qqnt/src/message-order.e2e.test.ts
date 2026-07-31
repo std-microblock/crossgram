@@ -9,7 +9,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
-import { MessageStore, StickerRpc, type IngestResult, type PlatformSession } from '@mtproto-relay/bridge'
+import { MessageStore, StickerRpc, type IngestResult, type PlatformSession, type Unsubscribe } from '@mtproto-relay/bridge'
 import { defineModels } from '../../bridge/src/models.js'
 import { QQNTPlatform } from './index.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
@@ -18,7 +18,7 @@ import { QQStickerProvider } from './sticker-provider.js'
 const session: PlatformSession = {
   platformSessionId: 'qqnt-order-e2e', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
 }
-const disposals: Array<() => Promise<void>> = []
+const disposals: Unsubscribe[] = []
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
@@ -185,8 +185,8 @@ describe('QQNT same-second message ordering E2E', () => {
     }
     const store = new MessageStore(ctx.database)
     const delivered: string[] = []
-    let unsubscribeFirst: (() => Promise<void>) | undefined
-    let unsubscribeSecond: (() => Promise<void>) | undefined
+    let unsubscribeFirst: Unsubscribe | undefined
+    let unsubscribeSecond: Unsubscribe | undefined
     try {
       unsubscribeFirst = await first.subscribe(exclusiveSession, () => {})
       await vi.waitFor(() => expect(lifecycle).toContain('open-1'))
