@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { CaptureQueryError, parseCaptureQuery, queryCapture } from './capture-api.js'
-import type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
+import type { CaptureSource } from './capture-api.js'
+import type { CapturedMtprotoEvent } from './types.js'
 
 const events: CapturedMtprotoEvent[] = [
   {
@@ -26,7 +27,7 @@ const events: CapturedMtprotoEvent[] = [
   },
 ]
 
-const data: Pick<MtprotoDebugData, 'capturing' | 'dropped' | 'maxEvents' | 'events'> = {
+const data: CaptureSource = {
   capturing: true, dropped: 7, maxEvents: 2_000, events,
 }
 

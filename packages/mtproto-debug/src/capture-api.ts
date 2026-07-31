@@ -1,4 +1,4 @@
-import type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
+import type { CapturedMtprotoEvent } from './types.js'
 
 export interface MtprotoCaptureFilters {
   limit?: number
@@ -17,6 +17,14 @@ export interface MtprotoCaptureFilters {
   sessionId?: string
   grep?: string
   fields?: Array<{ path: string, value: string }>
+}
+
+/** Flat view of the capture buffer; the live data stores events chunked (see `chunks.ts`). */
+export interface CaptureSource {
+  capturing: boolean
+  dropped: number
+  maxEvents: number
+  events: CapturedMtprotoEvent[]
 }
 
 export interface MtprotoCaptureSnapshot {
@@ -56,7 +64,7 @@ export function parseCaptureQuery(query: URLSearchParams, now = Date.now()): Mtp
   }
 }
 
-export function queryCapture(data: Pick<MtprotoDebugData, 'capturing' | 'dropped' | 'maxEvents' | 'events'>, filters: MtprotoCaptureFilters = {}): MtprotoCaptureSnapshot {
+export function queryCapture(data: CaptureSource, filters: MtprotoCaptureFilters = {}): MtprotoCaptureSnapshot {
   let events = data.events
   if (filters.since !== undefined) events = events.filter(event => event.timestamp >= filters.since!)
   if (filters.until !== undefined) events = events.filter(event => event.timestamp <= filters.until!)
