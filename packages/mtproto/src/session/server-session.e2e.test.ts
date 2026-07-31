@@ -44,6 +44,7 @@ const log = new LogManager('e2e', new NodePlatform())
 log.level = LogManager.OFF
 const clientLog = log.create('client')
 const GZIP_PACKED_ID = 0x3072CFA1
+const INVOKE_WITH_LAYER_ID = 0xDA9B0D0D
 
 function nowSec() { return Math.floor(Date.now() / 1000) }
 function makeMsgId(sub: number) { return Long.fromBits((Date.now() % 1000 << 21) | sub, nowSec()) }
@@ -205,6 +206,15 @@ function gzipPacked(body: Uint8Array): Uint8Array {
   const writer = TlBinaryWriter.manual(4 + TlSerializationCounter.countBytesOverhead(packed.length) + packed.length)
   writer.uint(GZIP_PACKED_ID)
   writer.bytes(packed)
+  return writer.result()
+}
+
+function invokeWithLayerGzip(query: { _: string }, layer = CURRENT_API_LAYER): Uint8Array {
+  const packedQuery = gzipPacked(TlBinaryWriter.serializeObject(__tlWriterMap, query))
+  const writer = TlBinaryWriter.manual(8 + packedQuery.length)
+  writer.uint(INVOKE_WITH_LAYER_ID)
+  writer.uint(layer)
+  writer.raw(packedQuery)
   return writer.result()
 }
 
@@ -1237,6 +1247,43 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       container.raw(request)
 
       await client.send(clientEncrypt(perm, container.result(), perm.salt, sessionId, 64))
+
+      const response = await readRpcResultEnvelope(client, perm)
+      expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
+      expect(response.result).toMatchObject({ _: 'config', thisDc: 1 })
+      expect(debugEvents.some((event) => (
+        event.direction === 'client->server'
+        && (event.payload as { _?: string })._ === 'invokeWithLayer'
+      ))).toBe(true)
+      expect(debugEvents.some((event) => (
+        (event.payload as { _?: string })._ === 'unparsed'
+        && (event.payload as { constructorId?: number }).constructorId === GZIP_PACKED_ID
+      ))).toBe(false)
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('unwraps a gzip_packed invokeWithLayer query inside a message container', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, stop } = await startServer((event) => debugEvents.push(event))
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x57575757, 0x57575757)
+      const request = invokeWithLayerGzip({ _: 'help.getConfig' })
+      const requestMessageId = makeMsgId(68)
+      const container = TlBinaryWriter.manual(8 + 16 + request.length)
+      container.uint(0x73f1f8dc)
+      container.uint(1)
+      container.long(requestMessageId)
+      container.uint(1)
+      container.uint(request.length)
+      container.raw(request)
+
+      await client.send(clientEncrypt(perm, container.result(), perm.salt, sessionId, 72))
 
       const response = await readRpcResultEnvelope(client, perm)
       expect(response.requestMessageId.toString()).toBe(requestMessageId.toString())
