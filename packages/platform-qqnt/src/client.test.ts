@@ -54,6 +54,25 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
+  it('posts native inline keyboard callback identity to the QQNT bridge', async () => {
+    const requests: unknown[] = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async (_input, init) => {
+        requests.push(JSON.parse(String(init?.body)))
+        return Response.json({ status: 0, promptText: 'ok', promptType: 0, promptIcon: 0 })
+      }),
+    })
+    await expect(client.clickInlineKeyboard({
+      conversationId: 'group', messageId: 'message', messageSequence: '7788',
+      buttonId: 'confirm', callbackData: 'confirm:42', botAppid: '1024',
+    })).resolves.toMatchObject({ promptText: 'ok' })
+    expect(requests).toEqual([{
+      conversationId: 'group', messageId: 'message', messageSequence: '7788',
+      buttonId: 'confirm', callbackData: 'confirm:42', botAppid: '1024',
+    }])
+  })
+
   it('sends the stable native sequence with reaction reads and writes', async () => {
     const requests: Array<{ url: string, method?: string, body?: unknown }> = []
     const client = new QQNTClient({

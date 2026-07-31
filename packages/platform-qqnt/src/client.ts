@@ -333,6 +333,21 @@ export class QQNTClient {
     })
   }
 
+  clickInlineKeyboard(input: {
+    conversationId: string
+    messageId: string
+    messageSequence?: string
+    buttonId: string
+    callbackData: string
+    botAppid: string
+  }): Promise<{ status: number, promptText: string, promptType: number, promptIcon: number }> {
+    return this.json('/messages/inline-keyboard/click', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(input),
+    })
+  }
+
   async *downloadFile(
     locator: QQMediaLocator,
     options: {

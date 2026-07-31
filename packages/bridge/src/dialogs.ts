@@ -1267,6 +1267,47 @@ export class DialogRpc {
     }
   }
 
+  async getBotCallbackAnswer(
+    req: tl.messages.RawGetBotCallbackAnswerRequest,
+  ): Promise<tl.messages.RawBotCallbackAnswer> {
+    if (!this._platform.clickInlineButton) throw new RpcError(400, 'BOT_RESPONSE_TIMEOUT')
+    const target = this._tlToMessage.get(req.msgId)
+      ?? await this._store?.findProjectedByTlId(this._session.platformSessionId, req.msgId)
+        .then((projected) => projected ? {
+          peerId: projected.source.conversationId,
+          platformMessageId: projected.source.id,
+          ordinal: 0,
+          nativeSequence: qqMessageSequenceFromMetadata(projected.source.metadata)?.toString(),
+        } : undefined)
+    if (!target) throw new RpcError(400, 'MESSAGE_ID_INVALID')
+    const conversationId = this._resolvePeer(req.peer)
+    const conversation = this._conversation(conversationId)
+    if (conversation.id !== target.peerId && conversation.parentId !== target.peerId) {
+      throw new RpcError(400, 'MESSAGE_ID_INVALID')
+    }
+    const message = await this._platform.getMessage?.(
+      this._session, { id: target.peerId }, target.platformMessageId,
+    )
+    const data = Buffer.from(req.data ?? []).toString('utf8')
+    const button = message?.content.inlineKeyboard?.rows
+      .flatMap((row) => row.buttons)
+      .find((candidate) => candidate.type === 'callback' && candidate.data === data)
+    if (!button || button.type !== 'callback') throw new RpcError(400, 'DATA_INVALID')
+    const answer = await this._platform.clickInlineButton(this._session, {
+      conversationId: target.peerId,
+      messageId: target.platformMessageId,
+      nativeSequence: target.nativeSequence,
+    }, button)
+    return {
+      _: 'messages.botCallbackAnswer',
+      alert: answer.alert || undefined,
+      hasUrl: Boolean(answer.url) || undefined,
+      message: answer.message,
+      url: answer.url,
+      cacheTime: 0,
+    }
+  }
+
   async sendMedia(req: SendMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     return this._sendMediaOnce(req.randomId.toString(), async () => {
       const resolved = await this._resolveSendMedia(req.media)
@@ -3134,7 +3175,30 @@ export class DialogRpc {
             _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
             url: this._conversationLinkUrl(entity.conversation),
           })
-        } else if (entity.definition.presentation.type === 'custom' && this._reactions) {
+        } else if (entity.type === 'text-link') {
+          output.push({
+            _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
+            url: entity.url,
+          })
+        } else if (entity.type === 'bold') {
+          output.push({ _: 'messageEntityBold', offset: base + entity.offset, length: entity.length })
+        } else if (entity.type === 'italic') {
+          output.push({ _: 'messageEntityItalic', offset: base + entity.offset, length: entity.length })
+        } else if (entity.type === 'underline') {
+          output.push({ _: 'messageEntityUnderline', offset: base + entity.offset, length: entity.length })
+        } else if (entity.type === 'strikethrough') {
+          output.push({ _: 'messageEntityStrike', offset: base + entity.offset, length: entity.length })
+        } else if (entity.type === 'code') {
+          output.push({ _: 'messageEntityCode', offset: base + entity.offset, length: entity.length })
+        } else if (entity.type === 'pre') {
+          output.push({
+            _: 'messageEntityPre', offset: base + entity.offset, length: entity.length,
+            language: entity.language ?? '',
+          })
+        } else if (entity.type === 'blockquote') {
+          output.push({ _: 'messageEntityBlockquote', offset: base + entity.offset, length: entity.length })
+        } else if (entity.type === 'custom-emoji'
+          && entity.definition.presentation.type === 'custom' && this._reactions) {
           const reaction = this._reactions.toTlReaction(source.conversationId, entity.definition)
           if (reaction._ === 'reactionCustomEmoji') output.push({
             _: 'messageEntityCustomEmoji', offset: base + entity.offset, length: entity.length,
@@ -4298,7 +4362,29 @@ export function projectTlMessage(options: {
     media,
     groupedId: groupedId ? Long.fromString(groupedId) : undefined,
     reactions,
+    replyMarkup: ordinal === 0 ? makeTlInlineKeyboard(source.content.inlineKeyboard) : undefined,
   } as tl.RawMessage
+}
+
+function makeTlInlineKeyboard(
+  keyboard: import('./platform.js').IMInlineKeyboard | undefined,
+): tl.RawReplyInlineMarkup | undefined {
+  if (!keyboard?.rows.length) return
+  const rows = keyboard.rows.map((row): tl.RawKeyboardButtonRow => ({
+    _: 'keyboardButtonRow',
+    buttons: row.buttons.map((button): tl.TypeKeyboardButton => {
+      const style = button.style ? {
+        _: 'keyboardButtonStyle' as const,
+        bgPrimary: button.style === 'primary' || undefined,
+        bgDanger: button.style === 'danger' || undefined,
+        bgSuccess: button.style === 'success' || undefined,
+      } : undefined
+      return button.type === 'url'
+        ? { _: 'keyboardButtonUrl', text: button.text, url: button.url, style }
+        : { _: 'keyboardButtonCallback', text: button.text, data: Buffer.from(button.data), style }
+    }),
+  }))
+  return { _: 'replyInlineMarkup', rows }
 }
 
 function uniqueUsers(users: tl.RawUser[]): tl.RawUser[] {

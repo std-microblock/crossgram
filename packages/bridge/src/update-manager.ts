@@ -765,7 +765,29 @@ function makeMessageEntities(
           _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
           url: conversationLinkUrl(platformSessionId, entity.conversation),
         })
-      } else if (entity.definition.presentation.type === 'custom') {
+      } else if (entity.type === 'text-link') {
+        entities.push({
+          _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
+          url: entity.url,
+        })
+      } else if (entity.type === 'bold') {
+        entities.push({ _: 'messageEntityBold', offset: base + entity.offset, length: entity.length })
+      } else if (entity.type === 'italic') {
+        entities.push({ _: 'messageEntityItalic', offset: base + entity.offset, length: entity.length })
+      } else if (entity.type === 'underline') {
+        entities.push({ _: 'messageEntityUnderline', offset: base + entity.offset, length: entity.length })
+      } else if (entity.type === 'strikethrough') {
+        entities.push({ _: 'messageEntityStrike', offset: base + entity.offset, length: entity.length })
+      } else if (entity.type === 'code') {
+        entities.push({ _: 'messageEntityCode', offset: base + entity.offset, length: entity.length })
+      } else if (entity.type === 'pre') {
+        entities.push({
+          _: 'messageEntityPre', offset: base + entity.offset, length: entity.length,
+          language: entity.language ?? '',
+        })
+      } else if (entity.type === 'blockquote') {
+        entities.push({ _: 'messageEntityBlockquote', offset: base + entity.offset, length: entity.length })
+      } else if (entity.type === 'custom-emoji' && entity.definition.presentation.type === 'custom') {
         entities.push({
           _: 'messageEntityCustomEmoji', offset: base + entity.offset, length: entity.length,
           documentId: Long.fromNumber(stableId([
