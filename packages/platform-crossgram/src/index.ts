@@ -10,7 +10,10 @@ import type {
   IMMessageSearchPage, IMMessageSearchQuery, IMPageQuery, IMPlatform, IMReactionContext, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
   IMSticker, IMStickerAsset, IMUser, IMUserPage, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { messagePartText, resolvePlatformPluginId, type VoiceCallMediaProvider, type VoiceWorkerCall } from '@mtproto-relay/bridge'
+import {
+  messagePartText, resolvePlatformPluginId,
+  type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
+} from '@mtproto-relay/bridge'
 import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { QQVoiceMedia } from './voice-media.js'
@@ -170,13 +173,18 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ) {
     this.client = new QQNTClient(options)
     if (qqVoiceMedia) {
-      this.voiceMedia = { start: (call) => this.startVoiceMedia(call) }
+      this.voiceMedia = { start: (call, _session, endpoint) => this.startVoiceMedia(call, endpoint) }
     }
     this.memberName = options.memberName ?? 'groupAlias'
     this.grayTipFilters = options.grayTipFilters ?? DEFAULT_GRAY_TIP_FILTERS
   }
 
-  private async startVoiceMedia(call: VoiceWorkerCall) {
+  private async startVoiceMedia(call: VoiceWorkerCall, endpoint: VoiceWorkerMediaEndpoint) {
+    if (typeof endpoint.send !== 'function'
+      || typeof endpoint.receive !== 'function'
+      || typeof endpoint.close !== 'function') {
+      throw new Error('worker PCM endpoint is unavailable')
+    }
     const lease = await this.client.mediaLease(call.callId)
     try {
       return await this.qqVoiceMedia!.start(new QQBridgePcmTransport(lease.socketPath), {
