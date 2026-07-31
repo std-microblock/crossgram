@@ -12,7 +12,7 @@ const session = {
 }
 
 const protocol: tl.RawPhoneCallProtocol = {
-  _: 'phoneCallProtocol', udpP2p: false, udpReflector: false, minLayer: 100, maxLayer: 100, libraryVersions: ['bridge'],
+  _: 'phoneCallProtocol', udpP2p: true, udpReflector: false, minLayer: 100, maxLayer: 100, libraryVersions: ['bridge'],
 }
 
 const gAHash = (value = 1) => new Uint8Array(32).fill(value)
@@ -87,6 +87,18 @@ class FakeWorker implements VoiceWorkerClient {
   }
 }
 
+function directProvider() {
+  return {
+    async get() {
+      return {
+        initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+        enableP2p: true, allowTcp: false, protocolV1: true,
+        enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
+      }
+    },
+  }
+}
+
 function setup(now = 1_000) {
   let current = now
   let randomValue = 0
@@ -101,6 +113,15 @@ function setup(now = 1_000) {
       return value
     },
     timeoutMs: 60_000,
+    mediaStartProvider: {
+      async get() {
+        return {
+          initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+          enableP2p: true, allowTcp: false, protocolV1: true,
+          enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
+        }
+      },
+    },
     publish: ({ update }) => { updates.push(update); return 1 },
   })
   return { calls, worker, updates, advance: (milliseconds: number) => { current += milliseconds } }
@@ -137,9 +158,104 @@ describe('CallRegistry', () => {
       { operation: 'prepare-recipient', call: { telegramRole: 'caller' }, value: clientGAHash },
       { operation: 'complete-recipient', call: { telegramRole: 'caller' }, value: clientGA, keyFingerprint: fingerprint },
     ])
-    expect(active.phoneCall).toMatchObject({ _: 'phoneCall', gAOrB: worker.recipientGB, keyFingerprint: fingerprint })
+    expect(active.phoneCall).toMatchObject({
+      _: 'phoneCall', gAOrB: worker.recipientGB, keyFingerprint: fingerprint, p2pAllowed: true, connections: [],
+    })
     expect(updates.map((update) => update.phoneCall._)).toEqual(['phoneCallRequested', 'phoneCall'])
     for (const update of updates) expect(roundTrip(update)._).toBe('updatePhoneCall')
+  })
+
+  it('lets a relay provider disable P2P in the final negotiated call', async () => {
+    const worker = new FakeWorker()
+    const calls = new CallRegistry({
+      worker, publish: () => 1,
+      mediaStartProvider: {
+        async get() {
+          return {
+            initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+            enableP2p: true, allowTcp: true, protocolV1: true,
+            enableAec: true, enableNs: true, enableAgc: true,
+            endpoints: [{
+              id: Long.ONE, ipv4: '127.0.0.1', ipv6: '', port: 443, kind: 'tcp-relay' as const, peerTag: new Uint8Array(16),
+            }],
+          }
+        },
+      },
+    })
+    const requested = await calls.request({
+      session, selfId: 1, participantId: 2, randomId: 98, gAHash: gAHash(), protocol: { ...protocol, udpP2p: false },
+    })
+    if (requested.phoneCall._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    const active = await calls.confirm(session, {
+      id: requested.phoneCall.id, accessHash: requested.phoneCall.accessHash,
+    }, publicValue(), Long.fromInt(12), { ...protocol, udpP2p: false })
+    expect(active.phoneCall).toMatchObject({ _: 'phoneCall', p2pAllowed: false, protocol: { udpP2p: false } })
+    expect(worker.events.at(-1)?.call.mediaStartConfig?.enableP2p).toBe(false)
+  })
+
+  it('rejects Direct ICE before caller or recipient worker completion when the peer disables P2P', async () => {
+    const recipientWorker = new FakeWorker()
+    const recipientCalls = new CallRegistry({ worker: recipientWorker, mediaStartProvider: directProvider(), publish: () => 1 })
+    const requested = await recipientCalls.request({
+      session, selfId: 1, participantId: 2, randomId: 96, gAHash: gAHash(), protocol,
+    })
+    if (requested.phoneCall._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    await expect(recipientCalls.confirm(session, {
+      id: requested.phoneCall.id, accessHash: requested.phoneCall.accessHash,
+    }, publicValue(), Long.fromInt(12), { ...protocol, udpP2p: false })).rejects.toMatchObject({ code: 'CALL_MEDIA_UNAVAILABLE' })
+    expect(recipientWorker.events.filter((event) => event.operation === 'complete-recipient')).toHaveLength(0)
+
+    const callerWorker = new FakeWorker()
+    const callerCalls = new CallRegistry({ worker: callerWorker, mediaStartProvider: directProvider(), publish: () => 1 })
+    const incoming = await callerCalls.receiveIncoming({ session, selfId: 1, callerId: 2, correlationId: 'p2p-disabled-peer' })
+    if (incoming._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    await callerCalls.received(session, { id: incoming.id, accessHash: incoming.accessHash })
+    await expect(callerCalls.accept(session, {
+      id: incoming.id, accessHash: incoming.accessHash,
+    }, publicValue(), { ...protocol, udpP2p: false })).rejects.toMatchObject({ code: 'CALL_MEDIA_UNAVAILABLE' })
+    expect(callerWorker.events.filter((event) => event.operation === 'complete-caller')).toHaveLength(0)
+  })
+
+  it('fails closed before media activation without a call-scoped provider', async () => {
+    const worker = new FakeWorker()
+    const calls = new CallRegistry({ worker })
+    const requested = await calls.request({
+      session, selfId: 1, participantId: 2, randomId: 99, gAHash: gAHash(), protocol,
+    })
+    if (requested.phoneCall._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    await expect(calls.confirm(session, {
+      id: requested.phoneCall.id, accessHash: requested.phoneCall.accessHash,
+    }, publicValue(), Long.fromInt(12), protocol)).rejects.toMatchObject({ code: 'CALL_MEDIA_UNAVAILABLE' })
+    expect(worker.events.filter((event) => event.operation === 'complete-recipient')).toHaveLength(0)
+  })
+
+  it('rejects an outbound worker signal until an authorized delivery accepts it', async () => {
+    const worker = new FakeWorker()
+    let liveDeliveries = 0
+    let attempts = 0
+    const calls = new CallRegistry({
+      worker, mediaStartProvider: directProvider(), publish: () => 1,
+      publishSignaling: async () => {
+        attempts++
+        return liveDeliveries
+      },
+    })
+    const requested = await calls.request({
+      session, selfId: 1, participantId: 2, randomId: 100, gAHash: gAHash(), protocol,
+    })
+    if (requested.phoneCall._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    const peer = { id: requested.phoneCall.id, accessHash: requested.phoneCall.accessHash }
+    await calls.confirm(session, peer, publicValue(), Long.fromInt(12), protocol)
+    const workerCall = {
+      callId: requested.phoneCall.id.toUnsigned().toString(), callerId: 1, participantId: 2,
+      telegramRole: 'caller' as const, protocol,
+    }
+
+    await expect(calls.handleWorkerEvent(workerCall, { kind: 'outbound-signal', data: Uint8Array.of(4, 5) }))
+      .rejects.toMatchObject({ code: 'CALL_SIGNALING_UNDELIVERED' })
+    liveDeliveries = 1
+    await expect(calls.handleWorkerEvent(workerCall, { kind: 'outbound-signal', data: Uint8Array.of(4, 5) })).resolves.toBeUndefined()
+    expect(attempts).toBe(2)
   })
 
   it('rejects a mismatched worker-computed recipient fingerprint before publishing active', async () => {
@@ -171,6 +287,7 @@ describe('CallRegistry', () => {
     const worker = new FakeWorker()
     const calls = new CallRegistry({
       worker,
+      mediaStartProvider: directProvider(),
       randomBytes: (size) => {
         const value = new Uint8Array(size)
         value[0] = 0x80
@@ -346,6 +463,7 @@ describe('CallRegistry', () => {
     let failAccepted = true
     const acceptCalls = new CallRegistry({
       worker: acceptWorker,
+      mediaStartProvider: directProvider(),
       publish: ({ update }) => {
         if (update.phoneCall._ === 'phoneCallAccepted' && failAccepted) {
           failAccepted = false
@@ -365,6 +483,7 @@ describe('CallRegistry', () => {
     let failActive = true
     const confirmCalls = new CallRegistry({
       worker: confirmWorker,
+      mediaStartProvider: directProvider(),
       publish: ({ update }) => {
         if (update.phoneCall._ === 'phoneCall' && failActive) {
           failActive = false
@@ -387,6 +506,7 @@ describe('CallRegistry', () => {
     let publishAttempts = 0
     const calls = new CallRegistry({
       worker,
+      mediaStartProvider: directProvider(),
       publish: async () => {
         publishAttempts++
         if (publishAttempts === 1) throw new Error('publisher unavailable')
@@ -471,7 +591,7 @@ describe('CallRegistry', () => {
       minLayer: 90, maxLayer: 110, libraryVersions: ['legacy', 'bridge'],
     }
     const recipientProtocol: tl.RawPhoneCallProtocol = {
-      _: 'phoneCallProtocol', udpP2p: false, udpReflector: true,
+      _: 'phoneCallProtocol', udpP2p: true, udpReflector: true,
       minLayer: 100, maxLayer: 120, libraryVersions: ['bridge', 'modern'],
     }
     worker.protocol = callerProtocol
@@ -488,7 +608,7 @@ describe('CallRegistry', () => {
     })
     expect(updates.at(-1)?.phoneCall).toMatchObject({
       _: 'phoneCall', protocol: {
-        minLayer: 100, maxLayer: 110, libraryVersions: ['bridge'], udpP2p: false, udpReflector: true,
+        minLayer: 100, maxLayer: 110, libraryVersions: ['bridge'], udpP2p: true, udpReflector: true,
       },
     })
   })
@@ -567,6 +687,7 @@ describe('CallRegistry', () => {
     const published: tl.RawUpdatePhoneCall[] = []
     const calls = new CallRegistry({
       worker,
+      mediaStartProvider: directProvider(),
       publish: ({ update }) => {
         if (update.phoneCall._ === 'phoneCallDiscarded') published.push(update)
         return liveConnections
@@ -723,6 +844,7 @@ describe('CallRegistry', () => {
     let failTerminal = true
     const calls = new CallRegistry({
       worker,
+      mediaStartProvider: directProvider(),
       publish: ({ update }) => {
         if (update.phoneCall._ === 'phoneCallDiscarded' && failTerminal) {
           failTerminal = false
@@ -780,6 +902,7 @@ describe('CallRegistry', () => {
     let current = 1_000
     const calls = new CallRegistry({
       worker,
+      mediaStartProvider: directProvider(),
       now: () => current,
       publish: () => liveConnections,
       replay: () => {
@@ -829,6 +952,7 @@ describe('CallRegistry', () => {
     let randomValue = 0
     const calls = new CallRegistry({
       worker,
+      mediaStartProvider: directProvider(),
       randomBytes: (size) => {
         const bytes = new Uint8Array(size)
         new DataView(bytes.buffer).setUint32(size - 4, ++randomValue)

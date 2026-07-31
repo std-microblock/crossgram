@@ -3,6 +3,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import type { PlatformSession } from '../platform.js'
 import { VoiceMediaAttachment, type VoiceCallMediaProvider, type VoiceWorkerMediaEndpoint } from './media.js'
+import type { VoiceWorkerEvent, VoiceWorkerMediaStartConfig } from './voice-worker-client.js'
 
 export type VoiceCallState = 'initializing' | 'requested' | 'received' | 'accepted' | 'active' | 'discarded'
 export type TelegramCallRole = 'caller' | 'recipient'
@@ -22,6 +23,13 @@ export interface VoiceWorkerCall {
   readonly participantId: number
   readonly telegramRole: TelegramCallRole
   readonly protocol: tl.TypePhoneCallProtocol
+  /** Call-scoped public relay settings supplied only by an explicit provider. */
+  readonly mediaStartConfig?: VoiceWorkerMediaStartConfig
+}
+
+/** Supplies real per-call relay and server settings; no fallback is permitted. */
+export interface VoiceMediaStartProvider {
+  get(call: VoiceWorkerCall, session: PlatformSession): Promise<VoiceWorkerMediaStartConfig | undefined>
 }
 
 export interface VoiceWorkerCallerPreparation {
@@ -88,10 +96,14 @@ export interface CallRegistryOptions {
   readonly timeoutMs?: number
   /** Returns the number of live authorized connections that accepted the update. */
   readonly publish?: (update: VoiceCallUpdate) => number | Promise<number>
+  /** Publishes one ephemeral call-scoped signaling update. */
+  readonly publishSignaling?: (session: PlatformSession, update: tl.RawUpdatePhoneCallSignalingData) => number | Promise<number>
   /** Replays one ephemeral update to a specific authorized binding. */
   readonly replay?: (session: PlatformSession, update: tl.RawUpdatePhoneCall, authKeyId: string) => number | Promise<number>
   /** Optional platform composition seam used only after worker media confirmation. */
   readonly media?: VoiceCallMediaProvider
+  /** Required to make a call media-active; absent providers fail closed. */
+  readonly mediaStartProvider?: VoiceMediaStartProvider
 }
 
 export interface CallRequest {
@@ -142,6 +154,8 @@ interface StoredCall {
   discarded?: tl.TypePhoneCallDiscardReason
   duration?: number
   media?: VoiceMediaAttachment
+  connections?: tl.TypePhoneConnection[]
+  p2pAllowed?: boolean
 }
 
 interface CallTombstone {
@@ -198,8 +212,10 @@ export class CallRegistry {
   private readonly _randomBytes: (size: number) => Uint8Array
   private readonly _timeoutMs: number
   private readonly _publish?: (update: VoiceCallUpdate) => number | Promise<number>
+  private readonly _publishSignaling?: CallRegistryOptions['publishSignaling']
   private readonly _replay?: (session: PlatformSession, update: tl.RawUpdatePhoneCall, authKeyId: string) => number | Promise<number>
   private readonly _media?: VoiceCallMediaProvider
+  private readonly _mediaStartProvider?: VoiceMediaStartProvider
   readonly #incomingHmacSecret = randomBytes(32)
 
   constructor(options: CallRegistryOptions = {}) {
@@ -208,8 +224,10 @@ export class CallRegistry {
     this._randomBytes = options.randomBytes ?? randomBytes
     this._timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this._publish = options.publish
+    this._publishSignaling = options.publishSignaling
     this._replay = options.replay
     this._media = options.media
+    this._mediaStartProvider = options.mediaStartProvider
   }
 
   async request(input: CallRequest): Promise<tl.phone.RawPhoneCall> {
@@ -349,8 +367,11 @@ export class CallRegistry {
       try {
         call.recipientProtocol = this._cloneProtocol(protocol)
         call.negotiatedProtocol = this._negotiateProtocol(call.callerProtocol, call.recipientProtocol)
+        const mediaStartConfig = this._applyMediaStartConfig(call, await this._mediaConfig(call))
         status = await this._requireWorker(
-          'completeTelegramCaller', this._worker?.completeTelegramCaller(this._workerCall(call), publicGB.slice()),
+          'completeTelegramCaller', this._worker?.completeTelegramCaller(
+            this._workerCall(call, mediaStartConfig), publicGB.slice(),
+          ),
         )
         if (status.state !== 'media-active' || !status.gA || !status.keyFingerprint) {
           throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
@@ -391,13 +412,16 @@ export class CallRegistry {
         return this._wrap(call)
       }
       this._requireState(call, 'requested')
-      this._negotiateProtocol(call.negotiatedProtocol, protocol)
+      call.negotiatedProtocol = this._negotiateProtocol(call.negotiatedProtocol, protocol)
       const publicGA = gA.slice()
       const workerFingerprint = cloneLong(keyFingerprint).toSigned()
       try {
+        const mediaStartConfig = this._applyMediaStartConfig(call, await this._mediaConfig(call))
         const status = await this._requireWorker(
           'completeTelegramRecipient',
-          this._worker?.completeTelegramRecipient(this._workerCall(call), publicGA.slice(), workerFingerprint),
+          this._worker?.completeTelegramRecipient(
+            this._workerCall(call, mediaStartConfig), publicGA.slice(), workerFingerprint,
+          ),
         )
         if (status.state !== 'media-active') throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
         if (!status.keyFingerprint || !sameWireLong(status.keyFingerprint, keyFingerprint)) {
@@ -447,6 +471,30 @@ export class CallRegistry {
         this._retire(call, discarded, pendingDelivery)
       }
       return discarded
+    })
+  }
+
+  /** Delivers one acknowledged worker event into Telegram's call update stream. */
+  async handleWorkerEvent(workerCall: VoiceWorkerCall, event: VoiceWorkerEvent): Promise<void> {
+    const call = this._calls.get(workerCall.callId)
+    if (!call || call.state === 'discarded') return
+    await this._serialize(call.session.platformSessionId, async () => {
+      if (this._calls.get(workerCall.callId) !== call || call.state === 'discarded') return
+      if (event.kind === 'native-error') {
+        await this._abortWorkerCall(call)
+        return
+      }
+      const data = event.data.slice()
+      try {
+        const delivered = await this._publishSignaling?.(call.session, {
+          _: 'updatePhoneCallSignalingData', phoneCallId: cloneLong(call.id), data,
+        }) ?? 0
+        if (!Number.isSafeInteger(delivered) || delivered <= 0) {
+          throw new VoiceCallError('CALL_SIGNALING_UNDELIVERED')
+        }
+      } finally {
+        data.fill(0)
+      }
     })
   }
 
@@ -591,6 +639,8 @@ export class CallRegistry {
     call.gB = undefined
     call.gA = undefined
     call.keyFingerprint = undefined
+    call.connections = undefined
+    call.p2pAllowed = undefined
     call.recipientProtocol = undefined
     call.pendingDelivery = undefined
     this._tombstones.set(this._key(call.id), tombstone)
@@ -716,13 +766,20 @@ export class CallRegistry {
     let endpoint: VoiceWorkerMediaEndpoint | undefined
     try {
       endpoint = await this._worker?.attachMedia?.(this._workerCall(call))
-      if (!endpoint) throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
-      const media = await this._media.start(this._workerCall(call), call.session)
+      if (!endpoint
+        || typeof endpoint.send !== 'function'
+        || typeof endpoint.receive !== 'function'
+        || typeof endpoint.close !== 'function') {
+        throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
+      }
+      const media = await this._media.start(this._workerCall(call), call.session, endpoint)
       const attachment = new VoiceMediaAttachment(media, endpoint)
       call.media = attachment
       void attachment.finished.then(() => this._terminalMedia(call))
     } catch {
-      if (endpoint) await Promise.resolve(endpoint.close()).catch(() => {})
+      if (endpoint && typeof endpoint.close === 'function') {
+        await Promise.resolve(endpoint.close()).catch(() => {})
+      }
       throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
     }
   }
@@ -795,11 +852,11 @@ export class CallRegistry {
       case 'received': return this._waiting(call)
       case 'accepted': return this._accepted(call)
       case 'active': return {
-        _: 'phoneCall', p2pAllowed: false, id: cloneLong(call.id), accessHash: cloneLong(call.accessHash), date: call.date,
+        _: 'phoneCall', p2pAllowed: call.p2pAllowed === true, id: cloneLong(call.id), accessHash: cloneLong(call.accessHash), date: call.date,
         adminId: call.adminId, participantId: call.participantId,
         gAOrB: (call.telegramRole === 'caller' ? call.gB : call.gA)?.slice() ?? new Uint8Array(),
         keyFingerprint: cloneLong(call.keyFingerprint ?? Long.ZERO), protocol: this._cloneProtocol(call.negotiatedProtocol),
-        connections: [], startDate: call.startDate ?? call.date,
+        connections: (call.connections ?? []).map((connection) => this._cloneConnection(connection)), startDate: call.startDate ?? call.date,
       }
       case 'discarded': return this._discarded(call)
     }
@@ -836,6 +893,13 @@ export class CallRegistry {
     }
   }
 
+  private _cloneConnection(connection: tl.TypePhoneConnection): tl.TypePhoneConnection {
+    if (connection._ === 'phoneConnection') {
+      return { ...connection, id: cloneLong(connection.id), peerTag: connection.peerTag.slice() }
+    }
+    return { ...connection, id: cloneLong(connection.id) }
+  }
+
   private _clonePhoneCall(phoneCall: tl.TypePhoneCall): tl.TypePhoneCall {
     switch (phoneCall._) {
       case 'phoneCallRequested': return {
@@ -853,7 +917,7 @@ export class CallRegistry {
       case 'phoneCall': return {
         ...phoneCall, id: cloneLong(phoneCall.id), accessHash: cloneLong(phoneCall.accessHash),
         keyFingerprint: cloneLong(phoneCall.keyFingerprint), gAOrB: phoneCall.gAOrB.slice(),
-        protocol: this._cloneProtocol(phoneCall.protocol), connections: [],
+        protocol: this._cloneProtocol(phoneCall.protocol), connections: phoneCall.connections.map((connection) => this._cloneConnection(connection)),
       }
       case 'phoneCallDiscarded': return { ...phoneCall, id: cloneLong(phoneCall.id) }
       default: return { ...phoneCall }
@@ -864,10 +928,36 @@ export class CallRegistry {
     return { _: 'phone.phoneCall', phoneCall: this._phoneCall(call), users: [] }
   }
 
-  private _workerCall(call: StoredCall): VoiceWorkerCall {
+  private async _mediaConfig(call: StoredCall): Promise<VoiceWorkerMediaStartConfig> {
+    const config = await this._mediaStartProvider?.get(this._workerCall(call), call.session)
+    if (!config) throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
+    return config
+  }
+
+  private _applyMediaStartConfig(
+    call: StoredCall,
+    config: VoiceWorkerMediaStartConfig,
+  ): VoiceWorkerMediaStartConfig {
+    const enableP2p = call.negotiatedProtocol.udpP2p && config.enableP2p
+    const effectiveConfig = { ...config, enableP2p }
+    if (!effectiveConfig.endpoints.length && !enableP2p) throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
+    call.connections = this._connectionsFromConfig(effectiveConfig)
+    call.p2pAllowed = enableP2p
+    call.negotiatedProtocol = { ...call.negotiatedProtocol, udpP2p: enableP2p }
+    return effectiveConfig
+  }
+
+  private _connectionsFromConfig(config: VoiceWorkerMediaStartConfig): tl.TypePhoneConnection[] {
+    return config.endpoints.map((endpoint) => ({
+      _: 'phoneConnection', id: cloneLong(endpoint.id), ip: endpoint.ipv4, ipv6: endpoint.ipv6,
+      port: endpoint.port, peerTag: endpoint.peerTag.slice(), tcp: endpoint.kind === 'tcp-relay',
+    }))
+  }
+
+  private _workerCall(call: StoredCall, mediaStartConfig?: VoiceWorkerMediaStartConfig): VoiceWorkerCall {
     return {
       callId: this._key(call.id), callerId: call.adminId, participantId: call.participantId,
-      telegramRole: call.telegramRole, protocol: this._cloneProtocol(call.negotiatedProtocol),
+      telegramRole: call.telegramRole, protocol: this._cloneProtocol(call.negotiatedProtocol), mediaStartConfig,
     }
   }
 

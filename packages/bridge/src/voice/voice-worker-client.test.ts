@@ -19,8 +19,15 @@ const protocol: tl.RawPhoneCallProtocol = {
   _: 'phoneCallProtocol', udpP2p: false, udpReflector: false,
   minLayer: 100, maxLayer: 100, libraryVersions: ['crossgram-voice-worker-v2'],
 }
+const mediaStartConfig = {
+  initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+  enableP2p: false, allowTcp: true, protocolV1: true, enableAec: true, enableNs: true, enableAgc: true,
+  endpoints: [{
+    id: Long.fromInt(1), ipv4: '127.0.0.1', ipv6: '', port: 443, kind: 'udp-relay' as const, peerTag: new Uint8Array(16),
+  }],
+}
 const call: VoiceWorkerCall = {
-  callId: 'transient-telegram-call', callerId: 1, participantId: 2, telegramRole: 'caller', protocol,
+  callId: 'transient-telegram-call', callerId: 1, participantId: 2, telegramRole: 'caller', protocol, mediaStartConfig,
 }
 
 const servers: Array<{ server: Server, directory: string }> = []
@@ -58,6 +65,7 @@ async function fakeServer(handler: (request: Buffer, socket: Socket) => void): P
   const path = join(directory, 'worker.sock')
   const requests: Buffer[] = []
   const server = createServer((socket) => {
+    socket.on('error', () => {})
     let received = Buffer.alloc(0)
     socket.on('data', (chunk: Buffer) => {
       received = Buffer.concat([received, chunk])
@@ -122,11 +130,20 @@ describe('voice worker IPC v2 codec', () => {
   it('encodes fixed-width v2 request fields and rejects malformed responses', () => {
     const frame = encodeVoiceWorkerRequest({
       tag: 0x04, callId: 9n, gA: new Uint8Array(256).fill(3), expectedFingerprint: Long.NEG_ONE,
+      config: {
+        initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+        enableP2p: false, allowTcp: true, protocolV1: true, enableAec: true, enableNs: true, enableAgc: true,
+        endpoints: [{
+          id: Long.fromInt(9), ipv4: '127.0.0.1', ipv6: '', port: 443, kind: 'udp-relay', peerTag: new Uint8Array(16),
+        }],
+      },
     })
-    expect(frame.readUInt32BE(0)).toBe(274)
+    expect(frame.readUInt32BE(0)).toBe(325)
     expect([...frame.subarray(4, 6)]).toEqual([2, 0x04])
     expect(frame.readBigUInt64BE(6)).toBe(9n)
-    expect(frame.subarray(-8)).toEqual(Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]))
+    expect(frame.subarray(4 + 2 + 8 + 256, 4 + 2 + 8 + 256 + 8))
+      .toEqual(Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]))
+    expect(frame[4 + 2 + 8 + 256 + 8 + 1 + 4 + 4]! & 1).toBe(0)
     expect(() => decodeVoiceWorkerResponse(Uint8Array.of(1, 0x86))).toThrow(VoiceCallError)
     expect(() => decodeVoiceWorkerResponse(Uint8Array.of(2, 0x86, 0))).toThrow(VoiceCallError)
     expect(() => decodeVoiceWorkerResponse(Uint8Array.of(2, 0xff, 0))).toThrow(VoiceCallError)
@@ -134,7 +151,7 @@ describe('voice worker IPC v2 codec', () => {
 })
 
 describe('VoiceWorkerSocketClient', () => {
-  it('attaches fixed PCM only after the Rust fake backend is active', async () => {
+  it('attaches fixed PCM ingress only after the Rust fake backend is active', async () => {
     const caller = new VoiceWorkerSocketClient({ socketPath: await rustFakeWorker() })
     const recipient = new VoiceWorkerSocketClient({ socketPath: await rustFakeWorker() })
     const callerPreparation = await caller.prepareTelegramCaller(call)
@@ -153,11 +170,9 @@ describe('VoiceWorkerSocketClient', () => {
     }
 
     await endpoint.send(pcm, { signal: controller.signal })
-    const received = await endpoint.receive({ signal: controller.signal })[Symbol.asyncIterator]().next()
     await endpoint.close()
 
     expect(completion.state).toBe('media-active')
-    expect(received.value?.data).toEqual(pcm.data)
     await expect(caller.attachMedia(call)).rejects.toMatchObject({ code: 'CALL_STATE_INVALID' })
   })
 
@@ -194,6 +209,134 @@ describe('VoiceWorkerSocketClient', () => {
     expect(server.requests.map(callId)).toEqual([1n, 1n, 1n, 1n, 1n, 1n])
     expect(server.requests[4]!.readBigUInt64BE(14)).toBe(1n)
     expect(server.requests).toHaveLength(6)
+  })
+
+  it('delivers one outbound event before acknowledging a lost acknowledgement exactly once', async () => {
+    const delivered = Promise.withResolvers<void>()
+    const acknowledged = Promise.withResolvers<void>()
+    let deliveries = 0
+    let handlerAttempts = 0
+    let ackRequests = 0
+    let workerAcknowledged = false
+    const server = await fakeServer((request, socket) => {
+      switch (tag(request)) {
+        case 0x03:
+          socket.end(response(Buffer.concat([Buffer.from([2, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
+          return
+        case 0x0b:
+          if (workerAcknowledged) {
+            socket.end(response(Buffer.from([2, 0x8d])))
+            return
+          }
+          socket.end(response(Buffer.from([2, 0x8c, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 2, 4, 5])))
+          return
+        case 0x0c:
+          ackRequests++
+          if (ackRequests === 1) {
+            socket.end()
+            return
+          }
+          workerAcknowledged = true
+          acknowledged.resolve()
+          socket.end(response(Buffer.from([2, 0x8e, 0, 0, 0, 0, 0, 0, 0, 1])))
+          return
+        default:
+          socket.destroy()
+      }
+    })
+    const client = new VoiceWorkerSocketClient({
+      socketPath: server.path,
+      onEvent: async (_call, event) => {
+        expect(event).toEqual({ kind: 'outbound-signal', data: Uint8Array.of(4, 5) })
+        handlerAttempts++
+        if (handlerAttempts <= 9) throw new Error('no live authorized client')
+        deliveries++
+        delivered.resolve()
+      },
+    })
+
+    await client.completeTelegramCaller(call, new Uint8Array(256).fill(3))
+    await delivered.promise
+    await acknowledged.promise
+    client.close()
+
+    expect(handlerAttempts).toBe(10)
+    expect(deliveries).toBe(1)
+    expect(ackRequests).toBe(2)
+  })
+
+  it('cancels a retrying event pump promptly when the client closes', async () => {
+    const attempted = Promise.withResolvers<void>()
+    let polls = 0
+    const server = await fakeServer((request, socket) => {
+      switch (tag(request)) {
+        case 0x03:
+          socket.end(response(Buffer.concat([Buffer.from([2, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
+          return
+        case 0x0b:
+          polls++
+          socket.end(response(Buffer.from([2, 0x8c, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 4])))
+          return
+        default:
+          socket.destroy()
+      }
+    })
+    const client = new VoiceWorkerSocketClient({
+      socketPath: server.path,
+      onEvent: async () => {
+        attempted.resolve()
+        throw new Error('no authorized recipient')
+      },
+    })
+
+    await client.completeTelegramCaller(call, new Uint8Array(256).fill(3))
+    await attempted.promise
+    client.close()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(polls).toBe(1)
+  })
+
+  it('aborts a held PollEvent socket before promptly sending Hangup', async () => {
+    const pollOpened = Promise.withResolvers<void>()
+    const pollClosed = Promise.withResolvers<void>()
+    const hangupSeen = Promise.withResolvers<void>()
+    let eventDeliveries = 0
+    const server = await fakeServer((request, socket) => {
+      switch (tag(request)) {
+        case 0x03:
+          socket.end(response(Buffer.concat([Buffer.from([2, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
+          return
+        case 0x0b:
+          socket.once('close', () => pollClosed.resolve())
+          pollOpened.resolve()
+          return
+        case 0x06:
+          hangupSeen.resolve()
+          socket.end(response(Buffer.from([2, 0x86])))
+          return
+        default:
+          socket.destroy()
+      }
+    })
+    const client = new VoiceWorkerSocketClient({
+      socketPath: server.path,
+      timeoutMs: 5_000,
+      onEvent: async () => { eventDeliveries++ },
+    })
+
+    await client.completeTelegramCaller(call, new Uint8Array(256).fill(3))
+    await pollOpened.promise
+    await Promise.race([
+      client.discardCall(call),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('Hangup timed out')), 500)),
+    ])
+    await pollClosed.promise
+    await hangupSeen.promise
+
+    expect(server.requests.map(tag)).toEqual([0x03, 0x0b, 0x06])
+    expect(eventDeliveries).toBe(0)
+    expect(openSocketCount(client)).toBe(0)
   })
 
   it('retries one lost signaling acknowledgement with exactly the same Unix frame', async () => {

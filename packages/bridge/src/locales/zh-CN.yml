@@ -6,3 +6,4 @@ uploadPath: 用于存储 Telegram 客户端上传文件的目录。
 autoMuteGroupChats: 默认关闭群聊通知；可在 Telegram 中为单个群聊单独开启。
 voiceWorkerSocketPath: Rust 语音工作进程的本地 Unix socket 路径；留空以禁用语音通话。
 voiceWorkerTimeoutMs: 单次本地语音工作进程请求允许的最长毫秒数。
+voiceDirectIce: 仅当配置的 MTProto 主机为回环地址时允许直接 ICE。

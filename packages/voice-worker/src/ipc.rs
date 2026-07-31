@@ -9,6 +9,65 @@ pub const PCM_FRAME_BYTES: usize = 1_920;
 pub const PCM_CAPABILITY_BYTES: usize = 32;
 pub const DH_PUBLIC_BYTES: usize = 256;
 pub const GA_HASH_BYTES: usize = 32;
+pub const MAX_ENDPOINTS: usize = 16;
+pub const MAX_HOST_BYTES: usize = 255;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EndpointKind {
+    Inet = 0,
+    Lan = 1,
+    UdpRelay = 2,
+    TcpRelay = 3,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaEndpoint {
+    pub id: i64,
+    pub ipv4: String,
+    pub ipv6: String,
+    pub port: u16,
+    pub kind: EndpointKind,
+    pub peer_tag: [u8; 16],
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaStartConfig {
+    pub is_outgoing: bool,
+    pub initialization_timeout_ms: u32,
+    pub receive_timeout_ms: u32,
+    pub enable_p2p: bool,
+    pub allow_tcp: bool,
+    pub protocol_v1: bool,
+    pub enable_aec: bool,
+    pub enable_ns: bool,
+    pub enable_agc: bool,
+    pub endpoints: Vec<MediaEndpoint>,
+}
+
+impl MediaStartConfig {
+    pub fn validate(&self) -> Result<(), IpcError> {
+        if self.initialization_timeout_ms == 0
+            || self.receive_timeout_ms == 0
+            || (self.endpoints.is_empty() && !self.enable_p2p)
+            || self.endpoints.len() > MAX_ENDPOINTS
+        {
+            return Err(IpcError::Malformed);
+        }
+        if self.endpoints.iter().any(|endpoint| {
+            endpoint.port == 0
+                || endpoint.ipv4.len() > MAX_HOST_BYTES
+                || endpoint.ipv6.len() > MAX_HOST_BYTES
+                || endpoint.ipv4.contains('\0')
+                || endpoint.ipv6.contains('\0')
+                || (endpoint.ipv4.is_empty() && endpoint.ipv6.is_empty())
+        }) {
+            return Err(IpcError::Malformed);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -22,11 +81,13 @@ pub enum Request {
     CompleteCaller {
         call_id: u64,
         gb: [u8; DH_PUBLIC_BYTES],
+        config: MediaStartConfig,
     },
     CompleteRecipient {
         call_id: u64,
         ga: [u8; DH_PUBLIC_BYTES],
         expected_fingerprint: i64,
+        config: MediaStartConfig,
     },
     Signal {
         call_id: u64,
@@ -53,6 +114,32 @@ pub enum Request {
         call_id: u64,
         capability: [u8; PCM_CAPABILITY_BYTES],
     },
+    PollEvent {
+        call_id: u64,
+    },
+    AckEvent {
+        call_id: u64,
+        event_id: u64,
+    },
+    #[cfg(feature = "test-fake")]
+    TestTakeCapture {
+        call_id: u64,
+    },
+    #[cfg(feature = "test-fake")]
+    TestInjectPlayout {
+        call_id: u64,
+        frame: Box<[u8; PCM_FRAME_BYTES]>,
+    },
+    #[cfg(feature = "test-fake")]
+    TestStats {
+        call_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerEvent {
+    OutboundSignal(Vec<u8>),
+    NativeError,
 }
 
 impl Request {
@@ -68,7 +155,13 @@ impl Request {
             | Self::AttachMedia { call_id, .. }
             | Self::SendPcm { call_id, .. }
             | Self::ReceivePcm { call_id, .. }
-            | Self::CloseMedia { call_id, .. } => *call_id,
+            | Self::CloseMedia { call_id, .. }
+            | Self::PollEvent { call_id }
+            | Self::AckEvent { call_id, .. } => *call_id,
+            #[cfg(feature = "test-fake")]
+            Self::TestTakeCapture { call_id }
+            | Self::TestInjectPlayout { call_id, .. }
+            | Self::TestStats { call_id } => *call_id,
         }
     }
 }
@@ -102,6 +195,19 @@ pub enum Response {
     },
     PcmPending,
     MediaClosed,
+    Event {
+        event_id: u64,
+        event: WorkerEvent,
+    },
+    EventPending,
+    EventAcknowledged {
+        event_id: u64,
+    },
+    #[cfg(feature = "test-fake")]
+    TestStats {
+        captured_dropped: u32,
+        playout_dropped: u32,
+    },
     Error {
         code: ErrorCode,
     },
@@ -171,11 +277,13 @@ pub fn decode_request(payload: &[u8]) -> Result<Request, IpcError> {
         3 => Request::CompleteCaller {
             call_id: reader.u64()?,
             gb: reader.array()?,
+            config: reader.media_start_config()?,
         },
         4 => Request::CompleteRecipient {
             call_id: reader.u64()?,
             ga: reader.array()?,
             expected_fingerprint: reader.i64_le()?,
+            config: reader.media_start_config()?,
         },
         5 => Request::Signal {
             call_id: reader.u64()?,
@@ -202,6 +310,26 @@ pub fn decode_request(payload: &[u8]) -> Result<Request, IpcError> {
             call_id: reader.u64()?,
             capability: reader.array()?,
         },
+        11 => Request::PollEvent {
+            call_id: reader.u64()?,
+        },
+        12 => Request::AckEvent {
+            call_id: reader.u64()?,
+            event_id: reader.u64()?,
+        },
+        #[cfg(feature = "test-fake")]
+        13 => Request::TestTakeCapture {
+            call_id: reader.u64()?,
+        },
+        #[cfg(feature = "test-fake")]
+        14 => Request::TestInjectPlayout {
+            call_id: reader.u64()?,
+            frame: Box::new(reader.array()?),
+        },
+        #[cfg(feature = "test-fake")]
+        15 => Request::TestStats {
+            call_id: reader.u64()?,
+        },
         _ => return Err(IpcError::Malformed),
     };
     reader.finish()?;
@@ -211,7 +339,9 @@ pub fn decode_request(payload: &[u8]) -> Result<Request, IpcError> {
 pub fn encode_request(request: &Request) -> Result<Vec<u8>, IpcError> {
     let mut writer = PayloadWriter::new(request_tag(request));
     match request {
-        Request::PrepareCaller { call_id } | Request::Hangup { call_id } => writer.u64(*call_id),
+        Request::PrepareCaller { call_id }
+        | Request::Hangup { call_id }
+        | Request::PollEvent { call_id } => writer.u64(*call_id),
         Request::AttachMedia {
             call_id,
             request_id,
@@ -243,18 +373,25 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, IpcError> {
             writer.u64(*call_id);
             writer.array(ga_hash);
         }
-        Request::CompleteCaller { call_id, gb } => {
+        Request::CompleteCaller {
+            call_id,
+            gb,
+            config,
+        } => {
             writer.u64(*call_id);
             writer.array(gb);
+            writer.media_start_config(config)?;
         }
         Request::CompleteRecipient {
             call_id,
             ga,
             expected_fingerprint,
+            config,
         } => {
             writer.u64(*call_id);
             writer.array(ga);
             writer.i64_le(*expected_fingerprint);
+            writer.media_start_config(config)?;
         }
         Request::Signal {
             call_id,
@@ -265,6 +402,19 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, IpcError> {
             writer.u64(*request_id);
             writer.bytes(signal, MAX_SIGNAL_BYTES)?;
         }
+        Request::AckEvent { call_id, event_id } => {
+            writer.u64(*call_id);
+            writer.u64(*event_id);
+        }
+        #[cfg(feature = "test-fake")]
+        Request::TestTakeCapture { call_id } => writer.u64(*call_id),
+        #[cfg(feature = "test-fake")]
+        Request::TestInjectPlayout { call_id, frame } => {
+            writer.u64(*call_id);
+            writer.array(frame);
+        }
+        #[cfg(feature = "test-fake")]
+        Request::TestStats { call_id } => writer.u64(*call_id),
     }
     Ok(writer.finish())
 }
@@ -299,6 +449,23 @@ pub fn decode_response(payload: &[u8]) -> Result<Response, IpcError> {
         },
         0x8a => Response::PcmPending,
         0x8b => Response::MediaClosed,
+        0x8c => Response::Event {
+            event_id: reader.u64()?,
+            event: match reader.u8()? {
+                1 => WorkerEvent::OutboundSignal(reader.bytes(MAX_SIGNAL_BYTES)?),
+                2 => WorkerEvent::NativeError,
+                _ => return Err(IpcError::Malformed),
+            },
+        },
+        0x8d => Response::EventPending,
+        0x8e => Response::EventAcknowledged {
+            event_id: reader.u64()?,
+        },
+        #[cfg(feature = "test-fake")]
+        0x8f => Response::TestStats {
+            captured_dropped: reader.u32()?,
+            playout_dropped: reader.u32()?,
+        },
         0xff => Response::Error {
             code: decode_error(reader.u8()?)?,
         },
@@ -327,8 +494,31 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, IpcError> {
             writer.array(capability);
         }
         Response::PcmReceived { frame } => writer.array(frame),
+        Response::Event { event_id, event } => {
+            writer.u64(*event_id);
+            match event {
+                WorkerEvent::OutboundSignal(signal) => {
+                    writer.u8(1);
+                    writer.bytes(signal, MAX_SIGNAL_BYTES)?;
+                }
+                WorkerEvent::NativeError => writer.u8(2),
+            }
+        }
+        Response::EventAcknowledged { event_id } => writer.u64(*event_id),
+        #[cfg(feature = "test-fake")]
+        Response::TestStats {
+            captured_dropped,
+            playout_dropped,
+        } => {
+            writer.u32(*captured_dropped);
+            writer.u32(*playout_dropped);
+        }
         Response::Error { code } => writer.u8(*code as u8),
-        Response::HungUp | Response::PcmSent | Response::PcmPending | Response::MediaClosed => {}
+        Response::HungUp
+        | Response::PcmSent
+        | Response::PcmPending
+        | Response::MediaClosed
+        | Response::EventPending => {}
     }
     Ok(writer.finish())
 }
@@ -345,6 +535,14 @@ const fn request_tag(request: &Request) -> u8 {
         Request::SendPcm { .. } => 8,
         Request::ReceivePcm { .. } => 9,
         Request::CloseMedia { .. } => 10,
+        Request::PollEvent { .. } => 11,
+        Request::AckEvent { .. } => 12,
+        #[cfg(feature = "test-fake")]
+        Request::TestTakeCapture { .. } => 13,
+        #[cfg(feature = "test-fake")]
+        Request::TestInjectPlayout { .. } => 14,
+        #[cfg(feature = "test-fake")]
+        Request::TestStats { .. } => 15,
     }
 }
 
@@ -361,6 +559,11 @@ const fn response_tag(response: &Response) -> u8 {
         Response::PcmReceived { .. } => 0x89,
         Response::PcmPending => 0x8a,
         Response::MediaClosed => 0x8b,
+        Response::Event { .. } => 0x8c,
+        Response::EventPending => 0x8d,
+        Response::EventAcknowledged { .. } => 0x8e,
+        #[cfg(feature = "test-fake")]
+        Response::TestStats { .. } => 0x8f,
         Response::Error { .. } => 0xff,
     }
 }
@@ -410,6 +613,16 @@ impl<'a> PayloadReader<'a> {
             self.take(8)?.try_into().map_err(|_| IpcError::Malformed)?,
         ))
     }
+    fn u32(&mut self) -> Result<u32, IpcError> {
+        Ok(u32::from_be_bytes(
+            self.take(4)?.try_into().map_err(|_| IpcError::Malformed)?,
+        ))
+    }
+    fn i64(&mut self) -> Result<i64, IpcError> {
+        Ok(i64::from_be_bytes(
+            self.take(8)?.try_into().map_err(|_| IpcError::Malformed)?,
+        ))
+    }
     fn array<const N: usize>(&mut self) -> Result<[u8; N], IpcError> {
         self.take(N)?.try_into().map_err(|_| IpcError::Malformed)
     }
@@ -421,6 +634,62 @@ impl<'a> PayloadReader<'a> {
             return Err(IpcError::Malformed);
         }
         Ok(self.take(length)?.to_vec())
+    }
+    fn media_start_config(&mut self) -> Result<MediaStartConfig, IpcError> {
+        let is_outgoing = self.u8()?;
+        if is_outgoing > 1 {
+            return Err(IpcError::Malformed);
+        }
+        let initialization_timeout_ms = self.u32()?;
+        let receive_timeout_ms = self.u32()?;
+        let flags = self.u8()?;
+        if flags & !0x3f != 0 {
+            return Err(IpcError::Malformed);
+        }
+        let endpoint_count = usize::from(self.u8()?);
+        if endpoint_count > MAX_ENDPOINTS || (endpoint_count == 0 && flags & 1 == 0) {
+            return Err(IpcError::Malformed);
+        }
+        let mut endpoints = Vec::with_capacity(endpoint_count);
+        for _ in 0..endpoint_count {
+            let id = self.i64()?;
+            let port =
+                u16::from_be_bytes(self.take(2)?.try_into().map_err(|_| IpcError::Malformed)?);
+            let kind = match self.u8()? {
+                0 => EndpointKind::Inet,
+                1 => EndpointKind::Lan,
+                2 => EndpointKind::UdpRelay,
+                3 => EndpointKind::TcpRelay,
+                _ => return Err(IpcError::Malformed),
+            };
+            let peer_tag = self.array()?;
+            let ipv4 =
+                String::from_utf8(self.bytes(MAX_HOST_BYTES)?).map_err(|_| IpcError::Malformed)?;
+            let ipv6 =
+                String::from_utf8(self.bytes(MAX_HOST_BYTES)?).map_err(|_| IpcError::Malformed)?;
+            endpoints.push(MediaEndpoint {
+                id,
+                ipv4,
+                ipv6,
+                port,
+                kind,
+                peer_tag,
+            });
+        }
+        let config = MediaStartConfig {
+            is_outgoing: is_outgoing == 1,
+            initialization_timeout_ms,
+            receive_timeout_ms,
+            enable_p2p: flags & 1 != 0,
+            allow_tcp: flags & 2 != 0,
+            protocol_v1: flags & 4 != 0,
+            enable_aec: flags & 8 != 0,
+            enable_ns: flags & 16 != 0,
+            enable_agc: flags & 32 != 0,
+            endpoints,
+        };
+        config.validate()?;
+        Ok(config)
     }
     fn take(&mut self, length: usize) -> Result<&'a [u8], IpcError> {
         let end = self
@@ -462,6 +731,12 @@ impl PayloadWriter {
     fn i64_le(&mut self, value: i64) {
         self.output.extend_from_slice(&value.to_le_bytes());
     }
+    fn u32(&mut self, value: u32) {
+        self.output.extend_from_slice(&value.to_be_bytes());
+    }
+    fn i64(&mut self, value: i64) {
+        self.output.extend_from_slice(&value.to_be_bytes());
+    }
     fn array<const N: usize>(&mut self, value: &[u8; N]) {
         self.output.extend_from_slice(value);
     }
@@ -474,6 +749,28 @@ impl PayloadWriter {
         self.output.extend_from_slice(value);
         Ok(())
     }
+    fn media_start_config(&mut self, config: &MediaStartConfig) -> Result<(), IpcError> {
+        config.validate()?;
+        self.u8(u8::from(config.is_outgoing));
+        self.u32(config.initialization_timeout_ms);
+        self.u32(config.receive_timeout_ms);
+        self.u8(u8::from(config.enable_p2p)
+            | (u8::from(config.allow_tcp) << 1)
+            | (u8::from(config.protocol_v1) << 2)
+            | (u8::from(config.enable_aec) << 3)
+            | (u8::from(config.enable_ns) << 4)
+            | (u8::from(config.enable_agc) << 5));
+        self.u8(u8::try_from(config.endpoints.len()).map_err(|_| IpcError::Malformed)?);
+        for endpoint in &config.endpoints {
+            self.i64(endpoint.id);
+            self.output.extend_from_slice(&endpoint.port.to_be_bytes());
+            self.u8(endpoint.kind as u8);
+            self.array(&endpoint.peer_tag);
+            self.bytes(endpoint.ipv4.as_bytes(), MAX_HOST_BYTES)?;
+            self.bytes(endpoint.ipv6.as_bytes(), MAX_HOST_BYTES)?;
+        }
+        Ok(())
+    }
     fn finish(self) -> Vec<u8> {
         self.output
     }
@@ -482,6 +779,28 @@ impl PayloadWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config(is_outgoing: bool) -> MediaStartConfig {
+        MediaStartConfig {
+            is_outgoing,
+            initialization_timeout_ms: 1,
+            receive_timeout_ms: 1,
+            enable_p2p: false,
+            allow_tcp: true,
+            protocol_v1: true,
+            enable_aec: true,
+            enable_ns: true,
+            enable_agc: true,
+            endpoints: vec![MediaEndpoint {
+                id: 9,
+                ipv4: "127.0.0.1".into(),
+                ipv6: String::new(),
+                port: 443,
+                kind: EndpointKind::UdpRelay,
+                peer_tag: [1; 16],
+            }],
+        }
+    }
 
     #[test]
     fn request_round_trips_are_exact_for_v2() {
@@ -494,11 +813,13 @@ mod tests {
             Request::CompleteCaller {
                 call_id: 9,
                 gb: [2; DH_PUBLIC_BYTES],
+                config: config(true),
             },
             Request::CompleteRecipient {
                 call_id: 9,
                 ga: [3; DH_PUBLIC_BYTES],
                 expected_fingerprint: -7,
+                config: config(false),
             },
             Request::Signal {
                 call_id: 9,
@@ -578,16 +899,48 @@ mod tests {
     }
 
     #[test]
+    fn allows_empty_endpoints_only_for_direct_p2p() {
+        let mut direct = config(true);
+        direct.enable_p2p = true;
+        direct.endpoints.clear();
+        assert_eq!(
+            decode_request(
+                &encode_request(&Request::CompleteCaller {
+                    call_id: 9,
+                    gb: [2; DH_PUBLIC_BYTES],
+                    config: direct,
+                })
+                .unwrap()
+            )
+            .unwrap()
+            .call_id(),
+            9
+        );
+
+        let mut relay = config(true);
+        relay.endpoints.clear();
+        assert!(
+            encode_request(&Request::CompleteCaller {
+                call_id: 9,
+                gb: [2; DH_PUBLIC_BYTES],
+                config: relay,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn exact_lengths_have_no_v1_fields_or_trailing_data() {
         assert_eq!(
             encode_request(&Request::CompleteRecipient {
                 call_id: 9,
                 ga: [8; DH_PUBLIC_BYTES],
-                expected_fingerprint: -7
+                expected_fingerprint: -7,
+                config: config(false),
             })
             .unwrap()
             .len(),
-            2 + 8 + DH_PUBLIC_BYTES + 8
+            2 + 8 + DH_PUBLIC_BYTES + 8 + 1 + 4 + 4 + 1 + 1 + 8 + 2 + 1 + 16 + 2 + 9 + 2
         );
         assert_eq!(
             encode_request(&Request::Signal {

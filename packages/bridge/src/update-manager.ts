@@ -78,6 +78,25 @@ export class UpdateManager {
     return delivered
   }
 
+  /** Sends one ephemeral call-scoped signaling update without journaling it. */
+  async publishPhoneSignaling(
+    session: PlatformSession,
+    update: tl.RawUpdatePhoneCallSignalingData,
+    excludeAuthKeyId?: string,
+  ): Promise<number> {
+    const payload: tl.TypeUpdates = {
+      _: 'updateShort', update, date: Math.floor(Date.now() / 1_000),
+    }
+    const bindings = await this._database.get('mtproto_auth_binding', {
+      platformSessionId: session.platformSessionId,
+    })
+    let delivered = 0
+    for (const binding of bindings) {
+      if (binding.authKeyId !== excludeAuthKeyId) delivered += this._sendUpdate(hexBytes(binding.authKeyId), payload)
+    }
+    return delivered
+  }
+
   /** Replays only a current in-memory call snapshot to its already-authorized binding. */
   async replayPhoneCall(
     session: PlatformSession,
