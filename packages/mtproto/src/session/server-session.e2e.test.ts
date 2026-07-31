@@ -410,6 +410,7 @@ async function bindTempAuthKey(
   temp: ClientKey,
   sessionId: Long,
   expiresIn = 3600,
+  wrapper: 'bare' | 'initialized' | 'gzip' = 'bare',
 ): Promise<void> {
   const bindInner = {
     _: 'mt_bind_auth_key_inner',
@@ -429,13 +430,18 @@ async function bindTempAuthKey(
   bw.raw(crypto.randomBytes(8))
   const msgKey = crypto.sha1(msgNoPad).subarray(4, 20)
   const encInner = createAesIgeForMessageOld(crypto, perm.authKey, msgKey, true).encrypt(bw.result())
-  const bindReq = TlBinaryWriter.serializeObject(__tlWriterMap, {
+  const bindRequest = {
     _: 'auth.bindTempAuthKey',
     permAuthKeyId: bindInner.permAuthKeyId,
     nonce: bindInner.nonce,
     expiresAt: bindInner.expiresAt,
     encryptedMessage: u8.concat3(perm.authKeyId, msgKey, encInner),
-  } as unknown as { _: string })
+  }
+  const bindReq = wrapper === 'initialized'
+    ? serializeInitializedRpc(bindRequest)
+    : wrapper === 'gzip'
+      ? invokeWithLayerPacked(bindRequest, gzipSync)
+      : TlBinaryWriter.serializeObject(__tlWriterMap, bindRequest as unknown as { _: string })
   await client.send(clientEncrypt(temp, bindReq, temp.salt, sessionId, 4))
   expect(await readRpcResult(client, temp)).toEqual({ _: 'boolTrue' })
 }
@@ -1373,6 +1379,29 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       await client.send(clientEncrypt(temp, req, temp.salt, sessionLong, 6))
       const config = await readRpcResult(client, temp)
       expect(config._).toBe('config')
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it.each([
+    ['initConnection', 'initialized'],
+    ['gzip_packed', 'gzip'],
+  ] as const)('binds a PFS key when TDLib sends auth.bindTempAuthKey through %s', async (_name, wrapper) => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop } = await startServer()
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const temp = await doClientHandshake(client, pubKey, true)
+      const sessionId = new Long(0x59595959, 0x59595959)
+
+      await bindTempAuthKey(client, perm, temp, sessionId, 3600, wrapper)
+
+      const request = serializeInitializedRpc({ _: 'help.getConfig' })
+      await client.send(clientEncrypt(temp, request, temp.salt, sessionId, 84))
+      expect(await readRpcResult(client, temp)).toMatchObject({ _: 'config', thisDc: 1 })
       client.close()
     } finally {
       await stop()
