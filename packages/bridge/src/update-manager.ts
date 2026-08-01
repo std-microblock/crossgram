@@ -642,7 +642,10 @@ export class UpdateManager {
   ): Promise<tl.updates.TypeDifference> {
     const state = await this.getState(platformSessionId)
     const deliveries = await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts)
-    if (!deliveries.length && request.pts === state.pts) {
+    const channelDeliveries = await this._store.getChannelUpdateDeliveriesSince(
+      platformSessionId, request.date,
+    )
+    if (!deliveries.length && !channelDeliveries.length && request.pts === state.pts) {
       return { _: 'updates.differenceEmpty', date: state.date, seq: state.seq }
     }
     const requestedLimit = request.ptsLimit ?? request.ptsTotalLimit ?? 100
@@ -663,6 +666,25 @@ export class UpdateManager {
       for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
       for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
     }
+    // Channel pts are intentionally independent from account pts, so a client
+    // that was disconnected cannot identify missed dialogs from its account
+    // cursor alone. Surface one channel-too-long marker per changed channel;
+    // Telegram clients then compare their durable channel pts and fetch every
+    // missing channel without opening the chat first. Repeated markers are safe
+    // when multiple events share the same second because channel difference is
+    // itself pts-deduplicated.
+    const changedChannels = new Map<number, number>()
+    for (const delivery of channelDeliveries.filter((delivery) => delivery.payload)) {
+      const channelId = Number(delivery.scope.slice('channel:'.length))
+      if (!Number.isSafeInteger(channelId)) continue
+      changedChannels.set(channelId, Math.max(changedChannels.get(channelId) ?? 0, delivery.pts))
+      const payload = decodeUpdate(delivery.payload)
+      for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
+      for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
+    }
+    otherUpdates.push(...[...changedChannels].map(([channelId, pts]): tl.RawUpdateChannelTooLong => ({
+      _: 'updateChannelTooLong', channelId, pts,
+    })))
     for (const delivery of page) await this._store.markUpdatePublished(delivery.eventKey)
     const last = page.at(-1)!
     const difference = {

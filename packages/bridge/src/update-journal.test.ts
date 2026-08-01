@@ -54,4 +54,15 @@ describe('MemoryUpdateDeliveryJournal', () => {
     expect(await journal.get('discarded')).toBeUndefined()
     expect(await journal.getAfter('session', 'account', 1, 10)).toEqual([])
   })
+
+  it('lists retained deliveries across scopes from an inclusive server-date cursor', async () => {
+    const journal = new MemoryUpdateDeliveryJournal(10)
+    await journal.create({ ...delivery('account-old', 'session', 2), date: 100, scope: 'account' })
+    await journal.create({ ...delivery('channel-a', 'session', 2), date: 101, scope: 'channel:10' })
+    await journal.create({ ...delivery('channel-b', 'session', 2), date: 101, scope: 'channel:20' })
+    await journal.create({ ...delivery('other-session', 'other', 2), date: 102, scope: 'channel:30' })
+
+    expect((await journal.getSince('session', 101)).map((row) => row.eventKey))
+      .toEqual(['channel-a', 'channel-b'])
+  })
 })

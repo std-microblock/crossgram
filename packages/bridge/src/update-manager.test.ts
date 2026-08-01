@@ -620,7 +620,44 @@ describe('UpdateManager', () => {
     })
     expect(accountDifference).toMatchObject({
       _: 'updates.difference', newMessages: [{ message: 'direct-1' }],
+      otherUpdates: [
+        { _: 'updateChannelTooLong', channelId: stableId('peer:alpha'), pts: 3 },
+        { _: 'updateChannelTooLong', channelId: stableId('peer:beta'), pts: 2 },
+      ],
       state: { pts: 2, seq: 4 },
+    })
+  })
+
+  it('announces every channel changed since an offline client server-date cursor', async () => {
+    const { store, manager } = await createHarness()
+    const alpha: IMConversation = { id: 'offline-alpha', kind: 'group', title: 'Offline Alpha' }
+    const beta: IMConversation = { id: 'offline-beta', kind: 'group', title: 'Offline Beta' }
+    const publish = async (conversation: IMConversation, id: string, timestamp: number) => {
+      const message: IMMessage = {
+        id, conversationId: conversation.id, senderId: 'alice', timestamp,
+        content: { parts: [{ type: 'text', text: id }] },
+      }
+      const result = await store.ingest(session, conversation, message)
+      await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    }
+
+    const before = await manager.getState(session.platformSessionId)
+    await publish(alpha, 'offline-alpha-message', before.date + 1)
+    await publish(beta, 'offline-beta-message', before.date + 2)
+
+    const difference = await manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: before.pts, date: before.date, qts: before.qts,
+    })
+    expect(difference).toMatchObject({
+      _: 'updates.difference', newMessages: [],
+      otherUpdates: [
+        { _: 'updateChannelTooLong', channelId: stableId('peer:offline-alpha'), pts: 2 },
+        { _: 'updateChannelTooLong', channelId: stableId('peer:offline-beta'), pts: 2 },
+      ],
+      chats: [
+        { _: 'channel', title: 'Offline Alpha' },
+        { _: 'channel', title: 'Offline Beta' },
+      ],
     })
   })
 

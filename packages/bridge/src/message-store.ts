@@ -1003,28 +1003,34 @@ export class MessageStore {
 
       const allocated = await this._database.withTransaction(async (database) => {
         const [current] = await database.get('mtproto_update_state', { platformSessionId })
+        // updates.getDifference only receives the client's last server date for
+        // discovering missed channel domains. Keep that cursor monotonic even
+        // when an upstream platform backfills a message with an older timestamp.
+        const deliveryDate = Math.max(current?.date ?? 0, date)
         const account = {
           platformSessionId,
           pts: (current?.pts ?? 1) + (channelId === undefined ? ptsCount : 0),
           qts: current?.qts ?? 0,
           seq: (current?.seq ?? 0) + 1,
-          date,
+          date: deliveryDate,
         }
         await database.upsert('mtproto_update_state', [account])
-        if (channelId === undefined) return { state: account, scope: ACCOUNT_UPDATE_SCOPE, seq: account.seq }
+        if (channelId === undefined) {
+          return { state: account, scope: ACCOUNT_UPDATE_SCOPE, seq: account.seq, date: deliveryDate }
+        }
         const id = channelStateId(platformSessionId, channelId)
         const [currentChannel] = await database.get('mtproto_channel_update_state', { id })
         const channel = {
           id, platformSessionId, channelId: String(channelId),
           pts: (currentChannel?.pts ?? current?.pts ?? 1) + ptsCount,
-          date,
+          date: Math.max(currentChannel?.date ?? 0, deliveryDate),
         }
         await database.upsert('mtproto_channel_update_state', [channel])
-        return { state: channel, scope: channelUpdateScope(channelId), seq: account.seq }
+        return { state: channel, scope: channelUpdateScope(channelId), seq: account.seq, date: deliveryDate }
       })
       return this._updateJournal.create({
         eventKey, platformSessionId, scope: allocated.scope, pts: allocated.state.pts, ptsCount,
-        seq: allocated.seq, date, published: false,
+        seq: allocated.seq, date: allocated.date, published: false,
         payload: '',
       })
     })
@@ -1053,6 +1059,11 @@ export class MessageStore {
       pts,
       limit,
     )
+  }
+
+  async getChannelUpdateDeliveriesSince(platformSessionId: string, date: number) {
+    return (await this._updateJournal.getSince(platformSessionId, date))
+      .filter((delivery) => delivery.scope.startsWith('channel:'))
   }
 
   async getConversation(

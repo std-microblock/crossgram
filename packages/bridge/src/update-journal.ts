@@ -10,6 +10,7 @@ export interface UpdateDeliveryJournal {
   setPayload(eventKey: string, payload: string): Promise<void>
   getPending(platformSessionId: string): Promise<UpdateDeliveryRow[]>
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number): Promise<UpdateDeliveryRow[]>
+  getSince(platformSessionId: string, date: number): Promise<UpdateDeliveryRow[]>
   prune(platformSessionId: string, scope: string): Promise<void>
 }
 
@@ -62,6 +63,14 @@ export class MemoryUpdateDeliveryJournal implements UpdateDeliveryJournal {
       .filter((delivery) => delivery.pts > pts)
       .sort((left, right) => left.pts - right.pts)
       .slice(0, limit)
+      .map((delivery) => ({ ...delivery }))
+  }
+
+  async getSince(platformSessionId: string, date: number): Promise<UpdateDeliveryRow[]> {
+    return [...this._byEventKey.values()]
+      .filter((delivery) => delivery.platformSessionId === platformSessionId)
+      .filter((delivery) => delivery.date >= date)
+      .sort((left, right) => left.seq - right.seq || left.messageId - right.messageId)
       .map((delivery) => ({ ...delivery }))
   }
 
