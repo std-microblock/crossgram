@@ -33,6 +33,20 @@ export class QQNTMessageSendRejectedError extends Error {
   }
 }
 
+const MEDIA_LEASE_VERSION = 1
+const MEDIA_LEASE_ID_HEX_LENGTH = 32
+const MEDIA_LEASE_TOKEN_BYTES = 32
+
+/** One short-lived, local-only capability for the QQ Bridge PCM gateway. */
+export interface QQNTMediaLease {
+  version: 1
+  socketPath: string
+  leaseId: string
+  token: Uint8Array
+  /** Monotonic gateway expiry; only the gateway compares it to its local clock. */
+  expiry: number
+}
+
 export class QQNTClient {
   readonly endpoint: string
   readonly webSocketEndpoint: string
@@ -50,6 +64,20 @@ export class QQNTClient {
 
   status(): Promise<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }> {
     return this.json('/status')
+  }
+
+  async mediaLease(callId: string): Promise<QQNTMediaLease> {
+    try {
+      const response = await this.fetchImpl(`${this.endpoint}/calls/media-lease`, {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ callId }),
+      })
+      if (!response.ok) throw new Error('media lease request rejected')
+      return parseMediaLease(await response.json())
+    } catch {
+      throw new Error('QQNT media lease request failed')
+    }
   }
 
   getDialogs(
@@ -660,6 +688,44 @@ async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Pro
     throw new Error(`incomplete media source: expected ${source.size} bytes, streamed ${size}`)
   }
   return { size, md5: md5.digest('hex'), sha1: sha1.digest('hex'), file10MMd5: first10M.digest('hex') }
+}
+
+function parseMediaLease(value: unknown): QQNTMediaLease {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid media lease')
+  const lease = value as Record<string, unknown>
+  const socketPath = lease.socketPath
+  const leaseId = lease.leaseId
+  const encodedToken = lease.token
+  const expiry = lease.expiry
+  if (lease.version !== MEDIA_LEASE_VERSION
+    || typeof socketPath !== 'string'
+    || !isAbsoluteUnixPath(socketPath)
+    || typeof leaseId !== 'string'
+    || !new RegExp(`^[0-9a-f]{${MEDIA_LEASE_ID_HEX_LENGTH}}$`).test(leaseId)
+    || typeof encodedToken !== 'string'
+    || !/^[A-Za-z0-9_-]{43}$/.test(encodedToken)
+    || typeof expiry !== 'number'
+    || !Number.isSafeInteger(expiry)
+    || expiry < 0) {
+    throw new Error('invalid media lease')
+  }
+  const token = Buffer.from(encodedToken, 'base64url')
+  try {
+    if (token.byteLength !== MEDIA_LEASE_TOKEN_BYTES) throw new Error('invalid media lease')
+    return {
+      version: MEDIA_LEASE_VERSION,
+      socketPath,
+      leaseId,
+      token: new Uint8Array(token),
+      expiry,
+    }
+  } finally {
+    token.fill(0)
+  }
+}
+
+function isAbsoluteUnixPath(value: string): boolean {
+  return value.startsWith('/') && value.length <= 4_096 && !value.includes('\0')
 }
 
 function queryString(query: Record<string, string | number | undefined>): string {

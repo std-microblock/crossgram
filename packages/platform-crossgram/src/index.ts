@@ -11,10 +11,14 @@ import {
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput,
   type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMTransferOptions,
   type IMSticker, type IMStickerAsset, type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
+  type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
 } from '@mtproto-relay/bridge'
 import { QQNTClient, QQNTMessageSendRejectedError, type QQNTClientOptions } from './client.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
+import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
+import { QQVoiceMedia } from './voice-media.js'
+import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
 import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import type {
   QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
@@ -98,6 +102,7 @@ class QQNTEventHandlingError extends Error {
 }
 
 export function apply(ctx: Context, config: Config = {}): void {
+  const voiceMedia = new QQVoiceMedia(ctx)
   const id = resolvePlatformPluginId(ctx, 'qqnt')
   const stickerProviderId = `${id}:stickers`
   defineQQNTEventCheckpointModel(ctx)
@@ -110,7 +115,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     database: ctx.database,
   })
   const logger = ctx.logger('platform-qqnt')
-  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger, ctx.database)
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger, ctx.database, voiceMedia)
   ctx.imPlatform.register(platform, id)
   ctx.imSticker.register(
     new QQStickerProvider(platform.client, stickerProviderId, mediaCache, logger, id),
@@ -148,6 +153,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   readonly client: QQNTClient
+  readonly voiceMedia?: VoiceCallMediaProvider
+  private readonly database?: Database
+  private readonly qqVoiceMedia?: QQVoiceMedia
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
   private readonly firstUnreadSeq = new Map<string, string>()
   private readonly reactionResources = new Map<string, Uint8Array>()
@@ -180,14 +188,43 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     private readonly stickerProviderId = 'qqnt:stickers',
     private readonly mediaCache?: QQMediaCache,
     private readonly logger?: Logger,
-    private readonly database?: Database,
+    databaseOrVoiceMedia?: Database | QQVoiceMedia,
+    qqVoiceMedia?: QQVoiceMedia,
   ) {
+    const legacyVoiceMedia = qqVoiceMedia ? undefined
+      : typeof (databaseOrVoiceMedia as QQVoiceMedia | undefined)?.start === 'function'
+        ? databaseOrVoiceMedia as QQVoiceMedia
+        : undefined
+    this.database = legacyVoiceMedia ? undefined : databaseOrVoiceMedia as Database | undefined
+    this.qqVoiceMedia = qqVoiceMedia ?? legacyVoiceMedia
     this.client = new QQNTClient({
       ...options,
       token: options.token ?? process.env.QQNT_BRIDGE_TOKEN,
     })
+    if (this.qqVoiceMedia) {
+      this.voiceMedia = { start: (call, _session, endpoint) => this.startVoiceMedia(call, endpoint) }
+    }
     this.memberName = options.memberName ?? 'groupAlias'
     this.grayTipFilters = options.grayTipFilters ?? DEFAULT_GRAY_TIP_FILTERS
+  }
+
+  private async startVoiceMedia(call: VoiceWorkerCall, endpoint: VoiceWorkerMediaEndpoint) {
+    if (typeof endpoint.send !== 'function'
+      || typeof endpoint.receive !== 'function'
+      || typeof endpoint.close !== 'function') {
+      throw new Error('worker PCM endpoint is unavailable')
+    }
+    const lease = await this.client.mediaLease(call.callId)
+    try {
+      return await this.qqVoiceMedia!.start(new QQBridgePcmTransport(lease.socketPath), {
+        callId: call.callId,
+        leaseId: lease.leaseId,
+        token: lease.token,
+      })
+    } finally {
+      // The media service consumes the token; this also covers invalid transport setup.
+      lease.token.fill(0)
+    }
   }
 
   async getAccount() {
@@ -2172,5 +2209,17 @@ async function mapConcurrent<T, R>(
 }
 
 export type { QQMediaLocator } from './protocol.js'
-export { QQNTClient } from './client.js'
+export { QQNTClient, type QQNTMediaLease } from './client.js'
+export {
+  QQBridgePcmTransport, QQBridgePcmTransportError,
+  type QQBridgePcmTransportOptions,
+} from './qq-bridge-pcm-transport.js'
 export { QQStickerProvider } from './sticker-provider.js'
+export {
+  QQVoiceMedia, QQVoiceMediaClient, QQVoiceMediaClosedError, QQVoiceMediaSession, QQVoiceMediaTimeoutError,
+  QQVoiceMediaTransportError,
+  QQ_VOICE_PCM_FORMAT, QQ_VOICE_PCM_QUEUE_CAPACITY,
+  type QQVoiceMediaConnection, type QQVoiceMediaConnectOptions, type QQVoiceMediaOperationOptions,
+  type QQVoiceMediaSessionContext, type QQVoiceMediaStartOptions, type QQVoiceMediaStats,
+  type QQVoiceMediaTransport, type QQVoicePcmFrame,
+} from './voice-media.js'
