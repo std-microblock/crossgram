@@ -22,7 +22,7 @@ import { QQStickerProvider } from './sticker-provider.js'
 const session: PlatformSession = {
   platformSessionId: 'qqnt-order-e2e', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
 }
-const disposals: Array<() => Promise<void>> = []
+const disposals: Unsubscribe[] = []
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
