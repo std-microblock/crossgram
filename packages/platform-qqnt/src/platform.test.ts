@@ -1924,6 +1924,9 @@ describe('QQNTPlatform mapping', () => {
     platform.client.setMessageReactions = vi.fn(async () => ({
       reactions: [{ key: '1:14', count: 1, selected: true }], maxSelected: 20,
     }))
+    await vi.waitFor(async () => expect((await platform.getAvailableReactions(
+      session, { conversationId: '2:g' },
+    )).available).toHaveLength(3), { timeout: 5_000 })
     const catalog = await platform.getAvailableReactions(session, { conversationId: '2:g' })
     expect(catalog).toMatchObject({
       available: [{
