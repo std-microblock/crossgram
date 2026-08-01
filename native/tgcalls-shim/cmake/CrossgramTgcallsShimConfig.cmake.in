@@ -1,0 +1,21 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+if(@CROSSGRAM_TGCALLS_SHIM_ENABLE_ARTIFACT@)
+  find_dependency(PkgConfig)
+  find_dependency(tg_owt CONFIG)
+  find_dependency(OpenSSL)
+  find_dependency(ZLIB)
+  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavfilter libavformat libavutil libswresample libswscale)
+  pkg_check_modules(RNNOISE REQUIRED IMPORTED_TARGET rnnoise)
+
+  if(NOT TARGET crossgram_tgcalls_artifact)
+    add_library(crossgram_tgcalls_artifact STATIC IMPORTED)
+    set_target_properties(crossgram_tgcalls_artifact PROPERTIES
+      IMPORTED_LOCATION "@CROSSGRAM_TGCALLS_ARTIFACT_ROOT@/lib/liblib_tgcalls.a"
+      INTERFACE_INCLUDE_DIRECTORIES "@CROSSGRAM_TGCALLS_ARTIFACT_ROOT@/include")
+  endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/CrossgramTgcallsShimTargets.cmake")
