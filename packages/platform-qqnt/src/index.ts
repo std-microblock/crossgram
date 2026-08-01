@@ -15,7 +15,6 @@ import {
 } from '@mtproto-relay/bridge'
 import { QQNTClient, QQNTMessageSendRejectedError, type QQNTClientOptions } from './client.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
-import { QQNTClient, type QQNTClientOptions } from './client.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { QQVoiceMedia } from './voice-media.js'
 import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
