@@ -53,7 +53,7 @@
 - [x] 商店包 `股市风云`（provider `qqnt:stickers`、pack `11474`、set ID `1025487121`）可在 App 内安装，24 个 document 完整可见。
 - [x] 卸载真实 E2E 通过：DB `uninstalled=1`，force-stop/restart 后只剩收藏夹，商店包不会被重新恢复。
 - [x] recent sticker 冷启动重发真实 E2E 通过：document `1167901003`，首次 TL message `1082059815`，冷启动后从 recent 再发 TL message `1082059975`，两次均为同一 document。
-- [x] 测试消息发送到用户允许的 conversation `479613101`，未向无关会话发送测试内容。
+- [x] 真实发信测试已结束；后续如需复测，仅允许使用调试专用群 `1084013940`，禁止在其他群或大群调试。
 - [x] Android driver 的卸载 tombstone、冷启动不恢复、recent 写入及重发断言已合入 `main`；14/14 runner/source tests 通过，新 APK 已构建并安装到 AVD。
 
 ## 发布与回归
@@ -65,7 +65,7 @@
 - [x] QQNT bridge v1.0.11 已部署，ready=true、protocolVersion=19；生产资源 API 和视频缩略图复测通过。
 - [x] QQNT bridge 可靠性改动已与 voice-call relay 主线整合并推送 `master`（`69bcce7`）。
 - [x] Android sticker lifecycle E2E 已合并并推送 `main`（`8482e27`）。
-- [x] 最新生产资源占用约为 Crossgram 1.03 GiB、QQNT bridge 381 MiB、swap 492 MiB；两项 systemd 服务 `NRestarts=0`。
+- [x] 最终轻量审计时生产资源占用约为 Crossgram 1.08 GiB、QQNT bridge 432 MiB、swap 493 MiB；两项 systemd 服务均为 active 且 `NRestarts=0`。
 - [x] 已停止临时 relay、SSH tunnel 和远端 `crossgram-e2e-qqnt-proxy.service`，并删除临时代理脚本与本地 E2E 配置/截图目录。
 - [x] 本文已合入 Crossgram `main`；本次任务的三个 feature worktree、本地分支和远端临时分支均已删除。
 
