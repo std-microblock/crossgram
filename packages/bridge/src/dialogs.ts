@@ -2729,6 +2729,7 @@ export class DialogRpc {
   private async _hydrateAllMessages(): Promise<void> {
     await this._hydrateUsers()
     const dialogs = await this._loadDialogs()
+    await this._persistDirectDialogUsers(dialogs)
     await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
   }
 
@@ -2787,6 +2788,16 @@ export class DialogRpc {
     const changed = unique.filter((user) => storedUserNeedsUpdate(this._storedUsers.get(user.id), user))
     if (!changed.length) return
     for (const row of await this._store.upsertUsers(this._session, changed)) this._registerUser(row)
+  }
+
+  private async _persistDirectDialogUsers(dialogs: readonly IMDialog[]): Promise<void> {
+    await this._persistUsers(dialogs
+      .filter((dialog) => dialog.conversation.kind === 'direct')
+      .map((dialog) => ({
+        id: dialog.conversation.id,
+        firstName: dialog.conversation.title,
+        avatar: dialog.conversation.avatar,
+      })))
   }
 
   private _registerUser(row: IMUserRow): void {
