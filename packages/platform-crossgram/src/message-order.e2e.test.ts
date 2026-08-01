@@ -235,6 +235,106 @@ describe('QQNT same-second message ordering E2E', () => {
 })
 
 describe('QQNT durable event checkpoint E2E', () => {
+  it('advances past an unknown reaction target and delivers the following message', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQNTEventCheckpointModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    const server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    webSocketServer.on('connection', (webSocket) => {
+      const conversation = {
+        id: 'reaction-gap-group', kind: 'group', title: 'Reaction gap group',
+        peerUid: 'reaction-gap-group', peerUin: '20', chatType: 2,
+      } as const
+      webSocket.send(JSON.stringify({
+        id: '20',
+        event: {
+          type: 'message-reactions', eventId: 'unknown-reaction', conversation,
+          target: { messageId: 'outside-history' }, timestamp: 20,
+          context: {
+            available: [{ key: 'like', presentation: { type: 'emoji', emoticon: '👍' } }],
+            reactions: [{ key: 'like', count: 1 }], maxSelected: 20,
+          },
+        },
+      }))
+      webSocket.send(JSON.stringify({
+        id: '21',
+        event: {
+          type: 'message', conversation,
+          message: {
+            id: 'message-after-reaction-gap', conversationId: conversation.id,
+            senderId: 'sender', timestamp: 21, outgoing: false,
+            parts: [{ type: 'text', text: 'delivered after ignored reaction' }],
+          },
+        },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing reaction gap test address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const checkpointSession = { ...session, platformSessionId: 'qqnt-reaction-gap-e2e' }
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    }, 'qqnt:stickers', undefined, undefined, ctx.database)
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [], reactions: [], maxSelected: 20,
+    }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const store = new MessageStore(ctx.database)
+    const delivered = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(checkpointSession, async (event) => {
+      if (event.type === 'message-reactions') {
+        await store.setReactions(checkpointSession, event.conversation, event.target, event.context)
+      } else if (event.type === 'message') {
+        await store.ingest(checkpointSession, event.conversation, event.message)
+        delivered.resolve()
+      }
+    })
+    try {
+      await Promise.race([
+        delivered.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('reaction gap E2E timed out')), 5_000)),
+      ])
+      await vi.waitFor(async () => expect(await ctx.database.get(
+        'mtproto_qqnt_event_checkpoint', { platformSessionId: checkpointSession.platformSessionId },
+      )).toMatchObject([{ lastEventId: '21' }]))
+      await expect(ctx.database.get('mtproto_im_message', {})).resolves.toMatchObject([{
+        primaryPlatformMessageId: 'message-after-reaction-gap',
+      }])
+    } finally {
+      await unsubscribe()
+    }
+  })
+
   it('resumes after the last committed event and never skips a failed event', async () => {
     const ctx = new Context()
     const fibers = [

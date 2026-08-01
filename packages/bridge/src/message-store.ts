@@ -513,7 +513,7 @@ export class MessageStore {
     conversation: IMConversation,
     target: IMMessageTarget,
     context: IMReactionContext,
-  ): Promise<ReactionResult> {
+  ): Promise<ReactionResult | undefined> {
     return this._write(() => this._database.withTransaction(async (database) => {
       const conversationRow = await this._upsertConversation(database, session, conversation, undefined, new Date())
       const [alias] = await database.get('mtproto_im_message_alias', {
@@ -521,9 +521,13 @@ export class MessageStore {
         conversationId: conversationRow.id,
         platformMessageId: target.targetId,
       })
-      if (!alias) throw new Error(`reaction target is not stored: ${target.targetId}`)
+      // QQNT may emit reaction changes for messages outside the relay's stored
+      // history window. They are legitimate stream events and must not pin the
+      // durable WebSocket checkpoint forever. If that message is loaded later,
+      // its history projection carries the current reaction state.
+      if (!alias) return
       const [row] = await database.get('mtproto_im_message', { id: alias.messageId })
-      if (!row || row.deleted) throw new Error(`reaction target message is unavailable: ${target.targetId}`)
+      if (!row || row.deleted) return
       const before = await database.select('mtproto_im_message_reaction', { messageId: row.id })
         .orderBy('nativeReactionKey').execute()
       await this._replaceReactions(database, row.id, context, new Date())

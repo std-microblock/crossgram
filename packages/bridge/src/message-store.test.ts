@@ -177,6 +177,22 @@ describe('MessageStore', () => {
     await expect(ctx.database.get('mtproto_im_message_reaction', {})).resolves.toEqual([])
   })
 
+  it('ignores reactions for messages outside the stored history window', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'reaction-history-miss', kind: 'group' as const, title: 'Group' }
+
+    await expect(store.setReactions(session, conversation, {
+      conversationId: conversation.id, messageId: 'not-stored', targetId: 'not-stored',
+    }, {
+      available: [{ key: 'like', presentation: { type: 'emoji', emoticon: '👍' } }],
+      reactions: [{ key: 'like', count: 1 }],
+      maxSelected: 20,
+    })).resolves.toBeUndefined()
+
+    await expect(ctx.database.get('mtproto_im_message_reaction', {})).resolves.toEqual([])
+    await expect(ctx.database.get('mtproto_im_conversation', {})).resolves.toHaveLength(1)
+  })
+
   it('persists a direct peer before projecting an outgoing first event', async () => {
     const { store } = await createStore()
     const conversation = {

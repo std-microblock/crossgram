@@ -253,7 +253,7 @@ export class PlatformSubscriptionManager {
       return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'message-reactions') {
       const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
-      return this._onEvent?.(session, { event, result }, options)
+      if (result) return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'read') {
       const result = await this._store.markRead(session, event.conversationId, event.upToMessageId)
       if (result) return this._onEvent?.(session, { event, result }, options)
