@@ -4130,6 +4130,10 @@ export class DialogRpc {
     if (!ref) return
     const target = this._conversation(ref.conversationId)
     if (target.id !== displayConversationId && target.parentId !== displayConversationId) return
+    // Linked merged-forward histories are synthetic, read-only conversations.
+    // Forwarding their generated conversation IDs to an adapter can make the
+    // upstream platform treat those IDs as real peers and create ghost chats.
+    if (this._isVirtualConversation(target)) return
     await this._platform.markRead(this._session, {
       conversationId: target.id,
       messageId: ref.id,
