@@ -67,7 +67,7 @@
 - [x] Android sticker lifecycle E2E 已合并并推送 `main`（`8482e27`）。
 - [x] 最新生产资源占用约为 Crossgram 1.03 GiB、QQNT bridge 381 MiB、swap 492 MiB；两项 systemd 服务 `NRestarts=0`。
 - [x] 已停止临时 relay、SSH tunnel 和远端 `crossgram-e2e-qqnt-proxy.service`，并删除临时代理脚本与本地 E2E 配置/截图目录。
-- [ ] 将本文合入 Crossgram `main`，并删除已合并的 worktree/临时分支。
+- [x] 本文已合入 Crossgram `main`；本次任务的三个 feature worktree、本地分支和远端临时分支均已删除。
 
 ## 证据
 
