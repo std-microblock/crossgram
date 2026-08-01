@@ -451,6 +451,56 @@ describe('QQNTPlatform mapping', () => {
     }))
   })
 
+  it('filters and cleans temporary merged-forward peers without calling QQNT peer APIs', async () => {
+    const temporaryId = 'qqnt-multi-forward:["633125440","7668634613890478612",""]'
+    const remove = vi.fn(async () => {})
+    const database = {
+      withTransaction: vi.fn(async (callback: (database: any) => Promise<void>) => callback({
+        get: vi.fn(async (table: string, query: any) => {
+          if (table === 'mtproto_im_conversation') return [{
+            id: 41, platformSessionId: session.platformSessionId,
+            platformConversationId: temporaryId,
+          }]
+          if (table === 'mtproto_im_message' && query.conversationId) return [{ id: 51, conversationId: 41 }]
+          if (table === 'mtproto_im_message') return []
+          if (table === 'mtproto_im_user') return [{
+            id: 61, platformId: session.platformId, platformUserId: temporaryId,
+          }]
+          return []
+        }),
+        remove,
+      })),
+    }
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, database as any)
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: temporaryId, kind: 'direct' as const, title: temporaryId,
+      peerUid: temporaryId, peerUin: '', chatType: 1 as const,
+    }, {
+      id: 'real-group', kind: 'group' as const, title: 'Real group',
+      peerUid: 'real-group', peerUin: '10001', chatType: 2 as const,
+    }] }))
+    platform.client.getConversation = vi.fn()
+    platform.client.getHistory = vi.fn()
+    platform.client.markRead = vi.fn()
+
+    await expect(platform.getDialogs(session)).resolves.toMatchObject({
+      dialogs: [{ conversation: { id: 'real-group', title: 'Real group' } }],
+    })
+    await expect(platform.getConversation(session, temporaryId)).resolves.toBeNull()
+    await expect(platform.getHistory(session, { id: temporaryId })).resolves.toEqual({ messages: [] })
+    await expect(platform.markRead(session, {
+      conversationId: temporaryId, messageId: 'inside-forward',
+    })).resolves.toBeUndefined()
+
+    expect(platform.client.getConversation).not.toHaveBeenCalled()
+    expect(platform.client.getHistory).not.toHaveBeenCalled()
+    expect(platform.client.markRead).not.toHaveBeenCalled()
+    expect(remove).toHaveBeenCalledWith('mtproto_im_message_reaction', { messageId: { $in: [51] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_im_conversation', { id: { $in: [41] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_im_user', { id: { $in: [61] } })
+  })
+
   it('downloads merged-forward files through the physical outer QQ conversation', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))

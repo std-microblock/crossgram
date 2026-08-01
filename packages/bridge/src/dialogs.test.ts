@@ -1060,11 +1060,15 @@ describe('DialogRpc', () => {
       _: 'channels.getFullChannel',
       channel: { _: 'inputChannel', channelId: temporaryId, accessHash: Long.ZERO },
     })).rejects.toMatchObject({ code: 400, text: 'CHANNEL_INVALID' } satisfies Partial<RpcError>)
-    await expect(freshRpc.getHistory(getHistoryRequest(temporaryId, { peer })))
-      .resolves.toMatchObject({ messages: [
+    const freshHistory = await freshRpc.getHistory(getHistoryRequest(temporaryId, { peer })) as tl.messages.RawMessages
+    expect(freshHistory).toMatchObject({ messages: [
         { _: 'message', message: 'work' },
         { _: 'message', message: 'forwarded content' },
       ] })
+    const newest = freshHistory.messages[0] as tl.RawMessage
+    await expect(freshRpc.readHistory({ _: 'messages.readHistory', peer, maxId: newest.id }))
+      .resolves.toMatchObject({ _: 'messages.affectedMessages' })
+    expect(platform.readTargets).toEqual([])
   })
 
   it('maps platform inline custom emoji entities to Telegram documents and back', async () => {
