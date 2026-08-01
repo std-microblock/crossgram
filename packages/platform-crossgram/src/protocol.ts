@@ -42,6 +42,13 @@ export interface WireMedia {
   width?: number
   height?: number
   duration?: number
+  preview?: {
+    mimeType?: string
+    size: number
+    width: number
+    height: number
+    locator: QQMediaLocator
+  }
   locator: QQMediaLocator
 }
 

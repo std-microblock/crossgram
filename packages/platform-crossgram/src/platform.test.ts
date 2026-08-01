@@ -2072,11 +2072,17 @@ describe('QQNTPlatform mapping', () => {
       messageId: 'm', elementId: 'e', chatType: 1 as const, peerUid: 'u',
       kind: 'file' as const, fileName: 'x.bin',
     }
+    const previewLocator = {
+      messageId: 'm', elementId: 'e', chatType: 1 as const, peerUid: 'u',
+      kind: 'image' as const, fileName: 'x.jpg', filePath: '/tmp/x.jpg',
+    }
     platform.client.sendMessage = vi.fn(async () => ({
       id: 'm', conversationId: '1:u', senderId: 'self', timestamp: 10, outgoing: true,
       parts: [{ type: 'media' as const, media: {
         id: 'e', kind: 'file' as const, name: 'clip.mp4', mimeType: 'video/mp4',
-        size: 3, width: 1280, height: 720, duration: 12, locator,
+        size: 3, width: 1280, height: 720, duration: 12,
+        preview: { mimeType: 'image/jpeg', size: 2, width: 1280, height: 720, locator: previewLocator },
+        locator,
       } }],
     }))
     const sent = await platform.sendMessage(session, { id: '1:u' }, {
@@ -2087,7 +2093,9 @@ describe('QQNTPlatform mapping', () => {
       } }],
     })
     expect(sent.content.parts[0]).toMatchObject({ media: {
-      mimeType: 'video/mp4', width: 1280, height: 720, duration: 12, locator,
+      mimeType: 'video/mp4', width: 1280, height: 720, duration: 12,
+      preview: { mimeType: 'image/jpeg', size: 2, width: 1280, height: 720, locator: previewLocator },
+      locator,
     } })
 
     platform.client.downloadFile = vi.fn(async function* (_locator, options) {

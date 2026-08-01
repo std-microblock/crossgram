@@ -1853,6 +1853,7 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
     width: input.width,
     height: input.height,
     duration: input.duration,
+    preview: input.preview,
     locator: input.locator,
   }
 }
