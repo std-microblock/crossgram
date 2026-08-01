@@ -2479,11 +2479,13 @@ describe('bridge login e2e', () => {
     }
     let virtualMemberCalls = 0
     let virtualReactionCalls = 0
+    const readTargets: Array<{ conversationId: string, messageId: string }> = []
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     const historyCalls: string[] = []
     const platform: bridge.IMPlatform = {
       capabilities: {
         history: true,
+        readState: { markRead: true, events: false },
         send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
         conversations: { groups: true, channels: false, subchannels: false },
         members: { list: true, administrators: true, permissions: true },
@@ -2523,6 +2525,9 @@ describe('bridge login e2e', () => {
       async getAvailableReactions() {
         virtualReactionCalls++
         throw new Error('virtual conversation must not query upstream reactions')
+      },
+      async markRead(_session, target) {
+        readTargets.push(target)
       },
     }
     const platformId = 'virtual-preview-e2e'
@@ -2621,6 +2626,10 @@ describe('bridge login e2e', () => {
         } },
       })
       expect(historyCalls).toEqual([parent.id, virtual.id])
+      await expect(callRpc(fresh, key, freshSid, {
+        _: 'messages.readHistory', peer, maxId: outerHistory.messages[0].id,
+      }, 12)).resolves.toMatchObject({ _: 'messages.affectedMessages' })
+      expect(readTargets).toEqual([])
       expect(await callRpc(fresh, key, freshSid, {
         _: 'contacts.resolveUsername', username: `bridgechat_${innerChat.id}`,
       }, 13)).toMatchObject({
