@@ -302,17 +302,23 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
-  it('rejects bridge-local file paths without issuing a download request', async () => {
-    const fetch = vi.fn()
-    const client = new QQNTClient({ fetch })
+  it('downloads bridge-local media paths through the authenticated asset route', async () => {
+    const fetch = vi.fn(async (input, init) => {
+      expect(String(input)).toBe('http://bridge.invalid/v1/files/asset')
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer bridge-token')
+      expect(new Headers(init?.headers).get('range')).toBe('bytes=1-3')
+      expect(JSON.parse(String(init?.body))).toMatchObject({ filePath: 'C:\\qq\\s14.png' })
+      return new Response('bcd', { status: 206 })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', token: 'bridge-token', fetch })
     const locator = {
       messageId: 'reaction:C:\\qq\\s14.png', elementId: 'reaction:C:\\qq\\s14.png',
       chatType: 1 as const, peerUid: '', kind: 'image' as const,
       fileName: 's14.png', filePath: 'C:\\qq\\s14.png', fileSize: '5',
     }
     await expect(collect(client.downloadFile(locator, { offset: 1, limit: 3 })))
-      .rejects.toThrow('no remote direct-link identity')
-    expect(fetch).not.toHaveBeenCalled()
+      .resolves.toEqual(Buffer.from('bcd'))
+    expect(fetch).toHaveBeenCalledOnce()
   })
 
   it('downloads catalog-keyed reaction ranges through the dedicated authenticated route', async () => {

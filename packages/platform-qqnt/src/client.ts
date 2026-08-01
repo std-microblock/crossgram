@@ -393,7 +393,16 @@ export class QQNTClient {
     const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
     const avatarUrl = qqAvatarUrl(locator)
     let response: Response
-    if (avatarUrl || hasDirectUrlIdentity(locator)) {
+    if (locator.filePath && !avatarUrl) {
+      response = await this.fetchImpl(`${this.endpoint}/files/asset`, {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
+        body: JSON.stringify(locator),
+        signal: options.signal,
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      if (!response.body) throw new Error('QQNT media asset response has no body')
+    } else if (avatarUrl || hasDirectUrlIdentity(locator)) {
       const directUrl = avatarUrl ?? (await this.resolveFileUrl(locator, options.signal)).url
       response = await this.fetchImpl(directUrl, {
         headers: rangeHeaders,
