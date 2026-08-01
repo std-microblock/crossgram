@@ -2352,6 +2352,81 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
+  it('catches up every static channel after reconnect without opening the chats', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let initial: TestClient | undefined
+    let resumed: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      initial = await TestClient.connect(port)
+      const key = await doClientHandshake(initial, pubKey)
+      await ctx.database.upsert('mtproto_auth_binding', [{
+        authKeyId: Buffer.from(key.authKeyId).toString('hex'),
+        platformId: 'static', platformSessionId: platformLogin.session.id,
+      }])
+      const initialSid = new Long(0x3456789a, 0x3abc, false)
+      const before = await callRpc(initial, key, initialSid, { _: 'updates.getState' }, 8)
+      initial.close()
+      initial = undefined
+
+      const staticAdapter = ctx.imPlatform.require('static') as staticPlatformPlugin.StaticPlatform
+      const adapterSession = bridge.sessionFromRow(platformLogin.session)
+      await staticAdapter.emitMessage(
+        adapterSession,
+        { id: 'group-a', kind: 'group', title: 'Static Group A' },
+        {
+          id: 'offline-group-a', conversationId: 'group-a', senderId: 'alice',
+          timestamp: before.date + 1, content: { parts: [{ type: 'text', text: 'offline alpha' }] },
+        },
+      )
+      await staticAdapter.emitMessage(
+        adapterSession,
+        { id: 'group-b', kind: 'group', title: 'Static Group B' },
+        {
+          id: 'offline-group-b', conversationId: 'group-b', senderId: 'bob',
+          timestamp: before.date + 2, content: { parts: [{ type: 'text', text: 'offline beta' }] },
+        },
+      )
+
+      resumed = await TestClient.connect(port)
+      const resumedSid = new Long(0x456789ab, 0x4abc, false)
+      const difference = await callRpc(resumed, key, resumedSid, {
+        _: 'updates.getDifference', pts: before.pts, date: before.date, qts: before.qts,
+      }, 12)
+      expect(difference).toMatchObject({
+        _: 'updates.difference', newMessages: [],
+        otherUpdates: [
+          { _: 'updateChannelTooLong', pts: 2 },
+          { _: 'updateChannelTooLong', pts: 2 },
+        ],
+      })
+      const chatsById = new Map<string, string>(
+        difference.chats.map((chat: any): [string, string] => [String(chat.id), String(chat.title)]),
+      )
+      expect(difference.otherUpdates.map((update: any) => chatsById.get(String(update.channelId))).sort())
+        .toEqual(['Static Group A', 'Static Group B'])
+
+      const caughtUp = new Map<string, string>()
+      for (let index = 0; index < difference.otherUpdates.length; index++) {
+        const update = difference.otherUpdates[index]
+        const channelDifference = await callRpc(resumed, key, resumedSid, {
+          _: 'updates.getChannelDifference', force: true,
+          channel: { _: 'inputChannel', channelId: update.channelId, accessHash: Long.ZERO },
+          filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+        }, 20 + index * 2)
+        caughtUp.set(chatsById.get(String(update.channelId))!, channelDifference.newMessages.at(-1).message)
+      }
+      expect(Object.fromEntries(caughtUp)).toEqual({
+        'Static Group A': 'offline alpha',
+        'Static Group B': 'offline beta',
+      })
+    } finally {
+      initial?.close()
+      resumed?.close()
+      await stop()
+    }
+  }, 30000)
+
   it('projects adjacent URL and mention boundaries without turning bare filenames into links', async () => {
     const conversation: bridge.IMConversation = {
       id: 'link-room', kind: 'group', title: 'Link boundary room',
@@ -2866,7 +2941,11 @@ describe('bridge login e2e', () => {
       expect(await callRpc(client, key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ pts: 1, seq: 3 })
       expect(await callRpc(client, key, sid, {
         _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
-      }, 11)).toMatchObject({ _: 'updates.differenceEmpty', seq: 3 })
+      }, 11)).toMatchObject({
+        _: 'updates.difference',
+        otherUpdates: [{ _: 'updateChannelTooLong', channelId: chatId, pts: 4 }],
+        state: { seq: 3 },
+      })
       const channelDifference = await callRpc(client, key, sid, {
         _: 'updates.getChannelDifference', force: true,
         channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
