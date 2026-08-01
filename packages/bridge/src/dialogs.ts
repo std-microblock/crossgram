@@ -152,7 +152,7 @@ export class DialogRpc {
   private readonly _searchCursors = new Map<string, string>()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
-  private _peersHydratedStoreRevision = -1
+  private _peersHydratedPeerRevision = -1
   private _dialogProjectionStoreRevision = -1
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
@@ -2827,7 +2827,7 @@ export class DialogRpc {
     if (
       !force
       && Date.now() - this._peersHydratedAt < DialogRpc.PEER_HYDRATION_TTL_MS
-      && (!this._store || this._peersHydratedStoreRevision === this._store.revision)
+      && (!this._store || this._peersHydratedPeerRevision === this._store.peerRevision)
     ) return
     if (this._peerHydration) return this._peerHydration
 
@@ -2860,7 +2860,7 @@ export class DialogRpc {
         ...dialogs.map((dialog) => dialog.conversation),
       ].flatMap((conversation) => conversation.kind === 'direct' ? [conversation.id] : []))
       this._peersHydratedAt = Date.now()
-      this._peersHydratedStoreRevision = this._store?.revision ?? -1
+      this._peersHydratedPeerRevision = this._store?.peerRevision ?? -1
     })()
     this._peerHydration = pending
     try {
@@ -4524,6 +4524,11 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   // access_hash is zero.
   const accessHash = Long.fromNumber(media.id)
   const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
+  const dimensions = media.width && media.height
+    ? { width: media.width, height: media.height }
+    : media.preview
+      ? { width: media.preview.width, height: media.preview.height }
+      : { width: 1, height: 1 }
   if (media.kind === 'image') {
     return {
       _: 'messageMediaPhoto',
@@ -4534,7 +4539,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
             _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
           }] : []),
           {
-            _: 'photoSize', type: 'x', w: media.width ?? 1, h: media.height ?? 1,
+            _: 'photoSize', type: 'x', w: dimensions.width, h: dimensions.height,
             size: Math.min(media.size ?? 0, 0x7fffffff),
           },
         ],
@@ -4549,7 +4554,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
     _: 'documentAttributeVideo',
     nosound: media.mimeType === 'video/webm' ? true : undefined,
     supportsStreaming: true,
-    duration: media.duration ?? 0, w: media.width ?? 1, h: media.height ?? 1,
+    duration: media.duration ?? 0, w: dimensions.width, h: dimensions.height,
   })
   return {
     _: 'messageMediaDocument',

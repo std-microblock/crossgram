@@ -9,7 +9,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, projectTlMessage, stableId } from './dialogs.js'
+import { DialogRpc, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { UploadManager } from './upload-manager.js'
@@ -194,6 +194,24 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('rich-media projection', () => {
+  it('uses preview dimensions when the upstream image omitted its original size', () => {
+    const projected = makeTlMessageMedia({
+      id: 1, messageId: 1, ordinal: 0, partIndex: 0, platformMediaId: 'missing-dimensions',
+      kind: 'image', name: 'wide.jpg', mimeType: 'image/jpeg', size: 100,
+      width: null, height: null, duration: null,
+      preview: {
+        mimeType: 'image/webp', size: 20, width: 320, height: 180,
+        locator: { previewKey: 'wide-preview' },
+      },
+      strippedThumbnail: null, locator: { remote: 'wide-original' },
+    }, 1)
+
+    expect(projected).toMatchObject({
+      _: 'messageMediaPhoto',
+      photo: { _: 'photo', sizes: [{ _: 'photoSize', type: 'x', w: 320, h: 180 }] },
+    })
+  })
+
   it('persists a native reply when the platform send response does not echo its reply ID', async () => {
     const { store, peerId } = await createStore()
     const sendMessage = vi.fn(async (): Promise<IMMessage> => ({

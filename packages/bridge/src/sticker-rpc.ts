@@ -137,13 +137,15 @@ export class StickerRpc {
       platformSessionId: this._session.platformSessionId,
       attached: req.attached ?? false,
     }).orderBy('lastUsedAt', 'desc').limit(200).execute()
-    const resolved = await this._resolveRows(rows)
+    const resolvedRows = await this._resolveRowsWithRows(rows)
+    const resolved = resolvedRows.map((item) => item.resolved)
     return {
       _: 'messages.recentStickers',
-      hash: Long.fromNumber(catalogHash(rows.map((row) => `${row.providerId}:${row.providerStickerId}:${row.useCount}`))),
+      hash: Long.fromNumber(catalogHash(resolvedRows.map(({ row }) =>
+        `${row.providerId}:${row.providerStickerId}:${row.useCount}`))),
       packs: stickerPacks(resolved),
       stickers: resolved.map((item) => this._makeDocument(item)),
-      dates: resolved.map((_, index) => Math.floor(rows[index]!.lastUsedAt.getTime() / 1000)),
+      dates: resolvedRows.map(({ row }) => Math.floor(row.lastUsedAt.getTime() / 1000)),
     }
   }
 
@@ -518,12 +520,23 @@ export class StickerRpc {
   }
 
   private async _resolveRows(rows: Array<{ providerId: string, providerStickerId: string }>): Promise<ResolvedSticker[]> {
-    const result: ResolvedSticker[] = []
+    return (await this._resolveRowsWithRows(rows)).map((item) => item.resolved)
+  }
+
+  private async _resolveRowsWithRows<T extends { providerId: string, providerStickerId: string }>(
+    rows: T[],
+  ): Promise<Array<{ row: T, resolved: ResolvedSticker }>> {
+    const result: Array<{ row: T, resolved: ResolvedSticker }> = []
     for (const row of rows) {
       const provider = this._registry.get(row.providerId)
       if (!provider) continue
-      const sticker = await provider.getSticker(this._context(), row.providerStickerId)
-      if (sticker) result.push({ providerId: row.providerId, provider, sticker: { ...sticker, providerId: row.providerId } })
+      const sticker = await provider.getSticker(this._context(), row.providerStickerId).catch(() => null)
+      if (sticker) result.push({
+        row,
+        resolved: {
+          providerId: row.providerId, provider, sticker: { ...sticker, providerId: row.providerId },
+        },
+      })
     }
     return result
   }
