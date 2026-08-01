@@ -253,6 +253,10 @@ export class QQMediaCache {
     )
   }
 
+  requiresAnimationProbe(media: IMMedia): boolean {
+    return media.kind === 'image' && (isAnimatedMedia(media) || mayBeAnimatedPng(media))
+  }
+
   async prepareInitialMedia(
     media: IMMedia<QQMediaLocator>,
     original: IMMediaSource,

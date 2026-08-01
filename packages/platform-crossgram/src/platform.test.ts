@@ -19,6 +19,12 @@ const session: PlatformSession = {
 
 const temporaryDirectories: string[] = []
 
+async function collect(source: AsyncIterable<Uint8Array>): Promise<Uint8Array[]> {
+  const chunks: Uint8Array[] = []
+  for await (const chunk of source) chunks.push(chunk)
+  return chunks
+}
+
 afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllEnvs()
@@ -190,6 +196,34 @@ describe('QQNTPlatform mapping', () => {
 
     expect(history.messages[0]).toMatchObject({ id: 'fast-history' })
     expect(performance.now() - started).toBeLessThan(250)
+  })
+
+  it('serves an empty reaction catalog immediately and backs off after an upstream timeout', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-01T12:00:00Z'))
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => {
+      throw new Error('QQNT bridge 500: QQ reaction catalog request timed out')
+    })
+    const target = { conversationId: '2:group', messageId: 'message' }
+
+    await expect(platform.getAvailableReactions(session, target)).resolves.toEqual({
+      available: [], reactions: [], maxSelected: 20,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(platform.getAvailableReactions(session, target)).resolves.toEqual({
+      available: [], reactions: [], maxSelected: 20,
+    })
+    expect(platform.client.getReactionCatalog).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(59_999)
+    await platform.getAvailableReactions(session, target)
+    expect(platform.client.getReactionCatalog).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(1)
+    await platform.getAvailableReactions(session, target)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(2)
   })
 
   it('reuses prepared dialog previews when a stale page refresh returns unchanged messages', async () => {
@@ -1575,12 +1609,9 @@ describe('QQNTPlatform mapping', () => {
       media: {
         name: 'photo.png', mimeType: 'image/png',
         locator: expect.not.objectContaining({ cachedPath: expect.anything() }),
-        preview: {
-          mimeType: 'image/webp', width: 6, height: 4,
-          locator: { previewKey: expect.any(String) },
-        },
       },
     })
+    expect((received as any[]).every((event) => !event.message.content.parts[0].media.preview)).toBe(true)
   })
 
   it('does not resolve a generated preview to the original QQ image URL', async () => {
@@ -1607,7 +1638,7 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(1)
   })
 
-  it('returns uncached history images as same-size empty placeholders and edits them when ready', async () => {
+  it('returns uncached history images as downloadable originals and warms previews without edits', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-placeholder-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
@@ -1618,7 +1649,7 @@ describe('QQNTPlatform mapping', () => {
     }).jpeg().toBuffer()
     const releaseDownload = Promise.withResolvers<void>()
     const downloadStarted = Promise.withResolvers<void>()
-    const edited = Promise.withResolvers<any>()
+    const events: any[] = []
     const wireMessage = {
       id: 'history-image', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
       parts: [{
@@ -1645,39 +1676,30 @@ describe('QQNTPlatform mapping', () => {
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
     })
     const unsubscribe = await platform.subscribe(session, (event) => {
-      if (event.type === 'message-edit') edited.resolve(event)
+      events.push(event)
     })
 
     const history = await platform.getHistory(session, { id: '2:group' })
-    const placeholder = (history.messages[0].content.parts[0] as any).media
-    expect(placeholder).toMatchObject({
+    const original = (history.messages[0].content.parts[0] as any).media
+    expect(original).toMatchObject({
       kind: 'image', size: jpeg.length, width: 12, height: 8,
-      locator: { deferred: true },
+      locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
-    const placeholderBytes: Uint8Array[] = []
-    for await (const chunk of platform.downloadMedia(session, placeholder)) placeholderBytes.push(chunk)
-    expect(placeholderBytes).toEqual([])
 
     await downloadStarted.promise
     releaseDownload.resolve()
-    const update = await edited.promise
-    expect(update).toMatchObject({
-      type: 'message-edit',
-      eventId: 'qqnt-media-ready-v1:2:group:history-image',
-      message: { content: { parts: [{ media: {
-        kind: 'image', size: jpeg.length, width: 12, height: 8,
-        locator: expect.not.objectContaining({ deferred: expect.anything() }),
+    await vi.waitFor(async () => expect((await platform.getHistory(session, { id: '2:group' }))
+      .messages[0]).toMatchObject({
+      content: { parts: [{ media: {
         preview: { mimeType: 'image/webp', width: 6, height: 4 },
-      } }] } },
-    })
-
-    const cached = await platform.getHistory(session, { id: '2:group' })
-    expect((cached.messages[0].content.parts[0] as any).media.locator).not.toHaveProperty('deferred')
+      } }] },
+    }))
+    expect(events.filter((event) => event.type === 'message-edit')).toEqual([])
     expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
     await unsubscribe()
   })
 
-  it('publishes an animated image first, then edits it to immutable cached WebM', async () => {
+  it('publishes an animated image once as immutable cached WebM', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-animated-upgrade-'))
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
@@ -1714,28 +1736,20 @@ describe('QQNTPlatform mapping', () => {
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
     })
     const events: any[] = []
-    const upgraded = Promise.withResolvers<void>()
+    const received = Promise.withResolvers<void>()
     const unsubscribe = await platform.subscribe(session, (event) => {
       events.push(event)
-      if (event.type === 'message-edit') upgraded.resolve()
+      if (event.type === 'message') received.resolve()
     })
 
-    await upgraded.promise
+    await received.promise
     const history = await platform.getHistory(session, { id: '2:group' })
     await new Promise((resolve) => setTimeout(resolve, 10))
     await unsubscribe()
 
-    expect(events).toHaveLength(2)
+    expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({
       type: 'message',
-      message: { content: { parts: [{ media: {
-        id: 'animated-media:original-v1', kind: 'image', mimeType: 'image/gif',
-        locator: expect.not.objectContaining({ cachedPath: expect.anything() }),
-      } }] } },
-    })
-    expect(events[1]).toMatchObject({
-      type: 'message-edit',
-      eventId: 'qqnt-media-webm-v1:2:group:animated-message',
       message: { content: { parts: [{ media: {
         id: 'animated-media:original-v1:webm-v1', kind: 'file', mimeType: 'video/webm',
         locator: { cachedPath: expect.stringMatching(/\.webm$/) },
@@ -1744,10 +1758,10 @@ describe('QQNTPlatform mapping', () => {
     expect(history.messages[0]).toMatchObject({
       content: { parts: [{ media: { id: 'animated-media:original-v1:webm-v1', mimeType: 'video/webm' } }] },
     })
-    expect(platform.client.downloadFile).toHaveBeenCalledTimes(2)
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
   }, 30_000)
 
-  it('returns uncached history stickers as empty placeholders and edits them when ready', async () => {
+  it('returns uncached history stickers only after a valid asset is prepared, without edits', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-sticker-placeholder-'))
     temporaryDirectories.push(cachePath)
     const cache = new QQMediaCache({ path: cachePath, previewMaxDimension: 8 })
@@ -1758,7 +1772,7 @@ describe('QQNTPlatform mapping', () => {
     }).png().toBuffer()
     const releaseSource = Promise.withResolvers<void>()
     const sourceStarted = Promise.withResolvers<void>()
-    const edited = Promise.withResolvers<any>()
+    const events: any[] = []
     const wireMessage = {
       id: 'history-sticker', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
       parts: [{
@@ -1788,43 +1802,29 @@ describe('QQNTPlatform mapping', () => {
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
     })
     const unsubscribe = await platform.subscribe(session, (event) => {
-      if (event.type === 'message-edit') edited.resolve(event)
+      events.push(event)
     })
 
-    const history = await platform.getHistory(session, { id: '2:group' })
-    const part = history.messages[0].content.parts[0]
-    if (part.type !== 'sticker') throw new Error('missing history sticker placeholder')
-    expect(part.sticker).toMatchObject({
-      stickerId: 'favorite:history-sticker', format: 'static', mimeType: 'image/webp',
-      size: 0, locator: { deferred: true },
-    })
-    const callsBeforePlaceholderRead = vi.mocked(platform.client.stickerSource).mock.calls.length
-    const placeholderAsset = await provider.openAsset({ session, platformKind: 'qq' }, part.sticker)
-    const placeholderBytes: Uint8Array[] = []
-    for await (const chunk of placeholderAsset.source.stream()) placeholderBytes.push(chunk)
-    expect(placeholderAsset.size).toBe(0)
-    expect(placeholderBytes).toEqual([])
-    expect(platform.client.stickerSource).toHaveBeenCalledTimes(callsBeforePlaceholderRead)
-
+    const historyPromise = platform.getHistory(session, { id: '2:group' })
     await sourceStarted.promise
     releaseSource.resolve()
-    const update = await edited.promise
-    expect(update).toMatchObject({
-      type: 'message-edit',
-      eventId: 'qqnt-media-ready-v1:2:group:history-sticker',
-      message: { content: { parts: [{ sticker: {
-        stickerId: 'favorite:history-sticker', format: 'static', mimeType: 'image/webp',
-        size: expect.any(Number),
-        locator: expect.not.objectContaining({ deferred: expect.anything() }),
-        thumbnail: { mimeType: 'image/webp', width: 8, height: 6 },
-      } }] } },
+    const history = await historyPromise
+    const part = history.messages[0].content.parts[0]
+    if (part.type !== 'sticker') throw new Error('missing history sticker')
+    expect(part.sticker).toMatchObject({
+      stickerId: 'favorite:history-sticker', format: 'static', mimeType: 'image/webp',
+      size: expect.any(Number), locator: expect.not.objectContaining({ deferred: expect.anything() }),
+      thumbnail: { mimeType: 'image/webp', width: 8, height: 6 },
     })
+    const asset = await provider.openAsset({ session, platformKind: 'qq' }, part.sticker)
+    expect(await collect(asset.source.stream())).not.toHaveLength(0)
 
     const cached = await platform.getHistory(session, { id: '2:group' })
     expect(cached.messages[0].content.parts[0]).toMatchObject({
       sticker: { size: expect.any(Number), locator: expect.not.objectContaining({ deferred: expect.anything() }) },
     })
-    expect(platform.client.stickerSource).toHaveBeenCalledTimes(1)
+    expect(events.filter((event) => event.type === 'message-edit')).toEqual([])
+    expect(platform.client.stickerSource).toHaveBeenCalledTimes(2)
     await unsubscribe()
   })
 
@@ -2164,7 +2164,13 @@ describe('QQNTPlatform dialogs polling', () => {
     vi.useRealTimers()
   })
 
-  function conversation(id: string, withLastMessage = true, originRequestId?: string) {
+  function conversation(
+    id: string,
+    withLastMessage = true,
+    originRequestId?: string,
+    messageId = `${id}-message`,
+    timestamp = 1,
+  ) {
     return {
       id,
       kind: 'group' as const,
@@ -2174,7 +2180,7 @@ describe('QQNTPlatform dialogs polling', () => {
       chatType: 2 as const,
       ...(withLastMessage ? {
         lastMessage: {
-          id: `${id}-message`, conversationId: id, senderId: 'member', timestamp: 1, outgoing: false,
+          id: messageId, conversationId: id, senderId: 'member', timestamp, outgoing: false,
           originRequestId, parts: [{ type: 'text' as const, text: id }],
         },
       } : {}),
@@ -2268,6 +2274,58 @@ describe('QQNTPlatform dialogs polling', () => {
       type: 'message', conversation: { id: 'new-group' }, message: { id: 'new-group-message' },
     }])
     expect(events).toHaveLength(1)
+    await unsubscribe()
+  })
+
+  it('recovers a changed last message for an already known dialog', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    let latestId = 'existing-1'
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('existing', true, undefined, latestId, latestId === 'existing-1' ? 1 : 2)],
+    }))
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [conversation('existing', true, undefined, latestId, 2).lastMessage!],
+    }))
+    const events: any[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.advanceTimersByTimeAsync(0)
+    latestId = 'existing-2'
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(events).toMatchObject([{
+      type: 'message', conversation: { id: 'existing' }, message: { id: 'existing-2' },
+    }])
+    expect(platform.client.getHistory).toHaveBeenCalledWith('existing', {
+      afterId: 'existing-1', limit: 100,
+    })
+    await unsubscribe()
+  })
+
+  it('recovers every message between the previous and latest dialog cursors in order', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform()
+    mockSubscribe(platform)
+    let latestId = '100'
+    platform.client.getDialogs = vi.fn(async () => ({
+      conversations: [conversation('busy', true, undefined, latestId, Number(latestId))],
+    }))
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [
+        conversation('busy', true, undefined, '102', 102).lastMessage!,
+        conversation('busy', true, undefined, '101', 101).lastMessage!,
+      ],
+    }))
+    const events: any[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.advanceTimersByTimeAsync(0)
+    latestId = '102'
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(events.map((event) => event.message.id)).toEqual(['101', '102'])
     await unsubscribe()
   })
 

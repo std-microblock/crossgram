@@ -92,6 +92,7 @@ export class MessageStore {
   /** Serialize writes across every store facade sharing the same database. */
   private static readonly _writeTails = new WeakMap<Database, Promise<void>>()
   private _revision = 0
+  private _peerRevision = 0
   private readonly _latestMessages = new Map<number, IMMessageRow | undefined>()
   private _dialogCachePreparation?: Promise<void>
 
@@ -105,6 +106,11 @@ export class MessageStore {
   /** Monotonic process-local version used to invalidate materialized read caches. */
   get revision(): number {
     return this._revision
+  }
+
+  /** Monotonic version for conversation identity changes, excluding ordinary message traffic. */
+  get peerRevision(): number {
+    return this._peerRevision
   }
 
   async prepareDialogCache(): Promise<void> {
@@ -1237,6 +1243,13 @@ export class MessageStore {
       platformSessionId: session.platformSessionId,
       platformConversationId: conversation.id,
     })
+    const peerChanged = !existing
+      || existing.kind !== conversation.kind
+      || existing.title !== conversation.title
+      || existing.parentPlatformConversationId !== (conversation.parentId ?? null)
+      || existing.spacePlatformId !== (conversation.spaceId ?? null)
+      || JSON.stringify(existing.avatar) !== JSON.stringify(conversation.avatar ?? existing.avatar ?? null)
+      || JSON.stringify(existing.metadata) !== JSON.stringify(conversation.metadata ?? {})
     await database.upsert('mtproto_im_conversation', [{
       platformSessionId: session.platformSessionId,
       platformConversationId: conversation.id,
@@ -1254,6 +1267,7 @@ export class MessageStore {
       platformConversationId: conversation.id,
     })
     if (!row) throw new Error('failed to persist conversation')
+    if (peerChanged) this._peerRevision++
     return row
   }
 
@@ -1631,8 +1645,16 @@ export class MessageStore {
         metadata: { ...message.metadata, reactionMaxSelected: context.maxSelected },
       })
     }
-    const definitions = new Map(context.available.map((definition) => [definition.key, definition]))
-    const summaries = new Map(context.reactions.map((reaction) => [reaction.key, reaction]))
+    const summaries = new Map(context.reactions
+      .filter((reaction) => reaction.count > 0 || reaction.selected || reaction.recentActors?.length)
+      .map((reaction) => [reaction.key, reaction]))
+    // The account-level catalog is shared by every message. Persisting every
+    // available definition per message creates O(messages × catalog) rows and
+    // turns high-volume group traffic into a SQLite write storm. A message only
+    // needs definitions for reactions that actually occur on that message.
+    const definitions = new Map(context.available
+      .filter((definition) => summaries.has(definition.key))
+      .map((definition) => [definition.key, definition]))
     const keys = new Set(definitions.keys())
     const existing = await database.get('mtproto_im_message_reaction', { messageId })
     for (const stale of existing.filter((reaction) => !keys.has(reaction.nativeReactionKey))) {

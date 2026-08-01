@@ -151,6 +151,31 @@ describe('StickerRpc', () => {
     expect(provider.listSavedStickers).toHaveBeenCalledTimes(1)
   })
 
+  it('skips broken recent stickers without shifting the surviving sticker date', async () => {
+    const { rpc, provider, sticker, query } = stickerHarness()
+    const brokenAt = new Date('2026-08-01T11:00:00Z')
+    const validAt = new Date('2026-08-01T10:00:00Z')
+    vi.mocked(query.execute).mockResolvedValueOnce([{
+      id: 1, platformSessionId: 'session', providerId: 'qq:stickers', providerStickerId: 'broken',
+      attached: false, useCount: 9, lastUsedAt: brokenAt,
+    }, {
+      id: 2, platformSessionId: 'session', providerId: 'qq:stickers', providerStickerId: sticker.stickerId,
+      attached: false, useCount: 3, lastUsedAt: validAt,
+    }])
+    vi.mocked(provider.getSticker).mockImplementation(async (_context, stickerId) => {
+      if (stickerId === 'broken') throw new Error('temporary provider failure')
+      return sticker
+    })
+
+    const recent = await rpc.getRecentStickers({
+      _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO,
+    })
+    expect(recent).toMatchObject({
+      _: 'messages.recentStickers', stickers: [{ _: 'document' }],
+      dates: [Math.floor(validAt.getTime() / 1000)],
+    })
+  })
+
   it('coalesces summary catalogs without materializing every pack before it is opened', async () => {
     let release!: () => void
     const blocked = new Promise<void>((resolve) => { release = resolve })

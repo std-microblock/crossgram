@@ -728,8 +728,8 @@ describe('QQNT remote media routing E2E', () => {
   })
 })
 
-describe('QQNT deferred history media E2E', () => {
-  it('persists an empty placeholder immediately and replaces it after the HTTP image is cached', async () => {
+describe('QQNT history media without placeholder edits E2E', () => {
+  it('persists a downloadable original immediately and reuses a warmed HTTP preview on refresh', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -818,31 +818,30 @@ describe('QQNT deferred history media E2E', () => {
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
     })
     const store = new MessageStore(ctx.database)
-    const editCompleted = Promise.withResolvers<IngestResult>()
+    const edits: unknown[] = []
     const unsubscribe = await platform.subscribe(session, async (event) => {
-      if (event.type !== 'message-edit') return
-      editCompleted.resolve(await store.ingest(session, event.conversation, event.message))
+      if (event.type === 'message-edit') edits.push(event)
     })
 
     const history = await platform.getHistory(session, conversation)
     const initial = await store.ingest(session, conversation, history.messages[0], { allocation: 'history' })
     const mediaId = initial.projection[0].mediaId!
-    const placeholder = await store.getMedia(session.platformSessionId, mediaId)
-    expect(placeholder?.media).toMatchObject({
+    const original = await store.getMedia(session.platformSessionId, mediaId)
+    expect(original?.media).toMatchObject({
       kind: 'image', size: jpeg.length, width: 40, height: 24,
-      locator: { deferred: true },
+      locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
-    expect(await collect(platform.downloadMedia(session, placeholder!.media as any))).toHaveLength(0)
 
     await imageRequested.promise
     expect(directUrlRequests).toBe(1)
     expect(imageRequests).toBe(1)
     releaseImage.resolve()
-    const edited = await Promise.race([
-      editCompleted.promise,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('history media edit timed out')), 5_000)),
-    ])
-    expect(edited.projection[0]).toMatchObject({
+    await vi.waitFor(async () => expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1))
+    const refreshedHistory = await platform.getHistory(session, conversation)
+    const refreshed = await store.ingest(
+      session, conversation, refreshedHistory.messages[0], { allocation: 'history' },
+    )
+    expect(refreshed.projection[0]).toMatchObject({
       tlMessageId: initial.projection[0].tlMessageId,
       mediaId,
     })
@@ -855,10 +854,11 @@ describe('QQNT deferred history media E2E', () => {
     expect(await collect(platform.downloadMedia(session, ready!.media as any))).toEqual(jpeg)
     expect(await ctx.database.get('mtproto_im_media', {})).toHaveLength(1)
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
+    expect(edits).toEqual([])
     await unsubscribe()
   })
 
-  it('persists an empty sticker document and edits the same message after HTTP preparation', async () => {
+  it('persists a valid sticker document only after HTTP preparation, without editing the message', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -934,52 +934,41 @@ describe('QQNT deferred history media E2E', () => {
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
     })
     const store = new MessageStore(ctx.database)
-    const editCompleted = Promise.withResolvers<IngestResult>()
+    const edits: unknown[] = []
     const unsubscribe = await platform.subscribe(session, async (event) => {
-      if (event.type !== 'message-edit') return
-      editCompleted.resolve(await store.ingest(session, event.conversation, event.message))
+      if (event.type === 'message-edit') edits.push(event)
     })
 
-    const history = await platform.getHistory(session, conversation)
-    const placeholderPart = history.messages[0].content.parts[0]
-    if (placeholderPart.type !== 'sticker') throw new Error('history sticker placeholder is unavailable')
-    expect(placeholderPart.sticker).toMatchObject({
-      format: 'static', mimeType: 'image/webp', size: 0, locator: { deferred: true },
-    })
-    const initial = await store.ingest(session, conversation, history.messages[0], { allocation: 'history' })
-    const requestsBeforePlaceholderRead = assetRequests
-    const placeholderAsset = await provider.openAsset({ session, platformKind: 'qq' }, placeholderPart.sticker)
-    expect(await collect(placeholderAsset.source.stream())).toHaveLength(0)
-    expect(assetRequests).toBe(requestsBeforePlaceholderRead)
-
+    const historyPromise = platform.getHistory(session, conversation)
     await stickerRequested.promise
     expect(assetRequests).toBe(1)
     releaseSticker.resolve()
-    const edited = await Promise.race([
-      editCompleted.promise,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('history sticker edit timed out')), 5_000)),
-    ])
-    expect(edited.projection[0].tlMessageId).toBe(initial.projection[0].tlMessageId)
+    const history = await historyPromise
+    const readyPart = history.messages[0].content.parts[0]
+    if (readyPart.type !== 'sticker') throw new Error('prepared history sticker is unavailable')
+    const initial = await store.ingest(session, conversation, history.messages[0], { allocation: 'history' })
     const [stored] = await store.readHistory(session.platformSessionId, conversation.id, { limit: 1 })
-    const readyPart = stored?.content.parts[0]
-    if (readyPart?.type !== 'sticker') throw new Error('prepared history sticker is unavailable')
-    expect(readyPart.sticker).toMatchObject({
+    const storedPart = stored?.content.parts[0]
+    if (storedPart?.type !== 'sticker') throw new Error('stored history sticker is unavailable')
+    expect(storedPart.sticker).toMatchObject({
       format: 'static', mimeType: 'image/webp', size: expect.any(Number),
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
       thumbnail: { mimeType: 'image/webp', width: 10, height: 8 },
     })
     const readyBytes = await collect((await provider.openAsset(
-      { session, platformKind: 'qq' }, readyPart.sticker,
+      { session, platformKind: 'qq' }, storedPart.sticker,
     )).source.stream())
     expect(readyBytes.subarray(8, 12).toString()).toBe('WEBP')
     expect(assetRequests).toBe(1)
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
+    expect(initial.projection[0].tlMessageId).toBeGreaterThan(0)
+    expect(edits).toEqual([])
     await unsubscribe()
   })
 })
 
-describe('QQNT animated media upgrade E2E', () => {
-  it('streams APNG detection over HTTP, edits to WebM, and preserves both downloadable media IDs', async () => {
+describe('QQNT animated media initial projection E2E', () => {
+  it('streams APNG detection over HTTP and publishes one downloadable WebM message', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -1091,7 +1080,7 @@ describe('QQNT animated media upgrade E2E', () => {
       if (event.type !== 'message' && event.type !== 'message-edit') return
       const result = await store.ingest(session, event.conversation, event.message)
       ingested.push({ type: event.type, result })
-      if (event.type === 'message-edit') complete.resolve()
+      if (event.type === 'message') complete.resolve()
     })
     try {
       await Promise.race([
@@ -1102,27 +1091,19 @@ describe('QQNT animated media upgrade E2E', () => {
       await unsubscribe()
     }
 
-    expect(ingested.map((entry) => entry.type)).toEqual(['message', 'message-edit'])
-    const originalMediaId = ingested[0].result.projection[0].mediaId!
-    const webmMediaId = ingested[1].result.projection[0].mediaId!
-    expect(webmMediaId).not.toBe(originalMediaId)
-    expect(ingested[1].result.projection[0].tlMessageId)
-      .toBe(ingested[0].result.projection[0].tlMessageId)
+    expect(ingested.map((entry) => entry.type)).toEqual(['message'])
+    const webmMediaId = ingested[0].result.projection[0].mediaId!
     expect(await ctx.database.get('mtproto_im_media', {})).toMatchObject([
-      { id: originalMediaId, platformMediaId: 'animated-media:original-v1', mimeType: 'image/png' },
       { id: webmMediaId, platformMediaId: 'animated-media:original-v1:webm-v1', mimeType: 'video/webm' },
     ])
-    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(2)
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
     expect(await ctx.database.get('mtproto_qqnt_media_animation', {})).toMatchObject([{ animated: true }])
 
-    const original = await store.getMedia(session.platformSessionId, originalMediaId)
     const webm = await store.getMedia(session.platformSessionId, webmMediaId)
-    expect(original).toBeDefined()
     expect(webm).toBeDefined()
-    expect(await collect(platform.downloadMedia(session, original!.media as any))).toEqual(apng)
     const webmBytes = await collect(platform.downloadMedia(session, webm!.media as any))
     expect([...webmBytes.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
-    expect(rangeHeaders).toEqual([undefined, 'bytes=0-65535', undefined, undefined])
+    expect(rangeHeaders).toEqual(['bytes=0-65535', undefined])
   }, 30_000)
 })
 
