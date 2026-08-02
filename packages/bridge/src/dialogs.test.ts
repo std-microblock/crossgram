@@ -718,17 +718,25 @@ describe('DialogRpc', () => {
     const aliceId = stableId('peer:alice')
     const request = sendMessageRequest(aliceId)
 
-    const first = await rpc.sendMessage(request) as tl.RawUpdateShortSentMessage
-    const duplicate = await rpc.sendMessage(request) as tl.RawUpdateShortSentMessage
+    const first = await rpc.sendMessage(request) as tl.RawUpdates
+    const duplicate = await rpc.sendMessage(request) as tl.RawUpdates
     expect(duplicate).toEqual(first)
     expect(first).toMatchObject({
-      _: 'updateShortSentMessage', out: true, ptsCount: 1,
+      _: 'updates', seq: 0,
+      updates: [
+        { _: 'updateMessageID', randomId: request.randomId },
+        {
+          _: 'updateNewMessage', ptsCount: 1,
+          message: { _: 'message', out: true, message: request.message },
+        },
+      ],
     })
+    const sentId = (first.updates[0] as tl.RawUpdateMessageID).id
 
     const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
     const sent = history.messages.filter((message) => message._ === 'message' && message.message === request.message)
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toMatchObject({ _: 'message', id: first.id, out: true })
+    expect(sent[0]).toMatchObject({ _: 'message', id: sentId, out: true })
     expect(() => wireRoundTrip(first)).not.toThrow()
   })
 
@@ -806,14 +814,15 @@ describe('DialogRpc', () => {
         _: 'inputMessageEntityMentionName', offset: 6, length: 4,
         userId: { _: 'inputUser', userId: bobId, accessHash: Long.ZERO },
       }],
-    })) as tl.RawUpdateShortSentMessage
+    })) as tl.RawUpdates
+    const sentId = (sent.updates[0] as tl.RawUpdateMessageID).id
 
     expect(platform.lastInput).toEqual({ parts: [{
       type: 'text', text: 'hello @Bob',
       entities: [{ type: 'mention', offset: 6, length: 4, userId: 'bob' }],
     }], replyToId: undefined })
     const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
-    const message = history.messages.find((item) => item._ === 'message' && item.id === sent.id)
+    const message = history.messages.find((item) => item._ === 'message' && item.id === sentId)
     expect(message).toMatchObject({
       _: 'message',
       entities: [{ _: 'messageEntityMentionName', offset: 6, length: 4, userId: bobId }],
@@ -833,14 +842,15 @@ describe('DialogRpc', () => {
         { _: 'messageEntityMention', offset: text.indexOf('@BoB'), length: '@BoB'.length },
         { _: 'messageEntityMention', offset: text.indexOf('@missing'), length: '@missing'.length },
       ],
-    })) as tl.RawUpdateShortSentMessage
+    })) as tl.RawUpdates
+    const sentId = (sent.updates[0] as tl.RawUpdateMessageID).id
 
     expect(platform.lastInput).toEqual({ parts: [{
       type: 'text', text,
       entities: [{ type: 'mention', offset: text.indexOf('@BoB'), length: '@BoB'.length, userId: 'bob' }],
     }], replyToId: undefined })
     const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
-    const message = history.messages.find((item) => item._ === 'message' && item.id === sent.id)
+    const message = history.messages.find((item) => item._ === 'message' && item.id === sentId)
     expect(message).toMatchObject({
       _: 'message',
       entities: [{

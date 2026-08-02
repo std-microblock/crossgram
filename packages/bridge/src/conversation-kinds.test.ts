@@ -162,7 +162,9 @@ async function createRpc(
           return {
             _: 'updates' as const,
             updates: result.projection.map((part) => ({
-              _: 'updateNewChannelMessage' as const,
+              _: event.conversation.kind === 'direct'
+                ? 'updateNewMessage' as const
+                : 'updateNewChannelMessage' as const,
               message: { _: 'messageEmpty' as const, id: part.tlMessageId },
               pts: 12, ptsCount: 1,
             })),
@@ -656,12 +658,22 @@ describe('conversation kinds', () => {
     const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
     const replied = history.messages[0] as tl.RawMessage
 
-    await rpc.sendMessage({
+    const sent = await rpc.sendMessage({
       _: 'messages.sendMessage', peer: groupPeer, message: 'native reply', randomId: Long.fromNumber(88),
       replyTo: { _: 'inputReplyToMessage', replyToMsgId: replied.id },
-    })
+    }) as tl.RawUpdates
 
     expect(sentInputs.at(-1)).toMatchObject({ replyToId: 'message-group' })
+    expect(sent).toMatchObject({
+      _: 'updates', seq: 0,
+      updates: [
+        { _: 'updateMessageID', randomId: Long.fromNumber(88) },
+        {
+          _: 'updateNewChannelMessage',
+          message: { replyTo: { _: 'messageReplyHeader', replyToMsgId: replied.id } },
+        },
+      ],
+    })
   })
 
   it('keeps contacts limited to direct conversations', async () => {
@@ -874,7 +886,7 @@ describe('conversation kinds', () => {
       excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true,
     }])
     expect(result).toMatchObject({
-      _: 'updates', seq: 2,
+      _: 'updates', seq: 0,
       updates: [
         { _: 'updateMessageID', randomId: Long.fromNumber(2026) },
         { _: 'updateNewChannelMessage', pts: 12, ptsCount: 1 },
@@ -882,6 +894,33 @@ describe('conversation kinds', () => {
     })
     expect((await store.readHistory(session.platformSessionId, 'group'))[0]).toMatchObject({
       content: { parts: [{ type: 'text', text: 'fan out to B' }] },
+    })
+  })
+
+  it('returns a self-contained direct reconciliation when the stored update already has a seq', async () => {
+    const { rpc, localDeliveryOptions } = await createRpc(platform, { publishLocalEvents: true })
+    await rpc.getDialogs(dialogsRequest())
+    const randomId = Long.fromNumber(2027)
+
+    const result = await rpc.sendMessage({
+      _: 'messages.sendMessage',
+      peer: { _: 'inputPeerUser', userId: rpc.peerTlId('direct'), accessHash: Long.ZERO },
+      message: 'replace the direct optimistic item', randomId,
+    }) as tl.RawUpdates
+
+    expect(localDeliveryOptions).toEqual([{
+      excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true,
+    }])
+    expect(result).toMatchObject({
+      _: 'updates', seq: 0,
+      updates: [
+        { _: 'updateMessageID', randomId },
+        { _: 'updateNewMessage', pts: 12, ptsCount: 1 },
+      ],
+    })
+    expect(roundTrip(result)).toMatchObject({
+      _: 'updates', seq: 0,
+      updates: [{ _: 'updateMessageID', randomId }, { _: 'updateNewMessage' }],
     })
   })
 

@@ -2120,15 +2120,12 @@ export class DialogRpc {
         | tl.RawUpdateNewChannelMessage
         | undefined
       if (!update) throw new RpcError(500, 'MESSAGE_UPDATE_NOT_FOUND')
-      const id = update.message.id
-      const target = this._conversation(peerId)
-      if (this._isTelegramChannel(target)) {
-        return this._withMessageIds(published, [req.randomId])
-      }
-      return {
-        _: 'updateShortSentMessage', out: true, id,
-        pts: update.pts, ptsCount: update.ptsCount, date: source.timestamp,
-      }
+      // Always carry random_id on the wire instead of relying on the implicit
+      // updateShortSentMessage request context. Desktop forks can apply the
+      // returned Updates without forwarding that out-of-band random ID, which
+      // leaves their optimistic local item pending and inserts this message as
+      // a second item. updateMessageID makes reconciliation self-contained.
+      return this._withMessageIds(published, [req.randomId])
     }
     let persisted: Awaited<ReturnType<MessageStore['ingest']>> | undefined
     if (this._store) {
@@ -2141,28 +2138,24 @@ export class DialogRpc {
     this._rememberMessage(item)
     const pts = await this._reservePts(1, source.timestamp)
     const target = this._conversation(peerId)
-    if (this._isTelegramChannel(target)) {
-      // Android cannot reconstruct a channel sender from updateShortSentMessage,
-      // which carries neither fromId nor peerId. Return the complete outgoing
-      // message so the client attributes it to the authorized self user.
-      const displayTarget = this._isSubchannel(target)
-        ? this._conversation(target.parentId!)
-        : target
-      return {
-        _: 'updates',
-        updates: [
-          { _: 'updateMessageID', id, randomId: req.randomId },
-          {
-            _: 'updateNewChannelMessage', message: this._makeMessage(item),
-            pts, ptsCount: 1,
-          },
-        ],
-        users: [this._makeSelfUser()], chats: [this._makeChat(displayTarget)],
-        date: source.timestamp, seq: 0,
-      }
-    }
+    const channel = this._isTelegramChannel(target)
+    const displayTarget = channel && this._isSubchannel(target)
+      ? this._conversation(target.parentId!)
+      : target
     return {
-      _: 'updateShortSentMessage', out: true, id, pts, ptsCount: 1, date: source.timestamp,
+      _: 'updates',
+      updates: [
+        { _: 'updateMessageID', id, randomId: req.randomId },
+        {
+          _: channel ? 'updateNewChannelMessage' : 'updateNewMessage',
+          message: this._makeMessage(item), pts, ptsCount: 1,
+        } as tl.TypeUpdate,
+      ],
+      users: channel
+        ? [this._makeSelfUser()]
+        : uniqueUsers([this._makeSelfUser(), await this._getPeerUser(peerId)]),
+      chats: channel ? [this._makeChat(displayTarget)] : [],
+      date: source.timestamp, seq: 0,
     }
   }
 
@@ -2377,6 +2370,11 @@ export class DialogRpc {
     return {
       ...payload,
       updates,
+      // This payload is returned by the send RPC, not a second sequenced push.
+      // If an unavoidable platform echo reached the client first, reusing its
+      // positive seq makes Telegram Desktop discard the whole RPC result before
+      // it can apply updateMessageID and replace the optimistic local message.
+      seq: 0,
     }
   }
 
