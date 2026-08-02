@@ -1,6 +1,7 @@
 * text eol=lf
 
 *.png -text
+*.apng -text
 *.jpg -text
 *.ico -text
 *.gif -text
