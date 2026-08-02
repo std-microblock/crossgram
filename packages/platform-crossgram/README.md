@@ -17,10 +17,9 @@
     # Hide gray-tip service messages containing any entry. Set [] to keep all.
     grayTipFilters:
       - 回应了你的消息
-    # Optional. Advertise a WebP thumb that is generated only when a client
-    # explicitly downloads thumb_size=m. History and live events never wait.
+    # Optional. Generate Telegram's tiny inline photoStrippedSize after the
+    # original history/live message has already been delivered.
     generatePreviews: false
-    previewMaxDimension: 320
     previewConcurrency: 2
 ```
 
@@ -54,13 +53,14 @@ for the client to detect from downloaded content. A startup migration strips
 legacy transform locators from old rows so existing history returns to the raw
 direct-download path.
 
-`generatePreviews` optionally advertises a compact `thumb_size=m` WebP. This is
-a lazy, isolated path: projecting history or a live message performs no media
-download, database lookup, or image decode. The original is opened and resized
-only if a client separately requests that thumbnail. Preview work is
-single-flight, bounded by `previewConcurrency`, cached in the
-`mtproto_qqnt_media_preview_v2` table, and failures affect only the thumbnail
-request. Original media downloads continue to use the direct QQ URL.
+`generatePreviews` optionally produces Telegram's smallest inline
+`photoStrippedSize`, not an `m` thumbnail. The initial history/live message is
+always delivered first without waiting for media I/O. A bounded background job
+then downloads the original, extracts a 40-pixel low-quality JPEG, stores only
+the compact stripped payload in `mtproto_qqnt_inline_preview`, and publishes a
+message edit that embeds those bytes directly in the TL message. Cache lookup,
+decoding and failures therefore stay outside `getHistory` and ordered live-event
+delivery. Original media downloads continue to use the direct QQ URL.
 
 QQ picture elements other than native normal/QZone photos are exposed as
 stickers. QQ sticker and reaction bytes are also exposed unchanged as their

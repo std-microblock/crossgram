@@ -18,7 +18,6 @@ import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
 import { QQNTPlatform } from './index.js'
 import { defineQQMediaPreviewModel, QQMediaPreviewer } from './media-preview.js'
-import type { QQMediaLocator } from './protocol.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
@@ -963,7 +962,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     await unsubscribe()
   })
 
-  it('keeps history responsive while an optional preview is generated on a separate download', async () => {
+  it('keeps history responsive and later embeds a background photoStrippedSize in the message', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -986,7 +985,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     const releaseSource = Promise.withResolvers<void>()
     let sourceRequests = 0
     const previewer = new QQMediaPreviewer({
-      enabled: true, maxDimension: 40, concurrency: 1, database: ctx.database,
+      enabled: true, concurrency: 1, database: ctx.database,
     })
     const platform = new QQNTPlatform({ generatePreviews: true }, 'qqnt:stickers', previewer)
     const conversation = { id: '2:lazy-preview', kind: 'group' as const, title: 'Lazy preview' }
@@ -1006,7 +1005,11 @@ describe('QQNT history media without placeholder edits E2E', () => {
       }],
     }
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
     platform.client.downloadFile = vi.fn(async function* () {
       sourceRequests++
       sourceRequested.resolve()
@@ -1014,29 +1017,28 @@ describe('QQNT history media without placeholder edits E2E', () => {
       yield jpeg
     })
 
-    const initial = await platform.getHistory(session, conversation)
-    expect(platform.client.downloadFile).not.toHaveBeenCalled()
     const store = new MessageStore(ctx.database)
+    const edited = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (event.type !== 'message-edit') return
+      await store.ingest(session, event.conversation, event.message)
+      edited.resolve()
+    })
+
+    const initial = await Promise.race([
+      platform.getHistory(session, conversation),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('history waited for preview')), 250)),
+    ])
     const ingested = await store.ingest(session, conversation, initial.messages[0], { allocation: 'history' })
     const stored = await store.getMedia(session.platformSessionId, ingested.projection[0].mediaId!)
-    expect(stored?.media.preview).toMatchObject({
-      mimeType: 'image/webp', width: 40, height: 24,
-      locator: { previewKey: expect.stringMatching(/^[0-9a-f]{64}$/) },
-    })
+    expect(stored?.media.preview).toBeUndefined()
+    expect(stored?.media.strippedThumbnail).toBeUndefined()
     const [storedRow] = await ctx.database.get('mtproto_im_media', { id: ingested.projection[0].mediaId! })
     const projected = makeTlMessageMedia(storedRow!, stored!.timestamp)
     if (projected._ !== 'messageMediaPhoto' || projected.photo?._ !== 'photo') {
       throw new Error('expected projected photo')
     }
-    expect(projected.photo.sizes.map((size) => size.type)).toEqual(['m', 'x'])
-
-    const preview = {
-      id: `${stored!.media.id}:preview`, kind: 'image' as const,
-      mimeType: stored!.media.preview!.mimeType, size: stored!.media.preview!.size,
-      width: stored!.media.preview!.width, height: stored!.media.preview!.height,
-      locator: stored!.media.preview!.locator as QQMediaLocator,
-    }
-    const pendingPreview = collect(platform.downloadMedia(session, preview))
+    expect(projected.photo.sizes.map((size) => size.type)).toEqual(['x'])
     await sourceRequested.promise
 
     // A thumbnail worker may be waiting on remote bytes, but history still
@@ -1048,13 +1050,18 @@ describe('QQNT history media without placeholder edits E2E', () => {
     expect(sourceRequests).toBe(1)
 
     releaseSource.resolve()
-    const previewBytes = await pendingPreview
-    await expect(sharp(previewBytes).metadata()).resolves.toMatchObject({
-      format: 'webp', width: 40, height: 24,
-    })
-    expect(await ctx.database.get('mtproto_qqnt_media_preview_v2', {})).toMatchObject([
-      { mimeType: 'image/webp', width: 40, height: 24 },
-    ])
+    await edited.promise
+    const ready = await store.getMedia(session.platformSessionId, ingested.projection[0].mediaId!)
+    expect(ready?.media.preview).toBeUndefined()
+    expect(ready?.media.strippedThumbnail).toBeInstanceOf(Uint8Array)
+    const [readyRow] = await ctx.database.get('mtproto_im_media', { id: ingested.projection[0].mediaId! })
+    const updated = makeTlMessageMedia(readyRow!, ready!.timestamp)
+    if (updated._ !== 'messageMediaPhoto' || updated.photo?._ !== 'photo') {
+      throw new Error('expected updated photo')
+    }
+    expect(updated.photo.sizes.map((size) => size.type)).toEqual(['i', 'x'])
+    expect(await ctx.database.get('mtproto_qqnt_inline_preview', {})).toHaveLength(1)
+    await unsubscribe()
   })
 
   it('persists raw sticker metadata without HTTP preparation and streams the original on demand', async () => {
