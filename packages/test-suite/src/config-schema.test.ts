@@ -19,7 +19,7 @@ const cases = [
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
     'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'grayTipFilters',
-    'generatePreviews', 'previewMaxDimension', 'previewConcurrency',
+    'generatePreviews', 'previewConcurrency',
   ]],
   ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'proxy', 'syncTimeoutMs', 'requestTimeoutMs']],
@@ -66,7 +66,6 @@ describe('plugin config schemas', () => {
     expect(qqntConfig({})).toMatchObject({
       grayTipFilters: ['回应了你的消息'],
       generatePreviews: false,
-      previewMaxDimension: 320,
       previewConcurrency: 2,
     })
     expect(discordConfig({ token: 'user-token' })).toMatchObject({

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import sharp from 'sharp'
-import type { IMMedia } from '@mtproto-relay/bridge'
+import { expandTelegramStrippedThumbnail, type IMMedia } from '@mtproto-relay/bridge'
 import { QQMediaPreviewer, mediaPreviewKey } from './media-preview.js'
 import type { QQMediaLocator } from './protocol.js'
 
@@ -22,33 +22,26 @@ async function png(width = 64, height = 40): Promise<Uint8Array> {
 }
 
 describe('QQMediaPreviewer', () => {
-  it('is disabled by default and leaves original media untouched', () => {
+  it('is disabled by default and leaves original media untouched', async () => {
     const original = media()
-    expect(new QQMediaPreviewer().project(original)).toBe(original)
+    const previewer = new QQMediaPreviewer()
+    expect(previewer.project(original)).toBe(original)
+    await expect(previewer.prepare(original, async function* () {
+      throw new Error('source must stay closed')
+    })).resolves.toBe(original)
   })
 
-  it('projects only deterministic preview metadata without opening media bytes', () => {
+  it('does not advertise a separate m-size preview or perform I/O while projecting', () => {
     const original = media()
-    const previewer = new QQMediaPreviewer({ enabled: true, maxDimension: 320 })
-    const projected = previewer.project(original)
-
-    expect(projected).toMatchObject({
-      id: original.id, kind: 'image', mimeType: 'image/png', locator: original.locator,
-      preview: {
-        mimeType: 'image/webp', width: 320, height: 180,
-        locator: {
-          messageId: original.locator!.messageId,
-          previewKey: mediaPreviewKey(original.locator!, 320),
-        },
-      },
-    })
+    const previewer = new QQMediaPreviewer({ enabled: true })
+    expect(previewer.project(original)).toBe(original)
+    expect(mediaPreviewKey(original.locator!)).toMatch(/^[0-9a-f]{64}$/)
   })
 
-  it('generates and single-flights a WebP only when its thumbnail is opened', async () => {
+  it('generates and single-flights a tiny inline stripped JPEG in the background path', async () => {
     const input = await png()
     const previewer = new QQMediaPreviewer({ enabled: true })
-    const projected = previewer.project(media())
-    const locator = projected.preview!.locator
+    const original = media()
     let opens = 0
     const source = async function* () {
       opens++
@@ -57,26 +50,25 @@ describe('QQMediaPreviewer', () => {
     }
 
     const [first, second] = await Promise.all([
-      previewer.open(locator, source),
-      previewer.open(locator, source),
+      previewer.prepare(original, source),
+      previewer.prepare(original, source),
     ])
 
     expect(opens).toBe(1)
-    expect(second).toBe(first)
-    expect(first.mimeType).toBe('image/webp')
-    expect(first.size).toBe(first.bytes.byteLength)
-    await expect(sharp(first.bytes).metadata()).resolves.toMatchObject({
-      format: 'webp', width: 64, height: 40,
-    })
-    await previewer.open(locator, source)
+    expect(first.preview).toBeUndefined()
+    expect(first.strippedThumbnail).toEqual(second.strippedThumbnail)
+    expect(first.strippedThumbnail!.byteLength).toBeLessThan(1024)
+    await expect(sharp(expandTelegramStrippedThumbnail(first.strippedThumbnail!)).metadata())
+      .resolves.toMatchObject({ format: 'jpeg', width: 40, height: 25 })
+
+    const projected = previewer.project(media())
+    expect(projected.strippedThumbnail).toEqual(first.strippedThumbnail)
     expect(opens).toBe(1)
   })
 
-  it('bounds independent preview work without coupling their callers', async () => {
+  it('bounds independent inline preview work', async () => {
     const input = await png()
     const previewer = new QQMediaPreviewer({ enabled: true, concurrency: 1 })
-    const firstLocator = previewer.project(media('first')).preview!.locator
-    const secondLocator = previewer.project(media('second')).preview!.locator
     const firstGate = Promise.withResolvers<void>()
     let opened = 0
     let running = 0
@@ -90,8 +82,8 @@ describe('QQMediaPreviewer', () => {
       running--
     }
 
-    const first = previewer.open(firstLocator, source(firstGate.promise))
-    const second = previewer.open(secondLocator, source())
+    const first = previewer.prepare(media('first'), source(firstGate.promise))
+    const second = previewer.prepare(media('second'), source())
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(opened).toBe(1)
     firstGate.resolve()
@@ -100,14 +92,13 @@ describe('QQMediaPreviewer', () => {
     expect(maximumRunning).toBe(1)
   })
 
-  it('rejects forged preview locators before opening the original', async () => {
+  it('isolates decoder failures from the original media object', async () => {
+    const original = media()
     const previewer = new QQMediaPreviewer({ enabled: true })
-    const locator = { ...media().locator!, previewKey: 'forged' }
-    let opened = false
-    await expect(previewer.open(locator, async function* () {
-      opened = true
-      yield await png()
-    })).rejects.toThrow(/reference is invalid/)
-    expect(opened).toBe(false)
+    await expect(previewer.prepare(original, async function* () {
+      yield new Uint8Array([1, 2, 3])
+    })).rejects.toThrow()
+    expect(original.strippedThumbnail).toBeUndefined()
+    expect(original.preview).toBeUndefined()
   })
 })
