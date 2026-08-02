@@ -13,6 +13,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { QQNTPlatform } from './index.js'
 import { QQVoiceMedia } from './voice-media.js'
 
+const describeUnix = process.platform === 'win32' ? describe.skip : describe
+
 const execFile = promisify(execFileCallback)
 const root = resolve(import.meta.dirname, '../../..')
 const workerDirectory = join(root, 'packages/voice-worker')
@@ -253,7 +255,7 @@ async function gateway(directory: string): Promise<Gateway> {
   }
 }
 
-describe('voice worker to QQ PCM composition', () => {
+describeUnix('voice worker to QQ PCM composition', () => {
   beforeAll(async () => {
     await execFile('cargo', ['build', '--features', 'test-fake'], {
       cwd: workerDirectory,

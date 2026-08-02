@@ -11,6 +11,8 @@ import {
   QQ_VOICE_PCM_FORMAT, QQVoiceMediaClosedError, type QQVoiceMediaConnectOptions,
 } from './voice-media.js'
 
+const describeUnix = process.platform === 'win32' ? describe.skip : describe
+
 const leaseId = '0123456789abcdef0123456789abcdef'
 const token = new Uint8Array(32).fill(7)
 
@@ -128,7 +130,7 @@ function readFrames(socket: Socket, receive: (type: number, payload: Buffer) => 
   })
 }
 
-describe('QQ Bridge PCM transport', () => {
+describeUnix('QQ Bridge PCM transport', () => {
   const servers: Array<{ close(): Promise<void> }> = []
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((server) => server.close()))
