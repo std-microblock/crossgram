@@ -94,12 +94,24 @@ export class QQStickerProvider implements IMStickerProvider {
   }
 
   private async mapPack(pack: WireStickerPack): Promise<IMStickerPack> {
-    const stickers = await mapConcurrent(pack.stickers, 4, (sticker) => this.mapSticker(sticker))
+    const mapped = await mapConcurrent(pack.stickers, 4, async (sticker) => {
+      try {
+        return await this.mapSticker(sticker)
+      } catch (error) {
+        this.logger?.warn(
+          'Skipping QQ sticker %s from pack %s because its asset could not be prepared: %s',
+          sticker.stickerId,
+          pack.packId,
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+    })
+    const stickers = mapped.filter((sticker): sticker is IMSticker => sticker !== undefined)
     return {
       providerId: this.providerId,
       packId: pack.packId,
       title: pack.title,
-      count: pack.count,
+      count: stickers.length,
       cover: stickers[0] && { providerId: this.providerId, stickerId: stickers[0].stickerId },
       version: pack.version,
       automaticAssociation: pack.packId === 'qq-favorites' ? 'provider-account' : undefined,

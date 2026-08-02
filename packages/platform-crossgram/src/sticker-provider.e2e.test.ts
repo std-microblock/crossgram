@@ -64,6 +64,52 @@ describe('QQStickerProvider saved-sticker pipeline', () => {
       expect.any(String),
     )
   })
+
+  it('materializes a favorites pack after discarding only its stale native asset', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mtproto-relay-qq-sticker-pack-'))
+    temporaryDirectories.push(directory)
+    const validPng = await sharp({
+      create: { width: 16, height: 12, channels: 4, background: { r: 220, g: 80, b: 20, alpha: 1 } },
+    }).png().toBuffer()
+    const assets = new Map([
+      ['stale', new Uint8Array([0x89, 0x50, 0x4e])],
+      ['good', new Uint8Array(validPng)],
+    ])
+    const client = {
+      getStickerPack: vi.fn(async () => ({
+        packId: 'qq-favorites', title: 'QQ 收藏表情', count: 2, version: 9,
+        stickers: [favorite('stale'), favorite('good')],
+      })),
+      stickerSource: vi.fn((reference: QQStickerReference) => source(assets.get(
+        reference.kind === 'favorite' ? reference.resId : reference.stickerId,
+      )!)),
+    }
+    const logger = { warn: vi.fn() }
+    const provider = new QQStickerProvider(
+      client as never,
+      'qq:stickers',
+      new QQMediaCache({ path: directory, generatePreviews: false }),
+      logger,
+    )
+
+    const result = await provider.getPack(context, 'qq-favorites')
+
+    expect(result).toMatchObject({
+      packId: 'qq-favorites', count: 1,
+      cover: { providerId: 'qq:stickers', stickerId: 'favorite:good' },
+      stickers: [{
+        providerId: 'qq:stickers', stickerId: 'favorite:good',
+        packId: 'qq-favorites', mimeType: 'image/webp', width: 16, height: 12,
+      }],
+    })
+    expect(result!.stickers[0]!.size).toBeGreaterThan(0)
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Skipping QQ sticker %s from pack %s because its asset could not be prepared: %s',
+      'favorite:stale',
+      'qq-favorites',
+      expect.any(String),
+    )
+  })
 })
 
 function favorite(id: string): WireSticker {
