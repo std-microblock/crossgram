@@ -323,11 +323,19 @@ describe('QQNTClient streaming transport', () => {
 
   it('falls back to the QQ direct URL when a bridge-local path is stale', async () => {
     const requests: string[] = []
+    let staleResponseCancelled = false
     const fetch = vi.fn(async (input) => {
       const url = String(input)
       requests.push(url)
       if (url === 'http://bridge.invalid/v1/files/asset') {
-        return new Response(JSON.stringify({ error: 'media asset not found' }), {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"error":"media asset not found"}'))
+          },
+          cancel() {
+            staleResponseCancelled = true
+          },
+        }), {
           status: 404, headers: { 'content-type': 'application/json' },
         })
       }
@@ -347,6 +355,34 @@ describe('QQNTClient streaming transport', () => {
       'http://bridge.invalid/v1/files/asset',
       'http://bridge.invalid/v1/files/direct-url',
       'https://cdn.invalid/photo.jpg',
+    ])
+    expect(staleResponseCancelled).toBe(true)
+  })
+
+  it('cancels response bodies that are intentionally ignored', async () => {
+    const cancelled: string[] = []
+    const fetch = vi.fn(async (input) => {
+      const url = String(input)
+      const status = url.endsWith('/calls/media-lease') ? 503 : 404
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"error":"ignored"}'))
+        },
+        cancel() {
+          cancelled.push(url)
+        },
+      }), { status, headers: { 'content-type': 'application/json' } })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(client.getUser('missing')).resolves.toBeNull()
+    await expect(client.getMessage('conversation', 'missing')).resolves.toBeNull()
+    await expect(client.mediaLease('call')).rejects.toThrow('QQNT media lease request failed')
+
+    expect(cancelled).toEqual([
+      'http://bridge.invalid/v1/users/missing',
+      'http://bridge.invalid/v1/messages/get',
+      'http://bridge.invalid/v1/calls/media-lease',
     ])
   })
 

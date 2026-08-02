@@ -73,7 +73,10 @@ export class QQNTClient {
         headers: this.headers({ 'content-type': 'application/json' }),
         body: JSON.stringify({ callId }),
       })
-      if (!response.ok) throw new Error('media lease request rejected')
+      if (!response.ok) {
+        await discardResponseBody(response)
+        throw new Error('media lease request rejected')
+      }
       return parseMediaLease(await response.json())
     } catch {
       throw new Error('QQNT media lease request failed')
@@ -309,7 +312,10 @@ export class QQNTClient {
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ conversationId, messageId }),
     })
-    if (response.status === 404) return null
+    if (response.status === 404) {
+      await discardResponseBody(response)
+      return null
+    }
     return responseJson(response)
   }
 
@@ -401,6 +407,7 @@ export class QQNTClient {
         signal: options.signal,
       })
       if (!response.ok && response.status === 404 && hasDirectUrlIdentity(locator)) {
+        await discardResponseBody(response)
         const directUrl = (await this.resolveFileUrl(locator, options.signal)).url
         response = await this.fetchImpl(directUrl, {
           headers: rangeHeaders,
@@ -591,7 +598,10 @@ export class QQNTClient {
       ...init,
       headers: init.headers ?? this.headers(),
     })
-    if (nullable404 && response.status === 404) return null as T
+    if (nullable404 && response.status === 404) {
+      await discardResponseBody(response)
+      return null as T
+    }
     return responseJson(response)
   }
 
@@ -758,6 +768,11 @@ function queryString(query: Record<string, string | number | undefined>): string
 async function responseJson<T>(response: Response): Promise<T> {
   if (!response.ok) throw new Error(await responseError(response))
   return await response.json() as T
+}
+
+async function discardResponseBody(response: Response): Promise<void> {
+  if (!response.body || response.bodyUsed) return
+  await response.body.cancel().catch(() => undefined)
 }
 
 async function responseError(response: Response): Promise<string> {
