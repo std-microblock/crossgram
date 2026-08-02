@@ -1333,25 +1333,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) return part
       const restored = await this.mediaCache!.restoreInitialMedia(part.media)
       if (restored) return { type: 'media' as const, media: restored }
-      if (this.mediaCache!.requiresAnimationProbe(part.media)) {
-        try {
-          const media = await this.preparePublishableMedia(part.media)
-          return { type: 'media' as const, media }
-        } catch (error) {
-          this.logger?.warn(
-            'history animated media preparation failed message=%s media=%s error=%s',
-            message.id, part.media.id, formatError(error),
-          )
-        }
-      }
       return part
     }))
-    const prepared = { ...message, content: { ...message.content, parts } }
-    const timer = setTimeout(() => {
-      this.scheduleMediaWarmup(conversation, prepared)
-    }, 0)
-    timer.unref()
-    return prepared
+    // Keep history metadata-only. The patched client asks getFileUrl for the
+    // original and downloads it from QQ's CDN; probing or warming every
+    // historical image here can serialize history behind slow media.
+    return { ...message, content: { ...message.content, parts } }
   }
 
   private cleanupLegacyMultiForwardDialogs(session: PlatformSession): Promise<void> {

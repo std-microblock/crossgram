@@ -829,7 +829,7 @@ describe('QQNT remote media routing E2E', () => {
 })
 
 describe('QQNT history media without placeholder edits E2E', () => {
-  it('persists a downloadable original immediately and reuses a warmed HTTP preview on refresh', async () => {
+  it('returns history without downloading images and exposes the original direct URL', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -932,11 +932,17 @@ describe('QQNT history media without placeholder edits E2E', () => {
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
 
-    await imageRequested.promise
+    expect(directUrlRequests).toBe(0)
+    expect(imageRequests).toBe(0)
+    await expect(platform.resolveMediaUrl(session, original!.media as any)).resolves.toMatchObject({
+      url: expect.stringContaining('/cdn/history.jpg'), supportsRange: true,
+    })
     expect(directUrlRequests).toBe(1)
-    expect(imageRequests).toBe(1)
+    expect(imageRequests).toBe(0)
+    const download = collect(platform.downloadMedia(session, original!.media as any))
+    await imageRequested.promise
     releaseImage.resolve()
-    await vi.waitFor(async () => expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1))
+    await expect(download).resolves.toEqual(jpeg)
     const refreshedHistory = await platform.getHistory(session, conversation)
     const refreshed = await store.ingest(
       session, conversation, refreshedHistory.messages[0], { allocation: 'history' },
@@ -949,11 +955,10 @@ describe('QQNT history media without placeholder edits E2E', () => {
     expect(ready?.media).toMatchObject({
       kind: 'image', size: jpeg.length, width: 40, height: 24,
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
-      preview: { mimeType: 'image/webp', width: 10, height: 6 },
     })
     expect(await collect(platform.downloadMedia(session, ready!.media as any))).toEqual(jpeg)
     expect(await ctx.database.get('mtproto_im_media', {})).toHaveLength(1)
-    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(0)
     expect(edits).toEqual([])
     await unsubscribe()
   })
