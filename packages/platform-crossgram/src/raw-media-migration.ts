@@ -81,17 +81,15 @@ export async function migrateLegacyQQMessageMedia(
         content: messageContent.get(messageId)!, updatedAt: new Date(),
       })
     }
-    if (previewKeys.size) {
-      const rows = await transaction.get('mtproto_qqnt_media_preview', { key: { $in: [...previewKeys] } })
-      result.previewRows = rows.length
-      if (rows.length) await transaction.remove('mtproto_qqnt_media_preview', { key: { $in: rows.map((row) => row.key) } })
-    }
-    if (cachedPaths.size) {
-      const rows = (await transaction.get('mtproto_qqnt_media_cache', {}))
-        .filter((row) => cachedPaths.has(row.path))
-      result.cacheRows = rows.length
-      if (rows.length) await transaction.remove('mtproto_qqnt_media_cache', { key: { $in: rows.map((row) => row.key) } })
-    }
+    // No runtime path consumes these former transform tables anymore. Purge
+    // every row, including orphaned assets no longer referenced by messages.
+    const previewRows = await transaction.get('mtproto_qqnt_media_preview', {})
+    result.previewRows = previewRows.length
+    if (previewRows.length) await transaction.remove('mtproto_qqnt_media_preview', {})
+    const cacheRows = await transaction.get('mtproto_qqnt_media_cache', {})
+    result.cacheRows = cacheRows.length
+    for (const row of cacheRows) cachedPaths.add(row.path)
+    if (cacheRows.length) await transaction.remove('mtproto_qqnt_media_cache', {})
     const animationRows = await transaction.get('mtproto_qqnt_media_animation', {})
     result.animationRows = animationRows.length
     if (animationRows.length) await transaction.remove('mtproto_qqnt_media_animation', {})
