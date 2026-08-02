@@ -267,7 +267,10 @@ describe('rich-media projection', () => {
 
     expect(projected).toMatchObject({
       _: 'messageMediaPhoto',
-      photo: { _: 'photo', sizes: [{ _: 'photoSize', type: 'x', w: 320, h: 180 }] },
+      photo: { _: 'photo', sizes: [
+        { _: 'photoSize', type: 'm', w: 320, h: 180, size: 20 },
+        { _: 'photoSize', type: 'x', w: 320, h: 180, size: 100 },
+      ] },
     })
   })
 
@@ -407,15 +410,16 @@ describe('rich-media projection', () => {
     expect((messages[1].media as tl.RawMessageMediaPhoto).photo).toMatchObject({
       _: 'photo', accessHash: Long.fromNumber(1), sizes: [
         { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
+        { _: 'photoSize', type: 'm', w: 320, h: 240, size: 7 },
         { _: 'photoSize', type: 'x', w: 800, h: 600, size: 1234 },
       ],
     })
     const photo = (messages[1].media as tl.RawMessageMediaPhoto).photo as tl.RawPhoto
-    expect(photo.sizes.map((size) => size.type)).toEqual(['i', 'x'])
+    expect(photo.sizes.map((size) => size.type)).toEqual(['i', 'm', 'x'])
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
-  it('serves the original photo for stale Telegram thumb_size m requests', async () => {
+  it('serves a projected photo preview for Telegram thumb_size m requests', async () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
     disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
@@ -432,14 +436,14 @@ describe('rich-media projection', () => {
       offset: 0, limit: 1024,
     })
     if (file._ !== 'upload.file') throw new Error('expected file')
-    expect(new TextDecoder().decode(file.bytes)).toBe('photo')
+    expect(new TextDecoder().decode(file.bytes)).toBe('photo-preview')
 
     const direct = await rpc.getFileUrl({
       _: 'inputPhotoFileLocation', id: media.photo.id, accessHash: media.photo.accessHash,
       fileReference: media.photo.fileReference, thumbSize: 'm',
     })
     expect(JSON.parse(direct.data)).toMatchObject({
-      url: 'https://cdn.example.test/photo', supportsRange: true,
+      url: 'https://cdn.example.test/photo-preview', supportsRange: true,
     })
   })
 
@@ -596,6 +600,7 @@ describe('rich-media projection', () => {
       _: 'message', fromId: { _: 'peerUser', userId: sender!.id },
       media: { _: 'messageMediaPhoto', photo: { _: 'photo', sizes: [
         { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
+        { _: 'photoSize', type: 'm' },
         { _: 'photoSize', type: 'x' },
       ] } },
     })

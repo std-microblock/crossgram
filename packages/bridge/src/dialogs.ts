@@ -1707,12 +1707,11 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = req.location._ === 'inputDocumentFileLocation'
-      && req.location.thumbSize === 'm' && stored.media.preview
+    const media = req.location.thumbSize === 'm' && stored.media.preview
       ? previewMedia(stored.media)
       : stored.media
     return {
-      _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp,
+      _: 'upload.file', type: storageFileType(media.mimeType ?? ''), mtime: stored.timestamp,
       bytes: await this._downloadMediaRange(media, offset, req.limit),
     }
   }
@@ -1746,8 +1745,7 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = location._ === 'inputDocumentFileLocation'
-      && location.thumbSize === 'm' && stored.media.preview
+    const media = location.thumbSize === 'm' && stored.media.preview
       ? previewMedia(stored.media)
       : stored.media
     let resolved: import('./platform.js').IMDirectDownload | undefined
@@ -4561,6 +4559,10 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
         sizes: [
           ...(media.strippedThumbnail?.byteLength ? [{
             _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
+          }] : []),
+          ...(media.preview ? [{
+            _: 'photoSize' as const, type: 'm', w: media.preview.width, h: media.preview.height,
+            size: Math.min(media.preview.size, 0x7fffffff),
           }] : []),
           {
             _: 'photoSize', type: 'x', w: dimensions.width, h: dimensions.height,

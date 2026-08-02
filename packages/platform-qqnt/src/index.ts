@@ -19,6 +19,7 @@ import { QQStickerProvider } from './sticker-provider.js'
 import { QQVoiceMedia } from './voice-media.js'
 import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
+import { defineQQMediaPreviewModel, QQMediaPreviewer } from './media-preview.js'
 import { migrateLegacyQQMessageMedia } from './raw-media-migration.js'
 import type {
   QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
@@ -38,6 +39,12 @@ export interface Config extends QQNTClientOptions {
   memberName?: MemberNameMode
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
   grayTipFilters?: string[]
+  /** Advertise compact previews generated only for explicit thumbnail requests. */
+  generatePreviews?: boolean
+  /** Maximum width/height of a generated WebP preview. */
+  previewMaxDimension?: number
+  /** Maximum number of concurrent preview generation jobs. */
+  previewConcurrency?: number
 }
 
 const DEFAULT_GRAY_TIP_FILTERS = ['回应了你的消息']
@@ -48,6 +55,9 @@ export const Config = z.object({
   token: z.string().role('secret'),
   memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
   grayTipFilters: z.array(z.string()).default(DEFAULT_GRAY_TIP_FILTERS),
+  generatePreviews: z.boolean().default(false),
+  previewMaxDimension: z.natural().min(32).max(1024).default(320),
+  previewConcurrency: z.natural().min(1).max(8).default(2),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -100,6 +110,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const stickerProviderId = `${id}:stickers`
   defineQQNTEventCheckpointModel(ctx)
   defineLegacyQQMediaSchema(ctx)
+  defineQQMediaPreviewModel(ctx)
   const mediaCachePath = resolve(process.cwd(), 'data', 'qqnt-media-cache', id)
   ctx.effect(async () => {
     await ctx.database.prepared()
@@ -113,7 +124,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     return () => undefined
   })
   const logger = ctx.logger('platform-qqnt')
-  const platform = new QQNTPlatform(config, stickerProviderId, undefined, logger, ctx.database, voiceMedia)
+  const mediaPreviews = new QQMediaPreviewer({
+    enabled: config.generatePreviews,
+    maxDimension: config.previewMaxDimension,
+    concurrency: config.previewConcurrency,
+    database: ctx.database,
+  })
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaPreviews, logger, ctx.database, voiceMedia)
   ctx.imPlatform.register(platform, id)
   ctx.imSticker.register(
     new QQStickerProvider(platform.client, stickerProviderId, undefined, logger, id),
@@ -182,7 +199,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   constructor(
     options: Config = {},
     private readonly stickerProviderId = 'qqnt:stickers',
-    _removedMediaCache?: unknown,
+    private readonly mediaPreviews = new QQMediaPreviewer({
+      enabled: options.generatePreviews,
+      maxDimension: options.previewMaxDimension,
+      concurrency: options.previewConcurrency,
+    }),
     private readonly logger?: Logger,
     databaseOrVoiceMedia?: Database | QQVoiceMedia,
     qqVoiceMedia?: QQVoiceMedia,
@@ -1059,6 +1080,21 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): AsyncIterable<Uint8Array> {
     if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
     if (media.locator.deferred) return
+    if (media.locator.previewKey) {
+      const preview = await this.mediaPreviews.open(
+        media.locator,
+        (signal) => this.client.downloadFile(rawQQMediaLocator(media.locator!), { signal }),
+        options.signal,
+      )
+      const start = Math.min(preview.size, Math.max(0, Math.trunc(options.offset ?? 0)))
+      const length = rangedSize(preview.size, start, options.limit)
+      const bytes = preview.bytes.subarray(start, start + length)
+      await options.onProgress?.({
+        phase: 'download', mediaIndex: 0, transferredBytes: bytes.byteLength, totalBytes: length,
+      })
+      if (bytes.byteLength) yield bytes
+      return
+    }
     let transferred = 0
     for await (const chunk of this.client.downloadFile(media.locator, {
       signal: options.signal, offset: options.offset, limit: options.limit,
@@ -1078,6 +1114,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMDirectDownload | undefined> {
     const locator = media.locator
     if (!locator || locator.deferred) return
+    if (locator.previewKey) return
     const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
     return { ...resolved, supportsRange: true }
   }
@@ -1416,6 +1453,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
     const message = mapMessage(
       input, this.memberName, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
+      (media) => this.mediaPreviews.project(media),
     )
     return message
   }
@@ -1673,6 +1711,7 @@ function mapMessage(
     preview: string | undefined,
     locator: WireMultiForwardLocator,
   ) => IMConversation<QQMediaLocator>,
+  projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator> {
   return {
     id: input.id,
@@ -1709,7 +1748,7 @@ function mapMessage(
     } : undefined,
     content: {
       serviceAction: input.serviceAction,
-      parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward),
+      parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward, projectMedia),
       inlineKeyboard: mapInlineKeyboard(input),
     },
   }
@@ -1751,6 +1790,7 @@ function mapParts(
     preview: string | undefined,
     locator: WireMultiForwardLocator,
   ) => IMConversation<QQMediaLocator>,
+  projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator>['content']['parts'] {
   const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
   for (const part of input.parts) {
@@ -1801,7 +1841,8 @@ function mapParts(
     } else if (part.type === 'card') {
       parts.push({ type: 'card', card: { ...part.card } })
     } else {
-      parts.push({ type: 'media', media: mapMedia(part.media) })
+      const media = mapMedia(part.media)
+      parts.push({ type: 'media', media: projectMedia?.(media) ?? media })
     }
   }
   return parts

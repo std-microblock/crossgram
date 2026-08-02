@@ -17,6 +17,11 @@
     # Hide gray-tip service messages containing any entry. Set [] to keep all.
     grayTipFilters:
       - 回应了你的消息
+    # Optional. Advertise a WebP thumb that is generated only when a client
+    # explicitly downloads thumb_size=m. History and live events never wait.
+    generatePreviews: false
+    previewMaxDimension: 320
+    previewConcurrency: 2
 ```
 
 The transport uses JSON for metadata, WebSocket for ordered incoming events, a
@@ -41,14 +46,21 @@ the caller without a fallback. Protocol v13's native `/files/play-url` and
 whole-file `200` responses remain supported during rolling upgrades.
 
 All ordinary message media keeps its original QQ format and locator. The relay
-does not download it to probe animation, generate previews, or transcode
-GIF/APNG/PNG into WebM. History and live-event ingestion therefore remain
-metadata-only, and patched clients call `crossgram.getFileUrl` before fetching
-the original bytes directly from QQ's CDN with HTTP Range. APNG files that QQ
-labels as ordinary `image/png` are intentionally left for the client to detect
-from downloaded content. A startup migration strips legacy `cachedPath` and
-`previewKey` locators from old message-media rows so existing history returns to
-the same raw direct-download path.
+does not probe animation or transcode GIF/APNG/PNG into WebM. History and
+live-event ingestion remain metadata-only, and patched clients call
+`crossgram.getFileUrl` before fetching the original bytes directly from QQ's
+CDN with HTTP Range. APNG files that QQ labels as ordinary `image/png` are left
+for the client to detect from downloaded content. A startup migration strips
+legacy transform locators from old rows so existing history returns to the raw
+direct-download path.
+
+`generatePreviews` optionally advertises a compact `thumb_size=m` WebP. This is
+a lazy, isolated path: projecting history or a live message performs no media
+download, database lookup, or image decode. The original is opened and resized
+only if a client separately requests that thumbnail. Preview work is
+single-flight, bounded by `previewConcurrency`, cached in the
+`mtproto_qqnt_media_preview_v2` table, and failures affect only the thumbnail
+request. Original media downloads continue to use the direct QQ URL.
 
 QQ picture elements other than native normal/QZone photos are exposed as
 stickers. QQ sticker and reaction bytes are also exposed unchanged as their
