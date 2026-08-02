@@ -4,7 +4,7 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
 import type {
-  IMMessage, IMPlatform, IMReactionContext, IMReactionDefinition, IMReactionResource, PlatformSession,
+  IMDirectDownload, IMMessage, IMPlatform, IMReactionContext, IMReactionDefinition, IMReactionResource, PlatformSession,
 } from './platform.js'
 
 const CATALOG_VERSION = 2
@@ -261,6 +261,15 @@ export class ReactionRpc {
     return { bytes: output, mimeType: custom.definition.presentation.resource.mimeType }
   }
 
+  async getFileUrl(documentId: number): Promise<IMDirectDownload | undefined> {
+    const custom = this._custom.get(documentId)
+    if (!custom || !this._platform.resolveReactionResourceUrl) return
+    return this._platform.resolveReactionResourceUrl(
+      this._session,
+      custom.definition.presentation.resource,
+    )
+  }
+
   private _customDocument(id: number, entry: CustomEntry): tl.RawDocument {
     const { alt, resource } = entry.definition.presentation
     const attributes: tl.TypeDocumentAttribute[] = [{
@@ -280,6 +289,7 @@ export class ReactionRpc {
       attributes.push({
         _: 'documentAttributeImageSize', w: resource.width, h: resource.height,
       })
+      if (resource.format === 'animated') attributes.push({ _: 'documentAttributeAnimated' })
     }
     return {
       _: 'document', id: Long.fromNumber(id), accessHash: Long.fromNumber(id),

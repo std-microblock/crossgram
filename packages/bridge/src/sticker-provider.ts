@@ -1,6 +1,6 @@
 import { Service, type Context } from 'cordis'
 import type {
-  IMConversationRef, IMMediaSource, JsonValue, PlatformSession, Unsubscribe,
+  IMConversationRef, IMDirectDownload, IMMediaSource, JsonValue, PlatformSession, Unsubscribe,
 } from './platform.js'
 
 export type IMStickerFormat = 'static' | 'animated' | 'video'
@@ -131,6 +131,11 @@ export interface IMStickerProvider {
     query?: StickerPageQuery,
   ): Promise<IMStickerPage>
   openAsset(context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset>
+  /** Resolve an original provider URL so patched clients can bypass relay bytes. */
+  resolveAssetUrl?(
+    context: StickerProviderContext,
+    sticker: IMSticker,
+  ): Promise<IMDirectDownload | undefined>
   /** Open the static thumbnail advertised by IMSticker.thumbnail. */
   openThumbnail?(context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset | null>
   prepareSend?(

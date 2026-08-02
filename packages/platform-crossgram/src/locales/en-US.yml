@@ -2,8 +2,4 @@ endpoint: Base URL of the QQNT bridge HTTP API.
 webSocketEndpoint: Full URL of the QQNT bridge WebSocket event stream. Derived from the HTTP endpoint when omitted.
 token: Bearer token used to authenticate with the QQNT bridge.
 memberName: Name shown for group members.
-mediaCachePath: Directory used for transformed media, stickers, and reactions.
-generatePreviews: Generate compact WebP previews and store their bytes in the database.
-previewMaxDimension: Maximum width or height of generated image previews.
-ffmpegPath: FFmpeg executable used to convert GIF and APNG media to WebM.
 grayTipFilters: Gray-tip text filters. A service message is hidden when its text contains any entry. Reaction notices are filtered by default.
