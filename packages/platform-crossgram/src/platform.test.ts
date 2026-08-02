@@ -1603,7 +1603,53 @@ describe('QQNTPlatform mapping', () => {
     expect((received as any[]).every((event) => !event.message.content.parts[0].media.preview)).toBe(true)
   })
 
-  it('strips legacy local markers before resolving the original QQ image URL', async () => {
+  it('adds enabled live-message preview metadata without delaying the event handler', async () => {
+    const platform = new QQNTPlatform({ generatePreviews: true })
+    const image = await sharp({
+      create: { width: 24, height: 16, channels: 3, background: { r: 30, g: 90, b: 180 } },
+    }).jpeg().toBuffer()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.downloadFile = vi.fn(async function* () { yield image })
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      await handler({
+        type: 'message',
+        conversation: {
+          id: '2:group', kind: 'group', title: 'Group', peerUid: 'group', peerUin: '42', chatType: 2,
+        },
+        message: {
+          id: 'live-preview', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+          parts: [{
+            type: 'media',
+            media: {
+              id: 'live-preview-media', kind: 'image', name: 'photo.jpg', mimeType: 'image/jpeg',
+              size: image.length, width: 24, height: 16,
+              locator: {
+                messageId: 'live-preview', elementId: 'live-preview-media', chatType: 2,
+                peerUid: 'group', kind: 'image', fileName: 'photo.jpg', md5: 'LIVE-PREVIEW',
+              },
+            },
+          }],
+        },
+      })
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      }
+    })
+    const received = Promise.withResolvers<any>()
+    const unsubscribe = await platform.subscribe(session, (event) => received.resolve(event))
+
+    await expect(received.promise).resolves.toMatchObject({
+      type: 'message',
+      message: { content: { parts: [{ media: {
+        preview: { mimeType: 'image/webp', width: 24, height: 16 },
+      } }] } },
+    })
+    expect(platform.client.downloadFile).not.toHaveBeenCalled()
+    await unsubscribe()
+  })
+
+  it('strips legacy markers from originals but keeps generated previews on relay getFile', async () => {
     const platform = new QQNTPlatform()
     platform.client.resolveFileUrl = vi.fn(async () => ({
       url: 'https://cdn.example.test/original.png', expiresAt: Date.now() + 60_000,
@@ -1623,10 +1669,8 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.resolveMediaUrl(session, original)).resolves.toMatchObject({
       url: 'https://cdn.example.test/original.png', supportsRange: true,
     })
-    await expect(platform.resolveMediaUrl(session, preview)).resolves.toMatchObject({
-      url: 'https://cdn.example.test/original.png', supportsRange: true,
-    })
-    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(2)
+    await expect(platform.resolveMediaUrl(session, preview)).resolves.toBeUndefined()
+    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(1)
     expect(platform.client.resolveFileUrl).toHaveBeenLastCalledWith(
       expect.not.objectContaining({ previewKey: expect.anything(), cachedPath: expect.anything() }),
     )
@@ -1674,6 +1718,57 @@ describe('QQNTPlatform mapping', () => {
     expect(events.filter((event) => event.type === 'message-edit')).toEqual([])
     expect(platform.client.downloadFile).not.toHaveBeenCalled()
     await unsubscribe()
+  })
+
+  it('advertises optional previews without blocking history and generates them only on thumb download', async () => {
+    const platform = new QQNTPlatform({ generatePreviews: true, previewMaxDimension: 10 })
+    const jpeg = await sharp({
+      create: { width: 20, height: 12, channels: 3, background: { r: 30, g: 90, b: 180 } },
+    }).jpeg().toBuffer()
+    const wireMessage = {
+      id: 'lazy-preview', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'lazy-preview-media', kind: 'image' as const, name: 'photo.jpg', mimeType: 'image/jpeg',
+          size: jpeg.length, width: 20, height: 12,
+          locator: {
+            messageId: 'lazy-preview', elementId: 'lazy-preview-media', chatType: 2 as const,
+            peerUid: 'group', kind: 'image' as const, fileName: 'photo.jpg', md5: 'LAZY-PREVIEW',
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.downloadFile = vi.fn(async function* () { yield jpeg })
+    platform.client.resolveFileUrl = vi.fn(async () => ({
+      url: 'https://cdn.example.test/photo.jpg', expiresAt: Date.now() + 60_000,
+    }))
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    const original = (history.messages[0].content.parts[0] as any).media as IMMedia<QQMediaLocator>
+    expect(original.preview).toMatchObject({
+      mimeType: 'image/webp', width: 20, height: 12,
+      locator: { previewKey: expect.stringMatching(/^[0-9a-f]{64}$/) },
+    })
+    expect(platform.client.downloadFile).not.toHaveBeenCalled()
+    await expect(platform.resolveMediaUrl(session, original)).resolves.toMatchObject({
+      url: 'https://cdn.example.test/photo.jpg', supportsRange: true,
+    })
+
+    const preview: IMMedia<QQMediaLocator> = {
+      id: `${original.id}:preview`, kind: 'image', mimeType: original.preview!.mimeType,
+      size: original.preview!.size, width: original.preview!.width, height: original.preview!.height,
+      locator: original.preview!.locator,
+    }
+    await expect(platform.resolveMediaUrl(session, preview)).resolves.toBeUndefined()
+    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(1)
+    const bytes = Buffer.concat((await collect(platform.downloadMedia(session, preview))).map(Buffer.from))
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
+    await expect(sharp(bytes).metadata()).resolves.toMatchObject({
+      format: 'webp', width: 20, height: 12,
+    })
   })
 
   it('publishes live and historical GIF images as the same untouched QQ asset', async () => {

@@ -3,3 +3,6 @@ webSocketEndpoint: QQNT 网桥 WebSocket 事件流的完整地址。留空时从
 token: 用于认证 QQNT 网桥的 Bearer Token。
 memberName: 群成员显示名称的取值方式。
 grayTipFilters: 灰条文本过滤列表；文本包含任一条目时不向 Telegram 展示。默认为过滤“回应了你的消息”通知。
+generatePreviews: 是否提供按需生成的 WebP 缩略图。生成仅发生在客户端请求缩略图时，不阻塞历史消息或实时消息。
+previewMaxDimension: 按需缩略图的最大宽高。
+previewConcurrency: 同时运行的缩略图生成任务上限。

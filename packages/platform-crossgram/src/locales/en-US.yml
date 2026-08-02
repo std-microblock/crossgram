@@ -3,3 +3,6 @@ webSocketEndpoint: Full URL of the QQNT bridge WebSocket event stream. Derived f
 token: Bearer token used to authenticate with the QQNT bridge.
 memberName: Name shown for group members.
 grayTipFilters: Gray-tip text filters. A service message is hidden when its text contains any entry. Reaction notices are filtered by default.
+generatePreviews: Offer lazily generated WebP thumbnails. Generation starts only for explicit thumbnail downloads and never blocks history or live messages.
+previewMaxDimension: Maximum width or height of an on-demand thumbnail.
+previewConcurrency: Maximum number of concurrent thumbnail generation jobs.
