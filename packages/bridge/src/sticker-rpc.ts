@@ -17,9 +17,9 @@ interface ResolvedSticker {
   sticker: IMSticker
 }
 
-// v6 invalidates zero-byte transformed sticker documents emitted before
-// providers materialized their final WebM/WebP metadata.
-const STICKER_PROJECTION_VERSION = 6
+// v7 invalidates Android's cached empty QQ sets from the period when the
+// native favorite snapshot and individual pack assets were unavailable.
+const STICKER_PROJECTION_VERSION = 7
 const STICKER_PROVIDER_CACHE_TTL_MS = 5 * 60_000
 // Telegram Desktop ignores every document field when date is zero, leaving a
 // zero-byte generic file. Keep synthetic sticker documents on a stable,
