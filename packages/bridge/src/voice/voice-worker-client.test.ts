@@ -15,6 +15,8 @@ import {
   encodeVoiceWorkerRequest,
 } from './voice-worker-client.js'
 
+const describeUnix = process.platform === 'win32' ? describe.skip : describe
+
 const protocol: tl.RawPhoneCallProtocol = {
   _: 'phoneCallProtocol', udpP2p: false, udpReflector: false,
   minLayer: 100, maxLayer: 100, libraryVersions: ['crossgram-voice-worker-v2'],
@@ -150,7 +152,7 @@ describe('voice worker IPC v2 codec', () => {
   })
 })
 
-describe('VoiceWorkerSocketClient', () => {
+describeUnix('VoiceWorkerSocketClient', () => {
   it('attaches fixed PCM ingress only after the Rust fake backend is active', async () => {
     const caller = new VoiceWorkerSocketClient({ socketPath: await rustFakeWorker() })
     const recipient = new VoiceWorkerSocketClient({ socketPath: await rustFakeWorker() })
