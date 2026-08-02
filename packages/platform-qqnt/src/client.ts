@@ -400,8 +400,19 @@ export class QQNTClient {
         body: JSON.stringify(locator),
         signal: options.signal,
       })
-      if (!response.ok) throw new Error(await responseError(response))
-      if (!response.body) throw new Error('QQNT media asset response has no body')
+      if (!response.ok && response.status === 404 && hasDirectUrlIdentity(locator)) {
+        const directUrl = (await this.resolveFileUrl(locator, options.signal)).url
+        response = await this.fetchImpl(directUrl, {
+          headers: rangeHeaders,
+          signal: options.signal,
+          redirect: 'follow',
+        })
+        if (!response.ok) throw new Error(await nativeResponseError(response))
+        if (!response.body) throw new Error('QQNT native media response has no body')
+      } else {
+        if (!response.ok) throw new Error(await responseError(response))
+        if (!response.body) throw new Error('QQNT media asset response has no body')
+      }
     } else if (avatarUrl || hasDirectUrlIdentity(locator)) {
       const directUrl = avatarUrl ?? (await this.resolveFileUrl(locator, options.signal)).url
       response = await this.fetchImpl(directUrl, {
