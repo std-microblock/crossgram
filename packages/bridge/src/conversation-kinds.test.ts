@@ -852,7 +852,7 @@ describe('conversation kinds', () => {
     }
   })
 
-  it('publishes a locally sent message to observer connections', async () => {
+  it('excludes the requester auth key when publishing a locally sent message', async () => {
     const { rpc, store, localEvents, localDeliveryOptions } = await createRpc(
       platform, { publishLocalEvents: true },
     )
@@ -871,7 +871,7 @@ describe('conversation kinds', () => {
       message: { conversationId: 'group', outgoing: true, content: { parts: [{ text: 'fan out to B' }] } },
     }])
     expect(localDeliveryOptions).toEqual([{
-      excludeConnection: requester, deliveredViaRpc: true,
+      excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true,
     }])
     expect(result).toMatchObject({
       _: 'updates', seq: 2,

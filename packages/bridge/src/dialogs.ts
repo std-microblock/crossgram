@@ -2351,7 +2351,10 @@ export class DialogRpc {
     const published = await this._onLocalEvent(
       this._session,
       { type: 'message', conversation, message },
-      this._localDelivery(excludeConnection),
+      // The RPC result owns random_id reconciliation for every transport that
+      // shares this auth key. Pushing the full message to a parallel transport
+      // first makes Telegram clients insert it separately from the local item.
+      this._localDelivery(excludeConnection, true),
     ) as tl.RawUpdates | undefined
     if (published === undefined || published._ !== 'updates') return
     this._historyCache.delete(conversationId)
@@ -2374,9 +2377,16 @@ export class DialogRpc {
     }
   }
 
-  private _localDelivery(excludeConnection?: ServerConnection): PlatformEventDeliveryOptions {
+  private _localDelivery(
+    excludeConnection?: ServerConnection,
+    excludeWholeAuthKey = false,
+  ): PlatformEventDeliveryOptions {
     return {
-      ...(excludeConnection ? { excludeConnection } : this._authKeyId ? { excludeAuthKeyId: this._authKeyId } : {}),
+      ...((excludeWholeAuthKey || !excludeConnection) && this._authKeyId
+        ? { excludeAuthKeyId: this._authKeyId }
+        : excludeConnection
+          ? { excludeConnection }
+          : {}),
       deliveredViaRpc: true,
     }
   }
