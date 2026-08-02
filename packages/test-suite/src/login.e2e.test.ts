@@ -19,7 +19,9 @@ import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import WebUI from '@cordisjs/plugin-webui'
-import { Mtproto, AbridgedPacketCodec, CURRENT_API_LAYER, generateRsaKeyPair } from '@mtproto-relay/mtproto'
+import {
+  Mtproto, AbridgedPacketCodec, CURRENT_API_LAYER, generateRsaKeyPair, type MtprotoDebugEvent,
+} from '@mtproto-relay/mtproto'
 import * as bridge from '@mtproto-relay/bridge'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
@@ -808,6 +810,64 @@ describe('bridge login e2e', () => {
         .resolves.toMatchObject({ _: 'updates', updates: [] })
     } finally {
       client?.close()
+      await stop()
+    }
+  }, 30_000)
+
+  it('does not echo a sent message to another connection using the requester auth key', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    const debugEvents: MtprotoDebugEvent[] = []
+    ctx.mtproto.onDebug.add((event) => debugEvents.push(event))
+    let requester: TestClient | undefined
+    let parallel: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, 'static')
+      requester = await TestClient.connect(port)
+      const key = await doClientHandshake(requester, pubKey)
+      const requesterSid = new Long(0x7654322b, 0x4abc, false)
+      const sentCode = await callRpc(requester, key, requesterSid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(requester, key, requesterSid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sentCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+      const dialogs = await callRpc(requester, key, requesterSid, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 6)
+      const alice = dialogs.users.find((user: any) => user.firstName === 'Alice')
+      expect(alice).toMatchObject({ _: 'user' })
+
+      parallel = await TestClient.connect(port)
+      const parallelSid = new Long(0x7654322c, 0x4abc, false)
+      await expect(callRpc(parallel, key, parallelSid, { _: 'updates.getState' }, 8))
+        .resolves.toMatchObject({ _: 'updates.state' })
+      const parallelConnectionId = debugEvents
+        .filter((event) => event.phase === 'connection' && event.payload
+          && (event.payload as { _?: string })._ === 'connection_opened')
+        .at(-1)?.connectionId
+      expect(parallelConnectionId).toBeTruthy()
+      debugEvents.length = 0
+
+      await expect(callRpc(requester, key, requesterSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: alice.accessHash },
+        message: 'single confirmation path', randomId: Long.fromNumber(0x43),
+      }, 10)).resolves.toMatchObject({ _: 'updateShortSentMessage', out: true })
+
+      const echoedUpdates = debugEvents.filter((event) => {
+        if (event.direction !== 'server->client' || event.connectionId !== parallelConnectionId) return false
+        const payload = event.payload as { _?: string, updates?: Array<{ _?: string }> } | undefined
+        return payload?._ === 'updates'
+          && payload.updates?.some((update) => update._ === 'updateNewMessage')
+      })
+      expect(echoedUpdates).toEqual([])
+    } finally {
+      parallel?.close()
+      requester?.close()
       await stop()
     }
   }, 30_000)
