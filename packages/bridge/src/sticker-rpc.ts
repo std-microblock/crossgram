@@ -5,7 +5,7 @@ import { RpcError } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
 import { telegramStickerPlaceholder } from './sticker-outline.js'
 import { isAutomaticallyAssociated, providerBelongsToAccount } from './sticker-dashboard.js'
-import type { IMPlatform, PlatformSession } from './platform.js'
+import type { IMDirectDownload, IMPlatform, PlatformSession } from './platform.js'
 import type {
   IMSticker, IMStickerAsset, IMStickerPack, IMStickerPackSummary, IMStickerProvider, IMStickerSendPlan,
   StickerProviderContext, StickerProviderRegistry,
@@ -377,6 +377,15 @@ export class StickerRpc {
       position += chunk.length
     }
     return output
+  }
+
+  async getFileUrl(
+    documentId: number,
+    fileReference?: Uint8Array,
+  ): Promise<IMDirectDownload | undefined> {
+    const resolved = await this._resolveDocument(documentId, fileReference)
+    if (!resolved?.provider.resolveAssetUrl) return
+    return resolved.provider.resolveAssetUrl(this._context(), resolved.sticker)
   }
 
   async getSetThumb(

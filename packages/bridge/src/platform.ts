@@ -340,8 +340,8 @@ export interface IMReactionSummary {
 
 export interface IMReactionResource {
   version: number
-  format: 'static' | 'video'
-  mimeType: 'image/webp' | 'image/png' | 'video/webm'
+  format: 'static' | 'animated' | 'video'
+  mimeType: 'image/webp' | 'image/png' | 'image/gif' | 'image/apng' | 'video/webm'
   width: number
   height: number
   size?: number
@@ -627,6 +627,10 @@ export interface IMPlatform<TMediaLocator = unknown> {
     resource: IMReactionResource,
     options?: IMDownloadOptions,
   ): AsyncIterable<Uint8Array>
+  resolveReactionResourceUrl?(
+    session: PlatformSession,
+    resource: IMReactionResource,
+  ): Promise<IMDirectDownload | undefined>
 }
 
 export function messageText(message: IMMessage<unknown>): string {

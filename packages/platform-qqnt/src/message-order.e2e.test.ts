@@ -15,8 +15,8 @@ import {
 import { makeTlMessageMedia } from '../../bridge/src/dialogs.js'
 import { defineModels } from '../../bridge/src/models.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
+import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
 import { QQNTPlatform } from './index.js'
-import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
@@ -757,7 +757,7 @@ describe('QQNT remote media routing E2E', () => {
     })])
   })
 
-  it('loads opaque reaction assets over HTTP and serves the transformed cache without local file routes', async () => {
+  it('keeps opaque reaction metadata raw and range-streams original bytes only on demand', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-http-e2e-'))
     temporaryDirectories.push(cachePath)
     const png = await sharp({
@@ -811,7 +811,7 @@ describe('QQNT remote media routing E2E', () => {
 
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`, token: 'bridge-token',
-    }, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+    }, 'qqnt:stickers', undefined)
     const catalog = await platform.getAvailableReactions(session, { conversationId: '2:group' })
     const definition = catalog.available[0]!
     if (definition.presentation.type !== 'custom') throw new Error('expected custom reaction')
@@ -819,8 +819,8 @@ describe('QQNT remote media routing E2E', () => {
     const bytes = await collect(platform.downloadReactionResource(session, resource, { offset: 3, limit: 7 }))
 
     expect(resource).toMatchObject({
-      format: 'static', mimeType: 'image/webp', width: 100, height: 100,
-      locator: { cacheKey: expect.any(String) },
+      format: 'static', mimeType: 'image/png', width: 24, height: 18,
+      locator: { reactionKey: '1:265' },
     })
     expect(bytes).toHaveLength(7)
     expect(assetBody).toEqual({ reactionKey: '1:265' })
@@ -838,7 +838,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     await Promise.all(fibers)
     await new Promise((resolve) => setTimeout(resolve, 25))
     defineModels(ctx)
-    defineQQMediaCacheModel(ctx)
+    defineLegacyQQMediaSchema(ctx)
     await ctx.database.prepared()
     disposals.push(async () => {
       for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -892,9 +892,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     temporaryDirectories.push(cachePath)
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`,
-    }, 'qqnt:stickers', new QQMediaCache({
-      path: cachePath, database: ctx.database, previewMaxDimension: 10,
-    }))
+    }, 'qqnt:stickers', undefined)
     const conversation = { id: '2:history', kind: 'group' as const, title: 'History' }
     const wireMessage = {
       id: 'history-image', conversationId: conversation.id, senderId: 'alice', timestamp: 1, outgoing: false,
@@ -963,7 +961,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     await unsubscribe()
   })
 
-  it('persists a valid sticker document only after HTTP preparation, without editing the message', async () => {
+  it('persists raw sticker metadata without HTTP preparation and streams the original on demand', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -972,7 +970,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     await Promise.all(fibers)
     await new Promise((resolve) => setTimeout(resolve, 25))
     defineModels(ctx)
-    defineQQMediaCacheModel(ctx)
+    defineLegacyQQMediaSchema(ctx)
     await ctx.database.prepared()
     disposals.push(async () => {
       for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -981,15 +979,11 @@ describe('QQNT history media without placeholder edits E2E', () => {
     const png = await sharp({
       create: { width: 24, height: 18, channels: 4, background: { r: 40, g: 120, b: 210, alpha: 1 } },
     }).png().toBuffer()
-    const releaseSticker = Promise.withResolvers<void>()
-    const stickerRequested = Promise.withResolvers<void>()
     let assetRequests = 0
     let server: Server | undefined
     server = createServer(async (request, response) => {
       if (request.method === 'POST' && request.url === '/v1/stickers/asset') {
         assetRequests++
-        stickerRequested.resolve()
-        await releaseSticker.promise
         response.setHeader('content-type', 'image/png')
         response.setHeader('content-length', String(png.length))
         response.end(png)
@@ -1012,7 +1006,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
 
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-sticker-e2e-'))
     temporaryDirectories.push(cachePath)
-    const cache = new QQMediaCache({ path: cachePath, database: ctx.database, previewMaxDimension: 10 })
+    const cache = undefined
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`,
     }, 'qqnt:stickers', cache)
@@ -1044,11 +1038,8 @@ describe('QQNT history media without placeholder edits E2E', () => {
       if (event.type === 'message-edit') edits.push(event)
     })
 
-    const historyPromise = platform.getHistory(session, conversation)
-    await stickerRequested.promise
-    expect(assetRequests).toBe(1)
-    releaseSticker.resolve()
-    const history = await historyPromise
+    const history = await platform.getHistory(session, conversation)
+    expect(assetRequests).toBe(0)
     const readyPart = history.messages[0].content.parts[0]
     if (readyPart.type !== 'sticker') throw new Error('prepared history sticker is unavailable')
     const initial = await store.ingest(session, conversation, history.messages[0], { allocation: 'history' })
@@ -1056,16 +1047,15 @@ describe('QQNT history media without placeholder edits E2E', () => {
     const storedPart = stored?.content.parts[0]
     if (storedPart?.type !== 'sticker') throw new Error('stored history sticker is unavailable')
     expect(storedPart.sticker).toMatchObject({
-      format: 'static', mimeType: 'image/webp', size: expect.any(Number),
+      format: 'static', mimeType: 'image/png', size: png.length,
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
-      thumbnail: { mimeType: 'image/webp', width: 10, height: 8 },
     })
     const readyBytes = await collect((await provider.openAsset(
       { session, platformKind: 'qq' }, storedPart.sticker,
     )).source.stream())
-    expect(readyBytes.subarray(8, 12).toString()).toBe('WEBP')
+    expect(readyBytes).toEqual(png)
     expect(assetRequests).toBe(1)
-    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(0)
     expect(initial.projection[0].tlMessageId).toBeGreaterThan(0)
     expect(edits).toEqual([])
     await unsubscribe()
@@ -1073,7 +1063,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
 })
 
 describe('QQNT animated media initial projection E2E', () => {
-  it('streams APNG detection over HTTP and publishes one downloadable WebM message', async () => {
+  it('publishes APNG-labelled PNG metadata without probing and resolves the original URL on demand', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -1082,7 +1072,7 @@ describe('QQNT animated media initial projection E2E', () => {
     await Promise.all(fibers)
     await new Promise((resolve) => setTimeout(resolve, 25))
     defineModels(ctx)
-    defineQQMediaCacheModel(ctx)
+    defineLegacyQQMediaSchema(ctx)
     await ctx.database.prepared()
     disposals.push(async () => {
       for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -1175,7 +1165,7 @@ describe('QQNT animated media initial projection E2E', () => {
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`,
       webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
-    }, 'qqnt:stickers', new QQMediaCache({ path: cachePath, database: ctx.database }))
+    }, 'qqnt:stickers', undefined)
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     const store = new MessageStore(ctx.database)
@@ -1197,23 +1187,24 @@ describe('QQNT animated media initial projection E2E', () => {
     }
 
     expect(ingested.map((entry) => entry.type)).toEqual(['message'])
-    const webmMediaId = ingested[0].result.projection[0].mediaId!
+    const mediaId = ingested[0].result.projection[0].mediaId!
     expect(await ctx.database.get('mtproto_im_media', {})).toMatchObject([
-      { id: webmMediaId, platformMediaId: 'animated-media:original-v1:webm-v1', mimeType: 'video/webm' },
+      { id: mediaId, platformMediaId: 'animated-media:original-v1', mimeType: 'image/png' },
     ])
-    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
-    expect(await ctx.database.get('mtproto_qqnt_media_animation', {})).toMatchObject([{ animated: true }])
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(0)
+    expect(await ctx.database.get('mtproto_qqnt_media_animation', {})).toHaveLength(0)
 
-    const webm = await store.getMedia(session.platformSessionId, webmMediaId)
-    expect(webm).toBeDefined()
-    const webmBytes = await collect(platform.downloadMedia(session, webm!.media as any))
-    expect([...webmBytes.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
-    expect(rangeHeaders).toEqual(['bytes=0-65535', undefined])
+    const raw = await store.getMedia(session.platformSessionId, mediaId)
+    expect(raw).toBeDefined()
+    await expect(platform.resolveMediaUrl(session, raw!.media as any)).resolves.toMatchObject({
+      url: nativeUrl, supportsRange: true,
+    })
+    expect(rangeHeaders).toEqual([])
   }, 30_000)
 })
 
 describe('QQNT animated system-face E2E', () => {
-  it('materializes a large QQ face as a WebM sticker before publishing the message', async () => {
+  it('publishes a large QQ face as raw APNG sticker metadata without opening bytes', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -1222,7 +1213,7 @@ describe('QQNT animated system-face E2E', () => {
     await Promise.all(fibers)
     await new Promise((resolve) => setTimeout(resolve, 25))
     defineModels(ctx)
-    defineQQMediaCacheModel(ctx)
+    defineLegacyQQMediaSchema(ctx)
     await ctx.database.prepared()
     disposals.push(async () => {
       for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -1304,7 +1295,7 @@ describe('QQNT animated system-face E2E', () => {
 
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-sticker-thumbnail-e2e-'))
     temporaryDirectories.push(cachePath)
-    const cache = new QQMediaCache({ path: cachePath, database: ctx.database, previewMaxDimension: 64 })
+    const cache = undefined
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`,
       webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
@@ -1335,12 +1326,8 @@ describe('QQNT animated system-face E2E', () => {
     expect(storedSticker.parts[0]).toMatchObject({
       type: 'sticker', sticker: {
         stickerId: 'sysface:476', title: '/不是吧',
-        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
+        format: 'animated', mimeType: 'image/apng', size: apng.length,
         locator: { kind: 'sysface', faceId: '476', faceType: 3, resultId: 'result-476' },
-        thumbnail: {
-          mimeType: 'image/webp', width: 12, height: 8,
-          locator: { cacheKey: expect.any(String) },
-        },
       },
     })
     expect(storedSticker.parts[0].sticker.size).toBeGreaterThan(0)
@@ -1363,16 +1350,12 @@ describe('QQNT animated system-face E2E', () => {
     expect(media.document.size).toBe(storedSticker.parts[0].sticker.size)
     expect(media.document.size).toBeGreaterThan(0)
     expect(media.document.attributes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ _: 'documentAttributeVideo', nosound: true }),
+      expect.objectContaining({ _: 'documentAttributeAnimated' }),
+      expect.objectContaining({ _: 'documentAttributeImageSize', w: 12, h: 8 }),
     ]))
-    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(1)
-    expect(assetRequests).toBe(1)
-    expect(assetReference).toMatchObject({
-      kind: 'sysface', faceId: '476', faceType: 3, resultId: 'result-476',
-    })
-    const thumbnail = await cache.openStickerThumbnail(storedSticker.parts[0].sticker)
-    if (!thumbnail) throw new Error('stored sticker thumbnail is unavailable')
-    expect((await collect(thumbnail.source.stream())).subarray(8, 12).toString()).toBe('WEBP')
+    expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(0)
+    expect(assetRequests).toBe(0)
+    expect(assetReference).toBeUndefined()
   }, 30_000)
 })
 

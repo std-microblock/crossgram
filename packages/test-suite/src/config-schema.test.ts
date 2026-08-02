@@ -18,8 +18,7 @@ const cases = [
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
-    'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'mediaCachePath', 'generatePreviews',
-    'previewMaxDimension', 'ffmpegPath', 'grayTipFilters',
+    'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'grayTipFilters',
   ]],
   ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'proxy', 'syncTimeoutMs', 'requestTimeoutMs']],
@@ -71,7 +70,7 @@ describe('plugin config schemas', () => {
 
   it('rejects invalid values at the field path', () => {
     expect(() => bridgeConfig({ serverPort: 65_536 })).toThrow(/serverPort/)
-    expect(() => qqntConfig({ previewMaxDimension: 0 })).toThrow(/previewMaxDimension/)
+    expect(() => qqntConfig({ memberName: 'invalid' as any })).toThrow(/memberName/)
     expect(() => discordConfig({ token: 'user-token', downloadChunkSize: 0 })).toThrow(/downloadChunkSize/)
     expect(() => matrixConfig({
       homeserver: 'https://matrix.example.org', accessToken: 'token', syncTimeoutMs: 0,

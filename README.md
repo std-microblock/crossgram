@@ -196,7 +196,6 @@ yarn build && yarn start  # 生产模式
   name: '@mtproto-relay/platform-qqnt'
   config:
     endpoint: http://127.0.0.1:18767/v1
-    generatePreviews: true
     # 默认隐藏“XXX回应了你的消息：XX”灰条；设为 [] 可全部显示
     grayTipFilters:
       - 回应了你的消息

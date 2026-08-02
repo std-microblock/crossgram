@@ -35,7 +35,6 @@
   name: '@mtproto-relay/platform-qqnt'
   config:
     webSocketEndpoint: ws://127.0.0.1:18767/v1/events/ws
-    generatePreviews: true
     grayTipFilters:
       - 回应了你的
 - id: discord
