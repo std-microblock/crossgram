@@ -804,7 +804,13 @@ describe('bridge login e2e', () => {
       await expect(callRpc(client, key, sid, {
         _: 'messages.sendMessage', peer, message: 'consume local draft',
         randomId: Long.fromNumber(0x42), clearDraft: true,
-      }, 14)).resolves.toMatchObject({ _: 'updateShortSentMessage' })
+      }, 14)).resolves.toMatchObject({
+        _: 'updates', seq: 0,
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(0x42) },
+          { _: 'updateNewMessage', message: { message: 'consume local draft' } },
+        ],
+      })
       expect(sendMessage).toHaveBeenCalledTimes(1)
       await expect(callRpc(client, key, sid, { _: 'messages.getAllDrafts' }, 16))
         .resolves.toMatchObject({ _: 'updates', updates: [] })
@@ -814,7 +820,7 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
-  it('does not echo a sent message to another connection using the requester auth key', async () => {
+  it('returns direct and group sends as unsequenced reconciliations without same-auth-key echoes', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     const debugEvents: MtprotoDebugEvent[] = []
     ctx.mtproto.onDebug.add((event) => debugEvents.push(event))
@@ -839,7 +845,9 @@ describe('bridge login e2e', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 6)
       const alice = dialogs.users.find((user: any) => user.firstName === 'Alice')
+      const group = dialogs.chats.find((chat: any) => chat.title === 'Static QQ Group')
       expect(alice).toMatchObject({ _: 'user' })
+      expect(group).toMatchObject({ _: 'channel' })
 
       parallel = await TestClient.connect(port)
       const parallelSid = new Long(0x7654322c, 0x4abc, false)
@@ -852,17 +860,41 @@ describe('bridge login e2e', () => {
       expect(parallelConnectionId).toBeTruthy()
       debugEvents.length = 0
 
-      await expect(callRpc(requester, key, requesterSid, {
+      const confirmation = await callRpc(requester, key, requesterSid, {
         _: 'messages.sendMessage',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: alice.accessHash },
         message: 'single confirmation path', randomId: Long.fromNumber(0x43),
-      }, 10)).resolves.toMatchObject({ _: 'updateShortSentMessage', out: true })
+      }, 10)
+      expect(confirmation).toMatchObject({
+        _: 'updates', seq: 0,
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(0x43) },
+          { _: 'updateNewMessage', message: { out: true, message: 'single confirmation path' } },
+        ],
+      })
+
+      const groupConfirmation = await callRpc(requester, key, requesterSid, {
+        _: 'messages.sendMessage',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: group.accessHash },
+        message: 'single group confirmation path', randomId: Long.fromNumber(0x44),
+      }, 12)
+      expect(groupConfirmation).toMatchObject({
+        _: 'updates', seq: 0,
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(0x44) },
+          {
+            _: 'updateNewChannelMessage',
+            message: { out: true, message: 'single group confirmation path' },
+          },
+        ],
+      })
 
       const echoedUpdates = debugEvents.filter((event) => {
         if (event.direction !== 'server->client' || event.connectionId !== parallelConnectionId) return false
         const payload = event.payload as { _?: string, updates?: Array<{ _?: string }> } | undefined
         return payload?._ === 'updates'
-          && payload.updates?.some((update) => update._ === 'updateNewMessage')
+          && payload.updates?.some((update) =>
+            update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage')
       })
       expect(echoedUpdates).toEqual([])
     } finally {
@@ -1405,7 +1437,19 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
         message: 'Sent through MTProto', randomId: Long.fromNumber(987654321),
       }, 37)
-      expect(sentMessage).toMatchObject({ _: 'updateShortSentMessage', out: true, ptsCount: 1 })
+      expect(sentMessage).toMatchObject({
+        _: 'updates', seq: 0,
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(987654321) },
+          {
+            _: 'updateNewMessage', ptsCount: 1,
+            message: { _: 'message', out: true, message: 'Sent through MTProto' },
+          },
+        ],
+      })
+      const sentMessageId = sentMessage.updates.find(
+        (update: any) => update._ === 'updateMessageID',
+      ).id
 
       const sentGroupMessage = await callRpc(resumed, key, resumedSid, {
         _: 'messages.sendMessage',
@@ -1413,7 +1457,7 @@ describe('bridge login e2e', () => {
         message: 'Sent to group through MTProto', randomId: Long.fromNumber(987654322),
       }, 38)
       expect(sentGroupMessage).toMatchObject({
-        _: 'updates',
+        _: 'updates', seq: 0,
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(987654322) },
           {
@@ -1483,7 +1527,7 @@ describe('bridge login e2e', () => {
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 39)
       expect(updatedHistory.messages[0]).toMatchObject({
-        _: 'message', id: sentMessage.id, out: true, message: 'Sent through MTProto',
+        _: 'message', id: sentMessageId, out: true, message: 'Sent through MTProto',
       })
 
       const socketPng = new Uint8Array(Buffer.from(
@@ -2369,13 +2413,13 @@ describe('bridge login e2e', () => {
       const edited = await callRpc(resumed, key, resumedSid, {
         _: 'messages.editMessage',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
-        id: sentMessage.id, message: 'Edited through MTProto',
+        id: sentMessageId, message: 'Edited through MTProto',
       }, 220)
       expect(edited).toMatchObject({
         _: 'updates',
         updates: [{
           _: 'updateEditMessage', ptsCount: 1,
-          message: { id: sentMessage.id, message: 'Edited through MTProto' },
+          message: { id: sentMessageId, message: 'Edited through MTProto' },
         }],
       })
       const forwarded = await callRpc(resumed, key, resumedSid, {
@@ -2383,7 +2427,7 @@ describe('bridge login e2e', () => {
         // Telegram Android sends inputPeerEmpty for direct/basic-group sources;
         // only channel forwards carry an explicit source peer.
         fromPeer: { _: 'inputPeerEmpty' },
-        id: [sentMessage.id], randomId: [Long.fromNumber(900)],
+        id: [sentMessageId], randomId: [Long.fromNumber(900)],
         toPeer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
       }, 222)
       expect(forwarded).toMatchObject({
@@ -2394,7 +2438,7 @@ describe('bridge login e2e', () => {
         ],
       })
       expect(await callRpc(resumed, key, resumedSid, {
-        _: 'messages.deleteMessages', revoke: true, id: [sentMessage.id],
+        _: 'messages.deleteMessages', revoke: true, id: [sentMessageId],
       }, 224)).toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
       const afterDelete = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getHistory',
@@ -2402,7 +2446,7 @@ describe('bridge login e2e', () => {
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 226)
-      expect(afterDelete.messages.some((item: any) => item.id === sentMessage.id)).toBe(false)
+      expect(afterDelete.messages.some((item: any) => item.id === sentMessageId)).toBe(false)
       dbg('bridge contacts/dialogs/history/send ok')
 
       resumed.close()

@@ -288,7 +288,19 @@ describe('rich-media projection', () => {
       peer: { _: 'inputPeerUser', userId: peerId, accessHash: Long.ZERO },
       replyTo: { _: 'inputReplyToMessage', replyToMsgId: target!.id },
       message: 'native reply', randomId: Long.fromNumber(9123),
-    }) as tl.RawUpdateShortSentMessage
+    }) as tl.RawUpdates
+    const sentId = (sent.updates[0] as tl.RawUpdateMessageID).id
+
+    expect(sent).toMatchObject({
+      _: 'updates', seq: 0,
+      updates: [
+        { _: 'updateMessageID', id: sentId, randomId: Long.fromNumber(9123) },
+        {
+          _: 'updateNewMessage',
+          message: { id: sentId, replyTo: { replyToMsgId: target!.id } },
+        },
+      ],
+    })
 
     expect(sendMessage).toHaveBeenCalledWith(
       session,
@@ -296,7 +308,7 @@ describe('rich-media projection', () => {
       expect.objectContaining({ replyToId: album.id }),
     )
     await expect(store.findProjectedByTlId(
-      session.platformSessionId, sent.id, conversation.id,
+      session.platformSessionId, sentId, conversation.id,
     )).resolves.toMatchObject({ source: { replyToId: album.id } })
   })
 
