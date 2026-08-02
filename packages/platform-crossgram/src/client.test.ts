@@ -321,6 +321,35 @@ describe('QQNTClient streaming transport', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('falls back to the QQ direct URL when a bridge-local path is stale', async () => {
+    const requests: string[] = []
+    const fetch = vi.fn(async (input) => {
+      const url = String(input)
+      requests.push(url)
+      if (url === 'http://bridge.invalid/v1/files/asset') {
+        return new Response(JSON.stringify({ error: 'media asset not found' }), {
+          status: 404, headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url === 'http://bridge.invalid/v1/files/direct-url') {
+        return Response.json({ url: 'https://cdn.invalid/photo.jpg', expiresAt: Date.now() + 60_000 })
+      }
+      if (url === 'https://cdn.invalid/photo.jpg') return new Response('direct-image')
+      return new Response('unexpected request', { status: 500 })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(collect(client.downloadFile({
+      messageId: 'message', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'image', fileName: 'photo.jpg', filePath: '/stale/photo.jpg', fileUuid: 'remote-photo',
+    }))).resolves.toEqual(Buffer.from('direct-image'))
+    expect(requests).toEqual([
+      'http://bridge.invalid/v1/files/asset',
+      'http://bridge.invalid/v1/files/direct-url',
+      'https://cdn.invalid/photo.jpg',
+    ])
+  })
+
   it('downloads catalog-keyed reaction ranges through the dedicated authenticated route', async () => {
     const requests: Array<{ url: string, body: unknown, range?: string, authorization?: string }> = []
     const progress: number[] = []
