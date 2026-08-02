@@ -63,6 +63,8 @@ const seededStrippedThumbnail = new Uint8Array(Buffer.from(
 const seededImagePreview = expandTelegramStrippedThumbnail(seededStrippedThumbnail)
 const staticStickerAsset = new Uint8Array(readFileSync(new URL('./assets/static.webp', import.meta.url)))
 const videoStickerAsset = new Uint8Array(readFileSync(new URL('./assets/video.webm', import.meta.url)))
+const gifStickerAsset = new Uint8Array(readFileSync(new URL('./assets/animated.gif', import.meta.url)))
+const apngStickerAsset = new Uint8Array(readFileSync(new URL('./assets/animated.apng', import.meta.url)))
 
 /** Cordis plugin entrypoint. Each plugin instance registers one isolated adapter. */
 export function apply(ctx: Context, config: Config = {}): void {
@@ -111,7 +113,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
       edit: { mode: 'native' },
       forward: { mode: 'native', preservesAuthor: true },
     },
-    stickers: { native: true, upload: true, formats: ['static', 'video'] },
+    stickers: { native: true, upload: true, formats: ['static', 'animated', 'video'] },
     reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 11 },
   }
 
@@ -829,6 +831,21 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
       content: { parts: [{ type: 'sticker', sticker: this._labSticker('plugin-video') }] },
     })
     this._append({
+      id: 'lab:sticker:gif', conversationId: 'reaction-sticker-lab',
+      senderId: 'alice', timestamp: 1_650_000_112,
+      content: { parts: [{ type: 'sticker', sticker: this._labSticker('plugin-gif') }] },
+    })
+    this._append({
+      id: 'lab:sticker:apng', conversationId: 'reaction-sticker-lab',
+      senderId: 'bob', timestamp: 1_650_000_114,
+      content: { parts: [{ type: 'sticker', sticker: this._labSticker('plugin-apng') }] },
+    })
+    this._append({
+      id: 'lab:sticker:saved-apng', conversationId: 'reaction-sticker-lab',
+      senderId: 'carol', timestamp: 1_650_000_116,
+      content: { parts: [{ type: 'sticker', sticker: this._labSticker('loose-saved') }] },
+    })
+    this._append({
       ...textMessage(
         'lab:reaction:standard', 'reaction-sticker-lab', 'alice',
         'Standard reactions: 👍 ❤️ 😂 😢 🔥 🎉 👏 🤔 🤯', 1_650_000_120,
@@ -869,18 +886,27 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
   }
 
   private _labSticker(stickerId: string): IMSticker {
-    const format = stickerId === 'plugin-video' ? 'video' : 'static'
-    const asset = stickerAsset(format)
+    const format = stickerId === 'plugin-video'
+      ? 'video'
+      : stickerId === 'plugin-gif' || stickerId === 'plugin-apng' || stickerId === 'loose-saved'
+        ? 'animated'
+        : 'static'
+    const mimeType = stickerId === 'plugin-gif'
+      ? 'image/gif'
+      : format === 'animated'
+        ? 'image/apng'
+        : stickerMimeType(format)
+    const asset = stickerAsset(format, mimeType)
     return {
       providerId: `${this._providerIdPrefix}:plugin`,
       stickerId,
       packId: stickerId === 'loose-saved' ? undefined : 'plugin-pack',
       format,
-      mimeType: stickerMimeType(format),
+      mimeType,
       width: 512,
       height: 512,
       size: asset.length,
-      emoji: [format === 'video' ? '🎬' : '⭐'],
+      emoji: [format === 'video' ? '🎬' : format === 'animated' ? '🎞️' : '⭐'],
       version: 1,
     }
   }
@@ -933,13 +959,15 @@ export class StaticStickerProvider implements IMStickerProvider {
         : [
             this._sticker('plugin-static', '⭐', 'static'),
             this._sticker('plugin-video', '🎬', 'video'),
+            this._sticker('plugin-gif', '🎞️', 'animated', 'image/gif'),
+            this._sticker('plugin-apng', '🖼️', 'animated', 'image/apng'),
           ],
     }
     if (!_native) {
       this._loose = {
-        ...this._sticker('loose-saved', '💾', 'static'),
+        ...this._sticker('loose-saved', '💾', 'animated', 'image/apng'),
         packId: undefined,
-        title: 'Platform Saved Loose Sticker',
+        title: 'Platform Saved APNG Sticker',
       }
     }
   }
@@ -980,7 +1008,7 @@ export class StaticStickerProvider implements IMStickerProvider {
   }
 
   async openAsset(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset> {
-    const bytes = stickerAsset(sticker.format)
+    const bytes = stickerAsset(sticker.format, sticker.mimeType)
     return {
       mimeType: sticker.mimeType, size: bytes.length,
       width: sticker.width, height: sticker.height,
@@ -1008,11 +1036,16 @@ export class StaticStickerProvider implements IMStickerProvider {
     }
   }
 
-  private _sticker(stickerId: string, emoji: string, format: IMSticker['format'] = 'static'): IMSticker {
-    const bytes = stickerAsset(format)
+  private _sticker(
+    stickerId: string,
+    emoji: string,
+    format: IMSticker['format'] = 'static',
+    mimeType = stickerMimeType(format),
+  ): IMSticker {
+    const bytes = stickerAsset(format, mimeType)
     return {
       providerId: this._providerId, stickerId, packId: this._pack?.packId ?? `${this._native ? 'native' : 'plugin'}-pack`,
-      format, mimeType: stickerMimeType(format), width: 512, height: 512,
+      format, mimeType, width: 512, height: 512,
       size: bytes.length, emoji: [emoji], version: 1,
     }
   }
@@ -1078,13 +1111,15 @@ function reactionDefinitions(conversationId: string, messageId?: string): IMReac
   return clone(emojiReactionDefinitions.slice(0, 2))
 }
 
-function stickerAsset(format: IMSticker['format']): Uint8Array {
+function stickerAsset(format: IMSticker['format'], mimeType = stickerMimeType(format)): Uint8Array {
   if (format === 'video') return videoStickerAsset
+  if (format === 'animated') return mimeType === 'image/apng' ? apngStickerAsset : gifStickerAsset
   return staticStickerAsset
 }
 
 function stickerMimeType(format: IMSticker['format']): string {
   if (format === 'video') return 'video/webm'
+  if (format === 'animated') return 'image/gif'
   return 'image/webp'
 }
 
