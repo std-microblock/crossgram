@@ -5,6 +5,47 @@ import type { IMSticker, IMStickerProvider, StickerProviderRegistry } from './st
 import type { IMPlatform, PlatformSession } from './platform.js'
 
 describe('StickerRpc', () => {
+  it.each([
+    ['GIF', 'image/gif', 'market:11690:gif-wave'],
+    ['APNG', 'image/apng', 'market:11690:apng-wave'],
+  ])('projects a QQ market %s as a sticker document tied to its store pack', (
+    _label,
+    mimeType,
+    stickerId,
+  ) => {
+    const { rpc } = stickerHarness()
+    const sticker: IMSticker = {
+      providerId: 'qq:stickers', stickerId, packId: '11690', title: 'Wave',
+      format: 'animated', mimeType, width: 320, height: 180, size: 4321, version: 7,
+    }
+
+    const media = rpc.makeMessageMedia(sticker)
+
+    expect(media._).toBe('messageMediaDocument')
+    expect(media).not.toHaveProperty('photo')
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+    expect(media.document.mimeType).toBe(mimeType)
+    expect(media.document.attributes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _: 'documentAttributeSticker',
+        stickerset: expect.objectContaining({ _: 'inputStickerSetID' }),
+      }),
+      { _: 'documentAttributeImageSize', w: 320, h: 180 },
+      { _: 'documentAttributeAnimated' },
+    ]))
+    expect(media.document.attributes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'documentAttributeVideo' }),
+    ]))
+    const stickerAttribute = media.document.attributes.find((attribute) =>
+      attribute._ === 'documentAttributeSticker')
+    if (!stickerAttribute || stickerAttribute._ !== 'documentAttributeSticker'
+      || stickerAttribute.stickerset._ !== 'inputStickerSetID') {
+      throw new Error('expected store sticker set ID')
+    }
+    expect(stickerAttribute.stickerset.id.equals(stickerAttribute.stickerset.accessHash)).toBe(true)
+    expect(stickerAttribute.stickerset.id.isZero()).toBe(false)
+  })
+
   it('rejects unsupported built-in sets instead of claiming an initial request was not modified', async () => {
     const { rpc } = stickerHarness()
 
