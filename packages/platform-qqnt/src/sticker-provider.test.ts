@@ -69,6 +69,40 @@ describe('QQStickerProvider saved stickers', () => {
     )
   })
 
+  it('keeps a sticker pack usable when one native asset is stale', async () => {
+    const pack = {
+      packId: 'qq-favorites', title: 'QQ 收藏表情', count: 3, version: 7,
+      stickers: [favorite('stale'), favorite('first'), favorite('second')],
+    }
+    const client = {
+      getStickerPack: vi.fn(async () => pack),
+      stickerSource: vi.fn(() => ({ async *stream() { yield new Uint8Array([1, 2, 3]) } })),
+    }
+    const mediaCache = {
+      prepareSticker: vi.fn(async (sticker: IMSticker) => {
+        if (sticker.stickerId === 'favorite:stale') throw new Error('QQNT bridge 404')
+        return { ...sticker, mimeType: 'image/webp', size: 321 }
+      }),
+    }
+    const logger = { warn: vi.fn() }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers', mediaCache as never, logger)
+
+    await expect(provider.getPack(context, 'qq-favorites')).resolves.toMatchObject({
+      packId: 'qq-favorites', count: 2,
+      cover: { stickerId: 'favorite:first' },
+      stickers: [
+        { stickerId: 'favorite:first', mimeType: 'image/webp', size: 321 },
+        { stickerId: 'favorite:second', mimeType: 'image/webp', size: 321 },
+      ],
+    })
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Skipping QQ sticker %s from pack %s because its asset could not be prepared: %s',
+      'favorite:stale',
+      'qq-favorites',
+      'QQNT bridge 404',
+    )
+  })
+
   it('still rejects when the saved-sticker catalog itself cannot be loaded', async () => {
     const client = {
       getSavedStickers: vi.fn(async () => { throw new Error('QQNT unavailable') }),
