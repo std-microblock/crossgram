@@ -1721,14 +1721,28 @@ export class DialogRpc {
     if (location._ !== 'inputDocumentFileLocation' && location._ !== 'inputPhotoFileLocation') {
       throw new RpcError(400, 'LOCATION_INVALID')
     }
+    const mediaId = location.id.toNumber()
+    if (!Number.isSafeInteger(mediaId) || mediaId <= 0 || !location.accessHash.equals(location.id)) {
+      throw new RpcError(400, 'FILE_REFERENCE_INVALID')
+    }
+    if (location._ === 'inputDocumentFileLocation' && !location.thumbSize) {
+      let asset: import('./platform.js').IMDirectDownload | undefined
+      let bridgeAsset = false
+      if (isBridgeReactionReference(location.fileReference, mediaId)) {
+        bridgeAsset = true
+        asset = await this._reactions?.getFileUrl(mediaId).catch(() => undefined)
+      } else if (isBridgeStickerReference(location.fileReference)) {
+        bridgeAsset = true
+        asset = await this._stickers?.getFileUrl(mediaId, location.fileReference).catch(() => undefined)
+      }
+      if (asset) return directDownloadJSON(asset)
+      if (bridgeAsset) throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
+    }
+    if (decodeBridgeMediaReference(location.fileReference) !== mediaId) {
+      throw new RpcError(400, 'FILE_REFERENCE_INVALID')
+    }
     if (!this._store || !this._platform.resolveMediaUrl) {
       throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
-    }
-    const mediaId = location.id.toNumber()
-    if (!Number.isSafeInteger(mediaId) || mediaId <= 0
-      || !location.accessHash.equals(location.id)
-      || decodeBridgeMediaReference(location.fileReference) !== mediaId) {
-      throw new RpcError(400, 'FILE_REFERENCE_INVALID')
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
@@ -1742,18 +1756,7 @@ export class DialogRpc {
     } catch {
       throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
     }
-    if (!resolved || !isHttpUrl(resolved.url) || !Number.isFinite(resolved.expiresAt)
-      || resolved.expiresAt <= Date.now()) {
-      throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
-    }
-    return {
-      _: 'dataJSON',
-      data: JSON.stringify({
-        url: resolved.url,
-        expiresAt: Math.trunc(resolved.expiresAt),
-        supportsRange: resolved.supportsRange,
-      }),
-    }
+    return directDownloadJSON(resolved)
   }
 
   private async _resolveAvatarMedia(peer: tl.TypeInputPeer, photoId: Long): Promise<IMMedia<any> | undefined> {
@@ -4550,7 +4553,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
     : media.preview
       ? { width: media.preview.width, height: media.preview.height }
       : { width: 1, height: 1 }
-  if (media.kind === 'image') {
+  if (media.kind === 'image' && !isAnimatedImageMime(media.mimeType)) {
     return {
       _: 'messageMediaPhoto',
       photo: {
@@ -4571,6 +4574,9 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   const attributes: tl.TypeDocumentAttribute[] = [
     { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
   ]
+  if (isAnimatedImageMime(media.mimeType)) attributes.push({
+    _: 'documentAttributeImageSize', w: dimensions.width, h: dimensions.height,
+  })
   if (media.mimeType?.startsWith('video/')) attributes.push({
     _: 'documentAttributeVideo',
     nosound: media.mimeType === 'video/webm' ? true : undefined,
@@ -4618,6 +4624,39 @@ function decodeBridgeMediaReference(bytes: Uint8Array): number | undefined {
   return Number.isSafeInteger(id) ? id : undefined
 }
 
+function isBridgeStickerReference(bytes: Uint8Array): boolean {
+  return decodeFileReference(bytes)?.startsWith('bridge-sticker:') ?? false
+}
+
+function isBridgeReactionReference(bytes: Uint8Array, documentId: number): boolean {
+  return decodeFileReference(bytes)?.startsWith(`bridge-reaction-resource:${documentId}:`) ?? false
+}
+
+function decodeFileReference(bytes: Uint8Array): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return
+  }
+}
+
+function directDownloadJSON(
+  resolved: import('./platform.js').IMDirectDownload | undefined,
+): tl.RawDataJSON {
+  if (!resolved || !isHttpUrl(resolved.url) || !Number.isFinite(resolved.expiresAt)
+    || resolved.expiresAt <= Date.now()) {
+    throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
+  }
+  return {
+    _: 'dataJSON',
+    data: JSON.stringify({
+      url: resolved.url,
+      expiresAt: Math.trunc(resolved.expiresAt),
+      supportsRange: resolved.supportsRange,
+    }),
+  }
+}
+
 function isHttpUrl(value: string): boolean {
   try {
     const protocol = new URL(value).protocol
@@ -4631,7 +4670,7 @@ function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessa
   const id = Long.fromString(staged.upload.fileId)
   const accessHash = id
   const fileReference = new TextEncoder().encode(`bridge-staged:${staged.upload.fileId}`)
-  if (staged.media.kind === 'image') {
+  if (staged.media.kind === 'image' && !isAnimatedImageMime(staged.media.mimeType)) {
     return {
       _: 'messageMediaPhoto',
       photo: {
@@ -4661,6 +4700,9 @@ function documentAttributes(media: Pick<IMMedia<any>, 'name' | 'mimeType' | 'wid
   const attributes: tl.TypeDocumentAttribute[] = [
     { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
   ]
+  if (isAnimatedImageMime(media.mimeType)) attributes.push({
+    _: 'documentAttributeImageSize', w: media.width ?? 1, h: media.height ?? 1,
+  })
   if (media.mimeType?.startsWith('video/')) attributes.push({
     _: 'documentAttributeVideo',
     nosound: media.mimeType === 'video/webm' ? true : undefined,
@@ -4668,6 +4710,10 @@ function documentAttributes(media: Pick<IMMedia<any>, 'name' | 'mimeType' | 'wid
     duration: media.duration ?? 0, w: media.width ?? 1, h: media.height ?? 1,
   })
   return attributes
+}
+
+function isAnimatedImageMime(mimeType: string | null | undefined): boolean {
+  return mimeType === 'image/gif' || mimeType === 'image/apng'
 }
 
 function qqSequenceKey(conversationId: string, sequence: number): string {

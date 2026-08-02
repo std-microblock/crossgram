@@ -1,10 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import sharp from 'sharp'
+import { describe, expect, it, vi } from 'vitest'
 import type { IMMediaSource, PlatformSession, StickerProviderContext } from '@mtproto-relay/bridge'
-import { QQMediaCache } from './media-cache.js'
 import type { QQStickerReference, WireSticker } from './protocol.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
@@ -14,122 +9,72 @@ const context: StickerProviderContext = {
     platformSessionId: 'qq-session', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
   } satisfies PlatformSession,
 }
-const temporaryDirectories: string[] = []
 
-afterEach(async () => {
-  sharp.cache(false)
-  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, {
-    recursive: true, force: true, maxRetries: 20, retryDelay: 25,
-  })))
-})
-
-describe('QQStickerProvider saved-sticker pipeline', () => {
-  it('materializes valid assets while isolating an image decoder failure', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'mtproto-relay-qq-sticker-provider-'))
-    temporaryDirectories.push(directory)
-    const validPng = await sharp({
-      create: { width: 16, height: 12, channels: 4, background: { r: 20, g: 80, b: 220, alpha: 1 } },
-    }).png().toBuffer()
-    const corruptImage = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0xff])
+describe('QQStickerProvider raw saved-sticker pipeline', () => {
+  it('lists every native sticker without decoding bytes and streams the selected original on demand', async () => {
     const assets = new Map([
-      ['bad', corruptImage],
-      ['good', new Uint8Array(validPng)],
+      ['bad', Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0xff])],
+      ['good', Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])],
     ])
+    let opens = 0
     const client = {
-      getSavedStickers: vi.fn(async () => ({
-        stickers: [favorite('bad'), favorite('good')],
-      })),
+      getSavedStickers: vi.fn(async () => ({ stickers: [favorite('bad'), favorite('good')] })),
       stickerSource: vi.fn((reference: QQStickerReference) => source(assets.get(
         reference.kind === 'favorite' ? reference.resId : reference.stickerId,
-      )!)),
+      )!, () => opens++)),
     }
-    const logger = { warn: vi.fn() }
-    const provider = new QQStickerProvider(
-      client as never,
-      'qq:stickers',
-      new QQMediaCache({ path: directory, generatePreviews: false }),
-      logger,
-    )
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
 
     const result = await provider.listSavedStickers(context)
 
-    expect(result.stickers).toMatchObject([{
-      providerId: 'qq:stickers', stickerId: 'favorite:good',
-      packId: 'qq-favorites', format: 'static', mimeType: 'image/webp', width: 16, height: 12,
-    }])
-    expect(result.stickers[0]!.size).toBeGreaterThan(0)
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Skipping QQ saved sticker %s because its asset could not be prepared: %s',
-      'favorite:bad',
-      expect.any(String),
-    )
+    expect(result.stickers).toMatchObject([
+      { stickerId: 'favorite:bad', format: 'static', mimeType: 'image/png' },
+      { stickerId: 'favorite:good', format: 'static', mimeType: 'image/png' },
+    ])
+    expect(client.stickerSource).not.toHaveBeenCalled()
+    const asset = await provider.openAsset(context, result.stickers[1]!)
+    expect(await collect(asset.source.stream())).toEqual(Buffer.from(assets.get('good')!))
+    expect(opens).toBe(1)
   })
 
-  it('materializes a favorites pack after discarding only its stale native asset', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'mtproto-relay-qq-sticker-pack-'))
-    temporaryDirectories.push(directory)
-    const validPng = await sharp({
-      create: { width: 16, height: 12, channels: 4, background: { r: 220, g: 80, b: 20, alpha: 1 } },
-    }).png().toBuffer()
-    const assets = new Map([
-      ['stale', new Uint8Array([0x89, 0x50, 0x4e])],
-      ['good', new Uint8Array(validPng)],
-    ])
+  it('keeps a complete pack metadata-only even when one native path will be stale at download time', async () => {
     const client = {
       getStickerPack: vi.fn(async () => ({
         packId: 'qq-favorites', title: 'QQ 收藏表情', count: 2, version: 9,
         stickers: [favorite('stale'), favorite('good')],
       })),
-      stickerSource: vi.fn((reference: QQStickerReference) => source(assets.get(
-        reference.kind === 'favorite' ? reference.resId : reference.stickerId,
-      )!)),
+      stickerSource: vi.fn(() => source(Uint8Array.from([1, 2, 3]), () => undefined)),
     }
-    const logger = { warn: vi.fn() }
-    const provider = new QQStickerProvider(
-      client as never,
-      'qq:stickers',
-      new QQMediaCache({ path: directory, generatePreviews: false }),
-      logger,
-    )
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
 
-    const result = await provider.getPack(context, 'qq-favorites')
-
-    expect(result).toMatchObject({
-      packId: 'qq-favorites', count: 1,
-      cover: { providerId: 'qq:stickers', stickerId: 'favorite:good' },
-      stickers: [{
-        providerId: 'qq:stickers', stickerId: 'favorite:good',
-        packId: 'qq-favorites', mimeType: 'image/webp', width: 16, height: 12,
-      }],
+    await expect(provider.getPack(context, 'qq-favorites')).resolves.toMatchObject({
+      packId: 'qq-favorites', count: 2,
+      cover: { stickerId: 'favorite:stale' },
+      stickers: [
+        { stickerId: 'favorite:stale', mimeType: 'image/png' },
+        { stickerId: 'favorite:good', mimeType: 'image/png' },
+      ],
     })
-    expect(result!.stickers[0]!.size).toBeGreaterThan(0)
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Skipping QQ sticker %s from pack %s because its asset could not be prepared: %s',
-      'favorite:stale',
-      'qq-favorites',
-      expect.any(String),
-    )
+    expect(client.stickerSource).not.toHaveBeenCalled()
   })
 })
 
 function favorite(id: string): WireSticker {
   return {
-    stickerId: `favorite:${id}`,
-    packId: 'qq-favorites',
-    title: id,
-    format: 'static',
-    mimeType: 'image/png',
-    width: 16,
-    height: 12,
+    stickerId: `favorite:${id}`, packId: 'qq-favorites', title: id,
+    format: 'static', mimeType: 'image/png', width: 16, height: 12,
     reference: {
       kind: 'favorite', resId: id, path: `/saved/${id}.png`, name: `${id}.png`, animated: false,
     },
   }
 }
 
-function source(bytes: Uint8Array): IMMediaSource {
-  return {
-    size: bytes.length,
-    async *stream() { yield bytes },
-  }
+function source(bytes: Uint8Array, opened: () => void): IMMediaSource {
+  return { size: bytes.length, async *stream() { opened(); yield bytes } }
+}
+
+async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  for await (const chunk of source) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks)
 }

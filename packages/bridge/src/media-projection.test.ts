@@ -194,6 +194,65 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('rich-media projection', () => {
+  it('projects raw GIF/APNG images as documents with client-decodable metadata', () => {
+    for (const mimeType of ['image/gif', 'image/apng']) {
+      expect(makeTlMessageMedia({
+        id: 91, messageId: 1, ordinal: 0, partIndex: 0, platformMediaId: mimeType,
+        kind: 'image', name: mimeType === 'image/gif' ? 'animation.gif' : 'animation.apng',
+        mimeType, size: 123, width: 40, height: 30, duration: null,
+        preview: null, strippedThumbnail: null, locator: { remote: mimeType },
+      }, 1)).toMatchObject({
+        _: 'messageMediaDocument',
+        document: {
+          _: 'document', mimeType,
+          attributes: [
+            { _: 'documentAttributeFilename' },
+            { _: 'documentAttributeImageSize', w: 40, h: 30 },
+          ],
+        },
+      })
+    }
+  })
+
+  it('returns sticker/reaction direct URLs and leaves stream-only assets on upload.getFile fallback', async () => {
+    const { store } = await createStore()
+    const direct = { url: 'https://cdn.example.test/raw.gif', expiresAt: Date.now() + 60_000, supportsRange: true }
+    const sticker = {
+      getFileUrl: vi.fn(async () => direct),
+      getFile: vi.fn(async () => Uint8Array.from([1, 2, 3])),
+    }
+    const reaction = {
+      getFileUrl: vi.fn(async () => undefined),
+      getFile: vi.fn(async () => ({ bytes: Uint8Array.from([4, 5, 6]), mimeType: 'image/apng' })),
+    }
+    const rpc = new DialogRpc(
+      platform, session, store, undefined, undefined, 1, sticker as never, reaction as never,
+    )
+    const stickerId = Long.fromNumber(7001)
+    const stickerReference = new TextEncoder().encode('bridge-sticker:qq:wave:1')
+    const stickerLocation = {
+      _: 'inputDocumentFileLocation' as const,
+      id: stickerId, accessHash: stickerId, fileReference: stickerReference, thumbSize: '',
+    }
+    const url = await rpc.getFileUrl(stickerLocation)
+    expect(JSON.parse(url.data)).toMatchObject({ url: direct.url, supportsRange: true })
+    expect(sticker.getFileUrl).toHaveBeenCalledWith(7001, stickerReference)
+
+    const reactionId = Long.fromNumber(7002)
+    const reactionReference = new TextEncoder().encode('bridge-reaction-resource:7002:1')
+    const reactionLocation = {
+      _: 'inputDocumentFileLocation' as const,
+      id: reactionId, accessHash: reactionId, fileReference: reactionReference, thumbSize: '',
+    }
+    await expect(rpc.getFileUrl(reactionLocation)).rejects.toThrow('MEDIA_DIRECT_URL_UNAVAILABLE')
+    const fallback = await rpc.getFile({
+      _: 'upload.getFile', precise: true, cdnSupported: false,
+      location: reactionLocation, offset: 0, limit: 3,
+    })
+    expect(fallback).toMatchObject({ _: 'upload.file', bytes: Uint8Array.from([4, 5, 6]) })
+    expect(reaction.getFile).toHaveBeenCalled()
+  })
+
   it('uses preview dimensions when the upstream image omitted its original size', () => {
     const projected = makeTlMessageMedia({
       id: 1, messageId: 1, ordinal: 0, partIndex: 0, platformMediaId: 'missing-dimensions',

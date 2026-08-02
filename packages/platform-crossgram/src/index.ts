@@ -10,7 +10,7 @@ import {
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput,
   type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMTransferOptions,
-  type IMSticker, type IMStickerAsset, type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
+  type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
   type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
 } from '@mtproto-relay/bridge'
 import { QQNTClient, QQNTMessageSendRejectedError, type QQNTClientOptions } from './client.js'
@@ -18,7 +18,8 @@ import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { QQStickerProvider } from './sticker-provider.js'
 import { QQVoiceMedia } from './voice-media.js'
 import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
-import { defineQQMediaCacheModel, QQMediaCache } from './media-cache.js'
+import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
+import { migrateLegacyQQMessageMedia } from './raw-media-migration.js'
 import type {
   QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
   WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireTextPart,
@@ -35,14 +36,6 @@ export interface Config extends QQNTClientOptions {
    * `groupAlias` prefers the conversation-scoped group card when available.
    */
   memberName?: MemberNameMode
-  /** Directory used for transformed media, stickers, and reactions. */
-  mediaCachePath?: string
-  /** Generate compact WebP previews and store them in the database. */
-  generatePreviews?: boolean
-  /** Maximum width/height of extracted image previews. */
-  previewMaxDimension?: number
-  /** Override the bundled FFmpeg executable used for GIF/APNG to WebM conversion. */
-  ffmpegPath?: string
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
   grayTipFilters?: string[]
 }
@@ -54,10 +47,6 @@ export const Config = z.object({
   webSocketEndpoint: z.string(),
   token: z.string().role('secret'),
   memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
-  mediaCachePath: z.string(),
-  generatePreviews: z.boolean().default(true),
-  previewMaxDimension: z.natural().min(1).default(320),
-  ffmpegPath: z.string(),
   grayTipFilters: z.array(z.string()).default(DEFAULT_GRAY_TIP_FILTERS),
 }).i18n({
   'en-US': enUS,
@@ -110,19 +99,24 @@ export function apply(ctx: Context, config: Config = {}): void {
   const id = resolvePlatformPluginId(ctx, 'qqnt')
   const stickerProviderId = `${id}:stickers`
   defineQQNTEventCheckpointModel(ctx)
-  defineQQMediaCacheModel(ctx)
-  const mediaCache = new QQMediaCache({
-    path: config.mediaCachePath ?? resolve(process.cwd(), 'data', 'qqnt-media-cache', id),
-    generatePreviews: config.generatePreviews,
-    previewMaxDimension: config.previewMaxDimension,
-    ffmpegPath: config.ffmpegPath,
-    database: ctx.database,
+  defineLegacyQQMediaSchema(ctx)
+  const mediaCachePath = resolve(process.cwd(), 'data', 'qqnt-media-cache', id)
+  ctx.effect(async () => {
+    await ctx.database.prepared()
+    const result = await migrateLegacyQQMessageMedia(ctx.database, id, mediaCachePath)
+    if (result.mediaRows) {
+      ctx.logger('platform-qqnt').info(
+        'migrated %d legacy server-transformed QQ message media rows to raw direct-download projection',
+        result.mediaRows,
+      )
+    }
+    return () => undefined
   })
   const logger = ctx.logger('platform-qqnt')
-  const platform = new QQNTPlatform(config, stickerProviderId, mediaCache, logger, ctx.database, voiceMedia)
+  const platform = new QQNTPlatform(config, stickerProviderId, undefined, logger, ctx.database, voiceMedia)
   ctx.imPlatform.register(platform, id)
   ctx.imSticker.register(
-    new QQStickerProvider(platform.client, stickerProviderId, mediaCache, logger, id),
+    new QQStickerProvider(platform.client, stickerProviderId, undefined, logger, id),
     stickerProviderId,
   )
 }
@@ -162,7 +156,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly qqVoiceMedia?: QQVoiceMedia
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
   private readonly firstUnreadSeq = new Map<string, string>()
-  private readonly reactionResources = new Map<string, Uint8Array>()
   private reactionCatalog?: IMReactionContext
   private reactionCatalogPromise?: Promise<IMReactionContext>
   private reactionCatalogRetryAt = 0
@@ -177,7 +170,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     string,
     (event: IMEvent<QQMediaLocator>) => void | Promise<void>
   >()
-  private readonly mediaPreparationJobs = new Map<string, Promise<void>>()
   private readonly preparedDialogPages = new Map<string, {
     page: IMDialogPage<QQMediaLocator>
     rawPage: IMDialogPage<QQMediaLocator>
@@ -190,7 +182,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   constructor(
     options: Config = {},
     private readonly stickerProviderId = 'qqnt:stickers',
-    private readonly mediaCache?: QQMediaCache,
+    _removedMediaCache?: unknown,
     private readonly logger?: Logger,
     databaseOrVoiceMedia?: Database | QQVoiceMedia,
     qqVoiceMedia?: QQVoiceMedia,
@@ -557,7 +549,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     try {
       const message = await this.prepareInitialMessage(event.message)
       await handler({ ...event, message })
-      this.scheduleMediaWarmup(event.conversation, message)
       return true
     } finally {
       inFlightMessageKeys.delete(key)
@@ -1068,14 +1059,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): AsyncIterable<Uint8Array> {
     if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
     if (media.locator.deferred) return
-    const original = {
-      size: media.size,
-      stream: ({ signal }: { signal?: AbortSignal } = {}) => this.client.downloadFile(media.locator!, { signal }),
-    }
-    if (this.mediaCache && (media.locator.previewKey || media.locator.cachedPath)) {
-      yield* this.mediaCache.download(media, original, options)
-      return
-    }
     let transferred = 0
     for await (const chunk of this.client.downloadFile(media.locator, {
       signal: options.signal, offset: options.offset, limit: options.limit,
@@ -1094,10 +1077,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     media: IMMedia<QQMediaLocator>,
   ): Promise<IMDirectDownload | undefined> {
     const locator = media.locator
-    // These assets live in relay-side cache, are generated locally, or have
-    // not received a downloadable QQ identity yet.
-    if (!locator || locator.deferred || locator.cachedPath || locator.previewKey) return
-    const resolved = await this.client.resolveFileUrl(locator)
+    if (!locator || locator.deferred) return
+    const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
     return { ...resolved, supportsRange: true }
   }
 
@@ -1156,24 +1137,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       throw new Error('QQ reaction resource has no usable locator')
     }
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('download aborted')
-    if (typeof locator.cacheKey === 'string') {
-      const cached = this.reactionResources.get(locator.cacheKey)
-      if (!cached) throw new Error(`QQ reaction resource cache miss: ${locator.cacheKey}`)
-      const start = Math.min(cached.length, Math.max(0, options.offset ?? 0))
-      const end = options.limit === undefined
-        ? cached.length
-        : Math.min(cached.length, start + Math.max(0, options.limit))
-      const output = cached.subarray(start, end)
-      if (!output.length) return
-      await options.onProgress?.({
-        phase: 'download',
-        mediaIndex: 0,
-        transferredBytes: output.length,
-        totalBytes: resource.size,
-      })
-      yield output
-      return
-    }
     if (isReactionResourceLocator(locator)) {
       let transferredBytes = 0
       for await (const chunk of this.client.downloadReactionResource(locator.reactionKey, {
@@ -1203,6 +1166,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
+  async resolveReactionResourceUrl(
+    _session: PlatformSession,
+    resource: IMReactionResource,
+  ): Promise<IMDirectDownload | undefined> {
+    const locator = resource.locator
+    if (!isRemoteQQMediaLocator(locator)) return
+    const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
+    return { ...resolved, supportsRange: true }
+  }
+
   private ensureReactionCatalog(): Promise<IMReactionContext> {
     if (this.reactionCatalog) return Promise.resolve(this.reactionCatalog)
     if (this.reactionCatalogPromise) return this.reactionCatalogPromise
@@ -1228,54 +1201,17 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const available = await mapConcurrent(source.available, 8, async (definition) => {
       if (definition.presentation.type !== 'custom') return definition
       const { resource } = definition.presentation
-      // Directly constructed test/lightweight instances may omit the cache;
-      // the production plugin always supplies it from apply().
-      if (!this.mediaCache) return definition
       const locator = resource.locator
       if (!isReactionResourceLocator(locator) && !isRemoteQQMediaLocator(locator)) return definition
-      const input: IMStickerAsset = {
-        source: {
-          size: resource.size,
-          stream: ({ signal } = {}) => isReactionResourceLocator(locator)
-            ? this.client.downloadReactionResource(locator.reactionKey, { signal })
-            : this.client.downloadFile(locator, { signal }),
-        },
-        mimeType: resource.format === 'video' ? 'image/apng' : 'image/png',
-        size: resource.size,
-        width: resource.width,
-        height: resource.height,
-      }
-      const asset = await this.mediaCache.openReaction(
-        definition.key, resource.version, resource.format, input,
-      )
-      const chunks: Uint8Array[] = []
-      let size = 0
-      for await (const chunk of asset.source.stream()) {
-        chunks.push(chunk)
-        size += chunk.length
-      }
-      const bytes = new Uint8Array(size)
-      let offset = 0
-      for (const chunk of chunks) {
-        bytes.set(chunk, offset)
-        offset += chunk.length
-      }
-      const video = resource.format === 'video'
-      const cacheKey = `${definition.key}:${resource.version}:${video ? 'webm' : 'webp'}-v1`
-      this.reactionResources.set(cacheKey, bytes)
+      const animated = resource.format === 'video'
       return {
         ...definition,
         presentation: {
           ...definition.presentation,
           resource: {
             ...resource,
-            version: resource.version * 100 + (video ? 2 : 1),
-            format: video ? 'video' as const : 'static' as const,
-            mimeType: video ? 'video/webm' as const : 'image/webp' as const,
-            width: 100,
-            height: 100,
-            size: bytes.length,
-            locator: { cacheKey },
+            format: animated ? 'animated' as const : 'static' as const,
+            mimeType: animated ? 'image/apng' as const : 'image/png' as const,
           },
         },
       }
@@ -1315,24 +1251,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
     const handler = this.eventHandlers.get(session.platformSessionId)
-    if (!handler || !this.mediaCache) return this.prepareInitialMessage(message)
+    if (!handler) return this.prepareInitialMessage(message)
     const parts = await Promise.all(message.content.parts.map(async (part) => {
-      if (part.type === 'sticker') {
-        try {
-          const restored = await this.restoreSticker(part.sticker)
-          if (restored) return { ...part, sticker: restored }
-          return { ...part, sticker: await this.prepareSticker(part.sticker) }
-        } catch (error) {
-          this.logger?.warn(
-            'history sticker preparation failed message=%s sticker=%s error=%s',
-            message.id, part.sticker.stickerId, formatError(error),
-          )
-          return part
-        }
-      }
-      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) return part
-      const restored = await this.mediaCache!.restoreInitialMedia(part.media)
-      if (restored) return { type: 'media' as const, media: restored }
       return part
     }))
     // Keep history metadata-only. The patched client asks getFileUrl for the
@@ -1497,16 +1417,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const message = mapMessage(
       input, this.memberName, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
     )
-    if (!this.mediaCache) return message
-    return {
-      ...message,
-      content: {
-        ...message.content,
-        parts: message.content.parts.map((part) => part.type === 'sticker'
-          ? { ...part, sticker: this.mediaCache!.projectSticker(part.sticker) }
-          : part),
-      },
-    }
+    return message
   }
 
   private rebaseMultiForwardMedia(
@@ -1538,40 +1449,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
     message = await this.prepareMultiForwardPreviews(message)
-    if (!this.mediaCache) return message
-    const parts = await Promise.all(message.content.parts.map(async (part) => {
-      if (part.type === 'sticker') {
-        try {
-          return {
-            ...part,
-            sticker: await this.prepareSticker(part.sticker),
-          }
-        } catch (error) {
-          this.logger?.warn(
-            'cached sticker thumbnail lookup failed message=%s sticker=%s error=%s',
-            message.id, part.sticker.stickerId, formatError(error),
-          )
-          return part
-        }
-      }
-      if (part.type !== 'media' || !part.media.locator || !this.mediaCache!.shouldPrepare(part.media)) return part
-      try {
-        const restored = await this.mediaCache!.restoreInitialMedia(part.media)
-        if (restored) return { type: 'media' as const, media: restored }
-        if (this.mediaCache!.requiresAnimationProbe(part.media)) {
-          const media = await this.preparePublishableMedia(part.media)
-          return { type: 'media' as const, media }
-        }
-        return part
-      } catch (error) {
-        this.logger?.warn(
-          'automatic media cache failed message=%s media=%s error=%s',
-          message.id, part.media.id, formatError(error),
-        )
-        return part
-      }
-    }))
-    return { ...message, content: { ...message.content, parts } }
+    return message
   }
 
   private async prepareMultiForwardPreviews(
@@ -1626,84 +1504,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       })
     this.multiForwardPreviewJobs.set(conversation.id, pending)
     return pending
-  }
-
-  private scheduleMediaWarmup(
-    conversation: IMConversation<QQMediaLocator>,
-    message: IMMessage<QQMediaLocator>,
-  ): void {
-    const key = `${conversation.id}\0${message.id}`
-    if (this.mediaPreparationJobs.has(key)) return
-    const pending = this.warmMediaCache(message).catch((error) => {
-      this.logger?.warn(
-        'background media warmup failed conversation=%s message=%s error=%s',
-        conversation.id, message.id, formatError(error),
-      )
-    }).finally(() => {
-      if (this.mediaPreparationJobs.get(key) === pending) this.mediaPreparationJobs.delete(key)
-    })
-    this.mediaPreparationJobs.set(key, pending)
-  }
-
-  private async preparePublishableMedia(
-    media: IMMedia<QQMediaLocator>,
-  ): Promise<IMMedia<QQMediaLocator>> {
-    const locator = media.locator!
-    const upgraded = await this.mediaCache!.prepareAnimatedUpgrade(media, {
-      size: media.size,
-      stream: ({ signal } = {}) => this.client.downloadFile(locator, { signal }),
-    }, {
-      read: ({ offset, limit, signal }) => this.client.downloadFile(locator, { offset, limit, signal }),
-    })
-    return upgraded ?? media
-  }
-
-  private async warmMediaCache(
-    message: IMMessage<QQMediaLocator>,
-  ): Promise<void> {
-    if (!this.mediaCache) return
-    await Promise.all(message.content.parts.map(async (part) => {
-      if (part.type === 'sticker') {
-        if (part.sticker.format !== 'video' || !part.sticker.locator || part.sticker.thumbnail) return part
-        const reference = part.sticker.locator as unknown as QQStickerReference
-        await this.mediaCache!.prepareStickerThumbnail(
-          part.sticker, this.client.stickerSource(reference, part.sticker.size),
-        )
-        return
-      }
-      if (part.type !== 'media' || part.media.kind !== 'image' || !part.media.locator) return part
-      const locator = part.media.locator
-      await this.mediaCache!.prepareMedia(part.media, {
-        size: part.media.size,
-        stream: ({ signal } = {}) => this.client.downloadFile(locator, { signal }),
-      })
-    }))
-  }
-
-  private prepareSticker(sticker: IMSticker): Promise<IMSticker> {
-    const reference = sticker.locator as unknown as QQStickerReference | undefined
-    if (!this.mediaCache || !reference) return Promise.resolve(sticker)
-    return this.mediaCache.prepareSticker({
-      ...sticker,
-      format: reference.animated ? 'animated' : 'static',
-      mimeType: reference.animated ? 'image/gif' : 'image/png',
-    }, {
-      source: this.client.stickerSource(reference, sticker.size),
-      mimeType: reference.animated ? 'image/gif' : 'image/png',
-      size: sticker.size,
-      width: sticker.width,
-      height: sticker.height,
-    })
-  }
-
-  private restoreSticker(sticker: IMSticker): Promise<IMSticker | undefined> {
-    const reference = sticker.locator as unknown as QQStickerReference | undefined
-    if (!this.mediaCache || !reference) return Promise.resolve(undefined)
-    return this.mediaCache.restoreSticker({
-      ...sticker,
-      format: reference.animated ? 'animated' : 'static',
-      mimeType: reference.animated ? 'image/gif' : 'image/png',
-    })
   }
 
   private readonly registerMultiForward = (
@@ -2061,6 +1861,11 @@ function isRemoteQQMediaLocator(value: unknown): value is QQMediaLocator {
     && (locator.kind === 'image' || locator.kind === 'file')
     && typeof locator.fileName === 'string'
     && Boolean(locator.originImageUrl || locator.fileUuid || locator.avatarUin)
+}
+
+function rawQQMediaLocator(locator: QQMediaLocator): QQMediaLocator {
+  const { cachedPath: _cachedPath, previewKey: _previewKey, deferred: _deferred, ...raw } = locator
+  return raw
 }
 
 function isReactionResourceLocator(value: unknown): value is { reactionKey: string } {

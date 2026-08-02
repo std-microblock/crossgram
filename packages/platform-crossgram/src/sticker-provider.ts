@@ -3,7 +3,6 @@ import type {
   StickerPageQuery, StickerProviderContext,
 } from '@mtproto-relay/bridge'
 import type { QQNTClient } from './client.js'
-import type { QQMediaCache } from './media-cache.js'
 import type { QQStickerReference, WireSticker, WireStickerPack } from './protocol.js'
 
 /** Exposes QQ market packs and the account's QQ favorite collection. */
@@ -13,7 +12,7 @@ export class QQStickerProvider implements IMStickerProvider {
   constructor(
     private readonly client: QQNTClient,
     private readonly providerId: string,
-    private readonly mediaCache?: QQMediaCache,
+    _removedMediaCache?: unknown,
     private readonly logger?: QQStickerLogger,
     ownerPlatformId?: string,
   ) {
@@ -65,14 +64,27 @@ export class QQStickerProvider implements IMStickerProvider {
     const reference = sticker.locator as unknown as QQStickerReference | undefined
     if (!reference) throw new Error(`QQ sticker ${sticker.stickerId} has no native reference`)
     if (reference.deferred) return emptyStickerAsset(sticker)
-    const original = this.originalAsset(sticker, reference)
-    return this.mediaCache
-      ? this.mediaCache.openSticker({ ...sticker, format: reference.animated ? 'animated' : 'static' }, original)
-      : { ...original, mimeType: sticker.mimeType }
+    return { ...this.originalAsset(sticker, reference), mimeType: sticker.mimeType }
   }
 
   async openThumbnail(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset | null> {
-    return this.mediaCache?.openStickerThumbnail(sticker) ?? null
+    return null
+  }
+
+  async resolveAssetUrl(_context: StickerProviderContext, sticker: IMSticker) {
+    const reference = sticker.locator as unknown as QQStickerReference | undefined
+    if (!reference || reference.deferred) return
+    if (reference.kind === 'favorite' && reference.locator) {
+      const resolved = await this.client.resolveFileUrl(reference.locator)
+      return { ...resolved, supportsRange: true }
+    }
+    const url = reference.kind === 'sysface'
+      ? reference.url
+      : reference.kind === 'favorite'
+        ? reference.path
+        : reference.animated ? reference.dynamicPath : reference.staticPath
+    if (!isHttpUrl(url)) return
+    return { url, expiresAt: Date.now() + 5 * 60_000, supportsRange: true }
   }
 
   async prepareSend(_context: StickerProviderContext, sticker: IMSticker) {
@@ -133,8 +145,7 @@ export class QQStickerProvider implements IMStickerProvider {
       version: sticker.version,
       locator: sticker.reference as unknown as JsonValue,
     }
-    if (!this.mediaCache) return mapped
-    return this.mediaCache.prepareSticker(mapped, this.originalAsset(mapped, sticker.reference))
+    return mapped
   }
 
   private originalAsset(sticker: IMSticker, reference: QQStickerReference): IMStickerAsset {
@@ -145,6 +156,16 @@ export class QQStickerProvider implements IMStickerProvider {
       width: sticker.width,
       height: sticker.height,
     }
+  }
+}
+
+function isHttpUrl(value: string | undefined): value is string {
+  if (!value) return false
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
   }
 }
 
