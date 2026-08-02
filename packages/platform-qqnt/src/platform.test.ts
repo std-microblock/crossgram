@@ -9,7 +9,6 @@ import {
   type IMMedia, type PlatformSession,
 } from '@mtproto-relay/bridge'
 import { parseQQMarkdown, QQNTPlatform } from './index.js'
-import { QQMediaCache } from './media-cache.js'
 import type { QQMediaLocator } from './protocol.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
@@ -870,10 +869,8 @@ describe('QQNTPlatform mapping', () => {
     }])
   })
 
-  it('materializes a sent animated sticker before returning the local echo', async () => {
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-sent-sticker-'))
-    temporaryDirectories.push(cachePath)
-    const platform = new QQNTPlatform({}, 'qq-provider', new QQMediaCache({ path: cachePath }))
+  it('returns a sent animated sticker as untouched QQ metadata without opening the asset', async () => {
+    const platform = new QQNTPlatform({}, 'qq-provider')
     const gif = await sharp({
       create: { width: 16, height: 12, channels: 4, background: { r: 20, g: 80, b: 220, alpha: 1 } },
     }).gif().toBuffer()
@@ -908,15 +905,11 @@ describe('QQNTPlatform mapping', () => {
 
     expect(sent.content.parts).toMatchObject([{
       type: 'sticker', sticker: {
-        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
-        thumbnail: { mimeType: 'image/webp' },
+        format: 'animated', mimeType: 'image/gif',
       },
     }])
-    const sticker = sent.content.parts[0]
-    if (sticker.type !== 'sticker') throw new Error('missing sent sticker')
-    expect(sticker.sticker.size).toBeGreaterThan(0)
-    expect(assetRequests).toBe(1)
-  }, 30_000)
+    expect(assetRequests).toBe(0)
+  })
 
   it('exposes QQ packs, assets, and native favorite mutation through the sticker provider', async () => {
     const platform = new QQNTPlatform()
@@ -1557,12 +1550,8 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
-  it('keeps received images in their original format and reuses database-style previews by QQ hash', async () => {
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-auto-media-'))
-    temporaryDirectories.push(cachePath)
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
-      path: cachePath, previewMaxDimension: 6,
-    }))
+  it('keeps received images metadata-only without downloads, previews, or transforms', async () => {
+    const platform = new QQNTPlatform()
     const png = await sharp({
       create: { width: 12, height: 8, channels: 4, background: { r: 30, g: 90, b: 180, alpha: 1 } },
     }).png().toBuffer()
@@ -1603,7 +1592,7 @@ describe('QQNTPlatform mapping', () => {
     await ready.promise
     await unsubscribe()
 
-    expect(platform.client.downloadFile).toHaveBeenCalledTimes(2)
+    expect(platform.client.downloadFile).not.toHaveBeenCalled()
     expect(received).toHaveLength(2)
     for (const event of received as any[]) expect(event.message.content.parts[0]).toMatchObject({
       media: {
@@ -1614,7 +1603,7 @@ describe('QQNTPlatform mapping', () => {
     expect((received as any[]).every((event) => !event.message.content.parts[0].media.preview)).toBe(true)
   })
 
-  it('does not resolve a generated preview to the original QQ image URL', async () => {
+  it('strips legacy local markers before resolving the original QQ image URL', async () => {
     const platform = new QQNTPlatform()
     platform.client.resolveFileUrl = vi.fn(async () => ({
       url: 'https://cdn.example.test/original.png', expiresAt: Date.now() + 60_000,
@@ -1634,21 +1623,20 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.resolveMediaUrl(session, original)).resolves.toMatchObject({
       url: 'https://cdn.example.test/original.png', supportsRange: true,
     })
-    await expect(platform.resolveMediaUrl(session, preview)).resolves.toBeUndefined()
-    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(1)
+    await expect(platform.resolveMediaUrl(session, preview)).resolves.toMatchObject({
+      url: 'https://cdn.example.test/original.png', supportsRange: true,
+    })
+    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(2)
+    expect(platform.client.resolveFileUrl).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ previewKey: expect.anything(), cachedPath: expect.anything() }),
+    )
   })
 
-  it('returns uncached history images as downloadable originals and warms previews without edits', async () => {
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-placeholder-'))
-    temporaryDirectories.push(cachePath)
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
-      path: cachePath, previewMaxDimension: 6,
-    }))
+  it('returns history images immediately without opening their bytes', async () => {
+    const platform = new QQNTPlatform()
     const jpeg = await sharp({
       create: { width: 12, height: 8, channels: 3, background: { r: 30, g: 90, b: 180 } },
     }).jpeg().toBuffer()
-    const releaseDownload = Promise.withResolvers<void>()
-    const downloadStarted = Promise.withResolvers<void>()
     const events: any[] = []
     const wireMessage = {
       id: 'history-image', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
@@ -1667,11 +1655,7 @@ describe('QQNTPlatform mapping', () => {
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
-    platform.client.downloadFile = vi.fn(async function* () {
-      downloadStarted.resolve()
-      await releaseDownload.promise
-      yield jpeg
-    })
+    platform.client.downloadFile = vi.fn(async function* () { yield jpeg })
     platform.client.subscribe = vi.fn(async (_handler, signal) => {
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
     })
@@ -1686,25 +1670,14 @@ describe('QQNTPlatform mapping', () => {
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
 
-    await downloadStarted.promise
-    releaseDownload.resolve()
-    await vi.waitFor(async () => expect((await platform.getHistory(session, { id: '2:group' }))
-      .messages[0]).toMatchObject({
-      content: { parts: [{ media: {
-        preview: { mimeType: 'image/webp', width: 6, height: 4 },
-      } }] },
-    }))
+    expect(original.preview).toBeUndefined()
     expect(events.filter((event) => event.type === 'message-edit')).toEqual([])
-    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
+    expect(platform.client.downloadFile).not.toHaveBeenCalled()
     await unsubscribe()
   })
 
-  it('publishes an animated image once as immutable cached WebM', async () => {
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-animated-upgrade-'))
-    temporaryDirectories.push(cachePath)
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({
-      path: cachePath, previewMaxDimension: 8,
-    }))
+  it('publishes live and historical GIF images as the same untouched QQ asset', async () => {
+    const platform = new QQNTPlatform()
     const gif = await sharp({
       create: { width: 16, height: 12, channels: 4, background: { r: 120, g: 40, b: 210, alpha: 1 } },
     }).gif().toBuffer()
@@ -1751,27 +1724,22 @@ describe('QQNTPlatform mapping', () => {
     expect(events[0]).toMatchObject({
       type: 'message',
       message: { content: { parts: [{ media: {
-        id: 'animated-media:original-v1:webm-v1', kind: 'file', mimeType: 'video/webm',
-        locator: { cachedPath: expect.stringMatching(/\.webm$/) },
+        id: 'animated-media:original-v1', kind: 'image', mimeType: 'image/gif',
+        locator: expect.not.objectContaining({ cachedPath: expect.anything(), previewKey: expect.anything() }),
       } }] } },
     })
     expect(history.messages[0]).toMatchObject({
-      content: { parts: [{ media: { id: 'animated-media:original-v1:webm-v1', mimeType: 'video/webm' } }] },
+      content: { parts: [{ media: { id: 'animated-media:original-v1', mimeType: 'image/gif' } }] },
     })
-    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
-  }, 30_000)
+    expect(platform.client.downloadFile).not.toHaveBeenCalled()
+  })
 
-  it('returns uncached history stickers only after a valid asset is prepared, without edits', async () => {
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-history-sticker-placeholder-'))
-    temporaryDirectories.push(cachePath)
-    const cache = new QQMediaCache({ path: cachePath, previewMaxDimension: 8 })
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', cache)
-    const provider = new QQStickerProvider(platform.client, 'qqnt:stickers', cache)
+  it('returns history stickers immediately and opens the original asset only on demand', async () => {
+    const platform = new QQNTPlatform()
+    const provider = new QQStickerProvider(platform.client, 'qqnt:stickers')
     const png = await sharp({
       create: { width: 16, height: 12, channels: 4, background: { r: 70, g: 150, b: 220, alpha: 1 } },
     }).png().toBuffer()
-    const releaseSource = Promise.withResolvers<void>()
-    const sourceStarted = Promise.withResolvers<void>()
     const events: any[] = []
     const wireMessage = {
       id: 'history-sticker', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
@@ -1793,8 +1761,6 @@ describe('QQNTPlatform mapping', () => {
     platform.client.stickerSource = vi.fn(() => ({
       size: png.length,
       async *stream() {
-        sourceStarted.resolve()
-        await releaseSource.promise
         yield png
       },
     }))
@@ -1805,33 +1771,23 @@ describe('QQNTPlatform mapping', () => {
       events.push(event)
     })
 
-    const historyPromise = platform.getHistory(session, { id: '2:group' })
-    await sourceStarted.promise
-    releaseSource.resolve()
-    const history = await historyPromise
+    const history = await platform.getHistory(session, { id: '2:group' })
     const part = history.messages[0].content.parts[0]
     if (part.type !== 'sticker') throw new Error('missing history sticker')
     expect(part.sticker).toMatchObject({
-      stickerId: 'favorite:history-sticker', format: 'static', mimeType: 'image/webp',
-      size: expect.any(Number), locator: expect.not.objectContaining({ deferred: expect.anything() }),
-      thumbnail: { mimeType: 'image/webp', width: 8, height: 6 },
+      stickerId: 'favorite:history-sticker', format: 'static', mimeType: 'image/png',
+      size: png.length, locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
     const asset = await provider.openAsset({ session, platformKind: 'qq' }, part.sticker)
     expect(await collect(asset.source.stream())).not.toHaveLength(0)
 
-    const cached = await platform.getHistory(session, { id: '2:group' })
-    expect(cached.messages[0].content.parts[0]).toMatchObject({
-      sticker: { size: expect.any(Number), locator: expect.not.objectContaining({ deferred: expect.anything() }) },
-    })
     expect(events.filter((event) => event.type === 'message-edit')).toEqual([])
-    expect(platform.client.stickerSource).toHaveBeenCalledTimes(2)
+    expect(platform.client.stickerSource).toHaveBeenCalledTimes(1)
     await unsubscribe()
   })
 
-  it('projects QQ animated system faces as WebM video stickers without leaking fallback text', async () => {
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-message-sticker-'))
-    temporaryDirectories.push(cachePath)
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+  it('projects QQ animated system faces as untouched APNG stickers without opening bytes', async () => {
+    const platform = new QQNTPlatform()
     const gif = await sharp({
       create: { width: 16, height: 12, channels: 4, background: { r: 120, g: 40, b: 210, alpha: 1 } },
     }).gif().toBuffer()
@@ -1858,23 +1814,18 @@ describe('QQNTPlatform mapping', () => {
     expect(history.messages[0].content.parts).toMatchObject([{
       type: 'sticker', sticker: {
         stickerId: 'sysface:476', title: '/不是吧',
-        format: 'video', mimeType: 'video/webm', size: expect.any(Number),
-        thumbnail: { mimeType: 'image/webp' },
+        format: 'animated', mimeType: 'image/apng',
         locator: {
           kind: 'sysface', faceId: '476', faceType: 3, packId: '3',
           stickerId: '476', stickerType: 2, resultId: 'result-476',
         },
       },
     }])
-    const part = history.messages[0].content.parts[0]
-    if (part.type !== 'sticker') throw new Error('missing history sticker')
-    expect(part.sticker.size).toBeGreaterThan(0)
+    expect(platform.client.stickerSource).not.toHaveBeenCalled()
   })
 
-  it('caches catalog-keyed static and animated reactions without exposing bridge paths', async () => {
-    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-cache-'))
-    temporaryDirectories.push(cachePath)
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', new QQMediaCache({ path: cachePath }))
+  it('keeps catalog-keyed static and animated reactions raw until download', async () => {
+    const platform = new QQNTPlatform()
     const png = await sharp({
       create: { width: 20, height: 20, channels: 4, background: { r: 80, g: 140, b: 220, alpha: 1 } },
     }).png().toBuffer()
@@ -1910,9 +1861,11 @@ describe('QQNTPlatform mapping', () => {
     }
     platform.client.getReactionCatalog = vi.fn(async () => context)
     platform.client.downloadFile = vi.fn()
-    platform.client.downloadReactionResource = vi.fn(async function* (reactionKey) {
+    platform.client.downloadReactionResource = vi.fn(async function* (reactionKey, options) {
       expect(reactionKey === '1:265' || reactionKey === '1:14').toBe(true)
-      yield reactionKey === '1:265' ? png : apng
+      const bytes = reactionKey === '1:265' ? png : apng
+      const start = options?.offset ?? 0
+      yield bytes.subarray(start, start + (options?.limit ?? bytes.length))
     })
     platform.client.getMessageReactions = vi.fn(async () => ({
       reactions: [{
@@ -1934,12 +1887,12 @@ describe('QQNTPlatform mapping', () => {
       }, {
         key: '1:265',
         presentation: {
-          resource: { format: 'static', mimeType: 'image/webp', width: 100, height: 100 },
+           resource: { format: 'static', mimeType: 'image/png', width: 200, height: 200 },
         },
       }, {
         key: '1:14',
         presentation: {
-          resource: { format: 'video', mimeType: 'video/webm', width: 100, height: 100 },
+           resource: { format: 'animated', mimeType: 'image/apng', width: 128, height: 128 },
         },
       }],
     })
@@ -1952,7 +1905,7 @@ describe('QQNTPlatform mapping', () => {
     )) cachedChunks.push(chunk)
     expect(Buffer.concat(cachedChunks)).toHaveLength(4)
     expect(platform.client.downloadFile).not.toHaveBeenCalled()
-    expect(platform.client.downloadReactionResource).toHaveBeenCalledTimes(2)
+    expect(platform.client.downloadReactionResource).toHaveBeenCalledTimes(1)
     await expect(platform.getMessageReactions(session, {
       conversationId: '2:g', messageId: 'm', targetId: 'm', nativeSequence: '571',
     })).resolves.toMatchObject({ reactions: [{

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { IMSticker, PlatformSession, StickerProviderContext } from '@mtproto-relay/bridge'
+import type { PlatformSession, StickerProviderContext } from '@mtproto-relay/bridge'
 import type { WireSticker } from './protocol.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
@@ -31,7 +31,7 @@ describe('QQStickerProvider saved stickers', () => {
     expect(provider.capabilities.ownerPlatformId).toBe('qq/primary')
   })
 
-  it('skips only corrupt saved sticker assets and preserves healthy prepared stickers', async () => {
+  it('maps saved sticker metadata without opening or preparing any asset bytes', async () => {
     const saved = [
       favorite('corrupt'),
       favorite('first'),
@@ -43,33 +43,24 @@ describe('QQStickerProvider saved stickers', () => {
       getSavedStickers: vi.fn(async () => ({ stickers: saved, nextCursor: 'next-page' })),
       stickerSource: vi.fn(() => ({ async *stream() { yield new Uint8Array([1, 2, 3]) } })),
     }
-    const mediaCache = {
-      prepareSticker: vi.fn(async (sticker: IMSticker) => {
-        if (sticker.stickerId === 'favorite:corrupt') throw new Error('Invalid frame data')
-        return { ...sticker, mimeType: 'image/webp', size: 321 }
-      }),
-    }
     const logger = { warn: vi.fn() }
-    const provider = new QQStickerProvider(client as never, 'qq:stickers', mediaCache as never, logger)
+    const provider = new QQStickerProvider(client as never, 'qq:stickers', undefined, logger)
 
     await expect(provider.listSavedStickers(context)).resolves.toMatchObject({
       nextCursor: 'next-page',
       stickers: [
-        { stickerId: 'favorite:first', mimeType: 'image/webp', size: 321 },
-        { stickerId: 'favorite:second', mimeType: 'image/webp', size: 321 },
-        { stickerId: 'favorite:third', mimeType: 'image/webp', size: 321 },
-        { stickerId: 'favorite:after-corrupt', mimeType: 'image/webp', size: 321 },
+        { stickerId: 'favorite:corrupt', mimeType: 'image/png' },
+        { stickerId: 'favorite:first', mimeType: 'image/png' },
+        { stickerId: 'favorite:second', mimeType: 'image/png' },
+        { stickerId: 'favorite:third', mimeType: 'image/png' },
+        { stickerId: 'favorite:after-corrupt', mimeType: 'image/png' },
       ],
     })
-    expect(mediaCache.prepareSticker).toHaveBeenCalledTimes(5)
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Skipping QQ saved sticker %s because its asset could not be prepared: %s',
-      'favorite:corrupt',
-      'Invalid frame data',
-    )
+    expect(client.stickerSource).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 
-  it('keeps a sticker pack usable when one native asset is stale', async () => {
+  it('returns a complete pack without server-side asset validation', async () => {
     const pack = {
       packId: 'qq-favorites', title: 'QQ 收藏表情', count: 3, version: 7,
       stickers: [favorite('stale'), favorite('first'), favorite('second')],
@@ -78,29 +69,20 @@ describe('QQStickerProvider saved stickers', () => {
       getStickerPack: vi.fn(async () => pack),
       stickerSource: vi.fn(() => ({ async *stream() { yield new Uint8Array([1, 2, 3]) } })),
     }
-    const mediaCache = {
-      prepareSticker: vi.fn(async (sticker: IMSticker) => {
-        if (sticker.stickerId === 'favorite:stale') throw new Error('QQNT bridge 404')
-        return { ...sticker, mimeType: 'image/webp', size: 321 }
-      }),
-    }
     const logger = { warn: vi.fn() }
-    const provider = new QQStickerProvider(client as never, 'qq:stickers', mediaCache as never, logger)
+    const provider = new QQStickerProvider(client as never, 'qq:stickers', undefined, logger)
 
     await expect(provider.getPack(context, 'qq-favorites')).resolves.toMatchObject({
-      packId: 'qq-favorites', count: 2,
-      cover: { stickerId: 'favorite:first' },
+      packId: 'qq-favorites', count: 3,
+      cover: { stickerId: 'favorite:stale' },
       stickers: [
-        { stickerId: 'favorite:first', mimeType: 'image/webp', size: 321 },
-        { stickerId: 'favorite:second', mimeType: 'image/webp', size: 321 },
+        { stickerId: 'favorite:stale', mimeType: 'image/png' },
+        { stickerId: 'favorite:first', mimeType: 'image/png' },
+        { stickerId: 'favorite:second', mimeType: 'image/png' },
       ],
     })
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Skipping QQ sticker %s from pack %s because its asset could not be prepared: %s',
-      'favorite:stale',
-      'qq-favorites',
-      'QQNT bridge 404',
-    )
+    expect(client.stickerSource).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 
   it('still rejects when the saved-sticker catalog itself cannot be loaded', async () => {
@@ -124,6 +106,40 @@ describe('QQStickerProvider saved stickers', () => {
         providerId: 'qq:stickers', stickerId: 'favorite:packed', packId: 'qq-favorites',
       }],
     })
+  })
+
+  it('resolves favorite and URL-backed sticker assets directly, and falls back for local market paths', async () => {
+    const client = {
+      resolveFileUrl: vi.fn(async () => ({
+        url: 'https://cdn.example.test/favorite.gif', expiresAt: Date.now() + 60_000,
+      })),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
+    const favoriteSticker = {
+      ...favorite('direct'), providerId: 'qq:stickers', format: 'animated' as const, mimeType: 'image/gif',
+      locator: {
+        kind: 'favorite', resId: 'direct', path: '/saved/direct.gif', name: 'direct.gif', animated: true,
+        locator: {
+          messageId: 'm', elementId: 'e', chatType: 2, peerUid: 'g', kind: 'image',
+          fileName: 'direct.gif', fileUuid: 'uuid',
+        },
+      },
+    }
+    await expect(provider.resolveAssetUrl(context, favoriteSticker)).resolves.toMatchObject({
+      url: 'https://cdn.example.test/favorite.gif', supportsRange: true,
+    })
+    await expect(provider.resolveAssetUrl(context, {
+      ...favorite('system'), providerId: 'qq:stickers', locator: {
+        kind: 'sysface', faceId: '1', faceType: 3, name: 'system', animated: true,
+        url: 'https://cdn.example.test/system.apng',
+      },
+    })).resolves.toMatchObject({ url: 'https://cdn.example.test/system.apng' })
+    await expect(provider.resolveAssetUrl(context, {
+      ...favorite('market'), providerId: 'qq:stickers', locator: {
+        kind: 'market', packageId: 'pack', stickerId: 'market', name: 'market', key: 'key',
+        width: 16, height: 12, animated: false, staticPath: 'C:/QQ/local.png',
+      },
+    })).resolves.toBeUndefined()
   })
 })
 

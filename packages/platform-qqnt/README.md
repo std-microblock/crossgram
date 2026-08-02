@@ -14,9 +14,6 @@
     # groupAlias (default) uses the current group's card when present.
     # nickname always uses the user's QQ profile nickname.
     memberName: groupAlias
-    # Compact WebP previews are kept as binary rows in the database.
-    generatePreviews: true
-    previewMaxDimension: 320
     # Hide gray-tip service messages containing any entry. Set [] to keep all.
     grayTipFilters:
       - 回应了你的消息
@@ -43,27 +40,21 @@ message media. Resolver, RKey, and CDN errors for native media are returned to
 the caller without a fallback. Protocol v13's native `/files/play-url` and
 whole-file `200` responses remain supported during rolling upgrades.
 
-Untouched media keeps its original format and streams from the native URL; it
-is never duplicated in the platform cache. GIF/APNG images are converted to
-WebM asynchronously: the original image is published first, then one message
-edit switches the projection to a new, immutable WebM media ID. The original
-media ID remains downloadable from QQ after the edit. PNG animation detection
-uses bounded native URL range reads, and completed decisions and WebM assets are
-reused by later history requests. When `generatePreviews` is enabled, compact
-WebP preview bytes are stored in the database while transformed WebM, sticker,
-and reaction assets remain on disk. A quality-20 stripped JPEG is stored beside
-each preview and included inline as Telegram `photoStrippedSize`, so clients can
-render a blurred placeholder before issuing a media request. An uncached image
-in requested history is returned immediately as an empty-download placeholder
-with the original byte size and dimensions. Preview generation runs in the
-background and publishes a message edit that enables the original and preview
-downloads without changing the logical message or media ID. Telegram range
-reads for ready original media go directly to the QQ CDN.
+All ordinary message media keeps its original QQ format and locator. The relay
+does not download it to probe animation, generate previews, or transcode
+GIF/APNG/PNG into WebM. History and live-event ingestion therefore remain
+metadata-only, and patched clients call `crossgram.getFileUrl` before fetching
+the original bytes directly from QQ's CDN with HTTP Range. APNG files that QQ
+labels as ordinary `image/png` are intentionally left for the client to detect
+from downloaded content. A startup migration strips legacy `cachedPath` and
+`previewKey` locators from old message-media rows so existing history returns to
+the same raw direct-download path.
 
 QQ picture elements other than native normal/QZone photos are exposed as
-stickers. Animated expression pictures and animated sticker assets are
-projected as Telegram video stickers (`video/webm`) rather than image/GIF
-documents.
+stickers. QQ sticker and reaction bytes are also exposed unchanged as their
+original PNG/GIF/APNG resources. The relay adds only Telegram document metadata
+such as sticker/custom-emoji, animated, image-size, and filename attributes;
+format detection and decoding stay entirely on the client.
 
 Bridge protocol v18 hashes each reopenable `IMMediaSource` in the relay, then
 reopens it for the HTTP request. The injected process uses the supplied MD5,
