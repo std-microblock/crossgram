@@ -33,7 +33,7 @@ describe('QQ voice media composition', () => {
         send() {}, receive: async () => { throw new Error('not used') }, close: async () => {}, finished: new Promise<void>(() => {}),
       }
     })
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, mediaService(start))
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, mediaService(start))
     vi.spyOn(platform.client, 'mediaLease').mockResolvedValue({
       version: 1, socketPath: '/run/qq-bridge/media.sock', leaseId: '0123456789abcdef0123456789abcdef', token, expiry: 1,
     })
@@ -48,7 +48,7 @@ describe('QQ voice media composition', () => {
 
   it('fails closed before requesting a lease for an invalid worker endpoint', async () => {
     const start = vi.fn()
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, mediaService(start))
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, mediaService(start))
     const lease = vi.spyOn(platform.client, 'mediaLease')
 
     await expect(platform.voiceMedia!.start(call, session, {} as VoiceWorkerMediaEndpoint)).rejects.toThrow('worker PCM endpoint')

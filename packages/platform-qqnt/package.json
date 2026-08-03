@@ -13,12 +13,12 @@
     "@bufbuild/protobuf": "^2.13.0",
     "@mtproto-relay/bridge": "workspace:*",
     "schemastery": "^3.18.0",
-    "sharp": "^0.34.4",
     "ws": "^8.21.1"
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "^2.13.0",
     "@types/ws": "^8.18.1",
+    "sharp": "^0.34.4",
     "vitest": "^2.1.9"
   },
   "scripts": {
