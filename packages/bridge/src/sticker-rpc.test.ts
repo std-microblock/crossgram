@@ -168,11 +168,11 @@ describe('StickerRpc', () => {
       capabilities: { ownerPlatformId: 'qq' },
       listPacks: vi.fn(async () => ({ packs: [{
         providerId: 'qq:stickers', packId: 'qq-favorites', title: 'QQ Favorites', count: 1,
-        automaticAssociation: 'provider-account',
+        automaticAssociation: 'provider-account' as const,
       }] })),
       getPack: vi.fn(async (_context, packId) => packId === 'qq-favorites' ? {
         providerId: 'qq:stickers', packId, title: 'QQ Favorites',
-        automaticAssociation: 'provider-account', stickers: [favorite],
+        automaticAssociation: 'provider-account' as const, stickers: [favorite],
       } : packId === '11474' ? {
         providerId: 'qq:stickers', packId, title: '股市风云', stickers: [market],
       } : null),

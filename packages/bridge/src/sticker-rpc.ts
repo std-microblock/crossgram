@@ -460,8 +460,12 @@ export class StickerRpc {
         const pack = await this._getPack(row.providerId, provider, row.providerPackId)
           .catch(() => null)
         if (!pack) continue
-        const { stickers: _stickers, ...summary } = pack
-        result.push({ providerId: row.providerId, provider, pack: summary })
+        const { stickers, ...summary } = pack
+        result.push({
+          providerId: row.providerId,
+          provider,
+          pack: { ...summary, count: pack.count ?? stickers.length },
+        })
         listed.add(key)
       }
       return result
