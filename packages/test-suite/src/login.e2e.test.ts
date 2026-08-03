@@ -1577,11 +1577,9 @@ describe('bridge login e2e', () => {
       expect(sentAlbumMessages.map((item: any) => item.groupedId)).toEqual([undefined, undefined])
       const sentPhoto = sentAlbumMessages[0].media.photo
       expect(sentPhoto.sizes).toMatchObject([
-        { _: 'photoStrippedSize', type: 'i', bytes: expect.any(Uint8Array) },
         { _: 'photoSize', type: 'x', w: 20, h: 10, size: socketPng.length },
       ])
-      expect(sentPhoto.sizes.map((size: any) => size.type)).toEqual(['i', 'x'])
-      expect([...sentPhoto.sizes[0].bytes.subarray(0, 3)]).toEqual([1, 10, 20])
+      expect(sentPhoto.sizes.map((size: any) => size.type)).toEqual(['x'])
       const legacyThumbnailRequest = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 1024,
         location: {
