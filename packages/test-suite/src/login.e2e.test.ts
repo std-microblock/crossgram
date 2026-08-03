@@ -2363,8 +2363,13 @@ describe('bridge login e2e', () => {
         .toEqual(expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeVideo' })]))
       expect(labStickerDocuments[0].attributes)
         .toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            _: 'documentAttributeSticker', stickerset: { _: 'inputStickerSetEmpty' },
+          }),
+        ]))
+      expect(labStickerDocuments[0].attributes)
+        .not.toEqual(expect.arrayContaining([
           expect.objectContaining({ _: 'documentAttributeAnimated' }),
-          expect.objectContaining({ stickerset: { _: 'inputStickerSetEmpty' } }),
         ]))
       expect(labStickerDocuments[4].attributes)
         .toEqual(expect.arrayContaining([
