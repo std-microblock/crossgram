@@ -12,7 +12,7 @@ import { Config as resourcesConfig } from '../../telegram-resources/src/index.js
 const cases = [
   ['bridge', bridgeConfig, [
     'dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
-    'blockedContentMode',
+    'blockedContentMode', 'satori',
     'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
@@ -45,6 +45,12 @@ describe('plugin config schemas', () => {
       port: 4430,
       host: '127.0.0.1',
       crypto: 'injected-for-test',
+    })
+    expect(bridgeConfig({})).not.toHaveProperty('satori')
+    expect(bridgeConfig({ satori: { platformId: 'qqnt', platform: 'qq' } }).satori).toEqual({
+      platformId: 'qqnt',
+      platform: 'qq',
+      maxMediaBytes: 8 * 1024 * 1024,
     })
     expect(bridgeConfig({})).toEqual({
       dcId: 1,

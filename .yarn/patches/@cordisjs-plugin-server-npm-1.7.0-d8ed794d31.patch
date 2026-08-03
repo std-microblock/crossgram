@@ -1,0 +1,45 @@
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 8a8c9224cb9d13e1b98e91fc373a65c83188f54b..3e613e369270881f76b6701c26b77a6bd17f0853 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -87,6 +87,8 @@ declare namespace Server {
+         port: number;
+         maxPort?: number;
+         baseUrl?: string;
++        /** Maximum bytes accepted in one WebSocket message. */
++        maxWebSocketPayload?: number;
+     }
+     const Config: z<Config>;
+ }
+diff --git a/lib/index.js b/lib/index.js
+index 4ff0ca1a9bffe633a3312b42cfc4b34d67d78b75..0d89da46a7cfaaa56ea5e50e2e0bdc2dd44eec52 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -376,7 +376,7 @@ var Server = class _Server extends Service2 {
+         res.headers.set("allow", allow);
+       }
+     });
+-    this._ws = new WebSocketServer({ noServer: true });
++    this._ws = new WebSocketServer({ noServer: true, maxPayload: config.maxWebSocketPayload });
+     this._http.on("upgrade", async (_req, socket, head) => {
+       const req = new Request(_req);
+       this.ctx.logger?.("server:ws").debug("upgrade %s", req.path);
+@@ -391,6 +391,8 @@ var Server = class _Server extends Service2 {
+               connection = ws;
+               this._ws.emit("connection", ws, _req);
+               route.clients.add(ws);
++              ws.on("error", () => {
++              });
+               ws.on("close", () => {
+                 route.clients.delete(ws);
+                 this.ctx.logger?.("server:ws").debug("close %s", req.path);
+@@ -489,7 +491,8 @@ var Server = class _Server extends Service2 {
+     host: z.string().default("127.0.0.1").description("要监听的 IP 地址。如果将此设置为 `0.0.0.0` 将监听所有地址，包括局域网和公网地址。"),
+     port: z.natural().required().max(65535).description("要监听的初始端口号。"),
+     maxPort: z.natural().max(65535).description("允许监听的最大端口号。"),
+-    baseUrl: z.string().role("link").description("应用暴露在公网的地址。")
++    baseUrl: z.string().role("link").description("应用暴露在公网的地址。"),
++    maxWebSocketPayload: z.natural().min(1).default(4 * 1024 * 1024).description("单个 WebSocket 消息允许的最大字节数。")
+   });
+ })(Server || (Server = {}));
+ var index_default = Server;
