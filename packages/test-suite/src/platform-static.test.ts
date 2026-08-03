@@ -130,22 +130,24 @@ describe('StaticPlatform', () => {
       await waitForPlugin(plugin)
       const platform = ctx.imPlatform.require('static-catalog')
       expect(platform.capabilities.stickers).toEqual({
-        native: true, upload: true, formats: ['static', 'video'],
+        native: true, upload: true, formats: ['static', 'animated', 'video'],
       })
       const context = { session, platformKind: 'static' }
       const native = await ctx.imSticker.require('static-catalog:native').listPacks(context)
       const provided = await ctx.imSticker.require('static-catalog:plugin').listPacks(context)
       expect(native.packs).toMatchObject([{ title: 'Static Native Stickers', count: 2 }])
-      expect(provided.packs).toMatchObject([{ title: 'Static Plugin Stickers', count: 2 }])
+      expect(provided.packs).toMatchObject([{ title: 'Static Plugin Stickers', count: 4 }])
       const pack = await ctx.imSticker.require('static-catalog:plugin')
         .getPack(context, provided.packs[0].packId)
-      expect(pack?.stickers.map((sticker) => sticker.format)).toEqual(['static', 'video'])
+      expect(pack?.stickers.map((sticker) => sticker.format)).toEqual([
+        'static', 'video', 'animated', 'animated',
+      ])
       const saved = await ctx.imSticker.require('static-catalog:plugin').listSavedStickers!(context)
       expect(saved.stickers).toMatchObject([{
         stickerId: 'loose-saved',
         packId: undefined,
-        title: 'Platform Saved Loose Sticker',
-        format: 'static',
+        title: 'Platform Saved APNG Sticker',
+        format: 'animated',
       }])
     } finally {
       await plugin.dispose()

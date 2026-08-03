@@ -304,7 +304,7 @@ describe('QQNT durable event checkpoint E2E', () => {
     const platform = new QQNTPlatform({
       endpoint: 'http://127.0.0.1:1/v1',
       webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
-    }, 'qqnt:stickers', undefined, undefined, ctx.database)
+    }, 'qqnt:stickers', undefined, ctx.database)
     platform.client.getReactionCatalog = vi.fn(async () => ({
       available: [], reactions: [], maxSelected: 20,
     }))
@@ -394,7 +394,7 @@ describe('QQNT durable event checkpoint E2E', () => {
     const createPlatform = () => {
       const platform = new QQNTPlatform(
         { endpoint: 'http://127.0.0.1:1/v1', webSocketEndpoint: endpoint },
-        'qqnt:stickers', undefined, undefined, ctx.database,
+        'qqnt:stickers', undefined, ctx.database,
       )
       platform.client.getReactionCatalog = vi.fn(async () => ({
         available: [], reactions: [], maxSelected: 20,
