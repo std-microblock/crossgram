@@ -70,7 +70,7 @@
     "@cordisjs/plugin-logger-webui": "^0.6.1",
     "@cordisjs/plugin-market": "^0.5.1",
     "@cordisjs/plugin-notifier": "^0.8.0",
-    "@cordisjs/plugin-server": "^1.6.2",
+    "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch",
     "@cordisjs/plugin-server-acl": "^1.0.1",
     "@cordisjs/plugin-server-webui": "^0.5.0",
     "@cordisjs/plugin-sso": "^0.2.2",
@@ -81,6 +81,7 @@
     "@cordisjs/plugin-webui": "^0.8.1",
     "@cordisjs/plugin-webui-sso": "^0.2.6",
     "@satorijs/core": "patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch",
+    "@satorijs/plugin-server": "patch:@satorijs/plugin-server@npm%3A2.9.1#~/.yarn/patches/@satorijs-plugin-server-npm-2.9.1-7c53ae5ba4.patch",
     "cordis": "^4.0.0-rc.5"
   },
   "repository": {

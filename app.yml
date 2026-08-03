@@ -18,6 +18,13 @@
 - id: satori-core
   name: '@satorijs/core'
   disabled: true
+- id: satori-server
+  name: '@satorijs/plugin-server'
+  disabled: true
+  config:
+    path: /satori
+    token: ${SATORI_TOKEN}
+    maxRequestBodyBytes: 8388608
 - id: satori-platform
   name: '@mtproto-relay/platform-satori'
   disabled: true
@@ -60,6 +67,7 @@
   name: '@cordisjs/plugin-server'
   config:
     port: 3140
+    maxWebSocketPayload: 4194304
 - id: aa143c36
   name: '@cordisjs/plugin-server-acl'
 - id: 8357f09b
