@@ -155,6 +155,95 @@ describe('StickerRpc', () => {
     expect(provider.getPack).toHaveBeenCalledWith(expect.anything(), '42')
   })
 
+  it('unions persisted installed packs with an incomplete provider catalog after restart', async () => {
+    const favorite: IMSticker = {
+      providerId: 'qq:stickers', stickerId: 'favorite:one', packId: 'qq-favorites',
+      title: 'Favorite', format: 'static', mimeType: 'image/png',
+    }
+    const market: IMSticker = {
+      providerId: 'qq:stickers', stickerId: 'market:11474:one', packId: '11474',
+      title: 'Market', format: 'animated', mimeType: 'image/apng',
+    }
+    const provider: IMStickerProvider = {
+      capabilities: { ownerPlatformId: 'qq' },
+      listPacks: vi.fn(async () => ({ packs: [{
+        providerId: 'qq:stickers', packId: 'qq-favorites', title: 'QQ Favorites', count: 1,
+        automaticAssociation: 'provider-account' as const,
+      }] })),
+      getPack: vi.fn(async (_context, packId) => packId === 'qq-favorites' ? {
+        providerId: 'qq:stickers', packId, title: 'QQ Favorites',
+        automaticAssociation: 'provider-account' as const, stickers: [favorite],
+      } : packId === '11474' ? {
+        providerId: 'qq:stickers', packId, title: '股市风云', stickers: [market],
+      } : null),
+      getSticker: vi.fn(async () => null),
+      openAsset: vi.fn(async () => { throw new Error('not used') }),
+    }
+    const registry = {
+      entries: [['qq:stickers', provider]],
+      get: (id: string) => id === 'qq:stickers' ? provider : undefined,
+      require: (id: string) => {
+        if (id !== 'qq:stickers') throw new Error(`unknown provider ${id}`)
+        return provider
+      },
+    } as unknown as StickerProviderRegistry
+    const installed = [{
+      id: 1, platformSessionId: 'session', providerId: 'qq:stickers', providerPackId: '11474',
+      installedAt: new Date('2026-08-01T00:00:00Z'), sortOrder: 0,
+      archived: false, uninstalled: false,
+    }]
+    const database = {
+      get: vi.fn(async (table: string, query: Record<string, unknown>) =>
+        table === 'mtproto_sticker_set_install'
+          ? installed.filter((row) => Object.entries(query).every(([key, value]) => (row as any)[key] === value))
+          : []),
+    }
+    const rpc = new StickerRpc(
+      database as never, registry, { platformKind: 'qq' } as IMPlatform,
+      { platformId: 'qq', platformSessionId: 'session' } as PlatformSession,
+    )
+
+    const all = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    expect(all).toMatchObject({
+      _: 'messages.allStickers',
+      sets: [
+        expect.objectContaining({ title: 'QQ Favorites', count: 1 }),
+        expect.objectContaining({ title: '股市风云', count: 1 }),
+      ],
+    })
+    if (all._ !== 'messages.allStickers') throw new Error('expected sticker catalog')
+    const marketSet = all.sets.find((set) => set.title === '股市风云')!
+    await expect(rpc.getStickerSet({
+      _: 'messages.getStickerSet',
+      stickerset: { _: 'inputStickerSetID', id: marketSet.id, accessHash: marketSet.accessHash },
+      hash: 0,
+    })).resolves.toMatchObject({
+      _: 'messages.stickerSet', set: { title: '股市风云' },
+      documents: [expect.objectContaining({ mimeType: 'image/apng' })],
+    })
+    expect(provider.listPacks).toHaveBeenCalledTimes(1)
+    expect(provider.getPack).toHaveBeenCalledWith(expect.anything(), '11474')
+  })
+
+  it('skips stale and explicitly uninstalled persisted packs without breaking the catalog', async () => {
+    const { rpc, provider, database } = stickerHarness(0)
+    vi.mocked(provider.listPacks).mockResolvedValue({ packs: [] })
+    vi.mocked(provider.getPack).mockRejectedValue(new Error('pack was removed upstream'))
+    vi.mocked(database.get).mockResolvedValue([{
+      id: 2, platformSessionId: 'session', providerId: 'qq:stickers', providerPackId: 'stale',
+      installedAt: new Date(), sortOrder: 0, archived: false, uninstalled: false,
+    }, {
+      id: 3, platformSessionId: 'session', providerId: 'qq:stickers', providerPackId: 'removed',
+      installedAt: new Date(), sortOrder: 1, archived: false, uninstalled: true,
+    }] as never)
+
+    await expect(rpc.getAllStickers({
+      _: 'messages.getAllStickers', hash: Long.ZERO,
+    })).resolves.toMatchObject({ _: 'messages.allStickers', sets: [] })
+    expect(provider.getPack).toHaveBeenCalledTimes(1)
+    expect(provider.getPack).toHaveBeenCalledWith(expect.anything(), 'stale')
+  })
+
   it('serves QQNT background refreshes from one provider snapshot and honors Telegram hashes', async () => {
     const { rpc, provider } = stickerHarness()
 

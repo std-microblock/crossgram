@@ -444,6 +444,30 @@ export class StickerRpc {
           if (pageIndex === 99) throw new Error('sticker pack pagination exceeded 100 pages')
         }
       }
+      const listed = new Set(result.map(({ providerId, pack }) => packKey(providerId, pack.packId)))
+      const installed = await this._database.get('mtproto_sticker_set_install', {
+        platformSessionId: this._session.platformSessionId,
+      })
+      for (const row of installed) {
+        const key = packKey(row.providerId, row.providerPackId)
+        if (row.uninstalled || listed.has(key)) continue
+        const provider = this._registry.get(row.providerId)
+        if (!provider) continue
+        // A provider's lightweight catalog can be temporarily incomplete
+        // after restart even though its detail endpoint can still reopen an
+        // installed pack. Persisted Telegram installs are therefore another
+        // catalog source, but a deleted/stale pack must not break every set.
+        const pack = await this._getPack(row.providerId, provider, row.providerPackId)
+          .catch(() => null)
+        if (!pack) continue
+        const { stickers, ...summary } = pack
+        result.push({
+          providerId: row.providerId,
+          provider,
+          pack: { ...summary, count: pack.count ?? stickers.length },
+        })
+        listed.add(key)
+      }
       return result
     })
   }
@@ -451,21 +475,9 @@ export class StickerRpc {
   private async _listPacks(): Promise<Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }>> {
     const all = await this._cached('catalog', async () => {
       const result: Array<{ providerId: string, provider: IMStickerProvider, pack: IMStickerPack }> = []
-      for (const [providerId, provider] of this._registry.entries) {
-        let cursor: string | undefined
-        const seen = new Set<string>()
-        for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
-          const page = await provider.listPacks(this._context(), { cursor, limit: 200 })
-          for (const summary of page.packs) {
-            const pack = await this._getPack(providerId, provider, summary.packId)
-            if (pack) result.push({ providerId, provider, pack })
-          }
-          if (!page.nextCursor) break
-          if (seen.has(page.nextCursor)) throw new Error(`sticker pack pagination repeated cursor: ${page.nextCursor}`)
-          seen.add(page.nextCursor)
-          cursor = page.nextCursor
-          if (pageIndex === 99) throw new Error('sticker pack pagination exceeded 100 pages')
-        }
+      for (const { providerId, provider, pack: summary } of await this._listPackSummaries()) {
+        const pack = await this._getPack(providerId, provider, summary.packId)
+        if (pack) result.push({ providerId, provider, pack })
       }
       return result
     })
