@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { tl } from '@mtcute/core'
+import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
+import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { StickerRpc } from './sticker-rpc.js'
 import type { IMSticker, IMStickerProvider, StickerProviderRegistry } from './sticker-provider.js'
@@ -19,7 +22,7 @@ describe('StickerRpc', () => {
       format: 'animated', mimeType, width: 320, height: 180, size: 4321, version: 7,
     }
 
-    const media = rpc.makeMessageMedia(sticker)
+    const media = wireRoundTrip(rpc.makeMessageMedia(sticker))
 
     expect(media._).toBe('messageMediaDocument')
     expect(media).not.toHaveProperty('photo')
@@ -31,9 +34,9 @@ describe('StickerRpc', () => {
         stickerset: expect.objectContaining({ _: 'inputStickerSetID' }),
       }),
       { _: 'documentAttributeImageSize', w: 320, h: 180 },
-      { _: 'documentAttributeAnimated' },
     ]))
     expect(media.document.attributes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'documentAttributeAnimated' }),
       expect.objectContaining({ _: 'documentAttributeVideo' }),
     ]))
     const stickerAttribute = media.document.attributes.find((attribute) =>
@@ -598,4 +601,9 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     cacheTtlMs,
   )
   return { rpc, provider, sticker, query, database }
+}
+
+function wireRoundTrip<T>(object: T): T {
+  const bytes = TlBinaryWriter.serializeObject(__tlWriterMap, object as tl.TlObject)
+  return new TlBinaryReader(__tlReaderMap, bytes).object() as T
 }

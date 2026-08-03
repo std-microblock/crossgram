@@ -1453,8 +1453,11 @@ describe('QQNT animated system-face E2E', () => {
     expect(media.document.size).toBe(storedSticker.parts[0].sticker.size)
     expect(media.document.size).toBeGreaterThan(0)
     expect(media.document.attributes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ _: 'documentAttributeAnimated' }),
+      expect.objectContaining({ _: 'documentAttributeSticker' }),
       expect.objectContaining({ _: 'documentAttributeImageSize', w: 12, h: 8 }),
+    ]))
+    expect(media.document.attributes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'documentAttributeAnimated' }),
     ]))
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(0)
     expect(assetRequests).toBe(0)
