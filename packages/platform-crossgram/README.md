@@ -65,7 +65,7 @@ delivery. Original media downloads continue to use the direct QQ URL.
 QQ picture elements other than native normal/QZone photos are exposed as
 stickers. QQ sticker and reaction bytes are also exposed unchanged as their
 original PNG/GIF/APNG resources. The relay adds only Telegram document metadata
-such as sticker/custom-emoji, animated, image-size, and filename attributes;
+such as sticker/custom-emoji, image-size, and filename attributes;
 format detection and decoding stay entirely on the client.
 
 Bridge protocol v18 hashes each reopenable `IMMediaSource` in the relay, then

@@ -678,7 +678,6 @@ export class StickerRpc {
     }, {
       _: 'documentAttributeImageSize', w: sticker.width ?? 512, h: sticker.height ?? 512,
     }]
-    if (sticker.format === 'animated') attributes.push({ _: 'documentAttributeAnimated' })
     if (sticker.format === 'video') {
       attributes.push({
         _: 'documentAttributeVideo', nosound: true, duration: 0,

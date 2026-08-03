@@ -80,7 +80,7 @@ describe('QQ store animated sticker object contract E2E', () => {
       const expectedMime = index === 0 ? 'image/gif' : 'image/apng'
       const packDocument = pack.documents[index]
       if (!packDocument || packDocument._ !== 'document') throw new Error('expected pack document')
-      assertStickerDocument(packDocument, expectedMime, set.id)
+      assertStickerDocument(wireRoundTrip(packDocument), expectedMime, set.id)
 
       const media = wireRoundTrip(rpc.makeMessageMedia(sticker))
       expect(media._).toBe('messageMediaDocument')
@@ -100,7 +100,9 @@ function assertStickerDocument(document: tl.RawDocument, mimeType: string, setId
       stickerset: expect.objectContaining({ _: 'inputStickerSetID' }),
     }),
     { _: 'documentAttributeImageSize', w: 320, h: 180 },
-    { _: 'documentAttributeAnimated' },
+  ]))
+  expect(document.attributes).not.toEqual(expect.arrayContaining([
+    expect.objectContaining({ _: 'documentAttributeAnimated' }),
   ]))
   const attribute = document.attributes.find((item) => item._ === 'documentAttributeSticker')
   if (!attribute || attribute._ !== 'documentAttributeSticker'
