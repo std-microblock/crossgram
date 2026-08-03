@@ -362,6 +362,185 @@ describe('SatoriExporter', () => {
     expect(events[0]!.event.message!.content).toMatch(/<img\b[^>]*\bsrc="https:\/\/media\.test\/sticker\.png"[^>]*>/u)
   })
 
+  it('round-trips a native sticker through standard Satori img metadata', async () => {
+    const { ctx, exporter, platform } = await createExporter()
+    const events: Session[] = []
+    ctx.on('message-created', (event) => { events.push(event) })
+    const reference = { asset: 'a', kind: 'sysface' }
+    const sticker = {
+      providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', title: 'Smile', format: 'static' as const, mimeType: 'image/png',
+    }
+    const plan = { type: 'native' as const, providerId: sticker.providerId, stickerId: sticker.stickerId, packId: sticker.packId, reference }
+    const getSticker = vi.fn(async () => sticker)
+    const prepareSend = vi.fn(async () => plan)
+    Object.assign(ctx, { imSticker: {
+      get: vi.fn(() => ({
+        capabilities: { ownerPlatformId: 'qqnt' }, getSticker, prepareSend,
+        resolveAssetUrl: async () => ({ url: 'https://media.test/sticker.png' }),
+      })),
+    } })
+    const conversation: IMConversation = { id: 'group:42', kind: 'group', title: 'QQ Group' }
+    const incoming = message('sticker', conversation.id)
+    incoming.content = { parts: [{ type: 'sticker', sticker }] }
+
+    exporter.handleMessage(session, conversation, incoming, { created: true })
+
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    const content = events[0]!.event.message!.content!
+    expect(content).toBe('<img src="https://media.test/sticker.png" title="Smile" type="image/png" data-crossgram-sticker-provider="qq-native" data-crossgram-sticker-id="s1" data-crossgram-sticker-pack="pack:1" data-crossgram-sticker-name="Smile" data-crossgram-sticker-reference="eyJhc3NldCI6ImEiLCJraW5kIjoic3lzZmFjZSJ9"/>')
+    const parsed = h.parse(content)
+    expect(parsed[0]!.attrs).toMatchObject({
+      dataCrossgramStickerProvider: 'qq-native',
+      dataCrossgramStickerId: 's1',
+      dataCrossgramStickerPack: 'pack:1',
+      dataCrossgramStickerName: 'Smile',
+      dataCrossgramStickerReference: 'eyJhc3NldCI6ImEiLCJraW5kIjoic3lzZmFjZSJ9',
+    })
+    expect(parsed.join('')).toBe(content)
+
+    await ctx.bots[0]!.createMessage('group:42', parsed)
+
+    expect(getSticker).toHaveBeenCalledWith(expect.objectContaining({ session, conversation: { id: 'group:42' } }), 's1')
+    expect(platform.sendMessage).toHaveBeenLastCalledWith(session, { id: 'group:42' }, { parts: [{ type: 'sticker', sticker: plan }] })
+  })
+
+  it('restores a valid native reference beyond the generic attribute limit', async () => {
+    const { ctx, platform } = await createExporter()
+    const reference = 'x'.repeat(192)
+    const encodedReference = Buffer.from(JSON.stringify(reference)).toString('base64url')
+    expect(encodedReference.length).toBeGreaterThan(256)
+    const sticker = {
+      providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', format: 'static' as const, mimeType: 'image/png',
+    }
+    const plan = { type: 'native' as const, providerId: sticker.providerId, stickerId: sticker.stickerId, packId: sticker.packId, reference }
+    Object.assign(ctx, { imSticker: {
+      get: () => ({ capabilities: { ownerPlatformId: 'qqnt' }, getSticker: async () => sticker, prepareSend: async () => plan }),
+    } })
+
+    await ctx.bots[0]!.createMessage('group:42', [h('img', {
+      src: 'internal:qq/self/sticker.png',
+      'data-crossgram-sticker-provider': sticker.providerId, 'data-crossgram-sticker-id': sticker.stickerId,
+      'data-crossgram-sticker-pack': sticker.packId, 'data-crossgram-sticker-name': 'Smile',
+      'data-crossgram-sticker-reference': encodedReference,
+    })])
+
+    expect(platform.sendMessage).toHaveBeenCalledWith(session, { id: 'group:42' }, { parts: [{ type: 'sticker', sticker: plan }] })
+  })
+
+  it('rejects mixed-case CrossGram metadata rather than treating it as ordinary media', async () => {
+    const { ctx, platform } = await createExporter()
+    const image = h('img', { src: 'internal:qq/self/sticker.png' })
+    image.attrs['DATA-CROSSGRAM-STICKER-PROVIDER'] = 'qq-native'
+
+    await expect(ctx.bots[0]!.createMessage('group:42', [image])).rejects.toThrow('Satori sticker')
+
+    expect(platform.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['partial metadata', { 'data-crossgram-sticker-provider': 'qq-native' }],
+    ['malformed reference', {
+      'data-crossgram-sticker-provider': 'qq-native', 'data-crossgram-sticker-id': 's1',
+      'data-crossgram-sticker-pack': 'pack:1', 'data-crossgram-sticker-name': 'Smile', 'data-crossgram-sticker-reference': 'a',
+    }],
+    ['oversized reference', {
+      'data-crossgram-sticker-provider': 'qq-native', 'data-crossgram-sticker-id': 's1',
+      'data-crossgram-sticker-pack': 'pack:1', 'data-crossgram-sticker-name': 'Smile', 'data-crossgram-sticker-reference': 'a'.repeat(4_097),
+    }],
+    ['oversized provider', {
+      'data-crossgram-sticker-provider': 'q'.repeat(257), 'data-crossgram-sticker-id': 's1',
+      'data-crossgram-sticker-pack': 'pack:1', 'data-crossgram-sticker-name': 'Smile',
+      'data-crossgram-sticker-reference': 'eyJhc3NldCI6ImEiLCJraW5kIjoic3lzZmFjZSJ9',
+    }],
+    ['non-string provider', {
+      'data-crossgram-sticker-provider': 1, 'data-crossgram-sticker-id': 's1',
+      'data-crossgram-sticker-pack': 'pack:1', 'data-crossgram-sticker-name': 'Smile',
+      'data-crossgram-sticker-reference': 'eyJhc3NldCI6ImEiLCJraW5kIjoic3lzZmFjZSJ9',
+    }],
+  ])('rejects %s instead of treating the image as ordinary media', async (_name, attributes) => {
+    const { ctx, platform } = await createExporter()
+
+    await expect(ctx.bots[0]!.createMessage('group:42', [h('img', {
+      src: 'internal:qq/self/sticker.png', ...attributes,
+    })])).rejects.toThrow('Satori sticker')
+
+    expect(platform.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('rejects native sticker metadata from a provider outside the current account', async () => {
+    const { ctx, platform } = await createExporter()
+    const getSticker = vi.fn()
+    Object.assign(ctx, { imSticker: {
+      get: vi.fn(() => ({ capabilities: { ownerPlatformId: 'another-account' }, getSticker })),
+    } })
+
+    await expect(ctx.bots[0]!.createMessage('group:42', [h('img', {
+      src: 'internal:qq/self/sticker.png',
+      'data-crossgram-sticker-provider': 'qq-native', 'data-crossgram-sticker-id': 's1',
+      'data-crossgram-sticker-pack': 'pack:1', 'data-crossgram-sticker-name': 'Smile',
+      'data-crossgram-sticker-reference': 'eyJhc3NldCI6ImEiLCJraW5kIjoic3lzZmFjZSJ9',
+    })])).rejects.toThrow('unavailable for this account')
+
+    expect(getSticker).not.toHaveBeenCalled()
+    expect(platform.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a non-native send plan', {
+      sticker: { providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', format: 'static' as const, mimeType: 'image/png' },
+      plan: { type: 'upload' as const },
+    }],
+    ['a sticker from a different provider', {
+      sticker: { providerId: 'other-provider', stickerId: 's1', packId: 'pack:1', format: 'static' as const, mimeType: 'image/png' },
+      plan: { type: 'native' as const, providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', reference: { asset: 'a', kind: 'sysface' } },
+    }],
+    ['a send plan from a different provider', {
+      sticker: { providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', format: 'static' as const, mimeType: 'image/png' },
+      plan: { type: 'native' as const, providerId: 'other-provider', stickerId: 's1', packId: 'pack:1', reference: { asset: 'a', kind: 'sysface' } },
+    }],
+  ])('rejects metadata when the provider returns %s', async (_name, { sticker, plan }) => {
+    const { ctx, platform } = await createExporter()
+    const getSticker = vi.fn(async () => sticker)
+    const prepareSend = vi.fn(async () => plan)
+    Object.assign(ctx, { imSticker: {
+      get: vi.fn(() => ({ capabilities: { ownerPlatformId: 'qqnt' }, getSticker, prepareSend })),
+    } })
+
+    await expect(ctx.bots[0]!.createMessage('group:42', [h('img', {
+      src: 'internal:qq/self/sticker.png',
+      'data-crossgram-sticker-provider': 'qq-native', 'data-crossgram-sticker-id': 's1',
+      'data-crossgram-sticker-pack': 'pack:1', 'data-crossgram-sticker-name': 'Smile',
+      'data-crossgram-sticker-reference': 'eyJhc3NldCI6ImEiLCJraW5kIjoic3lzZmFjZSJ9',
+    })])).rejects.toThrow(/Satori sticker/u)
+
+    expect(platform.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('rejects native sticker metadata that does not match the current provider plan', async () => {
+    const { ctx, platform } = await createExporter()
+    const getSticker = vi.fn(async () => ({
+      providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', format: 'static' as const, mimeType: 'image/png',
+    }))
+    Object.assign(ctx, { imSticker: {
+      get: vi.fn(() => ({
+        capabilities: { ownerPlatformId: 'qqnt' }, getSticker,
+        prepareSend: async () => ({
+          type: 'native' as const, providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', reference: { asset: 'different' },
+        }),
+      })),
+    } })
+
+    await expect(ctx.bots[0]!.createMessage('group:42', [h('img', {
+      src: 'internal:qq/self/sticker.png',
+      'data-crossgram-sticker-provider': 'qq-native', 'data-crossgram-sticker-id': 's1',
+      'data-crossgram-sticker-pack': 'pack:1', 'data-crossgram-sticker-name': 'Smile',
+      'data-crossgram-sticker-reference': 'eyJhc3NldCI6ImEiLCJraW5kIjoic3lzZmFjZSJ9',
+    })])).rejects.toThrow('does not match the provider')
+
+    expect(getSticker).toHaveBeenCalledOnce()
+    expect(platform.sendMessage).not.toHaveBeenCalled()
+  })
+
   it('uses a text placeholder and warning for an unresolved sticker', async () => {
     const { ctx, exporter, warnings } = await createExporter()
     const events: Session[] = []
