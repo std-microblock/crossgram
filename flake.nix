@@ -5,7 +5,15 @@
 
   outputs = {nixpkgs, ...}: let
     system = "x86_64-linux";
-    pkgs = import nixpkgs {inherit system;};
+    pkgs = import nixpkgs {
+      inherit system;
+      config.allowUnfreePredicate = package:
+        builtins.elem (nixpkgs.lib.getName package) [
+          "qq"
+          "qqnt-bridge-app.asar"
+          "qqnt_packet.linux-x64-gnu.node"
+        ];
+    };
     lib = pkgs.lib;
 
     sourcePins = {
@@ -778,6 +786,121 @@ PY
       exec ${pkgs.corepack}/bin/corepack yarn "$@"
     '';
 
+    qqntBridgeAppAsar = pkgs.requireFile {
+      name = "qqnt-bridge-app.asar";
+      hash = "sha256-eznzFxFcGDAgc2IHMmuD93b9ibOZLi8LgYrCUvBDk4k=";
+      url = "https://github.com/std-microblock/qqnt-bridge/releases/tag/v1.0.11";
+    };
+
+    qqntBridgePacketAddon = pkgs.requireFile {
+      name = "qqnt_packet.linux-x64-gnu.node";
+      hash = "sha256-Tyhs1gnpFgd5chtVtU7fUAeA9XFT8FVMAsgCBVtsRBk=";
+      url = "https://github.com/std-microblock/qqnt-bridge/releases/tag/v1.0.11";
+    };
+
+    qqPatched = pkgs.qq.overrideAttrs {
+      version = "3.2.30-50969";
+      src = pkgs.fetchurl {
+        url = "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/beta/fd40a3ec/linuxqq_3.2.30-50969_amd64.deb";
+        hash = "sha256-mPDYz9DWieiYw2Qy/q2oraLfnSh92lKjOJzHlZeMDA4=";
+      };
+      postInstall = ''
+        install -Dm644 ${qqntBridgeAppAsar} "$out/opt/QQ/resources/app.asar"
+        install -Dm755 ${qqntBridgePacketAddon} \
+          "$out/opt/QQ/resources/app.asar.unpacked/qqnt_packet.linux-x64-gnu.node"
+        ln -s app.asar.unpacked/qqnt_packet.linux-x64-gnu.node \
+          "$out/opt/QQ/resources/qqnt_packet.linux-x64-gnu.node"
+      '';
+    };
+
+    qq = pkgs.writeShellApplication {
+      name = "qq";
+      runtimeInputs = [pkgs.coreutils];
+      text = ''
+        data_dir="''${QQ_DATA_DIR:-}"
+        data_dir_set=0
+        args=()
+        while (($#)); do
+          case "$1" in
+            --data-dir)
+              if (($# < 2)); then
+                echo "qq: --data-dir requires a path" >&2
+                exit 2
+              fi
+              data_dir="$2"
+              data_dir_set=1
+              shift 2
+              ;;
+            --data-dir=*)
+              data_dir="''${1#*=}"
+              data_dir_set=1
+              shift
+              ;;
+            *)
+              args+=("$1")
+              shift
+              ;;
+          esac
+        done
+
+        if ((data_dir_set)) && [[ -z "$data_dir" ]]; then
+          echo "qq: --data-dir requires a non-empty path" >&2
+          exit 2
+        fi
+
+        if [[ -n "$data_dir" ]]; then
+          mkdir -p -- "$data_dir"
+          data_dir="$(realpath -- "$data_dir")"
+          export HOME="$data_dir"
+          export XDG_CONFIG_HOME="$data_dir/.config"
+          export XDG_CACHE_HOME="$data_dir/.cache"
+          export XDG_DATA_HOME="$data_dir/.local/share"
+        fi
+
+        exec ${qqPatched}/bin/qq "''${args[@]}"
+      '';
+    };
+
+    qqLauncherCheck = pkgs.runCommand "crossgram-qq-launcher-check" {} ''
+      test "$(sha256sum ${qqPatched}/opt/QQ/resources/app.asar | cut -d' ' -f1)" = \
+        "7b39f317115c183020736207326b83f776fd89b3992e2f0b818ac252f0439389"
+      test -x ${qqPatched}/opt/QQ/resources/app.asar.unpacked/qqnt_packet.linux-x64-gnu.node
+      test -x ${qqPatched}/opt/QQ/resources/qqnt_packet.linux-x64-gnu.node
+
+      set +e
+      ${qq}/bin/qq --data-dir 2>missing-path.stderr
+      missing_path_status=$?
+      ${qq}/bin/qq --data-dir= 2>empty-path.stderr
+      empty_path_status=$?
+      set -e
+
+      test "$missing_path_status" -eq 2
+      grep -F -- "--data-dir requires a path" missing-path.stderr
+      test "$empty_path_status" -eq 2
+      grep -F -- "--data-dir requires a non-empty path" empty-path.stderr
+
+      cp ${qq}/bin/qq qq-probe
+      substituteInPlace qq-probe \
+        --replace-fail 'exec ${qqPatched}/bin/qq "''${args[@]}"' \
+        'printf "%s\n" "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "''${args[@]}" > "$QQ_LAUNCHER_PROBE"'
+      mkdir probe-work
+      (
+        cd probe-work
+        QQ_LAUNCHER_PROBE="$PWD/result" ../qq-probe --data-dir=-valid-posix-path --forwarded value
+        data_dir="$PWD/-valid-posix-path"
+        printf "%s\n" \
+          "$data_dir" \
+          "$data_dir/.config" \
+          "$data_dir/.cache" \
+          "$data_dir/.local/share" \
+          --forwarded \
+          value \
+          > expected
+        diff -u expected result
+      )
+      touch "$out"
+    '';
+
     buildTools = with pkgs; [
       autoconf
       automake
@@ -847,6 +970,8 @@ PY
       crossgram-tgcalls-shim = tgcallsShim;
       crossgram-tgcalls-shim-shared = tgcallsShimShared;
       voice-worker = voiceWorker;
+      qq = qq;
+      qq-patched = qqPatched;
       tgcalls-artifact-licenses = tgcallsLicenses;
       tgcalls-artifact-sbom = tgcallsSbom;
     };
@@ -863,6 +988,7 @@ PY
     };
 
     checks.${system} = {
+      qq-launcher = qqLauncherCheck;
       toolchain =
         pkgs.runCommand "crossgram-voice-toolchain-check" {
           nativeBuildInputs = [corepack] ++ buildTools;
