@@ -2,7 +2,7 @@
 # Manual changes might be lost - proceed with caution!
 
 __metadata:
-  version: 10
+  version: 9
   cacheKey: 10c0
 
 "@antfu/install-pkg@npm:^1.1.0":
@@ -538,7 +538,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@cordisjs/plugin-server@npm:^1.6.0, @cordisjs/plugin-server@npm:^1.6.2":
+"@cordisjs/plugin-server@npm:1.7.0":
   version: 1.7.0
   resolution: "@cordisjs/plugin-server@npm:1.7.0"
   dependencies:
@@ -553,6 +553,24 @@ __metadata:
   peerDependencies:
     cordis: ^4.0.0-rc.6
   checksum: 10c0/7df8e109a3cb2f108b5630703d88c7aaa6762300b84f129a5bc05a95ce7998c663e29735cbf9cf2e8caf637bb28f18db6f1a6bb9d7b9be072aa1c09301786d8e
+  languageName: node
+  linkType: hard
+
+"@cordisjs/plugin-server@patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch":
+  version: 1.7.0
+  resolution: "@cordisjs/plugin-server@patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch::version=1.7.0&hash=5d9cf6"
+  dependencies:
+    "@standard-schema/spec": "npm:^1.0.0"
+    "@types/ws": "npm:^8.18.1"
+    accepts: "npm:^1.3.8"
+    cosmokit: "npm:^1.8.1"
+    path-to-regexp: "npm:^8.3.0"
+    path-to-regexp-typed: "npm:^8.0.0"
+    schemastery: "npm:^3.18.0"
+    ws: "npm:^8.19.0"
+  peerDependencies:
+    cordis: ^4.0.0-rc.6
+  checksum: 10c0/70a11a50111bc4efdd7e1c72c65467b5520500e776476dddf1ded858b9bc4756b11ce43c94b042cb9aeaaea3e10a3a644e768fc9445fbb7660f2b067be58f99c
   languageName: node
   linkType: hard
 
@@ -1811,6 +1829,7 @@ __metadata:
     "@mtcute/node": "npm:^0.30.3"
     "@mtcute/tl-runtime": "npm:^0.30.3"
     "@mtproto-relay/mtproto": "workspace:*"
+    "@satorijs/core": "npm:^4.6.0"
     "@vue/test-utils": "npm:^2.4.6"
     happy-dom: "npm:^18.0.1"
     long: "npm:^5.3.0"
@@ -1953,7 +1972,7 @@ __metadata:
     "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch"
     "@cordisjs/plugin-http": "npm:^1.5.0"
     "@cordisjs/plugin-loader": "npm:^1.0.0-rc.4"
-    "@cordisjs/plugin-server": "npm:^1.6.0"
+    "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch"
     "@cordisjs/plugin-webui": "npm:^0.8.1"
     "@fuman/io": "npm:^0.0.20"
     "@fuman/utils": "npm:^0.0.20"
@@ -2636,6 +2655,28 @@ __metadata:
     "@cordisjs/element": "npm:^0.2.0"
     cosmokit: "npm:^1.7.4"
   checksum: 10c0/7f1a888367022ee517015a1ea96c32734443a7c39d20eb6f64dfc3dc8391a6a5e579473995913ece66a5365a4f7bfa9bfcb1bd726091504cc07eafa9066e26dc
+  languageName: node
+  linkType: hard
+
+"@satorijs/plugin-server@npm:2.9.1":
+  version: 2.9.1
+  resolution: "@satorijs/plugin-server@npm:2.9.1"
+  dependencies:
+    cosmokit: "npm:^1.8.1"
+  peerDependencies:
+    "@satorijs/core": ^4.6.0
+  checksum: 10c0/1ea6242d26b1aec8a0e257d4991b1e9d1e75909453928a10bf45204e3712a37eee6b684ef6896b66cd7d6b61bee35cf34fd922d4b93e69276adb2d8749801ce6
+  languageName: node
+  linkType: hard
+
+"@satorijs/plugin-server@patch:@satorijs/plugin-server@npm%3A2.9.1#~/.yarn/patches/@satorijs-plugin-server-npm-2.9.1-7c53ae5ba4.patch":
+  version: 2.9.1
+  resolution: "@satorijs/plugin-server@patch:@satorijs/plugin-server@npm%3A2.9.1#~/.yarn/patches/@satorijs-plugin-server-npm-2.9.1-7c53ae5ba4.patch::version=2.9.1&hash=e3d87c"
+  dependencies:
+    cosmokit: "npm:^1.8.1"
+  peerDependencies:
+    "@satorijs/core": ^4.6.0
+  checksum: 10c0/9d2fdb46667f2ec0572309f3cbcb87ce139b0c08eadb7aff3593990212624b73798fd7785eb4d5ac7f7e1cb1feab98781cef30df20a5922217252ea766a99e1d
   languageName: node
   linkType: hard
 
@@ -5374,7 +5415,7 @@ __metadata:
     "@cordisjs/plugin-logger-webui": "npm:^0.6.1"
     "@cordisjs/plugin-market": "npm:^0.5.1"
     "@cordisjs/plugin-notifier": "npm:^0.8.0"
-    "@cordisjs/plugin-server": "npm:^1.6.2"
+    "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch"
     "@cordisjs/plugin-server-acl": "npm:^1.0.1"
     "@cordisjs/plugin-server-webui": "npm:^0.5.0"
     "@cordisjs/plugin-sso": "npm:^0.2.2"
@@ -5386,6 +5427,7 @@ __metadata:
     "@cordisjs/plugin-webui-sso": "npm:^0.2.6"
     "@cordisjs/unyaml": "npm:^2.0.3"
     "@satorijs/core": "patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch"
+    "@satorijs/plugin-server": "patch:@satorijs/plugin-server@npm%3A2.9.1#~/.yarn/patches/@satorijs-plugin-server-npm-2.9.1-7c53ae5ba4.patch"
     "@types/node": "npm:^25.3.5"
     cordis: "npm:^4.0.0-rc.5"
     cross-env: "npm:^10.1.0"

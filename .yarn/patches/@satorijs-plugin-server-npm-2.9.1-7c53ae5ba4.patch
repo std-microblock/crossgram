@@ -1,0 +1,1002 @@
+diff --git a/lib/index.cjs b/lib/index.cjs
+index 555f5f99dcf6a543451d205a138262ca2416a003..2245dd3e237586ac32895556ea65f12eb95130d7 100644
+--- a/lib/index.cjs
++++ b/lib/index.cjs
+@@ -1,9 +1,9 @@
+-"use strict";
++var __create = Object.create;
+ var __defProp = Object.defineProperty;
+ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+ var __getOwnPropNames = Object.getOwnPropertyNames;
++var __getProtoOf = Object.getPrototypeOf;
+ var __hasOwnProp = Object.prototype.hasOwnProperty;
+-var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+ var __export = (target, all) => {
+   for (var name in all)
+     __defProp(target, name, { get: all[name], enumerable: true });
+@@ -16,23 +16,29 @@ var __copyProps = (to, from, except, desc) => {
+   }
+   return to;
+ };
++var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
++  // If the importer is in node compatibility mode or this is not an ESM
++  // file that has been converted to a CommonJS file using a Babel-
++  // compatible transform (i.e. "__esModule" has not been set), then set
++  // "default" to the CommonJS "module.exports" for node compatibility.
++  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
++  mod
++));
+ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+-// src/index.ts
++// ../../../..src/index.ts
+ var index_exports = {};
+ __export(index_exports, {
+   default: () => index_default
+ });
+ module.exports = __toCommonJS(index_exports);
+ var import_core = require("@satorijs/core");
++var import_schemastery = __toESM(require("schemastery"), 1);
+ var import_cosmokit = require("cosmokit");
+-var import_node_stream = require("node:stream");
+ var import_promises = require("node:fs/promises");
++var import_node_stream = require("node:stream");
+ var kClient = /* @__PURE__ */ Symbol("state");
+ var Client = class {
+-  static {
+-    __name(this, "Client");
+-  }
+   authorized = false;
+ };
+ var FILTER_HEADERS = [
+@@ -58,12 +64,103 @@ var FILTER_RESPONSE_HEADERS = [
+   // misrepresenting this hop's actual server software.
+   "server"
+ ];
++var RequestBodyTooLargeError = class extends Error {
++};
++async function readRequestBody(req, maxBytes) {
++  const contentLength = Number(req.headers["content-length"]);
++  if (Number.isFinite(contentLength) && contentLength > maxBytes) throw new RequestBodyTooLargeError();
++  const chunks = [];
++  let total = 0;
++  for await (const chunk of req) {
++    const bytes = Buffer.from(chunk);
++    total += bytes.length;
++    if (total > maxBytes) {
++      req.resume();
++      throw new RequestBodyTooLargeError();
++    }
++    chunks.push(bytes);
++  }
++  return Buffer.concat(chunks, total);
++}
++function legacyServer(server, token, maxRequestBodyBytes = 8 * 1024 * 1024) {
++  return new Proxy(server, {
++    get(target, key, receiver) {
++      if (!ServerMethods.has(String(key))) return Reflect.get(target, key, receiver);
++      return (path, ...handlers) => {
++        const handler = handlers.at(-1);
++        return target[key](path, async (req, res, next) => {
++          if (!token || req.headers.get("authorization") !== `Bearer ${token}`) {
++            res.status = 403;
++            res.body = "invalid token";
++            return;
++          }
++          const raw = path.includes("/v1/internal/");
++          const contentType = req.headers.get("content-type") ?? "";
++          const needsBody = raw || contentType.includes("application/json") || contentType.includes("multipart/form-data");
++          let body;
++          try {
++            body = needsBody ? await readRequestBody(req._req, maxRequestBodyBytes) : void 0;
++          } catch (error) {
++            if (!(error instanceof RequestBodyTooLargeError)) throw error;
++            res.status = 413;
++            res.body = "request body too large";
++            return;
++          }
++          const form = !raw && contentType.includes("multipart/form-data") ? await new globalThis.Response(body, { headers: req.headers }).formData() : void 0;
++          const headers = Object.fromEntries(req.headers);
++          const files = form ? Object.fromEntries([...form].filter(([, value]) => value instanceof Blob)) : {};
++          const koa = {
++            params: req.params,
++            query: Object.fromEntries(req.query),
++            headers,
++            req: raw && body ? import_node_stream.Readable.from(body) : req._req,
++            method: req.method,
++            request: {
++              headers,
++              body: !raw && contentType.includes("application/json") && body ? JSON.parse(body.toString()) : {},
++              files
++            },
++            set(key2, value) {
++              res.headers.set(key2, value);
++            },
++            redirect(url) {
++              res.status = 302;
++              res.headers.set("location", url);
++            }
++          };
++          Object.defineProperties(koa, {
++            status: { get: () => res.status, set: (value) => {
++              res.status = value;
++            } },
++            body: {
++              get: () => res.body,
++              set: (value) => {
++                if (value && typeof value === "object" && !(value instanceof Uint8Array) && !(value instanceof Blob)) {
++                  res.json(value);
++                } else {
++                  res.body = value;
++                }
++              }
++            },
++            header: { value: new Proxy({}, { set: (_, key2, value) => {
++              res.headers.set(String(key2), String(value));
++              return true;
++            } }) }
++          });
++          return handler(koa, next);
++        });
++      };
++    }
++  });
++}
++var ServerMethods = /* @__PURE__ */ new Set(["all", "get", "delete", "head", "post", "put", "patch"]);
+ var SatoriServer = class extends import_core.Service {
+   constructor(ctx, config) {
+     super(ctx, "satori.server", true);
+     this.config = config;
+     const logger = ctx.logger("server");
+     const path = (0, import_cosmokit.sanitize)(config.path);
++    const server = legacyServer(ctx.server, config.token, config.maxRequestBodyBytes);
+     function checkAuth(koa) {
+       if (!config.token) return;
+       if (koa.request.headers.authorization !== `Bearer ${config.token}`) {
+@@ -72,20 +169,15 @@ var SatoriServer = class extends import_core.Service {
+         return true;
+       }
+     }
+-    __name(checkAuth, "checkAuth");
+-    ctx.server.get(path + "/v1/:name", async (koa, next) => {
++    server.get(path + "/v1/:name", async (koa, next) => {
+       const method = import_core.Universal.Methods[koa.params.name];
+       if (!method) return next();
+       koa.body = "Please use POST method to send requests.";
+       koa.status = 405;
+     });
+-    ctx.server.post(path + "/v1/:name", async (koa) => {
++    server.post(path + "/v1/:name", async (koa, next) => {
+       const method = import_core.Universal.Methods[koa.params.name];
+-      if (!method) {
+-        koa.body = "method not found";
+-        koa.status = 404;
+-        return;
+-      }
++      if (!method) return next();
+       if (checkAuth(koa)) return;
+       const selfId = koa.request.headers["satori-user-id"] ?? koa.request.headers["x-self-id"];
+       const platform = koa.request.headers["satori-platform"] ?? koa.request.headers["x-platform"];
+@@ -100,11 +192,12 @@ var SatoriServer = class extends import_core.Service {
+           return [key, (0, import_cosmokit.makeArray)(value)[0]];
+         });
+         const uploads = await Promise.all(entries.map(async ([, file]) => {
+-          const buffer2 = await (0, import_promises.readFile)(file.filepath);
++          const upload = file;
++          const buffer2 = upload instanceof Blob ? Buffer.from(await upload.arrayBuffer()) : await (0, import_promises.readFile)(upload.filepath);
+           return {
+             data: import_cosmokit.Binary.fromSource(buffer2),
+-            type: file.mimetype,
+-            filename: file.newFilename
++            type: upload.type || upload.mimetype || "application/octet-stream",
++            filename: "name" in upload ? upload.name : upload.newFilename
+           };
+         }));
+         const result2 = await bot.createUpload(...uploads);
+@@ -122,8 +215,8 @@ var SatoriServer = class extends import_core.Service {
+       koa.status = 200;
+     });
+     const marker = (0, import_cosmokit.defineProperty)((_, next) => next(), /* @__PURE__ */ Symbol.for("noParseBody"), true);
+-    ctx.server.all(path + "/v1/internal/:path(.+)", marker, async (koa) => {
+-      const url = new URL(`internal:${koa.params.path}`);
++    server.all(path + "/v1/internal/*path", marker, async (koa) => {
++      const url = new URL(`internal:${(0, import_cosmokit.makeArray)(koa.params.path).join("/")}`);
+       for (const [key, value] of Object.entries(koa.query)) {
+         for (const item of (0, import_cosmokit.makeArray)(value)) {
+           url.searchParams.append(key, item);
+@@ -147,42 +240,15 @@ var SatoriServer = class extends import_core.Service {
+       koa.status = response.status;
+       koa.body = response.body ? Buffer.from(response.body) : "";
+     });
+-    ctx.server.get(path + "/v1/proxy/:url(.+)", async (koa) => {
+-      let url;
+-      try {
+-        url = new URL(koa.params.url);
+-      } catch {
+-        koa.body = "invalid url";
+-        koa.status = 400;
+-        return;
+-      }
+-      koa.header["Access-Control-Allow-Origin"] = ctx.server.config.selfUrl || "*";
+-      const proxyUrls = [...ctx.satori.proxyUrls];
+-      if (!proxyUrls.some((proxyUrl) => url.href.startsWith(proxyUrl))) {
+-        koa.body = "forbidden";
+-        koa.status = 403;
+-        return;
+-      }
+-      try {
+-        koa.body = import_node_stream.Readable.fromWeb(await ctx.http.get(url.href, { responseType: "stream" }));
+-      } catch (error) {
+-        if (!ctx.http.isError(error) || !error.response) throw error;
+-        koa.status = error.response.status;
+-        koa.body = error.response.data;
+-        for (const [key, value] of error.response.headers) {
+-          koa.set(key, value);
+-        }
+-      }
++    server.all(path + "/v1/admin/*path", async (koa) => {
++      koa.redirect(`${path}/v1/meta/${(0, import_cosmokit.makeArray)(koa.params.path).join("/")}`);
+     });
+-    ctx.server.all(path + "/v1/admin/:path(.+)", async (koa) => {
+-      koa.redirect(`${path}/v1/meta/${koa.params.path}`);
+-    });
+-    ctx.server.post(path + "/v1/meta", async (koa) => {
++    server.post(path + "/v1/meta", async (koa) => {
+       if (checkAuth(koa)) return;
+       koa.body = import_core.Universal.transformKey(ctx.satori.toJSON(), import_cosmokit.snakeCase);
+       koa.status = 200;
+     });
+-    ctx.server.post(path + "/v1/meta/webhook.create", async (koa) => {
++    server.post(path + "/v1/meta/webhook.create", async (koa) => {
+       if (checkAuth(koa)) return;
+       const webhook = import_core.Universal.transformKey(koa.request.body, import_cosmokit.camelCase);
+       const index = config.webhooks.findIndex(({ url }) => url === webhook.url);
+@@ -193,7 +259,7 @@ var SatoriServer = class extends import_core.Service {
+       koa.body = {};
+       koa.status = 200;
+     });
+-    ctx.server.post(path + "/v1/meta/webhook.delete", async (koa) => {
++    server.post(path + "/v1/meta/webhook.delete", async (koa) => {
+       if (checkAuth(koa)) return;
+       const url = koa.request.body.url;
+       const index = config.webhooks.findIndex((webhook) => webhook.url === url);
+@@ -211,7 +277,8 @@ var SatoriServer = class extends import_core.Service {
+       }
+     }, import_cosmokit.Time.second * 10);
+     ctx.on("dispose", () => clearInterval(timeout));
+-    const layer = ctx.server.ws(path + "/v1/events", (socket) => {
++    const layer = server.ws(path + "/v1/events", async (_request, accept) => {
++      const socket = await accept();
+       const client = socket[kClient] = new Client();
+       socket.addEventListener("message", (event) => {
+         let payload;
+@@ -221,10 +288,8 @@ var SatoriServer = class extends import_core.Service {
+           return socket.close(4e3, "invalid message");
+         }
+         if (payload.op === import_core.Universal.Opcode.IDENTIFY) {
+-          if (config.token) {
+-            if (payload.body?.token !== config.token) {
+-              return socket.close(4004, "invalid token");
+-            }
++          if (!config.token || payload.body?.token !== config.token) {
++            return socket.close(4004, "invalid token");
+           }
+           client.authorized = true;
+           socket.send(JSON.stringify({
+@@ -244,17 +309,16 @@ var SatoriServer = class extends import_core.Service {
+         }
+       });
+     });
+-    function dispatch(socket, body) {
++    function dispatch(socket, body, op = import_core.Universal.Opcode.EVENT) {
+       socket.send(JSON.stringify({
+-        op: import_core.Universal.Opcode.EVENT,
++        op,
+         body
+       }));
+     }
+-    __name(dispatch, "dispatch");
+     function sendEvent(opcode, body) {
+       for (const socket of layer.clients) {
+         if (!socket[kClient]?.authorized) continue;
+-        dispatch(socket, body);
++        dispatch(socket, body, opcode);
+       }
+       for (const webhook of config.webhooks) {
+         if (!webhook.enabled) continue;
+@@ -268,7 +332,6 @@ var SatoriServer = class extends import_core.Service {
+         }).catch(logger.warn);
+       }
+     }
+-    __name(sendEvent, "sendEvent");
+     ctx.on("internal/session", (session) => {
+       const body = import_core.Universal.transformKey(session.toJSON(), import_cosmokit.snakeCase);
+       sendEvent(import_core.Universal.Opcode.EVENT, body);
+@@ -278,31 +341,30 @@ var SatoriServer = class extends import_core.Service {
+       sendEvent(import_core.Universal.Opcode.META, body);
+     });
+   }
+-  static {
+-    __name(this, "SatoriServer");
+-  }
+-  static inject = ["server", "http"];
++  config;
++  static inject = ["server", "http", "satori"];
+   get url() {
+     return (this.ctx.server.config.selfUrl ?? this.ctx.server.selfUrl) + this.config.path;
+   }
+ };
+ ((SatoriServer2) => {
+-  SatoriServer2.Webhook = import_core.Schema.object({
+-    enabled: import_core.Schema.boolean().default(true),
+-    url: import_core.Schema.string(),
+-    token: import_core.Schema.string()
++  SatoriServer2.Webhook = import_schemastery.default.object({
++    enabled: import_schemastery.default.boolean().default(true),
++    url: import_schemastery.default.string(),
++    token: import_schemastery.default.string()
+   });
+-  SatoriServer2.Config = import_core.Schema.object({
+-    path: import_core.Schema.string().default("/satori"),
+-    token: import_core.Schema.string().experimental(),
+-    api: import_core.Schema.object({
++  SatoriServer2.Config = import_schemastery.default.object({
++    path: import_schemastery.default.string().default("/satori"),
++    token: import_schemastery.default.string().experimental(),
++    api: import_schemastery.default.object({
+       // enabled: Schema.boolean().default(true),
+     }),
+-    websocket: import_core.Schema.object({
++    websocket: import_schemastery.default.object({
+       // enabled: Schema.boolean().default(true),
+-      resumeTimeout: import_core.Schema.number().default(import_cosmokit.Time.minute * 5)
++      resumeTimeout: import_schemastery.default.number().default(import_cosmokit.Time.minute * 5)
+     }),
+-    webhooks: import_core.Schema.array(SatoriServer2.Webhook)
++    maxRequestBodyBytes: import_schemastery.default.natural().min(1).default(8 * 1024 * 1024),
++    webhooks: import_schemastery.default.array(SatoriServer2.Webhook)
+   });
+ })(SatoriServer || (SatoriServer = {}));
+ var index_default = SatoriServer;
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 3e8f30cc44613db369d4475feda7adef04a1bbae..8df6c8d80267b95510243dd03cbd23b09114c035 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -1,4 +1,5 @@
+-import { Context, Schema, Service } from '@satorijs/core';
++import { Context, Service } from '@satorijs/core';
++import Schema from 'schemastery';
+ declare module '@satorijs/core' {
+     interface Satori {
+         server: SatoriServer;
+@@ -29,6 +30,8 @@ declare namespace SatoriServer {
+         token?: string;
+         api?: ApiConfig;
+         websocket?: WebSocketConfig;
++        /** Maximum bytes parsed for JSON, multipart, and internal raw request bodies. */
++        maxRequestBodyBytes?: number;
+         webhooks: Webhook[];
+     }
+     const Config: Schema<Config>;
+diff --git a/lib/index.mjs b/lib/index.mjs
+index de609840b91614f8d83fec3bd3912cb906348f9a..d7273793ea0b9af2c08b58290ab44834667edc76 100644
+--- a/lib/index.mjs
++++ b/lib/index.mjs
+@@ -1,16 +1,11 @@
+-var __defProp = Object.defineProperty;
+-var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+-
+-// src/index.ts
+-import { Schema, Service, Universal } from "@satorijs/core";
++// ../../../..src/index.ts
++import { Service, Universal } from "@satorijs/core";
++import Schema from "schemastery";
+ import { Binary, camelCase, defineProperty, makeArray, sanitize, snakeCase, Time } from "cosmokit";
+-import { Readable } from "node:stream";
+ import { readFile } from "node:fs/promises";
++import { Readable } from "node:stream";
+ var kClient = /* @__PURE__ */ Symbol("state");
+ var Client = class {
+-  static {
+-    __name(this, "Client");
+-  }
+   authorized = false;
+ };
+ var FILTER_HEADERS = [
+@@ -36,12 +31,103 @@ var FILTER_RESPONSE_HEADERS = [
+   // misrepresenting this hop's actual server software.
+   "server"
+ ];
++var RequestBodyTooLargeError = class extends Error {
++};
++async function readRequestBody(req, maxBytes) {
++  const contentLength = Number(req.headers["content-length"]);
++  if (Number.isFinite(contentLength) && contentLength > maxBytes) throw new RequestBodyTooLargeError();
++  const chunks = [];
++  let total = 0;
++  for await (const chunk of req) {
++    const bytes = Buffer.from(chunk);
++    total += bytes.length;
++    if (total > maxBytes) {
++      req.resume();
++      throw new RequestBodyTooLargeError();
++    }
++    chunks.push(bytes);
++  }
++  return Buffer.concat(chunks, total);
++}
++function legacyServer(server, token, maxRequestBodyBytes = 8 * 1024 * 1024) {
++  return new Proxy(server, {
++    get(target, key, receiver) {
++      if (!ServerMethods.has(String(key))) return Reflect.get(target, key, receiver);
++      return (path, ...handlers) => {
++        const handler = handlers.at(-1);
++        return target[key](path, async (req, res, next) => {
++          if (!token || req.headers.get("authorization") !== `Bearer ${token}`) {
++            res.status = 403;
++            res.body = "invalid token";
++            return;
++          }
++          const raw = path.includes("/v1/internal/");
++          const contentType = req.headers.get("content-type") ?? "";
++          const needsBody = raw || contentType.includes("application/json") || contentType.includes("multipart/form-data");
++          let body;
++          try {
++            body = needsBody ? await readRequestBody(req._req, maxRequestBodyBytes) : void 0;
++          } catch (error) {
++            if (!(error instanceof RequestBodyTooLargeError)) throw error;
++            res.status = 413;
++            res.body = "request body too large";
++            return;
++          }
++          const form = !raw && contentType.includes("multipart/form-data") ? await new globalThis.Response(body, { headers: req.headers }).formData() : void 0;
++          const headers = Object.fromEntries(req.headers);
++          const files = form ? Object.fromEntries([...form].filter(([, value]) => value instanceof Blob)) : {};
++          const koa = {
++            params: req.params,
++            query: Object.fromEntries(req.query),
++            headers,
++            req: raw && body ? Readable.from(body) : req._req,
++            method: req.method,
++            request: {
++              headers,
++              body: !raw && contentType.includes("application/json") && body ? JSON.parse(body.toString()) : {},
++              files
++            },
++            set(key2, value) {
++              res.headers.set(key2, value);
++            },
++            redirect(url) {
++              res.status = 302;
++              res.headers.set("location", url);
++            }
++          };
++          Object.defineProperties(koa, {
++            status: { get: () => res.status, set: (value) => {
++              res.status = value;
++            } },
++            body: {
++              get: () => res.body,
++              set: (value) => {
++                if (value && typeof value === "object" && !(value instanceof Uint8Array) && !(value instanceof Blob)) {
++                  res.json(value);
++                } else {
++                  res.body = value;
++                }
++              }
++            },
++            header: { value: new Proxy({}, { set: (_, key2, value) => {
++              res.headers.set(String(key2), String(value));
++              return true;
++            } }) }
++          });
++          return handler(koa, next);
++        });
++      };
++    }
++  });
++}
++var ServerMethods = /* @__PURE__ */ new Set(["all", "get", "delete", "head", "post", "put", "patch"]);
+ var SatoriServer = class extends Service {
+   constructor(ctx, config) {
+     super(ctx, "satori.server", true);
+     this.config = config;
+     const logger = ctx.logger("server");
+     const path = sanitize(config.path);
++    const server = legacyServer(ctx.server, config.token, config.maxRequestBodyBytes);
+     function checkAuth(koa) {
+       if (!config.token) return;
+       if (koa.request.headers.authorization !== `Bearer ${config.token}`) {
+@@ -50,20 +136,15 @@ var SatoriServer = class extends Service {
+         return true;
+       }
+     }
+-    __name(checkAuth, "checkAuth");
+-    ctx.server.get(path + "/v1/:name", async (koa, next) => {
++    server.get(path + "/v1/:name", async (koa, next) => {
+       const method = Universal.Methods[koa.params.name];
+       if (!method) return next();
+       koa.body = "Please use POST method to send requests.";
+       koa.status = 405;
+     });
+-    ctx.server.post(path + "/v1/:name", async (koa) => {
++    server.post(path + "/v1/:name", async (koa, next) => {
+       const method = Universal.Methods[koa.params.name];
+-      if (!method) {
+-        koa.body = "method not found";
+-        koa.status = 404;
+-        return;
+-      }
++      if (!method) return next();
+       if (checkAuth(koa)) return;
+       const selfId = koa.request.headers["satori-user-id"] ?? koa.request.headers["x-self-id"];
+       const platform = koa.request.headers["satori-platform"] ?? koa.request.headers["x-platform"];
+@@ -78,11 +159,12 @@ var SatoriServer = class extends Service {
+           return [key, makeArray(value)[0]];
+         });
+         const uploads = await Promise.all(entries.map(async ([, file]) => {
+-          const buffer2 = await readFile(file.filepath);
++          const upload = file;
++          const buffer2 = upload instanceof Blob ? Buffer.from(await upload.arrayBuffer()) : await readFile(upload.filepath);
+           return {
+             data: Binary.fromSource(buffer2),
+-            type: file.mimetype,
+-            filename: file.newFilename
++            type: upload.type || upload.mimetype || "application/octet-stream",
++            filename: "name" in upload ? upload.name : upload.newFilename
+           };
+         }));
+         const result2 = await bot.createUpload(...uploads);
+@@ -100,8 +182,8 @@ var SatoriServer = class extends Service {
+       koa.status = 200;
+     });
+     const marker = defineProperty((_, next) => next(), /* @__PURE__ */ Symbol.for("noParseBody"), true);
+-    ctx.server.all(path + "/v1/internal/:path(.+)", marker, async (koa) => {
+-      const url = new URL(`internal:${koa.params.path}`);
++    server.all(path + "/v1/internal/*path", marker, async (koa) => {
++      const url = new URL(`internal:${makeArray(koa.params.path).join("/")}`);
+       for (const [key, value] of Object.entries(koa.query)) {
+         for (const item of makeArray(value)) {
+           url.searchParams.append(key, item);
+@@ -125,42 +207,15 @@ var SatoriServer = class extends Service {
+       koa.status = response.status;
+       koa.body = response.body ? Buffer.from(response.body) : "";
+     });
+-    ctx.server.get(path + "/v1/proxy/:url(.+)", async (koa) => {
+-      let url;
+-      try {
+-        url = new URL(koa.params.url);
+-      } catch {
+-        koa.body = "invalid url";
+-        koa.status = 400;
+-        return;
+-      }
+-      koa.header["Access-Control-Allow-Origin"] = ctx.server.config.selfUrl || "*";
+-      const proxyUrls = [...ctx.satori.proxyUrls];
+-      if (!proxyUrls.some((proxyUrl) => url.href.startsWith(proxyUrl))) {
+-        koa.body = "forbidden";
+-        koa.status = 403;
+-        return;
+-      }
+-      try {
+-        koa.body = Readable.fromWeb(await ctx.http.get(url.href, { responseType: "stream" }));
+-      } catch (error) {
+-        if (!ctx.http.isError(error) || !error.response) throw error;
+-        koa.status = error.response.status;
+-        koa.body = error.response.data;
+-        for (const [key, value] of error.response.headers) {
+-          koa.set(key, value);
+-        }
+-      }
++    server.all(path + "/v1/admin/*path", async (koa) => {
++      koa.redirect(`${path}/v1/meta/${makeArray(koa.params.path).join("/")}`);
+     });
+-    ctx.server.all(path + "/v1/admin/:path(.+)", async (koa) => {
+-      koa.redirect(`${path}/v1/meta/${koa.params.path}`);
+-    });
+-    ctx.server.post(path + "/v1/meta", async (koa) => {
++    server.post(path + "/v1/meta", async (koa) => {
+       if (checkAuth(koa)) return;
+       koa.body = Universal.transformKey(ctx.satori.toJSON(), snakeCase);
+       koa.status = 200;
+     });
+-    ctx.server.post(path + "/v1/meta/webhook.create", async (koa) => {
++    server.post(path + "/v1/meta/webhook.create", async (koa) => {
+       if (checkAuth(koa)) return;
+       const webhook = Universal.transformKey(koa.request.body, camelCase);
+       const index = config.webhooks.findIndex(({ url }) => url === webhook.url);
+@@ -171,7 +226,7 @@ var SatoriServer = class extends Service {
+       koa.body = {};
+       koa.status = 200;
+     });
+-    ctx.server.post(path + "/v1/meta/webhook.delete", async (koa) => {
++    server.post(path + "/v1/meta/webhook.delete", async (koa) => {
+       if (checkAuth(koa)) return;
+       const url = koa.request.body.url;
+       const index = config.webhooks.findIndex((webhook) => webhook.url === url);
+@@ -189,7 +244,8 @@ var SatoriServer = class extends Service {
+       }
+     }, Time.second * 10);
+     ctx.on("dispose", () => clearInterval(timeout));
+-    const layer = ctx.server.ws(path + "/v1/events", (socket) => {
++    const layer = server.ws(path + "/v1/events", async (_request, accept) => {
++      const socket = await accept();
+       const client = socket[kClient] = new Client();
+       socket.addEventListener("message", (event) => {
+         let payload;
+@@ -199,10 +255,8 @@ var SatoriServer = class extends Service {
+           return socket.close(4e3, "invalid message");
+         }
+         if (payload.op === Universal.Opcode.IDENTIFY) {
+-          if (config.token) {
+-            if (payload.body?.token !== config.token) {
+-              return socket.close(4004, "invalid token");
+-            }
++          if (!config.token || payload.body?.token !== config.token) {
++            return socket.close(4004, "invalid token");
+           }
+           client.authorized = true;
+           socket.send(JSON.stringify({
+@@ -222,17 +276,16 @@ var SatoriServer = class extends Service {
+         }
+       });
+     });
+-    function dispatch(socket, body) {
++    function dispatch(socket, body, op = Universal.Opcode.EVENT) {
+       socket.send(JSON.stringify({
+-        op: Universal.Opcode.EVENT,
++        op,
+         body
+       }));
+     }
+-    __name(dispatch, "dispatch");
+     function sendEvent(opcode, body) {
+       for (const socket of layer.clients) {
+         if (!socket[kClient]?.authorized) continue;
+-        dispatch(socket, body);
++        dispatch(socket, body, opcode);
+       }
+       for (const webhook of config.webhooks) {
+         if (!webhook.enabled) continue;
+@@ -246,7 +299,6 @@ var SatoriServer = class extends Service {
+         }).catch(logger.warn);
+       }
+     }
+-    __name(sendEvent, "sendEvent");
+     ctx.on("internal/session", (session) => {
+       const body = Universal.transformKey(session.toJSON(), snakeCase);
+       sendEvent(Universal.Opcode.EVENT, body);
+@@ -256,10 +308,8 @@ var SatoriServer = class extends Service {
+       sendEvent(Universal.Opcode.META, body);
+     });
+   }
+-  static {
+-    __name(this, "SatoriServer");
+-  }
+-  static inject = ["server", "http"];
++  config;
++  static inject = ["server", "http", "satori"];
+   get url() {
+     return (this.ctx.server.config.selfUrl ?? this.ctx.server.selfUrl) + this.config.path;
+   }
+@@ -280,6 +330,7 @@ var SatoriServer = class extends Service {
+       // enabled: Schema.boolean().default(true),
+       resumeTimeout: Schema.number().default(Time.minute * 5)
+     }),
++    maxRequestBodyBytes: Schema.natural().min(1).default(8 * 1024 * 1024),
+     webhooks: Schema.array(SatoriServer2.Webhook)
+   });
+ })(SatoriServer || (SatoriServer = {}));
+diff --git a/package.json b/package.json
+index 572aa1956303a4df99799bfbfbbc6220895fce3d..7358a78cde905510078a0d0db820282033005157 100644
+--- a/package.json
++++ b/package.json
+@@ -44,6 +44,7 @@
+     "@satorijs/core": "^4.6.0"
+   },
+   "dependencies": {
+-    "cosmokit": "^1.8.1"
++    "cosmokit": "^1.8.1",
++    "schemastery": "^3.18.0"
+   }
+ }
+diff --git a/src/index.ts b/src/index.ts
+index 00bf7ca0fb13ecc60b836179bee2d9ba11bfdb1f..c6eb6cfd8e616041b429643044aeddd9f255cd1a 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,10 +1,10 @@
+-import { Context, Schema, Service, Session, Universal } from '@satorijs/core'
++import { Context, Service, Session, Universal } from '@satorijs/core'
++import Schema from 'schemastery'
+ import { Binary, camelCase, defineProperty, makeArray, sanitize, snakeCase, Time } from 'cosmokit'
+ import {} from '@cordisjs/plugin-server'
+ import WebSocket from 'ws'
+-import { Readable } from 'node:stream'
+ import { readFile } from 'node:fs/promises'
+-import { DefaultState, Middleware, ParameterizedContext } from 'koa'
++import { Readable } from 'node:stream'
+
+ declare module '@satorijs/core' {
+   interface Satori {
+@@ -50,15 +50,101 @@ const FILTER_RESPONSE_HEADERS = [
+   'server',
+ ]
+
++class RequestBodyTooLargeError extends Error {}
++
++async function readRequestBody(req: NodeJS.ReadableStream & { headers: Record<string, string | string[] | undefined> }, maxBytes: number): Promise<Buffer> {
++  const contentLength = Number(req.headers['content-length'])
++  if (Number.isFinite(contentLength) && contentLength > maxBytes) throw new RequestBodyTooLargeError()
++  const chunks: Buffer[] = []
++  let total = 0
++  for await (const chunk of req) {
++    const bytes = Buffer.from(chunk)
++    total += bytes.length
++    if (total > maxBytes) {
++      req.resume()
++      throw new RequestBodyTooLargeError()
++    }
++    chunks.push(bytes)
++  }
++  return Buffer.concat(chunks, total)
++}
++
++function legacyServer(server: any, token?: string, maxRequestBodyBytes = 8 * 1024 * 1024): any {
++  return new Proxy(server, {
++    get(target, key, receiver) {
++      if (!ServerMethods.has(String(key))) return Reflect.get(target, key, receiver)
++      return (path: string, ...handlers: Function[]) => {
++        const handler = handlers.at(-1)!
++        return target[key](path, async (req: any, res: any, next: () => Promise<unknown>) => {
++          if (!token || req.headers.get('authorization') !== `Bearer ${token}`) {
++            res.status = 403
++            res.body = 'invalid token'
++            return
++          }
++          const raw = path.includes('/v1/internal/')
++          const contentType = req.headers.get('content-type') ?? ''
++          const needsBody = raw || contentType.includes('application/json') || contentType.includes('multipart/form-data')
++          let body: Buffer | undefined
++          try {
++            body = needsBody ? await readRequestBody(req._req, maxRequestBodyBytes) : undefined
++          } catch (error) {
++            if (!(error instanceof RequestBodyTooLargeError)) throw error
++            res.status = 413
++            res.body = 'request body too large'
++            return
++          }
++          const form = !raw && contentType.includes('multipart/form-data')
++            ? await new globalThis.Response(body, { headers: req.headers }).formData()
++            : undefined
++          const headers = Object.fromEntries(req.headers) as Record<string, string>
++          const files = form ? Object.fromEntries([...form].filter(([, value]) => value instanceof Blob)) : {}
++          const koa: any = {
++            params: req.params,
++            query: Object.fromEntries(req.query),
++            headers,
++            req: raw && body ? Readable.from(body) : req._req,
++            method: req.method,
++            request: {
++              headers,
++              body: !raw && contentType.includes('application/json') && body ? JSON.parse(body.toString()) : {},
++              files,
++            },
++            set(key: string, value: string) { res.headers.set(key, value) },
++            redirect(url: string) { res.status = 302; res.headers.set('location', url) },
++          }
++          Object.defineProperties(koa, {
++            status: { get: () => res.status, set: (value) => { res.status = value } },
++            body: {
++              get: () => res.body,
++              set: (value) => {
++                if (value && typeof value === 'object' && !(value instanceof Uint8Array) && !(value instanceof Blob)) {
++                  res.json(value)
++                } else {
++                  res.body = value
++                }
++              },
++            },
++            header: { value: new Proxy({}, { set: (_, key, value) => { res.headers.set(String(key), String(value)); return true } }) },
++          })
++          return handler(koa, next)
++        })
++      }
++    },
++  })
++}
++
++const ServerMethods = new Set(['all', 'get', 'delete', 'head', 'post', 'put', 'patch'])
++
+ class SatoriServer extends Service<SatoriServer.Config> {
+-  static inject = ['server', 'http']
++  static inject = ['server', 'http', 'satori']
+
+   constructor(ctx: Context, public config: SatoriServer.Config) {
+     super(ctx, 'satori.server', true)
+     const logger = ctx.logger('server')
+     const path = sanitize(config.path)
++    const server = legacyServer(ctx.server, config.token, config.maxRequestBodyBytes)
+
+-    function checkAuth<T>(koa: ParameterizedContext<DefaultState, T, unknown>) {
++    function checkAuth(koa: any) {
+       if (!config.token) return
+       if (koa.request.headers.authorization !== `Bearer ${config.token}`) {
+         koa.body = 'invalid token'
+@@ -67,20 +153,16 @@ class SatoriServer extends Service<SatoriServer.Config> {
+       }
+     }
+
+-    ctx.server.get(path + '/v1/:name', async (koa, next) => {
++    server.get(path + '/v1/:name', async (koa, next) => {
+       const method = Universal.Methods[koa.params.name]
+       if (!method) return next()
+       koa.body = 'Please use POST method to send requests.'
+       koa.status = 405
+     })
+
+-    ctx.server.post(path + '/v1/:name', async (koa) => {
++    server.post(path + '/v1/:name', async (koa, next) => {
+       const method = Universal.Methods[koa.params.name]
+-      if (!method) {
+-        koa.body = 'method not found'
+-        koa.status = 404
+-        return
+-      }
++      if (!method) return next()
+
+       if (checkAuth(koa)) return
+
+@@ -98,11 +180,14 @@ class SatoriServer extends Service<SatoriServer.Config> {
+           return [key, makeArray(value)[0]] as const
+         })
+         const uploads = await Promise.all(entries.map<Promise<Universal.Upload>>(async ([, file]) => {
+-          const buffer = await readFile(file.filepath)
++          const upload = file as Blob & { filepath?: string, mimetype?: string, newFilename?: string }
++          const buffer = upload instanceof Blob
++            ? Buffer.from(await upload.arrayBuffer())
++            : await readFile(upload.filepath!)
+           return {
+             data: Binary.fromSource(buffer),
+-            type: file.mimetype!,
+-            filename: file.newFilename,
++            type: upload.type || upload.mimetype || 'application/octet-stream',
++            filename: 'name' in upload ? upload.name : upload.newFilename,
+           }
+         }))
+         const result = await bot.createUpload(...uploads)
+@@ -121,10 +206,10 @@ class SatoriServer extends Service<SatoriServer.Config> {
+       koa.status = 200
+     })
+
+-    const marker: Middleware = defineProperty((_, next) => next(), Symbol.for('noParseBody'), true)
++    const marker = defineProperty((_: unknown, next: () => Promise<unknown>) => next(), Symbol.for('noParseBody'), true)
+
+-    ctx.server.all(path + '/v1/internal/:path(.+)', marker, async (koa) => {
+-      const url = new URL(`internal:${koa.params.path}`)
++    server.all(path + '/v1/internal/*path', marker, async (koa: any) => {
++      const url = new URL(`internal:${makeArray(koa.params.path).join('/')}`)
+       for (const [key, value] of Object.entries(koa.query)) {
+         for (const item of makeArray(value)) {
+           url.searchParams.append(key, item)
+@@ -151,47 +236,17 @@ class SatoriServer extends Service<SatoriServer.Config> {
+       koa.body = response.body ? Buffer.from(response.body) : ''
+     })
+
+-    ctx.server.get(path + '/v1/proxy/:url(.+)', async (koa) => {
+-      let url: URL
+-      try {
+-        url = new URL(koa.params.url)
+-      } catch {
+-        koa.body = 'invalid url'
+-        koa.status = 400
+-        return
+-      }
+-
+-      koa.header['Access-Control-Allow-Origin'] = ctx.server.config.selfUrl || '*'
+-      const proxyUrls = [...ctx.satori.proxyUrls]
+-      if (!proxyUrls.some(proxyUrl => url.href.startsWith(proxyUrl))) {
+-        koa.body = 'forbidden'
+-        koa.status = 403
+-        return
+-      }
+-
+-      try {
+-        koa.body = Readable.fromWeb(await ctx.http.get(url.href, { responseType: 'stream' }))
+-      } catch (error) {
+-        if (!ctx.http.isError(error) || !error.response) throw error
+-        koa.status = error.response.status
+-        koa.body = error.response.data
+-        for (const [key, value] of error.response.headers) {
+-          koa.set(key, value)
+-        }
+-      }
+-    })
+-
+-    ctx.server.all(path + '/v1/admin/:path(.+)', async (koa) => {
+-      koa.redirect(`${path}/v1/meta/${koa.params.path}`)
++    server.all(path + '/v1/admin/*path', async (koa: any) => {
++      koa.redirect(`${path}/v1/meta/${makeArray(koa.params.path).join('/')}`)
+     })
+
+-    ctx.server.post(path + '/v1/meta', async (koa) => {
++    server.post(path + '/v1/meta', async (koa) => {
+       if (checkAuth(koa)) return
+       koa.body = Universal.transformKey(ctx.satori.toJSON(), snakeCase)
+       koa.status = 200
+     })
+
+-    ctx.server.post(path + '/v1/meta/webhook.create', async (koa) => {
++    server.post(path + '/v1/meta/webhook.create', async (koa) => {
+       if (checkAuth(koa)) return
+       const webhook: SatoriServer.Webhook = Universal.transformKey(koa.request.body, camelCase)
+       const index = config.webhooks.findIndex(({ url }) => url === webhook.url)
+@@ -203,7 +258,7 @@ class SatoriServer extends Service<SatoriServer.Config> {
+       koa.status = 200
+     })
+
+-    ctx.server.post(path + '/v1/meta/webhook.delete', async (koa) => {
++    server.post(path + '/v1/meta/webhook.delete', async (koa) => {
+       if (checkAuth(koa)) return
+       const url = koa.request.body.url
+       const index = config.webhooks.findIndex(webhook => webhook.url === url)
+@@ -225,7 +280,8 @@ class SatoriServer extends Service<SatoriServer.Config> {
+
+     ctx.on('dispose', () => clearInterval(timeout))
+
+-    const layer = ctx.server.ws(path + '/v1/events', (socket) => {
++    const layer = server.ws(path + '/v1/events', async (_request: unknown, accept: () => Promise<WebSocket>) => {
++      const socket = await accept()
+       const client = socket[kClient] = new Client()
+
+       socket.addEventListener('message', (event) => {
+@@ -237,10 +293,8 @@ class SatoriServer extends Service<SatoriServer.Config> {
+         }
+
+         if (payload.op === Universal.Opcode.IDENTIFY) {
+-          if (config.token) {
+-            if (payload.body?.token !== config.token) {
+-              return socket.close(4004, 'invalid token')
+-            }
++          if (!config.token || payload.body?.token !== config.token) {
++            return socket.close(4004, 'invalid token')
+           }
+
+           client.authorized = true
+@@ -262,9 +316,9 @@ class SatoriServer extends Service<SatoriServer.Config> {
+       })
+     })
+
+-    function dispatch(socket: WebSocket, body: any) {
++    function dispatch(socket: WebSocket, body: any, op: Universal.Opcode = Universal.Opcode.EVENT) {
+       socket.send(JSON.stringify({
+-        op: Universal.Opcode.EVENT,
++        op,
+         body,
+       }))
+     }
+@@ -272,7 +326,7 @@ class SatoriServer extends Service<SatoriServer.Config> {
+     function sendEvent(opcode: Universal.Opcode, body: any) {
+       for (const socket of layer.clients) {
+         if (!socket[kClient]?.authorized) continue
+-        dispatch(socket, body)
++        dispatch(socket, body, opcode)
+       }
+       for (const webhook of config.webhooks) {
+         if (!webhook.enabled) continue
+@@ -330,6 +384,8 @@ namespace SatoriServer {
+     token?: string
+     api?: ApiConfig
+     websocket?: WebSocketConfig
++    /** Maximum bytes parsed for JSON, multipart, and internal raw request bodies. */
++    maxRequestBodyBytes?: number
+     webhooks: Webhook[]
+   }
+
+@@ -343,6 +399,7 @@ namespace SatoriServer {
+       // enabled: Schema.boolean().default(true),
+       resumeTimeout: Schema.number().default(Time.minute * 5),
+     }),
++    maxRequestBodyBytes: Schema.natural().min(1).default(8 * 1024 * 1024),
+     webhooks: Schema.array(Webhook),
+   })
+ }
