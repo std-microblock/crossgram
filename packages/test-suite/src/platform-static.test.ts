@@ -130,22 +130,24 @@ describe('StaticPlatform', () => {
       await waitForPlugin(plugin)
       const platform = ctx.imPlatform.require('static-catalog')
       expect(platform.capabilities.stickers).toEqual({
-        native: true, upload: true, formats: ['static', 'video'],
+        native: true, upload: true, formats: ['static', 'animated', 'video'],
       })
       const context = { session, platformKind: 'static' }
       const native = await ctx.imSticker.require('static-catalog:native').listPacks(context)
       const provided = await ctx.imSticker.require('static-catalog:plugin').listPacks(context)
       expect(native.packs).toMatchObject([{ title: 'Static Native Stickers', count: 2 }])
-      expect(provided.packs).toMatchObject([{ title: 'Static Plugin Stickers', count: 2 }])
+      expect(provided.packs).toMatchObject([{ title: 'Static Plugin Stickers', count: 4 }])
       const pack = await ctx.imSticker.require('static-catalog:plugin')
         .getPack(context, provided.packs[0].packId)
-      expect(pack?.stickers.map((sticker) => sticker.format)).toEqual(['static', 'video'])
+      expect(pack?.stickers.map((sticker) => sticker.format)).toEqual([
+        'static', 'video', 'animated', 'animated',
+      ])
       const saved = await ctx.imSticker.require('static-catalog:plugin').listSavedStickers!(context)
       expect(saved.stickers).toMatchObject([{
         stickerId: 'loose-saved',
         packId: undefined,
-        title: 'Platform Saved Loose Sticker',
-        format: 'static',
+        title: 'Platform Saved APNG Sticker',
+        format: 'animated',
       }])
     } finally {
       await plugin.dispose()
@@ -474,7 +476,7 @@ describe('StaticPlatform', () => {
     ])
   })
 
-  it('generates downloadable and stripped thumbnails for uploaded valid images', async () => {
+  it('keeps uploaded valid images raw without generating server-side previews', async () => {
     const png = new Uint8Array(Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGklEQVR4nGNQTrn0n5qYYdTA/6Nh+H/4JRsAlX7U0I1qB6QAAAAASUVORK5CYII=',
       'base64',
@@ -487,16 +489,11 @@ describe('StaticPlatform', () => {
     if (part.type !== 'media') throw new Error('sent image missing')
 
     expect(part.media).toMatchObject({
-      width: 20, height: 10, strippedThumbnail: expect.any(Uint8Array),
-      preview: { mimeType: 'image/jpeg', width: 20, height: 10 },
+      width: 20, height: 10, size: png.length,
     })
-    expect([...part.media.strippedThumbnail!.subarray(0, 3)]).toEqual([1, 10, 20])
-    const preview = part.media.preview!
-    const bytes = await collect(platform.downloadMedia(session, {
-      id: `${part.media.id}:preview`, kind: 'image', mimeType: preview.mimeType,
-      size: preview.size, width: preview.width, height: preview.height, locator: preview.locator,
-    }))
-    expect([...bytes.subarray(0, 2), ...bytes.subarray(-2)]).toEqual([0xff, 0xd8, 0xff, 0xd9])
+    expect(part.media.strippedThumbnail).toBeUndefined()
+    expect(part.media.preview).toBeUndefined()
+    expect(await collect(platform.downloadMedia(session, part.media))).toEqual(png)
   })
 
   it('waits for subscribe handlers, stores incoming group messages, deduplicates, and unsubscribes', async () => {
