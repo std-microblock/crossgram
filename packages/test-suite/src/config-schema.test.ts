@@ -19,6 +19,7 @@ const cases = [
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
     'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'grayTipFilters',
+    'generatePreviews', 'previewConcurrency',
   ]],
   ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'proxy', 'syncTimeoutMs', 'requestTimeoutMs']],
@@ -62,7 +63,11 @@ describe('plugin config schemas', () => {
       initiallyPaused: false,
       apiPath: '/api/mtproto-debug/events',
     })
-    expect(qqntConfig({})).toMatchObject({ grayTipFilters: ['回应了你的消息'] })
+    expect(qqntConfig({})).toMatchObject({
+      grayTipFilters: ['回应了你的消息'],
+      generatePreviews: false,
+      previewConcurrency: 2,
+    })
     expect(discordConfig({ token: 'user-token' })).toMatchObject({
       token: 'user-token', includeBots: true, downloadChunkSize: 256 * 1024,
     })
@@ -71,6 +76,7 @@ describe('plugin config schemas', () => {
   it('rejects invalid values at the field path', () => {
     expect(() => bridgeConfig({ serverPort: 65_536 })).toThrow(/serverPort/)
     expect(() => qqntConfig({ memberName: 'invalid' as any })).toThrow(/memberName/)
+    expect(() => qqntConfig({ previewConcurrency: 0 })).toThrow(/previewConcurrency/)
     expect(() => discordConfig({ token: 'user-token', downloadChunkSize: 0 })).toThrow(/downloadChunkSize/)
     expect(() => matrixConfig({
       homeserver: 'https://matrix.example.org', accessToken: 'token', syncTimeoutMs: 0,
