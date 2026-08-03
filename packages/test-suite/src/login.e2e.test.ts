@@ -1910,7 +1910,7 @@ describe('bridge login e2e', () => {
         _: 'messages.allStickers',
         sets: expect.arrayContaining([
           expect.objectContaining({ title: 'Static Native Stickers', count: 2 }),
-          expect.objectContaining({ title: 'Static Plugin Stickers', count: 2 }),
+          expect.objectContaining({ title: 'Static Plugin Stickers', count: 4 }),
         ]),
       })
       const nativeSet = allStickers.sets.find((set: any) => set.title === 'Static Native Stickers')
@@ -1948,7 +1948,7 @@ describe('bridge login e2e', () => {
           title: 'Static Plugin Stickers', installedDate: expect.any(Number),
           thumbs: [expect.objectContaining({ _: 'photoSize' })],
           thumbDcId: 1,
-          thumbVersion: 6,
+          thumbVersion: 7,
           thumbDocumentId: expect.any(Long),
         },
         documents: expect.arrayContaining([expect.objectContaining({ _: 'document', mimeType: 'image/webp' })]),
@@ -2058,7 +2058,7 @@ describe('bridge login e2e', () => {
           && attribute.stickerset._ === 'inputStickerSetEmpty'))
       expect(looseStickerDocument).toMatchObject({
         _: 'document',
-        mimeType: 'image/webp',
+        mimeType: 'image/apng',
         attributes: expect.arrayContaining([
           expect.objectContaining({
             _: 'documentAttributeSticker',
@@ -2320,7 +2320,7 @@ describe('bridge login e2e', () => {
         'This message only allows ❤️ and 👏',
         'Custom reactions: static / video',
         'Standard reactions: 👍 ❤️ 😂 😢 🔥 🎉 👏 🤔 🤯',
-        '', '', '',
+        '', '', '', '', '', '',
       ])
       expect(labHistory.messages[0].reactions).toBeUndefined()
       expect(labHistory.messages[1].reactions.results).toHaveLength(2)
@@ -2350,7 +2350,7 @@ describe('bridge login e2e', () => {
       })
       const labStickerDocuments = labHistory.messages.slice(3).map((item: any) => item.media.document)
       expect(labStickerDocuments.map((document: any) => document.mimeType)).toEqual([
-        'video/webm', 'image/webp', 'image/webp',
+        'image/apng', 'image/apng', 'image/gif', 'video/webm', 'image/apng', 'image/webp',
       ])
       for (const document of labStickerDocuments) {
         expect(document.thumbs).toEqual(expect.arrayContaining([expect.objectContaining({
@@ -2359,9 +2359,14 @@ describe('bridge login e2e', () => {
         const outline = document.thumbs.find((thumb: any) => thumb._ === 'photoPathSize')
         expect(outline.bytes.byteLength).toBeGreaterThan(0)
       }
-      expect(labStickerDocuments[0].attributes)
+      expect(labStickerDocuments[3].attributes)
         .toEqual(expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeVideo' })]))
-      expect(labStickerDocuments[1].attributes)
+      expect(labStickerDocuments[0].attributes)
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ _: 'documentAttributeAnimated' }),
+          expect.objectContaining({ stickerset: { _: 'inputStickerSetEmpty' } }),
+        ]))
+      expect(labStickerDocuments[4].attributes)
         .toEqual(expect.arrayContaining([
           expect.objectContaining({ stickerset: { _: 'inputStickerSetEmpty' } }),
         ]))
@@ -2377,8 +2382,11 @@ describe('bridge login e2e', () => {
         labAssetHeaders.push([...file.bytes.subarray(0, 4)])
       }
       expect(labAssetHeaders).toEqual([
+        [0x89, 0x50, 0x4e, 0x47],
+        [0x89, 0x50, 0x4e, 0x47],
+        [0x47, 0x49, 0x46, 0x38],
         [0x1a, 0x45, 0xdf, 0xa3],
-        [0x52, 0x49, 0x46, 0x46],
+        [0x89, 0x50, 0x4e, 0x47],
         [0x52, 0x49, 0x46, 0x46],
       ])
       expect(await callRpc(resumed, key, resumedSid, {
@@ -3092,7 +3100,7 @@ describe('bridge login e2e', () => {
         },
       }, 18)
       expect(sentMedia).toMatchObject({
-        _: 'updates', seq: 4,
+        _: 'updates', seq: 0,
         updates: [
           { _: 'updateMessageID', randomId: Long.fromNumber(700) },
           {
@@ -3652,7 +3660,7 @@ describe('bridge login e2e', () => {
           attribute._ === 'documentAttributeSticker'
           && attribute.stickerset._ === 'inputStickerSetEmpty'))
       expect(historicalLooseDocument).toMatchObject({
-        _: 'document', mimeType: 'image/webp', fileReference: expect.any(Uint8Array),
+        _: 'document', mimeType: 'image/apng', fileReference: expect.any(Uint8Array),
       })
       const initialDialogs = await callRpc(client, key, sid, {
         _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
