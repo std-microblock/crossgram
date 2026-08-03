@@ -19,6 +19,7 @@ import { QQStickerProvider } from './sticker-provider.js'
 import { QQVoiceMedia } from './voice-media.js'
 import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
+import { defineQQMediaPreviewModel, mediaPreviewKey, QQMediaPreviewer } from './media-preview.js'
 import { migrateLegacyQQMessageMedia } from './raw-media-migration.js'
 import type {
   QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
@@ -38,6 +39,10 @@ export interface Config extends QQNTClientOptions {
   memberName?: MemberNameMode
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
   grayTipFilters?: string[]
+  /** Generate tiny photoStrippedSize payloads after delivering the original message. */
+  generatePreviews?: boolean
+  /** Maximum number of concurrent inline preview generation jobs. */
+  previewConcurrency?: number
 }
 
 const DEFAULT_GRAY_TIP_FILTERS = ['回应了你的消息']
@@ -48,6 +53,8 @@ export const Config = z.object({
   token: z.string().role('secret'),
   memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
   grayTipFilters: z.array(z.string()).default(DEFAULT_GRAY_TIP_FILTERS),
+  generatePreviews: z.boolean().default(false),
+  previewConcurrency: z.natural().min(1).max(8).default(2),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -100,6 +107,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const stickerProviderId = `${id}:stickers`
   defineQQNTEventCheckpointModel(ctx)
   defineLegacyQQMediaSchema(ctx)
+  defineQQMediaPreviewModel(ctx)
   const mediaCachePath = resolve(process.cwd(), 'data', 'qqnt-media-cache', id)
   ctx.effect(async () => {
     await ctx.database.prepared()
@@ -113,7 +121,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     return () => undefined
   })
   const logger = ctx.logger('platform-qqnt')
-  const platform = new QQNTPlatform(config, stickerProviderId, logger, ctx.database, voiceMedia)
+  const mediaPreviews = new QQMediaPreviewer({
+    enabled: config.generatePreviews,
+    concurrency: config.previewConcurrency,
+    database: ctx.database,
+  })
+  const platform = new QQNTPlatform(config, stickerProviderId, mediaPreviews, logger, ctx.database, voiceMedia)
   ctx.imPlatform.register(platform, id)
   ctx.imSticker.register(
     new QQStickerProvider(platform.client, stickerProviderId, undefined, logger, id),
@@ -178,10 +191,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     platformSessionId: string
   }>()
   private readonly dialogPageRefreshes = new Map<string, Promise<IMDialogPage<QQMediaLocator>>>()
+  private readonly inlinePreviewMessageJobs = new Map<string, Promise<void>>()
+  private readonly inlinePreviewPublished = new Set<string>()
 
   constructor(
     options: Config = {},
     private readonly stickerProviderId = 'qqnt:stickers',
+    private readonly mediaPreviews = new QQMediaPreviewer({
+      enabled: options.generatePreviews,
+      concurrency: options.previewConcurrency,
+    }),
     private readonly logger?: Logger,
     databaseOrVoiceMedia?: Database | QQVoiceMedia,
     qqVoiceMedia?: QQVoiceMedia,
@@ -284,7 +303,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
     this.eventHandlers.set(session.platformSessionId, handler)
     running = Promise.all([
-      this.subscribeLoop(session.platformSessionId, handler, knownLastMessageIds, inFlightMessageKeys, controller.signal),
+      this.subscribeLoop(session, handler, knownLastMessageIds, inFlightMessageKeys, controller.signal),
       this.subscribeDialogsLoop(session, handler, knownLastMessageIds, inFlightMessageKeys, controller.signal),
     ])
     started.resolve()
@@ -298,12 +317,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private async subscribeLoop(
-    platformSessionId: string,
+    session: PlatformSession,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
     knownLastMessageIds: Map<string, string | undefined>,
     inFlightMessageKeys: Set<string>,
     signal: AbortSignal,
   ): Promise<void> {
+    const platformSessionId = session.platformSessionId
     let lastEventId: string | undefined
     try {
       const [checkpoint] = await this.database?.get('mtproto_qqnt_event_checkpoint', {
@@ -377,7 +397,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               platformSessionId, eventId ?? '<none>', event.type === 'call-signal' ? eventSummary : imEventSummary(mapped),
             )
             if (mapped.type === 'message') {
-              const delivered = await this.dispatchMessage(handler, mapped, inFlightMessageKeys)
+              const delivered = await this.dispatchMessage(session, handler, mapped, inFlightMessageKeys)
               if (delivered) knownLastMessageIds.set(mapped.conversation.id, mapped.message.id)
             } else {
               await handler(mapped)
@@ -495,7 +515,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
                 knownLastMessageIds.set(conversationId, message.id)
                 continue
               }
-              const delivered = await this.dispatchMessage(handler, {
+              const delivered = await this.dispatchMessage(session, handler, {
                 type: 'message', conversation: dialog.conversation, message,
               }, inFlightMessageKeys)
               if (delivered) knownLastMessageIds.set(conversationId, message.id)
@@ -538,6 +558,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private async dispatchMessage(
+    session: PlatformSession,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
     event: Extract<IMEvent<QQMediaLocator>, { type: 'message' }>,
     inFlightMessageKeys: Set<string>,
@@ -548,6 +569,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     try {
       const message = await this.prepareInitialMessage(event.message)
       await handler({ ...event, message })
+      this.scheduleInlinePreview(session, event.conversation, message, handler)
       return true
     } finally {
       inFlightMessageKeys.delete(key)
@@ -964,7 +986,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         }
         throw error
       }
-      return this.prepareInitialMessage(this.mapMessage(sent))
+      const message = await this.prepareInitialMessage(this.mapMessage(sent))
+      this.scheduleInlinePreview(
+        session, this.conversationFor(conversation.id), message,
+        this.eventHandlers.get(session.platformSessionId),
+      )
+      return message
     } finally {
       const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
       timer.unref()
@@ -1246,15 +1273,79 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   private async prepareRequestedMessage(
     session: PlatformSession,
-    _conversation: IMConversation<QQMediaLocator>,
+    conversation: IMConversation<QQMediaLocator>,
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
     const handler = this.eventHandlers.get(session.platformSessionId)
-    if (!handler) return this.prepareInitialMessage(message)
+    const prepared = handler ? message : await this.prepareInitialMessage(message)
+    this.scheduleInlinePreview(session, conversation, prepared, handler)
     // Keep history metadata-only. The patched client asks getFileUrl for the
-    // original and downloads it from QQ's CDN; probing or warming every
-    // historical image here can serialize history behind slow media.
-    return message
+    // original and downloads it from QQ's CDN. Inline preview work is queued
+    // after this return and can only publish a later message-edit event.
+    return prepared
+  }
+
+  private scheduleInlinePreview(
+    session: PlatformSession,
+    conversation: IMConversation<QQMediaLocator>,
+    message: IMMessage<QQMediaLocator>,
+    handler?: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
+  ): void {
+    if (!this.mediaPreviews.enabled) return
+    const keys = message.content.parts.flatMap((part) => part.type === 'media'
+      && part.media.kind === 'image' && part.media.locator && !part.media.strippedThumbnail
+      ? [mediaPreviewKey(part.media.locator)]
+      : [])
+    if (!keys.length) return
+    const jobKey = `${session.platformSessionId}\0${conversation.id}\0${message.id}\0${keys.join(',')}`
+    if (this.inlinePreviewPublished.has(jobKey) || this.inlinePreviewMessageJobs.has(jobKey)) return
+
+    const pending = deferTurn().then(() => this.prepareInlinePreviewMessage(message)).then(async (updated) => {
+      if (updated === message || !handler
+        || this.eventHandlers.get(session.platformSessionId) !== handler) return
+      await handler({
+        type: 'message-edit',
+        eventId: `qqnt-inline-preview:${createHash('sha256').update(jobKey).digest('hex').slice(0, 32)}`,
+        conversation,
+        message: updated,
+      })
+      rememberSet(this.inlinePreviewPublished, jobKey, 4096)
+    }).catch((error) => {
+      this.logger?.warn(
+        'inline preview generation failed conversation=%s message=%s error=%s',
+        conversation.id, message.id, formatError(error),
+      )
+    }).finally(() => {
+      if (this.inlinePreviewMessageJobs.get(jobKey) === pending) {
+        this.inlinePreviewMessageJobs.delete(jobKey)
+      }
+    })
+    this.inlinePreviewMessageJobs.set(jobKey, pending)
+  }
+
+  private async prepareInlinePreviewMessage(
+    message: IMMessage<QQMediaLocator>,
+  ): Promise<IMMessage<QQMediaLocator>> {
+    let changed = false
+    const parts = await Promise.all(message.content.parts.map(async (part) => {
+      if (part.type !== 'media' || part.media.kind !== 'image'
+        || !part.media.locator || part.media.strippedThumbnail) return part
+      try {
+        const media = await this.mediaPreviews.prepare(
+          part.media,
+          (signal) => this.client.downloadFile(rawQQMediaLocator(part.media.locator!), { signal }),
+        )
+        if (media === part.media) return part
+        changed = true
+        return { ...part, media }
+      } catch (error) {
+        this.logger?.warn(
+          'inline preview item failed media=%s error=%s', part.media.id, formatError(error),
+        )
+        return part
+      }
+    }))
+    return changed ? { ...message, content: { ...message.content, parts } } : message
   }
 
   private cleanupLegacyMultiForwardDialogs(session: PlatformSession): Promise<void> {
@@ -1412,6 +1503,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
     const message = mapMessage(
       input, this.memberName, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
+      (media) => this.mediaPreviews.project(media),
     )
     return message
   }
@@ -1669,6 +1761,7 @@ function mapMessage(
     preview: string | undefined,
     locator: WireMultiForwardLocator,
   ) => IMConversation<QQMediaLocator>,
+  projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator> {
   return {
     id: input.id,
@@ -1705,7 +1798,7 @@ function mapMessage(
     } : undefined,
     content: {
       serviceAction: input.serviceAction,
-      parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward),
+      parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward, projectMedia),
       inlineKeyboard: mapInlineKeyboard(input),
     },
   }
@@ -1747,6 +1840,7 @@ function mapParts(
     preview: string | undefined,
     locator: WireMultiForwardLocator,
   ) => IMConversation<QQMediaLocator>,
+  projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator>['content']['parts'] {
   const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
   for (const part of input.parts) {
@@ -1797,7 +1891,8 @@ function mapParts(
     } else if (part.type === 'card') {
       parts.push({ type: 'card', card: { ...part.card } })
     } else {
-      parts.push({ type: 'media', media: mapMedia(part.media) })
+      const media = mapMedia(part.media)
+      parts.push({ type: 'media', media: projectMedia?.(media) ?? media })
     }
   }
   return parts
@@ -1862,6 +1957,19 @@ function isRemoteQQMediaLocator(value: unknown): value is QQMediaLocator {
 function rawQQMediaLocator(locator: QQMediaLocator): QQMediaLocator {
   const { cachedPath: _cachedPath, previewKey: _previewKey, deferred: _deferred, ...raw } = locator
   return raw
+}
+
+function rememberSet<T>(set: Set<T>, value: T, limit: number): void {
+  set.delete(value)
+  set.add(value)
+  while (set.size > limit) set.delete(set.values().next().value!)
+}
+
+function deferTurn(): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 0)
+    timer.unref()
+  })
 }
 
 function isReactionResourceLocator(value: unknown): value is { reactionKey: string } {

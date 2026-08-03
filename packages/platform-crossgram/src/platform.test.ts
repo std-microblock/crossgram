@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import type { Logger } from 'cordis'
 import {
-  IMMessageSendRejectedError, IMMessageTargetUnavailableError, PlatformMessageActions,
+  expandTelegramStrippedThumbnail, IMMessageSendRejectedError, IMMessageTargetUnavailableError, PlatformMessageActions,
   type IMMedia, type PlatformSession,
 } from '@mtproto-relay/bridge'
 import { parseQQMarkdown, QQNTPlatform } from './index.js'
@@ -504,7 +504,7 @@ describe('QQNTPlatform mapping', () => {
         remove,
       })),
     }
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, database as any)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, database as any)
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
       id: temporaryId, kind: 'direct' as const, title: temporaryId,
@@ -1069,7 +1069,7 @@ describe('QQNTPlatform mapping', () => {
     const logger = {
       debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
     } as unknown as Logger
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', logger)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, logger)
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     const frames: unknown[] = [
@@ -1108,7 +1108,7 @@ describe('QQNTPlatform mapping', () => {
     const logger = {
       debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
     }
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', logger as unknown as Logger)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, logger as unknown as Logger)
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     const conversation = {
@@ -1168,7 +1168,7 @@ describe('QQNTPlatform mapping', () => {
     const logger = {
       debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
     }
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', logger as unknown as Logger)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, logger as unknown as Logger)
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     const conversation = {
@@ -1603,6 +1603,67 @@ describe('QQNTPlatform mapping', () => {
     expect((received as any[]).every((event) => !event.message.content.parts[0].media.preview)).toBe(true)
   })
 
+  it('delivers a live image before generating its inline stripped preview', async () => {
+    const platform = new QQNTPlatform({ generatePreviews: true })
+    const image = await sharp({
+      create: { width: 24, height: 16, channels: 3, background: { r: 30, g: 90, b: 180 } },
+    }).jpeg().toBuffer()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const sourceRequested = Promise.withResolvers<void>()
+    const releaseSource = Promise.withResolvers<void>()
+    platform.client.downloadFile = vi.fn(async function* () {
+      sourceRequested.resolve()
+      await releaseSource.promise
+      yield image
+    })
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      await handler({
+        type: 'message',
+        conversation: {
+          id: '2:group', kind: 'group', title: 'Group', peerUid: 'group', peerUin: '42', chatType: 2,
+        },
+        message: {
+          id: 'live-preview', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+          parts: [{
+            type: 'media',
+            media: {
+              id: 'live-preview-media', kind: 'image', name: 'photo.jpg', mimeType: 'image/jpeg',
+              size: image.length, width: 24, height: 16,
+              locator: {
+                messageId: 'live-preview', elementId: 'live-preview-media', chatType: 2,
+                peerUid: 'group', kind: 'image', fileName: 'photo.jpg', md5: 'LIVE-PREVIEW',
+              },
+            },
+          }],
+        },
+      })
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      }
+    })
+    const events: any[] = []
+    const initial = Promise.withResolvers<any>()
+    const edited = Promise.withResolvers<any>()
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      events.push(event)
+      if (event.type === 'message') initial.resolve(event)
+      if (event.type === 'message-edit') edited.resolve(event)
+    })
+
+    const delivered = await initial.promise
+    expect(delivered.message.content.parts[0].media.preview).toBeUndefined()
+    expect(delivered.message.content.parts[0].media.strippedThumbnail).toBeUndefined()
+    await sourceRequested.promise
+    expect(events.map((event) => event.type)).toEqual(['message'])
+    releaseSource.resolve()
+    const update = await edited.promise
+    expect(update.message.content.parts[0].media.preview).toBeUndefined()
+    expect(update.message.content.parts[0].media.strippedThumbnail).toBeInstanceOf(Uint8Array)
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
+    await unsubscribe()
+  })
+
   it('strips legacy local markers before resolving the original QQ image URL', async () => {
     const platform = new QQNTPlatform()
     platform.client.resolveFileUrl = vi.fn(async () => ({
@@ -1673,6 +1734,68 @@ describe('QQNTPlatform mapping', () => {
     expect(original.preview).toBeUndefined()
     expect(events.filter((event) => event.type === 'message-edit')).toEqual([])
     expect(platform.client.downloadFile).not.toHaveBeenCalled()
+    await unsubscribe()
+  })
+
+  it('returns history before background inline preview generation and later publishes stripped bytes', async () => {
+    const platform = new QQNTPlatform({ generatePreviews: true })
+    const jpeg = await sharp({
+      create: { width: 20, height: 12, channels: 3, background: { r: 30, g: 90, b: 180 } },
+    }).jpeg().toBuffer()
+    const wireMessage = {
+      id: 'lazy-preview', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'lazy-preview-media', kind: 'image' as const, name: 'photo.jpg', mimeType: 'image/jpeg',
+          size: jpeg.length, width: 20, height: 12,
+          locator: {
+            messageId: 'lazy-preview', elementId: 'lazy-preview-media', chatType: 2 as const,
+            peerUid: 'group', kind: 'image' as const, fileName: 'photo.jpg', md5: 'LAZY-PREVIEW',
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    const sourceRequested = Promise.withResolvers<void>()
+    const releaseSource = Promise.withResolvers<void>()
+    platform.client.downloadFile = vi.fn(async function* () {
+      sourceRequested.resolve()
+      await releaseSource.promise
+      yield jpeg
+    })
+    platform.client.resolveFileUrl = vi.fn(async () => ({
+      url: 'https://cdn.example.test/photo.jpg', expiresAt: Date.now() + 60_000,
+    }))
+
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const edited = Promise.withResolvers<any>()
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      if (event.type === 'message-edit') edited.resolve(event)
+    })
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    const original = (history.messages[0].content.parts[0] as any).media as IMMedia<QQMediaLocator>
+    expect(original.preview).toBeUndefined()
+    expect(original.strippedThumbnail).toBeUndefined()
+    await sourceRequested.promise
+    await expect(platform.resolveMediaUrl(session, original)).resolves.toMatchObject({
+      url: 'https://cdn.example.test/photo.jpg', supportsRange: true,
+    })
+    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(1)
+
+    releaseSource.resolve()
+    const update = await edited.promise
+    const stripped = update.message.content.parts[0].media.strippedThumbnail as Uint8Array
+    expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
+    expect(update.message.content.parts[0].media.preview).toBeUndefined()
+    await expect(sharp(expandTelegramStrippedThumbnail(stripped)).metadata()).resolves.toMatchObject({
+      format: 'jpeg', width: 20, height: 12,
+    })
     await unsubscribe()
   })
 

@@ -306,7 +306,7 @@ describeUnix('voice worker to QQ PCM composition', () => {
 
     const mediaService = new QQVoiceMedia(new Context())
     cleanup.push(() => mediaService.close())
-    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, mediaService)
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, mediaService)
     const leaseToken = new Uint8Array(token)
     const mediaLease = vi.spyOn(platform.client, 'mediaLease').mockResolvedValue({
       version: 1,

@@ -17,6 +17,10 @@
     # Hide gray-tip service messages containing any entry. Set [] to keep all.
     grayTipFilters:
       - 回应了你的消息
+    # Optional. Generate Telegram's tiny inline photoStrippedSize after the
+    # original history/live message has already been delivered.
+    generatePreviews: false
+    previewConcurrency: 2
 ```
 
 The transport uses JSON for metadata, WebSocket for ordered incoming events, a
@@ -41,14 +45,22 @@ the caller without a fallback. Protocol v13's native `/files/play-url` and
 whole-file `200` responses remain supported during rolling upgrades.
 
 All ordinary message media keeps its original QQ format and locator. The relay
-does not download it to probe animation, generate previews, or transcode
-GIF/APNG/PNG into WebM. History and live-event ingestion therefore remain
-metadata-only, and patched clients call `crossgram.getFileUrl` before fetching
-the original bytes directly from QQ's CDN with HTTP Range. APNG files that QQ
-labels as ordinary `image/png` are intentionally left for the client to detect
-from downloaded content. A startup migration strips legacy `cachedPath` and
-`previewKey` locators from old message-media rows so existing history returns to
-the same raw direct-download path.
+does not probe animation or transcode GIF/APNG/PNG into WebM. History and
+live-event ingestion remain metadata-only, and patched clients call
+`crossgram.getFileUrl` before fetching the original bytes directly from QQ's
+CDN with HTTP Range. APNG files that QQ labels as ordinary `image/png` are left
+for the client to detect from downloaded content. A startup migration strips
+legacy transform locators from old rows so existing history returns to the raw
+direct-download path.
+
+`generatePreviews` optionally produces Telegram's smallest inline
+`photoStrippedSize`, not an `m` thumbnail. The initial history/live message is
+always delivered first without waiting for media I/O. A bounded background job
+then downloads the original, extracts a 40-pixel low-quality JPEG, stores only
+the compact stripped payload in `mtproto_qqnt_inline_preview`, and publishes a
+message edit that embeds those bytes directly in the TL message. Cache lookup,
+decoding and failures therefore stay outside `getHistory` and ordered live-event
+delivery. Original media downloads continue to use the direct QQ URL.
 
 QQ picture elements other than native normal/QZone photos are exposed as
 stickers. QQ sticker and reaction bytes are also exposed unchanged as their

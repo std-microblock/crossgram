@@ -17,6 +17,7 @@ import { defineModels } from '../../bridge/src/models.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
 import { QQNTPlatform } from './index.js'
+import { defineQQMediaPreviewModel, QQMediaPreviewer } from './media-preview.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
@@ -304,7 +305,7 @@ describe('QQNT durable event checkpoint E2E', () => {
     const platform = new QQNTPlatform({
       endpoint: 'http://127.0.0.1:1/v1',
       webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
-    }, 'qqnt:stickers', undefined, ctx.database)
+    }, 'qqnt:stickers', undefined, undefined, ctx.database)
     platform.client.getReactionCatalog = vi.fn(async () => ({
       available: [], reactions: [], maxSelected: 20,
     }))
@@ -394,7 +395,7 @@ describe('QQNT durable event checkpoint E2E', () => {
     const createPlatform = () => {
       const platform = new QQNTPlatform(
         { endpoint: 'http://127.0.0.1:1/v1', webSocketEndpoint: endpoint },
-        'qqnt:stickers', undefined, ctx.database,
+        'qqnt:stickers', undefined, undefined, ctx.database,
       )
       platform.client.getReactionCatalog = vi.fn(async () => ({
         available: [], reactions: [], maxSelected: 20,
@@ -958,6 +959,108 @@ describe('QQNT history media without placeholder edits E2E', () => {
     expect(await ctx.database.get('mtproto_im_media', {})).toHaveLength(1)
     expect(await ctx.database.get('mtproto_qqnt_media_preview', {})).toHaveLength(0)
     expect(edits).toEqual([])
+    await unsubscribe()
+  })
+
+  it('keeps history responsive and later embeds a background photoStrippedSize in the message', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineLegacyQQMediaSchema(ctx)
+    defineQQMediaPreviewModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const jpeg = await sharp({
+      create: { width: 80, height: 48, channels: 3, background: { r: 60, g: 120, b: 200 } },
+    }).jpeg().toBuffer()
+    const sourceRequested = Promise.withResolvers<void>()
+    const releaseSource = Promise.withResolvers<void>()
+    let sourceRequests = 0
+    const previewer = new QQMediaPreviewer({
+      enabled: true, concurrency: 1, database: ctx.database,
+    })
+    const platform = new QQNTPlatform({ generatePreviews: true }, 'qqnt:stickers', previewer)
+    const conversation = { id: '2:lazy-preview', kind: 'group' as const, title: 'Lazy preview' }
+    const wireMessage = {
+      id: 'lazy-preview-message', conversationId: conversation.id,
+      senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'lazy-preview-media', kind: 'image' as const, name: 'lazy.jpg', mimeType: 'image/jpeg',
+          size: jpeg.length, width: 80, height: 48,
+          locator: {
+            messageId: 'lazy-preview-message', elementId: 'lazy-preview-media', chatType: 2 as const,
+            peerUid: 'lazy-preview', kind: 'image' as const, fileName: 'lazy.jpg', md5: 'LAZY-E2E',
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    platform.client.downloadFile = vi.fn(async function* () {
+      sourceRequests++
+      sourceRequested.resolve()
+      await releaseSource.promise
+      yield jpeg
+    })
+
+    const store = new MessageStore(ctx.database)
+    const edited = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (event.type !== 'message-edit') return
+      await store.ingest(session, event.conversation, event.message)
+      edited.resolve()
+    })
+
+    const initial = await Promise.race([
+      platform.getHistory(session, conversation),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('history waited for preview')), 250)),
+    ])
+    const ingested = await store.ingest(session, conversation, initial.messages[0], { allocation: 'history' })
+    const stored = await store.getMedia(session.platformSessionId, ingested.projection[0].mediaId!)
+    expect(stored?.media.preview).toBeUndefined()
+    expect(stored?.media.strippedThumbnail).toBeUndefined()
+    const [storedRow] = await ctx.database.get('mtproto_im_media', { id: ingested.projection[0].mediaId! })
+    const projected = makeTlMessageMedia(storedRow!, stored!.timestamp)
+    if (projected._ !== 'messageMediaPhoto' || projected.photo?._ !== 'photo') {
+      throw new Error('expected projected photo')
+    }
+    expect(projected.photo.sizes.map((size) => size.type)).toEqual(['x'])
+    await sourceRequested.promise
+
+    // A thumbnail worker may be waiting on remote bytes, but history still
+    // returns through the metadata-only path instead of joining that promise.
+    await expect(Promise.race([
+      platform.getHistory(session, conversation),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('history joined preview work')), 250)),
+    ])).resolves.toMatchObject({ messages: [{ id: 'lazy-preview-message' }] })
+    expect(sourceRequests).toBe(1)
+
+    releaseSource.resolve()
+    await edited.promise
+    const ready = await store.getMedia(session.platformSessionId, ingested.projection[0].mediaId!)
+    expect(ready?.media.preview).toBeUndefined()
+    expect(ready?.media.strippedThumbnail).toBeInstanceOf(Uint8Array)
+    const [readyRow] = await ctx.database.get('mtproto_im_media', { id: ingested.projection[0].mediaId! })
+    const updated = makeTlMessageMedia(readyRow!, ready!.timestamp)
+    if (updated._ !== 'messageMediaPhoto' || updated.photo?._ !== 'photo') {
+      throw new Error('expected updated photo')
+    }
+    expect(updated.photo.sizes.map((size) => size.type)).toEqual(['i', 'x'])
+    expect(await ctx.database.get('mtproto_qqnt_inline_preview', {})).toHaveLength(1)
     await unsubscribe()
   })
 
