@@ -502,6 +502,21 @@ export type IMEvent<TMediaLocator = unknown> =
       context: IMReactionContext
       timestamp: number
     }
+  | {
+      /** Transient one-to-one voice-call state; never persisted as a message. */
+      type: 'voice-call'
+      callRef: string
+      signal: 'incoming' | 'accept-requested' | 'refuse-requested' | 'logout-requested' | 'ended'
+      media: 'voice' | 'unknown'
+      conversation: IMConversation<TMediaLocator>
+      timestamp: number
+    }
+
+export type IMVoiceCallOperation = 'accept' | 'reject' | 'hangup'
+
+export interface IMVoiceCallController {
+  control(session: PlatformSession, callRef: string, operation: IMVoiceCallOperation): Promise<void>
+}
 
 export type Unsubscribe = () => void | Promise<void>
 
@@ -510,6 +525,8 @@ export interface IMPlatform<TMediaLocator = unknown> {
   readonly capabilities: PlatformCapabilities
   /** Optional one-call media composition for platforms that supply PCM transport. */
   readonly voiceMedia?: VoiceCallMediaProvider
+  /** Optional source-platform call controls; call references remain transient. */
+  readonly voiceCalls?: IMVoiceCallController
 
   /** Resolve the platform's current user; bridge never invents profile fields. */
   getAccount?(): Promise<IMPlatformAccount<TMediaLocator>>
