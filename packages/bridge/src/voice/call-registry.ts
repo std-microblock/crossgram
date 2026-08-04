@@ -388,11 +388,11 @@ export class CallRegistry {
       this._requireTelegramRole(call, 'recipient')
       if (call.state === 'active') {
         await this._deliverPending(call, excludeAuthKeyId)
-        return this._wrap(call)
+        return this._wrapPhoneCall(this._waiting(call))
       }
       if (call.state === 'accepted') {
         await this._finishAccept(call, excludeAuthKeyId)
-        return this._wrap(call)
+        return this._wrapPhoneCall(this._waiting(call))
       }
       // phone.receivedCall is only a delivery/ringing acknowledgement. Some
       // Telegram clients accept directly from phoneCallRequested without
@@ -426,10 +426,12 @@ export class CallRegistry {
       call.gA = status.gA.slice()
       call.keyFingerprint = cloneLong(status.keyFingerprint).toSigned()
       call.state = 'accepted'
-      const accepted = this._wrap(call)
       await this._publishTransition(call, excludeAuthKeyId)
       await this._finishAccept(call, excludeAuthKeyId)
-      return accepted
+      // Telegram Desktop requires phone.acceptCall to return phoneCallWaiting;
+      // phoneCallAccepted is the caller-side update, while the recipient moves
+      // forward on the subsequent active phoneCall update.
+      return this._wrapPhoneCall(this._waiting(call))
     })
   }
 
@@ -1009,7 +1011,11 @@ export class CallRegistry {
   }
 
   private _wrap(call: StoredCall): tl.phone.RawPhoneCall {
-    return { _: 'phone.phoneCall', phoneCall: this._phoneCall(call), users: [] }
+    return this._wrapPhoneCall(this._phoneCall(call))
+  }
+
+  private _wrapPhoneCall(phoneCall: tl.TypePhoneCall): tl.phone.RawPhoneCall {
+    return { _: 'phone.phoneCall', phoneCall: this._clonePhoneCall(phoneCall), users: [] }
   }
 
   private async _mediaConfig(call: StoredCall): Promise<VoiceWorkerMediaStartConfig> {
