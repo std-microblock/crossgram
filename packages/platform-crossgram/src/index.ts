@@ -65,8 +65,7 @@ export const inject = ['imPlatform', 'imSticker', 'database', 'model']
 
 const DIALOGS_POLL_INTERVAL_MS = 15_000
 const REACTION_CATALOG_GRACE_MS = 10
-const REACTION_CATALOG_RPC_GRACE_MS = 250
-const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
+const REACTION_CATALOG_RETRY_DELAY_MS = 5_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CONVERSATION_PREFIX = 'qqnt-multi-forward:'
@@ -1112,8 +1111,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const locator = media.locator
     if (!locator || locator.deferred) return
     if (media.voice) return
-    const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
-    return { ...resolved, supportsRange: true }
+    return this.client.resolveFileUrlForDirectDownload(rawQQMediaLocator(locator))
   }
 
   async getAvailableReactions(
@@ -1123,8 +1121,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (!this.isGroupConversation(target.conversationId)) {
       return { available: [], reactions: [], maxSelected: 0 }
     }
-    await waitAtMost(this.ensureReactionCatalog(), REACTION_CATALOG_RPC_GRACE_MS)
-    return this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
+    return this.ensureReactionCatalog()
   }
 
   async getMessageReactions(
@@ -1206,8 +1203,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMDirectDownload | undefined> {
     const locator = resource.locator
     if (!isRemoteQQMediaLocator(locator)) return
-    const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
-    return { ...resolved, supportsRange: true }
+    return this.client.resolveFileUrlForDirectDownload(rawQQMediaLocator(locator))
   }
 
   private ensureReactionCatalog(): Promise<IMReactionContext> {
@@ -1260,8 +1256,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private async withReactionCatalog(state: WireReactionState): Promise<IMReactionContext> {
-    void this.ensureReactionCatalog()
-    const catalog = this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
+    const catalog = await this.ensureReactionCatalog()
     return { available: catalog.available, reactions: state.reactions, maxSelected: state.maxSelected }
   }
 

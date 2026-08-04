@@ -23,6 +23,7 @@ export interface QQNTSubscribeOptions {
 export interface DirectUrl {
   url: string
   expiresAt: number
+  supportsRange?: boolean
 }
 
 /** The QQNT message endpoint permanently rejected this exact send. */
@@ -36,6 +37,8 @@ export class QQNTMessageSendRejectedError extends Error {
 const MEDIA_LEASE_VERSION = 1
 const MEDIA_LEASE_ID_HEX_LENGTH = 32
 const MEDIA_LEASE_TOKEN_BYTES = 32
+const MAX_UNRANGED_FILE_BYTES = 64 * 1024 * 1024
+const MAX_UNRANGED_CACHE_BYTES = 128 * 1024 * 1024
 
 /** One short-lived, local-only capability for the QQ Bridge PCM gateway. */
 export interface QQNTMediaLease {
@@ -54,6 +57,10 @@ export class QQNTClient {
   private readonly fetchImpl: typeof globalThis.fetch
   private readonly directUrls = new Map<string, DirectUrl>()
   private readonly directUrlRefreshes = new Map<string, Promise<DirectUrl>>()
+  private readonly directRangeChecks = new Map<string, Promise<boolean>>()
+  private readonly unrangedFiles = new Map<string, Uint8Array>()
+  private readonly unrangedFileLoads = new Map<string, Promise<Uint8Array>>()
+  private unrangedFileBytes = 0
   private bridgeProtocol?: number
 
   constructor(options: QQNTClientOptions = {}) {
@@ -427,6 +434,8 @@ export class QQNTClient {
     const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
     const avatarUrl = qqAvatarUrl(locator)
     let response: Response
+    let directKey: string | undefined
+    let direct: DirectUrl | undefined
     if (locator.filePath && !avatarUrl) {
       response = await this.fetchImpl(`${this.endpoint}/files/asset`, {
         method: 'POST',
@@ -436,9 +445,19 @@ export class QQNTClient {
       })
       if (!response.ok && response.status === 404 && hasDirectUrlIdentity(locator)) {
         await discardResponseBody(response)
-        const directUrl = (await this.resolveFileUrl(locator, options.signal)).url
-        response = await this.fetchImpl(directUrl, {
-          headers: rangeHeaders,
+        directKey = directUrlIdentity(locator)
+        direct = await this.resolveFileUrl(locator, options.signal)
+        const cached = ranged && direct.supportsRange === false
+          ? await this.cachedUnrangedFile(directKey, direct.url, locator, options.signal)
+          : undefined
+        if (cached) {
+          const accepted = cached.subarray(offset, limit === undefined ? undefined : offset + limit)
+          await options.onChunk?.(accepted.length)
+          if (accepted.length) yield accepted
+          return
+        }
+        response = await this.fetchImpl(direct.url, {
+          headers: direct.supportsRange === false ? {} : rangeHeaders,
           signal: options.signal,
           redirect: 'follow',
         })
@@ -449,9 +468,20 @@ export class QQNTClient {
         if (!response.body) throw new Error('QQNT media asset response has no body')
       }
     } else if (avatarUrl || hasDirectUrlIdentity(locator)) {
-      const directUrl = avatarUrl ?? (await this.resolveFileUrl(locator, options.signal)).url
+      directKey = avatarUrl ? undefined : directUrlIdentity(locator)
+      direct = avatarUrl ? undefined : await this.resolveFileUrl(locator, options.signal)
+      const directUrl = avatarUrl ?? direct!.url
+      const cached = directKey && ranged && direct?.supportsRange === false
+        ? await this.cachedUnrangedFile(directKey, directUrl, locator, options.signal)
+        : undefined
+      if (cached) {
+        const accepted = cached.subarray(offset, limit === undefined ? undefined : offset + limit)
+        await options.onChunk?.(accepted.length)
+        if (accepted.length) yield accepted
+        return
+      }
       response = await this.fetchImpl(directUrl, {
-        headers: rangeHeaders,
+        headers: direct?.supportsRange === false ? {} : rangeHeaders,
         signal: options.signal,
         redirect: 'follow',
       })
@@ -460,6 +490,16 @@ export class QQNTClient {
     } else {
       throw new Error('QQNT media locator has no remote direct-link identity')
     }
+    if (directKey && ranged && response.status === 200 && shouldCacheUnrangedFile(locator)) {
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      this.markDirectRangeSupport(directKey, false)
+      this.rememberUnrangedFile(directKey, bytes)
+      const accepted = bytes.subarray(offset, limit === undefined ? undefined : offset + limit)
+      await options.onChunk?.(accepted.length)
+      if (accepted.length) yield accepted
+      return
+    }
+    if (directKey && response.status === 206) this.markDirectRangeSupport(directKey, true)
     const reader = response.body.getReader()
     // QQ CDN and qlogo normally apply Range. Retain local slicing for a whole-file
     // 200 response so a CDN that ignores Range still satisfies upload.getFile.
@@ -567,6 +607,30 @@ export class QQNTClient {
     return resolved
   }
 
+  async resolveFileUrlForDirectDownload(
+    locator: QQMediaLocator,
+    signal?: AbortSignal,
+  ): Promise<DirectUrl & { supportsRange: boolean }> {
+    const key = directUrlIdentity(locator)
+    const resolved = await this.resolveFileUrl(locator, signal)
+    if (resolved.supportsRange !== undefined) return resolved as DirectUrl & { supportsRange: boolean }
+    const inspected = await this.inspectDirectUrl(resolved.url, resolved.expiresAt, signal)
+    this.rememberDirectUrl(key, inspected)
+    return inspected
+  }
+
+  async inspectDirectUrl(
+    url: string,
+    expiresAt: number,
+    signal?: AbortSignal,
+  ): Promise<DirectUrl & { supportsRange: boolean }> {
+    const active = this.directRangeChecks.get(url)
+    const pending = active ?? this.probeDirectRange(url, signal)
+      .finally(() => this.directRangeChecks.delete(url))
+    if (!active) this.directRangeChecks.set(url, pending)
+    return { url, expiresAt, supportsRange: await pending }
+  }
+
   private fetchDirectUrl(locator: QQMediaLocator): Promise<DirectUrl> {
     return this.json<DirectUrl>('/files/direct-url', false, {
       method: 'POST',
@@ -582,6 +646,70 @@ export class QQNTClient {
       this.directUrls.set(key, value)
     }
     while (this.directUrls.size > 1_024) this.directUrls.delete(this.directUrls.keys().next().value!)
+  }
+
+  private async probeDirectRange(url: string, signal?: AbortSignal): Promise<boolean> {
+    try {
+      const response = await this.fetchImpl(url, {
+        headers: { 'accept-encoding': 'identity', range: 'bytes=0-0' },
+        signal,
+        redirect: 'follow',
+      })
+      const supported = response.status === 206 && /^bytes\s+0-0\//i.test(response.headers.get('content-range') ?? '')
+      await discardResponseBody(response)
+      return supported
+    } catch {
+      return false
+    }
+  }
+
+  private markDirectRangeSupport(key: string, supportsRange: boolean): void {
+    const resolved = this.directUrls.get(key)
+    if (resolved) this.rememberDirectUrl(key, { ...resolved, supportsRange })
+  }
+
+  private async cachedUnrangedFile(
+    key: string,
+    url: string,
+    locator: QQMediaLocator,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array | undefined> {
+    const cached = this.unrangedFiles.get(key)
+    if (cached) {
+      this.unrangedFiles.delete(key)
+      this.unrangedFiles.set(key, cached)
+      return cached
+    }
+    if (!shouldCacheUnrangedFile(locator)) return
+    const active = this.unrangedFileLoads.get(key)
+    const pending = active ?? this.fetchUnrangedFile(url, signal).finally(() => this.unrangedFileLoads.delete(key))
+    if (!active) this.unrangedFileLoads.set(key, pending)
+    const bytes = await pending
+    this.rememberUnrangedFile(key, bytes)
+    return bytes
+  }
+
+  private async fetchUnrangedFile(url: string, signal?: AbortSignal): Promise<Uint8Array> {
+    const response = await this.fetchImpl(url, {
+      headers: { 'accept-encoding': 'identity' }, signal, redirect: 'follow',
+    })
+    if (!response.ok) throw new Error(await nativeResponseError(response))
+    return new Uint8Array(await response.arrayBuffer())
+  }
+
+  private rememberUnrangedFile(key: string, bytes: Uint8Array): void {
+    const previous = this.unrangedFiles.get(key)
+    if (previous) this.unrangedFileBytes -= previous.length
+    this.unrangedFiles.delete(key)
+    if (bytes.length > MAX_UNRANGED_FILE_BYTES) return
+    this.unrangedFiles.set(key, bytes)
+    this.unrangedFileBytes += bytes.length
+    while (this.unrangedFileBytes > MAX_UNRANGED_CACHE_BYTES && this.unrangedFiles.size) {
+      const oldest = this.unrangedFiles.keys().next().value!
+      const removed = this.unrangedFiles.get(oldest)!
+      this.unrangedFiles.delete(oldest)
+      this.unrangedFileBytes -= removed.length
+    }
   }
 
   async subscribe(
@@ -842,6 +970,12 @@ function qqAvatarUrl(locator: QQMediaLocator): string | undefined {
     && /^\d+$/.test(groupUin)) {
     return `https://p.qlogo.cn/gh/${groupUin}/${groupUin}/640/`
   }
+}
+
+function shouldCacheUnrangedFile(locator: QQMediaLocator): boolean {
+  const declared = Number(locator.fileSize)
+  return locator.kind === 'image'
+    || Number.isFinite(declared) && declared >= 0 && declared <= MAX_UNRANGED_FILE_BYTES
 }
 
 function hasDirectUrlIdentity(locator: QQMediaLocator): boolean {

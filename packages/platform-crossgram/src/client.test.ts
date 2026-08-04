@@ -567,6 +567,34 @@ describe('QQNTClient streaming transport', () => {
     expect(resolutions).toBe(2)
   })
 
+  it('probes a direct URL once and refuses to advertise a CDN that ignores Range', async () => {
+    const requests: Array<{ url: string, range?: string }> = []
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, range: new Headers(init?.headers).get('range') ?? undefined })
+      if (url === 'http://bridge.invalid/v1/files/direct-url') {
+        return Response.json({
+          url: 'https://cdn.qq.example/no-range', expiresAt: Date.now() + 60_000,
+        })
+      }
+      return new Response('whole-file')
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+    const locator = {
+      messageId: 'no-range', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'image' as const, fileName: 'photo.jpg', fileUuid: 'no-range-file', fileSize: '10',
+    }
+
+    await expect(client.resolveFileUrlForDirectDownload(locator)).resolves.toMatchObject({
+      url: 'https://cdn.qq.example/no-range', supportsRange: false,
+    })
+    await expect(client.resolveFileUrlForDirectDownload(locator)).resolves.toMatchObject({ supportsRange: false })
+    expect(requests).toEqual([
+      { url: 'http://bridge.invalid/v1/files/direct-url', range: undefined },
+      { url: 'https://cdn.qq.example/no-range', range: 'bytes=0-0' },
+    ])
+  })
+
   it('downloads an image from its packet-refreshed direct URL without leaking bridge authorization', async () => {
     const requests: Array<{ url: string, range?: string, authorization?: string }> = []
     server = createServer(async (request, response) => {
@@ -670,7 +698,8 @@ describe('QQNTClient streaming transport', () => {
     expect(requestUrls).toEqual(['/files/direct-url', '/expired-image'])
   })
 
-  it('locally slices a whole-file response when the QQ CDN ignores Range', async () => {
+  it('stops retrying Range and reuses a whole-file response when the QQ CDN ignores it', async () => {
+    const rangeHeaders: Array<string | undefined> = []
     server = createServer(async (request, response) => {
       if (request.url === '/files/direct-url') {
         for await (const _chunk of request) { /* drain locator */ }
@@ -681,6 +710,7 @@ describe('QQNTClient streaming transport', () => {
           url: `http://127.0.0.1:${address.port}/qq-cdn/file`, expiresAt: Date.now() + 60_000,
         }))
       } else if (request.url === '/qq-cdn/file') {
+        rangeHeaders.push(request.headers.range)
         response.end('abcdefghij')
       } else {
         response.writeHead(500).end()
@@ -691,13 +721,16 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
-    const chunks: Uint8Array[] = []
-    for await (const chunk of client.downloadFile({
-      messageId: 'file', elementId: 'element', chatType: 2, peerUid: '1002974327',
-      kind: 'file', fileName: 'document.bin', fileUuid: 'group-file-uuid',
-    }, { offset: 3, limit: 3 })) chunks.push(chunk)
+    const locator = {
+      messageId: 'file', elementId: 'element', chatType: 2 as const, peerUid: '1002974327',
+      kind: 'file' as const, fileName: 'document.bin', fileUuid: 'group-file-uuid', fileSize: '10',
+    }
+    const first = await collect(client.downloadFile(locator, { offset: 3, limit: 3 }))
+    const second = await collect(client.downloadFile(locator, { offset: 6, limit: 2 }))
 
-    expect(Buffer.concat(chunks).toString()).toBe('def')
+    expect(first.toString()).toBe('def')
+    expect(second.toString()).toBe('gh')
+    expect(rangeHeaders).toEqual(['bytes=3-5'])
   })
 
   it('uses the independent WebSocket endpoint, parses frames sequentially, and resumes from the acknowledged event', async () => {

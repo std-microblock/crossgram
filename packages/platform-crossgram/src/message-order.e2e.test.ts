@@ -769,6 +769,7 @@ describe('QQNT remote media routing E2E', () => {
     let server: Server | undefined
     server = createServer(async (request, response) => {
       if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+        await new Promise((resolve) => setTimeout(resolve, 100))
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({
           available: [{
@@ -783,6 +784,13 @@ describe('QQNT remote media routing E2E', () => {
             },
           }],
           reactions: [], maxSelected: 20,
+        }))
+        return
+      }
+      if (request.method === 'GET' && request.url?.startsWith('/v1/messages/reactions?')) {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          reactions: [{ key: '1:265', count: 2, selected: true }], maxSelected: 20,
         }))
         return
       }
@@ -813,6 +821,11 @@ describe('QQNT remote media routing E2E', () => {
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`, token: 'bridge-token',
     }, 'qqnt:stickers', undefined)
+    await expect(platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'message', targetId: 'message', nativeSequence: '571',
+    })).resolves.toMatchObject({
+      available: [{ key: '1:265' }], reactions: [{ key: '1:265', count: 2, selected: true }],
+    })
     const catalog = await platform.getAvailableReactions(session, { conversationId: '2:group' })
     const definition = catalog.available[0]!
     if (definition.presentation.type !== 'custom') throw new Error('expected custom reaction')
@@ -867,6 +880,14 @@ describe('QQNT history media without placeholder edits E2E', () => {
       }
       if (request.method === 'GET' && request.url === '/cdn/history.jpg') {
         imageRequests++
+        if (request.headers.range === 'bytes=0-0') {
+          response.writeHead(206, {
+            'content-type': 'image/jpeg', 'content-length': '1',
+            'content-range': `bytes 0-0/${jpeg.length}`, 'accept-ranges': 'bytes',
+          })
+          response.end(jpeg.subarray(0, 1))
+          return
+        }
         imageRequested.resolve()
         await releaseImage.promise
         response.setHeader('content-type', 'image/jpeg')
@@ -937,7 +958,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
       url: expect.stringContaining('/cdn/history.jpg'), supportsRange: true,
     })
     expect(directUrlRequests).toBe(1)
-    expect(imageRequests).toBe(0)
+    expect(imageRequests).toBe(1)
     const download = collect(platform.downloadMedia(session, original!.media as any))
     await imageRequested.promise
     releaseImage.resolve()
@@ -1166,7 +1187,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
 })
 
 describe('QQNT animated media initial projection E2E', () => {
-  it('publishes APNG-labelled PNG metadata without probing and resolves the original URL on demand', async () => {
+  it('publishes APNG-labelled PNG metadata and probes Range only when resolving the original URL', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -1302,7 +1323,7 @@ describe('QQNT animated media initial projection E2E', () => {
     await expect(platform.resolveMediaUrl(session, raw!.media as any)).resolves.toMatchObject({
       url: nativeUrl, supportsRange: true,
     })
-    expect(rangeHeaders).toEqual([])
+    expect(rangeHeaders).toEqual(['bytes=0-0'])
   }, 30_000)
 })
 
