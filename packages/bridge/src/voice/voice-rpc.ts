@@ -5,6 +5,7 @@ import type { IMPlatform, PlatformSession } from '../platform.js'
 import {
   CallRegistry, type CallPeer, type IncomingCall, type PlatformCallControl, VoiceCallError,
 } from './call-registry.js'
+import { getDhConfig } from './dh-config.js'
 
 /** RPC adapter around the transient registry; it performs no database writes. */
 export class VoiceRpc {
@@ -16,6 +17,10 @@ export class VoiceRpc {
   async getCallConfig(): Promise<tl.RawDataJSON> {
     // No relay credentials or worker endpoint data are ever exposed to JS clients.
     return { _: 'dataJSON', data: '{}' }
+  }
+
+  getDhConfig(request: tl.messages.RawGetDhConfigRequest): tl.messages.TypeDhConfig {
+    return getDhConfig(request)
   }
 
   async request(
