@@ -346,7 +346,9 @@ bridge 会将这种 loose sticker 投影为：
 
 对于非 QQ 平台，它会出现在统一 `messages.getFavedStickers` 中，仍然可以下载、发送、进入 recent，并可由 bridge 再次收藏；但不会伪造 sticker set，也不会出现在 `getAllStickers`。本地收藏和 Provider 收藏按 `(providerId, stickerId)` 去重。QQ 则只通过 `qq-favorites` sticker set 提供收藏。
 
-Sticker set 的安装状态同样属于 bridge 用户状态。`installStickerSet`、`uninstallStickerSet`、`toggleStickerSets` 和 `reorderStickerSets` 写入 bridge 数据库；安装后的 set 通过 `StickerSet.installedDate` 返回，服务重启后保持。
+Sticker set 的安装状态同样属于 bridge 用户状态。`installStickerSet`、`uninstallStickerSet`、`toggleStickerSets` 和 `reorderStickerSets` 写入 bridge 数据库；安装后的 set 通过 `StickerSet.installedDate` 返回，服务重启后保持。属于当前平台账户的 Provider pack（例如 QQ 已拥有的商店包和 QQ 收藏夹）必须标记 `automaticAssociation: 'provider-account'`，会直接出现在该账户的 sticker 列表，不再经由 Web UI 的“添加到用户”分配步骤。
+
+跨平台贴纸导入（例如把 Telegram sticker 转为 QQ 可用资源）不属于 Bridge 的 pack 分配逻辑；后续应由独立的 Sticker Pro 流程负责创建/上传资源并写入 QQ 收藏夹或目标包。
 
 `IMMessagePart` 和 `IMMessageInputPart` 支持 `type: 'sticker'`。发送计划分为：
 

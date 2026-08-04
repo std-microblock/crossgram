@@ -413,17 +413,6 @@ async function waitForWebuiRoute(ctx: Context, route: string) {
   throw new Error(`webui route was not registered: ${route}`)
 }
 
-async function assignStaticStickerPacksThroughDashboard(ctx: Context, platformSessionId: string) {
-  const entry = await waitForWebuiRoute(ctx, '/sticker-packs')
-  const data = entry.data as bridge.StickerPackDashboardData
-  await data.refreshStickerPacks()
-  const packs = data.stickerPacks.filter(pack => pack.providerId.startsWith('static:'))
-  expect(packs.map(pack => pack.packId).sort()).toEqual(['native-pack', 'plugin-pack'])
-  for (const pack of packs) {
-    await data.setStickerPackAssigned(platformSessionId, pack.providerId, pack.packId, true)
-  }
-}
-
 function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
   const plugin = (ctx: Context) => { ctx.imPlatform.register(platform, id) }
   plugin.inject = ['imPlatform']
@@ -1051,8 +1040,8 @@ describe('bridge login e2e', () => {
           virtualPhone: `+${phone}`, loginCode: expect.stringMatching(/^\d{6}$/),
         }],
       })
+      expect(accountEntry.files.routes).toEqual(['/platform-accounts'])
       expect(JSON.stringify(accountEntry?.data)).not.toContain(platformLogin.auth.totpSecret)
-      await assignStaticStickerPacksThroughDashboard(ctx, platformLogin.session.id)
 
       const avatarResponse = await fetch(`http://127.0.0.1:${ctx.server.port}/api/platforms/static/avatar`)
       expect(avatarResponse.status).toBe(200)
@@ -2413,7 +2402,9 @@ describe('bridge login e2e', () => {
         _: 'messages.getAllStickers', hash: Long.ZERO,
       }, 218)
       expect(catalogAfterUninstall).toMatchObject({ _: 'messages.allStickers' })
-      expect(catalogAfterUninstall.sets).not.toEqual(expect.arrayContaining([
+      // Platform-owned packs are always available to their owner; Telegram's
+      // uninstall acknowledgement must not hide them behind bridge state.
+      expect(catalogAfterUninstall.sets).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: pluginSet.id }),
       ]))
       expect(await callRpc(resumed, key, resumedSid, {
@@ -3602,7 +3593,6 @@ describe('bridge login e2e', () => {
     try {
       first = await startApp({ rsaKey, databasePath, authKeyStorePath })
       const platformLogin = await waitForPlatformLogin(first.ctx, 'static')
-      await assignStaticStickerPacksThroughDashboard(first.ctx, platformLogin.session.id)
 
       client = await TestClient.connect(first.port)
       const key = await doClientHandshake(client, first.pubKey)
@@ -3891,7 +3881,6 @@ describe('bridge login e2e', () => {
     let client: TestClient | undefined
     try {
       const platformLogin = await waitForPlatformLogin(ctx, 'static')
-      await assignStaticStickerPacksThroughDashboard(ctx, platformLogin.session.id)
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
       const sid = new Long(0x56789abc, 0x5abc, false)
