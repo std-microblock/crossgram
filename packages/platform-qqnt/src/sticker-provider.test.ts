@@ -11,7 +11,7 @@ const context: StickerProviderContext = {
 }
 
 describe('QQStickerProvider saved stickers', () => {
-  it('declares the synthetic QQ favorites pack as owned by its QQNT account', async () => {
+  it('declares every QQ-owned pack as automatic for its QQNT account', async () => {
     const client = {
       getStickerPacks: vi.fn(async () => ({
         packs: [
@@ -25,7 +25,7 @@ describe('QQStickerProvider saved stickers', () => {
     await expect(provider.listPacks(context)).resolves.toMatchObject({
       packs: [
         { packId: 'qq-favorites', automaticAssociation: 'provider-account' },
-        { packId: 'market-1', automaticAssociation: undefined },
+        { packId: 'market-1', automaticAssociation: 'provider-account' },
       ],
     })
     expect(provider.capabilities.ownerPlatformId).toBe('qq/primary')
