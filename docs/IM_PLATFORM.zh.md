@@ -319,9 +319,11 @@ ctx.imSticker.register(companyStickerProvider, 'company-stickers')
 
 平台插件可以共享同一个底层 client，同时注册 `IMPlatform` 和平台原生 `IMStickerProvider`。独立贴纸包只注册 Provider，不需要依赖任何具体 IM API。
 
-`messages.getRecentStickers`、`saveRecentSticker`、`getFavedStickers`、`faveSticker` 和 clear 操作全部由 bridge 数据库统一管理。发送经平台确认并完成入库后才进入 recent；Provider 临时卸载不会删除 favorite/recent 记录。
+`messages.getRecentStickers`、`saveRecentSticker` 和 clear 操作由 bridge 数据库统一管理。发送经平台确认并完成入库后才进入 recent。
 
-平台本身已有的用户收藏可由 Provider 的 `listSavedStickers()` 暴露。此列表允许返回不属于任何 pack 的 sticker：
+QQ 的收藏夹不是 Telegram 的 `getFavedStickers`：QQ Provider 将它作为唯一的、账户关联的 `qq-favorites` sticker set 暴露，避免 Telegram 有限额的收藏夹与 QQ 收藏夹重复。QQ 客户端发出的 `faveSticker` / `unfave` 会直接调用 Provider 的 `setSavedSticker()`，继而映射为 QQNT 的加入/移出收藏夹操作；不再写入 bridge 本地 favorite 表。
+
+其它平台本身已有的用户收藏可由 Provider 的 `listSavedStickers()` 暴露。此列表允许返回不属于任何 pack 的 sticker：
 
 ```ts
 {
@@ -342,7 +344,7 @@ bridge 会将这种 loose sticker 投影为：
 }
 ```
 
-它会出现在统一 `messages.getFavedStickers` 中，仍然可以下载、发送、进入 recent，并可由 bridge 再次收藏；但不会伪造 sticker set，也不会出现在 `getAllStickers`。本地收藏和 Provider 收藏按 `(providerId, stickerId)` 去重。
+对于非 QQ 平台，它会出现在统一 `messages.getFavedStickers` 中，仍然可以下载、发送、进入 recent，并可由 bridge 再次收藏；但不会伪造 sticker set，也不会出现在 `getAllStickers`。本地收藏和 Provider 收藏按 `(providerId, stickerId)` 去重。QQ 则只通过 `qq-favorites` sticker set 提供收藏。
 
 Sticker set 的安装状态同样属于 bridge 用户状态。`installStickerSet`、`uninstallStickerSet`、`toggleStickerSets` 和 `reorderStickerSets` 写入 bridge 数据库；安装后的 set 通过 `StickerSet.installedDate` 返回，服务重启后保持。
 
