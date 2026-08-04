@@ -90,6 +90,18 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
+  it('does not publish transient platform voice control events as Telegram messages', async () => {
+    const { manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'caller', kind: 'direct', title: 'Caller' }
+
+    await manager.publish(session, { event: {
+      type: 'voice-call', callRef: 'opaque-source-ref', signal: 'incoming', media: 'voice',
+      conversation, timestamp: 1,
+    } })
+
+    expect(sent).toEqual([])
+  })
+
   it('gives a paginated channel dialog the durable pts baseline for its next live update', async () => {
     const upperConversation: IMConversation = { id: 'upper-group', kind: 'group', title: 'Upper Group' }
     const lowerConversation: IMConversation = { id: 'lower-group', kind: 'group', title: 'Lower Group' }

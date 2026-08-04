@@ -242,6 +242,7 @@ export class UpdateManager {
       'update publish start platform=%s session=%s %s',
       session.platformId, session.platformSessionId, committedEventSummary(committed),
     )
+    if (committed.event.type === 'voice-call') return
     if (committed.event.type === 'message-delete') {
       return this._publishDelete(
         session,
@@ -267,7 +268,7 @@ export class UpdateManager {
     return this._publishMessage(
       session,
       committed as Exclude<CommittedPlatformEvent, {
-        event: { type: 'message-delete' | 'message-reactions' | 'read' }
+        event: { type: 'message-delete' | 'message-reactions' | 'read' | 'voice-call' }
       }>,
       options,
     )
@@ -381,7 +382,7 @@ export class UpdateManager {
   private async _publishMessage(
     session: PlatformSession,
     committed: Exclude<CommittedPlatformEvent, {
-      event: { type: 'message-delete' | 'message-reactions' | 'read' }
+      event: { type: 'message-delete' | 'message-reactions' | 'read' | 'voice-call' }
     }>,
     options: PlatformEventDeliveryOptions,
   ): Promise<PlatformEventPublishResult> {
@@ -789,7 +790,11 @@ export class UpdateManager {
 }
 
 function committedEventSummary(committed: CommittedPlatformEvent): string {
-  const { event, result } = committed
+  const { event } = committed
+  if (event.type === 'voice-call') {
+    return `type=voice-call signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`
+  }
+  const { result } = committed as Exclude<CommittedPlatformEvent, { event: { type: 'voice-call' } }>
   if (event.type === 'message' || event.type === 'message-edit') {
     const ingest = result as import('./message-store.js').IngestResult
     return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} created=${ingest.created} changed=${ingest.changed} projection=${ingest.projection.length}`

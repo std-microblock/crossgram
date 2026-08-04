@@ -425,14 +425,24 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).resolves.toMatchObject({ user: { id: 'u_self' } })
   })
 
+  it('accepts bridge protocol 21 for source-backed voice controls', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 21, ready: true, selfUin: '10001', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn(async () => ({ id: 'u_self', name: 'Platform Alice' }))
+
+    await expect(platform.getAccount()).resolves.toMatchObject({ user: { id: 'u_self' } })
+  })
+
   it('refuses to invent an account while QQNT is not ready', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({ protocolVersion: 1, ready: false }))
     await expect(platform.getAccount()).rejects.toThrow('not ready')
   })
 
-  it('rejects bridge protocols outside the supported 19-20 range', async () => {
-    for (const protocolVersion of [18, 21, 19.5, Number.NaN, '19', undefined]) {
+  it('rejects bridge protocols outside the supported 19-21 range', async () => {
+    for (const protocolVersion of [18, 22, 19.5, Number.NaN, '19', undefined]) {
       const platform = new QQNTPlatform()
       const status = {
         protocolVersion, ready: true, selfUin: '10001', selfUid: 'u_self',
@@ -440,7 +450,7 @@ describe('QQNTPlatform mapping', () => {
       platform.client.status = vi.fn(async () => status)
       platform.client.getUser = vi.fn()
 
-      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-20')
+      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-21')
       expect(platform.client.getUser).not.toHaveBeenCalled()
     }
   })
@@ -1104,7 +1114,7 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
-  it('maps validated call signals into stable Telegram service messages', async () => {
+  it('maps validated call signals into transient voice events with the exact control reference', async () => {
     const logger = {
       debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
     }
@@ -1116,12 +1126,12 @@ describe('QQNTPlatform mapping', () => {
       participantCount: 999,
     }
     const cases = [
-      { signal: 'incoming', media: 'voice', text: 'QQ 语音通话呼入', outgoing: false },
-      { signal: 'incoming', media: 'unknown', text: 'QQ 通话呼入', outgoing: false },
-      { signal: 'accept-requested', media: 'voice', text: '已请求接听 QQ 通话', outgoing: true },
-      { signal: 'refuse-requested', media: 'voice', text: '已拒绝 QQ 通话', outgoing: true },
-      { signal: 'logout-requested', media: 'voice', text: '已请求挂断 QQ 通话', outgoing: true },
-      { signal: 'ended', media: 'voice', text: 'QQ 通话已结束', outgoing: true },
+      { signal: 'incoming', media: 'voice' },
+      { signal: 'incoming', media: 'unknown' },
+      { signal: 'accept-requested', media: 'voice' },
+      { signal: 'refuse-requested', media: 'voice' },
+      { signal: 'logout-requested', media: 'voice' },
+      { signal: 'ended', media: 'voice' },
     ] as const
     const frames = cases.map(({ signal, media }, index) => ({
       type: 'call-signal' as const, version: 1 as const, signal, media,
@@ -1142,26 +1152,33 @@ describe('QQNTPlatform mapping', () => {
     const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
     await vi.waitFor(() => expect(acknowledged).toHaveLength(frames.length))
 
-    expect(received.slice(0, cases.length)).toEqual(cases.map(({ signal, media, text, outgoing }, index) => ({
-      type: 'message',
+    expect(received.slice(0, cases.length)).toEqual(cases.map(({ signal, media }, index) => ({
+      type: 'voice-call',
+      callRef: `call_${index}-stable`,
+      signal,
+      media,
       conversation: expect.objectContaining({ id: conversation.id }),
-      message: {
-        id: expect.stringMatching(new RegExp(`^qq-call:[a-f0-9]{32}:${signal}$`)),
-        conversationId: conversation.id,
-        senderId: conversation.id,
-        timestamp: 100 + index,
-        outgoing,
-        metadata: { qqCallSignal: signal, qqCallMedia: media },
-        content: { serviceAction: { type: 'custom', text }, parts: [] },
-      },
+      timestamp: 100 + index,
     })))
-    expect((received[frames.length - 1] as any).message.id).toBe((received[0] as any).message.id)
+    expect(received[frames.length - 1]).toMatchObject({ callRef: 'call_0-stable', signal: 'incoming' })
     expect((received[0] as any).conversation.metadata).not.toHaveProperty('participantsCount')
-    expect(JSON.stringify(received)).not.toContain('call_0-stable')
     const debug = logger.debug.mock.calls.flat().join(' ')
     expect(debug).toContain('type=call-signal version=1 signal=incoming media=voice conversation=1:alice')
     expect(debug).not.toContain('call_0-stable')
     await unsubscribe()
+  })
+
+  it('delegates source call controls with the exact transient QQ reference', async () => {
+    const platform = new QQNTPlatform()
+    const controlCall = vi.spyOn(platform.client, 'controlCall').mockResolvedValue()
+
+    await platform.voiceCalls.control(session, 'exact-qq-call-ref', 'accept')
+    await platform.voiceCalls.control(session, 'exact-qq-call-ref', 'hangup')
+
+    expect(controlCall.mock.calls).toEqual([
+      ['exact-qq-call-ref', 'accept'],
+      ['exact-qq-call-ref', 'hangup'],
+    ])
   })
 
   it('ACKs invalid call-signal frames without delivery, reconnection, or payload logging', async () => {
@@ -1219,7 +1236,7 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
-  it('delivers call-signal bursts through the normal message path', async () => {
+  it('delivers call-signal bursts through the transient voice path without hashing references', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
@@ -1239,10 +1256,9 @@ describe('QQNTPlatform mapping', () => {
     const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
     await vi.waitFor(() => expect(received).toHaveLength(frames.length))
 
-    const messageIds = received.map((event: any) => event.message.id)
-    expect(messageIds).toHaveLength(frames.length)
-    expect(messageIds.every((id) => /^qq-call:[a-f0-9]{32}:ended$/.test(id))).toBe(true)
-    expect(JSON.stringify(received)).not.toContain('burst_0')
+    const callRefs = received.map((event: any) => event.callRef)
+    expect(callRefs).toEqual(frames.map((frame) => frame.callId))
+    expect(received.every((event: any) => event.type === 'voice-call' && event.signal === 'ended')).toBe(true)
     await unsubscribe()
   })
 
