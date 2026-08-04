@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { mkdir, open, rm, type FileHandle } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
@@ -13,6 +17,7 @@ export interface QQNTClientOptions {
   webSocketEndpoint?: string
   token?: string
   fetch?: typeof globalThis.fetch
+  unrangedCachePath?: string
 }
 
 export interface QQNTSubscribeOptions {
@@ -37,8 +42,18 @@ export class QQNTMessageSendRejectedError extends Error {
 const MEDIA_LEASE_VERSION = 1
 const MEDIA_LEASE_ID_HEX_LENGTH = 32
 const MEDIA_LEASE_TOKEN_BYTES = 32
-const MAX_UNRANGED_FILE_BYTES = 64 * 1024 * 1024
-const MAX_UNRANGED_CACHE_BYTES = 128 * 1024 * 1024
+const MAX_UNRANGED_CACHE_BYTES = 4 * 1024 * 1024 * 1024
+const MAX_UNRANGED_CACHE_ENTRIES = 8
+let unrangedCacheSequence = 0
+
+interface CachedUnrangedFile {
+  path: string
+  size: number
+  complete: boolean
+  accounted: boolean
+  error?: unknown
+  waiters: Set<() => void>
+}
 
 /** One short-lived, local-only capability for the QQ Bridge PCM gateway. */
 export interface QQNTMediaLease {
@@ -58,8 +73,9 @@ export class QQNTClient {
   private readonly directUrls = new Map<string, DirectUrl>()
   private readonly directUrlRefreshes = new Map<string, Promise<DirectUrl>>()
   private readonly directRangeChecks = new Map<string, Promise<boolean>>()
-  private readonly unrangedFiles = new Map<string, Uint8Array>()
-  private readonly unrangedFileLoads = new Map<string, Promise<Uint8Array>>()
+  private readonly unrangedFiles = new Map<string, CachedUnrangedFile>()
+  private readonly unrangedFileLoads = new Map<string, Promise<CachedUnrangedFile>>()
+  private readonly unrangedCachePath: string
   private unrangedFileBytes = 0
   private bridgeProtocol?: number
 
@@ -68,6 +84,8 @@ export class QQNTClient {
     this.webSocketEndpoint = options.webSocketEndpoint ?? `${this.endpoint}/events/ws`
     this.token = options.token
     this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.unrangedCachePath = options.unrangedCachePath
+      ?? join(tmpdir(), `crossgram-qqnt-unranged-${process.pid}-${++unrangedCacheSequence}`)
   }
 
   async status(): Promise<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }> {
@@ -448,12 +466,10 @@ export class QQNTClient {
         directKey = directUrlIdentity(locator)
         direct = await this.resolveFileUrl(locator, options.signal)
         const cached = ranged && direct.supportsRange === false
-          ? await this.cachedUnrangedFile(directKey, direct.url, locator, options.signal)
+          ? await this.cachedUnrangedFile(directKey, direct.url)
           : undefined
         if (cached) {
-          const accepted = cached.subarray(offset, limit === undefined ? undefined : offset + limit)
-          await options.onChunk?.(accepted.length)
-          if (accepted.length) yield accepted
+          yield* this.readCachedUnrangedFile(cached, offset, limit, options)
           return
         }
         response = await this.fetchImpl(direct.url, {
@@ -472,12 +488,10 @@ export class QQNTClient {
       direct = avatarUrl ? undefined : await this.resolveFileUrl(locator, options.signal)
       const directUrl = avatarUrl ?? direct!.url
       const cached = directKey && ranged && direct?.supportsRange === false
-        ? await this.cachedUnrangedFile(directKey, directUrl, locator, options.signal)
+        ? await this.cachedUnrangedFile(directKey, directUrl)
         : undefined
       if (cached) {
-        const accepted = cached.subarray(offset, limit === undefined ? undefined : offset + limit)
-        await options.onChunk?.(accepted.length)
-        if (accepted.length) yield accepted
+        yield* this.readCachedUnrangedFile(cached, offset, limit, options)
         return
       }
       response = await this.fetchImpl(directUrl, {
@@ -490,13 +504,11 @@ export class QQNTClient {
     } else {
       throw new Error('QQNT media locator has no remote direct-link identity')
     }
-    if (directKey && ranged && response.status === 200 && shouldCacheUnrangedFile(locator)) {
-      const bytes = new Uint8Array(await response.arrayBuffer())
+    if (directKey && ranged && response.status === 200) {
+      const cached = await this.cacheUnrangedResponse(directKey, response)
       this.markDirectRangeSupport(directKey, false)
-      this.rememberUnrangedFile(directKey, bytes)
-      const accepted = bytes.subarray(offset, limit === undefined ? undefined : offset + limit)
-      await options.onChunk?.(accepted.length)
-      if (accepted.length) yield accepted
+      this.rememberUnrangedFile(directKey, cached)
+      yield* this.readCachedUnrangedFile(cached, offset, limit, options)
       return
     }
     if (directKey && response.status === 206) this.markDirectRangeSupport(directKey, true)
@@ -651,11 +663,15 @@ export class QQNTClient {
   private async probeDirectRange(url: string, signal?: AbortSignal): Promise<boolean> {
     try {
       const response = await this.fetchImpl(url, {
-        headers: { 'accept-encoding': 'identity', range: 'bytes=0-0' },
+        // QQ multimedia has URLs that return `200` with an empty body for the
+        // degenerate 0-0 probe while serving every real multi-byte range as
+        // proper 206. Probe two bytes so capability detection matches the
+        // client's actual chunk requests without downloading a full chunk.
+        headers: { 'accept-encoding': 'identity', range: 'bytes=0-1' },
         signal,
         redirect: 'follow',
       })
-      const supported = response.status === 206 && /^bytes\s+0-0\//i.test(response.headers.get('content-range') ?? '')
+      const supported = response.status === 206 && /^bytes\s+0-1\//i.test(response.headers.get('content-range') ?? '')
       await discardResponseBody(response)
       return supported
     } catch {
@@ -671,44 +687,160 @@ export class QQNTClient {
   private async cachedUnrangedFile(
     key: string,
     url: string,
-    locator: QQMediaLocator,
-    signal?: AbortSignal,
-  ): Promise<Uint8Array | undefined> {
+  ): Promise<CachedUnrangedFile | undefined> {
     const cached = this.unrangedFiles.get(key)
     if (cached) {
       this.unrangedFiles.delete(key)
       this.unrangedFiles.set(key, cached)
       return cached
     }
-    if (!shouldCacheUnrangedFile(locator)) return
     const active = this.unrangedFileLoads.get(key)
-    const pending = active ?? this.fetchUnrangedFile(url, signal).finally(() => this.unrangedFileLoads.delete(key))
+    const pending = active ?? this.fetchUnrangedFile(key, url)
+      .finally(() => this.unrangedFileLoads.delete(key))
     if (!active) this.unrangedFileLoads.set(key, pending)
     const bytes = await pending
     this.rememberUnrangedFile(key, bytes)
     return bytes
   }
 
-  private async fetchUnrangedFile(url: string, signal?: AbortSignal): Promise<Uint8Array> {
+  private async fetchUnrangedFile(
+    key: string,
+    url: string,
+  ): Promise<CachedUnrangedFile> {
     const response = await this.fetchImpl(url, {
-      headers: { 'accept-encoding': 'identity' }, signal, redirect: 'follow',
+      headers: { 'accept-encoding': 'identity' }, redirect: 'follow',
     })
     if (!response.ok) throw new Error(await nativeResponseError(response))
-    return new Uint8Array(await response.arrayBuffer())
+    return this.cacheUnrangedResponse(key, response)
   }
 
-  private rememberUnrangedFile(key: string, bytes: Uint8Array): void {
+  private async cacheUnrangedResponse(key: string, response: Response): Promise<CachedUnrangedFile> {
+    if (!response.body) throw new Error('QQNT native media response has no body')
+    await mkdir(this.unrangedCachePath, { recursive: true })
+    const digest = createHash('sha256').update(key).digest('hex')
+    const path = join(this.unrangedCachePath, digest)
+    await rm(path, { force: true })
+    const file = await open(path, 'wx')
+    const cached: CachedUnrangedFile = {
+      path, size: 0, complete: false, accounted: false, waiters: new Set(),
+    }
+    // Keep consuming the single whole-file response after the first Telegram
+    // getFile chunk has been satisfied. Later 128 KiB requests wait only for
+    // their byte boundary to reach disk instead of starting another HTTP GET.
+    void this.populateUnrangedFile(key, cached, response, file)
+    return cached
+  }
+
+  private async populateUnrangedFile(
+    key: string,
+    cached: CachedUnrangedFile,
+    response: Response,
+    file: FileHandle,
+  ): Promise<void> {
+    const reader = response.body!.getReader()
+    let completed = false
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          completed = true
+          break
+        }
+        if (!value?.length) continue
+        let offset = 0
+        while (offset < value.length) {
+          const { bytesWritten } = await file.write(value, offset, value.length - offset, null)
+          if (!bytesWritten) throw new Error('QQNT unranged cache write made no progress')
+          offset += bytesWritten
+        }
+        cached.size += value.length
+        notifyUnrangedFileWaiters(cached)
+      }
+    } catch (error) {
+      cached.error = error
+    } finally {
+      if (!completed) await reader.cancel().catch(() => undefined)
+      reader.releaseLock()
+      await file.close().catch(() => undefined)
+      cached.complete = true
+      notifyUnrangedFileWaiters(cached)
+      if (cached.error) {
+        if (this.unrangedFiles.get(key) === cached) this.unrangedFiles.delete(key)
+        await rm(cached.path, { force: true }).catch(() => undefined)
+      } else {
+        this.accountCompletedUnrangedFile(key, cached)
+      }
+    }
+  }
+
+  private async *readCachedUnrangedFile(
+    cached: CachedUnrangedFile,
+    offset: number,
+    limit: number | undefined,
+    options: { signal?: AbortSignal, onChunk?(size: number): Promise<void> | void },
+  ): AsyncIterable<Uint8Array> {
+    const requiredSize = limit === undefined ? Number.POSITIVE_INFINITY : offset + limit
+    while (!cached.complete && cached.size < requiredSize) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('download aborted')
+      await new Promise<void>((resolve, reject) => {
+        const wake = () => {
+          options.signal?.removeEventListener('abort', abort)
+          resolve()
+        }
+        const abort = () => {
+          cached.waiters.delete(wake)
+          reject(options.signal?.reason ?? new Error('download aborted'))
+        }
+        cached.waiters.add(wake)
+        options.signal?.addEventListener('abort', abort, { once: true })
+      })
+    }
+    if (cached.error) throw cached.error
+    if (offset >= cached.size) return
+    const end = limit === undefined
+      ? cached.size - 1
+      : Math.min(cached.size - 1, offset + limit - 1)
+    for await (const chunk of createReadStream(cached.path, { start: offset, end, signal: options.signal })) {
+      const bytes = new Uint8Array(chunk)
+      await options.onChunk?.(bytes.length)
+      yield bytes
+    }
+  }
+
+  private rememberUnrangedFile(key: string, cached: CachedUnrangedFile): void {
+    if (cached.error) return
     const previous = this.unrangedFiles.get(key)
-    if (previous) this.unrangedFileBytes -= previous.length
+    if (previous === cached) {
+      this.unrangedFiles.delete(key)
+      this.unrangedFiles.set(key, cached)
+      return
+    }
+    if (previous?.accounted) this.unrangedFileBytes -= previous.size
     this.unrangedFiles.delete(key)
-    if (bytes.length > MAX_UNRANGED_FILE_BYTES) return
-    this.unrangedFiles.set(key, bytes)
-    this.unrangedFileBytes += bytes.length
-    while (this.unrangedFileBytes > MAX_UNRANGED_CACHE_BYTES && this.unrangedFiles.size) {
-      const oldest = this.unrangedFiles.keys().next().value!
-      const removed = this.unrangedFiles.get(oldest)!
-      this.unrangedFiles.delete(oldest)
-      this.unrangedFileBytes -= removed.length
+    this.unrangedFiles.set(key, cached)
+    if (previous && previous.path !== cached.path) void rm(previous.path, { force: true }).catch(() => undefined)
+    if (cached.complete && !cached.error) this.accountCompletedUnrangedFile(key, cached)
+  }
+
+  private accountCompletedUnrangedFile(key: string, cached: CachedUnrangedFile): void {
+    if (this.unrangedFiles.get(key) !== cached || cached.accounted) return
+    cached.accounted = true
+    this.unrangedFileBytes += cached.size
+    this.evictUnrangedFiles()
+  }
+
+  private evictUnrangedFiles(): void {
+    while (this.unrangedFileBytes > MAX_UNRANGED_CACHE_BYTES
+      || this.unrangedFiles.size > MAX_UNRANGED_CACHE_ENTRIES) {
+      // Retain one oversized file so its later upload.getFile chunks never
+      // fall back to re-downloading the same whole response.
+      if (this.unrangedFiles.size <= 1) return
+      const oldest = [...this.unrangedFiles].find(([, cached]) => cached.complete)
+      if (!oldest) return
+      const [key, removed] = oldest
+      this.unrangedFiles.delete(key)
+      if (removed.accounted) this.unrangedFileBytes -= removed.size
+      void rm(removed.path, { force: true }).catch(() => undefined)
     }
   }
 
@@ -944,6 +1076,12 @@ async function discardResponseBody(response: Response): Promise<void> {
   await response.body.cancel().catch(() => undefined)
 }
 
+function notifyUnrangedFileWaiters(cached: CachedUnrangedFile): void {
+  const waiters = [...cached.waiters]
+  cached.waiters.clear()
+  for (const wake of waiters) wake()
+}
+
 async function responseError(response: Response): Promise<string> {
   const text = await response.text()
   try {
@@ -970,12 +1108,6 @@ function qqAvatarUrl(locator: QQMediaLocator): string | undefined {
     && /^\d+$/.test(groupUin)) {
     return `https://p.qlogo.cn/gh/${groupUin}/${groupUin}/640/`
   }
-}
-
-function shouldCacheUnrangedFile(locator: QQMediaLocator): boolean {
-  const declared = Number(locator.fileSize)
-  return locator.kind === 'image'
-    || Number.isFinite(declared) && declared >= 0 && declared <= MAX_UNRANGED_FILE_BYTES
 }
 
 function hasDirectUrlIdentity(locator: QQMediaLocator): boolean {
