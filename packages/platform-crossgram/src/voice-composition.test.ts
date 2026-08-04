@@ -5,6 +5,7 @@ import { QQNTPlatform } from './index.js'
 
 const call = {
   callId: 'opaque-telegram-call', callerId: 1, participantId: 2, telegramRole: 'caller' as const,
+  platformCallRef: 'opaque-qq-call-ref',
   protocol: {
     _: 'phoneCallProtocol' as const, udpP2p: false, udpReflector: false,
     minLayer: 100, maxLayer: 100, libraryVersions: ['bridge'],
@@ -40,6 +41,7 @@ describe('QQ voice media composition', () => {
 
     await platform.voiceMedia!.start(call, session, endpoint)
 
+    expect(platform.client.mediaLease).toHaveBeenCalledWith('opaque-qq-call-ref')
     expect(start).toHaveBeenCalledOnce()
     expect(options?.callId).toBe(call.callId)
     expect(options?.token).toBe(token)
@@ -58,5 +60,14 @@ describe('QQ voice media composition', () => {
   it('does not expose a media provider when no QQVoiceMedia service was installed', () => {
     const platform = new QQNTPlatform()
     expect(platform.voiceMedia).toBeUndefined()
+  })
+
+  it('fails closed when a QQ media lease would otherwise use the Telegram call id', async () => {
+    const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, mediaService(vi.fn()))
+    const lease = vi.spyOn(platform.client, 'mediaLease')
+    const telegramOnly = { ...call, platformCallRef: undefined }
+
+    await expect(platform.voiceMedia!.start(telegramOnly, session, endpoint)).rejects.toThrow('QQ voice call reference')
+    expect(lease).not.toHaveBeenCalled()
   })
 })

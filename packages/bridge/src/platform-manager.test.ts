@@ -86,6 +86,33 @@ function incoming(id: string, conversationId = 'room'): IMMessage {
 }
 
 describe('PlatformSubscriptionManager', () => {
+  it('delivers voice calls transiently without persisting their exact platform reference', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: unknown[] = []
+    const ingest = vi.spyOn(store, 'ingest')
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, value) => { committed.push(value) },
+    )
+    const conversation: IMConversation = { id: 'alice', kind: 'direct', title: 'Alice' }
+    await manager.ensure(session)
+
+    await platform.emit({
+      type: 'voice-call', callRef: 'exact-opaque-call-ref', signal: 'incoming', media: 'voice',
+      conversation, timestamp: 123,
+    })
+
+    expect(committed).toEqual([{ event: {
+      type: 'voice-call', callRef: 'exact-opaque-call-ref', signal: 'incoming', media: 'voice',
+      conversation, timestamp: 123,
+    } }])
+    expect(ingest).not.toHaveBeenCalled()
+    expect(await store.readHistory(session.platformSessionId, conversation.id)).toEqual([])
+    await manager.stop()
+  })
+
   it('subscribes once, persists before resolving, and can stop and restart one platform', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

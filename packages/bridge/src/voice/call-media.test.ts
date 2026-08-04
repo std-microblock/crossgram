@@ -164,8 +164,14 @@ async function request(calls: CallRegistry) {
   return { id: result.phoneCall.id, accessHash: result.phoneCall.accessHash }
 }
 
-async function incoming(calls: CallRegistry) {
-  const result = await calls.receiveIncoming({ session, selfId: 1, callerId: 2, correlationId: 'opaque-qq-call' })
+async function incoming(
+  calls: CallRegistry,
+  platformControl?: { control(operation: 'accept' | 'reject' | 'hangup'): Promise<void> },
+) {
+  const result = await calls.receiveIncoming({
+    session, selfId: 1, callerId: 2, correlationId: 'opaque-qq-call',
+    platformCallRef: 'opaque-qq-call', platformControl,
+  })
   if (result._ !== 'phoneCallRequested') throw new Error('expected requested call')
   return { id: result.id, accessHash: result.accessHash }
 }
@@ -208,6 +214,76 @@ describe('CallRegistry QQ media composition', () => {
     expect(starts).toHaveBeenCalledOnce()
     expect(worker.attachMedia).toHaveBeenCalledOnce()
     expect(worker.attachMedia.mock.calls[0]?.[0]).toMatchObject({ telegramRole: 'recipient' })
+  })
+
+  it('retains the exact QQ reference in memory and accepts QQ only after worker media is attached', async () => {
+    const { calls, worker, starts } = setup()
+    const control = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
+    const peer = await incoming(calls, control)
+    await calls.received(session, peer)
+
+    await calls.accept(session, peer, new Uint8Array(256).fill(5), protocol)
+
+    expect(worker.attachMedia.mock.calls[0]?.[0]).toMatchObject({
+      telegramRole: 'recipient', platformCallRef: 'opaque-qq-call',
+    })
+    expect(starts.mock.calls[0]?.[0]).toMatchObject({ platformCallRef: 'opaque-qq-call' })
+    expect(control.control).toHaveBeenCalledOnce()
+    expect(control.control).toHaveBeenCalledWith('accept')
+    expect(starts.mock.invocationCallOrder[0]).toBeLessThan(control.control.mock.invocationCallOrder[0]!)
+  })
+
+  it('uses reject while QQ is ringing and hangup after it has been accepted', async () => {
+    const first = setup()
+    const firstControl = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
+    const ringingPeer = await incoming(first.calls, firstControl)
+
+    await first.calls.discard(session, ringingPeer, { _: 'phoneCallDiscardReasonBusy' }, 0)
+    await first.calls.platformEnded(session, 'opaque-qq-call')
+
+    expect(firstControl.control).toHaveBeenCalledOnce()
+    expect(firstControl.control).toHaveBeenCalledWith('reject')
+
+    const second = setup()
+    const secondControl = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
+    const activePeer = await incoming(second.calls, secondControl)
+    await second.calls.received(session, activePeer)
+    await second.calls.accept(session, activePeer, new Uint8Array(256).fill(5), protocol)
+    await second.calls.discard(session, activePeer, { _: 'phoneCallDiscardReasonHangup' }, 3)
+
+    expect(secondControl.control.mock.calls.map(([operation]) => operation)).toEqual(['accept', 'hangup'])
+  })
+
+  it('turns a source-side QQ end into one Telegram discarded update without echoing a control', async () => {
+    const { calls, updates, worker } = setup()
+    const control = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
+    await incoming(calls, control)
+
+    await calls.platformEnded(session, 'opaque-qq-call')
+    await calls.platformEnded(session, 'opaque-qq-call')
+
+    expect(control.control).not.toHaveBeenCalled()
+    expect(updates.map((update) => update.phoneCall._)).toEqual(['phoneCallRequested', 'phoneCallDiscarded'])
+    expect(worker.discardCall).toHaveBeenCalledOnce()
+    expect(calls.snapshot(session)).toBeUndefined()
+  })
+
+  it('rejects and acknowledges a QQ call when worker preparation fails before Telegram can ring', async () => {
+    const { calls, updates, worker } = setup()
+    vi.spyOn(worker, 'prepareTelegramCaller').mockRejectedValue(new Error('worker unavailable'))
+    const control = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
+
+    const result = await calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'failed-qq-call',
+      platformCallRef: 'failed-qq-call', platformControl: control,
+    })
+
+    expect(result).toMatchObject({ _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonDisconnect' } })
+    expect(control.control).toHaveBeenCalledOnce()
+    expect(control.control).toHaveBeenCalledWith('reject')
+    expect(updates.map((update) => update.phoneCall._)).toEqual(['phoneCallDiscarded'])
+    expect(worker.discardCall).toHaveBeenCalledOnce()
+    expect(calls.snapshot(session)).toBeUndefined()
   })
 
   it('fails closed before acquiring a platform lease when the confirmed endpoint is invalid', async () => {
