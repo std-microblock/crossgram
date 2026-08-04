@@ -11,6 +11,25 @@ const context: StickerProviderContext = {
 }
 
 describe('QQStickerProvider raw saved-sticker pipeline', () => {
+  it('keeps a QQ favorite as a native send plan without downloading its asset', async () => {
+    const client = {
+      getSavedStickers: vi.fn(async () => ({ stickers: [favorite('remote')] })),
+      stickerSource: vi.fn(),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
+
+    const { stickers } = await provider.listSavedStickers(context)
+    const plan = await provider.prepareSend(context, stickers[0]!)
+
+    expect(plan).toEqual({
+      type: 'native', providerId: 'qq:stickers', stickerId: 'favorite:remote', packId: 'qq-favorites',
+      reference: {
+        kind: 'favorite', resId: 'remote', path: '/saved/remote.png', name: 'remote.png', animated: false,
+      },
+    })
+    expect(client.stickerSource).not.toHaveBeenCalled()
+  })
+
   it('lists every native sticker without decoding bytes and streams the selected original on demand', async () => {
     const assets = new Map([
       ['bad', Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0xff])],

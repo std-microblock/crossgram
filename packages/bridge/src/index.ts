@@ -39,10 +39,6 @@ import {
 import { AuthTransferStore } from './auth-transfer.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { DialogFolderStore } from './dialog-folders.js'
-import {
-  collectStickerDashboard, setStickerPackAssignment,
-  type StickerDashboardPack, type StickerDashboardSourceAccount, type StickerPackDashboardData,
-} from './sticker-dashboard.js'
 import { CallRegistry, type VoiceMediaStartProvider, type VoiceWorkerClient } from './voice/call-registry.js'
 import type { VoiceCallMediaProvider } from './voice/media.js'
 import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
@@ -73,7 +69,7 @@ export * from './voice/voice-worker-client.js'
 export * from './voice/voice-rpc.js'
 export * from './stripped-thumbnail.js'
 export * from './sticker-outline.js'
-export * from './sticker-dashboard.js'
+export * from './sticker-ownership.js'
 export * from './satori-export.js'
 
 export const name = 'mtproto-bridge'
@@ -309,39 +305,20 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       }
     })
   }
-  let publishedStickerPacks: StickerDashboardPack[] = []
-  const dashboard: PlatformAccountDashboardData & StickerPackDashboardData = {
+  const dashboard: PlatformAccountDashboardData = {
     accounts: [],
     updatedAt: Date.now(),
-    stickerAccounts: [],
-    stickerPacks: [],
-    stickerUpdatedAt: Date.now(),
     async refresh() {
       await ctx.database.prepared()
       await Promise.allSettled(registry.ids.map(platformId => provision(platformId)))
       publishAccounts()
-      await publishStickerPacks()
-    },
-    async refreshStickerPacks() {
-      await ctx.database.prepared()
-      await publishStickerPacks()
-    },
-    async setStickerPackAssigned(platformSessionId, providerId, packId, assigned) {
-      const pack = publishedStickerPacks.find((item) =>
-        item.providerId === providerId && item.packId === packId)
-      if (!pack) throw new Error('表情包不存在，请刷新后重试。')
-      const assignment = pack.assignments.find((item) => item.platformSessionId === platformSessionId)
-      if (!assignment) throw new Error('目标账号不存在，请刷新后重试。')
-      if (!assigned && assignment.automatic) throw new Error('账号固有表情包不能取消关联。')
-      await setStickerPackAssignment(ctx.database, platformSessionId, providerId, packId, assigned)
-      await publishStickerPacks()
     },
   }
   const dashboardEntry = ctx.webui.addEntry({
     baseUrl: import.meta.url,
     source: '../client/index.ts',
     manifest: '../dist/manifest.json',
-    routes: ['/platform-accounts', '/sticker-packs'],
+    routes: ['/platform-accounts'],
   }, dashboard)
 
   const publishAccounts = (now = Date.now()) => {
@@ -356,35 +333,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         const error = accountErrors.get(platformId)
         return makeUnavailableAccountView(platformId, kind, error ? 'error' : 'loading', error)
       })
-    })
-  }
-
-  const stickerSourceAccounts = (): StickerDashboardSourceAccount[] => [...provisionedAccounts]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([platformId, account]) => {
-      const platform = registry.require(platformId)
-      const displayName = [account.profile.firstName, account.profile.lastName].filter(Boolean).join(' ')
-        || account.profile.username || account.profile.id
-      return {
-        session: account.session,
-        view: {
-          platformId,
-          platformSessionId: account.session.platformSessionId,
-          platformKind: platform.platformKind ?? platformId,
-          displayName,
-          username: account.profile.username,
-          userId: account.profile.id,
-        },
-      }
-    })
-
-  const publishStickerPacks = async (now = Date.now()) => {
-    const snapshot = await collectStickerDashboard(ctx.database, stickerProviders.registry, stickerSourceAccounts())
-    publishedStickerPacks = snapshot.packs
-    dashboardEntry.mutate((value) => {
-      value.stickerUpdatedAt = now
-      value.stickerAccounts = snapshot.accounts
-      value.stickerPacks = snapshot.packs
     })
   }
 
@@ -453,7 +401,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
           const migrated = await migrateQualifiedPlatformIds(ctx.database, platformId)
           if (migrated) ctx.logger('bridge').info('migrated %d qualified platform sessions to %s', migrated, platformId)
           await provision(platformId)
-          await publishStickerPacks()
           await subscriptions.startActiveSessions(platformId)
         })
         .catch((error) => ctx.logger('bridge').warn(
@@ -465,9 +412,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       provisionedAccounts.delete(platformId)
       accountErrors.delete(platformId)
       publishAccounts()
-      void publishStickerPacks().catch((error) => ctx.logger('bridge').warn(
-        'failed to refresh sticker dashboard: %s', String(error),
-      ))
       void subscriptions.stopPlatform(platformId).catch((error) => ctx.logger('bridge').warn(
         'failed to stop platform sessions (%s): %s', platformId, String(error),
       ))
@@ -480,7 +424,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     // Delivery rows from pre-memory-journal versions are no longer used.
     await ctx.database.remove('mtproto_update_delivery', {})
     await Promise.all(registry.ids.map(platformId => provision(platformId)))
-    await publishStickerPacks()
     await subscriptions.startActiveSessions()
     return () => subscriptions.stop()
   })

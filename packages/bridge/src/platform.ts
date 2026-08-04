@@ -171,6 +171,8 @@ export interface IMMedia<TLocator = unknown> {
   height?: number
   /** Playback duration in seconds for streamable audio/video media. */
   duration?: number
+  /** True only for recorded voice messages, not ordinary audio files. */
+  voice?: boolean
   /** Optional adapter-generated preview, downloaded through the same media method. */
   preview?: IMMediaPreview<TLocator>
   /** Telegram-compatible inline stripped JPEG shown before any media download. */

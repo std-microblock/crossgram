@@ -2204,6 +2204,9 @@ export class DialogRpc {
     const videoAttribute = media._ === 'inputMediaUploadedDocument'
       ? media.attributes.find((item) => item._ === 'documentAttributeVideo')
       : undefined
+    const audioAttribute = media._ === 'inputMediaUploadedDocument'
+      ? media.attributes.find((item) => item._ === 'documentAttributeAudio')
+      : undefined
     const detected = kind === 'image' ? await probeImageDimensions(upload.source) : undefined
     return {
       media: {
@@ -2213,7 +2216,9 @@ export class DialogRpc {
         size: upload.source.size,
         width: detected?.width ?? (videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.w : undefined),
         height: detected?.height ?? (videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.h : undefined),
-        duration: videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.duration : undefined,
+        duration: videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.duration
+          : audioAttribute?._ === 'documentAttributeAudio' ? audioAttribute.duration : undefined,
+        voice: audioAttribute?._ === 'documentAttributeAudio' ? audioAttribute.voice : undefined,
         source: upload.source,
       },
       upload,
@@ -4575,7 +4580,10 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   if (isAnimatedImageMime(media.mimeType)) attributes.push({
     _: 'documentAttributeImageSize', w: dimensions.width, h: dimensions.height,
   })
-  if (media.mimeType?.startsWith('video/')) attributes.push({
+  if (media.voice) attributes.push({
+    _: 'documentAttributeAudio', voice: true, duration: media.duration ?? 0,
+  })
+  else if (media.mimeType?.startsWith('video/')) attributes.push({
     _: 'documentAttributeVideo',
     nosound: media.mimeType === 'video/webm' ? true : undefined,
     supportsStreaming: true,
@@ -4694,14 +4702,17 @@ function makeStagedMessageMedia(staged: StagedMedia, dcId: number): tl.TypeMessa
   }
 }
 
-function documentAttributes(media: Pick<IMMedia<any>, 'name' | 'mimeType' | 'width' | 'height' | 'duration'>): tl.TypeDocumentAttribute[] {
+function documentAttributes(media: Pick<IMMedia<any>, 'name' | 'mimeType' | 'width' | 'height' | 'duration' | 'voice'>): tl.TypeDocumentAttribute[] {
   const attributes: tl.TypeDocumentAttribute[] = [
     { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
   ]
   if (isAnimatedImageMime(media.mimeType)) attributes.push({
     _: 'documentAttributeImageSize', w: media.width ?? 1, h: media.height ?? 1,
   })
-  if (media.mimeType?.startsWith('video/')) attributes.push({
+  if (media.voice) attributes.push({
+    _: 'documentAttributeAudio', voice: true, duration: media.duration ?? 0,
+  })
+  else if (media.mimeType?.startsWith('video/')) attributes.push({
     _: 'documentAttributeVideo',
     nosound: media.mimeType === 'video/webm' ? true : undefined,
     supportsStreaming: true,

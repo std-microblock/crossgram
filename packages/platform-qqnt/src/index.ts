@@ -254,7 +254,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const userId = status.selfUid ?? status.selfUin
     if (!status.ready || !userId) throw new Error('QQNT account is not ready')
     if (!Number.isInteger(status.protocolVersion)
-      || status.protocolVersion < MIN_PROTOCOL_VERSION || status.protocolVersion > MAX_PROTOCOL_VERSION) {
+      || status.protocolVersion < MIN_PROTOCOL_VERSION
+      || status.protocolVersion > MAX_PROTOCOL_VERSION) {
       throw new Error(`QQNT bridge protocol ${status.protocolVersion} is unsupported; supported range is ${MIN_PROTOCOL_VERSION}-${MAX_PROTOCOL_VERSION}`)
     }
     const user = await this.client.getUser(userId)
@@ -969,6 +970,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       sticker = stickerPart.sticker.reference as unknown as QQStickerReference
     }
     if (mediaParts.length > 9) throw new Error('QQNT supports at most nine media items per message')
+    const voiceParts = mediaParts.filter((part) => part.media.voice)
+    if (voiceParts.length && (voiceParts.length !== 1 || mediaParts.length !== 1 || text || sticker || content.replyToId || content.replyToNativeSequence)) {
+      throw new Error('QQNT voice messages must contain exactly one voice item without a reply')
+    }
     const media = mediaParts.map((part, index) => ({
       kind: part.media.kind,
       name: part.media.name ?? `upload-${Date.now()}-${index}`,
@@ -976,6 +981,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       width: part.media.width,
       height: part.media.height,
       duration: part.media.duration,
+      voice: part.media.voice,
       source: part.media.source,
     }))
     const originRequestId = randomUUID()
@@ -1071,6 +1077,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           media: {
             kind: part.media.kind, name: part.media.name, mimeType: part.media.mimeType,
             size: part.media.size, width: part.media.width, height: part.media.height,
+            duration: part.media.duration, voice: part.media.voice,
             source: {
               size: part.media.size,
               stream: ({ signal } = {}) => this.downloadMedia(session, part.media, { signal }),
@@ -1112,8 +1119,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMDirectDownload | undefined> {
     const locator = media.locator
     if (!locator || locator.deferred) return
-    const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
-    return { ...resolved, supportsRange: true }
+    if (media.voice) return
+    return this.client.resolveFileUrlForDirectDownload(rawQQMediaLocator(locator))
   }
 
   async getAvailableReactions(
@@ -1206,8 +1213,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMDirectDownload | undefined> {
     const locator = resource.locator
     if (!isRemoteQQMediaLocator(locator)) return
-    const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
-    return { ...resolved, supportsRange: true }
+    return this.client.resolveFileUrlForDirectDownload(rawQQMediaLocator(locator))
   }
 
   private ensureReactionCatalog(): Promise<IMReactionContext> {
@@ -1260,8 +1266,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private async withReactionCatalog(state: WireReactionState): Promise<IMReactionContext> {
-    void this.ensureReactionCatalog()
-    const catalog = this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
+    const loading = this.ensureReactionCatalog()
+    // A reaction count without its definition cannot be represented in TL:
+    // ReactionRpc will omit it and therefore never register the custom emoji
+    // document requested by Telegram clients. Keep reaction-free message paths
+    // non-blocking, but wait for the shared catalog whenever the response
+    // actually contains reactions that need projecting.
+    const catalog = state.reactions.length
+      ? await loading
+      : this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
     return { available: catalog.available, reactions: state.reactions, maxSelected: state.maxSelected }
   }
 
@@ -1725,6 +1738,7 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
     width: input.width,
     height: input.height,
     duration: input.duration,
+    voice: input.voice,
     preview: input.preview,
     locator: input.locator,
   }

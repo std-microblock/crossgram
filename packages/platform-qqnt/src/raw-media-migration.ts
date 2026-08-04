@@ -132,9 +132,9 @@ function rawMediaValues(
   const declaredSize = Number(locator.fileSize)
   return {
     platformMediaId: row.platformMediaId.replace(/:webm-v1$/, ''),
-    kind: locator.kind,
+    kind: locator.kind === 'image' ? 'image' : 'file',
     name: name ?? null,
-    mimeType: mimeTypeFromName(name, locator.kind),
+    mimeType: mimeTypeFromName(name, locator.kind === 'image' ? 'image' : 'file'),
     size: Number.isSafeInteger(declaredSize) && declaredSize >= 0 ? declaredSize : row.size,
   } as const
 }

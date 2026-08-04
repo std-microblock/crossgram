@@ -247,7 +247,7 @@ describe('StickerRpc', () => {
     expect(provider.getPack).toHaveBeenCalledWith(expect.anything(), 'stale')
   })
 
-  it('serves QQNT background refreshes from one provider snapshot and honors Telegram hashes', async () => {
+  it('serves QQNT favorites only through the account-owned sticker set and honors Telegram hashes', async () => {
     const { rpc, provider } = stickerHarness()
 
     const all = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
@@ -265,7 +265,7 @@ describe('StickerRpc', () => {
     const saved = await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
     expect(saved._).toBe('messages.favedStickers')
     if (saved._ !== 'messages.favedStickers') throw new Error('expected full saved stickers')
-    expect(saved.stickers).toMatchObject([{ _: 'document', size: 321 }])
+    expect(saved).toMatchObject({ packs: [], stickers: [] })
 
     await expect(rpc.getAllStickers({
       _: 'messages.getAllStickers', hash: all.hash,
@@ -281,7 +281,7 @@ describe('StickerRpc', () => {
 
     expect(provider.listPacks).toHaveBeenCalledTimes(1)
     expect(provider.getPack).toHaveBeenCalledTimes(1)
-    expect(provider.listSavedStickers).toHaveBeenCalledTimes(1)
+    expect(provider.listSavedStickers).not.toHaveBeenCalled()
   })
 
   it('skips broken recent stickers without shifting the surviving sticker date', async () => {
@@ -331,13 +331,13 @@ describe('StickerRpc', () => {
     expect(provider.getPack).not.toHaveBeenCalled()
   })
 
-  it('invalidates saved stickers immediately after a favorite mutation', async () => {
+  it('maps QQ favorite mutations to QQNT and refreshes the account-owned pack without filling Telegram favorites', async () => {
     const { rpc, provider, sticker } = stickerHarness()
     await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
     await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
     await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
     await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
-    expect(provider.listSavedStickers).toHaveBeenCalledTimes(1)
+    expect(provider.listSavedStickers).not.toHaveBeenCalled()
 
     const media = rpc.makeMessageMedia(sticker)
     if (!media.document || media.document._ !== 'document') throw new Error('expected document')
@@ -352,7 +352,8 @@ describe('StickerRpc', () => {
     await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
 
     expect(provider.setSavedSticker).toHaveBeenCalledTimes(1)
-    expect(provider.listSavedStickers).toHaveBeenCalledTimes(2)
+    expect(provider.setSavedSticker).toHaveBeenCalledWith(expect.anything(), sticker, true)
+    expect(provider.listSavedStickers).not.toHaveBeenCalled()
     expect(provider.listPacks).toHaveBeenCalledTimes(2)
   })
 
@@ -432,7 +433,7 @@ describe('StickerRpc', () => {
     })).resolves.toMatchObject({ _: 'messages.allStickers', sets: [{ title: 'QQ 收藏表情' }] })
   })
 
-  it('uses an upload plan and bridge-local favorite state for a pack assigned across accounts', async () => {
+  it('uses an upload plan but rejects Telegram-local favorites for a pack assigned across QQ accounts', async () => {
     const { rpc, provider, sticker, database } = stickerHarness()
     ;(provider as { capabilities: IMStickerProvider['capabilities'] }).capabilities = {
       platformKinds: ['qq'], ownerPlatformId: 'qq/source', sessionScoped: true,
@@ -455,41 +456,27 @@ describe('StickerRpc', () => {
 
     await expect(rpc.resolveSend(input)).resolves.toMatchObject({ plan: { type: 'upload' } })
     expect(provider.prepareSend).not.toHaveBeenCalled()
-    await rpc.faveSticker({ _: 'messages.faveSticker', id: input, unfave: false })
+    await expect(rpc.faveSticker({ _: 'messages.faveSticker', id: input, unfave: false }))
+      .rejects.toMatchObject({ code: 400, text: 'STICKER_FAVORITES_UNSUPPORTED' })
     expect(provider.setSavedSticker).not.toHaveBeenCalled()
-    expect(database.upsert).toHaveBeenCalled()
+    expect(database.upsert).not.toHaveBeenCalled()
   })
 
-  it('restores local favorite document mappings before returning not-modified', async () => {
-    const loose: IMSticker = {
-      providerId: 'qq:stickers', stickerId: 'favorite:local-only',
-      title: 'Local favorite', format: 'static', mimeType: 'image/png', version: 1,
-    }
-    const row = { providerId: 'qq:stickers', providerStickerId: loose.stickerId }
+  it('ignores legacy bridge-local QQ favorite rows in favor of the QQ favorite set', async () => {
+    const row = { providerId: 'qq:stickers', providerStickerId: 'favorite:local-only' }
     const first = stickerHarness()
-    vi.mocked(first.provider.getSticker).mockResolvedValue(loose)
-    vi.mocked(first.provider.listSavedStickers!).mockResolvedValue({ stickers: [] })
     first.query.execute.mockResolvedValue([row] as never)
     const full = await first.rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
     if (full._ !== 'messages.favedStickers') throw new Error('expected full saved stickers')
-    const document = full.stickers[0]!
-    if (document._ !== 'document') throw new Error('expected saved sticker document')
+    expect(full).toMatchObject({ packs: [], stickers: [] })
+    expect(first.database.select).not.toHaveBeenCalled()
 
     const resumed = stickerHarness()
-    vi.mocked(resumed.provider.getSticker).mockResolvedValue(loose)
-    vi.mocked(resumed.provider.listSavedStickers!).mockResolvedValue({ stickers: [] })
     resumed.query.execute.mockResolvedValue([row] as never)
     await expect(resumed.rpc.getFavedStickers({
       _: 'messages.getFavedStickers', hash: full.hash,
     })).resolves.toEqual({ _: 'messages.favedStickersNotModified' })
-    await expect(resumed.rpc.faveSticker({
-      _: 'messages.faveSticker', unfave: false,
-      id: {
-        _: 'inputDocument', id: document.id, accessHash: document.accessHash,
-        fileReference: document.fileReference,
-      },
-    })).resolves.toEqual({ _: 'boolTrue' })
-    expect(resumed.provider.setSavedSticker).toHaveBeenCalledWith(expect.anything(), loose, true)
+    expect(resumed.database.select).not.toHaveBeenCalled()
   })
 
   it('recovers a historical message sticker from its file reference after the document cache is lost', async () => {

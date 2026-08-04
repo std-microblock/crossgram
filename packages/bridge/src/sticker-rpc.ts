@@ -4,7 +4,7 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
 import { telegramStickerPlaceholder } from './sticker-outline.js'
-import { isAutomaticallyAssociated, providerBelongsToAccount } from './sticker-dashboard.js'
+import { isAutomaticallyAssociated, providerBelongsToAccount } from './sticker-ownership.js'
 import type { IMDirectDownload, IMPlatform, PlatformSession } from './platform.js'
 import type {
   IMSticker, IMStickerAsset, IMStickerPack, IMStickerPackSummary, IMStickerProvider, IMStickerSendPlan,
@@ -173,6 +173,14 @@ export class StickerRpc {
   }
 
   async getFavedStickers(req: tl.messages.RawGetFavedStickersRequest): Promise<tl.messages.TypeFavedStickers> {
+    if (this._platform.platformKind === 'qq') {
+      // QQ favorites are one account-owned QQ sticker set. Do not mirror them
+      // into Telegram's separate, capped favorite feed: that creates two
+      // folders for one QQ collection and makes their contents diverge.
+      const hash = Long.fromNumber(catalogHash([]))
+      if (hashMatches(req.hash, hash)) return { _: 'messages.favedStickersNotModified' }
+      return { _: 'messages.favedStickers', hash, packs: [], stickers: [] }
+    }
     const rows = await this._database.select('mtproto_sticker_favorite', {
       platformSessionId: this._session.platformSessionId,
     }).orderBy('createdAt', 'desc').limit(200).execute()
@@ -195,6 +203,17 @@ export class StickerRpc {
 
   async faveSticker(req: tl.messages.RawFaveStickerRequest): Promise<tl.TlObject> {
     const resolved = await this._resolveInputDocument(req.id)
+    if (this._platform.platformKind === 'qq') {
+      if (!this._providerBelongsToCurrentAccount(resolved.provider) || !resolved.provider.setSavedSticker) {
+        throw new RpcError(400, 'STICKER_FAVORITES_UNSUPPORTED')
+      }
+      // Adding/removing a favorite from a QQ-backed Telegram client is always
+      // the native QQ operation. The resulting QQ collection is exposed only
+      // through its account-owned qq-favorites sticker set.
+      await resolved.provider.setSavedSticker(this._context(), resolved.sticker, !req.unfave)
+      this._providerCache.clear()
+      return { _: 'boolTrue' } as unknown as tl.TlObject
+    }
     if (this._providerBelongsToCurrentAccount(resolved.provider)) {
       await resolved.provider.setSavedSticker?.(this._context(), resolved.sticker, !req.unfave)
     }

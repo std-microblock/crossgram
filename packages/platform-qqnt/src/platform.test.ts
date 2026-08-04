@@ -225,6 +225,49 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(2)
   })
 
+  it('waits for reaction definitions when a message has reaction counts to project', async () => {
+    const platform = new QQNTPlatform()
+    const catalog = Promise.withResolvers<Awaited<ReturnType<typeof platform.client.getReactionCatalog>>>()
+    platform.client.getReactionCatalog = vi.fn(() => catalog.promise)
+    platform.client.getMessageReactions = vi.fn(async () => ({
+      reactions: [{ key: '1:265', count: 3, selected: true }], maxSelected: 20,
+    }))
+    const pending = platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'message', targetId: 'message',
+    })
+    let settled = false
+    void pending.finally(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    catalog.resolve({
+      available: [{
+        key: '1:265', title: '辣眼睛', presentation: {
+          type: 'custom', alt: '[辣眼睛]', resource: {
+            version: 1, format: 'static', mimeType: 'image/png', width: 24, height: 18,
+            locator: { reactionKey: '1:265' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    })
+    await expect(pending).resolves.toMatchObject({
+      available: [{ key: '1:265' }], reactions: [{ key: '1:265', count: 3, selected: true }],
+    })
+  })
+
+  it('does not wait for reaction definitions when a message has no reactions', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(() => new Promise<Awaited<
+      ReturnType<typeof platform.client.getReactionCatalog>
+    >>(() => {}))
+    platform.client.getMessageReactions = vi.fn(async () => ({ reactions: [], maxSelected: 20 }))
+
+    await expect(platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'message', targetId: 'message',
+    })).resolves.toEqual({ available: [], reactions: [], maxSelected: 20 })
+  })
+
   it('reuses prepared dialog previews when a stale page refresh returns unchanged messages', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
@@ -391,7 +434,7 @@ describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 20, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 21, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
@@ -1682,8 +1725,8 @@ describe('QQNTPlatform mapping', () => {
 
   it('strips legacy local markers before resolving the original QQ image URL', async () => {
     const platform = new QQNTPlatform()
-    platform.client.resolveFileUrl = vi.fn(async () => ({
-      url: 'https://cdn.example.test/original.png', expiresAt: Date.now() + 60_000,
+    platform.client.resolveFileUrlForDirectDownload = vi.fn(async () => ({
+      url: 'https://cdn.example.test/original.png', expiresAt: Date.now() + 60_000, supportsRange: true,
     }))
     const original: IMMedia<QQMediaLocator> = {
       id: 'image', kind: 'image', mimeType: 'image/png', size: 6_705_675,
@@ -1703,8 +1746,8 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.resolveMediaUrl(session, preview)).resolves.toMatchObject({
       url: 'https://cdn.example.test/original.png', supportsRange: true,
     })
-    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(2)
-    expect(platform.client.resolveFileUrl).toHaveBeenLastCalledWith(
+    expect(platform.client.resolveFileUrlForDirectDownload).toHaveBeenCalledTimes(2)
+    expect(platform.client.resolveFileUrlForDirectDownload).toHaveBeenLastCalledWith(
       expect.not.objectContaining({ previewKey: expect.anything(), cachedPath: expect.anything() }),
     )
   })
@@ -1781,8 +1824,8 @@ describe('QQNTPlatform mapping', () => {
       await releaseSource.promise
       yield jpeg
     })
-    platform.client.resolveFileUrl = vi.fn(async () => ({
-      url: 'https://cdn.example.test/photo.jpg', expiresAt: Date.now() + 60_000,
+    platform.client.resolveFileUrlForDirectDownload = vi.fn(async () => ({
+      url: 'https://cdn.example.test/photo.jpg', expiresAt: Date.now() + 60_000, supportsRange: true,
     }))
 
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
@@ -1802,7 +1845,7 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.resolveMediaUrl(session, original)).resolves.toMatchObject({
       url: 'https://cdn.example.test/photo.jpg', supportsRange: true,
     })
-    expect(platform.client.resolveFileUrl).toHaveBeenCalledTimes(1)
+    expect(platform.client.resolveFileUrlForDirectDownload).toHaveBeenCalledTimes(1)
 
     releaseSource.resolve()
     const update = await edited.promise
@@ -2202,6 +2245,55 @@ describe('QQNTPlatform mapping', () => {
     }, { offset: 1, limit: 2, onProgress: (item) => { progress.push(item.transferredBytes) } })) chunks.push(...chunk)
     expect(chunks).toEqual([2, 3])
     expect(progress).toEqual([1, 2])
+  })
+
+  it('maps recorded voice media with its OGG duration and rejects mixed voice messages', async () => {
+    const platform = new QQNTPlatform()
+    const locator = {
+      messageId: 'voice-message', elementId: 'voice-element', chatType: 1 as const, peerUid: 'u',
+      kind: 'voice' as const, fileName: 'voice.ogg', fileSize: '42', filePath: '/cache/voice.ogg',
+    }
+    platform.client.sendMessage = vi.fn(async (_conversation, _text, media) => {
+      expect(media).toMatchObject([{ kind: 'file', voice: true, mimeType: 'audio/ogg', duration: 7 }])
+      return {
+        id: 'voice-message', conversationId: '1:u', senderId: 'self', timestamp: 10, outgoing: true,
+        parts: [{ type: 'media' as const, media: {
+          id: 'voice-element', kind: 'file' as const, voice: true, name: 'voice.ogg', mimeType: 'audio/ogg',
+          size: 42, duration: 7, locator,
+        } }],
+      }
+    })
+    const sent = await platform.sendMessage(session, { id: '1:u' }, { parts: [{ type: 'media', media: {
+      kind: 'file', voice: true, name: 'voice.ogg', mimeType: 'audio/ogg', duration: 7,
+      source: { async *stream() { yield Uint8Array.of(1) } },
+    } }] })
+    expect(sent.content.parts).toMatchObject([{ type: 'media', media: {
+      voice: true, mimeType: 'audio/ogg', size: 42, duration: 7, locator,
+    } }])
+    await expect(platform.sendMessage(session, { id: '1:u' }, { parts: [
+      { type: 'text', text: 'no mixing' },
+      { type: 'media', media: { kind: 'file', voice: true, source: { async *stream() { yield Uint8Array.of(1) } } } },
+    ] })).rejects.toThrow('exactly one voice item without a reply')
+  })
+
+  it('rejects multiple voice items and voice media mixed with ordinary media', async () => {
+    const platform = new QQNTPlatform()
+    const send = vi.spyOn(platform.client, 'sendMessage')
+    const source = { async *stream() { yield Uint8Array.of(1) } }
+    for (const parts of [
+      [
+        { type: 'media' as const, media: { kind: 'file' as const, voice: true, source } },
+        { type: 'media' as const, media: { kind: 'file' as const, voice: true, source } },
+      ],
+      [
+        { type: 'media' as const, media: { kind: 'file' as const, voice: true, source } },
+        { type: 'media' as const, media: { kind: 'file' as const, source } },
+      ],
+    ]) {
+      await expect(platform.sendMessage(session, { id: '1:u' }, { parts }))
+        .rejects.toThrow('exactly one voice item without a reply')
+    }
+    expect(send).not.toHaveBeenCalled()
   })
 
   it('infers video MIME types for QQ file elements without changing ordinary documents', async () => {

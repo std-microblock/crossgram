@@ -943,6 +943,7 @@ export class StaticStickerProvider implements IMStickerProvider {
       title: _native ? 'Static Native Stickers' : 'Static Plugin Stickers',
       shortName: `static_${kind}`,
       version: 1,
+      automaticAssociation: 'provider-account',
       stickers: _native
         ? [this._sticker('native-smile', '🙂'), this._sticker('native-party', '🎉')]
         : [
@@ -970,6 +971,7 @@ export class StaticStickerProvider implements IMStickerProvider {
         shortName: this._pack.shortName,
         count: this._pack.stickers.length,
         version: this._pack.version,
+        automaticAssociation: this._pack.automaticAssociation,
       }],
     }
   }
