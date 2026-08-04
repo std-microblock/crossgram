@@ -870,7 +870,11 @@ export class CallRegistry {
     await this._deliverPending(call, excludeAuthKeyId)
     call.state = 'active'
     call.startDate = Math.floor(this._now() / 1_000)
-    await this._publishTransition(call, excludeAuthKeyId)
+    // The worker is the synthetic Telegram caller, so no second Telegram auth
+    // key will ever confirm this incoming call. The accepting recipient gets
+    // phoneCallAccepted in its RPC response, then must also receive the active
+    // update that a real caller's phone.confirmCall would normally produce.
+    await this._publishTransition(call)
   }
 
   private async _publishTransition(call: StoredCall, excludeAuthKeyId?: string): Promise<void> {
