@@ -92,6 +92,7 @@ export interface IMMediaRow {
   width: number | null
   height: number | null
   duration: number | null
+  voice?: boolean
   preview: {
     mimeType?: string
     size: number
@@ -339,7 +340,7 @@ export function defineModels(ctx: Context): void {
     id: 'unsigned', messageId: 'unsigned', ordinal: 'unsigned', partIndex: 'unsigned', platformMediaId: 'text',
     kind: 'string', name: { type: 'text', nullable: true }, mimeType: { type: 'text', nullable: true },
     size: { type: 'unsigned', nullable: true }, width: { type: 'unsigned', nullable: true },
-    height: { type: 'unsigned', nullable: true }, duration: { type: 'unsigned', nullable: true },
+    height: { type: 'unsigned', nullable: true }, duration: { type: 'unsigned', nullable: true }, voice: 'boolean',
     preview: { type: 'json', nullable: true },
     strippedThumbnail: { type: 'binary', nullable: true }, locator: 'json',
   }, {

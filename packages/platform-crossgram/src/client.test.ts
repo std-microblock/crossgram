@@ -739,6 +739,45 @@ describe('QQNTClient streaming transport', () => {
     ])
   })
 
+  it('streams a voice request body to a real local HTTP server', async () => {
+    let prepared = 0
+    let manifest: Record<string, unknown> | undefined
+    let body = new Uint8Array()
+    server = createServer(async (request, response) => {
+      if (request.url === '/status') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ protocolVersion: 21, ready: true }))
+        return
+      }
+      prepared++
+      manifest = JSON.parse(Buffer.from(String(request.headers['x-qqnt-manifest']), 'base64url').toString())
+      body = new Uint8Array(await collect(request))
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ id: 'voice', conversationId: 'c', senderId: 's', timestamp: 1, outgoing: true, parts: [] }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    await client.status()
+    await client.sendMessage('c', undefined, [{
+      kind: 'file', voice: true, name: 'voice.ogg', source: { async *stream() { yield Uint8Array.of(1, 2); yield Uint8Array.of(3) } },
+    }])
+    expect(prepared).toBe(1)
+    expect([...body]).toEqual([1, 2, 3])
+    expect(manifest).toMatchObject({ media: [{ kind: 'voice', name: 'voice.ogg' }] })
+  })
+
+  it('rejects voice sends against a v20 bridge before posting bytes', async () => {
+    const fetch = vi.fn(async () => Response.json({ protocolVersion: 20, ready: true }))
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+    await expect(client.sendMessage('c', undefined, [{
+      kind: 'file', voice: true, name: 'voice.ogg', source: { async *stream() { yield Uint8Array.of(1) } },
+    }])).rejects.toThrow('protocol 21 is required')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it('derives the WebSocket endpoint from the HTTP endpoint when no override is configured', () => {
     expect(new QQNTClient({ endpoint: 'https://bridge.example/v1/' }).webSocketEndpoint)
       .toBe('https://bridge.example/v1/events/ws')

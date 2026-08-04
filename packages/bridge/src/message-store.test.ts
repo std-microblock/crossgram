@@ -364,6 +364,25 @@ describe('MessageStore', () => {
     })
   })
 
+  it('round-trips recorded voice media metadata through persistence', async () => {
+    const { ctx, store } = await createStore()
+    const conversation: IMConversation = { id: 'voice-room', kind: 'direct', title: 'Voice room' }
+    const message: IMMessage = {
+      id: 'voice-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { parts: [{ type: 'media', media: {
+        id: 'voice-media', kind: 'file', voice: true, name: 'voice.ogg', mimeType: 'audio/ogg',
+        size: 42, duration: 7, locator: { kind: 'voice', fileName: 'voice.ogg' },
+      } }] },
+    }
+    const ingested = await store.ingest(session, conversation, message)
+    await expect(ctx.database.get('mtproto_im_media', { messageId: ingested.message.id })).resolves.toMatchObject([{
+      platformMediaId: 'voice-media', mimeType: 'audio/ogg', size: 42, duration: 7, voice: true,
+    }])
+    await expect(store.readHistory(session.platformSessionId, conversation.id)).resolves.toMatchObject([{
+      content: { parts: [{ type: 'media', media: { voice: true, size: 42, duration: 7 } }] },
+    }])
+  })
+
   it('uses one auto-increment Telegram user ID across sessions of the same platform entry', async () => {
     const { ctx, store } = await createStore()
     const first = await store.upsertUser(session, { id: 'opaque-alice', firstName: 'opaque-alice' })

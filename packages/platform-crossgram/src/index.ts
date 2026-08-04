@@ -29,7 +29,7 @@ import type {
 export type MemberNameMode = 'nickname' | 'groupAlias'
 
 const MIN_PROTOCOL_VERSION = 19
-const MAX_PROTOCOL_VERSION = 20
+const MAX_PROTOCOL_VERSION = 21
 
 export interface Config extends QQNTClientOptions {
   /**
@@ -246,7 +246,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const userId = status.selfUid ?? status.selfUin
     if (!status.ready || !userId) throw new Error('QQNT account is not ready')
     if (!Number.isInteger(status.protocolVersion)
-      || (status.protocolVersion !== MIN_PROTOCOL_VERSION && status.protocolVersion !== MAX_PROTOCOL_VERSION)) {
+      || status.protocolVersion < MIN_PROTOCOL_VERSION
+      || status.protocolVersion > MAX_PROTOCOL_VERSION) {
       throw new Error(`QQNT bridge protocol ${status.protocolVersion} is unsupported; supported range is ${MIN_PROTOCOL_VERSION}-${MAX_PROTOCOL_VERSION}`)
     }
     const user = await this.client.getUser(userId)
@@ -961,6 +962,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       sticker = stickerPart.sticker.reference as unknown as QQStickerReference
     }
     if (mediaParts.length > 9) throw new Error('QQNT supports at most nine media items per message')
+    const voiceParts = mediaParts.filter((part) => part.media.voice)
+    if (voiceParts.length && (voiceParts.length !== 1 || mediaParts.length !== 1 || text || sticker || content.replyToId || content.replyToNativeSequence)) {
+      throw new Error('QQNT voice messages must contain exactly one voice item without a reply')
+    }
     const media = mediaParts.map((part, index) => ({
       kind: part.media.kind,
       name: part.media.name ?? `upload-${Date.now()}-${index}`,
@@ -968,6 +973,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       width: part.media.width,
       height: part.media.height,
       duration: part.media.duration,
+      voice: part.media.voice,
       source: part.media.source,
     }))
     const originRequestId = randomUUID()
@@ -1063,6 +1069,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           media: {
             kind: part.media.kind, name: part.media.name, mimeType: part.media.mimeType,
             size: part.media.size, width: part.media.width, height: part.media.height,
+            duration: part.media.duration, voice: part.media.voice,
             source: {
               size: part.media.size,
               stream: ({ signal } = {}) => this.downloadMedia(session, part.media, { signal }),
@@ -1104,6 +1111,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMDirectDownload | undefined> {
     const locator = media.locator
     if (!locator || locator.deferred) return
+    if (media.voice) return
     const resolved = await this.client.resolveFileUrl(rawQQMediaLocator(locator))
     return { ...resolved, supportsRange: true }
   }
@@ -1728,6 +1736,7 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
     width: input.width,
     height: input.height,
     duration: input.duration,
+    voice: input.voice,
     preview: input.preview,
     locator: input.locator,
   }
