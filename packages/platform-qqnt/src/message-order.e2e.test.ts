@@ -770,6 +770,7 @@ describe('QQNT remote media routing E2E', () => {
     let server: Server | undefined
     server = createServer(async (request, response) => {
       if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+        await new Promise((resolve) => setTimeout(resolve, 100))
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({
           available: [{
@@ -784,6 +785,13 @@ describe('QQNT remote media routing E2E', () => {
             },
           }],
           reactions: [], maxSelected: 20,
+        }))
+        return
+      }
+      if (request.method === 'GET' && request.url?.startsWith('/v1/messages/reactions?')) {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          reactions: [{ key: '1:265', count: 2, selected: true }], maxSelected: 20,
         }))
         return
       }
@@ -814,7 +822,10 @@ describe('QQNT remote media routing E2E', () => {
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`, token: 'bridge-token',
     }, 'qqnt:stickers', undefined)
-    const catalog = await platform.getAvailableReactions(session, { conversationId: '2:group' })
+    const catalog = await platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'message', targetId: 'message', nativeSequence: '571',
+    })
+    expect(catalog.reactions).toEqual([{ key: '1:265', count: 2, selected: true }])
     const definition = catalog.available[0]!
     if (definition.presentation.type !== 'custom') throw new Error('expected custom reaction')
     const resource = definition.presentation.resource

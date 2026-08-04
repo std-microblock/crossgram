@@ -225,6 +225,49 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getReactionCatalog).toHaveBeenCalledTimes(2)
   })
 
+  it('waits for reaction definitions when a message has reaction counts to project', async () => {
+    const platform = new QQNTPlatform()
+    const catalog = Promise.withResolvers<Awaited<ReturnType<typeof platform.client.getReactionCatalog>>>()
+    platform.client.getReactionCatalog = vi.fn(() => catalog.promise)
+    platform.client.getMessageReactions = vi.fn(async () => ({
+      reactions: [{ key: '1:265', count: 3, selected: true }], maxSelected: 20,
+    }))
+    const pending = platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'message', targetId: 'message',
+    })
+    let settled = false
+    void pending.finally(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    catalog.resolve({
+      available: [{
+        key: '1:265', title: '辣眼睛', presentation: {
+          type: 'custom', alt: '[辣眼睛]', resource: {
+            version: 1, format: 'static', mimeType: 'image/png', width: 24, height: 18,
+            locator: { reactionKey: '1:265' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    })
+    await expect(pending).resolves.toMatchObject({
+      available: [{ key: '1:265' }], reactions: [{ key: '1:265', count: 3, selected: true }],
+    })
+  })
+
+  it('does not wait for reaction definitions when a message has no reactions', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(() => new Promise<Awaited<
+      ReturnType<typeof platform.client.getReactionCatalog>
+    >>(() => {}))
+    platform.client.getMessageReactions = vi.fn(async () => ({ reactions: [], maxSelected: 20 }))
+
+    await expect(platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'message', targetId: 'message',
+    })).resolves.toEqual({ available: [], reactions: [], maxSelected: 20 })
+  })
+
   it('reuses prepared dialog previews when a stale page refresh returns unchanged messages', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))

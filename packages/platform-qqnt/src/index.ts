@@ -1258,8 +1258,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private async withReactionCatalog(state: WireReactionState): Promise<IMReactionContext> {
-    void this.ensureReactionCatalog()
-    const catalog = this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
+    const loading = this.ensureReactionCatalog()
+    // A reaction count without its definition cannot be represented in TL:
+    // ReactionRpc will omit it and therefore never register the custom emoji
+    // document requested by Telegram clients. Keep reaction-free message paths
+    // non-blocking, but wait for the shared catalog whenever the response
+    // actually contains reactions that need projecting.
+    const catalog = state.reactions.length
+      ? await loading
+      : this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
     return { available: catalog.available, reactions: state.reactions, maxSelected: state.maxSelected }
   }
 
