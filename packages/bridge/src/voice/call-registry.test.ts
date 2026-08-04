@@ -360,6 +360,22 @@ describe('CallRegistry', () => {
     ])
   })
 
+  it('accepts directly from requested when the client skips phone.receivedCall', async () => {
+    const { calls, worker, updates } = setup()
+    const requested = await incoming(calls, 'accept-without-received-ack')
+    const peer = { id: requested.id, accessHash: requested.accessHash }
+
+    const accepted = await calls.accept(session, peer, publicValue(6), protocol)
+
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallAccepted', gB: publicValue(6) })
+    expect(worker.events.map((event) => event.operation)).toEqual([
+      'prepare-caller', 'complete-caller',
+    ])
+    expect(updates.map((update) => update.phoneCall._)).toEqual([
+      'phoneCallRequested', 'phoneCallAccepted', 'phoneCall',
+    ])
+  })
+
   it('rejects role-incompatible phone RPC transitions without changing the call', async () => {
     const { calls, updates } = setup()
     const caller = await requested(calls)

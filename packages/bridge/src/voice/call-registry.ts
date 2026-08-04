@@ -394,7 +394,12 @@ export class CallRegistry {
         await this._finishAccept(call, excludeAuthKeyId)
         return this._wrap(call)
       }
-      this._requireState(call, 'received')
+      // phone.receivedCall is only a delivery/ringing acknowledgement. Some
+      // Telegram clients accept directly from phoneCallRequested without
+      // sending that optional acknowledgement first.
+      if (call.state !== 'requested' && call.state !== 'received') {
+        throw new VoiceCallError('CALL_STATE_INVALID')
+      }
       const publicGB = gB.slice()
       let status: VoiceWorkerCallerCompletion
       try {
