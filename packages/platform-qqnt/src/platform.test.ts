@@ -391,7 +391,7 @@ describe('QQNTPlatform mapping', () => {
   it('supplies the current QQ account identity and avatar to bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 20, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 21, ready: true, selfUin: '10001', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
       id: 'u_self', numericId: '10001', name: 'Platform Alice',
@@ -431,8 +431,8 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).rejects.toThrow('not ready')
   })
 
-  it('rejects bridge protocols outside the supported 19-20 range', async () => {
-    for (const protocolVersion of [18, 21, 19.5, Number.NaN, '19', undefined]) {
+  it('rejects bridge protocols outside the supported 19-21 range', async () => {
+    for (const protocolVersion of [18, 22, 19.5, Number.NaN, '19', undefined]) {
       const platform = new QQNTPlatform()
       const status = {
         protocolVersion, ready: true, selfUin: '10001', selfUid: 'u_self',
@@ -440,7 +440,7 @@ describe('QQNTPlatform mapping', () => {
       platform.client.status = vi.fn(async () => status)
       platform.client.getUser = vi.fn()
 
-      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-20')
+      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-21')
       expect(platform.client.getUser).not.toHaveBeenCalled()
     }
   })
@@ -2186,6 +2186,55 @@ describe('QQNTPlatform mapping', () => {
     }, { offset: 1, limit: 2, onProgress: (item) => { progress.push(item.transferredBytes) } })) chunks.push(...chunk)
     expect(chunks).toEqual([2, 3])
     expect(progress).toEqual([1, 2])
+  })
+
+  it('maps recorded voice media with its OGG duration and rejects mixed voice messages', async () => {
+    const platform = new QQNTPlatform()
+    const locator = {
+      messageId: 'voice-message', elementId: 'voice-element', chatType: 1 as const, peerUid: 'u',
+      kind: 'voice' as const, fileName: 'voice.ogg', fileSize: '42', filePath: '/cache/voice.ogg',
+    }
+    platform.client.sendMessage = vi.fn(async (_conversation, _text, media) => {
+      expect(media).toMatchObject([{ kind: 'file', voice: true, mimeType: 'audio/ogg', duration: 7 }])
+      return {
+        id: 'voice-message', conversationId: '1:u', senderId: 'self', timestamp: 10, outgoing: true,
+        parts: [{ type: 'media' as const, media: {
+          id: 'voice-element', kind: 'file' as const, voice: true, name: 'voice.ogg', mimeType: 'audio/ogg',
+          size: 42, duration: 7, locator,
+        } }],
+      }
+    })
+    const sent = await platform.sendMessage(session, { id: '1:u' }, { parts: [{ type: 'media', media: {
+      kind: 'file', voice: true, name: 'voice.ogg', mimeType: 'audio/ogg', duration: 7,
+      source: { async *stream() { yield Uint8Array.of(1) } },
+    } }] })
+    expect(sent.content.parts).toMatchObject([{ type: 'media', media: {
+      voice: true, mimeType: 'audio/ogg', size: 42, duration: 7, locator,
+    } }])
+    await expect(platform.sendMessage(session, { id: '1:u' }, { parts: [
+      { type: 'text', text: 'no mixing' },
+      { type: 'media', media: { kind: 'file', voice: true, source: { async *stream() { yield Uint8Array.of(1) } } } },
+    ] })).rejects.toThrow('exactly one voice item without a reply')
+  })
+
+  it('rejects multiple voice items and voice media mixed with ordinary media', async () => {
+    const platform = new QQNTPlatform()
+    const send = vi.spyOn(platform.client, 'sendMessage')
+    const source = { async *stream() { yield Uint8Array.of(1) } }
+    for (const parts of [
+      [
+        { type: 'media' as const, media: { kind: 'file' as const, voice: true, source } },
+        { type: 'media' as const, media: { kind: 'file' as const, voice: true, source } },
+      ],
+      [
+        { type: 'media' as const, media: { kind: 'file' as const, voice: true, source } },
+        { type: 'media' as const, media: { kind: 'file' as const, source } },
+      ],
+    ]) {
+      await expect(platform.sendMessage(session, { id: '1:u' }, { parts }))
+        .rejects.toThrow('exactly one voice item without a reply')
+    }
+    expect(send).not.toHaveBeenCalled()
   })
 
   it('infers video MIME types for QQ file elements without changing ordinary documents', async () => {

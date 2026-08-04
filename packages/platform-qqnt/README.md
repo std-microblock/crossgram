@@ -44,6 +44,8 @@ message media. Resolver, RKey, and CDN errors for native media are returned to
 the caller without a fallback. Protocol v13's native `/files/play-url` and
 whole-file `200` responses remain supported during rolling upgrades.
 
+Recorded QQ PTT with a readable local path is exposed as a Telegram voice message (`audio/ogg`); Telegram voice messages are sent as one native QQ PTT bubble. Ordinary audio documents remain non-voice files.
+
 All ordinary message media keeps its original QQ format and locator. The relay
 does not probe animation or transcode GIF/APNG/PNG into WebM. History and
 live-event ingestion remain metadata-only, and patched clients call

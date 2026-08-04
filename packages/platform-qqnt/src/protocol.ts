@@ -5,7 +5,7 @@ export interface QQMediaLocator {
   elementId: string
   chatType: 1 | 2
   peerUid: string
-  kind: 'image' | 'file'
+  kind: 'image' | 'file' | 'voice'
   fileName: string
   fileSize?: string
   filePath?: string
@@ -42,6 +42,7 @@ export interface WireMedia {
   width?: number
   height?: number
   duration?: number
+  voice?: boolean
   preview?: {
     mimeType?: string
     size: number

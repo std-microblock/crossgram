@@ -213,6 +213,25 @@ describe('media send streaming', () => {
     })).rejects.toThrow('FILE_REFERENCE_INVALID')
   })
 
+  it('keeps ordinary document audio non-voice while preserving its duration', async () => {
+    const { rpc, uploads, inputs, peerId } = await createHarness()
+    await uploads.savePart(session.platformSessionId, '91', 0, Uint8Array.of(1, 2, 3))
+    await rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(91), message: '',
+      media: {
+        _: 'inputMediaUploadedDocument', file: inputFile(91, 1, 'music.mp3'), mimeType: 'audio/mpeg',
+        attributes: [
+          { _: 'documentAttributeFilename', fileName: 'music.mp3' },
+          { _: 'documentAttributeAudio', voice: false, duration: 12 },
+        ],
+      },
+    })
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0]!.parts).toMatchObject([{ type: 'media', media: {
+      kind: 'file', name: 'music.mp3', mimeType: 'audio/mpeg', duration: 12, voice: false,
+    } }])
+  })
+
   it('sends mixed image and file content through one platform call with independent streams', async () => {
     const { rpc, uploads, inputs, consumed, progress, peerId } = await createHarness()
     await uploads.savePart(session.platformSessionId, '1', 0, new Uint8Array([1, 2]))

@@ -54,6 +54,7 @@ export class QQNTClient {
   private readonly fetchImpl: typeof globalThis.fetch
   private readonly directUrls = new Map<string, DirectUrl>()
   private readonly directUrlRefreshes = new Map<string, Promise<DirectUrl>>()
+  private bridgeProtocol?: number
 
   constructor(options: QQNTClientOptions = {}) {
     this.endpoint = (options.endpoint ?? 'http://127.0.0.1:18767/v1').replace(/\/+$/, '')
@@ -62,8 +63,10 @@ export class QQNTClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch
   }
 
-  status(): Promise<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }> {
-    return this.json('/status')
+  async status(): Promise<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }> {
+    const status = await this.json<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }>('/status')
+    this.bridgeProtocol = status.protocolVersion
+    return status
   }
 
   async mediaLease(callId: string): Promise<QQNTMediaLease> {
@@ -210,6 +213,7 @@ export class QQNTClient {
     text: string | undefined,
     media: Array<{
       kind: 'image' | 'file'
+      voice?: boolean
       name: string
       mimeType?: string
       width?: number
@@ -224,6 +228,30 @@ export class QQNTClient {
     replyToId?: string,
     replyToSequence?: string,
   ): Promise<WireMessage> {
+    const voice = media?.find((item) => item.voice)
+    if (voice) {
+      if (this.bridgeProtocol === undefined) await this.status()
+      if (this.bridgeProtocol! < 21) {
+        throw new Error('QQNT bridge protocol 21 is required for voice messages')
+      }
+      if (media?.length !== 1 || text || textParts?.length || sticker || replyToId || replyToSequence) {
+        throw new Error('QQNT voice messages must contain exactly one voice item without a reply')
+      }
+      const manifest = {
+        conversationId, replyToId, replyToSequence, originRequestId,
+        media: [{ kind: 'voice', name: voice.name, mimeType: voice.mimeType, duration: voice.duration }],
+      }
+      const response = await this.fetchImpl(`${this.endpoint}/messages`, {
+        method: 'POST', headers: this.headers({
+          'x-qqnt-manifest': Buffer.from(JSON.stringify(manifest)).toString('base64url'),
+        }),
+        body: sourceReadableStream(voice.source, options.signal), signal: options.signal,
+        // Node's fetch requires this for a streaming request body.
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+      if (response.status === 403) throw new QQNTMessageSendRejectedError(await responseError(response))
+      return responseJson(response)
+    }
     const preparedMedia = media && await Promise.all(media.map(async (item) => ({
       item,
       hashes: await hashMediaSource(item.source, options.signal),
@@ -718,6 +746,19 @@ async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Pro
     throw new Error(`incomplete media source: expected ${source.size} bytes, streamed ${size}`)
   }
   return { size, md5: md5.digest('hex'), sha1: sha1.digest('hex'), file10MMd5: first10M.digest('hex') }
+}
+
+function sourceReadableStream(source: IMMediaSource, signal?: AbortSignal): ReadableStream<Uint8Array> {
+  const iterator = source.stream({ signal })[Symbol.asyncIterator]()
+  return new ReadableStream({
+    async pull(controller) {
+      if (signal?.aborted) throw signal.reason ?? new Error('upload aborted')
+      const next = await iterator.next()
+      if (next.done) controller.close()
+      else controller.enqueue(next.value)
+    },
+    async cancel() { await iterator.return?.() },
+  })
 }
 
 function parseMediaLease(value: unknown): QQNTMediaLease {
