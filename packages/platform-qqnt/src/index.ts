@@ -65,7 +65,8 @@ export const inject = ['imPlatform', 'imSticker', 'database', 'model']
 
 const DIALOGS_POLL_INTERVAL_MS = 15_000
 const REACTION_CATALOG_GRACE_MS = 10
-const REACTION_CATALOG_RETRY_DELAY_MS = 5_000
+const REACTION_CATALOG_RPC_GRACE_MS = 250
+const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CONVERSATION_PREFIX = 'qqnt-multi-forward:'
@@ -1121,7 +1122,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (!this.isGroupConversation(target.conversationId)) {
       return { available: [], reactions: [], maxSelected: 0 }
     }
-    return this.ensureReactionCatalog()
+    await waitAtMost(this.ensureReactionCatalog(), REACTION_CATALOG_RPC_GRACE_MS)
+    return this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
   }
 
   async getMessageReactions(
@@ -1256,7 +1258,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private async withReactionCatalog(state: WireReactionState): Promise<IMReactionContext> {
-    const catalog = await this.ensureReactionCatalog()
+    void this.ensureReactionCatalog()
+    const catalog = this.reactionCatalog ?? EMPTY_GROUP_REACTION_CATALOG
     return { available: catalog.available, reactions: state.reactions, maxSelected: state.maxSelected }
   }
 

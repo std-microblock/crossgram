@@ -1,5 +1,8 @@
 import { createServer, type Server } from 'node:http'
 import { once } from 'node:events'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocketServer } from 'ws'
 import { QQNTClient } from './client.js'
@@ -591,8 +594,33 @@ describe('QQNTClient streaming transport', () => {
     await expect(client.resolveFileUrlForDirectDownload(locator)).resolves.toMatchObject({ supportsRange: false })
     expect(requests).toEqual([
       { url: 'http://bridge.invalid/v1/files/direct-url', range: undefined },
-      { url: 'https://cdn.qq.example/no-range', range: 'bytes=0-0' },
+      { url: 'https://cdn.qq.example/no-range', range: 'bytes=0-1' },
     ])
+  })
+
+  it('accepts QQ CDN URLs that reject the degenerate 0-0 probe but serve real ranges', async () => {
+    const ranges: Array<string | undefined> = []
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input)
+      if (url === 'http://bridge.invalid/v1/files/direct-url') {
+        return Response.json({
+          url: 'https://cdn.qq.example/quirky-range', expiresAt: Date.now() + 60_000,
+        })
+      }
+      const range = new Headers(init?.headers).get('range') ?? undefined
+      ranges.push(range)
+      if (range === 'bytes=0-0') return new Response(null, { status: 200 })
+      return new Response('ab', {
+        status: 206, headers: { 'content-range': 'bytes 0-1/22871', 'content-length': '2' },
+      })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(client.resolveFileUrlForDirectDownload({
+      messageId: 'quirky', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'image', fileName: 'photo.png', fileUuid: 'quirky-file', fileSize: '22871',
+    })).resolves.toMatchObject({ supportsRange: true })
+    expect(ranges).toEqual(['bytes=0-1'])
   })
 
   it('downloads an image from its packet-refreshed direct URL without leaking bridge authorization', async () => {
@@ -731,6 +759,81 @@ describe('QQNTClient streaming transport', () => {
     expect(first.toString()).toBe('def')
     expect(second.toString()).toBe('gh')
     expect(rangeHeaders).toEqual(['bytes=3-5'])
+  })
+
+  it('spools one unranged HTTP response to disk for sequential 128 KiB getFile chunks', async () => {
+    const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-unranged-client-test-'))
+    const chunkSize = 128 * 1024
+    const wholeFile = Buffer.alloc(chunkSize * 2)
+    for (let index = 0; index < wholeFile.length; index++) wholeFile[index] = index % 251
+    const releaseTail = Promise.withResolvers<void>()
+    const firstHalfSent = Promise.withResolvers<void>()
+    const cdnRanges: Array<string | undefined> = []
+    try {
+      server = createServer(async (request, response) => {
+        if (request.url === '/files/direct-url') {
+          for await (const _chunk of request) { /* drain locator */ }
+          const address = server!.address()
+          if (!address || typeof address === 'string') throw new Error('missing address')
+          response.setHeader('content-type', 'application/json')
+          response.end(JSON.stringify({
+            url: `http://127.0.0.1:${address.port}/qq-cdn/large-file`,
+            expiresAt: Date.now() + 60_000,
+          }))
+          return
+        }
+        if (request.url === '/qq-cdn/large-file') {
+          cdnRanges.push(request.headers.range)
+          if (request.headers.range) {
+            response.end('range ignored')
+            return
+          }
+          response.writeHead(200, { 'content-length': String(wholeFile.length) })
+          response.write(wholeFile.subarray(0, chunkSize), () => firstHalfSent.resolve())
+          await releaseTail.promise
+          response.end(wholeFile.subarray(chunkSize))
+          return
+        }
+        response.writeHead(500).end()
+      })
+      server.listen(0, '127.0.0.1')
+      await once(server, 'listening')
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('missing address')
+      const client = new QQNTClient({
+        endpoint: `http://127.0.0.1:${address.port}`,
+        unrangedCachePath: cachePath,
+      })
+      const locator = {
+        messageId: 'large-file', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+        kind: 'file' as const, fileName: 'large.bin', fileUuid: 'large-file-uuid',
+        // This used to exceed the in-memory fallback limit and trigger one
+        // whole-file HTTP request for every Telegram upload.getFile chunk.
+        fileSize: String(128 * 1024 * 1024),
+      }
+
+      await expect(client.resolveFileUrlForDirectDownload(locator)).resolves.toMatchObject({
+        supportsRange: false,
+      })
+      const first = collect(client.downloadFile(locator, { offset: 0, limit: chunkSize }))
+      await firstHalfSent.promise
+      await expect(Promise.race([
+        first,
+        new Promise<Buffer>((_, reject) => setTimeout(() => reject(new Error('first chunk waited for EOF')), 2_000)),
+      ])).resolves.toEqual(wholeFile.subarray(0, chunkSize))
+
+      const second = collect(client.downloadFile(locator, { offset: chunkSize, limit: chunkSize }))
+      let secondSettled = false
+      void second.finally(() => { secondSettled = true })
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(secondSettled).toBe(false)
+      releaseTail.resolve()
+      await expect(second).resolves.toEqual(wholeFile.subarray(chunkSize))
+      expect(cdnRanges).toEqual(['bytes=0-1', undefined])
+    } finally {
+      releaseTail.resolve()
+      await rm(cachePath, { recursive: true, force: true, maxRetries: 20, retryDelay: 25 })
+    }
   })
 
   it('uses the independent WebSocket endpoint, parses frames sequentially, and resumes from the acknowledged event', async () => {
