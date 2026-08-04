@@ -19,7 +19,7 @@ const describeUnix = process.platform === 'win32' ? describe.skip : describe
 
 const protocol: tl.RawPhoneCallProtocol = {
   _: 'phoneCallProtocol', udpP2p: false, udpReflector: false,
-  minLayer: 100, maxLayer: 100, libraryVersions: ['crossgram-voice-worker-v2'],
+  minLayer: 65, maxLayer: 92, libraryVersions: ['5.0.0'],
 }
 const mediaStartConfig = {
   initializationTimeoutMs: 1, receiveTimeoutMs: 1,
@@ -129,6 +129,16 @@ function openSocketCount(client: VoiceWorkerSocketClient): number {
 }
 
 describe('voice worker IPC v2 codec', () => {
+  it('advertises the exact protocol implemented by the pinned native tgcalls adapter', () => {
+    const client = new VoiceWorkerSocketClient({ socketPath: '/unused/worker.sock' })
+
+    expect(client.protocol).toEqual({
+      _: 'phoneCallProtocol', udpP2p: true, udpReflector: false,
+      minLayer: 65, maxLayer: 92, libraryVersions: ['5.0.0'],
+    })
+    client.close()
+  })
+
   it('encodes fixed-width v2 request fields and rejects malformed responses', () => {
     const frame = encodeVoiceWorkerRequest({
       tag: 0x04, callId: 9n, gA: new Uint8Array(256).fill(3), expectedFingerprint: Long.NEG_ONE,

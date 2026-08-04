@@ -347,7 +347,7 @@ describe('CallRegistry', () => {
     expect(worker.events.find((event) => event.operation === 'complete-caller')).toMatchObject({
       call: { telegramRole: 'recipient' }, value: publicValue(5),
     })
-    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallAccepted', gB: publicValue(5) })
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallWaiting' })
     expect(updates.map((update) => update.phoneCall._)).toEqual([
       'phoneCallRequested', 'phoneCallWaiting', 'phoneCallAccepted', 'phoneCall',
     ])
@@ -367,7 +367,7 @@ describe('CallRegistry', () => {
 
     const accepted = await calls.accept(session, peer, publicValue(6), protocol)
 
-    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallAccepted', gB: publicValue(6) })
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallWaiting' })
     expect(worker.events.map((event) => event.operation)).toEqual([
       'prepare-caller', 'complete-caller',
     ])
@@ -628,7 +628,8 @@ describe('CallRegistry', () => {
     await calls.received(session, peer)
     const accepted = await calls.accept(session, peer, publicValue(), recipientProtocol)
 
-    expect(accepted.phoneCall).toMatchObject({
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallWaiting', protocol: callerProtocol })
+    expect(updates.at(-2)?.phoneCall).toMatchObject({
       _: 'phoneCallAccepted', protocol: recipientProtocol,
     })
     expect(updates.at(-1)?.phoneCall).toMatchObject({
