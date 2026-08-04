@@ -775,6 +775,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   } as tl.RawUpdates))
 
   // ── Voice calls (transient; never journaled) ──
+  rpc.register('messages.getDhConfig', async (rpc, req) => {
+    await requireBridgeSession(rpc)
+    return voice.getDhConfig(req as tl.messages.RawGetDhConfigRequest)
+  })
   rpc.register('phone.getCallConfig', async (rpc) => {
     await requireBridgeSession(rpc)
     return voice.getCallConfig()
