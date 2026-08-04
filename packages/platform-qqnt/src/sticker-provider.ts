@@ -75,8 +75,7 @@ export class QQStickerProvider implements IMStickerProvider {
     const reference = sticker.locator as unknown as QQStickerReference | undefined
     if (!reference || reference.deferred) return
     if (reference.kind === 'favorite' && reference.locator) {
-      const resolved = await this.client.resolveFileUrl(reference.locator)
-      return { ...resolved, supportsRange: true }
+      return this.client.resolveFileUrlForDirectDownload(reference.locator)
     }
     const url = reference.kind === 'sysface'
       ? reference.url
@@ -84,7 +83,7 @@ export class QQStickerProvider implements IMStickerProvider {
         ? reference.path
         : reference.animated ? reference.dynamicPath : reference.staticPath
     if (!isHttpUrl(url)) return
-    return { url, expiresAt: Date.now() + 5 * 60_000, supportsRange: true }
+    return this.client.inspectDirectUrl(url, Date.now() + 5 * 60_000)
   }
 
   async prepareSend(_context: StickerProviderContext, sticker: IMSticker) {
