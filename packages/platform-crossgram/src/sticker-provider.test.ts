@@ -11,7 +11,7 @@ const context: StickerProviderContext = {
 }
 
 describe('QQStickerProvider saved stickers', () => {
-  it('declares the synthetic QQ favorites pack as owned by its QQNT account', async () => {
+  it('declares every QQ-owned pack as automatic for its QQNT account', async () => {
     const client = {
       getStickerPacks: vi.fn(async () => ({
         packs: [
@@ -25,7 +25,7 @@ describe('QQStickerProvider saved stickers', () => {
     await expect(provider.listPacks(context)).resolves.toMatchObject({
       packs: [
         { packId: 'qq-favorites', automaticAssociation: 'provider-account' },
-        { packId: 'market-1', automaticAssociation: undefined },
+        { packId: 'market-1', automaticAssociation: 'provider-account' },
       ],
     })
     expect(provider.capabilities.ownerPlatformId).toBe('qq/primary')
@@ -110,9 +110,10 @@ describe('QQStickerProvider saved stickers', () => {
 
   it('resolves favorite and URL-backed sticker assets directly, and falls back for local market paths', async () => {
     const client = {
-      resolveFileUrl: vi.fn(async () => ({
-        url: 'https://cdn.example.test/favorite.gif', expiresAt: Date.now() + 60_000,
+      resolveFileUrlForDirectDownload: vi.fn(async () => ({
+        url: 'https://cdn.example.test/favorite.gif', expiresAt: Date.now() + 60_000, supportsRange: true,
       })),
+      inspectDirectUrl: vi.fn(async (url: string, expiresAt: number) => ({ url, expiresAt, supportsRange: true })),
     }
     const provider = new QQStickerProvider(client as never, 'qq:stickers')
     const favoriteSticker = {

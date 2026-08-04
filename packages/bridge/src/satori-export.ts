@@ -1,7 +1,7 @@
 import { Bot, h, type Universal } from '@satorijs/core'
 import type { Context } from 'cordis'
 import type { IngestResult } from './message-store.js'
-import { providerBelongsToAccount } from './sticker-dashboard.js'
+import { providerBelongsToAccount } from './sticker-ownership.js'
 import type { IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMMessagePart, IMPlatform, IMTextEntity, JsonValue, PlatformSession } from './platform.js'
 import type { IMSticker, IMStickerProvider, IMStickerSendPlan, StickerProviderContext } from './sticker-provider.js'
 

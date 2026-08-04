@@ -214,6 +214,20 @@ describe('rich-media projection', () => {
     }
   })
 
+  it('round-trips recorded voice media as an OGG document with exact size', () => {
+    const projected = wireRoundTrip(makeTlMessageMedia({
+      id: 92, messageId: 1, ordinal: 0, partIndex: 0, platformMediaId: 'voice',
+      kind: 'file', name: 'voice.ogg', mimeType: 'audio/ogg', size: 42, width: null, height: null,
+      duration: 7, voice: true, preview: null, strippedThumbnail: null, locator: { remote: 'voice' },
+    }, 1)) as tl.RawMessageMediaDocument
+    expect(projected).toMatchObject({
+      _: 'messageMediaDocument', document: {
+        _: 'document', mimeType: 'audio/ogg', size: 42,
+        attributes: expect.arrayContaining([{ _: 'documentAttributeAudio', voice: true, duration: 7 }]),
+      },
+    })
+  })
+
   it('returns sticker/reaction direct URLs and leaves stream-only assets on upload.getFile fallback', async () => {
     const { store } = await createStore()
     const direct = { url: 'https://cdn.example.test/raw.gif', expiresAt: Date.now() + 60_000, supportsRange: true }

@@ -25,7 +25,7 @@ afterEach(async () => {
 })
 
 describe('QQ store animated sticker object contract E2E', () => {
-  it('keeps raw GIF/APNG MIME and projects both pack and message entries as Telegram sticker documents', async () => {
+  it('exposes account-owned QQ packs immediately without a separate user-assignment operation', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
     await Promise.all(fibers)
@@ -57,15 +57,19 @@ describe('QQ store animated sticker object contract E2E', () => {
     const rpc = new StickerRpc(
       ctx.database, registry, { platformKind: 'qq' } as never, session,
     )
-    await ctx.database.create('mtproto_sticker_set_install', {
-      platformSessionId: session.platformSessionId, providerId: 'qqnt:stickers', providerPackId: '11690',
-      installedAt: new Date('2026-08-02T00:00:00Z'), sortOrder: 0, archived: false, uninstalled: false,
-    })
-
     const all = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
     if (all._ !== 'messages.allStickers') throw new Error('expected complete sticker catalog')
     expect(all.sets).toHaveLength(1)
     const set = all.sets[0]!
+    expect(set.installedDate).toEqual(expect.any(Number))
+    await expect(rpc.installStickerSet({
+      _: 'messages.installStickerSet',
+      stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },
+      archived: false,
+    })).resolves.toEqual({ _: 'messages.stickerSetInstallResultSuccess' })
+    await expect(ctx.database.get('mtproto_sticker_set_install', {
+      platformSessionId: session.platformSessionId,
+    })).resolves.toEqual([])
     const pack = await rpc.getStickerSet({
       _: 'messages.getStickerSet',
       stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },

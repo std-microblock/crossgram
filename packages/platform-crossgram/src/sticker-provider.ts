@@ -25,7 +25,7 @@ export class QQStickerProvider implements IMStickerProvider {
       packs: page.packs.map((pack) => ({
         ...pack,
         providerId: this.providerId,
-        automaticAssociation: pack.packId === 'qq-favorites' ? 'provider-account' as const : undefined,
+        automaticAssociation: 'provider-account' as const,
       })),
       nextCursor: page.nextCursor,
     }
@@ -75,8 +75,7 @@ export class QQStickerProvider implements IMStickerProvider {
     const reference = sticker.locator as unknown as QQStickerReference | undefined
     if (!reference || reference.deferred) return
     if (reference.kind === 'favorite' && reference.locator) {
-      const resolved = await this.client.resolveFileUrl(reference.locator)
-      return { ...resolved, supportsRange: true }
+      return this.client.resolveFileUrlForDirectDownload(reference.locator)
     }
     const url = reference.kind === 'sysface'
       ? reference.url
@@ -84,7 +83,7 @@ export class QQStickerProvider implements IMStickerProvider {
         ? reference.path
         : reference.animated ? reference.dynamicPath : reference.staticPath
     if (!isHttpUrl(url)) return
-    return { url, expiresAt: Date.now() + 5 * 60_000, supportsRange: true }
+    return this.client.inspectDirectUrl(url, Date.now() + 5 * 60_000)
   }
 
   async prepareSend(_context: StickerProviderContext, sticker: IMSticker) {
@@ -126,7 +125,7 @@ export class QQStickerProvider implements IMStickerProvider {
       count: stickers.length,
       cover: stickers[0] && { providerId: this.providerId, stickerId: stickers[0].stickerId },
       version: pack.version,
-      automaticAssociation: pack.packId === 'qq-favorites' ? 'provider-account' : undefined,
+      automaticAssociation: 'provider-account',
       stickers,
     }
   }

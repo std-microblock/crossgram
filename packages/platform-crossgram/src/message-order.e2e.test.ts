@@ -14,6 +14,7 @@ import {
 } from '@mtproto-relay/bridge'
 import { makeTlMessageMedia } from '../../bridge/src/dialogs.js'
 import { defineModels } from '../../bridge/src/models.js'
+import { ReactionRpc } from '../../bridge/src/reaction-rpc.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
 import { QQNTPlatform } from './index.js'
@@ -758,7 +759,7 @@ describe('QQNT remote media routing E2E', () => {
     })])
   })
 
-  it('keeps opaque reaction metadata raw and range-streams original bytes only on demand', async () => {
+  it('projects an animated QQ reaction into a non-empty Telegram document and serves its bytes', async () => {
     const cachePath = await mkdtemp(join(tmpdir(), 'qqnt-reaction-http-e2e-'))
     temporaryDirectories.push(cachePath)
     const png = await sharp({
@@ -769,6 +770,7 @@ describe('QQNT remote media routing E2E', () => {
     let server: Server | undefined
     server = createServer(async (request, response) => {
       if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
+        await new Promise((resolve) => setTimeout(resolve, 100))
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({
           available: [{
@@ -776,13 +778,20 @@ describe('QQNT remote media routing E2E', () => {
             presentation: {
               type: 'custom', alt: '[辣眼睛]',
               resource: {
-                version: 1, format: 'static', mimeType: 'image/png',
+                version: 1, format: 'video', mimeType: 'video/webm',
                 width: 24, height: 18, size: png.length,
                 locator: { reactionKey: '1:265' },
               },
             },
           }],
           reactions: [], maxSelected: 20,
+        }))
+        return
+      }
+      if (request.method === 'GET' && request.url?.startsWith('/v1/messages/reactions?')) {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          reactions: [{ key: '1:265', count: 2, selected: true }], maxSelected: 20,
         }))
         return
       }
@@ -813,17 +822,28 @@ describe('QQNT remote media routing E2E', () => {
     const platform = new QQNTPlatform({
       endpoint: `http://127.0.0.1:${address.port}/v1`, token: 'bridge-token',
     }, 'qqnt:stickers', undefined)
-    const catalog = await platform.getAvailableReactions(session, { conversationId: '2:group' })
+    const catalog = await platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'message', targetId: 'message', nativeSequence: '571',
+    })
+    expect(catalog.reactions).toEqual([{ key: '1:265', count: 2, selected: true }])
     const definition = catalog.available[0]!
     if (definition.presentation.type !== 'custom') throw new Error('expected custom reaction')
     const resource = definition.presentation.resource
-    const bytes = await collect(platform.downloadReactionResource(session, resource, { offset: 3, limit: 7 }))
+    const reactionRpc = new ReactionRpc(platform, session)
+    const reaction = reactionRpc.toTlReaction('2:group', definition)
+    if (reaction._ !== 'reactionCustomEmoji') throw new Error('expected custom reaction document')
+    const [document] = reactionRpc.getCustomEmojiDocuments([reaction.documentId])
+    const file = await reactionRpc.getFile(reaction.documentId.toNumber(), 3, 7)
 
     expect(resource).toMatchObject({
-      format: 'static', mimeType: 'image/png', width: 24, height: 18,
+      format: 'animated', mimeType: 'image/apng', width: 24, height: 18, size: png.length,
       locator: { reactionKey: '1:265' },
     })
-    expect(bytes).toHaveLength(7)
+    expect(document).toMatchObject({
+      _: 'document', size: png.length, mimeType: 'image/apng',
+      attributes: expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeCustomEmoji' })]),
+    })
+    expect(Buffer.from(file?.bytes ?? [])).toEqual(png.subarray(3, 10))
     expect(assetBody).toEqual({ reactionKey: '1:265' })
     expect(removedRouteRequests).toBe(0)
   })
@@ -867,6 +887,14 @@ describe('QQNT history media without placeholder edits E2E', () => {
       }
       if (request.method === 'GET' && request.url === '/cdn/history.jpg') {
         imageRequests++
+        if (request.headers.range === 'bytes=0-1') {
+          response.writeHead(206, {
+            'content-type': 'image/jpeg', 'content-length': '2',
+            'content-range': `bytes 0-1/${jpeg.length}`, 'accept-ranges': 'bytes',
+          })
+          response.end(jpeg.subarray(0, 2))
+          return
+        }
         imageRequested.resolve()
         await releaseImage.promise
         response.setHeader('content-type', 'image/jpeg')
@@ -937,7 +965,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
       url: expect.stringContaining('/cdn/history.jpg'), supportsRange: true,
     })
     expect(directUrlRequests).toBe(1)
-    expect(imageRequests).toBe(0)
+    expect(imageRequests).toBe(1)
     const download = collect(platform.downloadMedia(session, original!.media as any))
     await imageRequested.promise
     releaseImage.resolve()
@@ -996,7 +1024,10 @@ describe('QQNT history media without placeholder edits E2E', () => {
         type: 'media' as const,
         media: {
           id: 'lazy-preview-media', kind: 'image' as const, name: 'lazy.jpg', mimeType: 'image/jpeg',
-          size: jpeg.length, width: 80, height: 48,
+          // QQNT can omit picWidth/picHeight even while its original bytes are
+          // available. The initial photo is necessarily a temporary 1x1
+          // placeholder; the background preparation must repair it.
+          size: jpeg.length,
           locator: {
             messageId: 'lazy-preview-message', elementId: 'lazy-preview-media', chatType: 2 as const,
             peerUid: 'lazy-preview', kind: 'image' as const, fileName: 'lazy.jpg', md5: 'LAZY-E2E',
@@ -1039,6 +1070,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
       throw new Error('expected projected photo')
     }
     expect(projected.photo.sizes.map((size) => size.type)).toEqual(['x'])
+    expect(projected.photo.sizes[0]).toMatchObject({ w: 1, h: 1 })
     await sourceRequested.promise
 
     // A thumbnail worker may be waiting on remote bytes, but history still
@@ -1060,6 +1092,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
       throw new Error('expected updated photo')
     }
     expect(updated.photo.sizes.map((size) => size.type)).toEqual(['i', 'x'])
+    expect(updated.photo.sizes.at(-1)).toMatchObject({ w: 80, h: 48 })
     expect(await ctx.database.get('mtproto_qqnt_inline_preview', {})).toHaveLength(1)
     await unsubscribe()
   })
@@ -1166,7 +1199,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
 })
 
 describe('QQNT animated media initial projection E2E', () => {
-  it('publishes APNG-labelled PNG metadata without probing and resolves the original URL on demand', async () => {
+  it('publishes APNG-labelled PNG metadata and probes Range only when resolving the original URL', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -1302,7 +1335,7 @@ describe('QQNT animated media initial projection E2E', () => {
     await expect(platform.resolveMediaUrl(session, raw!.media as any)).resolves.toMatchObject({
       url: nativeUrl, supportsRange: true,
     })
-    expect(rangeHeaders).toEqual([])
+    expect(rangeHeaders).toEqual(['bytes=0-1'])
   }, 30_000)
 })
 

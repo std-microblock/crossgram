@@ -435,6 +435,7 @@ export class MessageStore {
         width: item.width ?? null,
         height: item.height ?? null,
         duration: item.duration ?? null,
+        voice: item.voice === true,
         preview: item.preview ? { ...item.preview, locator: item.preview.locator as JsonValue } : null,
         strippedThumbnail: item.strippedThumbnail ? exactArrayBuffer(item.strippedThumbnail) : null,
         locator: (item.locator ?? null) as JsonValue,
