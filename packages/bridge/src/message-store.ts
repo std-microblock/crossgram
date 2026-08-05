@@ -488,6 +488,7 @@ export class MessageStore {
         if (!message) continue
         if (!message.deleted) {
           await database.set('mtproto_im_message', { id: messageId }, { deleted: true, updatedAt: new Date() })
+          await database.remove('mtproto_message_mention', { messageId })
           deletedMessageIds.push(messageId)
         }
         const parts = await database.select('mtproto_tl_message_part', { messageId })
@@ -897,6 +898,140 @@ export class MessageStore {
     return source.replyToId
       ? this.findProjectedByPlatformId(platformSessionId, source.conversationId, source.replyToId)
       : undefined
+  }
+
+  /** Persist the Telegram `mentioned` classification without re-unreading an acknowledged row. */
+  async setMessageMentioned(
+    platformSessionId: string,
+    platformConversationId: string,
+    tlMessageId: number,
+    mentioned: boolean,
+    unreadIfNew: boolean,
+  ): Promise<boolean> {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const [conversation] = await database.get('mtproto_im_conversation', {
+        platformSessionId, platformConversationId,
+      })
+      if (!conversation) return false
+      const [part] = await database.get('mtproto_tl_message_part', {
+        platformSessionId, conversationId: conversation.id, tlMessageId, ordinal: 0,
+      })
+      if (!part) return false
+      const [existing] = await database.get('mtproto_message_mention', { messageId: part.messageId })
+      if (!mentioned) {
+        if (existing) await database.remove('mtproto_message_mention', { messageId: part.messageId })
+        return false
+      }
+      if (existing) {
+        if (existing.tlMessageId !== tlMessageId) {
+          await database.set('mtproto_message_mention', { messageId: part.messageId }, {
+            tlMessageId, updatedAt: new Date(),
+          })
+        }
+        return false
+      }
+      await database.create('mtproto_message_mention', {
+        messageId: part.messageId,
+        platformSessionId,
+        conversationId: conversation.id,
+        tlMessageId,
+        unread: unreadIfNew,
+        updatedAt: new Date(),
+      })
+      return unreadIfNew
+    }), 'mention-state')
+  }
+
+  async countUnreadMentions(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<number> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return 0
+    return this._database.select('mtproto_message_mention', {
+      platformSessionId, conversationId: conversation.id, unread: true,
+    }).execute().then((rows) => rows.length)
+  }
+
+  async countUnreadMentionsMany(
+    platformSessionId: string,
+    platformConversationIds: readonly string[],
+  ): Promise<Map<string, number>> {
+    const uniqueIds = [...new Set(platformConversationIds)]
+    const counts = new Map(uniqueIds.map((id) => [id, 0]))
+    if (!uniqueIds.length) return counts
+    const conversations = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId: { $in: uniqueIds },
+    })
+    if (!conversations.length) return counts
+    const byRowId = new Map(conversations.map((conversation) => [
+      conversation.id, conversation.platformConversationId,
+    ]))
+    const mentions = await this._database.get('mtproto_message_mention', {
+      platformSessionId, conversationId: { $in: [...byRowId.keys()] }, unread: true,
+    })
+    for (const mention of mentions) {
+      const conversationId = byRowId.get(mention.conversationId)
+      if (conversationId) counts.set(conversationId, (counts.get(conversationId) ?? 0) + 1)
+    }
+    return counts
+  }
+
+  async listUnreadMentions(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<ProjectedMessage[]> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return []
+    const mentions = await this._database.select('mtproto_message_mention', {
+      platformSessionId, conversationId: conversation.id, unread: true,
+    }).orderBy('tlMessageId', 'desc').execute()
+    if (!mentions.length) return []
+    const messageIds = mentions.map((mention) => mention.messageId)
+    const rows = await this._database.get('mtproto_im_message', {
+      id: { $in: messageIds }, deleted: false,
+    })
+    if (!rows.length) return []
+    const [sources, parts, media] = await Promise.all([
+      this._hydrateMessages(rows, new Map([[conversation.id, conversation.platformConversationId]])),
+      this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } }),
+      this._database.get('mtproto_im_media', { messageId: { $in: messageIds } }),
+    ])
+    const sourceByMessageId = new Map(rows.map((row, index) => [row.id, sources[index]]))
+    const partsByMessage = groupByMessageId(parts, (left, right) => left.ordinal - right.ordinal)
+    const mediaByMessage = groupByMessageId(media, (left, right) => left.ordinal - right.ordinal)
+    return mentions.flatMap((mention) => {
+      const source = sourceByMessageId.get(mention.messageId)
+      return source ? [{
+        source,
+        parts: partsByMessage.get(mention.messageId) ?? [],
+        media: mediaByMessage.get(mention.messageId) ?? [],
+      }] : []
+    })
+  }
+
+  async markMentionsRead(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<number> {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const [conversation] = await database.get('mtproto_im_conversation', {
+        platformSessionId, platformConversationId,
+      })
+      if (!conversation) return 0
+      const rows = await database.get('mtproto_message_mention', {
+        platformSessionId, conversationId: conversation.id, unread: true,
+      })
+      if (!rows.length) return 0
+      await database.set('mtproto_message_mention', {
+        platformSessionId, conversationId: conversation.id, unread: true,
+      }, { unread: false, updatedAt: new Date() })
+      return rows.length
+    }), 'mention-read')
   }
 
   async getOldestTlMessageId(

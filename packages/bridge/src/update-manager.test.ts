@@ -1003,6 +1003,84 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('lists, paginates, acknowledges, and durably clears unread mentions after live delivery', async () => {
+    const conversation: IMConversation = { id: 'mention-navigation', kind: 'group', title: 'Mention Navigation' }
+    const own: IMMessage = {
+      id: 'own', conversationId: conversation.id, senderId: session.userId,
+      outgoing: true, timestamp: 40, content: { parts: [{ type: 'text', text: 'question' }] },
+    }
+    const explicit: IMMessage = {
+      id: 'explicit', conversationId: conversation.id, senderId: 'alice', timestamp: 41,
+      content: { parts: [{
+        type: 'text', text: '@Current answer',
+        entities: [{ type: 'mention', offset: 0, length: 8, userId: session.userId }],
+      }] },
+    }
+    const reply: IMMessage = {
+      id: 'reply', conversationId: conversation.id, senderId: 'bob', replyToId: own.id,
+      timestamp: 42, content: { parts: [{ type: 'text', text: 'reply answer' }] },
+    }
+    const ordinary: IMMessage = {
+      id: 'ordinary', conversationId: conversation.id, senderId: 'carol', timestamp: 43,
+      content: { parts: [{ type: 'text', text: 'ordinary newest message' }] },
+    }
+    const messages = [own, explicit, reply, ordinary]
+    const mentionPlatform: IMPlatform = {
+      ...platform,
+      capabilities: { ...platform.capabilities, history: true },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation, unreadCount: 3, lastMessage: ordinary, readInboxMaxMessage: own,
+        }] }
+      },
+      async getHistory() { return { messages } },
+    }
+    const { store, manager } = await createHarness(undefined, mentionPlatform)
+    await store.ingest(session, conversation, own)
+    for (const message of [explicit, reply, ordinary]) {
+      const result = await store.ingest(session, conversation, message)
+      await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    }
+
+    const rpc = new DialogRpc(mentionPlatform, session, store)
+    const dialogs = await rpc.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    }) as tl.messages.RawDialogs
+    expect(dialogs.dialogs[0]).toMatchObject({ unreadCount: 3, unreadMentionsCount: 2 })
+    const peer = {
+      _: 'inputPeerChannel' as const,
+      channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ONE,
+    }
+    const request: tl.messages.RawGetUnreadMentionsRequest = {
+      _: 'messages.getUnreadMentions', peer,
+      offsetId: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0,
+    }
+    const unread = await rpc.getUnreadMentions(request) as tl.messages.RawMessages
+    expect(unread.messages).toMatchObject([
+      { _: 'message', message: 'reply answer', mentioned: true },
+      { _: 'message', message: '@Current answer', mentioned: true },
+    ])
+    const newestMentionId = (unread.messages[0] as tl.RawMessage).id
+    const older = await rpc.getUnreadMentions({
+      ...request, offsetId: newestMentionId, limit: 1,
+    }) as tl.messages.RawMessages
+    expect(older.messages).toMatchObject([{ message: '@Current answer', mentioned: true }])
+
+    await expect(rpc.readMentions({ _: 'messages.readMentions', peer })).resolves.toMatchObject({
+      _: 'messages.affectedHistory', ptsCount: 0, offset: 0,
+    })
+    await expect(rpc.getUnreadMentions(request)).resolves.toMatchObject({ messages: [] })
+
+    const resumed = new DialogRpc(mentionPlatform, session, store)
+    const resumedDialogs = await resumed.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    }) as tl.messages.RawDialogs
+    expect(resumedDialogs.dialogs[0]).toMatchObject({ unreadMentionsCount: 0 })
+    await expect(resumed.getUnreadMentions(request)).resolves.toMatchObject({ messages: [] })
+  })
+
   it('publishes subchannel events through the parent forum and topic root', async () => {
     const { store, manager, sent } = await createHarness()
     const parent: IMConversation = { id: 'general', kind: 'channel', title: 'General' }

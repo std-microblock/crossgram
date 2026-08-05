@@ -640,6 +640,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getChannelMessages(req as tl.channels.RawGetMessagesRequest))
   rpc.register('messages.search', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
+  rpc.register('messages.getUnreadMentions', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getUnreadMentions(
+      req as tl.messages.RawGetUnreadMentionsRequest,
+    ))
+  rpc.register('messages.readMentions', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.readMentions(req as tl.messages.RawReadMentionsRequest))
   rpc.register('messages.readHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.readHistory(
       req as tl.messages.RawReadHistoryRequest, rpc.connection,
