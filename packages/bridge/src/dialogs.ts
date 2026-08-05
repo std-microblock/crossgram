@@ -4565,10 +4565,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
           ...(media.strippedThumbnail?.byteLength ? [{
             _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
           }] : []),
-          {
-            _: 'photoSize', type: 'x', w: dimensions.width, h: dimensions.height,
-            size: Math.min(media.size ?? 0, 0x7fffffff),
-          },
+          ...originalPhotoSizes(dimensions, media.size),
         ],
         dcId,
       },
@@ -4723,6 +4720,38 @@ function documentAttributes(media: Pick<IMMedia<any>, 'name' | 'mimeType' | 'wid
 
 function isAnimatedImageMime(mimeType: string | null | undefined): boolean {
   return mimeType === 'image/gif' || mimeType === 'image/apng'
+}
+
+const TELEGRAM_DISPLAY_PHOTO_SIDE = 1280
+
+function originalPhotoSizes(
+  dimensions: { width: number, height: number },
+  byteSize: number | null | undefined,
+): tl.RawPhotoSize[] {
+  const size = Math.min(byteSize ?? 0, 0x7fffffff)
+  const maxSide = Math.max(dimensions.width, dimensions.height)
+  if (maxSide <= TELEGRAM_DISPLAY_PHOTO_SIDE) {
+    return [{
+      _: 'photoSize', type: 'x', w: dimensions.width, h: dimensions.height, size,
+    }]
+  }
+
+  const scale = TELEGRAM_DISPLAY_PHOTO_SIDE / maxSide
+  // Android chooses the largest photo size whose side is at most 1280. With
+  // only a stripped thumbnail plus an oversized original it keeps the 50px
+  // stripped image forever. Advertise a display-sized alias backed by the
+  // same original bytes, then retain the true dimensions as the `w` size.
+  return [
+    {
+      _: 'photoSize', type: 'y',
+      w: Math.max(1, Math.round(dimensions.width * scale)),
+      h: Math.max(1, Math.round(dimensions.height * scale)),
+      size,
+    },
+    {
+      _: 'photoSize', type: 'w', w: dimensions.width, h: dimensions.height, size,
+    },
+  ]
 }
 
 function qqSequenceKey(conversationId: string, sequence: number): string {

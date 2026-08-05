@@ -1007,7 +1007,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     })
 
     const jpeg = await sharp({
-      create: { width: 80, height: 48, channels: 3, background: { r: 60, g: 120, b: 200 } },
+      create: { width: 2832, height: 1280, channels: 3, background: { r: 60, g: 120, b: 200 } },
     }).jpeg().toBuffer()
     const sourceRequested = Promise.withResolvers<void>()
     const releaseSource = Promise.withResolvers<void>()
@@ -1024,7 +1024,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
         type: 'media' as const,
         media: {
           id: 'lazy-preview-media', kind: 'image' as const, name: 'lazy.jpg', mimeType: 'image/jpeg',
-          size: jpeg.length, width: 80, height: 48,
+          size: jpeg.length, width: 2832, height: 1280,
           locator: {
             messageId: 'lazy-preview-message', elementId: 'lazy-preview-media', chatType: 2 as const,
             peerUid: 'lazy-preview', kind: 'image' as const, fileName: 'lazy.jpg', md5: 'LAZY-E2E',
@@ -1066,7 +1066,10 @@ describe('QQNT history media without placeholder edits E2E', () => {
     if (projected._ !== 'messageMediaPhoto' || projected.photo?._ !== 'photo') {
       throw new Error('expected projected photo')
     }
-    expect(projected.photo.sizes.map((size) => size.type)).toEqual(['x'])
+    expect(projected.photo.sizes).toMatchObject([
+      { _: 'photoSize', type: 'y', w: 1280, h: 579, size: jpeg.length },
+      { _: 'photoSize', type: 'w', w: 2832, h: 1280, size: jpeg.length },
+    ])
     await sourceRequested.promise
 
     // A thumbnail worker may be waiting on remote bytes, but history still
@@ -1087,7 +1090,11 @@ describe('QQNT history media without placeholder edits E2E', () => {
     if (updated._ !== 'messageMediaPhoto' || updated.photo?._ !== 'photo') {
       throw new Error('expected updated photo')
     }
-    expect(updated.photo.sizes.map((size) => size.type)).toEqual(['i', 'x'])
+    expect(updated.photo.sizes).toMatchObject([
+      { _: 'photoStrippedSize', type: 'i' },
+      { _: 'photoSize', type: 'y', w: 1280, h: 579, size: jpeg.length },
+      { _: 'photoSize', type: 'w', w: 2832, h: 1280, size: jpeg.length },
+    ])
     expect(await ctx.database.get('mtproto_qqnt_inline_preview', {})).toHaveLength(1)
     await unsubscribe()
   })
