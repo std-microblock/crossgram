@@ -57,7 +57,6 @@ describe('QQMediaPreviewer', () => {
     expect(opens).toBe(1)
     expect(first.preview).toBeUndefined()
     expect(first.strippedThumbnail).toEqual(second.strippedThumbnail)
-    expect(first).toMatchObject({ width: 640, height: 360 })
     expect(first.strippedThumbnail!.byteLength).toBeLessThan(1024)
     await expect(sharp(expandTelegramStrippedThumbnail(first.strippedThumbnail!)).metadata())
       .resolves.toMatchObject({ format: 'jpeg', width: 40, height: 25 })
@@ -65,18 +64,6 @@ describe('QQMediaPreviewer', () => {
     const projected = previewer.project(media())
     expect(projected.strippedThumbnail).toEqual(first.strippedThumbnail)
     expect(opens).toBe(1)
-  })
-
-  it('fills missing media dimensions from the decoded original, not the tiny preview', async () => {
-    const previewer = new QQMediaPreviewer({ enabled: true })
-    const original = { ...media(), width: undefined, height: undefined }
-    const prepared = await previewer.prepare(original, async function* () {
-      yield await png(640, 360)
-    })
-
-    expect(prepared).toMatchObject({ width: 640, height: 360 })
-    await expect(sharp(expandTelegramStrippedThumbnail(prepared.strippedThumbnail!)).metadata())
-      .resolves.toMatchObject({ width: 40, height: 23 })
   })
 
   it('bounds independent inline preview work', async () => {

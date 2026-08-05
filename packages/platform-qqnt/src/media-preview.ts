@@ -44,8 +44,8 @@ const MEMORY_PREVIEW_CACHE_LIMIT = 4096
 export class QQMediaPreviewer {
   readonly enabled: boolean
   readonly concurrency: number
-  private readonly active = new Map<string, Promise<PreparedPreview>>()
-  private readonly memory = new Map<string, PreparedPreview>()
+  private readonly active = new Map<string, Promise<Uint8Array>>()
+  private readonly memory = new Map<string, Uint8Array>()
   private readonly waiters: Array<() => void> = []
   private running = 0
 
@@ -57,15 +57,8 @@ export class QQMediaPreviewer {
   /** Attach only an already-memory-resident inline preview; never perform I/O. */
   project(media: IMMedia<QQMediaLocator>): IMMedia<QQMediaLocator> {
     if (!this.enabled || media.kind !== 'image' || !media.locator || media.strippedThumbnail) return media
-    const key = mediaPreviewKey(media.locator)
-    const preview = this.memory.get(key)
-    if (!preview) return media
-    const remembered = remember(this.memory, key, preview)
-    return {
-      ...media,
-      ...(hasDimensions(media) ? {} : remembered.dimensions),
-      strippedThumbnail: remembered.bytes,
-    }
+    const bytes = this.memory.get(mediaPreviewKey(media.locator))
+    return bytes ? { ...media, strippedThumbnail: remember(this.memory, mediaPreviewKey(media.locator), bytes) } : media
   }
 
   async prepare(
@@ -75,19 +68,15 @@ export class QQMediaPreviewer {
   ): Promise<IMMedia<QQMediaLocator>> {
     if (!this.enabled || media.kind !== 'image' || !media.locator || media.strippedThumbnail) return media
     const key = mediaPreviewKey(media.locator)
-    const preview = await this.open(key, source, signal)
-    return {
-      ...media,
-      ...(hasDimensions(media) ? {} : preview.dimensions),
-      strippedThumbnail: preview.bytes,
-    }
+    const bytes = await this.open(key, source, signal)
+    return { ...media, strippedThumbnail: bytes }
   }
 
   private async open(
     key: string,
     source: (signal?: AbortSignal) => AsyncIterable<Uint8Array>,
     signal?: AbortSignal,
-  ): Promise<PreparedPreview> {
+  ): Promise<Uint8Array> {
     const cached = this.memory.get(key)
     if (cached) return remember(this.memory, key, cached)
     const current = this.active.get(key)
@@ -105,19 +94,19 @@ export class QQMediaPreviewer {
     key: string,
     source: (signal?: AbortSignal) => AsyncIterable<Uint8Array>,
     signal?: AbortSignal,
-  ): Promise<PreparedPreview> {
+  ): Promise<Uint8Array> {
     const [stored] = await this.options.database?.get('mtproto_qqnt_inline_preview', { key }) ?? []
-    if (stored) return remember(this.memory, key, preparedPreview(new Uint8Array(stored.bytes)))
+    if (stored) return remember(this.memory, key, new Uint8Array(stored.bytes))
     return this.withSlot(async () => {
-      const preview = await this.create(source(signal), signal)
+      const bytes = await this.create(source(signal), signal)
       await this.options.database?.upsert('mtproto_qqnt_inline_preview', [{
-        key, bytes: exactArrayBuffer(preview.bytes), updatedAt: new Date(),
+        key, bytes: exactArrayBuffer(bytes), updatedAt: new Date(),
       }], ['key'])
-      return remember(this.memory, key, preview)
+      return remember(this.memory, key, bytes)
     })
   }
 
-  private async create(source: AsyncIterable<Uint8Array>, signal?: AbortSignal): Promise<PreparedPreview> {
+  private async create(source: AsyncIterable<Uint8Array>, signal?: AbortSignal): Promise<Uint8Array> {
     const transformer = sharp({ limitInputPixels: MAX_INPUT_PIXELS, sequentialRead: true })
       .rotate()
       .resize({ width: 40, height: 40, fit: 'inside', withoutEnlargement: true })
@@ -125,15 +114,8 @@ export class QQMediaPreviewer {
         quality: 20, chromaSubsampling: '4:2:0', progressive: false, optimizeCoding: false,
       })
     const output = transformer.toBuffer()
-    const metadata = transformer.metadata()
     await pipeline(Readable.from(limitedSource(source, signal)), transformer)
-    const [bytes, input] = await Promise.all([output, metadata])
-    return {
-      bytes: stripTelegramJpegThumbnail(bytes),
-      dimensions: validDimensions(input.autoOrient?.width, input.autoOrient?.height)
-        ?? validDimensions(input.width, input.height)
-        ?? dimensionsFromStripped(bytes),
-    }
+    return stripTelegramJpegThumbnail(await output)
   }
 
   private async withSlot<T>(run: () => Promise<T>): Promise<T> {
@@ -180,35 +162,11 @@ async function* limitedSource(
   }
 }
 
-interface PreparedPreview {
-  bytes: Uint8Array
-  dimensions: { width: number, height: number }
-}
-
-function preparedPreview(bytes: Uint8Array): PreparedPreview {
-  return { bytes, dimensions: dimensionsFromStripped(bytes) }
-}
-
-function dimensionsFromStripped(bytes: Uint8Array): { width: number, height: number } {
-  // Telegram's stripped JPEG envelope stores height then width after its 0x01 marker.
-  return validDimensions(bytes[2], bytes[1]) ?? { width: 1, height: 1 }
-}
-
-function validDimensions(width: number | undefined, height: number | undefined): { width: number, height: number } | undefined {
-  return Number.isInteger(width) && width > 0 && Number.isInteger(height) && height > 0
-    ? { width, height }
-    : undefined
-}
-
-function hasDimensions(media: Pick<IMMedia<QQMediaLocator>, 'width' | 'height'>): boolean {
-  return validDimensions(media.width, media.height) !== undefined
-}
-
-function remember(cache: Map<string, PreparedPreview>, key: string, preview: PreparedPreview): PreparedPreview {
+function remember(cache: Map<string, Uint8Array>, key: string, bytes: Uint8Array): Uint8Array {
   cache.delete(key)
-  cache.set(key, preview)
+  cache.set(key, bytes)
   if (cache.size > MEMORY_PREVIEW_CACHE_LIMIT) cache.delete(cache.keys().next().value!)
-  return preview
+  return bytes
 }
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {

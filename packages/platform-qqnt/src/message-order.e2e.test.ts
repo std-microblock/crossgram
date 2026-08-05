@@ -1024,10 +1024,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
         type: 'media' as const,
         media: {
           id: 'lazy-preview-media', kind: 'image' as const, name: 'lazy.jpg', mimeType: 'image/jpeg',
-          // QQNT can omit picWidth/picHeight even while its original bytes are
-          // available. The initial photo is necessarily a temporary 1x1
-          // placeholder; the background preparation must repair it.
-          size: jpeg.length,
+          size: jpeg.length, width: 80, height: 48,
           locator: {
             messageId: 'lazy-preview-message', elementId: 'lazy-preview-media', chatType: 2 as const,
             peerUid: 'lazy-preview', kind: 'image' as const, fileName: 'lazy.jpg', md5: 'LAZY-E2E',
@@ -1070,7 +1067,6 @@ describe('QQNT history media without placeholder edits E2E', () => {
       throw new Error('expected projected photo')
     }
     expect(projected.photo.sizes.map((size) => size.type)).toEqual(['x'])
-    expect(projected.photo.sizes[0]).toMatchObject({ w: 1, h: 1 })
     await sourceRequested.promise
 
     // A thumbnail worker may be waiting on remote bytes, but history still
@@ -1092,7 +1088,6 @@ describe('QQNT history media without placeholder edits E2E', () => {
       throw new Error('expected updated photo')
     }
     expect(updated.photo.sizes.map((size) => size.type)).toEqual(['i', 'x'])
-    expect(updated.photo.sizes.at(-1)).toMatchObject({ w: 80, h: 48 })
     expect(await ctx.database.get('mtproto_qqnt_inline_preview', {})).toHaveLength(1)
     await unsubscribe()
   })
