@@ -84,4 +84,46 @@ describe('QQNTClient response lifecycle', () => {
     expect(maximumActiveStaleResponses).toBeLessThanOrEqual(2)
     expect(sockets.size).toBeLessThanOrEqual(3)
   })
+
+  it('requests sticker ranges and cancels a bridge response that ignores the range', async () => {
+    let activeResponses = 0
+    let closedResponses = 0
+    let receivedRange: string | undefined
+    server = createServer(async (request, response) => {
+      if (request.url !== '/v1/stickers/asset') {
+        response.writeHead(500).end('unexpected request')
+        return
+      }
+      for await (const _chunk of request) { /* drain reference */ }
+      receivedRange = request.headers.range
+      activeResponses++
+      const interval = setInterval(() => response.write('abcdefgh'), 10)
+      response.once('close', () => {
+        clearInterval(interval)
+        activeResponses--
+        closedResponses++
+      })
+      response.writeHead(200, { 'content-type': 'image/png' })
+      response.write('abcdefgh')
+    })
+    server.on('connection', (socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}/v1` })
+    const source = client.stickerSource({
+      kind: 'favorite', resId: 'saved', path: '/saved/sticker.png', name: 'sticker.png', animated: false,
+    })
+
+    await expect(collect(source.streamRange!({ offset: 4, limit: 4 })))
+      .resolves.toEqual(Buffer.from('efgh'))
+    await waitFor(() => closedResponses === 1 && activeResponses === 0)
+
+    expect(receivedRange).toBe('bytes=4-7')
+    expect(sockets.size).toBeLessThanOrEqual(1)
+  })
 })
