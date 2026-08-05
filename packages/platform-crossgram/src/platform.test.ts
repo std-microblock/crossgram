@@ -1667,14 +1667,18 @@ describe('QQNTPlatform mapping', () => {
     const image = await sharp({
       create: { width: 24, height: 16, channels: 3, background: { r: 30, g: 90, b: 180 } },
     }).jpeg().toBuffer()
+    const nativePreview = await sharp({
+      create: { width: 12, height: 8, channels: 3, background: { r: 30, g: 90, b: 180 } },
+    }).jpeg().toBuffer()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
     const sourceRequested = Promise.withResolvers<void>()
     const releaseSource = Promise.withResolvers<void>()
-    platform.client.downloadFile = vi.fn(async function* () {
+    platform.client.downloadFile = vi.fn(async function* (locator) {
+      expect(locator).toMatchObject({ fileName: 'photo_720.jpg', filePath: '/qq/thumb/photo_720.jpg' })
       sourceRequested.resolve()
       await releaseSource.promise
-      yield image
+      yield nativePreview
     })
     platform.client.subscribe = vi.fn(async (handler, signal) => {
       await handler({
@@ -1689,6 +1693,14 @@ describe('QQNTPlatform mapping', () => {
             media: {
               id: 'live-preview-media', kind: 'image', name: 'photo.jpg', mimeType: 'image/jpeg',
               size: image.length, width: 24, height: 16,
+              preview: {
+                mimeType: 'image/jpeg', size: nativePreview.length, width: 12, height: 8,
+                locator: {
+                  messageId: 'live-preview', elementId: 'live-preview-media', chatType: 2,
+                  peerUid: 'group', kind: 'image', fileName: 'photo_720.jpg',
+                  fileSize: String(nativePreview.length), filePath: '/qq/thumb/photo_720.jpg',
+                },
+              },
               locator: {
                 messageId: 'live-preview', elementId: 'live-preview-media', chatType: 2,
                 peerUid: 'group', kind: 'image', fileName: 'photo.jpg', md5: 'LIVE-PREVIEW',
@@ -1711,13 +1723,18 @@ describe('QQNTPlatform mapping', () => {
     })
 
     const delivered = await initial.promise
-    expect(delivered.message.content.parts[0].media.preview).toBeUndefined()
+    expect(delivered.message.content.parts[0].media.preview).toMatchObject({
+      size: nativePreview.length, width: 12, height: 8,
+      locator: { fileName: 'photo_720.jpg' },
+    })
     expect(delivered.message.content.parts[0].media.strippedThumbnail).toBeUndefined()
     await sourceRequested.promise
     expect(events.map((event) => event.type)).toEqual(['message'])
     releaseSource.resolve()
     const update = await edited.promise
-    expect(update.message.content.parts[0].media.preview).toBeUndefined()
+    expect(update.message.content.parts[0].media.preview).toMatchObject({
+      size: nativePreview.length, width: 12, height: 8,
+    })
     expect(update.message.content.parts[0].media.strippedThumbnail).toBeInstanceOf(Uint8Array)
     expect(platform.client.downloadFile).toHaveBeenCalledTimes(1)
     await unsubscribe()

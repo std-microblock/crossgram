@@ -80,9 +80,23 @@ describe('legacy QQ message media migration', () => {
     await ctx.database.create('mtproto_qqnt_media_animation', {
       key: 'animation-key', animated: true, updatedAt: new Date(),
     })
+    const nativePreview = {
+      mimeType: 'image/jpeg', size: 80, width: 1280, height: 579,
+      locator: locator({ fileName: 'native_720.jpg', fileSize: '80', filePath: '/qq/Thumb/native_720.jpg' }),
+    }
+    const nativeIngested = await store.ingest(session, { id: 'group', kind: 'group', title: 'Group' }, {
+      id: 'native-preview-message', conversationId: 'group', senderId: 'alice', timestamp: 2,
+      content: { parts: [{ type: 'media', media: {
+        id: 'native-photo:original-v1', kind: 'image', name: 'native.jpg', mimeType: 'image/jpeg',
+        size: 320_332, width: 2832, height: 1280, preview: nativePreview,
+        strippedThumbnail: Uint8Array.from([1, 18, 40, 1]),
+        locator: locator({ fileName: 'native.jpg', fileSize: '320332' }),
+      } }] },
+    })
+    const [nativeRow] = await ctx.database.get('mtproto_im_media', { messageId: nativeIngested.message.id })
 
     await expect(migrateLegacyQQMessageMedia(ctx.database, 'qqnt', cacheRoot)).resolves.toEqual({
-      mediaRows: 1, messages: 1, previewRows: 1, cacheRows: 1, animationRows: 1, files: 1,
+      mediaRows: 2, messages: 2, previewRows: 1, cacheRows: 1, animationRows: 1, files: 1,
     })
     const [migrated] = await ctx.database.get('mtproto_im_media', { id: row!.id })
     expect(migrated).toMatchObject({
@@ -95,6 +109,15 @@ describe('legacy QQ message media migration', () => {
       id: 'gif:original-v1', kind: 'image', name: 'animation.gif', mimeType: 'image/gif', size: 200,
       locator: expect.not.objectContaining({ cachedPath: expect.anything(), previewKey: expect.anything() }),
     } }] })
+    const [nativeMigrated] = await ctx.database.get('mtproto_im_media', { id: nativeRow!.id })
+    expect(nativeMigrated).toMatchObject({
+      preview: nativePreview,
+      strippedThumbnail: null,
+    })
+    const [nativeMessage] = await ctx.database.get('mtproto_im_message', { id: nativeIngested.message.id })
+    expect(nativeMessage!.content).toMatchObject({
+      parts: [{ media: { preview: nativePreview } }],
+    })
     await expect(ctx.database.get('mtproto_qqnt_media_preview', {})).resolves.toEqual([])
     await expect(ctx.database.get('mtproto_qqnt_media_cache', {})).resolves.toEqual([])
     await expect(ctx.database.get('mtproto_qqnt_media_animation', {})).resolves.toEqual([])
