@@ -111,6 +111,23 @@ export class QQNTClient {
     }
   }
 
+  async controlCall(callId: string, operation: 'accept' | 'reject' | 'hangup'): Promise<void> {
+    try {
+      const response = await this.fetchImpl(`${this.endpoint}/calls/control`, {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ callId, operation }),
+      })
+      if (!response.ok) {
+        await discardResponseBody(response)
+        throw new Error('call control rejected')
+      }
+      await discardResponseBody(response)
+    } catch {
+      throw new Error('QQNT call control failed')
+    }
+  }
+
   getDialogs(
     query: { cursor?: string, afterId?: string, limit?: number } = {},
     signal?: AbortSignal,

@@ -3,8 +3,9 @@ import { RpcError } from '@mtproto-relay/mtproto'
 import type { MessageStore } from '../message-store.js'
 import type { IMPlatform, PlatformSession } from '../platform.js'
 import {
-  CallRegistry, type CallPeer, type IncomingCall, VoiceCallError,
+  CallRegistry, type CallPeer, type IncomingCall, type PlatformCallControl, VoiceCallError,
 } from './call-registry.js'
+import { getDhConfig } from './dh-config.js'
 
 /** RPC adapter around the transient registry; it performs no database writes. */
 export class VoiceRpc {
@@ -16,6 +17,10 @@ export class VoiceRpc {
   async getCallConfig(): Promise<tl.RawDataJSON> {
     // No relay credentials or worker endpoint data are ever exposed to JS clients.
     return { _: 'dataJSON', data: '{}' }
+  }
+
+  getDhConfig(request: tl.messages.RawGetDhConfigRequest): tl.messages.TypeDhConfig {
+    return getDhConfig(request)
   }
 
   async request(
@@ -124,6 +129,7 @@ export class VoiceRpc {
     session: PlatformSession,
     remotePlatformUserId: string,
     correlationId: string,
+    platformControl?: PlatformCallControl,
   ): Promise<tl.RawPhoneCallRequested | tl.RawPhoneCallDiscarded> {
     const [self, remote] = await Promise.all([
       this._store.getUser(session.platformId, session.userId),
@@ -131,8 +137,19 @@ export class VoiceRpc {
     ])
     if (!self || !remote || self.id === remote.id) throw new RpcError(400, 'CALL_USER_INVALID')
     try {
-      const incoming: IncomingCall = { session, selfId: self.id, callerId: remote.id, correlationId }
+      const incoming: IncomingCall = {
+        session, selfId: self.id, callerId: remote.id, correlationId,
+        platformCallRef: correlationId, platformControl,
+      }
       return await this._calls.receiveIncoming(incoming)
+    } catch (error) {
+      throw asRpcError(error)
+    }
+  }
+
+  async platformEnded(session: PlatformSession, correlationId: string): Promise<void> {
+    try {
+      await this._calls.platformEnded(session, correlationId)
     } catch (error) {
       throw asRpcError(error)
     }

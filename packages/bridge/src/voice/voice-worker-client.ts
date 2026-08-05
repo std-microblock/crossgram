@@ -182,9 +182,11 @@ export function decodeVoiceWorkerResponse(payload: Uint8Array): VoiceWorkerIpcRe
  * Unix connection so a restarted worker can be reached by the same instance.
  */
 export class VoiceWorkerSocketClient implements VoiceWorkerClient {
+  // The pinned native adapter registers InstanceImpl and starts ProtocolVersion::V1.
+  // Its upstream source advertises version 5.0.0 with call layers 65 through 92.
   readonly protocol: tl.TypePhoneCallProtocol = {
     _: 'phoneCallProtocol', udpP2p: true, udpReflector: false,
-    minLayer: 100, maxLayer: 100, libraryVersions: ['crossgram-voice-worker-v2'],
+    minLayer: 65, maxLayer: 92, libraryVersions: ['5.0.0'],
   }
 
   private readonly _callIds = new Map<string, bigint>()

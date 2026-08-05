@@ -23,6 +23,8 @@ export interface VoiceWorkerCall {
   readonly participantId: number
   readonly telegramRole: TelegramCallRole
   readonly protocol: tl.TypePhoneCallProtocol
+  /** Exact source-platform reference, retained only for this live call. */
+  readonly platformCallRef?: string
   /** Call-scoped public relay settings supplied only by an explicit provider. */
   readonly mediaStartConfig?: VoiceWorkerMediaStartConfig
 }
@@ -122,6 +124,13 @@ export interface IncomingCall {
   readonly callerId: number
   /** Opaque source correlation retained only for in-memory retry deduplication. */
   readonly correlationId: string
+  /** Exact source call reference used for controls and media authorization. */
+  readonly platformCallRef?: string
+  readonly platformControl?: PlatformCallControl
+}
+
+export interface PlatformCallControl {
+  control(operation: 'accept' | 'reject' | 'hangup'): Promise<void>
 }
 
 export interface CallPeer {
@@ -156,6 +165,8 @@ interface StoredCall {
   media?: VoiceMediaAttachment
   connections?: tl.TypePhoneConnection[]
   p2pAllowed?: boolean
+  platformCallRef?: string
+  platformControl?: PlatformCallControl
 }
 
 interface CallTombstone {
@@ -305,6 +316,8 @@ export class CallRegistry {
       const call = this._create(
         input.session, input.callerId, input.selfId, this._incomingProtocol(), 'recipient', undefined, correlationKey,
       )
+      call.platformCallRef = input.platformCallRef
+      call.platformControl = input.platformControl
       call.state = 'initializing'
       this._remember(call)
       this._incomingCalls.set(correlationKey, call)
@@ -317,6 +330,26 @@ export class CallRegistry {
         call.gAHash = status.gAHash.slice()
         call.state = 'requested'
       } catch (error) {
+        if (call.platformControl) {
+          try {
+            await this._controlPlatformCall(call, 'reject')
+          } catch {
+            await this._teardownWorkerCall(call)
+            this._forget(call)
+            throw error
+          }
+          await this._teardownWorkerCall(call)
+          call.state = 'discarded'
+          call.discarded = { _: 'phoneCallDiscardReasonDisconnect' }
+          const discarded = this._discarded(call)
+          let pendingDelivery = true
+          try {
+            pendingDelivery = await this._publishCall(call.session, discarded) <= 0
+          } finally {
+            this._retire(call, discarded, pendingDelivery)
+          }
+          return discarded
+        }
         await this._teardownWorkerCall(call)
         this._forget(call)
         throw error
@@ -355,13 +388,18 @@ export class CallRegistry {
       this._requireTelegramRole(call, 'recipient')
       if (call.state === 'active') {
         await this._deliverPending(call, excludeAuthKeyId)
-        return this._wrap(call)
+        return this._wrapPhoneCall(this._waiting(call))
       }
       if (call.state === 'accepted') {
         await this._finishAccept(call, excludeAuthKeyId)
-        return this._wrap(call)
+        return this._wrapPhoneCall(this._waiting(call))
       }
-      this._requireState(call, 'received')
+      // phone.receivedCall is only a delivery/ringing acknowledgement. Some
+      // Telegram clients accept directly from phoneCallRequested without
+      // sending that optional acknowledgement first.
+      if (call.state !== 'requested' && call.state !== 'received') {
+        throw new VoiceCallError('CALL_STATE_INVALID')
+      }
       const publicGB = gB.slice()
       let status: VoiceWorkerCallerCompletion
       try {
@@ -378,6 +416,7 @@ export class CallRegistry {
         }
         this._requirePublicValue(status.gA)
         await this._attachMedia(call)
+        await this._controlPlatformCall(call, 'accept')
       } catch (error) {
         this._zero(publicGB)
         await this._abortWorkerCall(call, excludeAuthKeyId)
@@ -387,10 +426,12 @@ export class CallRegistry {
       call.gA = status.gA.slice()
       call.keyFingerprint = cloneLong(status.keyFingerprint).toSigned()
       call.state = 'accepted'
-      const accepted = this._wrap(call)
       await this._publishTransition(call, excludeAuthKeyId)
       await this._finishAccept(call, excludeAuthKeyId)
-      return accepted
+      // Telegram Desktop requires phone.acceptCall to return phoneCallWaiting;
+      // phoneCallAccepted is the caller-side update, while the recipient moves
+      // forward on the subsequent active phoneCall update.
+      return this._wrapPhoneCall(this._waiting(call))
     })
   }
 
@@ -458,7 +499,12 @@ export class CallRegistry {
         await this._deliverTombstone(call, session, excludeAuthKeyId)
         return this._discarded(call)
       }
-      // Local teardown must not be held hostage by an already-unavailable worker.
+      await this._controlPlatformCall(
+        call,
+        call.state === 'initializing' || call.state === 'requested' || call.state === 'received'
+          ? 'reject'
+          : 'hangup',
+      )
       await this._teardownWorkerCall(call)
       call.state = 'discarded'
       call.discarded = reason
@@ -471,6 +517,26 @@ export class CallRegistry {
         this._retire(call, discarded, pendingDelivery)
       }
       return discarded
+    })
+  }
+
+  /** Retires a Telegram call when the source platform reports its terminal state. */
+  async platformEnded(session: PlatformSession, correlationId: string): Promise<void> {
+    if (!correlationId) throw new VoiceCallError('CALL_CORRELATION_INVALID')
+    await this._serialize(session.platformSessionId, async () => {
+      const correlationKey = this._incomingKey(session, correlationId)
+      const call = this._incomingCalls.get(correlationKey)
+      if (!call || call.state === 'discarded') return
+      await this._teardownWorkerCall(call)
+      call.state = 'discarded'
+      call.discarded = { _: 'phoneCallDiscardReasonHangup' }
+      const discarded = this._discarded(call)
+      let pendingDelivery = true
+      try {
+        pendingDelivery = await this._publishCall(call.session, discarded) <= 0
+      } finally {
+        this._retire(call, discarded, pendingDelivery)
+      }
     })
   }
 
@@ -643,6 +709,8 @@ export class CallRegistry {
     call.p2pAllowed = undefined
     call.recipientProtocol = undefined
     call.pendingDelivery = undefined
+    call.platformCallRef = undefined
+    call.platformControl = undefined
     this._tombstones.set(this._key(call.id), tombstone)
     if (tombstone.incomingCorrelationDigest) this._incomingTombstones.set(tombstone.incomingCorrelationDigest, tombstone)
     this._pruneTombstones()
@@ -739,6 +807,12 @@ export class CallRegistry {
   }
 
   private async _abortWorkerCall(call: StoredCall, excludeAuthKeyId?: string): Promise<void> {
+    await this._controlPlatformCall(
+      call,
+      call.state === 'initializing' || call.state === 'requested' || call.state === 'received'
+        ? 'reject'
+        : 'hangup',
+    ).catch(() => {})
     await this._teardownWorkerCall(call)
     call.state = 'discarded'
     call.discarded = { _: 'phoneCallDiscardReasonDisconnect' }
@@ -758,6 +832,14 @@ export class CallRegistry {
     call.media = undefined
     await media?.close().catch(() => {})
     await this._worker?.discardCall(this._workerCall(call)).catch(() => {})
+  }
+
+  private async _controlPlatformCall(
+    call: StoredCall,
+    operation: 'accept' | 'reject' | 'hangup',
+  ): Promise<void> {
+    if (!call.platformControl) return
+    await call.platformControl.control(operation)
   }
 
   private async _attachMedia(call: StoredCall): Promise<void> {
@@ -795,7 +877,11 @@ export class CallRegistry {
     await this._deliverPending(call, excludeAuthKeyId)
     call.state = 'active'
     call.startDate = Math.floor(this._now() / 1_000)
-    await this._publishTransition(call, excludeAuthKeyId)
+    // The worker is the synthetic Telegram caller, so no second Telegram auth
+    // key will ever confirm this incoming call. The accepting recipient gets
+    // phoneCallAccepted in its RPC response, then must also receive the active
+    // update that a real caller's phone.confirmCall would normally produce.
+    await this._publishTransition(call)
   }
 
   private async _publishTransition(call: StoredCall, excludeAuthKeyId?: string): Promise<void> {
@@ -925,7 +1011,11 @@ export class CallRegistry {
   }
 
   private _wrap(call: StoredCall): tl.phone.RawPhoneCall {
-    return { _: 'phone.phoneCall', phoneCall: this._phoneCall(call), users: [] }
+    return this._wrapPhoneCall(this._phoneCall(call))
+  }
+
+  private _wrapPhoneCall(phoneCall: tl.TypePhoneCall): tl.phone.RawPhoneCall {
+    return { _: 'phone.phoneCall', phoneCall: this._clonePhoneCall(phoneCall), users: [] }
   }
 
   private async _mediaConfig(call: StoredCall): Promise<VoiceWorkerMediaStartConfig> {
@@ -958,6 +1048,7 @@ export class CallRegistry {
     return {
       callId: this._key(call.id), callerId: call.adminId, participantId: call.participantId,
       telegramRole: call.telegramRole, protocol: this._cloneProtocol(call.negotiatedProtocol), mediaStartConfig,
+      platformCallRef: call.platformCallRef,
     }
   }
 
