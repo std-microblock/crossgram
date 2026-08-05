@@ -25,7 +25,7 @@ export class QQStickerProvider implements IMStickerProvider {
       packs: page.packs.map((pack) => ({
         ...pack,
         providerId: this.providerId,
-        automaticAssociation: 'provider-account' as const,
+        automaticAssociation: pack.packId === 'qq-favorites' ? 'provider-account' as const : undefined,
       })),
       nextCursor: page.nextCursor,
     }
@@ -125,7 +125,7 @@ export class QQStickerProvider implements IMStickerProvider {
       count: stickers.length,
       cover: stickers[0] && { providerId: this.providerId, stickerId: stickers[0].stickerId },
       version: pack.version,
-      automaticAssociation: 'provider-account',
+      automaticAssociation: pack.packId === 'qq-favorites' ? 'provider-account' : undefined,
       stickers,
     }
   }

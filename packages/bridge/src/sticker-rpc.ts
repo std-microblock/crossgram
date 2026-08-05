@@ -4,7 +4,7 @@ import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
 import { telegramStickerPlaceholder } from './sticker-outline.js'
-import { isAutomaticallyAssociated, providerBelongsToAccount } from './sticker-ownership.js'
+import { isAutomaticallyAssociated, providerBelongsToAccount } from './sticker-dashboard.js'
 import type { IMDirectDownload, IMPlatform, PlatformSession } from './platform.js'
 import type {
   IMSticker, IMStickerAsset, IMStickerPack, IMStickerPackSummary, IMStickerProvider, IMStickerSendPlan,
