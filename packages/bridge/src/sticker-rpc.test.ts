@@ -113,6 +113,27 @@ describe('StickerRpc', () => {
     expect(provider.openThumbnail).not.toHaveBeenCalled()
   })
 
+  it('delegates document ranges to a provider-native range stream', async () => {
+    const { rpc, sticker, provider } = stickerHarness()
+    const asset = Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7])
+    const stream = vi.fn(async function* () { yield asset })
+    const streamRange = vi.fn(async function* ({ offset, limit }: { offset: number, limit: number }) {
+      yield asset.subarray(offset, offset + limit)
+    })
+    vi.mocked(provider.openAsset).mockResolvedValue({
+      mimeType: 'image/png', size: asset.length, source: { size: asset.length, stream, streamRange },
+    })
+    const media = rpc.makeMessageMedia(sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+
+    await expect(rpc.getFile(
+      media.document.id.toNumber(), 2, 4, media.document.fileReference,
+    )).resolves.toEqual(asset.subarray(2, 6))
+
+    expect(streamRange).toHaveBeenCalledWith({ offset: 2, limit: 4 })
+    expect(stream).not.toHaveBeenCalled()
+  })
+
   it('resolves the set attached to a message sticker even when the pack is not listed', async () => {
     const sticker: IMSticker = {
       providerId: 'qq:stickers', stickerId: 'market:42:wave', packId: '42',

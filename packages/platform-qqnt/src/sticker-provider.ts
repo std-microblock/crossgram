@@ -80,7 +80,7 @@ export class QQStickerProvider implements IMStickerProvider {
     const url = reference.kind === 'sysface'
       ? reference.url
       : reference.kind === 'favorite'
-        ? reference.path
+        ? reference.url ?? reference.path
         : reference.animated ? reference.dynamicPath : reference.staticPath
     if (!isHttpUrl(url)) return
     return this.client.inspectDirectUrl(url, Date.now() + 5 * 60_000)

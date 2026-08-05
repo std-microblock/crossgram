@@ -136,6 +136,12 @@ describe('QQStickerProvider saved stickers', () => {
       },
     })).resolves.toMatchObject({ url: 'https://cdn.example.test/system.apng' })
     await expect(provider.resolveAssetUrl(context, {
+      ...favorite('favorite-url'), providerId: 'qq:stickers', locator: {
+        kind: 'favorite', resId: 'favorite-url', path: '/saved/favorite-url.gif',
+        name: 'favorite-url.gif', animated: true, url: 'https://cdn.example.test/favorite-url.gif',
+      },
+    })).resolves.toMatchObject({ url: 'https://cdn.example.test/favorite-url.gif' })
+    await expect(provider.resolveAssetUrl(context, {
       ...favorite('market'), providerId: 'qq:stickers', locator: {
         kind: 'market', packageId: 'pack', stickerId: 'market', name: 'market', key: 'key',
         width: 16, height: 12, animated: false, staticPath: 'C:/QQ/local.png',

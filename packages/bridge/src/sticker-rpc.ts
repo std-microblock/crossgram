@@ -374,28 +374,7 @@ export class StickerRpc {
       ? await resolved.provider.openThumbnail?.(this._context(), resolved.sticker)
       : await resolved.provider.openAsset(this._context(), resolved.sticker)
     if (!asset) return
-    const chunks: Uint8Array[] = []
-    let skipped = 0
-    let size = 0
-    for await (const chunk of asset.source.stream()) {
-      if (skipped + chunk.length <= offset) {
-        skipped += chunk.length
-        continue
-      }
-      const start = Math.max(0, offset - skipped)
-      const accepted = chunk.subarray(start, start + Math.max(0, limit - size))
-      chunks.push(accepted)
-      size += accepted.length
-      skipped += chunk.length
-      if (size >= limit) break
-    }
-    const output = new Uint8Array(size)
-    let position = 0
-    for (const chunk of chunks) {
-      output.set(chunk, position)
-      position += chunk.length
-    }
-    return output
+    return readAssetRange(asset, offset, limit)
   }
 
   async getFileUrl(
@@ -867,9 +846,13 @@ async function readAssetRange(
   limit: number,
 ): Promise<Uint8Array> {
   const chunks: Uint8Array[] = []
-  let skipped = 0
+  const ranged = asset.source.streamRange
+  let skipped = ranged ? offset : 0
   let size = 0
-  for await (const chunk of asset.source.stream()) {
+  const stream = ranged
+    ? ranged.call(asset.source, { offset, limit })
+    : asset.source.stream()
+  for await (const chunk of stream) {
     if (skipped + chunk.length <= offset) {
       skipped += chunk.length
       continue

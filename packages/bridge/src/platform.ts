@@ -193,6 +193,12 @@ export interface IMDirectDownload {
 export interface IMMediaSource {
   size?: number
   stream(options?: { signal?: AbortSignal }): AsyncIterable<Uint8Array>
+  /**
+   * Optional provider-native byte-range reader. Implement this when the
+   * upstream can avoid reopening and discarding the beginning of an asset for
+   * every Telegram upload.getFile request.
+   */
+  streamRange?(options: { offset: number, limit: number, signal?: AbortSignal }): AsyncIterable<Uint8Array>
 }
 
 export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {

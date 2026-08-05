@@ -220,25 +220,61 @@ export class QQNTClient {
     return {
       size,
       async *stream(options = {}) {
-        const response = await client.fetchImpl(`${client.endpoint}/stickers/asset`, {
-          method: 'POST',
-          headers: client.headers({ 'content-type': 'application/json' }),
-          body: JSON.stringify(reference),
-          signal: options.signal,
-        })
-        if (!response.ok) throw new Error(await responseError(response))
-        if (!response.body) throw new Error('QQNT sticker response has no body')
-        const reader = response.body.getReader()
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) return
-            if (value?.length) yield value
-          }
-        } finally {
-          reader.releaseLock()
-        }
+        yield* client.downloadSticker(reference, { signal: options.signal })
       },
+      async *streamRange(options) {
+        yield* client.downloadSticker(reference, options)
+      },
+    }
+  }
+
+  private async *downloadSticker(
+    reference: QQStickerReference,
+    options: { signal?: AbortSignal, offset?: number, limit?: number } = {},
+  ): AsyncIterable<Uint8Array> {
+    const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+    const limit = options.limit === undefined ? undefined : Math.max(0, Math.trunc(options.limit))
+    if (limit === 0) return
+    const ranged = offset > 0 || limit !== undefined
+    const end = limit === undefined ? '' : String(offset + limit - 1)
+    const response = await this.fetchImpl(`${this.endpoint}/stickers/asset`, {
+      method: 'POST',
+      headers: this.headers({
+        'content-type': 'application/json',
+        ...(ranged ? { range: `bytes=${offset}-${end}` } : {}),
+      }),
+      body: JSON.stringify(reference),
+      signal: options.signal,
+    })
+    if (!response.ok) throw new Error(await responseError(response))
+    if (!response.body) throw new Error('QQNT sticker response has no body')
+    const reader = response.body.getReader()
+    let skipped = response.status === 206 ? offset : 0
+    let remaining = limit ?? Number.POSITIVE_INFINITY
+    let completed = false
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          completed = true
+          return
+        }
+        if (!value?.length) continue
+        if (skipped + value.length <= offset) {
+          skipped += value.length
+          continue
+        }
+        const start = Math.max(0, offset - skipped)
+        const accepted = value.subarray(start, start + remaining)
+        skipped += value.length
+        if (!accepted.length) continue
+        remaining -= accepted.length
+        yield accepted
+        if (remaining <= 0) return
+      }
+    } finally {
+      if (!completed) await reader.cancel().catch(() => undefined)
+      reader.releaseLock()
     }
   }
 
