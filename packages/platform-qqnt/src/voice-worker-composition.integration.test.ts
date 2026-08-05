@@ -40,6 +40,7 @@ const config = {
 function call(callId: string, telegramRole: 'caller' | 'recipient'): VoiceWorkerCall {
   return {
     callId,
+    platformCallRef: `qq-${callId}`,
     callerId: 1,
     participantId: 2,
     telegramRole,
@@ -318,6 +319,7 @@ describeUnix('voice worker to QQ PCM composition', () => {
 
     const media = await platform.voiceMedia!.start(callerCall, session, callerEndpoint)
     expect(mediaLease).toHaveBeenCalledTimes(1)
+    expect(mediaLease).toHaveBeenCalledWith('qq-caller-call')
     expect(qqGateway.authentications).toEqual([
       Buffer.concat([Buffer.from([1]), Buffer.from(leaseId, 'hex'), Buffer.from(token)]),
     ])

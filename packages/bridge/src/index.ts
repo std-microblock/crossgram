@@ -253,19 +253,24 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error),
     ),
     async (session, event, options) => {
-      const signal = event.event.type === 'message' ? event.event.message.metadata?.qqCallSignal : undefined
-      if (
-        voiceWorker
-        && registry.get(session.platformId)?.platformKind === 'qq'
-        && signal === 'incoming'
-        && event.event.type === 'message'
-        && event.event.message.metadata?.qqCallMedia === 'voice'
-      ) {
-        // The correlation is opaque and retained only by the transient registry
-        // to suppress retries of this same QQ source event.
-        await voice.receiveIncoming(session, event.event.conversation.id, event.event.message.id)
+      if (event.event.type === 'voice-call') {
+        const platform = registry.get(session.platformId)
+        if (voiceWorker && platform?.platformKind === 'qq' && event.event.media === 'voice') {
+          const callRef = event.event.callRef
+          if (event.event.signal === 'incoming' && platform.voiceCalls) {
+            await voice.receiveIncoming(
+              session,
+              event.event.conversation.id,
+              callRef,
+              { control: (operation) => platform.voiceCalls!.control(session, callRef, operation) },
+            )
+          } else if (event.event.signal === 'ended') {
+            await voice.platformEnded(session, callRef)
+          }
+        }
+        return
       }
-      if (event.event.type === 'message' && 'created' in event.result) {
+      if (event.event.type === 'message' && 'result' in event && 'created' in event.result) {
         satoriExporter?.handleMessage(session, event.event.conversation, event.event.message, event.result)
       }
       return updates.publish(session, event, options)
@@ -770,6 +775,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   } as tl.RawUpdates))
 
   // ── Voice calls (transient; never journaled) ──
+  rpc.register('messages.getDhConfig', async (rpc, req) => {
+    await requireBridgeSession(rpc)
+    return voice.getDhConfig(req as tl.messages.RawGetDhConfigRequest)
+  })
   rpc.register('phone.getCallConfig', async (rpc) => {
     await requireBridgeSession(rpc)
     return voice.getCallConfig()

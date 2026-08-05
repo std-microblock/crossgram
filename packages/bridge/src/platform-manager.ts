@@ -257,6 +257,9 @@ export class PlatformSubscriptionManager {
     } else if (event.type === 'read') {
       const result = await this._store.markRead(session, event.conversationId, event.upToMessageId)
       if (result) return this._onEvent?.(session, { event, result }, options)
+    } else if (event.type === 'voice-call') {
+      // Calls are intentionally transient and bypass every database/journal path.
+      return this._onEvent?.(session, { event }, options)
     }
   }
 }
@@ -273,6 +276,9 @@ function platformEventSummary(event: IMEvent): string {
   }
   if (event.type === 'read') {
     return `type=read conversation=${event.conversationId} upToMessage=${event.upToMessageId}`
+  }
+  if (event.type === 'voice-call') {
+    return `type=voice-call signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`
   }
   return `type=conversation conversation=${event.conversation.id}`
 }
@@ -292,6 +298,7 @@ export type CommittedPlatformEvent =
   | { event: Extract<IMEvent, { type: 'message-delete' }>, result: DeleteResult }
   | { event: Extract<IMEvent, { type: 'message-reactions' }>, result: ReactionResult }
   | { event: Extract<IMEvent, { type: 'read' }>, result: ReadResult }
+  | { event: Extract<IMEvent, { type: 'voice-call' }> }
 
 export interface PlatformEventDeliveryOptions {
   /** Do not push an update to the auth key receiving the same payload via RPC. */

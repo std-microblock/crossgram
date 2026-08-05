@@ -57,6 +57,45 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
+  it('posts the exact live QQ call reference and operation to the authenticated control route', async () => {
+    const requests: Array<{ url: string, method?: string, body: unknown, authorization?: string }> = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      token: 'secret',
+      fetch: vi.fn(async (input, init) => {
+        const headers = new Headers(init?.headers)
+        requests.push({
+          url: String(input), method: init?.method,
+          body: JSON.parse(String(init?.body)),
+          authorization: headers.get('authorization') ?? undefined,
+        })
+        return Response.json({ ok: true })
+      }),
+    })
+
+    await client.controlCall('qq-call_opaque-42', 'accept')
+
+    expect(requests).toEqual([{
+      url: 'http://bridge.invalid/v1/calls/control', method: 'POST',
+      body: { callId: 'qq-call_opaque-42', operation: 'accept' },
+      authorization: 'Bearer secret',
+    }])
+  })
+
+  it('does not expose an opaque QQ call reference in control errors', async () => {
+    const callRef = 'sensitive-qq-call-reference'
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async () => Response.json({ error: `failed ${callRef}` }, { status: 503 })),
+    })
+
+    const error = await client.controlCall(callRef, 'hangup').catch((value: unknown) => value)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(String(error)).toBe('Error: QQNT call control failed')
+    expect(String(error)).not.toContain(callRef)
+  })
+
   it('posts native inline keyboard callback identity to the QQNT bridge', async () => {
     const requests: unknown[] = []
     const client = new QQNTClient({

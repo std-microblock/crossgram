@@ -165,6 +165,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   readonly client: QQNTClient
   readonly voiceMedia?: VoiceCallMediaProvider
+  readonly voiceCalls = {
+    control: (
+      _session: PlatformSession,
+      callRef: string,
+      operation: 'accept' | 'reject' | 'hangup',
+    ) => this.client.controlCall(callRef, operation),
+  }
   private readonly database?: Database
   private readonly qqVoiceMedia?: QQVoiceMedia
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
@@ -228,7 +235,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       || typeof endpoint.close !== 'function') {
       throw new Error('worker PCM endpoint is unavailable')
     }
-    const lease = await this.client.mediaLease(call.callId)
+    if (!call.platformCallRef) throw new Error('QQ voice call reference is unavailable')
+    const lease = await this.client.mediaLease(call.platformCallRef)
     try {
       return await this.qqVoiceMedia!.start(new QQBridgePcmTransport(lease.socketPath), {
         callId: call.callId,
@@ -1467,24 +1475,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
     }
     if (input.type === 'call-signal') {
-      const text = input.signal === 'incoming'
-        ? input.media === 'voice' ? 'QQ 语音通话呼入' : 'QQ 通话呼入'
-        : input.signal === 'accept-requested' ? '已请求接听 QQ 通话'
-          : input.signal === 'refuse-requested' ? '已拒绝 QQ 通话'
-            : input.signal === 'logout-requested' ? '已请求挂断 QQ 通话'
-              : 'QQ 通话已结束'
       return {
-        type: 'message',
+        type: 'voice-call',
+        callRef: input.callId,
+        signal: input.signal,
+        media: input.media,
         conversation,
-        message: {
-          id: `qq-call:${createHash('sha256').update(input.callId).digest('hex').slice(0, 32)}:${input.signal}`,
-          conversationId: input.conversation.id,
-          senderId: input.conversation.id,
-          timestamp: input.timestamp,
-          outgoing: input.signal !== 'incoming',
-          metadata: { qqCallSignal: input.signal, qqCallMedia: input.media },
-          content: { serviceAction: { type: 'custom', text }, parts: [] },
-        },
+        timestamp: input.timestamp,
       }
     }
     if (input.type === 'message-delete') return {

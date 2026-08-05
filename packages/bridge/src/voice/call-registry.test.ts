@@ -103,6 +103,7 @@ function setup(now = 1_000) {
   let current = now
   let randomValue = 0
   const updates: tl.RawUpdatePhoneCall[] = []
+  const deliveries: Array<{ state: tl.TypePhoneCall['_'], excludeAuthKeyId?: string }> = []
   const worker = new FakeWorker()
   const calls = new CallRegistry({
     worker,
@@ -122,9 +123,13 @@ function setup(now = 1_000) {
         }
       },
     },
-    publish: ({ update }) => { updates.push(update); return 1 },
+    publish: ({ update, excludeAuthKeyId }) => {
+      updates.push(update)
+      deliveries.push({ state: update.phoneCall._, excludeAuthKeyId })
+      return 1
+    },
   })
-  return { calls, worker, updates, advance: (milliseconds: number) => { current += milliseconds } }
+  return { calls, worker, updates, deliveries, advance: (milliseconds: number) => { current += milliseconds } }
 }
 
 async function requested(registry: CallRegistry, randomId = 1) {
@@ -328,13 +333,13 @@ describe('CallRegistry', () => {
   })
 
   it('runs the Telegram-recipient flow through caller preparation and caller completion', async () => {
-    const { calls, worker, updates } = setup()
+    const { calls, worker, updates, deliveries } = setup()
     const first = await incoming(calls)
     const retry = await incoming(calls)
     const peer = { id: first.id, accessHash: first.accessHash }
 
     await calls.received(session, peer)
-    const accepted = await calls.accept(session, peer, publicValue(5), protocol)
+    const accepted = await calls.accept(session, peer, publicValue(5), protocol, 'accepting-auth-key')
 
     expect(first).toMatchObject({ _: 'phoneCallRequested', gAHash: worker.callerGAHash })
     expect(retry).toEqual(first)
@@ -342,13 +347,33 @@ describe('CallRegistry', () => {
     expect(worker.events.find((event) => event.operation === 'complete-caller')).toMatchObject({
       call: { telegramRole: 'recipient' }, value: publicValue(5),
     })
-    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallAccepted', gB: publicValue(5) })
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallWaiting' })
     expect(updates.map((update) => update.phoneCall._)).toEqual([
       'phoneCallRequested', 'phoneCallWaiting', 'phoneCallAccepted', 'phoneCall',
     ])
     expect(updates.at(-1)?.phoneCall).toMatchObject({
       _: 'phoneCall', gAOrB: worker.callerGA, keyFingerprint: worker.callerFingerprint,
     })
+    expect(deliveries.slice(-2)).toEqual([
+      { state: 'phoneCallAccepted', excludeAuthKeyId: 'accepting-auth-key' },
+      { state: 'phoneCall', excludeAuthKeyId: undefined },
+    ])
+  })
+
+  it('accepts directly from requested when the client skips phone.receivedCall', async () => {
+    const { calls, worker, updates } = setup()
+    const requested = await incoming(calls, 'accept-without-received-ack')
+    const peer = { id: requested.id, accessHash: requested.accessHash }
+
+    const accepted = await calls.accept(session, peer, publicValue(6), protocol)
+
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallWaiting' })
+    expect(worker.events.map((event) => event.operation)).toEqual([
+      'prepare-caller', 'complete-caller',
+    ])
+    expect(updates.map((update) => update.phoneCall._)).toEqual([
+      'phoneCallRequested', 'phoneCallAccepted', 'phoneCall',
+    ])
   })
 
   it('rejects role-incompatible phone RPC transitions without changing the call', async () => {
@@ -603,7 +628,8 @@ describe('CallRegistry', () => {
     await calls.received(session, peer)
     const accepted = await calls.accept(session, peer, publicValue(), recipientProtocol)
 
-    expect(accepted.phoneCall).toMatchObject({
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallWaiting', protocol: callerProtocol })
+    expect(updates.at(-2)?.phoneCall).toMatchObject({
       _: 'phoneCallAccepted', protocol: recipientProtocol,
     })
     expect(updates.at(-1)?.phoneCall).toMatchObject({

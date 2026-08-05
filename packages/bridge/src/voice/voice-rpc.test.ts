@@ -75,7 +75,7 @@ describe('VoiceRpc incoming calls', () => {
     await expect(voice.accept(session, {
       peer, gB: publicValue(), protocol: workerProtocol,
     } as tl.phone.RawAcceptCallRequest)).resolves.toMatchObject({
-      _: 'phone.phoneCall', phoneCall: { _: 'phoneCallAccepted', protocol: workerProtocol },
+      _: 'phone.phoneCall', phoneCall: { _: 'phoneCallWaiting', protocol: workerProtocol },
     })
 
     const incompatible = createVoiceRpc()
