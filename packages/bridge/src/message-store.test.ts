@@ -42,6 +42,44 @@ async function createStore() {
 }
 
 describe('MessageStore', () => {
+  it('persists unread mention navigation state and never re-unreads an acknowledged message', async () => {
+    const { store } = await createStore()
+    const conversation: IMConversation = { id: 'mentions', kind: 'group', title: 'Mentions' }
+    const first: IMMessage = {
+      id: 'first-mention', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { parts: [{ type: 'text', text: '@self first' }] },
+    }
+    const second: IMMessage = {
+      id: 'second-mention', conversationId: conversation.id, senderId: 'bob', timestamp: 2,
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const firstResult = await store.ingest(session, conversation, first)
+    const secondResult = await store.ingest(session, conversation, second)
+    const firstId = firstResult.projection[0].tlMessageId
+    const secondId = secondResult.projection[0].tlMessageId
+
+    await store.setMessageMentioned(session.platformSessionId, conversation.id, firstId, true, true)
+    await store.setMessageMentioned(session.platformSessionId, conversation.id, secondId, true, true)
+
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(2)
+    await expect(store.listUnreadMentions(session.platformSessionId, conversation.id)).resolves.toMatchObject([
+      { source: { id: second.id }, parts: [{ tlMessageId: secondId, ordinal: 0 }] },
+      { source: { id: first.id }, parts: [{ tlMessageId: firstId, ordinal: 0 }] },
+    ])
+    await expect(store.markMentionsRead(session.platformSessionId, conversation.id)).resolves.toBe(2)
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(0)
+
+    await store.setMessageMentioned(session.platformSessionId, conversation.id, secondId, true, true)
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(0)
+
+    await store.setMessageMentioned(session.platformSessionId, conversation.id, secondId, false, false)
+    await store.setMessageMentioned(session.platformSessionId, conversation.id, secondId, true, true)
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(1)
+
+    await store.deleteMessages(session, conversation, [second.id])
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(0)
+  })
+
   it('reads only requested dialogs in caller order with their latest stored message', async () => {
     const { store } = await createStore()
     const first = { id: 'first-dialog', kind: 'group' as const, title: 'First' }

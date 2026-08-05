@@ -79,6 +79,16 @@ export interface IMMessageAliasRow {
   ordinal: number
 }
 
+/** Bridge-owned Telegram unread-mention state for one logical platform message. */
+export interface MessageMentionRow {
+  messageId: number
+  platformSessionId: string
+  conversationId: number
+  tlMessageId: number
+  unread: boolean
+  updatedAt: Date
+}
+
 export interface IMMediaRow {
   id: number
   messageId: number
@@ -258,6 +268,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_im_user: IMUserRow
     mtproto_im_message: IMMessageRow
     mtproto_im_message_alias: IMMessageAliasRow
+    mtproto_message_mention: MessageMentionRow
     mtproto_im_media: IMMediaRow
     mtproto_tl_message_part: TlMessagePartRow
     mtproto_id_counter: IdCounterRow
@@ -334,6 +345,15 @@ export function defineModels(ctx: Context): void {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'conversationId', 'platformMessageId']],
     indexes: ['messageId'],
+  })
+
+  ctx.model.extend('mtproto_message_mention', {
+    messageId: 'unsigned', platformSessionId: 'string', conversationId: 'unsigned',
+    tlMessageId: 'unsigned', unread: 'boolean', updatedAt: 'timestamp',
+  }, {
+    primary: 'messageId',
+    unique: [['platformSessionId', 'conversationId', 'tlMessageId']],
+    indexes: [['platformSessionId', 'conversationId', 'unread', 'tlMessageId']],
   })
 
   ctx.model.extend('mtproto_im_media', {
