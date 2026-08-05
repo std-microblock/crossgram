@@ -931,6 +931,78 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('sets the Telegram mentioned flag for live self mentions and replies to outgoing messages only', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'muted-group', kind: 'group', title: 'Muted Group' }
+    const outgoing: IMMessage = {
+      id: 'outgoing-target', conversationId: conversation.id, senderId: session.userId,
+      outgoing: true, timestamp: 30,
+      content: { parts: [{ type: 'text', text: 'my message' }] },
+    }
+    const incomingTarget: IMMessage = {
+      id: 'incoming-target', conversationId: conversation.id, senderId: 'bob', timestamp: 31,
+      content: { parts: [{ type: 'text', text: 'bob message' }] },
+    }
+    const outgoingResult = await store.ingest(session, conversation, outgoing)
+    const outgoingTlId = outgoingResult.projection[0].tlMessageId
+    await store.ingest(session, conversation, incomingTarget)
+
+    const cases: Array<{ message: IMMessage, mentioned: boolean }> = [{
+      message: {
+        id: 'explicit-self-mention', conversationId: conversation.id, senderId: 'alice', timestamp: 32,
+        content: { parts: [{
+          type: 'text', text: '@Current',
+          entities: [{ type: 'mention', offset: 0, length: 8, userId: session.userId }],
+        }] },
+      },
+      mentioned: true,
+    }, {
+      message: {
+        id: 'native-reply-to-self', conversationId: conversation.id, senderId: 'alice', timestamp: 33,
+        metadata: { telegramReplyToMessageId: outgoingTlId },
+        content: { parts: [{ type: 'text', text: 'native reply' }] },
+      },
+      mentioned: true,
+    }, {
+      message: {
+        id: 'reply-to-other', conversationId: conversation.id, senderId: 'alice', timestamp: 34,
+        replyToId: incomingTarget.id,
+        content: { parts: [{ type: 'text', text: 'not for self' }] },
+      },
+      mentioned: false,
+    }, {
+      message: {
+        id: 'mention-other', conversationId: conversation.id, senderId: 'alice', timestamp: 35,
+        content: { parts: [{
+          type: 'text', text: '@Bob',
+          entities: [{ type: 'mention', offset: 0, length: 4, userId: 'bob' }],
+        }] },
+      },
+      mentioned: false,
+    }]
+
+    for (const item of cases) {
+      const result = await store.ingest(session, conversation, item.message)
+      await manager.publish(session, {
+        event: { type: 'message', conversation, message: item.message }, result,
+      })
+    }
+
+    const liveMessages = sent.map(({ update }) => {
+      const pushed = (update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
+      return roundTrip(pushed.message) as tl.RawMessage
+    })
+    expect(liveMessages.map((message) => [message.message, message.mentioned ?? false])).toEqual([
+      ['@Current', true],
+      ['native reply', true],
+      ['not for self', false],
+      ['@Bob', false],
+    ])
+    expect(liveMessages[1].replyTo).toMatchObject({
+      _: 'messageReplyHeader', replyToMsgId: outgoingTlId,
+    })
+  })
+
   it('publishes subchannel events through the parent forum and topic root', async () => {
     const { store, manager, sent } = await createHarness()
     const parent: IMConversation = { id: 'general', kind: 'channel', title: 'General' }

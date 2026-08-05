@@ -139,6 +139,77 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('DialogRpc', () => {
+  it('marks unread group mentions and replies to the current user for Telegram notification badges', async () => {
+    const mentionGroup = { id: 'mention-group', kind: 'group' as const, title: 'Mentions' }
+    const replyGroup = { id: 'reply-group', kind: 'group' as const, title: 'Replies' }
+    const otherGroup = { id: 'other-group', kind: 'group' as const, title: 'Other mentions' }
+    const selfTarget: IMMessage = {
+      id: 'self-target', conversationId: replyGroup.id, senderId: session.userId,
+      outgoing: true, timestamp: 10, content: { parts: [{ type: 'text', text: 'my message' }] },
+    }
+    const reply: IMMessage = {
+      id: 'reply', conversationId: replyGroup.id, senderId: 'alice', replyToId: selfTarget.id,
+      timestamp: 11, content: { parts: [{ type: 'text', text: 'answer' }] },
+    }
+    const mention: IMMessage = {
+      id: 'mention', conversationId: mentionGroup.id, senderId: 'bob', timestamp: 12,
+      content: { parts: [{
+        type: 'text', text: '@Current ping',
+        entities: [{ type: 'mention', offset: 0, length: 8, userId: session.userId }],
+      }] },
+    }
+    const otherMention: IMMessage = {
+      id: 'other', conversationId: otherGroup.id, senderId: 'bob', timestamp: 13,
+      content: { parts: [{
+        type: 'text', text: '@Other ping',
+        entities: [{ type: 'mention', offset: 0, length: 6, userId: 'other' }],
+      }] },
+    }
+    const histories = new Map([
+      [mentionGroup.id, [mention]],
+      [replyGroup.id, [selfTarget, reply]],
+      [otherGroup.id, [otherMention]],
+    ])
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() {
+        return { dialogs: [
+          { conversation: otherGroup, unreadCount: 1, lastMessage: otherMention },
+          { conversation: mentionGroup, unreadCount: 1, lastMessage: mention },
+          { conversation: replyGroup, unreadCount: 1, lastMessage: reply, readInboxMaxMessage: selfTarget },
+        ] }
+      },
+      async getHistory(_session, conversation) { return { messages: histories.get(conversation.id) ?? [] } },
+      async getUser(_session, id) { return { id, firstName: id } },
+    }
+    const rpc = new DialogRpc(platform, session)
+    const decoded = wireRoundTrip(await rpc.getDialogs(getDialogsRequest())) as tl.messages.RawDialogs
+    const dialogs = new Map(decoded.dialogs.map((dialog) => [
+      dialog.peer._ === 'peerChannel' ? dialog.peer.channelId : 0,
+      dialog as tl.RawDialog,
+    ]))
+    const messages = new Map(decoded.messages.flatMap((message) =>
+      message._ === 'message' && message.peerId._ === 'peerChannel'
+        ? [[message.peerId.channelId, message] as const]
+        : []))
+
+    expect(dialogs.get(rpc.peerTlId(mentionGroup.id))).toMatchObject({ unreadMentionsCount: 1 })
+    expect(messages.get(rpc.peerTlId(mentionGroup.id))).toMatchObject({ mentioned: true })
+    expect(dialogs.get(rpc.peerTlId(replyGroup.id))).toMatchObject({ unreadMentionsCount: 1 })
+    expect(messages.get(rpc.peerTlId(replyGroup.id))).toMatchObject({
+      mentioned: true,
+      replyTo: { _: 'messageReplyHeader' },
+    })
+    expect(dialogs.get(rpc.peerTlId(otherGroup.id))).toMatchObject({ unreadMentionsCount: 0 })
+    expect(messages.get(rpc.peerTlId(otherGroup.id))?.mentioned).toBe(false)
+  })
+
   it('does not expose a generic merged-forward counter as the card description', () => {
     const media = makeTlConversationPreview({
       id: 'generic-forward', kind: 'group', title: '聊天记录',
