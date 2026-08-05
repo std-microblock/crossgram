@@ -1372,9 +1372,10 @@ describe('bridge login e2e', () => {
       const seededPhoto = groupHistory.messages[1].media.photo
       expect(seededPhoto.sizes).toMatchObject([
         { _: 'photoStrippedSize', type: 'i', bytes: expect.any(Uint8Array) },
-        { _: 'photoSize', type: 'x', w: 1240, h: 1754 },
+        { _: 'photoSize', type: 'y', w: 905, h: 1280 },
+        { _: 'photoSize', type: 'w', w: 1240, h: 1754 },
       ])
-      expect(seededPhoto.sizes.map((size: any) => size.type)).toEqual(['i', 'x'])
+      expect(seededPhoto.sizes.map((size: any) => size.type)).toEqual(['i', 'y', 'w'])
       expect([...seededPhoto.sizes[0].bytes.subarray(0, 3)]).toEqual([1, 40, 28])
       const seededFile = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 64,

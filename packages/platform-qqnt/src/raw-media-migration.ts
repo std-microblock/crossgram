@@ -55,6 +55,7 @@ export async function migrateLegacyQQMessageMedia(
       if (locator.previewKey) previewKeys.add(locator.previewKey)
       const previewLocator = row.preview && qqLocator(row.preview.locator)
       if (previewLocator?.previewKey) previewKeys.add(previewLocator.previewKey)
+      const removePreview = Boolean(previewLocator && hasLegacyLocalMarker(previewLocator))
       if (locator.cachedPath) cachedPaths.add(locator.cachedPath)
       const cleanedLocator = rawLocator(locator)
       const transformed = isTranscodedRow(row, locator)
@@ -62,7 +63,7 @@ export async function migrateLegacyQQMessageMedia(
       await transaction.set('mtproto_im_media', { id: row.id }, {
         ...raw,
         locator: cleanedLocator as unknown as JsonValue,
-        preview: null,
+        ...(removePreview ? { preview: null } : {}),
         strippedThumbnail: null,
       })
       result.mediaRows++
@@ -72,7 +73,7 @@ export async function migrateLegacyQQMessageMedia(
         ...raw,
         id: raw?.platformMediaId ?? row.platformMediaId,
         locator: cleanedLocator,
-        preview: undefined,
+        ...(removePreview ? { preview: undefined } : {}),
         strippedThumbnail: undefined,
       })) changedMessages.add(row.messageId)
     }
@@ -110,10 +111,18 @@ function isLegacyLocalProjection(
   row: { platformMediaId: string, preview: unknown, strippedThumbnail: unknown },
   locator: QQMediaLocator,
 ): boolean {
+  const previewLocator = row.preview && typeof row.preview === 'object' && 'locator' in row.preview
+    ? qqLocator(row.preview.locator as JsonValue)
+    : undefined
   return Boolean(
-    locator.cachedPath || locator.previewKey || locator.deferred
-    || row.preview || row.strippedThumbnail || row.platformMediaId.endsWith(':webm-v1'),
+    hasLegacyLocalMarker(locator)
+    || previewLocator && hasLegacyLocalMarker(previewLocator)
+    || row.strippedThumbnail || row.platformMediaId.endsWith(':webm-v1'),
   )
+}
+
+function hasLegacyLocalMarker(locator: QQMediaLocator): boolean {
+  return Boolean(locator.cachedPath || locator.previewKey || locator.deferred)
 }
 
 function isTranscodedRow(
@@ -175,8 +184,8 @@ function rewriteStoredPart(
   const current = (part as { media?: unknown }).media
   if (!current || typeof current !== 'object' || Array.isArray(current)) return false
   const next = { ...current, ...media }
-  delete next.preview
-  delete next.strippedThumbnail
+  if ('preview' in media && media.preview === undefined) delete next.preview
+  if ('strippedThumbnail' in media && media.strippedThumbnail === undefined) delete next.strippedThumbnail
   ;(part as { media: unknown }).media = next
   return true
 }

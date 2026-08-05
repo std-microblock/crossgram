@@ -12,9 +12,10 @@ import sharp from 'sharp'
 import {
   MessageStore, StickerRpc, type IngestResult, type PlatformSession, type Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { makeTlMessageMedia } from '../../bridge/src/dialogs.js'
+import { DialogRpc, makeTlMessageMedia } from '../../bridge/src/dialogs.js'
 import { defineModels } from '../../bridge/src/models.js'
 import { ReactionRpc } from '../../bridge/src/reaction-rpc.js'
+import { UploadManager } from '../../bridge/src/upload-manager.js'
 import { defineQQNTEventCheckpointModel } from './event-checkpoint.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
 import { QQNTPlatform } from './index.js'
@@ -866,12 +867,16 @@ describe('QQNT history media without placeholder edits E2E', () => {
     })
 
     const jpeg = await sharp({
-      create: { width: 40, height: 24, channels: 3, background: { r: 20, g: 80, b: 180 } },
+      create: { width: 2832, height: 1280, channels: 3, background: { r: 20, g: 80, b: 180 } },
+    }).jpeg().toBuffer()
+    const nativePreview = await sharp({
+      create: { width: 1280, height: 579, channels: 3, background: { r: 20, g: 80, b: 180 } },
     }).jpeg().toBuffer()
     const releaseImage = Promise.withResolvers<void>()
     const imageRequested = Promise.withResolvers<void>()
     let directUrlRequests = 0
     let imageRequests = 0
+    let previewRequests = 0
     let server: Server | undefined
     server = createServer(async (request, response) => {
       if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
@@ -883,6 +888,24 @@ describe('QQNT history media without placeholder edits E2E', () => {
           url: `http://127.0.0.1:${address.port}/cdn/history.jpg`,
           expiresAt: Date.now() + 60_000,
         }))
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/files/asset') {
+        previewRequests++
+        for await (const _chunk of request) { /* drain locator body */ }
+        const match = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range ?? '')
+        const start = match ? Number(match[1]) : 0
+        const end = Math.min(
+          nativePreview.length - 1,
+          match?.[2] ? Number(match[2]) : nativePreview.length - 1,
+        )
+        const bytes = nativePreview.subarray(start, end + 1)
+        response.writeHead(match ? 206 : 200, {
+          'content-type': 'image/jpeg', 'content-length': String(bytes.length),
+          ...(match ? { 'content-range': `bytes ${start}-${end}/${nativePreview.length}` } : {}),
+          'accept-ranges': 'bytes',
+        })
+        response.end(bytes)
         return
       }
       if (request.method === 'GET' && request.url === '/cdn/history.jpg') {
@@ -929,7 +952,15 @@ describe('QQNT history media without placeholder edits E2E', () => {
         type: 'media' as const,
         media: {
           id: 'history-media', kind: 'image' as const, name: 'history.jpg', mimeType: 'image/jpeg',
-          size: jpeg.length, width: 40, height: 24,
+          size: jpeg.length, width: 2832, height: 1280,
+          preview: {
+            mimeType: 'image/jpeg', size: nativePreview.length, width: 1280, height: 579,
+            locator: {
+              messageId: 'history-image', elementId: 'history-media', chatType: 2 as const,
+              peerUid: 'history', kind: 'image' as const, fileName: 'history_720.jpg',
+              fileSize: String(nativePreview.length), filePath: '/qq/cache/history_720.jpg',
+            },
+          },
           locator: {
             messageId: 'history-image', elementId: 'history-media', chatType: 2 as const,
             peerUid: 'history', kind: 'image' as const, fileName: 'history.jpg',
@@ -955,9 +986,35 @@ describe('QQNT history media without placeholder edits E2E', () => {
     const mediaId = initial.projection[0].mediaId!
     const original = await store.getMedia(session.platformSessionId, mediaId)
     expect(original?.media).toMatchObject({
-      kind: 'image', size: jpeg.length, width: 40, height: 24,
+      kind: 'image', size: jpeg.length, width: 2832, height: 1280,
+      preview: { size: nativePreview.length, width: 1280, height: 579 },
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
+
+    const [storedRow] = await ctx.database.get('mtproto_im_media', { id: mediaId })
+    const projected = makeTlMessageMedia(storedRow!, original!.timestamp)
+    if (projected._ !== 'messageMediaPhoto' || projected.photo?._ !== 'photo') {
+      throw new Error('expected projected photo')
+    }
+    expect(projected.photo.sizes).toMatchObject([
+      { _: 'photoSize', type: 'm', w: 1280, h: 579, size: nativePreview.length },
+      { _: 'photoSize', type: 'y', w: 2560, h: 1157, size: jpeg.length },
+      { _: 'photoSize', type: 'w', w: 2832, h: 1280, size: jpeg.length },
+    ])
+    const uploadPath = await mkdtemp(join(tmpdir(), 'qqnt-native-preview-download-'))
+    temporaryDirectories.push(uploadPath)
+    const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
+    const previewFile = await rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPhotoFileLocation', id: projected.photo.id, accessHash: projected.photo.accessHash,
+        fileReference: projected.photo.fileReference, thumbSize: 'm',
+      },
+      offset: 0, limit: 1024 * 1024,
+    })
+    if (previewFile._ !== 'upload.file') throw new Error('expected native preview file')
+    expect(Buffer.from(previewFile.bytes)).toEqual(Buffer.from(nativePreview))
+    expect(previewRequests).toBe(1)
 
     expect(directUrlRequests).toBe(0)
     expect(imageRequests).toBe(0)
@@ -980,7 +1037,8 @@ describe('QQNT history media without placeholder edits E2E', () => {
     })
     const ready = await store.getMedia(session.platformSessionId, mediaId)
     expect(ready?.media).toMatchObject({
-      kind: 'image', size: jpeg.length, width: 40, height: 24,
+      kind: 'image', size: jpeg.length, width: 2832, height: 1280,
+      preview: { size: nativePreview.length, width: 1280, height: 579 },
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
     expect(await collect(platform.downloadMedia(session, ready!.media as any))).toEqual(jpeg)

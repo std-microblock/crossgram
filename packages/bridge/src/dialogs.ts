@@ -1712,12 +1712,12 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = req.location._ === 'inputDocumentFileLocation'
-      && req.location.thumbSize === 'm' && stored.media.preview
+    const media = req.location.thumbSize === 'm' && stored.media.preview
       ? previewMedia(stored.media)
       : stored.media
     return {
-      _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: stored.timestamp,
+      _: 'upload.file', type: storageFileType(media.mimeType ?? 'application/octet-stream'),
+      mtime: stored.timestamp,
       bytes: await this._downloadMediaRange(media, offset, req.limit),
     }
   }
@@ -1751,8 +1751,7 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = location._ === 'inputDocumentFileLocation'
-      && location.thumbSize === 'm' && stored.media.preview
+    const media = location.thumbSize === 'm' && stored.media.preview
       ? previewMedia(stored.media)
       : stored.media
     let resolved: import('./platform.js').IMDirectDownload | undefined
@@ -4598,7 +4597,8 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
           ...(media.strippedThumbnail?.byteLength ? [{
             _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
           }] : []),
-          ...originalPhotoSizes(dimensions, media.size),
+          ...(media.preview ? [photoPreviewSize(media.preview)] : []),
+          ...originalPhotoSizes(dimensions, media.size, Boolean(media.preview)),
         ],
         dcId,
       },
@@ -4756,10 +4756,12 @@ function isAnimatedImageMime(mimeType: string | null | undefined): boolean {
 }
 
 const TELEGRAM_DISPLAY_PHOTO_SIDE = 1280
+const TELEGRAM_HIGH_QUALITY_PHOTO_SIDE = 2560
 
 function originalPhotoSizes(
   dimensions: { width: number, height: number },
   byteSize: number | null | undefined,
+  hasNativePreview = false,
 ): tl.RawPhotoSize[] {
   const size = Math.min(byteSize ?? 0, 0x7fffffff)
   const maxSide = Math.max(dimensions.width, dimensions.height)
@@ -4767,6 +4769,21 @@ function originalPhotoSizes(
     return [{
       _: 'photoSize', type: 'x', w: dimensions.width, h: dimensions.height, size,
     }]
+  }
+
+  if (hasNativePreview) {
+    if (maxSide <= TELEGRAM_HIGH_QUALITY_PHOTO_SIDE) {
+      return [{
+        _: 'photoSize', type: 'y', w: dimensions.width, h: dimensions.height, size,
+      }]
+    }
+    const highQuality = cappedPhotoDimensions(
+      dimensions.width, dimensions.height, TELEGRAM_HIGH_QUALITY_PHOTO_SIDE,
+    )
+    return [
+      { _: 'photoSize', type: 'y', w: highQuality.width, h: highQuality.height, size },
+      { _: 'photoSize', type: 'w', w: dimensions.width, h: dimensions.height, size },
+    ]
   }
 
   const scale = TELEGRAM_DISPLAY_PHOTO_SIDE / maxSide
@@ -4785,6 +4802,28 @@ function originalPhotoSizes(
       _: 'photoSize', type: 'w', w: dimensions.width, h: dimensions.height, size,
     },
   ]
+}
+
+function photoPreviewSize(preview: NonNullable<IMMediaRow['preview']>): tl.RawPhotoSize {
+  const dimensions = cappedPhotoDimensions(preview.width, preview.height, TELEGRAM_DISPLAY_PHOTO_SIDE)
+  return {
+    _: 'photoSize', type: 'm', w: dimensions.width, h: dimensions.height,
+    size: Math.min(preview.size, 0x7fffffff),
+  }
+}
+
+function cappedPhotoDimensions(
+  width: number,
+  height: number,
+  limit: number,
+): { width: number, height: number } {
+  const maxSide = Math.max(width, height)
+  if (maxSide <= limit) return { width, height }
+  const scale = limit / maxSide
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  }
 }
 
 function qqSequenceKey(conversationId: string, sequence: number): string {
