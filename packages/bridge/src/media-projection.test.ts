@@ -441,6 +441,36 @@ describe('rich-media projection', () => {
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
+  it('adds a 1280px original-byte alias before an oversized photo', () => {
+    const media = makeTlMessageMedia({
+      id: 19_855,
+      messageId: 1,
+      ordinal: 0,
+      partIndex: 0,
+      platformMediaId: 'oversized-photo',
+      kind: 'image',
+      name: 'wide.jpg',
+      mimeType: 'image/jpeg',
+      size: 320_332,
+      width: 2_832,
+      height: 1_280,
+      duration: null,
+      preview: null,
+      strippedThumbnail: new Uint8Array(strippedThumbnail).buffer,
+      locator: {},
+    }, 1_785_912_121)
+
+    if (media._ !== 'messageMediaPhoto' || media.photo?._ !== 'photo') {
+      throw new Error('expected projected photo')
+    }
+    expect(media.photo.sizes).toMatchObject([
+      { _: 'photoStrippedSize', type: 'i' },
+      { _: 'photoSize', type: 'y', w: 1280, h: 579, size: 320_332 },
+      { _: 'photoSize', type: 'w', w: 2832, h: 1280, size: 320_332 },
+    ])
+    expect(() => wireRoundTrip(media)).not.toThrow()
+  })
+
   it('serves the original photo for stale Telegram thumb_size m requests', async () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
