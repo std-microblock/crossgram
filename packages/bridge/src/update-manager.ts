@@ -506,6 +506,19 @@ export class UpdateManager {
       }
       const sticker = projected.source.content.parts.find((item) => item.type === 'sticker')
       const card = projected.source.content.parts.find((item) => item.type === 'card')
+      const mentioned = part.ordinal === 0 && projected.source.outgoing !== true && (
+        messageMentionsUser(projected.source, session.userId)
+        || replied?.source.outgoing === true
+      )
+      if (part.ordinal === 0) {
+        await this._store.setMessageMentioned(
+          session.platformSessionId,
+          event.conversation.id,
+          part.tlMessageId,
+          mentioned,
+          true,
+        )
+      }
       const message = projectTlMessage({
         conversation: displayConversation,
         source: projected.source,
@@ -531,10 +544,7 @@ export class UpdateManager {
           : undefined,
         topicId,
         replyToTlId: nativeReplyTo ?? replied?.parts[0]?.tlMessageId,
-        mentioned: part.ordinal === 0 && projected.source.outgoing !== true && (
-          messageMentionsUser(projected.source, session.userId)
-          || replied?.source.outgoing === true
-        ),
+        mentioned,
       })
       updates.push({
         _: isEdit

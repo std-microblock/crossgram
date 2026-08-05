@@ -116,6 +116,8 @@ export class DialogRpc {
   private readonly _messageToTl = new Map<string, number>()
   private readonly _tlToMessage = new Map<number, MessageRef>()
   private readonly _messageOutgoingByTl = new Map<number, boolean>()
+  private readonly _memoryMentionStates = new Map<string, Map<number, boolean>>()
+  private readonly _unreadMentionCounts = new Map<string, number>()
   private _nextMessageId = 1
   private _pts = 1
   private readonly _sentByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
@@ -290,6 +292,7 @@ export class DialogRpc {
     const projectionsMs = performance.now() - projectionsAt
     const materializeAt = performance.now()
     const drafts = await this._mainDrafts()
+    await this._preloadUnreadMentionCounts(all.map((dialog) => dialog.conversation.id))
     const materialized = await Promise.all(all.map((dialog) =>
       this._materializeDialog(
         dialog, drafts.get(dialog.conversation.id),
@@ -400,6 +403,7 @@ export class DialogRpc {
         .flatMap((message) => message ? messageReferencedUserIds(message) : []),
     ]))
     const drafts = await this._mainDrafts()
+    await this._preloadUnreadMentionCounts(selected.map((dialog) => dialog.conversation.id))
     const materialized = await Promise.all(selected.map((dialog) =>
       this._materializeDialog(
         dialog, drafts.get(dialog.conversation.id),
@@ -613,6 +617,59 @@ export class DialogRpc {
       ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
+  }
+
+  async getUnreadMentions(
+    req: tl.messages.RawGetUnreadMentionsRequest,
+  ): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    const conversationId = await this._resolveMentionConversation(req.peer, req.topMsgId)
+    const conversation = this._conversation(conversationId)
+    const dialog = await this._mentionDialog(conversationId)
+    const history = await this._visibleMessages(await this._loadHistory(conversationId, {
+      limit: Math.max(100, Math.min(dialog?.unreadCount ?? 0, 1_000)),
+    }))
+    await this._syncMentionStates(conversationId, history, dialog?.unreadCount ?? 0)
+    const mentioned = await this._unreadMentionMessages(conversationId)
+    const visible = await this._visibleMessages(mentioned)
+    const { filtered, page } = selectHistoryWindow(visible, {
+      offsetId: req.offsetId,
+      addOffset: req.addOffset,
+      limit: req.limit,
+      maxId: req.maxId,
+      minId: req.minId,
+    })
+    const users = await this._messageSenders(page.map((item) => item.source))
+    return {
+      _: page.length < filtered.length ? 'messages.messagesSlice' : 'messages.messages',
+      ...(page.length < filtered.length ? { count: filtered.length } : {}),
+      messages: page.map((item) => this._makeMessage(item)), topics: [],
+      chats: conversation.kind === 'direct' ? [] : [this._makeChat(
+        conversation.parentId ? this._conversation(conversation.parentId) : conversation,
+      )],
+      users: uniqueUsers([...users, this._makeSelfUser()]),
+    } as unknown as tl.messages.TypeMessages
+  }
+
+  async readMentions(
+    req: tl.messages.RawReadMentionsRequest,
+  ): Promise<tl.messages.RawAffectedHistory> {
+    await this._hydratePeers()
+    const conversationId = await this._resolveMentionConversation(req.peer, req.topMsgId)
+    if (this._store) {
+      await this._store.markMentionsRead(this._session.platformSessionId, conversationId)
+      this._unreadMentionCounts.set(conversationId, 0)
+    } else {
+      const states = this._memoryMentionStates.get(conversationId)
+      if (states) for (const id of states.keys()) states.set(id, false)
+    }
+    const state = await this._store?.getUpdateState(this._session.platformSessionId)
+    return {
+      _: 'messages.affectedHistory',
+      pts: state?.pts ?? this._pts,
+      ptsCount: 0,
+      offset: 0,
+    }
   }
 
   private async _searchPlatform(
@@ -2523,9 +2580,24 @@ export class DialogRpc {
         ?? unpersistedReadInboxMaxId
         ?? this._messageId(platformPeerId, source.readInboxMaxMessage.id)
     }
-    const message = source.lastMessage
-      ? this._makeMessage(top ?? { source: source.lastMessage, tlId: topMessage, ordinal: 0 })
-      : undefined
+    const topItem = top ?? (source.lastMessage
+      ? { source: source.lastMessage, tlId: topMessage, ordinal: 0 }
+      : undefined)
+    const createdUnreadMentions = topItem
+      ? await this._syncMentionStates(platformPeerId, [topItem], source.unreadCount > 0 ? 1 : 0)
+      : 0
+    let unreadMentionsCount: number
+    if (this._store) {
+      const preloaded = this._unreadMentionCounts.get(platformPeerId)
+      unreadMentionsCount = preloaded === undefined
+        ? await this._store.countUnreadMentions(this._session.platformSessionId, platformPeerId)
+        : preloaded + createdUnreadMentions
+      this._unreadMentionCounts.set(platformPeerId, unreadMentionsCount)
+    } else {
+      unreadMentionsCount = [...(this._memoryMentionStates.get(platformPeerId)?.values() ?? [])]
+        .filter((unread) => unread).length
+    }
+    const message = topItem ? this._makeMessage(topItem) : undefined
     const pts = this._isTelegramChannel(source.conversation)
       ? await this._channelPts(source.conversation)
       : undefined
@@ -2536,10 +2608,7 @@ export class DialogRpc {
       readInboxMaxId,
       readOutboxMaxId: topMessage,
       unreadCount: source.unreadCount,
-      unreadMentionsCount: source.unreadCount > 0 && top && this._messageMentioned(
-        top.source,
-        this._messageReplyHeader(top.source)?.replyToMsgId,
-      ) ? 1 : 0,
+      unreadMentionsCount,
       unreadReactionsCount: 0,
       unreadPollVotesCount: 0,
       notifySettings: await this._peerNotifySettings(platformPeerId),
@@ -3209,6 +3278,101 @@ export class DialogRpc {
       messageMentionsUser(source, this._session.userId)
       || (replyToTlId !== undefined && this._messageOutgoingByTl.get(replyToTlId) === true)
     )
+  }
+
+  private async _resolveMentionConversation(
+    peer: tl.TypeInputPeer,
+    topMsgId?: number,
+  ): Promise<string> {
+    const peerId = this._resolvePeer(peer)
+    if (!topMsgId) return peerId
+    await this._ensureTopics(peerId)
+    const childId = this._topicToConversation.get(topMsgId)
+    if (!childId || this._conversation(childId).parentId !== peerId) {
+      throw new RpcError(400, 'MSG_ID_INVALID')
+    }
+    return childId
+  }
+
+  private async _mentionDialog(conversationId: string): Promise<IMDialog | undefined> {
+    const cached = this._dialogCache.get(conversationId)
+    if (cached) return cached
+    const stored = await this._store?.readDialogs(
+      this._session.platformSessionId, [conversationId],
+    )
+    const dialog = stored?.[0]
+    if (dialog) this._dialogCache.set(conversationId, dialog)
+    return dialog
+  }
+
+  private async _preloadUnreadMentionCounts(conversationIds: readonly string[]): Promise<void> {
+    if (!this._store || !conversationIds.length) return
+    const counts = await this._store.countUnreadMentionsMany(
+      this._session.platformSessionId, conversationIds,
+    )
+    for (const [conversationId, count] of counts) this._unreadMentionCounts.set(conversationId, count)
+  }
+
+  private async _syncMentionStates(
+    conversationId: string,
+    history: readonly MaterializedMessage[],
+    unreadCount: number,
+  ): Promise<number> {
+    const logical = [...new Map(history
+      .filter((item) => item.ordinal === 0)
+      .map((item) => [item.tlId, item])).values()]
+      .sort((left, right) => right.tlId - left.tlId)
+    const unreadIds = new Set(logical
+      .filter((item) => item.source.outgoing !== true)
+      .slice(0, Math.max(0, unreadCount))
+      .map((item) => item.tlId))
+    let createdUnreadCount = 0
+    for (const item of logical) {
+      const replyToTlId = this._messageReplyHeader(item.source)?.replyToMsgId
+      const mentioned = this._messageMentioned(item.source, replyToTlId)
+      if (this._store) {
+        if (!mentioned) continue
+        const createdUnread = await this._store.setMessageMentioned(
+          this._session.platformSessionId,
+          conversationId,
+          item.tlId,
+          mentioned,
+          unreadIds.has(item.tlId),
+        )
+        if (createdUnread) createdUnreadCount++
+        continue
+      }
+      let states = this._memoryMentionStates.get(conversationId)
+      if (!states) this._memoryMentionStates.set(conversationId, states = new Map())
+      if (!mentioned) states.delete(item.tlId)
+      else if (!states.has(item.tlId)) states.set(item.tlId, unreadIds.has(item.tlId))
+    }
+    return createdUnreadCount
+  }
+
+  private async _unreadMentionMessages(conversationId: string): Promise<MaterializedMessage[]> {
+    if (!this._store) {
+      const unread = this._memoryMentionStates.get(conversationId)
+      return (this._historyCache.get(conversationId) ?? [])
+        .filter((item) => item.ordinal === 0 && unread?.get(item.tlId) === true)
+        .sort((left, right) => right.tlId - left.tlId)
+    }
+    const projected = await this._store.listUnreadMentions(
+      this._session.platformSessionId, conversationId,
+    )
+    const output = projected.flatMap(({ source, parts, media }) => parts
+      .filter((part) => part.ordinal === 0)
+      .map((part): MaterializedMessage => ({
+        source,
+        tlId: part.tlMessageId,
+        ordinal: part.ordinal,
+        groupedId: part.groupedId ?? undefined,
+        media: media.find((entry) => entry.id === part.mediaId),
+      })))
+      .sort((left, right) => right.tlId - left.tlId)
+    for (const item of output) this._rememberMessage(item)
+    await this._rememberReplyTargets(output.map((item) => item.source), false)
+    return output
   }
 
   private _messageEntities(source: IMMessage): tl.TypeMessageEntity[] | undefined {
