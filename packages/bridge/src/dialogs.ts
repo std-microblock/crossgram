@@ -3,7 +3,7 @@ import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import {
   cardUrl, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
-  messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
+  messageMentionsUser, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
@@ -115,6 +115,7 @@ export class DialogRpc {
   private readonly _tlToUser = new Map<number, string>()
   private readonly _messageToTl = new Map<string, number>()
   private readonly _tlToMessage = new Map<number, MessageRef>()
+  private readonly _messageOutgoingByTl = new Map<number, boolean>()
   private _nextMessageId = 1
   private _pts = 1
   private readonly _sentByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
@@ -281,6 +282,10 @@ export class DialogRpc {
         const revisionAfter = this._store.revision
         this._dialogProjectionStoreRevision = revisionBefore === revisionAfter ? revisionAfter : -1
       }
+      await this._rememberReplyTargets(
+        all.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []),
+        false,
+      )
     }
     const projectionsMs = performance.now() - projectionsAt
     const materializeAt = performance.now()
@@ -2532,7 +2537,10 @@ export class DialogRpc {
       readInboxMaxId,
       readOutboxMaxId: topMessage,
       unreadCount: source.unreadCount,
-      unreadMentionsCount: 0,
+      unreadMentionsCount: source.unreadCount > 0 && top && this._messageMentioned(
+        top.source,
+        this._messageReplyHeader(top.source)?.replyToMsgId,
+      ) ? 1 : 0,
       unreadReactionsCount: 0,
       unreadPollVotesCount: 0,
       notifySettings: await this._peerNotifySettings(platformPeerId),
@@ -3088,6 +3096,7 @@ export class DialogRpc {
         : undefined,
       replyToTlId: reply?.replyToMsgId,
       topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
+      mentioned: item.ordinal === 0 && this._messageMentioned(source, reply?.replyToMsgId),
     })
   }
 
@@ -3108,6 +3117,7 @@ export class DialogRpc {
         ? { nativeSequence: String(nativeSequence) }
         : {}),
     })
+    this._messageOutgoingByTl.set(item.tlId, item.source.outgoing === true)
   }
 
   private async _rememberReplyTargets(
@@ -3136,6 +3146,21 @@ export class DialogRpc {
         }
         if (this._messageToTl.has(key)) continue
       } else if (telegramReplyToMessageId(message)) {
+        const replyToTlId = telegramReplyToMessageId(message)!
+        if (!this._messageOutgoingByTl.has(replyToTlId)) {
+          const projected = await this._store.findProjectedByTlId(
+            this._session.platformSessionId, replyToTlId, message.conversationId,
+          )
+          if (projected) {
+            for (const part of projected.parts) this._rememberMessage({
+              source: projected.source,
+              tlId: part.tlMessageId,
+              ordinal: part.ordinal,
+              groupedId: part.groupedId ?? undefined,
+              media: projected.media.find((entry) => entry.id === part.mediaId),
+            })
+          }
+        }
         continue
       }
       if (!message.replyToId) continue
@@ -3178,6 +3203,13 @@ export class DialogRpc {
       `${source.conversationId}\u0000${source.replyToId}\u00000`,
     )
     return replyToMsgId ? { _: 'messageReplyHeader', replyToMsgId } : undefined
+  }
+
+  private _messageMentioned(source: IMMessage, replyToTlId?: number): boolean {
+    return source.outgoing !== true && (
+      messageMentionsUser(source, this._session.userId)
+      || (replyToTlId !== undefined && this._messageOutgoingByTl.get(replyToTlId) === true)
+    )
   }
 
   private _messageEntities(source: IMMessage): tl.TypeMessageEntity[] | undefined {
@@ -4353,10 +4385,11 @@ export function projectTlMessage(options: {
   reactions?: tl.RawMessageReactions
   replyToTlId?: number
   topicId?: number
+  mentioned?: boolean
 }): tl.TypeMessage {
   const {
     conversation, source, tlId, ordinal,
-    groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
+    groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId, mentioned,
   } = options
   const conversationId = stableId(`peer:${conversation.id}`)
   const replyTo: tl.RawMessageReplyHeader | undefined = topicId && topicId !== tlId
@@ -4381,7 +4414,7 @@ export function projectTlMessage(options: {
   }
   const text = ordinal === 0 ? messageText(source) : ''
   return {
-    _: 'message', out: source.outgoing || undefined, id: tlId,
+    _: 'message', out: source.outgoing || undefined, mentioned: mentioned || undefined, id: tlId,
     fromId,
     peerId: peerId ?? (conversation.kind === 'direct'
       ? { _: 'peerUser', userId: conversationId }

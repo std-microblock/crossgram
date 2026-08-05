@@ -314,6 +314,14 @@ export interface IMMessage<TMediaLocator = unknown> {
   replyToId?: string
 }
 
+/** Whether a platform message explicitly mentions one platform user. */
+export function messageMentionsUser(message: IMMessage, userId: string): boolean {
+  return message.content.parts.some((part) =>
+    part.type === 'text'
+    && part.entities?.some((entity) => entity.type === 'mention' && entity.userId === userId),
+  )
+}
+
 export function telegramMessageId(message: IMMessage): number | undefined {
   return telegramMessageIdFromMetadata(message.metadata)
 }

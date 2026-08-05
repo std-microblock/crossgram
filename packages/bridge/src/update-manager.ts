@@ -10,7 +10,7 @@ import {
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
-  cardUrl, messagePartText, telegramReplyToMessageId,
+  cardUrl, messageMentionsUser, messagePartText, telegramReplyToMessageId,
   type IMConversation, type IMMessage, type PlatformSession,
 } from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
@@ -473,16 +473,20 @@ export class UpdateManager {
         ? telegramReplyToMessageId(projected.source)
         : undefined
       let replied = qqReplySequence === undefined
-        ? undefined
+        ? nativeReplyTo
+          ? await this._store.findProjectedByTlId(
+              session.platformSessionId, nativeReplyTo, event.conversation.id,
+            )
+          : undefined
         : await this._store.findProjectedByNativeSequence(
             session.platformSessionId, event.conversation.id, qqReplySequence,
           )
-      if (!nativeReplyTo && !replied && projected.source.replyToId) {
+      if (!replied && projected.source.replyToId) {
         replied = await this._store.findProjectedByPlatformId(
           session.platformSessionId, event.conversation.id, projected.source.replyToId,
         )
       }
-      if (!nativeReplyTo && !replied && projected.source.replyToId && platform.getMessage) {
+      if (!replied && projected.source.replyToId && platform.getMessage) {
         try {
           const target = await platform.getMessage(
             session, { id: event.conversation.id }, projected.source.replyToId,
@@ -527,6 +531,10 @@ export class UpdateManager {
           : undefined,
         topicId,
         replyToTlId: nativeReplyTo ?? replied?.parts[0]?.tlMessageId,
+        mentioned: part.ordinal === 0 && projected.source.outgoing !== true && (
+          messageMentionsUser(projected.source, session.userId)
+          || replied?.source.outgoing === true
+        ),
       })
       updates.push({
         _: isEdit

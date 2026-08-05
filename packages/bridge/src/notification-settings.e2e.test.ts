@@ -13,7 +13,7 @@ import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { defineModels } from './models.js'
 import { MUTE_FOREVER, NotificationSettingsStore } from './notification-settings.js'
-import type { IMConversation, IMPlatform, PlatformSession } from './platform.js'
+import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
 const RPC_RESULT_ID = 0xf35c6d01
 const VECTOR_ID = 0x1cb5c415
@@ -74,9 +74,9 @@ function makeContext(): ServerRpcContext {
   }
 }
 
-function createDialog(settings: NotificationSettingsStore): DialogRpc {
+function createDialog(settings: NotificationSettingsStore, targetPlatform: IMPlatform = platform): DialogRpc {
   return new DialogRpc(
-    platform, session, undefined, undefined, undefined, 1,
+    targetPlatform, session, undefined, undefined, undefined, 1,
     undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
     settings,
   )
@@ -144,7 +144,86 @@ function decodeRpcResult(bytes: Uint8Array): unknown {
   return reader.object()
 }
 
+function roundTripObject<T>(value: T): T {
+  const bytes = TlBinaryWriter.serializeObject(__tlWriterMap, value as tl.TlObject)
+  return new TlBinaryReader(__tlReaderMap, bytes).object() as T
+}
+
 describe('notification settings RPC e2e', () => {
+  it('keeps muted groups exceptional for explicit mentions and replies to the current user', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise(resolve => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const mentionGroup: IMConversation = { id: 'muted-mention', kind: 'group', title: 'Muted mention' }
+    const replyGroup: IMConversation = { id: 'muted-reply', kind: 'group', title: 'Muted reply' }
+    const mention: IMMessage = {
+      id: 'mention', conversationId: mentionGroup.id, senderId: 'alice', timestamp: 20,
+      content: { parts: [{
+        type: 'text', text: '@self ping',
+        entities: [{ type: 'mention', offset: 0, length: 5, userId: session.userId }],
+      }] },
+    }
+    const ownMessage: IMMessage = {
+      id: 'own-message', conversationId: replyGroup.id, senderId: session.userId,
+      outgoing: true, timestamp: 21, content: { parts: [{ type: 'text', text: 'question' }] },
+    }
+    const reply: IMMessage = {
+      id: 'reply', conversationId: replyGroup.id, senderId: 'bob', replyToId: ownMessage.id,
+      timestamp: 22, content: { parts: [{ type: 'text', text: 'answer' }] },
+    }
+    const histories = new Map([
+      [mentionGroup.id, [mention]],
+      [replyGroup.id, [ownMessage, reply]],
+    ])
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: [
+          { conversation: replyGroup, unreadCount: 1, lastMessage: reply, readInboxMaxMessage: ownMessage },
+          { conversation: mentionGroup, unreadCount: 1, lastMessage: mention },
+        ] }
+      },
+      async getHistory(_session, conversation) {
+        return { messages: histories.get(conversation.id) ?? [] }
+      },
+    }
+    const settings = new NotificationSettingsStore(ctx.database, true)
+    const dialogs = createDialog(settings, targetPlatform)
+    await expect(roundTripRpc(dispatcherFor(dialogs), {
+      _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+    const page = roundTripObject(await dialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })) as tl.messages.RawDialogs
+
+    expect(page.dialogs).toHaveLength(2)
+    expect(page.dialogs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        unreadMentionsCount: 1,
+        notifySettings: expect.objectContaining({ _: 'peerNotifySettings' }),
+      }),
+      expect.objectContaining({
+        unreadMentionsCount: 1,
+        notifySettings: expect.objectContaining({ _: 'peerNotifySettings' }),
+      }),
+    ]))
+    expect(page.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'message', message: '@self ping', mentioned: true }),
+      expect.objectContaining({
+        _: 'message', message: 'answer', mentioned: true,
+        replyTo: expect.objectContaining({ _: 'messageReplyHeader' }),
+      }),
+    ]))
+  })
+
   it('round-trips group defaults and durable per-chat overrides through TL and SQLite', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
