@@ -19,6 +19,8 @@ export interface QQMediaLocator {
   file10MMd5?: string
   /** QQ's original CDN URL; bridge protocol v15 can replace its expired RKey. */
   originImageUrl?: string
+  /** QQ image CDN tier. 0 is original; 198 and 720 are native thumbnail specifications. */
+  imageSpec?: 0 | 198 | 720
   /** Present only for native QQ video elements. 0 h264, 1 h265. */
   videoCodecFormat?: number
   avatarUin?: string
