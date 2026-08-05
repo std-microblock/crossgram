@@ -881,18 +881,20 @@ describe('QQNT history media without placeholder edits E2E', () => {
     server = createServer(async (request, response) => {
       if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
         directUrlRequests++
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        const locator = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { imageSpec?: number }
         const address = server!.address()
         if (!address || typeof address === 'string') throw new Error('missing test server address')
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({
-          url: `http://127.0.0.1:${address.port}/cdn/history.jpg`,
+          url: `http://127.0.0.1:${address.port}/cdn/${locator.imageSpec === 720 ? 'history-720' : 'history'}.jpg`,
           expiresAt: Date.now() + 60_000,
         }))
         return
       }
-      if (request.method === 'POST' && request.url === '/v1/files/asset') {
+      if (request.method === 'GET' && request.url === '/cdn/history-720.jpg') {
         previewRequests++
-        for await (const _chunk of request) { /* drain locator body */ }
         const match = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range ?? '')
         const start = match ? Number(match[1]) : 0
         const end = Math.min(
@@ -957,14 +959,16 @@ describe('QQNT history media without placeholder edits E2E', () => {
             mimeType: 'image/jpeg', size: nativePreview.length, width: 1280, height: 579,
             locator: {
               messageId: 'history-image', elementId: 'history-media', chatType: 2 as const,
-              peerUid: 'history', kind: 'image' as const, fileName: 'history_720.jpg',
-              fileSize: String(nativePreview.length), filePath: '/qq/cache/history_720.jpg',
+              peerUid: 'history', kind: 'image' as const, fileName: 'history.jpg',
+              fileSize: String(nativePreview.length), imageSpec: 720 as const,
+              originImageUrl: '/download?appid=1407&fileid=history&spec=0',
             },
           },
           locator: {
             messageId: 'history-image', elementId: 'history-media', chatType: 2 as const,
             peerUid: 'history', kind: 'image' as const, fileName: 'history.jpg',
-            fileUuid: 'history-file-uuid', md5: 'HISTORY-E2E',
+            fileUuid: 'history-file-uuid', md5: 'HISTORY-E2E', imageSpec: 0 as const,
+            originImageUrl: '/download?appid=1407&fileid=history&spec=0',
           },
         },
       }],
@@ -1004,24 +1008,31 @@ describe('QQNT history media without placeholder edits E2E', () => {
     const uploadPath = await mkdtemp(join(tmpdir(), 'qqnt-native-preview-download-'))
     temporaryDirectories.push(uploadPath)
     const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
+    const previewLocation = {
+      _: 'inputPhotoFileLocation' as const, id: projected.photo.id, accessHash: projected.photo.accessHash,
+      fileReference: projected.photo.fileReference, thumbSize: 'm',
+    }
+    const previewDirect = await rpc.getFileUrl(previewLocation)
+    expect(JSON.parse(previewDirect.data)).toMatchObject({
+      url: expect.stringContaining('/cdn/history-720.jpg'), supportsRange: true,
+    })
+    expect(directUrlRequests).toBe(1)
+    expect(previewRequests).toBe(1)
     const previewFile = await rpc.getFile({
       _: 'upload.getFile', precise: false, cdnSupported: false,
-      location: {
-        _: 'inputPhotoFileLocation', id: projected.photo.id, accessHash: projected.photo.accessHash,
-        fileReference: projected.photo.fileReference, thumbSize: 'm',
-      },
+      location: previewLocation,
       offset: 0, limit: 1024 * 1024,
     })
     if (previewFile._ !== 'upload.file') throw new Error('expected native preview file')
     expect(Buffer.from(previewFile.bytes)).toEqual(Buffer.from(nativePreview))
-    expect(previewRequests).toBe(1)
+    expect(previewRequests).toBe(2)
 
-    expect(directUrlRequests).toBe(0)
+    expect(directUrlRequests).toBe(1)
     expect(imageRequests).toBe(0)
     await expect(platform.resolveMediaUrl(session, original!.media as any)).resolves.toMatchObject({
       url: expect.stringContaining('/cdn/history.jpg'), supportsRange: true,
     })
-    expect(directUrlRequests).toBe(1)
+    expect(directUrlRequests).toBe(2)
     expect(imageRequests).toBe(1)
     const download = collect(platform.downloadMedia(session, original!.media as any))
     await imageRequested.promise

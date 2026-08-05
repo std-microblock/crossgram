@@ -1675,7 +1675,10 @@ describe('QQNTPlatform mapping', () => {
     const sourceRequested = Promise.withResolvers<void>()
     const releaseSource = Promise.withResolvers<void>()
     platform.client.downloadFile = vi.fn(async function* (locator) {
-      expect(locator).toMatchObject({ fileName: 'photo_720.jpg', filePath: '/qq/thumb/photo_720.jpg' })
+      expect(locator).toMatchObject({
+        fileName: 'photo.jpg', filePath: undefined, fileSize: undefined, imageSpec: 198,
+        originImageUrl: '/download?appid=1407&fileid=photo&spec=0',
+      })
       sourceRequested.resolve()
       await releaseSource.promise
       yield nativePreview
@@ -1697,8 +1700,9 @@ describe('QQNTPlatform mapping', () => {
                 mimeType: 'image/jpeg', size: nativePreview.length, width: 12, height: 8,
                 locator: {
                   messageId: 'live-preview', elementId: 'live-preview-media', chatType: 2,
-                  peerUid: 'group', kind: 'image', fileName: 'photo_720.jpg',
-                  fileSize: String(nativePreview.length), filePath: '/qq/thumb/photo_720.jpg',
+                  peerUid: 'group', kind: 'image', fileName: 'photo.jpg',
+                  fileSize: String(nativePreview.length), imageSpec: 720,
+                  originImageUrl: '/download?appid=1407&fileid=photo&spec=0',
                 },
               },
               locator: {
@@ -1725,7 +1729,7 @@ describe('QQNTPlatform mapping', () => {
     const delivered = await initial.promise
     expect(delivered.message.content.parts[0].media.preview).toMatchObject({
       size: nativePreview.length, width: 12, height: 8,
-      locator: { fileName: 'photo_720.jpg' },
+      locator: { fileName: 'photo.jpg', imageSpec: 720 },
     })
     expect(delivered.message.content.parts[0].media.strippedThumbnail).toBeUndefined()
     await sourceRequested.promise

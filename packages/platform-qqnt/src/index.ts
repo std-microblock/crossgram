@@ -1352,7 +1352,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       if (part.type !== 'media' || part.media.kind !== 'image'
         || !part.media.locator || part.media.strippedThumbnail) return part
       try {
-        const sourceLocator = part.media.preview?.locator ?? part.media.locator
+        const previewLocator = part.media.preview?.locator
+        const sourceLocator = previewLocator?.kind === 'image' && previewLocator.originImageUrl
+          ? { ...previewLocator, filePath: undefined, fileSize: undefined, imageSpec: 198 as const }
+          : previewLocator ?? part.media.locator
         const media = await this.mediaPreviews.prepare(
           part.media,
           (signal) => this.client.downloadFile(rawQQMediaLocator(sourceLocator), { signal }),

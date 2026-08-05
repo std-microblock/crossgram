@@ -55,15 +55,16 @@ for the client to detect from downloaded content. A startup migration strips
 legacy transform locators from old rows so existing history returns to the raw
 direct-download path.
 
-When QQ exposes a complete native `Thumb/*_720` image, the adapter publishes it
-as Telegram's `m` photo size while keeping the original as the largest size.
-Telegram can therefore paint the QQ thumbnail through the local bridge first and
-fetch the original directly from QQ's CDN only when a larger view needs it.
+QQ's native image download protocol defines original (`spec=0`) and thumbnail
+tiers (`spec=198` / `spec=720`). The adapter publishes the 720 tier as Telegram's
+`m` photo size while keeping the original as the largest sizes. Both are resolved
+through `/files/direct-url` only to refresh the RKey, then fetched directly from
+QQ's CDN; the relay never serves a QQ `Thumb` cache file as message media.
 
 `generatePreviews` optionally adds Telegram's smallest inline
 `photoStrippedSize`. The initial history/live message is always delivered first
-without waiting for media I/O. A bounded background job reads the native QQ
-thumbnail when available (otherwise the original), extracts a 40-pixel
+without waiting for media I/O. A bounded background job reads QQ's remote 198
+tier when available (otherwise the original), extracts a 40-pixel
 low-quality JPEG, stores only the compact stripped payload in
 `mtproto_qqnt_inline_preview`, and publishes a message edit that embeds those
 bytes directly in the TL message. Cache lookup, decoding and failures therefore

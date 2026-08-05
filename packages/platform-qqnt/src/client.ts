@@ -1170,6 +1170,7 @@ function hasDirectUrlIdentity(locator: QQMediaLocator): boolean {
 function directUrlIdentity(locator: QQMediaLocator): string {
   return JSON.stringify([
     locator.chatType, locator.peerUid, locator.fileUuid ?? '', locator.file10MMd5 ?? '',
-    locator.videoCodecFormat ?? null, locator.originImageUrl ?? '', locator.avatarUin ?? '',
+    locator.videoCodecFormat ?? null, locator.originImageUrl ?? '', locator.imageSpec ?? null,
+    locator.avatarUin ?? '',
   ])
 }
