@@ -758,6 +758,72 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('pushes complete reaction counts, recent actors, and actor users together', async () => {
+    const reactionPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
+      },
+    }
+    const { store, manager, sent } = await createHarness(undefined, reactionPlatform)
+    const conversation: IMConversation = { id: 'reaction-actors', kind: 'group', title: 'Reaction Actors' }
+    const message: IMMessage = {
+      id: 'reaction-actors-target',
+      conversationId: conversation.id,
+      senderId: 'alice',
+      timestamp: 30,
+      content: { parts: [{ type: 'text', text: 'target' }] },
+    }
+    const created = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result: created })
+    const target = {
+      conversationId: conversation.id,
+      messageId: message.id,
+      targetId: message.id,
+    }
+    const context = {
+      available: [{ key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }],
+      reactions: [{
+        key: 'like',
+        count: 3,
+        recentActors: [{ userId: 'self' }, { userId: 'bob' }, { userId: 'carol' }],
+      }],
+      maxSelected: 20,
+    }
+    const reacted = await store.setReactions(session, conversation, target, context)
+
+    await manager.publish(session, {
+      event: {
+        type: 'message-reactions', eventId: 'reaction-actors-update', conversation,
+        target, context, timestamp: 31,
+      },
+      result: reacted,
+    })
+
+    const payload = sent[1]!.update as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateMessageReactions
+    expect(update.reactions).toMatchObject({
+      canSeeList: true,
+      results: [{ count: 3 }],
+      recentReactions: [
+        { my: true, peerId: { _: 'peerUser' } },
+        { peerId: { _: 'peerUser' } },
+        { peerId: { _: 'peerUser' } },
+      ],
+    })
+    expect(payload.users).toHaveLength(3)
+    expect(payload.users).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'user', self: true, firstName: 'User self', photo: expect.any(Object) }),
+      expect.objectContaining({ _: 'user', firstName: 'User bob', photo: expect.any(Object) }),
+      expect.objectContaining({ _: 'user', firstName: 'User carol', photo: expect.any(Object) }),
+    ]))
+    expect(new Set(update.reactions.recentReactions!.map((item) => item.peerId._ === 'peerUser'
+      ? item.peerId.userId
+      : 0))).toEqual(new Set(payload.users.map((user) => user.id)))
+    expect(() => roundTrip(payload)).not.toThrow()
+  })
+
   it('projects platform read events into direct and channel inbox updates', async () => {
     const { store, manager, sent } = await createHarness()
     const direct: IMConversation = { id: 'alice', kind: 'direct', title: 'Alice' }
