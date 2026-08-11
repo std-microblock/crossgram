@@ -268,7 +268,7 @@ export interface IMMessageContent<TMediaLocator = unknown> {
   parts: IMMessagePart<TMediaLocator>[]
   inlineKeyboard?: IMInlineKeyboard
   /** Platform service/system message rendered by Telegram as a MessageService. */
-  serviceAction?: { type: 'custom', text: string }
+  serviceAction?: { type: 'custom', text: string } | { type: 'phone-call', duration?: number }
 }
 
 export interface IMInlineKeyboard {
