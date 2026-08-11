@@ -1015,9 +1015,10 @@ describe('DialogRpc', () => {
     ])
   })
 
-  it('separates adjacent links and mentions without linking bare filenames in serialized history', async () => {
+  it('separates adjacent links and mentions without linking filenames or dot-separated prose', async () => {
     const platform = new DialogTestPlatform()
-    const text = '地址 http://aaa.com@某个群友，附件 这不是一个链接啊.zip'
+    const prose = '我想到隔壁有人用.net写东西后aot并且导出C符号入口点给cpp乃至Java用'
+    const text = `地址 http://aaa.com@某个群友，附件 这不是一个链接啊.zip，讨论 ${prose}`
     const mentionOffset = text.indexOf('@')
     platform.addMessage('alice', {
       id: 'link-boundaries', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_230,

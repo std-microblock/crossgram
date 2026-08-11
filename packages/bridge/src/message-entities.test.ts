@@ -9,7 +9,7 @@ describe('withAutoLinkEntities', () => {
       'ftp://files.example.org:21/pub',
       'tg://resolve?domain=telegram',
       'www.example.net/docs',
-      '例子.测试/路径',
+      '例子.中国/路径',
     ].join(' | ')
 
     expect(linkTexts(text)).toEqual([
@@ -17,7 +17,7 @@ describe('withAutoLinkEntities', () => {
       'ftp://files.example.org:21/pub',
       'tg://resolve?domain=telegram',
       'www.example.net/docs',
-      '例子.测试/路径',
+      '例子.中国/路径',
     ])
   })
 
@@ -92,6 +92,27 @@ describe('withAutoLinkEntities', () => {
       'https://downloads.example/file.zip',
       'www.example.zip',
       'example.zip/download',
+    ])
+  })
+
+  it('does not turn dot-separated tokens embedded in prose into links', () => {
+    const texts = [
+      '我想到隔壁有人用.net写东西后aot并且导出C符号入口点给cpp乃至Java用',
+      '这段用asp.net写完再aot',
+      '构建node.js项目再发布',
+      '中文example.com中文',
+    ]
+
+    for (const text of texts) expect(linkTexts(text)).toEqual([])
+  })
+
+  it('recognizes domains when separated from surrounding prose', () => {
+    const text = '中文 example.com 中文 | 例子.中国/路径 | 例子.com/路径'
+
+    expect(linkTexts(text)).toEqual([
+      'example.com',
+      '例子.中国/路径',
+      '例子.com/路径',
     ])
   })
 })
