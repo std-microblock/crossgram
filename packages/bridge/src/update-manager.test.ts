@@ -11,7 +11,7 @@ import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
-import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
+import type { IMConversation, IMMessage, IMMessageInput, IMPlatform, PlatformSession } from './platform.js'
 import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { ReactionRpc } from './reaction-rpc.js'
@@ -513,6 +513,80 @@ describe('UpdateManager', () => {
     expect(sent.slice(0, 2).every(({ update }) => update === deletePayload)).toBe(true)
     expect(sent.slice(2).every(({ update }) => update === replacementPayload)).toBe(true)
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
+  })
+
+  it('preserves reply context when fallback editing deletes and resends the message', async () => {
+    const conversation: IMConversation = { id: 'edit-reply-room', kind: 'group', title: 'Edit reply room' }
+    const target: IMMessage = {
+      id: 'reply-target', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      metadata: { qqMsgSeq: '40' },
+      content: { parts: [{ type: 'text', text: 'target' }] },
+    }
+    const original: IMMessage = {
+      id: 'reply-message', conversationId: conversation.id, senderId: session.userId,
+      timestamp: 101, outgoing: true, replyToId: target.id,
+      metadata: { qqMsgSeq: '41', qqReplyToMsgSeq: '40', telegramReplyToMessageId: 40 },
+      content: { parts: [{ type: 'text', text: 'before edit' }] },
+    }
+    const sentInputs: IMMessageInput[] = []
+    const deletedTargets: string[][] = []
+    const editPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        history: true,
+        messageActions: {
+          delete: { own: { supported: true }, others: { supported: false } },
+          edit: { mode: 'delete-and-resend' },
+          forward: { mode: 'unsupported', preservesAuthor: false },
+        },
+      },
+      async getDialogs() {
+        return { dialogs: [{ conversation, unreadCount: 0, lastMessage: original }] }
+      },
+      async getHistory() {
+        return { messages: [target, original] }
+      },
+      async deleteMessages(_session, _conversation, messageIds) {
+        deletedTargets.push([...messageIds])
+      },
+      async sendMessage(_session, _conversation, content) {
+        sentInputs.push(content)
+        return {
+          id: 'edited-replacement', conversationId: conversation.id, senderId: session.userId,
+          timestamp: 102, outgoing: true,
+          content: { parts: [{ type: 'text', text: 'after edit' }] },
+        }
+      },
+    }
+    const { store } = await createHarness(undefined, editPlatform)
+    await store.ingest(session, conversation, target)
+    const storedOriginal = await store.ingest(session, conversation, original)
+    const rpc = new DialogRpc(editPlatform, session, store)
+
+    await rpc.editMessage({
+      _: 'messages.editMessage',
+      peer: {
+        _: 'inputPeerChannel', channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ONE,
+      },
+      id: storedOriginal.projection[0].tlMessageId,
+      message: 'after edit',
+    })
+
+    expect(deletedTargets).toEqual([[original.id]])
+    expect(sentInputs).toMatchObject([{
+      replyToId: target.id,
+      replyToNativeSequence: '40',
+      parts: [{ type: 'text', text: 'after edit' }],
+    }])
+    await expect(store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, 'edited-replacement',
+    )).resolves.toMatchObject({
+      source: {
+        replyToId: target.id,
+        metadata: { qqReplyToMsgSeq: '40', telegramReplyToMessageId: 40 },
+      },
+    })
   })
 
   it('includes clickable URL entities in live updates', async () => {

@@ -10,6 +10,11 @@ export class MessageActionUnavailableError extends Error {
   }
 }
 
+export interface MessageEditResult {
+  message: IMMessage
+  replacedMessageId?: string
+}
+
 /** Applies platform-declared fallback semantics without leaking them into Telegram RPC code. */
 export class PlatformMessageActions {
   constructor(
@@ -30,7 +35,7 @@ export class PlatformMessageActions {
     target: IMMessageTarget,
     content: IMMessageInput,
     options?: IMTransferOptions,
-  ): Promise<{ message: IMMessage, replacedMessageId?: string }> {
+  ): Promise<MessageEditResult> {
     const mode = this._platform.capabilities.messageActions?.edit.mode ?? 'unsupported'
     if (mode === 'native') {
       if (!this._platform.editMessage) throw new MessageActionUnavailableError('edit')
