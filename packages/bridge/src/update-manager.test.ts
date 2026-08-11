@@ -1063,11 +1063,13 @@ describe('UpdateManager', () => {
       const pushed = (update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
       return roundTrip(pushed.message) as tl.RawMessage
     })
-    expect(liveMessages.map((message) => [message.message, message.mentioned ?? false])).toEqual([
-      ['@Current', true],
-      ['native reply', true],
-      ['not for self', false],
-      ['@Bob', false],
+    expect(liveMessages.map((message) => [
+      message.message, message.mentioned ?? false, message.mediaUnread ?? false,
+    ])).toEqual([
+      ['@Current', true, true],
+      ['native reply', true, true],
+      ['not for self', false, false],
+      ['@Bob', false, false],
     ])
     expect(liveMessages[1].replyTo).toMatchObject({
       _: 'messageReplyHeader', replyToMsgId: outgoingTlId,

@@ -50,10 +50,14 @@ function dispatcherFor(dialogs: DialogRpc): RpcDispatcher {
   const dispatcher = new RpcDispatcher()
   dispatcher.register('messages.getDialogs', async (_context, request) =>
     dialogs.getDialogs(request as tl.messages.RawGetDialogsRequest))
+  dispatcher.register('messages.getHistory', async (_context, request) =>
+    dialogs.getHistory(request as tl.messages.RawGetHistoryRequest))
   dispatcher.register('messages.getUnreadMentions', async (_context, request) =>
     dialogs.getUnreadMentions(request as tl.messages.RawGetUnreadMentionsRequest))
   dispatcher.register('messages.readMentions', async (_context, request) =>
     dialogs.readMentions(request as tl.messages.RawReadMentionsRequest))
+  dispatcher.register('channels.readMessageContents', async (_context, request) =>
+    dialogs.readChannelMessageContents(request as tl.channels.RawReadMessageContentsRequest))
   return dispatcher
 }
 
@@ -179,19 +183,55 @@ describe('unread mention navigation RPC e2e', () => {
       // can jump to the earliest outstanding mention.
       offsetId: 1, addOffset: -100, limit: 100, maxId: 0, minId: 0,
     }
-    await expect(roundTripRpc(dispatcher, request)).resolves.toMatchObject({
-      messages: [
-        { _: 'message', message: 'reply ping', mentioned: true },
-        { _: 'message', message: '@Current ping', mentioned: true },
-      ],
+    const unread = await roundTripRpc(dispatcher, request) as tl.messages.RawMessages
+    expect(unread.messages).toMatchObject([
+      { _: 'message', message: 'reply ping', mentioned: true, mediaUnread: true },
+      { _: 'message', message: '@Current ping', mentioned: true, mediaUnread: true },
+    ])
+
+    const history = await roundTripRpc(dispatcher, {
+      _: 'messages.getHistory', peer, offsetId: 0, offsetDate: 0,
+      addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    const historyMessages = history.messages.filter((message): message is tl.RawMessage => message._ === 'message')
+    expect(historyMessages.find((message) => message.message === 'reply ping')).toMatchObject({
+      mentioned: true, mediaUnread: true,
     })
+    expect(historyMessages.find((message) => message.message === '@Current ping')).toMatchObject({
+      mentioned: true, mediaUnread: true,
+    })
+
+    const replyMessage = unread.messages.find((message): message is tl.RawMessage =>
+      message._ === 'message' && message.message === 'reply ping')
+    if (!replyMessage) throw new Error('missing unread reply')
     await expect(roundTripRpc(dispatcher, {
+      _: 'channels.readMessageContents',
+      channel: { _: 'inputChannel', channelId: peer.channelId, accessHash: peer.accessHash },
+      id: [replyMessage.id],
+    })).resolves.toMatchObject({ _: 'boolTrue' })
+
+    const resumed = dispatcherFor(new DialogRpc(platform, session, store))
+    await expect(roundTripRpc(resumed, request)).resolves.toMatchObject({
+      messages: [{ message: '@Current ping', mentioned: true, mediaUnread: true }],
+    })
+    await expect(roundTripRpc(resumed, {
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })).resolves.toMatchObject({ dialogs: [{ unreadMentionsCount: 1 }] })
+    await expect(roundTripRpc(resumed, {
       _: 'messages.readMentions', peer,
     })).resolves.toMatchObject({ _: 'messages.affectedHistory', ptsCount: 0, offset: 0 })
 
-    const resumed = dispatcherFor(new DialogRpc(platform, session, store))
-    await expect(roundTripRpc(resumed, request)).resolves.toMatchObject({ messages: [] })
-    await expect(roundTripRpc(resumed, {
+    const acknowledged = dispatcherFor(new DialogRpc(platform, session, store))
+    await expect(roundTripRpc(acknowledged, request)).resolves.toMatchObject({ messages: [] })
+    const acknowledgedHistory = await roundTripRpc(acknowledged, {
+      _: 'messages.getHistory', peer, offsetId: 0, offsetDate: 0,
+      addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    const acknowledgedMention = acknowledgedHistory.messages.find((message): message is tl.RawMessage =>
+      message._ === 'message' && message.message === '@Current ping')
+    expect(acknowledgedMention).toMatchObject({ mentioned: true, mediaUnread: false })
+    await expect(roundTripRpc(acknowledged, {
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
     })).resolves.toMatchObject({ dialogs: [{ unreadMentionsCount: 0 }] })

@@ -109,6 +109,21 @@ it('projects a conversation-scoped sender title as a Telegram member tag', () =>
   })).toMatchObject({ _: 'message', id: 8, fromRank: 'Group Alias' })
 })
 
+it('projects unread mentions with Telegram content-unread state', () => {
+  const source: IMMessage = {
+    id: 'unread-mention', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_002,
+    content: { parts: [{ type: 'text', text: '@Current ping' }] },
+  }
+  expect(projectTlMessage({
+    conversation, source, tlId: 9, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 }, mentioned: true, unreadMention: true,
+  })).toMatchObject({ _: 'message', mentioned: true, mediaUnread: true })
+  expect(projectTlMessage({
+    conversation, source, tlId: 9, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 }, mentioned: true, unreadMention: false,
+  })).toMatchObject({ _: 'message', mentioned: true, mediaUnread: undefined })
+})
+
 it('projects phone-call service actions as native Telegram call records', () => {
   const source: IMMessage = {
     id: 'call-record', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_002,
