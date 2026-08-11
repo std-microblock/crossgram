@@ -963,6 +963,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           if (!wire) throw new Error(`QQ source message not found: ${messageId}`)
           return this.mapMessage(wire)
         })
+      const preserveSourceReply = from.id === to.id
+        && options.replyToId === undefined
+        && options.replyToNativeSequence === undefined
+      const replyToId = options.replyToId ?? (preserveSourceReply ? source.replyToId : undefined)
+      const replyToNativeSequence = options.replyToNativeSequence
+        ?? (preserveSourceReply ? qqReplyNativeSequence(source) : undefined)
+
+      
       const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
         if (part.type === 'text') return { ...part }
         if (part.type === 'card') return { type: 'text' as const, text: messagePartText(part) }
@@ -992,7 +1000,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       })
       outputs.push(await this.sendMessage(session, to, {
         parts,
-        replyToId: options.replyToId,
+        replyToId,
+        replyToNativeSequence,
       }))
     }
     return outputs
@@ -1744,6 +1753,12 @@ function mapMessage(
       inlineKeyboard: mapInlineKeyboard(input),
     },
   }
+}
+
+function qqReplyNativeSequence(message: IMMessage): string | undefined {
+  const value = message.metadata?.qqReplyToMsgSeq
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return value
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value)
 }
 
 function mapInlineKeyboard(

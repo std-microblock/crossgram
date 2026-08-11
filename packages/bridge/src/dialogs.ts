@@ -1499,32 +1499,25 @@ export class DialogRpc {
       throw new RpcError(400, 'MESSAGE_EDIT_TIME_EXPIRED')
     }
     const ordinal = projected.parts.find((part) => part.tlMessageId === req.id)?.ordinal ?? 0
-    const replyToNativeSequence = qqReplySequenceFromMetadata(projected.source.metadata)
     let edited: MessageEditResult
     try {
       edited = await this._actions.edit({
         conversationId, messageId: projected.source.id,
         targetId: projected.source.sourceIds?.[ordinal] ?? projected.source.id,
-      }, {
-        parts: [{ type: 'text', text: req.message }],
-        ...(projected.source.replyToId ? { replyToId: projected.source.replyToId } : {}),
-        ...(replyToNativeSequence === undefined
-          ? {}
-          : { replyToNativeSequence: String(replyToNativeSequence) }),
-      })
+      }, { parts: [{ type: 'text', text: req.message }] })
     } catch (error) {
       this._throwMessageAction(error, 'MESSAGE_EDIT_FORBIDDEN')
     }
     const conversation = this._conversation(conversationId)
-    const editedSource = preserveReplyContext(edited!.message, projected.source)
     const source: IMMessage<any> = edited!.replacedMessageId
-      ? { ...editedSource, conversationId, outgoing: true }
+      ? { ...edited!.message, conversationId, outgoing: true }
       : {
-          ...editedSource,
+          ...edited!.message,
           conversationId,
           senderId: projected.source.senderId,
           outgoing: projected.source.outgoing,
         }
+
     const now = source.timestamp || Math.floor(Date.now() / 1000)
     if (edited!.replacedMessageId && this._onLocalEvent) {
       const replacementKey = `${edited!.replacedMessageId}:${source.id}`
@@ -1607,6 +1600,7 @@ export class DialogRpc {
     if (req.id.length !== req.randomId.length) throw new RpcError(400, 'RANDOM_ID_INVALID')
     await this._hydratePeers()
     const toId = this._resolveMessageTarget(req.toPeer, req.replyTo)
+    const replyTarget = await this._resolveReplyTarget(toId, req.replyTo)
     let fromId = req.fromPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._resolvePeer(req.fromPeer)
@@ -1635,6 +1629,10 @@ export class DialogRpc {
       forwarded = await this._actions.forward(
         { id: fromId }, sourceIds, { id: toId }, {
           dropAuthor: req.dropAuthor,
+          ...(replyTarget?.id ? { replyToId: replyTarget.id } : {}),
+          ...(replyTarget?.nativeSequence
+            ? { replyToNativeSequence: replyTarget.nativeSequence }
+            : {}),
           sourceMessages,
         },
       )
@@ -4929,21 +4927,6 @@ function cappedPhotoDimensions(
   }
 }
 
-const REPLY_METADATA_KEYS = ['qqReplyToMsgSeq', 'telegramReplyToMessageId'] as const
-
-function preserveReplyContext(message: IMMessage<any>, original: IMMessage<any>): IMMessage<any> {
-  const metadata = { ...message.metadata }
-  for (const key of REPLY_METADATA_KEYS) {
-    if (metadata[key] === undefined && original.metadata?.[key] !== undefined) {
-      metadata[key] = original.metadata[key]
-    }
-  }
-  return {
-    ...message,
-    replyToId: message.replyToId ?? original.replyToId,
-    metadata,
-  }
-}
 
 function qqSequenceKey(conversationId: string, sequence: number): string {
   return `${conversationId}\u0000qq-sequence:${sequence}`
