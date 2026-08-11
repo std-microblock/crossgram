@@ -418,8 +418,6 @@ export interface IMDeleteMessagesOptions {
 export interface IMForwardMessagesOptions {
   dropAuthor?: boolean
   replyToId?: string
-  /** Stable platform-native sequence for the destination reply target. */
-  replyToNativeSequence?: string
   /** Authorized stored sources used when an adapter must copy instead of natively forward. */
   sourceMessages?: readonly IMMessage<any>[]
 }

@@ -1600,7 +1600,6 @@ export class DialogRpc {
     if (req.id.length !== req.randomId.length) throw new RpcError(400, 'RANDOM_ID_INVALID')
     await this._hydratePeers()
     const toId = this._resolveMessageTarget(req.toPeer, req.replyTo)
-    const replyTarget = await this._resolveReplyTarget(toId, req.replyTo)
     let fromId = req.fromPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._resolvePeer(req.fromPeer)
@@ -1629,10 +1628,6 @@ export class DialogRpc {
       forwarded = await this._actions.forward(
         { id: fromId }, sourceIds, { id: toId }, {
           dropAuthor: req.dropAuthor,
-          ...(replyTarget?.id ? { replyToId: replyTarget.id } : {}),
-          ...(replyTarget?.nativeSequence
-            ? { replyToNativeSequence: replyTarget.nativeSequence }
-            : {}),
           sourceMessages,
         },
       )

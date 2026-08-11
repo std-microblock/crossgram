@@ -11,7 +11,7 @@ import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
-import type { IMConversation, IMForwardMessagesOptions, IMMessage, IMPlatform, PlatformSession } from './platform.js'
+import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { ReactionRpc } from './reaction-rpc.js'
@@ -515,71 +515,6 @@ describe('UpdateManager', () => {
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
   })
 
-  it('passes the Telegram forward reply target to the platform copy operation', async () => {
-    const conversation: IMConversation = { id: 'forward-reply-room', kind: 'group', title: 'Forward reply room' }
-    const target: IMMessage = {
-      id: 'reply-target', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
-      metadata: { qqMsgSeq: '40' },
-      content: { parts: [{ type: 'text', text: 'target' }] },
-    }
-    const original: IMMessage = {
-      id: 'forward-source', conversationId: conversation.id, senderId: 'bob', timestamp: 101,
-      metadata: { qqMsgSeq: '41' },
-      content: { parts: [{ type: 'text', text: 'forward me' }] },
-    }
-    let forwardedOptions: IMForwardMessagesOptions | undefined
-    const forwardPlatform: IMPlatform = {
-      ...platform,
-      capabilities: {
-        ...platform.capabilities,
-        history: true,
-        messageActions: {
-          delete: { own: { supported: false }, others: { supported: false } },
-          edit: { mode: 'unsupported' },
-          forward: { mode: 'copy', preservesAuthor: false },
-        },
-      },
-      async getDialogs() {
-        return { dialogs: [{ conversation, unreadCount: 0, lastMessage: original }] }
-      },
-      async forwardMessages(_session, _from, _messageIds, _to, options) {
-        forwardedOptions = options
-        return [{
-          id: 'forwarded-copy', conversationId: conversation.id, senderId: session.userId,
-          timestamp: 102, outgoing: true,
-          content: { parts: [{ type: 'text', text: 'forward me' }] },
-        }]
-      },
-    }
-    const { store } = await createHarness(undefined, forwardPlatform)
-    const storedTarget = await store.ingest(session, conversation, target)
-    const storedOriginal = await store.ingest(session, conversation, original)
-    const rpc = new DialogRpc(forwardPlatform, session, store)
-    const peer = {
-      _: 'inputPeerChannel' as const,
-      channelId: stableId(`peer:${conversation.id}`),
-      accessHash: Long.ONE,
-    }
-
-    await rpc.forwardMessages({
-      _: 'messages.forwardMessages',
-      fromPeer: peer,
-      id: [storedOriginal.projection[0].tlMessageId],
-      randomId: [Long.fromNumber(123)],
-      toPeer: peer,
-      dropAuthor: true,
-      replyTo: {
-        _: 'inputReplyToMessage', replyToMsgId: storedTarget.projection[0].tlMessageId,
-      },
-    })
-
-    expect(forwardedOptions).toMatchObject({
-      dropAuthor: true,
-      replyToId: target.id,
-      replyToNativeSequence: '40',
-      sourceMessages: [{ id: original.id }],
-    })
-  })
 
   it('includes clickable URL entities in live updates', async () => {
     const { store, manager, sent } = await createHarness()

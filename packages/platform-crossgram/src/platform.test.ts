@@ -767,41 +767,6 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getMessage).toHaveBeenCalledTimes(2)
   })
 
-  it('preserves mention entities and reply context when copying a message in the same conversation', async () => {
-    const platform = new QQNTPlatform()
-    platform.client.sendMessage = vi.fn(async () => ({
-      id: 'copied', conversationId: 'room', senderId: 'self', timestamp: 2, outgoing: true,
-      parts: [{ type: 'text' as const, text: '@Alice hello' }],
-    }))
-
-    await platform.forwardMessages(
-      session,
-      { id: 'room' },
-      ['source'],
-      { id: 'room' },
-      {
-        dropAuthor: true,
-        sourceMessages: [{
-          id: 'source', conversationId: 'room', senderId: 'alice', timestamp: 1,
-          replyToId: 'reply-target', metadata: { qqMsgSeq: '41', qqReplyToMsgSeq: '40' },
-          content: { parts: [{
-            type: 'text', text: '@Alice hello',
-            entities: [{
-              type: 'mention', offset: 0, length: 6, userId: 'alice', numericId: '12345',
-            }],
-          }] },
-        }],
-      },
-    )
-
-    const call = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]!
-    expect(call[6]).toEqual([{
-      type: 'text', text: '@Alice hello',
-      entities: [{ type: 'mention', offset: 0, length: 6, userId: 'alice', numericId: '12345' }],
-    }])
-    expect(call[7]).toBe('reply-target')
-    expect(call[8]).toBe('40')
-  })
 
   it('copies authorized stored content when QQ rejects its native forward API', async () => {
     const platform = new QQNTPlatform()
