@@ -268,9 +268,7 @@ describe('QQNTPlatform mapping', () => {
     })).resolves.toEqual({ available: [], reactions: [], maxSelected: 20 })
   })
 
-  it('reuses prepared dialog previews when a stale page refresh returns unchanged messages', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+  it('revalidates and prepares every dialog request', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     const text = { type: 'text' as const, text: 'unchanged preview' }
@@ -285,15 +283,10 @@ describe('QQNTPlatform mapping', () => {
     const prepare = vi.spyOn(platform as any, 'prepareRequestedMessage')
 
     await platform.getDialogs(session)
-    expect(prepare).toHaveBeenCalledTimes(1)
-
-    vi.advanceTimersByTime(15_001)
     await platform.getDialogs(session)
-    const refresh = [...(platform as any).dialogPageRefreshes.values()][0] as Promise<unknown>
-    await refresh
 
     expect(platform.client.getDialogs).toHaveBeenCalledTimes(2)
-    expect(prepare).toHaveBeenCalledTimes(1)
+    expect(prepare).toHaveBeenCalledTimes(2)
   })
 
   it('preserves QQ group msgSeq and replayMsgSeq as Telegram message IDs', async () => {
@@ -2438,12 +2431,12 @@ describe('QQNTPlatform dialogs polling', () => {
     await unsubscribe()
   })
 
-  it('serves the foreground dialog list from the prepared polling cache', async () => {
+  it('revalidates the foreground dialog list instead of using the polling snapshot', async () => {
     vi.useFakeTimers()
     const platform = new QQNTPlatform()
     mockSubscribe(platform)
     platform.client.getDialogs = vi.fn(async () => ({
-      conversations: [conversation('cached-first')], total: 1,
+      conversations: [conversation('revalidated-first')], total: 1,
     }))
 
     const unsubscribe = await platform.subscribe(session, () => {})
@@ -2452,9 +2445,9 @@ describe('QQNTPlatform dialogs polling', () => {
 
     await expect(platform.getDialogs(session, { limit: 101 })).resolves.toMatchObject({
       total: 1,
-      dialogs: [{ conversation: { id: 'cached-first' }, lastMessage: { id: 'cached-first-message' } }],
+      dialogs: [{ conversation: { id: 'revalidated-first' }, lastMessage: { id: 'revalidated-first-message' } }],
     })
-    expect(platform.client.getDialogs).toHaveBeenCalledOnce()
+    expect(platform.client.getDialogs).toHaveBeenCalledTimes(2)
     await unsubscribe()
   })
 

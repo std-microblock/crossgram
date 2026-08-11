@@ -126,12 +126,6 @@ export class DialogRpc {
   private _selfUser?: IMUser
   private readonly _data?: PlatformDataService
   private readonly _store?: MessageStore
-  private readonly _historyCache = new Map<string, MaterializedMessage[]>()
-  private readonly _historyCacheMetadata = new Map<
-    string,
-    { requestKey: string, storeRevision: number, freshUntil: number }
-  >()
-  private readonly _dialogCache = new Map<string, IMDialog>()
   private readonly _readInboxMaxMessageIds = new Map<string, string>()
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
@@ -156,7 +150,6 @@ export class DialogRpc {
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peersHydratedPeerRevision = -1
-  private _dialogProjectionStoreRevision = -1
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
 
@@ -192,7 +185,10 @@ export class DialogRpc {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
       this._store = store
-      this._data = new PlatformDataService(_platform, _session, store, _onTrace)
+      this._data = new PlatformDataService(
+        _platform, _session, store, _onTrace, undefined,
+        _onLocalEvent ? (event) => _onLocalEvent(_session, event) : undefined,
+      )
     }
   }
 
@@ -249,44 +245,30 @@ export class DialogRpc {
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
     const projectionsAt = performance.now()
+    const dialogProjections = new Map<string, MaterializedMessage[]>()
     if (this._store) {
       const targets = all.flatMap((dialog) => [dialog.lastMessage, dialog.readInboxMaxMessage]
         .flatMap((message) => message ? [{
           conversationId: dialog.conversation.id,
           platformMessageId: message.id,
         }] : []))
-      const revisionBefore = this._store.revision
-      const cached = revisionBefore === this._dialogProjectionStoreRevision
-        && targets.every((target) => this._historyCache.get(target.conversationId)?.some((item) =>
-          item.source.id === target.platformMessageId
-          || item.source.sourceIds?.includes(target.platformMessageId)))
-      if (!cached) {
-        const projected = await this._store.readProjectedByPlatformIds(
-          this._session.platformSessionId,
-          targets,
-        )
-        for (const stored of projected) {
-          const additions = stored.parts.map((part): MaterializedMessage => ({
-            source: stored.source,
-            tlId: part.tlMessageId,
-            ordinal: part.ordinal,
-            groupedId: part.groupedId ?? undefined,
-            media: stored.media.find((entry) => entry.id === part.mediaId),
-          }))
-          const existing = this._historyCache.get(stored.source.conversationId) ?? []
-          const additionIds = new Set(additions.map((item) => item.tlId))
-          this._historyCache.set(stored.source.conversationId, [
-            ...existing.filter((item) => !additionIds.has(item.tlId)),
-            ...additions,
-          ].sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId))
-          for (const item of additions) this._rememberMessage(item)
-        }
-        const revisionAfter = this._store.revision
-        this._dialogProjectionStoreRevision = revisionBefore === revisionAfter ? revisionAfter : -1
+      const projected = await this._store.readProjectedByPlatformIds(
+        this._session.platformSessionId, targets,
+      )
+      for (const stored of projected) {
+        const materialized = stored.parts.map((part): MaterializedMessage => ({
+          source: stored.source,
+          tlId: part.tlMessageId,
+          ordinal: part.ordinal,
+          groupedId: part.groupedId ?? undefined,
+          media: stored.media.find((entry) => entry.id === part.mediaId),
+        })).sort((left, right) => right.tlId - left.tlId)
+        const existing = dialogProjections.get(stored.source.conversationId) ?? []
+        dialogProjections.set(stored.source.conversationId, [...existing, ...materialized])
+        for (const item of materialized) this._rememberMessage(item)
       }
       await this._rememberReplyTargets(
-        all.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []),
-        false,
+        all.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []), false,
       )
     }
     const projectionsMs = performance.now() - projectionsAt
@@ -297,6 +279,7 @@ export class DialogRpc {
       this._materializeDialog(
         dialog, drafts.get(dialog.conversation.id),
         archivedPeerIds.has(dialog.conversation.id) ? 1 : undefined,
+        dialogProjections.get(dialog.conversation.id),
       )))
     const materializeMs = performance.now() - materializeAt
     let start = 0
@@ -336,25 +319,19 @@ export class DialogRpc {
 
   async getPeerDialogs(req: GetPeerDialogsRequest): Promise<tl.messages.RawPeerDialogs> {
     await this._hydratePeers()
-    let loaded = [...this._dialogCache.values()]
-    if (req.peers.some((peer) => peer._ === 'inputDialogPeerFolder')) {
-      await this._loadAllDialogs()
-      loaded = [...this._dialogCache.values()]
-    }
+    const includesFolder = req.peers.some((peer) => peer._ === 'inputDialogPeerFolder')
     const requestedPeerIds = req.peers.flatMap((requested) => {
       if (requested._ === 'inputDialogPeerFolder') return []
       const peerId = this._resolveKnownInputPeer(requested.peer)
       return peerId === undefined ? [] : [peerId]
     })
-    const missingRequestedPeerIds = requestedPeerIds.filter((peerId) => !this._dialogCache.has(peerId))
-    if (missingRequestedPeerIds.length) {
-      const additions = this._store
-        ? await this._store.readDialogs(this._session.platformSessionId, missingRequestedPeerIds)
+    const loaded = includesFolder ? await this._loadAllDialogs() : []
+    const additions = requestedPeerIds.length
+      ? this._store
+        ? await this._store.readDialogs(this._session.platformSessionId, requestedPeerIds)
         : await this._loadDialogs({ limit: Math.max(100, req.peers.length) })
-      for (const dialog of additions) this._dialogCache.set(dialog.conversation.id, dialog)
-      loaded = [...this._dialogCache.values()]
-    }
-    const byId = new Map(loaded.map((dialog) => {
+      : []
+    const byId = new Map([...loaded, ...additions].map((dialog) => {
       this._peerId(dialog.conversation.id)
       return [dialog.conversation.id, dialog]
     }))
@@ -394,9 +371,7 @@ export class DialogRpc {
       seen.add(peerId)
     }
 
-    if (!this._store) {
-      await Promise.all(selected.map((dialog) => this._loadHistory(dialog.conversation.id)))
-    }
+    if (!this._store) await Promise.all(selected.map((dialog) => this._loadHistory(dialog.conversation.id)))
     await this._syncStoredUsers(selected.flatMap((dialog) => [
       ...(dialog.conversation.kind === 'direct' ? [dialog.conversation.id] : []),
       ...[dialog.lastMessage, dialog.readInboxMaxMessage]
@@ -690,11 +665,10 @@ export class DialogRpc {
       : undefined
     let maxTimestamp = req.maxDate > 0 ? req.maxDate : undefined
     if (req.offsetId > 0 && !cursor) {
-      const cached = this._historyCache.get(peerId)?.find((item) => item.tlId === req.offsetId)?.source
-      const stored = !cached && this._store
+      const stored = this._store
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, req.offsetId, peerId)
         : undefined
-      const anchorTimestamp = cached?.timestamp ?? stored?.source.timestamp
+      const anchorTimestamp = stored?.source.timestamp
       if (anchorTimestamp !== undefined) {
         maxTimestamp = Math.min(maxTimestamp ?? anchorTimestamp, anchorTimestamp)
       }
@@ -1476,8 +1450,6 @@ export class DialogRpc {
         this._session, conversation, [...new Set(targets.map((target) => target.source.id))],
       )
       result.tlMessageIds.forEach((id) => affected.add(id))
-      const cache = this._historyCache.get(conversationId)
-      if (cache) this._historyCache.set(conversationId, cache.filter((item) => !affected.has(item.tlId)))
     }
     const ptsCount = affected.size
     // Deleting stale or already-deleted Telegram ids is idempotent. No rows
@@ -1560,7 +1532,6 @@ export class DialogRpc {
         { type: 'message', conversation, message: source },
         delivery,
       )
-      this._historyCache.delete(conversationId)
       // The requester receives the same durable PTS-bearing updates as the
       // observer sockets, but in the edit RPC response instead of as a push.
       const payloads = [deleted, replacement]
@@ -2419,7 +2390,6 @@ export class DialogRpc {
       this._localDelivery(excludeConnection, true),
     ) as tl.RawUpdates | undefined
     if (published === undefined || published._ !== 'updates') return
-    this._historyCache.delete(conversationId)
     return published
   }
 
@@ -2518,7 +2488,12 @@ export class DialogRpc {
     )).pts
   }
 
-  private async _materializeDialog(source: IMDialog, storedDraft?: StoredDraft, folderId?: number) {
+  private async _materializeDialog(
+    source: IMDialog,
+    storedDraft?: StoredDraft,
+    folderId?: number,
+    requestProjections: readonly MaterializedMessage[] = [],
+  ) {
     source = await this._visibleDialog(source)
     const platformPeerId = source.conversation.id
     this._conversations.set(platformPeerId, source.conversation)
@@ -2537,14 +2512,12 @@ export class DialogRpc {
       ? this._messageId(platformPeerId, source.readInboxMaxMessage.id)
       : undefined
     let projected = source.lastMessage
-      ? this._historyCache.get(platformPeerId)?.filter((item) =>
+      ? requestProjections.filter((item) =>
           item.source.id === source.lastMessage!.id || item.source.sourceIds?.includes(source.lastMessage!.id))
       : undefined
     if (source.lastMessage && !projected?.length && this._store) {
       const stored = await this._store.findProjectedByPlatformId(
-        this._session.platformSessionId,
-        platformPeerId,
-        source.lastMessage.id,
+        this._session.platformSessionId, platformPeerId, source.lastMessage.id,
       )
       projected = stored?.parts.map((part): MaterializedMessage => ({
         source: stored.source,
@@ -2559,14 +2532,12 @@ export class DialogRpc {
     const topMessage = top?.tlId ?? (source.lastMessage ? this._messageId(platformPeerId, source.lastMessage.id) : 0)
     let readInboxMaxId = source.unreadCount > 0 ? 0 : topMessage
     if (source.unreadCount > 0 && source.readInboxMaxMessage) {
-      let readProjection = this._historyCache.get(platformPeerId)?.filter((item) =>
+      let readProjection = requestProjections.filter((item) =>
         item.source.id === source.readInboxMaxMessage!.id
         || item.source.sourceIds?.includes(source.readInboxMaxMessage!.id))
-      if (!readProjection?.length && this._store) {
+      if (!readProjection.length && this._store) {
         const stored = await this._store.findProjectedByPlatformId(
-          this._session.platformSessionId,
-          platformPeerId,
-          source.readInboxMaxMessage.id,
+          this._session.platformSessionId, platformPeerId, source.readInboxMaxMessage.id,
         )
         readProjection = stored?.parts.map((part): MaterializedMessage => ({
           source: stored.source,
@@ -2574,11 +2545,11 @@ export class DialogRpc {
           ordinal: part.ordinal,
           groupedId: part.groupedId ?? undefined,
           media: stored.media.find((entry) => entry.id === part.mediaId),
-        }))
+        })) ?? []
       }
-      readInboxMaxId = readProjection?.reduce((maximum, item) => Math.max(maximum, item.tlId), 0)
-        ?? unpersistedReadInboxMaxId
-        ?? this._messageId(platformPeerId, source.readInboxMaxMessage.id)
+      readInboxMaxId = readProjection.reduce((maximum, item) => Math.max(maximum, item.tlId), 0)
+        || unpersistedReadInboxMaxId
+        || this._messageId(platformPeerId, source.readInboxMaxMessage.id)
     }
     const topItem = top ?? (source.lastMessage
       ? { source: source.lastMessage, tlId: topMessage, ordinal: 0 }
@@ -2623,21 +2594,6 @@ export class DialogRpc {
     const startedAt = performance.now()
     this._onTrace?.('history load profile stage=start peer=%s limit=%d', peerId, request.limit ?? 1)
     if (this._data && this._store) {
-      const requestKey = historyWindowKey(request)
-      const cached = this._historyCache.get(peerId)
-      const cacheMetadata = this._historyCacheMetadata.get(peerId)
-      if (
-        cached
-        && cacheMetadata?.requestKey === requestKey
-        && cacheMetadata.storeRevision === this._store.revision
-        && cacheMetadata.freshUntil > startedAt
-      ) {
-        this._onTrace?.(
-          'history load profile peer=%s cache=true materialized=%d totalMs=%d',
-          peerId, cached.length, profileMilliseconds(performance.now() - startedAt),
-        )
-        return cached
-      }
       const anchorId = request.offsetId || request.maxId || undefined
       const anchorAt = performance.now()
       let anchor = anchorId
@@ -2656,13 +2612,8 @@ export class DialogRpc {
       )
       const syncHistoryWindow = async () => {
         if (isAroundUnread()) {
-          // Telegram Desktop opens an unread dialog with
-          // offset_id=read_inbox_max_id and a negative add_offset. Let adapters
-          // perform their initial unread-aware fetch (QQNT uses firstUnreadSeq).
           await this._data!.syncHistory(peerId, { limit: fetchLimit })
         } else if (negativeOffset && anchor) {
-          // A generic jump also needs both sides of its anchor, but must not be
-          // mistaken for QQNT's conversation-level unread anchor.
           const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
           await this._data!.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
           await this._data!.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
@@ -2673,15 +2624,8 @@ export class DialogRpc {
           })
         }
       }
-      const readStoredWindow = async (loadMissingReplyTargets: boolean) => {
+      const readStoredWindow = async () => {
         const projectAt = performance.now()
-        const projectionRevision = this._store!.revision
-        // Telegram Android paginates channels with add_offset=-1 so the anchor
-        // can overlap the next page. Read that window at the anchor instead of
-        // reading the globally newest rows; otherwise a deep anchor falls near
-        // or beyond the end of the materialized window and returns only a few
-        // newer messages. Larger negative offsets are around-message/unread
-        // windows and still need rows from both sides of the anchor.
         const backwardPageMaxTimestamp = negativeOffset
           && request.addOffset === -1
           && !isAroundUnread()
@@ -2732,54 +2676,15 @@ export class DialogRpc {
         })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
         const materializeMs = performance.now() - materializeAt
         const repliesAt = performance.now()
-        await this._rememberReplyTargets(
-          history.map((item) => item.source),
-          loadMissingReplyTargets,
-        )
+        await this._rememberReplyTargets(history.map((item) => item.source), true)
         const repliesMs = performance.now() - repliesAt
         return {
-          history, projected: projected.length, projectionRevision,
-          usersMs, projectionReadMs, materializeMs, repliesMs,
-        }
-      }
-      const cacheStoredWindow = (stored: Awaited<ReturnType<typeof readStoredWindow>>) => {
-        this._historyCache.set(peerId, stored.history)
-        if (stored.projectionRevision === this._store!.revision) {
-          this._historyCacheMetadata.set(peerId, {
-            requestKey,
-            storeRevision: stored.projectionRevision,
-            freshUntil: performance.now() + PlatformDataService.HISTORY_SYNC_FRESH_MS,
-          })
-        } else {
-          this._historyCacheMetadata.delete(peerId)
-        }
-      }
-      const traceStoredWindow = (
-        stored: Awaited<ReturnType<typeof readStoredWindow>>,
-        upstreamMs: number,
-        storeHit: boolean,
-      ) => this._onTrace?.(
-        'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s storeHit=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
-        peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(isAroundUnread()), storeHit,
-        stored.projected, stored.history.length,
-        profileMilliseconds(anchorMs), profileMilliseconds(upstreamMs), profileMilliseconds(stored.usersMs),
-        profileMilliseconds(stored.projectionReadMs), profileMilliseconds(stored.materializeMs),
-        profileMilliseconds(stored.repliesMs), profileMilliseconds(performance.now() - startedAt),
-      )
-
-      if (!anchorId || anchor) {
-        // This is a speculative local read. Missing reply targets may be part
-        // of the history page we are about to synchronize, so do not issue an
-        // extra foreground getMessage request before deciding whether the
-        // stored window is complete.
-        const stored = await readStoredWindow(false)
-        if (selectHistoryWindow(stored.history, request).page.length >= clampLimit(request.limit)) {
-          cacheStoredWindow(stored)
-          traceStoredWindow(stored, 0, true)
-          void syncHistoryWindow().catch((error) => this._onTrace?.(
-            'history background sync failed peer=%s error=%s', peerId, String(error),
-          ))
-          return stored.history
+          history,
+          projected: projected.length,
+          usersMs,
+          projectionReadMs,
+          materializeMs,
+          repliesMs,
         }
       }
 
@@ -2791,12 +2696,15 @@ export class DialogRpc {
           this._session.platformSessionId, anchorId, peerId,
         )
       }
-      // The upstream history page has already been synchronized. A reply
-      // target still missing now is genuinely outside that page and needs the
-      // targeted fallback to preserve Telegram reply headers.
-      const stored = await readStoredWindow(true)
-      cacheStoredWindow(stored)
-      traceStoredWindow(stored, upstreamMs, false)
+      const stored = await readStoredWindow()
+      this._onTrace?.(
+        'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
+        peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(isAroundUnread()),
+        stored.projected, stored.history.length,
+        profileMilliseconds(anchorMs), profileMilliseconds(upstreamMs), profileMilliseconds(stored.usersMs),
+        profileMilliseconds(stored.projectionReadMs), profileMilliseconds(stored.materializeMs),
+        profileMilliseconds(stored.repliesMs), profileMilliseconds(performance.now() - startedAt),
+      )
       return stored.history
     }
 
@@ -2810,7 +2718,6 @@ export class DialogRpc {
       this._rememberMessage(item)
       return item
     }).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
-    this._historyCache.set(peerId, materialized)
     this._onTrace?.(
       'history load profile peer=%s store=false fetched=%d materialized=%d totalMs=%d',
       peerId, history.length, materialized.length, profileMilliseconds(performance.now() - startedAt),
@@ -2985,7 +2892,6 @@ export class DialogRpc {
       : await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)
     const dialogs = page.dialogs
     for (const dialog of dialogs) {
-      this._dialogCache.set(dialog.conversation.id, dialog)
       this._conversations.set(dialog.conversation.id, dialog.conversation)
       if (dialog.readInboxMaxMessage) {
         this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
@@ -3038,15 +2944,17 @@ export class DialogRpc {
     }
   }
 
-  private async _loadAllDialogs(): Promise<void> {
+  private async _loadAllDialogs(): Promise<IMDialog[]> {
     let afterId: string | undefined
     let scanned = 0
+    const dialogs: IMDialog[] = []
     const visitedOffsets = new Set<string | undefined>()
     while (scanned < 100_000) {
       if (visitedOffsets.has(afterId)) break
       visitedOffsets.add(afterId)
       const page = await this._loadDialogPage({ limit: 500, afterId })
       if (!page.dialogs.length) break
+      dialogs.push(...page.dialogs)
       scanned += page.dialogs.length
       const lastId = page.dialogs.at(-1)!.conversation.id
       const hasMore = Boolean(page.nextCursor)
@@ -3055,6 +2963,7 @@ export class DialogRpc {
       if (!hasMore || lastId === afterId) break
       afterId = lastId
     }
+    return dialogs
   }
 
   private async _loadSubdialogPage(
@@ -3067,7 +2976,6 @@ export class DialogRpc {
       ? await this._data.getSubdialogsPage(parentId, query)
       : await load.call(this._platform, this._session, { id: parentId }, query)
     for (const dialog of page.dialogs) {
-      this._dialogCache.set(dialog.conversation.id, dialog)
       this._conversations.set(dialog.conversation.id, dialog.conversation)
       if (dialog.readInboxMaxMessage) {
         this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
@@ -3295,14 +3203,9 @@ export class DialogRpc {
   }
 
   private async _mentionDialog(conversationId: string): Promise<IMDialog | undefined> {
-    const cached = this._dialogCache.get(conversationId)
-    if (cached) return cached
-    const stored = await this._store?.readDialogs(
+    return (await this._store?.readDialogs(
       this._session.platformSessionId, [conversationId],
-    )
-    const dialog = stored?.[0]
-    if (dialog) this._dialogCache.set(conversationId, dialog)
-    return dialog
+    ))?.[0]
   }
 
   private async _preloadUnreadMentionCounts(conversationIds: readonly string[]): Promise<void> {
@@ -3353,7 +3256,7 @@ export class DialogRpc {
   private async _unreadMentionMessages(conversationId: string): Promise<MaterializedMessage[]> {
     if (!this._store) {
       const unread = this._memoryMentionStates.get(conversationId)
-      return (this._historyCache.get(conversationId) ?? [])
+      return (await this._loadHistory(conversationId, { limit: 1_000 }))
         .filter((item) => item.ordinal === 0 && unread?.get(item.tlId) === true)
         .sort((left, right) => right.tlId - left.tlId)
     }
@@ -4143,8 +4046,6 @@ export class DialogRpc {
   }
 
   private async _storedTopicSeed(conversationId: string): Promise<MaterializedMessage[]> {
-    const cached = this._historyCache.get(conversationId)
-    if (cached?.length) return cached
     if (!this._store) return []
     const projected = await this._store.readProjectedHistory(
       this._session.platformSessionId, conversationId, { limit: 1 },
@@ -4157,7 +4058,6 @@ export class DialogRpc {
       media: media.find((entry) => entry.id === part.mediaId),
     }))).sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId)
     for (const item of history) this._rememberMessage(item)
-    if (history.length) this._historyCache.set(conversationId, history)
     return history
   }
 
@@ -4365,14 +4265,6 @@ export class DialogRpc {
       conversationId: target.id,
       upToMessageId: ref.id,
     }, this._localDelivery(excludeConnection))
-    const cached = this._dialogCache.get(target.id)
-    if (cached) {
-      this._dialogCache.set(target.id, {
-        ...cached,
-        unreadCount: 0,
-        readInboxMaxMessage: projected?.source,
-      })
-    }
   }
 
   private async _findReadProjection(
@@ -4660,16 +4552,6 @@ function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): 
   return false
 }
 
-function historyWindowKey(request: HistoryWindow): string {
-  return JSON.stringify([
-    request.offsetId ?? 0,
-    request.offsetDate ?? 0,
-    request.addOffset ?? 0,
-    request.limit,
-    request.maxId ?? 0,
-    request.minId ?? 0,
-  ])
-}
 
 function selectHistoryWindow(
   all: readonly MaterializedMessage[],

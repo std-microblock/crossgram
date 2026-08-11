@@ -421,7 +421,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       ctx.logger('bridge').info('IM platform registered: %s', platformId)
       void ctx.database.prepared()
         .then(async () => {
-          await store.prepareDialogCache()
           const migrated = await migrateQualifiedPlatformIds(ctx.database, platformId)
           if (migrated) ctx.logger('bridge').info('migrated %d qualified platform sessions to %s', migrated, platformId)
           await provision(platformId)
@@ -448,7 +447,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   ctx.effect(async () => {
     await ctx.database.prepared()
-    await store.prepareDialogCache()
     // Delivery rows from pre-memory-journal versions are no longer used.
     await ctx.database.remove('mtproto_update_delivery', {})
     await Promise.all(registry.ids.map(platformId => provision(platformId)))

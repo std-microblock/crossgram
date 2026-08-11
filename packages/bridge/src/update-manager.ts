@@ -404,8 +404,8 @@ export class UpdateManager {
       ? `${session.platformSessionId}:edit:${event.eventId}`
       : `${session.platformSessionId}:message:${result.message.id}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
-    if (!delivery && isEdit && !result.changed) {
-      this._onTrace?.('update publish skipped eventKey=%s reason=unchanged-edit', eventKey)
+    if (!delivery && !result.created && !result.changed) {
+      this._onTrace?.('update publish skipped eventKey=%s reason=unchanged-message', eventKey)
       return
     }
     const displayConversation = event.conversation.kind === 'channel' && event.conversation.parentId

@@ -190,14 +190,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     string,
     (event: IMEvent<QQMediaLocator>) => void | Promise<void>
   >()
-  private readonly preparedDialogPages = new Map<string, {
-    page: IMDialogPage<QQMediaLocator>
-    rawPage: IMDialogPage<QQMediaLocator>
-    cachedAt: number
-    firstPage: boolean
-    platformSessionId: string
-  }>()
-  private readonly dialogPageRefreshes = new Map<string, Promise<IMDialogPage<QQMediaLocator>>>()
   private readonly inlinePreviewMessageJobs = new Map<string, Promise<void>>()
   private readonly inlinePreviewPublished = new Set<string>()
 
@@ -489,8 +481,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           const seenCursors = new Set<string>()
           do {
             const query = { cursor, limit: 100 }
-            const page = await this.fetchDialogsPage(query, signal)
-            await this.cachePreparedDialogPage(session, query, page)
+            const page = await this.prepareDialogPage(
+              session, await this.fetchDialogsPage(query, signal),
+            )
             for (const dialog of page.dialogs) {
               knownLastMessageIds.set(dialog.conversation.id, dialog.lastMessage?.id)
             }
@@ -503,8 +496,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           // Recent changes move to the first page, so subsequent polling only
           // needs that page rather than scanning hundreds of dialogs each time.
           const query = { limit: 100 }
-          const page = await this.fetchDialogsPage(query, signal)
-          await this.cachePreparedDialogPage(session, query, page)
+          const page = await this.prepareDialogPage(
+            session, await this.fetchDialogsPage(query, signal),
+          )
           for (const dialog of page.dialogs) {
             const conversationId = dialog.conversation.id
             const previousId = knownLastMessageIds.get(conversationId)
@@ -588,17 +582,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   async getDialogs(session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
     await this.cleanupLegacyMultiForwardDialogs(session)
     await waitAtMost(this.ensureReactionCatalog().catch(() => undefined), REACTION_CATALOG_GRACE_MS)
-    const cached = this.cachedPreparedDialogPage(session, query)
-    if (cached) {
-      if (Date.now() - cached.cachedAt >= DIALOGS_POLL_INTERVAL_MS) {
-        void this.refreshPreparedDialogPage(session, query).catch((error) => this.logger?.warn(
-          'Dialog page background refresh failed session=%s error=%s',
-          session.platformSessionId, formatError(error),
-        ))
-      }
-      return cached.page
-    }
-    return this.refreshPreparedDialogPage(session, query)
+    return this.prepareDialogPage(session, await this.fetchDialogsPage(query))
   }
 
   async getConversation(
@@ -644,97 +628,19 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private async prepareDialogPage(
     session: PlatformSession,
     page: IMDialogPage<QQMediaLocator>,
-    previous?: {
-      page: IMDialogPage<QQMediaLocator>
-      rawPage: IMDialogPage<QQMediaLocator>
-    },
   ): Promise<IMDialogPage<QQMediaLocator>> {
-    const previousRaw = new Map(previous?.rawPage.dialogs.map((dialog) => [dialog.conversation.id, dialog]))
-    const previousPrepared = new Map(previous?.page.dialogs.map((dialog) => [dialog.conversation.id, dialog]))
-    const preparePreview = async (
-      message: IMMessage<QQMediaLocator> | undefined,
-      raw: IMMessage<QQMediaLocator> | undefined,
-      prepared: IMMessage<QQMediaLocator> | undefined,
-      conversation: IMConversation<QQMediaLocator>,
-    ) => message && rawDialogPreviewEqual(message, raw) && prepared
-      ? prepared
-      : message
-        ? this.prepareRequestedMessage(session, conversation, message)
-        : undefined
     return {
       ...page,
-      dialogs: await Promise.all(page.dialogs.map(async (dialog) => {
-        const raw = previousRaw.get(dialog.conversation.id)
-        const prepared = previousPrepared.get(dialog.conversation.id)
-        return {
-          ...dialog,
-          lastMessage: await preparePreview(
-            dialog.lastMessage, raw?.lastMessage, prepared?.lastMessage, dialog.conversation,
-          ),
-          readInboxMaxMessage: await preparePreview(
-            dialog.readInboxMaxMessage,
-            raw?.readInboxMaxMessage,
-            prepared?.readInboxMaxMessage,
-            dialog.conversation,
-          ),
-        }
-      })),
+      dialogs: await Promise.all(page.dialogs.map(async (dialog) => ({
+        ...dialog,
+        lastMessage: dialog.lastMessage
+          ? await this.prepareRequestedMessage(session, dialog.conversation, dialog.lastMessage)
+          : undefined,
+        readInboxMaxMessage: dialog.readInboxMaxMessage
+          ? await this.prepareRequestedMessage(session, dialog.conversation, dialog.readInboxMaxMessage)
+          : undefined,
+      }))),
     }
-  }
-
-  private async cachePreparedDialogPage(
-    session: PlatformSession,
-    query: IMPageQuery,
-    page: IMDialogPage<QQMediaLocator>,
-  ): Promise<IMDialogPage<QQMediaLocator>> {
-    const key = dialogPageCacheKey(session.platformSessionId, query)
-    const previous = this.preparedDialogPages.get(key)
-    const prepared = await this.prepareDialogPage(session, page, previous)
-    this.preparedDialogPages.set(key, {
-      page: prepared, rawPage: page,
-      cachedAt: Date.now(),
-      firstPage: !query.cursor && !query.afterId,
-      platformSessionId: session.platformSessionId,
-    })
-    if (this.preparedDialogPages.size > 64) {
-      this.preparedDialogPages.delete(this.preparedDialogPages.keys().next().value!)
-    }
-    return prepared
-  }
-
-  private cachedPreparedDialogPage(
-    session: PlatformSession,
-    query: IMPageQuery,
-  ): { page: IMDialogPage<QQMediaLocator>, cachedAt: number } | undefined {
-    const exact = this.preparedDialogPages.get(dialogPageCacheKey(session.platformSessionId, query))
-    const cached = exact ?? (!query.cursor && !query.afterId
-      ? [...this.preparedDialogPages.values()]
-        .filter((entry) => entry.firstPage && entry.platformSessionId === session.platformSessionId)
-        .sort((left, right) => left.cachedAt - right.cachedAt)
-        .at(-1)
-      : undefined)
-    if (!cached) return
-    const limit = query.limit ?? cached.page.dialogs.length
-    return {
-      cachedAt: cached.cachedAt,
-      page: { ...cached.page, dialogs: cached.page.dialogs.slice(0, limit) },
-    }
-  }
-
-  private refreshPreparedDialogPage(
-    session: PlatformSession,
-    query: IMPageQuery,
-  ): Promise<IMDialogPage<QQMediaLocator>> {
-    const key = dialogPageCacheKey(session.platformSessionId, query)
-    const existing = this.dialogPageRefreshes.get(key)
-    if (existing) return existing
-    const pending = this.fetchDialogsPage(query)
-      .then((page) => this.cachePreparedDialogPage(session, query, page))
-      .finally(() => {
-        if (this.dialogPageRefreshes.get(key) === pending) this.dialogPageRefreshes.delete(key)
-      })
-    this.dialogPageRefreshes.set(key, pending)
-    return pending
   }
 
   async getContacts(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMUserPage<QQMediaLocator>> {

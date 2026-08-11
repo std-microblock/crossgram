@@ -966,7 +966,7 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
-  it('returns the same warm 100-message history page without duplicate persistence', async () => {
+  it('revalidates the same 100-message history page without duplicate persistence', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
     try {
@@ -1026,9 +1026,8 @@ describe('bridge login e2e', () => {
       expect(cached.messages.map((item: any) => [item.id, item.message]))
         .toEqual(first.messages.map((item: any) => [item.id, item.message]))
       expect(persistedAfter).toHaveLength(persistedBefore.length)
-      expect(getHistory).toHaveBeenCalledTimes(upstreamCallsAfterFirstPage)
-      expect(cachedHistoryGets).toHaveLength(0)
-      expect(cachedHistorySelects).toHaveLength(0)
+      expect(getHistory).toHaveBeenCalledTimes(upstreamCallsAfterFirstPage + 2)
+      expect(cachedHistoryGets.length + cachedHistorySelects.length).toBeGreaterThan(0)
     } finally {
       client?.close()
       await stop()
@@ -1372,10 +1371,10 @@ describe('bridge login e2e', () => {
       const seededPhoto = groupHistory.messages[1].media.photo
       expect(seededPhoto.sizes).toMatchObject([
         { _: 'photoStrippedSize', type: 'i', bytes: expect.any(Uint8Array) },
-        { _: 'photoSize', type: 'y', w: 905, h: 1280 },
-        { _: 'photoSize', type: 'w', w: 1240, h: 1754 },
+        { _: 'photoSize', type: 'm', w: 28, h: 40 },
+        { _: 'photoSize', type: 'y', w: 1240, h: 1754 },
       ])
-      expect(seededPhoto.sizes.map((size: any) => size.type)).toEqual(['i', 'y', 'w'])
+      expect(seededPhoto.sizes.map((size: any) => size.type)).toEqual(['i', 'm', 'y'])
       expect([...seededPhoto.sizes[0].bytes.subarray(0, 3)]).toEqual([1, 40, 28])
       const seededFile = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 64,
@@ -1393,7 +1392,7 @@ describe('bridge login e2e', () => {
         },
       }, 35)
       expect([...seededLegacyThumbnailRequest.bytes.subarray(0, 8)])
-        .toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+        .toEqual([255, 216, 255, 224, 0, 16, 74, 70])
       const seededImage = await callRpc(resumed, key, resumedSid, {
         _: 'upload.getFile', offset: 0, limit: 1024,
         location: {
@@ -2816,7 +2815,7 @@ describe('bridge login e2e', () => {
           url: `https://t.me/bridgechat_${innerChat.id}`,
         } },
       })
-      expect(historyCalls).toEqual([parent.id, virtual.id])
+      expect(historyCalls).toEqual([parent.id, parent.id, virtual.id])
       await expect(callRpc(fresh, key, freshSid, {
         _: 'messages.readHistory', peer, maxId: outerHistory.messages[0].id,
       }, 12)).resolves.toMatchObject({ _: 'messages.affectedMessages' })
@@ -2832,7 +2831,7 @@ describe('bridge login e2e', () => {
       }, 15)).toMatchObject({
         messages: [{ _: 'message', message: 'inner last message' }, { _: 'message', message: 'inner first message' }],
       })
-      expect(historyCalls).toEqual([parent.id, virtual.id, innerVirtual.id])
+      expect(historyCalls).toEqual([parent.id, parent.id, virtual.id, parent.id, innerVirtual.id])
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getFullChat', chatId: virtualChat.id,
       }, 17)).toMatchObject({

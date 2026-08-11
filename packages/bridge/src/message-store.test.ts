@@ -106,7 +106,7 @@ describe('MessageStore', () => {
       ])
   })
 
-  it('hydrates a 100-dialog first screen with one bulk query per related table', async () => {
+  it('revalidates latest rows for a 100-dialog first screen and bulk-hydrates related data', async () => {
     const { ctx, store } = await createStore()
     const conversations = Array.from({ length: 100 }, (_, index) => ({
       id: `bulk-dialog-${index}`, kind: 'group' as const, title: `Bulk ${index}`,
@@ -156,7 +156,7 @@ describe('MessageStore', () => {
       'mtproto_im_message_reaction',
       'mtproto_im_user',
     ])
-    expect(select.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toHaveLength(0)
+    expect(select.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toHaveLength(100)
 
     get.mockClear()
     const projectedStartedAt = performance.now()

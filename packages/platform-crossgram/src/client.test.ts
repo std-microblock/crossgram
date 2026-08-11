@@ -953,6 +953,37 @@ describe('QQNTClient streaming transport', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('revalidates dialogs and history with ETag and reuses only 304 responses', async () => {
+    const requests: Array<{ url: string, ifNoneMatch: string | null }> = []
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input)
+      const ifNoneMatch = new Headers(init?.headers).get('if-none-match')
+      requests.push({ url, ifNoneMatch })
+      if (url.includes('/dialogs')) {
+        if (ifNoneMatch === '"dialogs-v1"') return new Response(null, { status: 304, headers: { etag: '"dialogs-v1"' } })
+        return Response.json({ conversations: [{ id: 'room' }] }, { headers: { etag: '"dialogs-v1"' } })
+      }
+      if (ifNoneMatch === '"history-v1"') return new Response(null, { status: 304, headers: { etag: '"history-v1"' } })
+      return Response.json({ messages: [{ id: 'message-1' }] }, { headers: { etag: '"history-v1"' } })
+    })
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1', token: 'secret',
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    })
+
+    await expect(client.getDialogs({ limit: 20 })).resolves.toEqual({ conversations: [{ id: 'room' }] })
+    await expect(client.getDialogs({ limit: 20 })).resolves.toEqual({ conversations: [{ id: 'room' }] })
+    await expect(client.getHistory('room', { limit: 20 })).resolves.toEqual({ messages: [{ id: 'message-1' }] })
+    await expect(client.getHistory('room', { limit: 20 })).resolves.toEqual({ messages: [{ id: 'message-1' }] })
+
+    expect(requests.map((request) => request.ifNoneMatch)).toEqual([
+      null, '"dialogs-v1"', null, '"history-v1"',
+    ])
+    for (const call of fetchMock.mock.calls) {
+      expect(new Headers(call[1]?.headers).get('authorization')).toBe('Bearer secret')
+    }
+  })
+
   it('derives the WebSocket endpoint from the HTTP endpoint when no override is configured', () => {
     expect(new QQNTClient({ endpoint: 'https://bridge.example/v1/' }).webSocketEndpoint)
       .toBe('https://bridge.example/v1/events/ws')
