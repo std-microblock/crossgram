@@ -21,6 +21,7 @@ import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
 import { defineQQMediaPreviewModel, mediaPreviewKey, QQMediaPreviewer } from './media-preview.js'
 import { migrateLegacyQQMessageMedia } from './raw-media-migration.js'
+import { migrateLegacyQQGroupAliasUsers } from './user-name-migration.js'
 import type {
   QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
   WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireTextPart,
@@ -104,6 +105,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   const mediaCachePath = resolve(process.cwd(), 'data', 'qqnt-media-cache', id)
   ctx.effect(async () => {
     await ctx.database.prepared()
+    const userRows = await migrateLegacyQQGroupAliasUsers(ctx.database, id)
+    if (userRows) {
+      ctx.logger('platform-qqnt').info(
+        'migrated %d legacy QQ group-card user names to stable profile nicknames',
+        userRows,
+      )
+    }
     const result = await migrateLegacyQQMessageMedia(ctx.database, id, mediaCachePath)
     if (result.mediaRows) {
       ctx.logger('platform-qqnt').info(
