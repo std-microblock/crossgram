@@ -7,7 +7,7 @@ import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
-  WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
+  WireReactionActorPage, WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
   WireTextPart,
 } from './protocol.js'
 import { uploadHighway, type QQMediaUploadPlan } from './highway.js'
@@ -460,6 +460,19 @@ export class QQNTClient {
     messageSequence?: string,
   ): Promise<WireReactionState> {
     return this.json(`/messages/reactions${queryString({ conversationId, messageId, messageSequence })}`)
+  }
+
+  getMessageReactionActors(
+    conversationId: string,
+    messageId: string,
+    reactionKey: string | undefined,
+    offset: string | undefined,
+    limit: number,
+    messageSequence?: string,
+  ): Promise<WireReactionActorPage> {
+    return this.json(`/messages/reactions/list${queryString({
+      conversationId, messageId, reactionKey, offset, limit, messageSequence,
+    })}`)
   }
 
   setMessageReactions(

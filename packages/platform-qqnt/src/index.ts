@@ -8,8 +8,8 @@ import zhCN from './locales/zh-CN.yml'
 import {
   IMMessageSendRejectedError, IMMessageTargetUnavailableError, messagePartText, resolvePlatformPluginId,
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage,
-  type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput,
-  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMTransferOptions,
+  type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
+  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMTransferOptions,
   type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
   type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
 } from '@mtproto-relay/bridge'
@@ -1041,7 +1041,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   async getMessageReactions(
     _session: PlatformSession,
-    target: import('@mtproto-relay/bridge').IMMessageTarget,
+    target: IMMessageTarget,
   ): Promise<IMReactionContext> {
     if (!this.isGroupConversation(target.conversationId)) {
       return { available: [], reactions: [], maxSelected: 0 }
@@ -1053,9 +1053,32 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     )
   }
 
+  async getMessageReactionActors(
+    _session: PlatformSession,
+    target: IMMessageTarget,
+    request: IMReactionActorPageRequest,
+  ): Promise<IMReactionActorPage> {
+    if (!this.isGroupConversation(target.conversationId)) {
+      return { context: { available: [], reactions: [], maxSelected: 0 }, actors: [] }
+    }
+    const page = await this.client.getMessageReactionActors(
+      target.conversationId,
+      target.targetId,
+      request.reactionKey,
+      request.offset,
+      request.limit,
+      target.nativeSequence,
+    )
+    return {
+      context: await this.withReactionCatalog(page.state),
+      actors: page.actors,
+      nextOffset: page.nextOffset,
+    }
+  }
+
   async setMessageReactions(
     _session: PlatformSession,
-    target: import('@mtproto-relay/bridge').IMMessageTarget,
+    target: IMMessageTarget,
     reactionKeys: readonly string[],
   ): Promise<IMReactionContext> {
     if (!this.isGroupConversation(target.conversationId)) {

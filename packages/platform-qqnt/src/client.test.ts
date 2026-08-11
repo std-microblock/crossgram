@@ -129,10 +129,15 @@ describe('QQNTClient streaming transport', () => {
     })
 
     await client.getMessageReactions('group/1', 'account-scoped-id', '571')
+    await client.getMessageReactionActors('group/1', 'account-scoped-id', '2:128522', 'opaque+cursor', 25, '571')
     await client.setMessageReactions('group/1', 'account-scoped-id', ['2:128522'], '571')
 
     expect(requests).toEqual([{
       url: 'http://bridge.invalid/v1/messages/reactions?conversationId=group%2F1&messageId=account-scoped-id&messageSequence=571',
+      method: undefined,
+      body: undefined,
+    }, {
+      url: 'http://bridge.invalid/v1/messages/reactions/list?conversationId=group%2F1&messageId=account-scoped-id&reactionKey=2%3A128522&offset=opaque%2Bcursor&limit=25&messageSequence=571',
       method: undefined,
       body: undefined,
     }, {

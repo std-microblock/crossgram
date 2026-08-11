@@ -381,6 +381,18 @@ export interface IMReactionContext {
   maxSelected: number
 }
 
+export interface IMReactionActorPage {
+  context: IMReactionContext
+  actors: Array<{ reactionKey: string, actor: IMReactionActor }>
+  nextOffset?: string
+}
+
+export interface IMReactionActorPageRequest {
+  reactionKey?: string
+  offset?: string
+  limit: number
+}
+
 export interface IMMessageTarget {
   conversationId: string
   messageId: string
@@ -663,6 +675,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
     session: PlatformSession,
     target: IMMessageTarget,
   ): Promise<IMReactionContext>
+  getMessageReactionActors?(
+    session: PlatformSession,
+    target: IMMessageTarget,
+    request: IMReactionActorPageRequest,
+  ): Promise<IMReactionActorPage>
   downloadReactionResource?(
     session: PlatformSession,
     resource: IMReactionResource,

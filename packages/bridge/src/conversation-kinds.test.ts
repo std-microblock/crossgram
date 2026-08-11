@@ -12,7 +12,7 @@ import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { IMMessageTargetUnavailableError } from './platform.js'
-import type { IMConversation, IMEvent, IMMessage, IMPlatform, PlatformSession } from './platform.js'
+import type { IMConversation, IMEvent, IMMessage, IMMessageTarget, IMPlatform, IMReactionActorPageRequest, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
   platformSessionId: 'kinds-session', platformId: 'kinds', userId: 'self', credentials: {}, metadata: {},
@@ -486,7 +486,7 @@ describe('conversation kinds', () => {
     })).rejects.toMatchObject({ code: 400, text: 'REACTION_INVALID' })
   })
 
-  it('refreshes and returns the platform users behind message reactions', async () => {
+  it('passes Telegram reaction offsets through to the platform actor pages', async () => {
     const reactionContext = {
       available: [{
         key: 'like',
@@ -495,13 +495,20 @@ describe('conversation kinds', () => {
       reactions: [{ key: 'like', count: 3 }],
       maxSelected: 1,
     }
-    const getMessageReactions = vi.fn(async () => ({
-      ...reactionContext,
-      reactions: [{
-        key: 'like', count: 3,
-        recentActors: [{ userId: 'alice' }, { userId: 'bob' }],
-      }],
-    }))
+    const getMessageReactionActors = vi.fn(async (
+      _session: PlatformSession,
+      _target: IMMessageTarget,
+      request: IMReactionActorPageRequest,
+    ) => request.offset === 'qq-next'
+      ? {
+          context: reactionContext,
+          actors: [{ reactionKey: 'like', actor: { userId: 'bob' } }],
+        }
+      : {
+          context: reactionContext,
+          actors: [{ reactionKey: 'like', actor: { userId: 'alice' } }],
+          nextOffset: 'qq-next',
+        })
     const selectedPlatform: IMPlatform = {
       ...platform,
       capabilities: {
@@ -516,31 +523,46 @@ describe('conversation kinds', () => {
           lastMessage: { ...source(conversation), metadata: { qqMsgSeq: '571' }, reactionContext },
         }] }
       },
-      getMessageReactions,
+      getMessageReactionActors,
     }
     const { rpc } = await createRpc(selectedPlatform)
     const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
     const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
     const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
 
-    const result = await rpc.getMessageReactionsList({
-      _: 'messages.getMessageReactionsList', peer, id: message.id, offset: '', limit: 100,
+    const first = await rpc.getMessageReactionsList({
+      _: 'messages.getMessageReactionsList', peer, id: message.id, offset: '', limit: 1,
     })
-    expect(result).toMatchObject({
+    expect(first).toMatchObject({
       _: 'messages.messageReactionsList',
       count: 3,
+      nextOffset: 'qq-next',
       reactions: [
         { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: await rpc.userTlId('alice') } },
-        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: await rpc.userTlId('bob') } },
       ],
       users: expect.arrayContaining([
         expect.objectContaining({ _: 'user', firstName: 'alice' }),
+      ]),
+    })
+    const second = await rpc.getMessageReactionsList({
+      _: 'messages.getMessageReactionsList', peer, id: message.id, offset: first.nextOffset!, limit: 100,
+    })
+    expect(second).toMatchObject({
+      count: 3,
+      reactions: [
+        { _: 'messagePeerReaction', peerId: { _: 'peerUser', userId: await rpc.userTlId('bob') } },
+      ],
+      users: expect.arrayContaining([
         expect.objectContaining({ _: 'user', firstName: 'bob' }),
       ]),
     })
-    expect(getMessageReactions).toHaveBeenCalledWith(session, {
+    expect(second.nextOffset).toBeUndefined()
+    expect(getMessageReactionActors).toHaveBeenNthCalledWith(1, session, {
       conversationId: 'group', messageId: 'message-group', targetId: 'message-group', nativeSequence: '571',
-    })
+    }, { reactionKey: undefined, offset: undefined, limit: 1 })
+    expect(getMessageReactionActors).toHaveBeenNthCalledWith(2, session, {
+      conversationId: 'group', messageId: 'message-group', targetId: 'message-group', nativeSequence: '571',
+    }, { reactionKey: undefined, offset: 'qq-next', limit: 100 })
   })
 
   it('materializes direct, group, and hierarchical channel dialogs with the correct peer types', async () => {
