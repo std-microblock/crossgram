@@ -37,6 +37,17 @@ export class ServerConnection {
   private _recvBuffer = Bytes.alloc(65536)
   /** Codec is `null` until the transport is detected from the first bytes. */
   private _codec: IPacketCodec | null = null
+  /**
+   * Monotonic timestamp (ms) when the socket last reported write
+   * backpressure (`socket.write()` returned false). Reset on `drain`.
+   * A connection that stays backpressured for a long time is stalled —
+   * the peer is not consuming bytes (dead app, black-holed path), while TCP
+   * still reports ESTABLISHED. Without this signal updates pile up forever.
+   */
+  private _backpressuredSince: number | null = null
+  private readonly _onDrain = (): void => {
+    this._backpressuredSince = null
+  }
 
   constructor(
     private readonly _socket: Socket,
@@ -44,11 +55,13 @@ export class ServerConnection {
     private readonly _log: Logger,
   ) {
     _socket.on('data', (data: Buffer) => this._handleData(data))
+    _socket.on('drain', this._onDrain)
     _socket.on('error', (err: Error) => {
       this._log.warn('socket error: %s', err.message)
     })
     _socket.on('close', () => {
       this._closed = true
+      _socket.off('drain', this._onDrain)
       if (!this._closeEmitted) {
         this._closeEmitted = true
         this.onClose.emit()
@@ -96,7 +109,10 @@ export class ServerConnection {
         this._closed = true
         this._socket.end(encoded)
       } else {
-        this._socket.write(encoded)
+        const flushed = this._socket.write(encoded)
+        if (!flushed && this._backpressuredSince === null) {
+          this._backpressuredSince = Date.now()
+        }
       }
     }
     if (result instanceof Promise) {
@@ -106,10 +122,31 @@ export class ServerConnection {
     }
   }
 
+  /**
+   * Milliseconds this connection has been write-backpressured without the
+   * peer draining it. `0` means the peer is consuming bytes normally.
+   */
+  get stalledForMs(): number {
+    if (this._backpressuredSince === null) return 0
+    return Date.now() - this._backpressuredSince
+  }
+
+  /** Bytes currently queued in the Node writable buffer. */
+  get bufferedBytes(): number {
+    return this._socket.writableLength
+  }
+
+  /** Human-readable peer identity for logs. */
+  get label(): string {
+    return `${this._socket.remoteAddress ?? '?'}:${this._socket.remotePort ?? '?'}`
+  }
+
   /** Close the connection */
   close(): void {
     if (this._closed) return
     this._closed = true
+    this._backpressuredSince = null
+    this._socket.off('drain', this._onDrain)
     this._socket.destroy()
   }
 

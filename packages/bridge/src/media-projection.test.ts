@@ -98,6 +98,45 @@ it('projects platform service actions as Telegram MessageService records', () =>
   })
 })
 
+it('projects phone-call service actions as native Telegram call records', () => {
+  const source: IMMessage = {
+    id: 'call-record', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_002,
+    content: { parts: [], serviceAction: { type: 'phone-call' } },
+  }
+  const projected = projectTlMessage({
+    conversation, source, tlId: 8, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 },
+  })
+  expect(projected).toMatchObject({
+    _: 'messageService', id: 8,
+    action: { _: 'messageActionPhoneCall', callId: Long.fromNumber(stableId('phone-call:call-record')) },
+  })
+  if (projected._ !== 'messageService' || projected.action._ !== 'messageActionPhoneCall') {
+    throw new Error('expected native phone-call action')
+  }
+  expect(projected.action.reason).toBeUndefined()
+  expect(projected.action.duration).toBeUndefined()
+  expect(projected.action.video).toBeUndefined()
+})
+
+it('projects a custom service action with no text as an empty MessageService action', () => {
+  // Some platforms emit a gray tip whose text is empty or absent. The TL action
+  // still requires the `message` field, so it must not be projected as
+  // `undefined` (which makes messages.getHistory serialization fail with
+  // "missing required property message").
+  const source: IMMessage = {
+    id: 'empty-gray-tip', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_003,
+    content: { parts: [], serviceAction: { type: 'custom', text: '' } },
+  }
+  expect(projectTlMessage({
+    conversation, source, tlId: 9, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 },
+  })).toMatchObject({
+    _: 'messageService', id: 9,
+    action: { _: 'messageActionCustomAction', message: '' },
+  })
+})
+
 it('keeps forum topic metadata when a topic message also replies to another message', () => {
   const topicConversation: IMConversation = {
     id: 'support-thread', kind: 'channel', title: 'Support', parentId: 'general',

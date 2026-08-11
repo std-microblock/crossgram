@@ -56,6 +56,14 @@ export const Config = z.object({
 })
 
 /**
+ * A connection that has been write-backpressured for this long (the peer is
+ * not consuming bytes) is presumed stalled and is closed so the client
+ * reconnects and re-syncs via updates.getDifference.
+ */
+const STALL_TIMEOUT_MS = 30_000
+const STALL_WATCH_INTERVAL_MS = 5_000
+
+/**
  * The MTProto server, as a native cordis service (`ctx.mtproto`).
  *
  * Owns the TCP listener and per-connection MTProto sessions directly (the
@@ -121,9 +129,10 @@ export class Mtproto extends Service {
     }, `mtproto.register(${method})`)
   }
 
-  /** Broadcast a server-initiated update to all authorized sessions. */
+  /** Broadcast a server-initiated update to all authorized, non-stalled sessions. */
   broadcastUpdate(update: tl.TypeUpdates): void {
     for (const session of this._sessions) {
+      if (session.connection.stalledForMs >= STALL_TIMEOUT_MS) continue
       this._applyKnownApiLayer(session)
       session.sendUpdate(update)
     }
@@ -137,8 +146,13 @@ export class Mtproto extends Service {
   ): number {
     const candidates = [...this._sessions].filter((session) =>
       equalBytes(session.authKeyId, authKeyId) && session.connection !== excludeConnection)
-    const updateSessions = candidates.filter((session) => session.acceptsUpdates)
-    const targets = updateSessions.length ? updateSessions : candidates.slice(0, 1)
+    // A stalled connection accepts bytes into its kernel/Node buffers forever
+    // without the peer ever reading them. Skip it so the update is delivered
+    // on a live connection (or left pending for updates.getDifference).
+    const healthy = candidates.filter((session) =>
+      session.connection.stalledForMs < STALL_TIMEOUT_MS)
+    const updateSessions = healthy.filter((session) => session.acceptsUpdates)
+    const targets = updateSessions.length ? updateSessions : healthy.slice(0, 1)
     for (const session of targets) {
       this._applyKnownApiLayer(session)
       session.sendUpdate(update)
@@ -161,7 +175,23 @@ export class Mtproto extends Service {
       })
     })
 
+    // Reap stalled connections so a client whose TCP path went black (but the
+    // socket still reports ESTABLISHED) reconnects and re-syncs updates.
+    const stallWatcher = setInterval(() => {
+      for (const session of this._sessions) {
+        const stalled = session.connection.stalledForMs
+        if (stalled < STALL_TIMEOUT_MS) continue
+        this._log.warn(
+          'connection %s stalled for %d ms with %d bytes buffered; closing to force a client reconnect',
+          session.connection.label, stalled, session.connection.bufferedBytes,
+        )
+        session.connection.close()
+      }
+    }, STALL_WATCH_INTERVAL_MS)
+    stallWatcher.unref?.()
+
     yield () => new Promise<void>((res) => {
+      clearInterval(stallWatcher)
       for (const socket of this._sockets) socket.destroy()
       this._sockets.clear()
       server.close(() => { this._server = null; res() })

@@ -4572,7 +4572,9 @@ export function projectTlMessage(options: {
         : { _: 'peerChannel', channelId: conversationId }),
       replyTo,
       date: source.timestamp,
-      action: { _: 'messageActionCustomAction', message: source.content.serviceAction.text },
+      action: source.content.serviceAction.type === 'phone-call'
+        ? { _: 'messageActionPhoneCall', callId: Long.fromNumber(stableId('phone-call:' + source.id)) }
+        : { _: 'messageActionCustomAction', message: source.content.serviceAction.text ?? '' },
     } as tl.RawMessageService
   }
   const text = ordinal === 0 ? messageText(source) : ''
