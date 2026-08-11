@@ -91,6 +91,8 @@ only for older manifests without hashes during rolling upgrades.
 The member API keeps the QQ profile nickname and conversation-scoped group
 alias as separate fields. The adapter always exposes the stable profile nickname
 as the Telegram user name and maps the group alias to Telegram's member tag.
+On startup, legacy rows that stored group aliases as global names are restored
+from their retained QQ profile metadata.
 User avatars use QQ's fixed qlogo endpoint and group avatars continue to use QQNT's avatar service; both are
 exposed through the same ranged media stream.
 
