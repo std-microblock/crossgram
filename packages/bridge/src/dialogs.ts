@@ -6,8 +6,8 @@ import {
   messageMentionsUser, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
-  type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMTextEntity, type IMTransferProgress,
-  type IMUser,
+  type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
+  type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
@@ -2064,39 +2064,84 @@ export class DialogRpc {
         ? undefined
         : String(projected.parts[0].nativeSequence),
     }
-    const refreshed = await this._platform.getMessageReactions?.(this._session, target)
-    const unfilteredContext = refreshed
-      ? (await this._store!.setReactions(
-          this._session, this._conversation(peerId), target, refreshed,
-        )).message.reactionContext
-      : projected.source.reactionContext
-    const context = this._blockedPeers?.filterReactionContext(
-      this._session.platformSessionId, unfilteredContext,
-    ) ?? unfilteredContext
-    const filter = req.reaction && context
-      ? this._reactions!.resolveInput(peerId, req.reaction, context).key
+    const baseContext = projected.source.reactionContext
+      ?? await this._platform.getAvailableReactions?.(this._session, target)
+    const filter = req.reaction && baseContext
+      ? this._reactions!.resolveInput(peerId, req.reaction, baseContext).key
       : undefined
+    const blocked = await this._blockedPeers?.ensureLoaded(this._session.platformSessionId)
+    const canPageUpstream = Boolean(this._platform.getMessageReactionActors
+      && (this._blockedPeers?.mode === 'show' || !blocked?.size))
+
+    let context: IMReactionContext | undefined
+    let actors: Array<{ summary: IMReactionSummary, actor: IMReactionActor }>
+    let nextOffset: string | undefined
+    if (canPageUpstream) {
+      const page = await this._platform.getMessageReactionActors!(this._session, target, {
+        reactionKey: filter,
+        offset: req.offset || undefined,
+        limit: Math.max(0, req.limit),
+      })
+      const preservedActors = new Map((projected.source.reactionContext?.reactions ?? [])
+        .map((summary) => [summary.key, summary.recentActors]))
+      const persistedContext = {
+        ...page.context,
+        reactions: page.context.reactions.map((summary) => ({
+          ...summary,
+          recentActors: preservedActors.get(summary.key),
+        })),
+      }
+      await this._store!.setReactions(
+        this._session, this._conversation(peerId), target, persistedContext,
+      )
+      context = page.context
+      const summaries = new Map(context.reactions.map((summary) => [summary.key, summary]))
+      actors = page.actors.flatMap(({ reactionKey, actor }) => {
+        const summary = summaries.get(reactionKey)
+        return summary ? [{ summary, actor }] : []
+      })
+      nextOffset = page.nextOffset
+    } else {
+      const refreshed = await this._platform.getMessageReactions?.(this._session, target)
+      const unfilteredContext = refreshed
+        ? (await this._store!.setReactions(
+            this._session, this._conversation(peerId), target, refreshed,
+          )).message.reactionContext
+        : projected.source.reactionContext
+      context = this._blockedPeers?.filterReactionContext(
+        this._session.platformSessionId, unfilteredContext,
+      ) ?? unfilteredContext
+      const allActors = (context?.reactions ?? []).flatMap((summary) =>
+        summary.key === filter || filter === undefined
+          ? (summary.recentActors ?? []).map((actor) => ({ summary, actor }))
+          : [])
+      const offset = !req.offset ? 0 : /^\d+$/.test(req.offset) ? Number(req.offset) : -1
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new RpcError(400, 'OFFSET_INVALID')
+      actors = allActors.slice(offset, offset + Math.max(0, req.limit))
+      const next = offset + actors.length
+      nextOffset = next < allActors.length ? String(next) : undefined
+    }
+
     const definitions = new Map((context?.available ?? []).map((item) => [item.key, item]))
-    const actors = (context?.reactions ?? []).flatMap((summary) =>
-      summary.key === filter || filter === undefined
-        ? (summary.recentActors ?? []).map((actor) => ({ summary, actor }))
-        : [])
-      .slice(0, Math.max(0, req.limit))
     const users = await Promise.all([...new Set(actors.map(({ actor }) => actor.userId))]
       .map((id) => this._getPeerUser(id)))
     return {
       _: 'messages.messageReactionsList',
       count: (context?.reactions ?? []).reduce((count, summary) =>
         summary.key === filter || filter === undefined ? count + summary.count : count, 0),
-      reactions: actors.map(({ summary, actor }) => ({
-        _: 'messagePeerReaction',
-        peerId: { _: 'peerUser', userId: this._userId(actor.userId) },
-        date: actor.timestamp ?? projected.source.timestamp,
-        reaction: this._reactions!.toTlReaction(peerId, definitions.get(summary.key)!),
-        my: actor.userId === this._session.userId || undefined,
-      })),
+      reactions: actors.flatMap(({ summary, actor }): tl.RawMessagePeerReaction[] => {
+        const definition = definitions.get(summary.key)
+        return definition ? [{
+          _: 'messagePeerReaction',
+          peerId: { _: 'peerUser', userId: this._userId(actor.userId) },
+          date: actor.timestamp ?? projected.source.timestamp,
+          reaction: this._reactions!.toTlReaction(peerId, definition),
+          my: actor.userId === this._session.userId || undefined,
+        }] : []
+      }),
       chats: [],
       users: uniqueUsers([...users, this._makeSelfUser()]),
+      nextOffset,
     }
   }
 

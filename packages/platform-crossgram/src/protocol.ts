@@ -309,6 +309,12 @@ export interface WireReactionState {
   maxSelected: number
 }
 
+export interface WireReactionActorPage {
+  state: WireReactionState
+  actors: Array<{ reactionKey: string, actor: { userId: string, timestamp?: number } }>
+  nextOffset?: string
+}
+
 export interface WireMemberPage {
   members: Array<{
     user: {
