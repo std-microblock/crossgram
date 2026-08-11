@@ -1,7 +1,6 @@
 endpoint: QQNT 网桥 HTTP API 的基础地址。
 webSocketEndpoint: QQNT 网桥 WebSocket 事件流的完整地址。留空时从 HTTP 地址自动推导。
 token: 用于认证 QQNT 网桥的 Bearer Token。
-memberName: 群成员显示名称的取值方式。
 grayTipFilters: 灰条文本过滤列表；文本包含任一条目时不向 Telegram 展示。默认为过滤“回应了你的消息”通知。
 generatePreviews: 是否后台生成随消息携带的极小 photoStrippedSize 预览。原消息先返回，生成完成后通过消息编辑回填。
 previewConcurrency: 同时运行的内嵌预览生成任务上限。

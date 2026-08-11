@@ -80,8 +80,8 @@ describe('Telegram Android member pagination e2e', () => {
       user: {
         id: `member-${index}`,
         firstName: `Member ${index}`,
-        metadata: index === 112 ? { qqGroupAlias: 'Android Target' } : {},
       },
+      title: index === 112 ? 'Android Target' : undefined,
       role: 'member' as const,
       permissions,
     }))
@@ -156,7 +156,9 @@ describe('Telegram Android member pagination e2e', () => {
     expect(second.users[0]).toMatchObject({ firstName: 'Member 100' })
     expect(second.users[24]).toMatchObject({ firstName: 'Member 124' })
     expect(mention).toMatchObject({
-      _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Member 112' }],
+      _: 'channels.channelParticipants', count: 1,
+      participants: [{ _: 'channelParticipant', rank: 'Android Target' }],
+      users: [{ firstName: 'Member 112' }],
     })
     expect(calls).toEqual([0, 30, 60, 90, 120].map((offset) => ({
       cursor: offset ? `cursor-${offset}` : undefined,
