@@ -1,7 +1,6 @@
 endpoint: Base URL of the QQNT bridge HTTP API.
 webSocketEndpoint: Full URL of the QQNT bridge WebSocket event stream. Derived from the HTTP endpoint when omitted.
 token: Bearer token used to authenticate with the QQNT bridge.
-memberName: Name shown for group members.
 grayTipFilters: Gray-tip text filters. A service message is hidden when its text contains any entry. Reaction notices are filtered by default.
 generatePreviews: Generate tiny photoStrippedSize payloads in the background. The original message is delivered first and later updated with the inline preview.
 previewConcurrency: Maximum number of concurrent inline preview generation jobs.
