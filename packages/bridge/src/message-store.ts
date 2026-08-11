@@ -93,8 +93,6 @@ export class MessageStore {
   private static readonly _writeTails = new WeakMap<Database, Promise<void>>()
   private _revision = 0
   private _peerRevision = 0
-  private readonly _latestMessages = new Map<number, IMMessageRow | undefined>()
-  private _dialogCachePreparation?: Promise<void>
 
   constructor(
     private readonly _database: Database,
@@ -113,31 +111,6 @@ export class MessageStore {
     return this._peerRevision
   }
 
-  async prepareDialogCache(): Promise<void> {
-    if (this._dialogCachePreparation) return this._dialogCachePreparation
-    const pending = (async () => {
-      const conversations = await this._database.get('mtproto_im_conversation', {})
-      const latestRows = await Promise.all(conversations.map(async (conversation) => {
-        const [latest] = await this._database.select('mtproto_im_message', {
-          conversationId: conversation.id, deleted: false,
-        }).orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(1).execute()
-        return latest
-      }))
-      for (const [index, conversation] of conversations.entries()) {
-        this._latestMessages.set(conversation.id, latestRows[index])
-      }
-      this._onTrace?.(
-        'dialog cache prepared conversations=%d messages=%d',
-        conversations.length, latestRows.filter(Boolean).length,
-      )
-    })()
-    this._dialogCachePreparation = pending
-    try {
-      await pending
-    } finally {
-      if (this._dialogCachePreparation === pending) this._dialogCachePreparation = undefined
-    }
-  }
 
   async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
     return this._write(() => this._database.withTransaction(async (database) =>
@@ -241,7 +214,6 @@ export class MessageStore {
       }
       return results
     }), options.allocation === 'history' ? 'history-ingest' : 'ingest', true)
-    this._rememberLatestMessages(results.map((result) => result.message))
     return results
   }
 
@@ -306,7 +278,6 @@ export class MessageStore {
       }
       return messages
     }), 'dialog-ingest', true)
-    this._rememberLatestMessages(messages)
   }
 
   private async _ingestMessage(
@@ -502,7 +473,6 @@ export class MessageStore {
         tlMessageIds,
       }
     }), 'message-delete', true)
-    if (deleted.changed) this._latestMessages.delete(deleted.conversationRowId)
     return {
       changed: deleted.changed,
       messageIds: deleted.messageIds,
@@ -1698,34 +1668,12 @@ export class MessageStore {
   private async _latestMessagesForConversations(
     conversationIds: readonly number[],
   ): Promise<Array<IMMessageRow | undefined>> {
-    if (!conversationIds.length) return []
-    const missing = [...new Set(conversationIds.filter((conversationId) =>
-      !this._latestMessages.has(conversationId)))]
-    const loaded = await Promise.all(missing.map(async (conversationId) => {
+    return Promise.all(conversationIds.map(async (conversationId) => {
       const [latest] = await this._database.select('mtproto_im_message', {
         conversationId, deleted: false,
       }).orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(1).execute()
       return latest
     }))
-    for (const [index, conversationId] of missing.entries()) {
-      this._latestMessages.set(conversationId, loaded[index])
-    }
-    return conversationIds.map((conversationId) => this._latestMessages.get(conversationId))
-  }
-
-  private _rememberLatestMessages(rows: readonly IMMessageRow[]): void {
-    for (const row of rows) {
-      const current = this._latestMessages.get(row.conversationId)
-      if (
-        !this._latestMessages.has(row.conversationId)
-        || !current
-        || current.id === row.id
-        || row.timestamp > current.timestamp
-        || (row.timestamp === current.timestamp && row.id > current.id)
-      ) {
-        this._latestMessages.set(row.conversationId, row)
-      }
-    }
   }
 
   private async _hydrateMessages(

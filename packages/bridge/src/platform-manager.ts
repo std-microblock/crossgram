@@ -219,11 +219,39 @@ export class PlatformSubscriptionManager {
       this._onTrace?.(
         'platform subscription ready platform=%s session=%s', session.platformId, session.platformSessionId,
       )
+      void this._reconcileSession(platform, session).catch((error) => {
+        this._onTrace?.(
+          'platform startup reconciliation failed platform=%s session=%s error=%s',
+          session.platformId, session.platformSessionId, formatError(error),
+        )
+        this._onError(error, session)
+      })
     } catch (error) {
       if (this._subscriptions.get(session.platformSessionId)?.pending === pending) {
         this._subscriptions.delete(session.platformSessionId)
       }
       throw error
+    }
+  }
+
+  private async _reconcileSession(platform: IMPlatform, session: PlatformSession): Promise<void> {
+    if (!platform.capabilities.history || !platform.getDialogs) return
+    const data = new PlatformDataService(
+      platform, session, this._store, this._onTrace, undefined,
+      (event) => this._enqueue(session, event),
+    )
+    let afterId: string | undefined
+    const visited = new Set<string | undefined>()
+    while (!visited.has(afterId)) {
+      visited.add(afterId)
+      const page = await data.getDialogsPage({ limit: 500, afterId })
+      if (!page.dialogs.length) return
+      const lastId = page.dialogs.at(-1)!.conversation.id
+      const hasMore = Boolean(page.nextCursor)
+        || (page.total !== undefined && visited.size * 500 < page.total)
+        || page.dialogs.length >= 500
+      if (!hasMore || lastId === afterId) return
+      afterId = lastId
     }
   }
 
@@ -373,39 +401,26 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
-  static readonly HISTORY_SYNC_FRESH_MS = 1_000
-  private static readonly _dialogLoads = new WeakMap<IMPlatform, Map<string, Promise<IMDialogPage>>>()
-  private static readonly _historySyncs = new WeakMap<IMPlatform, Map<string, Promise<void>>>()
-  private readonly _freshHistorySyncs = new Map<string, number>()
 
   constructor(
     private readonly _platform: IMPlatform,
     private readonly _session: PlatformSession,
     private readonly _store: MessageStore,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
-    private readonly _now: () => number = () => performance.now(),
-  ) {}
+    now: () => number = () => performance.now(),
+    private readonly _publishRecovered?: (
+      event: Extract<IMEvent, { type: 'message' }>,
+    ) => Promise<unknown>,
+  ) {
+    void now
+  }
 
   async getDialogs(query: { limit?: number, afterId?: string } = {}): Promise<IMDialog[]> {
     return (await this.getDialogsPage(query)).dialogs
   }
 
-  async getDialogsPage(query: { limit?: number, afterId?: string } = {}): Promise<IMDialogPage> {
-    const key = dialogLoadKey(this._session, query)
-    let loads = PlatformDataService._dialogLoads.get(this._platform)
-    if (!loads) {
-      loads = new Map()
-      PlatformDataService._dialogLoads.set(this._platform, loads)
-    }
-    const existing = loads.get(key)
-    if (existing) return existing
-    const pending = this._loadDialogsPage(query)
-    loads.set(key, pending)
-    try {
-      return await pending
-    } finally {
-      if (loads.get(key) === pending) loads.delete(key)
-    }
+  getDialogsPage(query: { limit?: number, afterId?: string } = {}): Promise<IMDialogPage> {
+    return this._loadDialogsPage(query)
   }
 
   async getSubdialogsPage(
@@ -413,133 +428,104 @@ export class PlatformDataService {
     query: { limit?: number, afterId?: string } = {},
   ): Promise<IMDialogPage> {
     if (!this._platform.getSubdialogs) return { dialogs: [], total: 0 }
-    const key = `subdialogs:${parentId}:${dialogLoadKey(this._session, query)}`
-    let loads = PlatformDataService._dialogLoads.get(this._platform)
-    if (!loads) {
-      loads = new Map()
-      PlatformDataService._dialogLoads.set(this._platform, loads)
-    }
-    const existing = loads.get(key)
-    if (existing) return existing
-    const pending = this._platform.getSubdialogs(
-      this._session,
-      { id: parentId },
-      query,
-    ).then(async (page) => {
-      await this._ingestDialogs(page.dialogs)
-      return page
-    })
-    loads.set(key, pending)
-    try {
-      return await pending
-    } finally {
-      if (loads.get(key) === pending) loads.delete(key)
-    }
+    const page = await this._platform.getSubdialogs(this._session, { id: parentId }, query)
+    const stored = await this._store.readDialogs(
+      this._session.platformSessionId,
+      page.dialogs.map((dialog) => dialog.conversation.id),
+    )
+    await this._reconcileDialogs(page.dialogs, stored)
+    return page
   }
 
   private async _loadDialogsPage(query: { limit?: number, afterId?: string }): Promise<IMDialogPage> {
-    const storedPromise = this._store.listDialogs(this._session.platformSessionId, {
+    const stored = await this._store.listDialogs(this._session.platformSessionId, {
       limit: query.limit,
       afterConversationId: query.afterId,
     })
-    const hasUpstream = Boolean(this._platform.capabilities.history && this._platform.getDialogs)
-    if (!hasUpstream) {
-      const stored = await storedPromise
+    if (!this._platform.capabilities.history || !this._platform.getDialogs) {
       return { dialogs: stored, total: stored.length }
     }
-    const upstreamPromise = this._platform.getDialogs(this._session, query)
-    const first = await Promise.race([
-      upstreamPromise.then((page) => ({ kind: 'upstream' as const, page }))
-        .catch((error: unknown) => ({ kind: 'error' as const, error })),
-      storedPromise.then((stored) => stored.length
-        ? { kind: 'stored' as const, stored }
-        : new Promise<never>(() => {})),
-    ])
-    if (first.kind === 'stored') {
-      void upstreamPromise.then((page) => this._ingestChangedDialogs(page.dialogs, first.stored))
-        .catch((error) => this._onTrace?.(
-          'dialog background refresh failed session=%s error=%s',
-          this._session.platformSessionId, String(error),
-        ))
-      return { dialogs: first.stored, total: first.stored.length }
-    }
-    const stored = await storedPromise
-    if (first.kind === 'error') {
-      if (!stored.length) throw first.error
+    let upstreamPage: IMDialogPage
+    try {
+      upstreamPage = await this._platform.getDialogs(this._session, query)
+    } catch (error) {
+      if (!stored.length) throw error
       this._onTrace?.(
         'dialog upstream refresh failed; serving stored page session=%s dialogs=%d error=%s',
-        this._session.platformSessionId, stored.length, String(first.error),
+        this._session.platformSessionId, stored.length, String(error),
       )
       return { dialogs: stored, total: stored.length }
     }
-    const upstreamPage = first.page
-    const upstream = upstreamPage.dialogs
-    // A history-capable adapter's current page is authoritative. Returning all
-    // previously stored rows leaks removed dialogs and legacy conversation IDs
-    // forever (for example after an adapter fixes its opaque-ID mapping).
-    const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
-    if (stored.length) {
-      void this._ingestChangedDialogs(upstream, stored).catch((error) => this._onTrace?.(
-          'dialog background persistence failed session=%s error=%s',
-          this._session.platformSessionId, String(error),
-      ))
-    } else {
-      await this._ingestChangedDialogs(upstream, stored)
+    const persistedDialogs = await this._store.readDialogs(
+      this._session.platformSessionId,
+      upstreamPage.dialogs.map((dialog) => dialog.conversation.id),
+    )
+    await this._reconcileDialogs(upstreamPage.dialogs, persistedDialogs)
+    const persisted = new Map(persistedDialogs.map((dialog) => [dialog.conversation.id, dialog]))
+    return {
+      ...upstreamPage,
+      dialogs: upstreamPage.dialogs.map((dialog) => {
+        const previous = persisted.get(dialog.conversation.id)
+        return {
+          ...previous,
+          ...dialog,
+          conversation: { ...previous?.conversation, ...dialog.conversation },
+          lastMessage: dialog.lastMessage ?? previous?.lastMessage,
+        }
+      }),
     }
-    const dialogs = upstream.map((dialog) => {
-      const cached = persisted.get(dialog.conversation.id)
-      return {
-        ...cached,
-        ...dialog,
-        conversation: { ...cached?.conversation, ...dialog.conversation },
-        lastMessage: dialog.lastMessage ?? cached?.lastMessage,
-      }
-    })
-    return { dialogs, nextCursor: upstreamPage?.nextCursor, total: upstreamPage?.total }
   }
 
-  private async _ingestChangedDialogs(upstream: readonly IMDialog[], stored: readonly IMDialog[]): Promise<void> {
+  private async _reconcileDialogs(upstream: readonly IMDialog[], stored: readonly IMDialog[]): Promise<void> {
     const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
+    for (const dialog of upstream) {
+      const previous = persisted.get(dialog.conversation.id)
+      if (previous) await this._recoverDialogMessages(dialog, previous)
+    }
     const changed = upstream.filter((dialog) => dialogNeedsPersistence(
       dialog, persisted.get(dialog.conversation.id),
     ))
-    if (changed.length) await this._ingestDialogs(changed)
+    if (changed.length) await this._store.ingestDialogs(this._session, changed)
+  }
+
+  private async _recoverDialogMessages(dialog: IMDialog, stored: IMDialog): Promise<void> {
+    const latest = dialog.lastMessage
+    if (!this._publishRecovered || !latest || latest.id === stored.lastMessage?.id) return
+    let recovered = [latest]
+    if (stored.lastMessage && this._platform.getHistory) {
+      try {
+        const page = await this._platform.getHistory(this._session, dialog.conversation, {
+          after: { id: stored.lastMessage.id, timestamp: stored.lastMessage.timestamp },
+          limit: 100,
+        })
+        recovered = [...page.messages, latest]
+      } catch (error) {
+        this._onTrace?.(
+          'dialog recovery history failed conversation=%s previous=%s latest=%s error=%s',
+          dialog.conversation.id, stored.lastMessage.id, latest.id, String(error),
+        )
+      }
+    }
+    const unique = [...new Map(recovered.map((message) => [message.id, message])).values()]
+      .sort((left, right) => left.timestamp - right.timestamp || left.id.localeCompare(right.id))
+    for (const message of unique) {
+      const existing = await this._store.findProjectedByPlatformId(
+        this._session.platformSessionId, dialog.conversation.id, message.id,
+      )
+      if (existing) continue
+      await this._publishRecovered({
+        type: 'message', delivery: 'recovery', conversation: dialog.conversation, message,
+      })
+    }
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {
     return { messages: await this._loadHistory(conversationId, query, true) }
   }
 
-  /** Fetch and persist one upstream page without hydrating rows the caller will not consume. */
+  /** Fetch and persist one upstream page before every read; HTTP ETag handles unchanged QQNT responses. */
   async syncHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<void> {
-    const key = historySyncKey(this._session, conversationId, query)
-    const now = this._now()
-    const freshUntil = this._freshHistorySyncs.get(key)
-    if (freshUntil !== undefined) {
-      if (freshUntil > now) return
-      this._freshHistorySyncs.delete(key)
-    }
-    let syncs = PlatformDataService._historySyncs.get(this._platform)
-    if (!syncs) {
-      syncs = new Map()
-      PlatformDataService._historySyncs.set(this._platform, syncs)
-    }
-    const existing = syncs.get(key)
-    if (existing) return existing
-    const pending = this._loadHistory(conversationId, query, false).then(() => {})
-    syncs.set(key, pending)
-    try {
-      await pending
-      this._freshHistorySyncs.delete(key)
-      this._freshHistorySyncs.set(key, this._now() + PlatformDataService.HISTORY_SYNC_FRESH_MS)
-      if (this._freshHistorySyncs.size > 256) {
-        this._freshHistorySyncs.delete(this._freshHistorySyncs.keys().next().value!)
-      }
-    } finally {
-      if (syncs.get(key) === pending) {
-        syncs.delete(key)
-      }
-    }
+    await this._loadHistory(conversationId, query, false)
   }
 
   private async _loadHistory(
@@ -549,8 +535,7 @@ export class PlatformDataService {
   ): Promise<IMMessage[]> {
     const startedAt = performance.now()
     this._onTrace?.(
-      'history data profile stage=start conversation=%s limit=%d',
-      conversationId, query.limit ?? 100,
+      'history data profile stage=start conversation=%s limit=%d', conversationId, query.limit ?? 100,
     )
     let conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
     if (!conversation) {
@@ -558,6 +543,7 @@ export class PlatformDataService {
       conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
     }
     conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
+    const [storedDialog] = await this._store.readDialogs(this._session.platformSessionId, [conversationId])
     const conversationMs = performance.now() - startedAt
 
     let upstreamMs = 0
@@ -570,16 +556,31 @@ export class PlatformDataService {
       upstreamMs = performance.now() - upstreamAt
       upstreamMessages = page.messages.length
       const ingestAt = performance.now()
-      this._onTrace?.(
-        'history data profile stage=ingest-start conversation=%s upstreamMs=%d messages=%d',
-        conversationId, profileMilliseconds(upstreamMs), upstreamMessages,
+      const remaining: IMMessage[] = []
+      const baseline = storedDialog?.lastMessage
+      const canPublish = Boolean(
+        this._publishRecovered && baseline && !query.cursor && !query.before && !query.after,
       )
-      await this._store.ingestMany(
-        this._session,
-        conversation,
-        page.messages.slice().sort((left, right) => right.timestamp - left.timestamp),
-        { allocation: 'history' },
-      )
+      for (const message of page.messages.slice().sort((left, right) =>
+        left.timestamp - right.timestamp || left.id.localeCompare(right.id))) {
+        const existing = await this._store.findProjectedByPlatformId(
+          this._session.platformSessionId, conversationId, message.id,
+        )
+        const isNewer = baseline && (
+          message.timestamp > baseline.timestamp
+          || (message.timestamp === baseline.timestamp && message.id.localeCompare(baseline.id) > 0)
+        )
+        if (!existing && canPublish && isNewer) {
+          await this._publishRecovered!({
+            type: 'message', delivery: 'recovery', conversation, message,
+          })
+        } else {
+          remaining.push(message)
+        }
+      }
+      if (remaining.length) {
+        await this._store.ingestMany(this._session, conversation, remaining, { allocation: 'history' })
+      }
       ingestMs = performance.now() - ingestAt
     }
     let readMs = 0
@@ -636,42 +637,8 @@ export class PlatformDataService {
     await this._store.ingest(this._session, conversation, message, { allocation: 'history' })
     return message
   }
-
-  private async _ingestDialogs(dialogs: readonly IMDialog[]): Promise<void> {
-    await this._store.ingestDialogs(this._session, dialogs)
-  }
 }
 
-function dialogLoadKey(
-  session: PlatformSession,
-  query: { limit?: number, afterId?: string },
-): string {
-  return JSON.stringify([
-    session.platformId,
-    session.platformSessionId,
-    query.limit ?? null,
-    query.afterId ?? null,
-  ])
-}
-
-function historySyncKey(
-  session: PlatformSession,
-  conversationId: string,
-  query: IMHistoryQuery,
-): string {
-  return JSON.stringify([
-    session.platformId,
-    session.platformSessionId,
-    conversationId,
-    query.limit ?? 100,
-    query.cursor ?? null,
-    query.afterId ?? null,
-    query.before?.id ?? null,
-    query.before?.timestamp ?? null,
-    query.after?.id ?? null,
-    query.after?.timestamp ?? null,
-  ])
-}
 
 function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined): boolean {
   if (!stored) return true

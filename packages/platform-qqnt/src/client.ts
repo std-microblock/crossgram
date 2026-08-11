@@ -44,6 +44,7 @@ const MEDIA_LEASE_ID_HEX_LENGTH = 32
 const MEDIA_LEASE_TOKEN_BYTES = 32
 const MAX_UNRANGED_CACHE_BYTES = 4 * 1024 * 1024 * 1024
 const MAX_UNRANGED_CACHE_ENTRIES = 8
+const MAX_REVALIDATED_JSON_RESPONSES = 256
 let unrangedCacheSequence = 0
 
 interface CachedUnrangedFile {
@@ -78,6 +79,7 @@ export class QQNTClient {
   private readonly unrangedCachePath: string
   private unrangedFileBytes = 0
   private bridgeProtocol?: number
+  private readonly revalidatedJsonResponses = new Map<string, { etag: string, value: unknown }>()
 
   constructor(options: QQNTClientOptions = {}) {
     this.endpoint = (options.endpoint ?? 'http://127.0.0.1:18767/v1').replace(/\/+$/, '')
@@ -136,7 +138,7 @@ export class QQNTClient {
     nextCursor?: string
     total?: number
   }> {
-    return this.json(`/dialogs${queryString(query)}`, false, { signal })
+    return this.revalidatedJson(`/dialogs${queryString(query)}`, { signal })
   }
 
   getContacts(query: { cursor?: string, limit?: number } = {}): Promise<{
@@ -163,7 +165,7 @@ export class QQNTClient {
     afterId?: string
     aroundUnreadSeq?: string
   } = {}): Promise<{ messages: WireMessage[], nextCursor?: string }> {
-    return this.json(`/conversations/${encodeURIComponent(id)}/history${queryString(query)}`)
+    return this.revalidatedJson(`/conversations/${encodeURIComponent(id)}/history${queryString(query)}`)
   }
 
   searchMessages(id: string, query: {
@@ -928,6 +930,33 @@ export class QQNTClient {
       else if (webSocket.readyState === WebSocket.CONNECTING) webSocket.terminate()
       messages.dispose()
     }
+  }
+
+  private async revalidatedJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const cached = this.revalidatedJsonResponses.get(path)
+    const response = await this.fetchImpl(`${this.endpoint}${path}`, {
+      ...init,
+      headers: this.headers(cached ? { 'if-none-match': cached.etag } : {}),
+    })
+    if (response.status === 304) {
+      await discardResponseBody(response)
+      if (!cached) throw new Error('QQNT bridge returned 304 without a cached response')
+      this.revalidatedJsonResponses.delete(path)
+      this.revalidatedJsonResponses.set(path, cached)
+      return cached.value as T
+    }
+    const value = await responseJson<T>(response)
+    const etag = response.headers.get('etag')
+    if (etag) {
+      this.revalidatedJsonResponses.delete(path)
+      this.revalidatedJsonResponses.set(path, { etag, value })
+      if (this.revalidatedJsonResponses.size > MAX_REVALIDATED_JSON_RESPONSES) {
+        this.revalidatedJsonResponses.delete(this.revalidatedJsonResponses.keys().next().value!)
+      }
+    } else {
+      this.revalidatedJsonResponses.delete(path)
+    }
+    return value
   }
 
   private async json<T>(

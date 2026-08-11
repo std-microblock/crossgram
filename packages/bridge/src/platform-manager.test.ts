@@ -268,6 +268,37 @@ describe('PlatformSubscriptionManager', () => {
     expect(platform.subscribeCalls).toBe(1)
     await manager.stop()
   })
+  it('recovers messages missed before subscription startup through the committed update pipeline', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'restart-room', kind: 'group', title: 'Restart room' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('1', conversation.id))
+    platform.getDialogs = vi.fn(async () => ({
+      dialogs: [{ conversation, unreadCount: 2, lastMessage: incoming('3', conversation.id) }],
+    }))
+    platform.getHistory = vi.fn(async () => ({
+      messages: [incoming('3', conversation.id), incoming('2', conversation.id)],
+    }))
+    const committed: Array<{ event: IMEvent }> = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, event) => { committed.push(event) },
+    )
+
+    await manager.ensure(session)
+    await vi.waitFor(() => expect(committed).toHaveLength(2))
+
+    expect(committed.map(({ event }) => event.type === 'message' ? event.message.id : event.type))
+      .toEqual(['2', '3'])
+    expect(committed.map(({ event }) => event.type === 'message' ? event.delivery : undefined))
+      .toEqual(['recovery', 'recovery'])
+    await expect(store.readHistory(session.platformSessionId, conversation.id, { limit: 10 }))
+      .resolves.toMatchObject([{ id: '3' }, { id: '2' }, { id: '1' }])
+    await manager.stop()
+  })
+
 })
 
 describe('PlatformDataService', () => {
@@ -290,7 +321,7 @@ describe('PlatformDataService', () => {
     })
   })
 
-  it('returns a persisted first page before a slow upstream refresh finishes', async () => {
+  it('waits for the authoritative upstream page instead of returning stale persisted dialogs', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
@@ -304,16 +335,46 @@ describe('PlatformDataService', () => {
     })
     const data = new PlatformDataService(platform, session, store)
 
-    const page = await Promise.race([
-      data.getDialogsPage({ limit: 100 }),
-      new Promise<never>((_, reject) => setTimeout(
-        () => reject(new Error('persisted dialog page exceeded 100ms')),
-        100,
-      )),
-    ])
-    expect(page.dialogs).toMatchObject([{ lastMessage: { id: 'stored-latest' } }])
-    release.resolve()
+    let settled = false
+    const pending = data.getDialogsPage({ limit: 100 }).finally(() => { settled = true })
     await vi.waitFor(() => expect(platform.getDialogs).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    release.resolve()
+
+    await expect(pending).resolves.toMatchObject({
+      dialogs: [{ lastMessage: { id: 'fresh-latest' } }],
+    })
+  })
+
+  it('keeps dialog preview and opened history on the same recovered latest message', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'consistent-room', kind: 'group', title: 'Consistent room' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('1', conversation.id))
+    platform.getDialogs = vi.fn(async () => ({
+      dialogs: [{ conversation, unreadCount: 2, lastMessage: incoming('3', conversation.id) }],
+    }))
+    platform.getHistory = vi.fn(async () => ({
+      messages: [incoming('3', conversation.id), incoming('2', conversation.id)],
+    }))
+    const recovered: string[] = []
+    const data = new PlatformDataService(
+      platform, session, store, undefined, undefined,
+      async (event) => {
+        recovered.push(event.message.id)
+        await store.ingest(session, event.conversation, event.message)
+      },
+    )
+
+    const dialogs = await data.getDialogsPage({ limit: 100 })
+    const history = await data.getHistory(conversation.id, { limit: 10 })
+
+    expect(recovered).toEqual(['2', '3'])
+    expect(dialogs.dialogs[0]?.lastMessage?.id).toBe('3')
+    expect(history.messages[0]?.id).toBe('3')
+    expect((await store.readDialogs(session.platformSessionId, [conversation.id]))[0]?.lastMessage?.id).toBe('3')
   })
 
   it('opens a persisted peer dialog without waiting for an upstream dialog refresh', async () => {
@@ -477,41 +538,30 @@ describe('PlatformDataService', () => {
     expect(readHistory).toHaveBeenCalledOnce()
   })
 
-  it('coalesces concurrent syncs for the same history window', async () => {
+  it('revalidates every concurrent and sequential history sync', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
-    const conversation: IMConversation = { id: 'coalesced-room', kind: 'group', title: 'Coalesced room' }
+    const conversation: IMConversation = { id: 'revalidated-room', kind: 'group', title: 'Revalidated room' }
     const store = new MessageStore(database)
     await store.upsertConversation(session, conversation)
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const getHistory = vi.fn(async () => {
-      await gate
-      return { messages: [incoming('8', conversation.id)] }
-    })
+    const getHistory = vi.fn(async () => ({ messages: [incoming('8', conversation.id)] }))
     platform.getHistory = getHistory
-    let now = 10_000
-    const data = new PlatformDataService(platform, session, store, undefined, () => now)
+    const data = new PlatformDataService(platform, session, store)
 
-    const syncs = Promise.all([
+    await Promise.all([
       data.syncHistory(conversation.id, { limit: 50 }),
       data.syncHistory(conversation.id, { limit: 50 }),
       data.syncHistory(conversation.id, { limit: 50 }),
     ])
-    await vi.waitFor(() => expect(getHistory).toHaveBeenCalledOnce())
-    release()
-    await syncs
-
+    expect(getHistory).toHaveBeenCalledTimes(3)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
+
     await data.syncHistory(conversation.id, { limit: 50 })
-    expect(getHistory).toHaveBeenCalledOnce()
-    now += PlatformDataService.HISTORY_SYNC_FRESH_MS + 1
-    await data.syncHistory(conversation.id, { limit: 50 })
-    expect(getHistory).toHaveBeenCalledTimes(2)
+    expect(getHistory).toHaveBeenCalledTimes(4)
   })
 
-  it('only reuses a fresh sync for the exact history window', async () => {
+  it('revalidates every exact and anchored history window', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
@@ -522,7 +572,7 @@ describe('PlatformDataService', () => {
       async () => ({ messages: [incoming('8', conversation.id)] }),
     )
     platform.getHistory = getHistory
-    const data = new PlatformDataService(platform, session, store, undefined, () => 10_000)
+    const data = new PlatformDataService(platform, session, store)
 
     await data.syncHistory(conversation.id, { limit: 50 })
     await data.syncHistory(conversation.id, { limit: 50 })
@@ -531,8 +581,8 @@ describe('PlatformDataService', () => {
       before: { id: '8', timestamp: 8 },
     })
 
-    expect(getHistory).toHaveBeenCalledTimes(2)
-    expect(getHistory.mock.calls[1]?.[2]).toMatchObject({ before: { id: '8', timestamp: 8 } })
+    expect(getHistory).toHaveBeenCalledTimes(3)
+    expect(getHistory.mock.calls[2]?.[2]).toMatchObject({ before: { id: '8', timestamp: 8 } })
   })
 
   it('does not mark a failed history sync as fresh', async () => {
@@ -569,15 +619,14 @@ describe('PlatformDataService', () => {
     expect(calls).toBe(1)
   })
 
-  it('coalesces dialog fetch and persistence across data-service instances', async () => {
+  it('revalidates concurrent dialog reads without an in-memory request cache', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
     const conversation: IMConversation = { id: 'shared-dialog-room', kind: 'group', title: 'Shared' }
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const release = Promise.withResolvers<void>()
     const getDialogs = vi.fn(async () => {
-      await gate
+      await release.promise
       return { dialogs: [{ conversation, unreadCount: 0, lastMessage: incoming('10', conversation.id) }] }
     })
     platform.getDialogs = getDialogs
@@ -591,11 +640,11 @@ describe('PlatformDataService', () => {
       second.getDialogsPage({ limit: 50 }),
       first.getDialogsPage({ limit: 50 }),
     ])
-    await vi.waitFor(() => expect(getDialogs).toHaveBeenCalledOnce())
-    release()
+    await vi.waitFor(() => expect(getDialogs).toHaveBeenCalledTimes(3))
+    release.resolve()
 
     await expect(pages).resolves.toHaveLength(3)
-    expect(ingestDialogs).toHaveBeenCalledOnce()
+    expect(ingestDialogs).toHaveBeenCalledTimes(3)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
   })
 

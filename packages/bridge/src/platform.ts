@@ -499,7 +499,13 @@ export interface IMDownloadOptions extends IMTransferOptions {
 }
 
 export type IMEvent<TMediaLocator = unknown> =
-  | { type: 'message', message: IMMessage<TMediaLocator>, conversation: IMConversation<TMediaLocator> }
+  | {
+      type: 'message'
+      message: IMMessage<TMediaLocator>
+      conversation: IMConversation<TMediaLocator>
+      /** Set when a read reconciles a message missed by the live subscription. */
+      delivery?: 'recovery'
+    }
   | { type: 'message-edit', eventId: string, message: IMMessage<TMediaLocator>, conversation: IMConversation<TMediaLocator> }
   | {
       type: 'message-delete'

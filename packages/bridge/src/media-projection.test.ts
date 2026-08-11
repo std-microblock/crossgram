@@ -902,7 +902,7 @@ describe('rich-media projection', () => {
       .toBeLessThanOrEqual(6)
   })
 
-  it('serves a complete stored first screen before a slow upstream refresh finishes', async () => {
+  it('waits for an authoritative history revalidation before serving a stored first screen', async () => {
     const { store, peerId } = await createStore()
     const messages = Array.from({ length: 60 }, (_, index): IMMessage => ({
       id: `stored-${60 - index}`,
@@ -919,21 +919,17 @@ describe('rich-media projection', () => {
       return { messages: messages.slice(0, 51) }
     })
     const rpc = new DialogRpc({ ...platform, getHistory }, session, store)
-    const revisionBeforeRefresh = store.revision
 
-    const result = await Promise.race([
-      rpc.getHistory({ ...historyRequest(peerId), limit: 50 }),
-      new Promise<never>((_, reject) => setTimeout(
-        () => reject(new Error('stored first screen exceeded 100ms')),
-        100,
-      )),
-    ]) as tl.messages.RawMessages
+    let settled = false
+    const pending = rpc.getHistory({ ...historyRequest(peerId), limit: 50 })
+      .finally(() => { settled = true }) as Promise<tl.messages.RawMessages>
+    await vi.waitFor(() => expect(getHistory).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    releaseUpstream.resolve()
+    const result = await pending
 
     expect(result.messages).toHaveLength(50)
     expect(result.messages[0]).toMatchObject({ _: 'message', message: 'stored 60' })
-    expect(getHistory).toHaveBeenCalledOnce()
-    releaseUpstream.resolve()
-    await vi.waitFor(() => expect(store.revision).toBeGreaterThan(revisionBeforeRefresh))
   })
 
   it('lets an adapter fetch around unread state for a persisted negative-offset window', async () => {
