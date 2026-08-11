@@ -87,6 +87,7 @@ export const UPDATE_DELIVERY_RETENTION = 1_000
 export const ACCOUNT_UPDATE_SCOPE = 'account'
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 const STORED_SENDER_TITLE_KEY = '__mtprotoRelaySenderTitle'
+const REPLY_METADATA_KEYS = ['qqReplyToMsgSeq', 'telegramReplyToMessageId'] as const
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
@@ -334,7 +335,7 @@ export class MessageStore {
     }
 
     const created = !message
-    const storedMetadata = messageMetadata(source)
+    const storedMetadata = messageMetadata(source, message?.metadata)
     const storedContent = persistMessageContent(source.content)
     const changed = !message || (!message.deleted && (
       message.senderUserId !== senderRow.id
@@ -1888,10 +1889,18 @@ function toConversation(row: IMConversationRow): IMConversation {
   }
 }
 
-function messageMetadata(message: IMMessage): JsonObject {
+function messageMetadata(message: IMMessage, previous?: JsonObject): JsonObject {
+  const metadata = { ...message.metadata }
+  for (const key of REPLY_METADATA_KEYS) {
+    if (metadata[key] === undefined && previous?.[key] !== undefined) metadata[key] = previous[key]
+  }
   return {
-    ...message.metadata,
-    ...(message.replyToId !== undefined ? { [STORED_REPLY_TO_KEY]: message.replyToId } : {}),
+    ...metadata,
+    ...(message.replyToId !== undefined
+      ? { [STORED_REPLY_TO_KEY]: message.replyToId }
+      : typeof previous?.[STORED_REPLY_TO_KEY] === 'string'
+        ? { [STORED_REPLY_TO_KEY]: previous[STORED_REPLY_TO_KEY] }
+        : {}),
     ...(message.senderTitle !== undefined ? { [STORED_SENDER_TITLE_KEY]: message.senderTitle } : {}),
   }
 }

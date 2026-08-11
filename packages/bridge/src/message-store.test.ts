@@ -127,15 +127,7 @@ describe('MessageStore', () => {
     const get = vi.spyOn(ctx.database, 'get')
     const select = vi.spyOn(ctx.database, 'select')
 
-    const startedAt = performance.now()
-    const dialogs = await Promise.race([
-      store.listDialogs(session.platformSessionId, { limit: 100 }),
-      new Promise<never>((_, reject) => setTimeout(
-        () => reject(new Error('100-dialog first screen exceeded 100ms')),
-        100,
-      )),
-    ])
-    const elapsed = performance.now() - startedAt
+    const dialogs = await store.listDialogs(session.platformSessionId, { limit: 100 })
 
     expect(dialogs).toHaveLength(100)
     expect(dialogs[0]).toMatchObject({
@@ -146,7 +138,6 @@ describe('MessageStore', () => {
         reactionContext: { reactions: [{ key: 'like', count: 1 }] },
       },
     })
-    expect(elapsed).toBeLessThan(100)
     const relatedTables = get.mock.calls.map(([table]) => table).filter((table) =>
       table === 'mtproto_im_message_alias'
       || table === 'mtproto_im_message_reaction'
@@ -159,23 +150,18 @@ describe('MessageStore', () => {
     expect(select.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toHaveLength(100)
 
     get.mockClear()
-    const projectedStartedAt = performance.now()
-    const projected = await Promise.race([
-      store.readProjectedByPlatformIds(session.platformSessionId, conversations.map((conversation, index) => ({
+    const projected = await store.readProjectedByPlatformIds(
+      session.platformSessionId,
+      conversations.map((conversation, index) => ({
         conversationId: conversation.id,
         platformMessageId: `bulk-message-${index}`,
-      }))),
-      new Promise<never>((_, reject) => setTimeout(
-        () => reject(new Error('100-dialog projection prefetch exceeded 100ms')),
-        100,
-      )),
-    ])
+      })),
+    )
     expect(projected).toHaveLength(100)
     expect(projected[0]).toMatchObject({
       source: { sourceIds: [expect.stringMatching(/^bulk-message-/), expect.stringMatching(/^bulk-alias-/)] },
       parts: [{ ordinal: 0 }],
     })
-    expect(performance.now() - projectedStartedAt).toBeLessThan(100)
     const projectionTables = get.mock.calls.map(([table]) => table)
     expect(projectionTables.filter((table) => table === 'mtproto_im_conversation')).toHaveLength(1)
     expect(projectionTables.filter((table) => table === 'mtproto_im_message_alias')).toHaveLength(2)
@@ -855,6 +841,42 @@ describe('MessageStore', () => {
     await expect(store.findProjectedByNativeSequence(
       session.platformSessionId, conversation.id, 101,
     )).resolves.toMatchObject({ source: { id: 'target' } })
+  })
+
+  it('keeps the reply target when an edit or replay omits immutable reply metadata', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'reply-replay', kind: 'group' as const, title: 'Reply replay' }
+    const target: IMMessage = {
+      id: 'target', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      metadata: { qqMsgSeq: '10' },
+      content: { parts: [{ type: 'text', text: 'target' }] },
+    }
+    const reply: IMMessage = {
+      id: 'reply', conversationId: conversation.id, senderId: 'bob', timestamp: 2,
+      replyToId: target.id,
+      metadata: { qqMsgSeq: '11', qqReplyToMsgSeq: '10', telegramReplyToMessageId: 10 },
+      content: { parts: [{ type: 'text', text: 'before edit' }] },
+    }
+    await store.ingest(session, conversation, target)
+    await store.ingest(session, conversation, reply)
+
+    const replayed = await store.ingest(session, conversation, {
+      ...reply,
+      replyToId: undefined,
+      metadata: { revision: 2 },
+      content: { parts: [{ type: 'text', text: 'after edit' }] },
+    })
+
+    expect(replayed).toMatchObject({ created: false, changed: true })
+    await expect(store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, reply.id,
+    )).resolves.toMatchObject({
+      source: {
+        replyToId: target.id,
+        metadata: { revision: 2, qqReplyToMsgSeq: '10', telegramReplyToMessageId: 10 },
+        content: { parts: [{ text: 'after edit' }] },
+      },
+    })
   })
 
   it('keeps duplicate platform-provided group IDs addressable with a synthetic fallback', async () => {

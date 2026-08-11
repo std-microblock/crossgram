@@ -13,6 +13,7 @@ import {
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
 import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
+  type MessageEditResult,
 } from './message-actions.js'
 import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
@@ -1498,20 +1499,28 @@ export class DialogRpc {
       throw new RpcError(400, 'MESSAGE_EDIT_TIME_EXPIRED')
     }
     const ordinal = projected.parts.find((part) => part.tlMessageId === req.id)?.ordinal ?? 0
-    let edited: Awaited<ReturnType<PlatformMessageActions['edit']>>
+    const replyToNativeSequence = qqReplySequenceFromMetadata(projected.source.metadata)
+    let edited: MessageEditResult
     try {
       edited = await this._actions.edit({
         conversationId, messageId: projected.source.id,
         targetId: projected.source.sourceIds?.[ordinal] ?? projected.source.id,
-      }, { parts: [{ type: 'text', text: req.message }] })
+      }, {
+        parts: [{ type: 'text', text: req.message }],
+        ...(projected.source.replyToId ? { replyToId: projected.source.replyToId } : {}),
+        ...(replyToNativeSequence === undefined
+          ? {}
+          : { replyToNativeSequence: String(replyToNativeSequence) }),
+      })
     } catch (error) {
       this._throwMessageAction(error, 'MESSAGE_EDIT_FORBIDDEN')
     }
     const conversation = this._conversation(conversationId)
+    const editedSource = preserveReplyContext(edited!.message, projected.source)
     const source: IMMessage<any> = edited!.replacedMessageId
-      ? { ...edited!.message, conversationId, outgoing: true }
+      ? { ...editedSource, conversationId, outgoing: true }
       : {
-          ...edited!.message,
+          ...editedSource,
           conversationId,
           senderId: projected.source.senderId,
           outgoing: projected.source.outgoing,
@@ -4872,6 +4881,22 @@ function cappedPhotoDimensions(
   return {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
+  }
+}
+
+const REPLY_METADATA_KEYS = ['qqReplyToMsgSeq', 'telegramReplyToMessageId'] as const
+
+function preserveReplyContext(message: IMMessage<any>, original: IMMessage<any>): IMMessage<any> {
+  const metadata = { ...message.metadata }
+  for (const key of REPLY_METADATA_KEYS) {
+    if (metadata[key] === undefined && original.metadata?.[key] !== undefined) {
+      metadata[key] = original.metadata[key]
+    }
+  }
+  return {
+    ...message,
+    replyToId: message.replyToId ?? original.replyToId,
+    metadata,
   }
 }
 
