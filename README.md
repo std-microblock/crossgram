@@ -20,6 +20,7 @@ CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mt
 | **Satori adaptor** | `@mtproto-relay/platform-satori` | ⚠️ 通用核心能力 |
 | **Matrix** | `@mtproto-relay/platform-matrix` | ✅（未加密房间） |
 | **参考实现（static）** | `@mtproto-relay/platform-static` | ✅ |
+| **Satori exporter** | `@mtproto-relay/satori-exporter` | ✅ 独立插件 |
 | 微信 / 其它 | — | 🚧 |
 
 > [!CAUTION]
@@ -168,6 +169,31 @@ yarn add @satorijs/adapter-discord
 当前通用映射覆盖账号、消息事件、会话与历史、联系人、成员、文字/媒体收发、编辑、删除及媒体下载；
 具体能力仍取决于 adaptor 在 Satori `login.features` 中声明的 API。Satori 4.6 的 npm 包仍携带 Cordis 3
 依赖元数据，本仓库通过 Yarn patch 将它适配到 Cordis 4，并为旧 adaptor 保留 HTTP 兼容 API。
+
+### 导出平台会话到 Satori
+
+Satori exporter 是独立插件 `@mtproto-relay/satori-exporter`，不再由 bridge 配置或管理。
+先加载 bridge 和目标平台，再加载 Satori core、Satori server 与 exporter；`platformId` 使用目标平台配置项的 `id`：
+
+```yaml
+- id: satori-core
+  name: '@satorijs/core'
+
+- id: satori-server
+  name: '@satorijs/plugin-server'
+  config:
+    path: /satori
+    token: ${SATORI_TOKEN}
+
+- id: qq-exporter
+  name: '@mtproto-relay/satori-exporter'
+  config:
+    platformId: qqnt
+    platform: qq
+```
+
+exporter 跟随 bridge 公布的平台会话生命周期注册 Bot，并只转发持久化成功的新入站消息；
+Satori core 或目标平台重载时会清理旧 Bot，再从当前活动会话恢复。
 
 ## 快速开始
 

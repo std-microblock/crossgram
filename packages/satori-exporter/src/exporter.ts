@@ -1,9 +1,11 @@
 import { Bot, h, type Universal } from '@satorijs/core'
 import type { Context } from 'cordis'
-import type { IngestResult } from './message-store.js'
-import { providerBelongsToAccount } from './sticker-dashboard.js'
-import type { IMConversation, IMMediaInput, IMMessage, IMMessageInput, IMMessagePart, IMPlatform, IMTextEntity, JsonValue, PlatformSession } from './platform.js'
-import type { IMSticker, IMStickerProvider, IMStickerSendPlan, StickerProviderContext } from './sticker-provider.js'
+import {
+  providerBelongsToAccount,
+  type IMConversation, type IMMediaInput, type IMMessage, type IMMessageInput, type IMMessagePart,
+  type IMPlatform, type IMSticker, type IMStickerProvider, type IMStickerSendPlan, type IMTextEntity,
+  type IngestResult, type JsonValue, type PlatformSession, type StickerProviderContext,
+} from '@mtproto-relay/bridge'
 
 export interface SatoriExportConfig {
   platformId: string

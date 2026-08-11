@@ -8,7 +8,7 @@ import { DialogRpc } from './dialogs.js'
 import { defineModels } from './models.js'
 import { MessageStore } from './message-store.js'
 import {
-  migrateQualifiedPlatformIds, PlatformDataService, PlatformRegistry, PlatformSubscriptionManager,
+  IMPlatformService, migrateQualifiedPlatformIds, PlatformDataService, PlatformRegistry, PlatformSubscriptionManager,
 } from './platform-manager.js'
 import type {
   IMConversation, IMEvent, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities,
@@ -614,6 +614,66 @@ describe('PlatformDataService', () => {
     const data = new PlatformDataService(platform, session, store)
 
     expect((await data.getDialogs()).map((dialog) => dialog.conversation.id)).toEqual(['raw-user'])
+  })
+})
+
+describe('IMPlatformService', () => {
+  it('publishes active session replacements and committed events to independent plugins', () => {
+    const ctx = new Context()
+    const service = new IMPlatformService(ctx)
+    const first = new PushPlatform()
+    const second = new PushPlatform()
+    const replacement = { ...session, platformSessionId: 'session-two' }
+    const lifecycle: Array<{ event: string, sessionId: string }> = []
+    const committed: string[] = []
+    service.onSessionChange((event, binding) => {
+      lifecycle.push({ event, sessionId: binding.session.platformSessionId })
+    })
+    service.onCommittedEvent((_activeSession, value) => {
+      if (value.event.type === 'message') committed.push(value.event.message.id)
+    })
+
+    service.activateSession('push', first, session)
+    service.activateSession('push', second, replacement)
+    service.emitCommittedEvent(replacement, {
+      event: {
+        type: 'message', conversation: { id: 'room', kind: 'group', title: 'Room' },
+        message: incoming('committed'),
+      },
+      result: {
+        created: true,
+        changed: true,
+        projection: [],
+        message: {
+          id: 1,
+          platformSessionId: replacement.platformSessionId,
+          conversationId: 1,
+          primaryPlatformMessageId: 'committed',
+          senderUserId: 1,
+          text: 'message-committed',
+          content: {},
+          timestamp: 1,
+          outgoing: false,
+          deleted: false,
+          platformGroupId: null,
+          metadata: {},
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      },
+    })
+    service.deactivateSession('push', first)
+    expect(service.sessions).toEqual([{ registrationId: 'push', platform: second, session: replacement }])
+    service.deactivateSession('push', second)
+
+    expect(lifecycle).toEqual([
+      { event: 'activate', sessionId: 'session-one' },
+      { event: 'deactivate', sessionId: 'session-one' },
+      { event: 'activate', sessionId: 'session-two' },
+      { event: 'deactivate', sessionId: 'session-two' },
+    ])
+    expect(committed).toEqual(['committed'])
+    expect(service.sessions).toEqual([])
   })
 })
 

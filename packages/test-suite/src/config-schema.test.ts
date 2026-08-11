@@ -7,13 +7,13 @@ import { Config as discordConfig } from '../../platform-discord/src/index.js'
 import { Config as matrixConfig } from '../../platform-matrix/src/index.js'
 import { Config as staticConfig } from '../../platform-static/src/index.js'
 import { Config as satoriConfig } from '../../platform-satori/src/index.js'
+import { Config as exporterConfig } from '../../satori-exporter/src/index.js'
 import { Config as resourcesConfig } from '../../telegram-resources/src/index.js'
 
 const cases = [
   ['bridge', bridgeConfig, [
     'dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
-    'blockedContentMode', 'satori',
-    'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
+    'blockedContentMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
@@ -25,6 +25,7 @@ const cases = [
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'proxy', 'syncTimeoutMs', 'requestTimeoutMs']],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['satori', satoriConfig, ['bot']],
+  ['satori-exporter', exporterConfig, ['platformId', 'platform', 'maxMediaBytes']],
   ['resources', resourcesConfig, ['assetsPath', 'providerId']],
 ] as const
 
@@ -46,12 +47,6 @@ describe('plugin config schemas', () => {
       host: '127.0.0.1',
       crypto: 'injected-for-test',
     })
-    expect(bridgeConfig({})).not.toHaveProperty('satori')
-    expect(bridgeConfig({ satori: { platformId: 'qqnt', platform: 'qq' } }).satori).toEqual({
-      platformId: 'qqnt',
-      platform: 'qq',
-      maxMediaBytes: 8 * 1024 * 1024,
-    })
     expect(bridgeConfig({})).toEqual({
       dcId: 1,
       serverHost: '127.0.0.1',
@@ -63,6 +58,11 @@ describe('plugin config schemas', () => {
       voiceWorkerSocketPath: '',
       voiceWorkerTimeoutMs: 5_000,
       voiceDirectIce: true,
+    })
+    expect(exporterConfig({ platformId: 'qqnt', platform: 'qq' })).toEqual({
+      platformId: 'qqnt',
+      platform: 'qq',
+      maxMediaBytes: 8 * 1024 * 1024,
     })
     expect(debugConfig({})).toEqual({
       maxEvents: 2_000,
@@ -88,6 +88,8 @@ describe('plugin config schemas', () => {
       homeserver: 'https://matrix.example.org', accessToken: 'token', syncTimeoutMs: 0,
     })).toThrow(/syncTimeoutMs/)
     expect(() => staticConfig({ transferChunkSize: 0 })).toThrow(/transferChunkSize/)
+    expect(() => exporterConfig({ platformId: undefined as unknown as string })).toThrow(/platformId/)
+    expect(() => exporterConfig({ platformId: 'qqnt', maxMediaBytes: 0 })).toThrow(/maxMediaBytes/)
   })
 
   it('requires Matrix connection credentials and hides its access token', () => {

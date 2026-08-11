@@ -8,9 +8,12 @@ import * as discord from '../../platform-discord/src/index.js'
 import * as matrix from '../../platform-matrix/src/index.js'
 import * as staticPlatform from '../../platform-static/src/index.js'
 import * as satoriPlatform from '../../platform-satori/src/index.js'
+import * as satoriExporter from '../../satori-exporter/src/index.js'
 import * as resources from '../../telegram-resources/src/index.js'
 
-const modules = { bridge, debug, mtproto, qqnt, discord, matrix, staticPlatform, satoriPlatform, resources }
+const modules = {
+  bridge, debug, mtproto, qqnt, discord, matrix, staticPlatform, satoriPlatform, satoriExporter, resources,
+}
 
 describe('loader WebUI config discovery', () => {
   it.each(Object.entries(modules))('%s survives the loader export-unwrapping path', (_name, exports) => {

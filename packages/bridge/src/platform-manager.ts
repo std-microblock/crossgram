@@ -47,6 +47,19 @@ export type PlatformRegistryListener = (
   platform: IMPlatform,
 ) => void
 
+export interface ActivePlatformSession {
+  registrationId: string
+  platform: IMPlatform
+  session: PlatformSession
+}
+
+export type PlatformSessionEvent = 'activate' | 'deactivate'
+export type PlatformSessionListener = (event: PlatformSessionEvent, binding: ActivePlatformSession) => void
+export type CommittedPlatformEventListener = (
+  session: PlatformSession,
+  event: CommittedPlatformEvent,
+) => void
+
 /** Resolve the stable Cordis config-entry ID, with a fallback for direct `ctx.plugin()` usage. */
 export function resolvePlatformPluginId(ctx: Context, fallback?: string): string {
   const entryId = (ctx.fiber as typeof ctx.fiber & {
@@ -61,6 +74,9 @@ export function resolvePlatformPluginId(ctx: Context, fallback?: string): string
 export class IMPlatformService extends Service {
   readonly registry: PlatformRegistry
   private readonly _listeners = new Set<PlatformRegistryListener>()
+  private readonly _activeSessions = new Map<string, ActivePlatformSession>()
+  private readonly _sessionListeners = new Set<PlatformSessionListener>()
+  private readonly _committedEventListeners = new Set<CommittedPlatformEventListener>()
 
   constructor(ctx: Context) {
     super(ctx, 'imPlatform')
@@ -77,6 +93,46 @@ export class IMPlatformService extends Service {
 
   get ids(): string[] {
     return this.registry.ids
+  }
+
+  get sessions(): ActivePlatformSession[] {
+    return [...this._activeSessions.values()]
+  }
+
+  activateSession(registrationId: string, platform: IMPlatform, session: PlatformSession): void {
+    const current = this._activeSessions.get(registrationId)
+    if (current?.platform === platform && current.session === session) return
+    if (current && (current.platform !== platform || current.session.platformSessionId !== session.platformSessionId)) {
+      this._emitSession('deactivate', current)
+    }
+    const binding = { registrationId, platform, session }
+    this._activeSessions.set(registrationId, binding)
+    this._emitSession('activate', binding)
+  }
+
+  deactivateSession(registrationId: string, platform?: IMPlatform): void {
+    const binding = this._activeSessions.get(registrationId)
+    if (!binding || (platform && binding.platform !== platform)) return
+    this._activeSessions.delete(registrationId)
+    this._emitSession('deactivate', binding)
+  }
+
+  onSessionChange(listener: PlatformSessionListener): Unsubscribe {
+    return this.ctx.effect(() => {
+      this._sessionListeners.add(listener)
+      return () => this._sessionListeners.delete(listener)
+    }, 'imPlatform.onSessionChange')
+  }
+
+  onCommittedEvent(listener: CommittedPlatformEventListener): Unsubscribe {
+    return this.ctx.effect(() => {
+      this._committedEventListeners.add(listener)
+      return () => this._committedEventListeners.delete(listener)
+    }, 'imPlatform.onCommittedEvent')
+  }
+
+  emitCommittedEvent(session: PlatformSession, event: CommittedPlatformEvent): void {
+    for (const listener of [...this._committedEventListeners]) listener(session, event)
   }
 
   /** Register an adapter for the lifetime of the calling Cordis plugin fiber. */
@@ -100,6 +156,10 @@ export class IMPlatformService extends Service {
 
   private _emit(event: PlatformRegistryEvent, registrationId: string, platform: IMPlatform): void {
     for (const listener of this._listeners) listener(event, registrationId, platform)
+  }
+
+  private _emitSession(event: PlatformSessionEvent, binding: ActivePlatformSession): void {
+    for (const listener of [...this._sessionListeners]) listener(event, binding)
   }
 }
 
