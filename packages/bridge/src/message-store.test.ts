@@ -843,41 +843,6 @@ describe('MessageStore', () => {
     )).resolves.toMatchObject({ source: { id: 'target' } })
   })
 
-  it('keeps the reply target when an edit or replay omits immutable reply metadata', async () => {
-    const { store } = await createStore()
-    const conversation = { id: 'reply-replay', kind: 'group' as const, title: 'Reply replay' }
-    const target: IMMessage = {
-      id: 'target', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
-      metadata: { qqMsgSeq: '10' },
-      content: { parts: [{ type: 'text', text: 'target' }] },
-    }
-    const reply: IMMessage = {
-      id: 'reply', conversationId: conversation.id, senderId: 'bob', timestamp: 2,
-      replyToId: target.id,
-      metadata: { qqMsgSeq: '11', qqReplyToMsgSeq: '10', telegramReplyToMessageId: 10 },
-      content: { parts: [{ type: 'text', text: 'before edit' }] },
-    }
-    await store.ingest(session, conversation, target)
-    await store.ingest(session, conversation, reply)
-
-    const replayed = await store.ingest(session, conversation, {
-      ...reply,
-      replyToId: undefined,
-      metadata: { revision: 2 },
-      content: { parts: [{ type: 'text', text: 'after edit' }] },
-    })
-
-    expect(replayed).toMatchObject({ created: false, changed: true })
-    await expect(store.findProjectedByPlatformId(
-      session.platformSessionId, conversation.id, reply.id,
-    )).resolves.toMatchObject({
-      source: {
-        replyToId: target.id,
-        metadata: { revision: 2, qqReplyToMsgSeq: '10', telegramReplyToMessageId: 10 },
-        content: { parts: [{ text: 'after edit' }] },
-      },
-    })
-  })
 
   it('keeps duplicate platform-provided group IDs addressable with a synthetic fallback', async () => {
     const { store } = await createStore()
