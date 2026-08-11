@@ -5,8 +5,11 @@ import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import Http from '@cordisjs/plugin-http'
 import Satori, { h } from '@satorijs/core'
-import * as bridge from './index.js'
-import type { IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession, Unsubscribe } from './platform.js'
+import * as bridge from '@mtproto-relay/bridge'
+import type {
+  IMEvent, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession, Unsubscribe,
+} from '@mtproto-relay/bridge'
+import * as exporter from './index.js'
 
 const capabilities: PlatformCapabilities = {
   history: false,
@@ -17,11 +20,21 @@ const capabilities: PlatformCapabilities = {
 class LifecyclePlatform implements IMPlatform {
   readonly capabilities = capabilities
   readonly getAccount = vi.fn(async () => ({ user: { id: 'self', firstName: 'Self' }, credentials: {} }))
-  readonly subscribe = vi.fn(async (): Promise<Unsubscribe> => () => {})
   readonly getConversation = vi.fn(async (_session: PlatformSession, id: string) => ({ id, kind: 'group' as const, title: id }))
   readonly sendMessage = vi.fn(async (_session: PlatformSession, conversation: { id: string }, content: IMMessageInput): Promise<IMMessage> => ({
     id: 'sent', conversationId: conversation.id, senderId: 'self', timestamp: 1, outgoing: true, content: content as IMMessage['content'],
   }))
+  private _handler?: (event: IMEvent) => void | Promise<void>
+
+  readonly subscribe = vi.fn(async (_session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe> => {
+    this._handler = handler
+    return () => { this._handler = undefined }
+  })
+
+  async emit(event: IMEvent): Promise<void> {
+    if (!this._handler) throw new Error('platform is not subscribed')
+    await this._handler(event)
+  }
 }
 
 const disposals: Array<() => unknown> = []
@@ -38,7 +51,7 @@ async function installSatoriScope(ctx: Context) {
   }
 }
 
-describe('bridge Satori exporter lifecycle', () => {
+describe('standalone Satori exporter lifecycle', () => {
   it('provisions, unregisters, and reloads a platform without retaining stale Satori bots', async () => {
     const ctx = new Context()
     const mtproto = { register: vi.fn(), broadcastUpdate: vi.fn(), sendUpdateToAuthKey: vi.fn() }
@@ -55,9 +68,12 @@ describe('bridge Satori exporter lifecycle', () => {
     disposals.push(() => Promise.resolve(provideWebui()), () => Promise.resolve(provideMtproto()), ...infrastructure.map(fiber => () => fiber.dispose()))
     await Promise.all(infrastructure)
     await new Promise(resolve => setTimeout(resolve, 25))
-    const bridgeFiber = ctx.plugin(bridge, { satori: { platformId: 'qqnt', platform: 'qq' } })
+    const bridgeFiber = ctx.plugin(bridge)
     disposals.push(() => bridgeFiber.dispose())
     await bridgeFiber
+    const exporterFiber = ctx.plugin(exporter, { platformId: 'qqnt', platform: 'qq' })
+    disposals.push(() => exporterFiber.dispose())
+    await exporterFiber
     await ctx.database.prepared()
 
     const platform = new LifecyclePlatform()
@@ -69,6 +85,17 @@ describe('bridge Satori exporter lifecycle', () => {
     await vi.waitFor(() => expect(ctx.bots).toHaveLength(1))
     const oldBot = ctx.bots[0]!
     expect(oldBot.status).toBe(1)
+    const received: string[] = []
+    ctx.on('message-created', event => received.push(event.event.message!.id))
+    await platform.emit({
+      type: 'message',
+      conversation: { id: 'group:42', kind: 'group', title: 'Group 42' },
+      message: {
+        id: 'incoming:1', conversationId: 'group:42', senderId: 'alice', timestamp: 1,
+        content: { parts: [{ type: 'text', text: 'hello from bridge' }] },
+      },
+    })
+    await vi.waitFor(() => expect(received).toEqual(['incoming:1']))
 
     unregister()
     await vi.waitFor(() => expect(ctx.bots).toHaveLength(0))

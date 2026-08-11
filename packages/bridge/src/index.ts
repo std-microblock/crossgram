@@ -47,7 +47,6 @@ import { CallRegistry, type VoiceMediaStartProvider, type VoiceWorkerClient } fr
 import type { VoiceCallMediaProvider } from './voice/media.js'
 import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
-import { SatoriExporter, type SatoriExportConfig } from './satori-export.js'
 
 export * from './platform.js'
 export * from './message-store.js'
@@ -74,7 +73,6 @@ export * from './voice/voice-rpc.js'
 export * from './stripped-thumbnail.js'
 export * from './sticker-outline.js'
 export * from './sticker-dashboard.js'
-export * from './satori-export.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui']
@@ -90,8 +88,6 @@ export interface BridgeConfig {
   autoMuteGroupChats?: boolean
   /** Visibility policy for users blocked through Telegram. */
   blockedContentMode?: BlockedContentMode
-  /** Optional Satori export of one provisioned platform session. */
-  satori?: SatoriExportConfig
   /** Optional native worker; it must expose public status/material only. */
   voiceWorker?: VoiceWorkerClient
   /** Local Rust voice-worker Unix socket; an empty path leaves calls unavailable. */
@@ -115,14 +111,6 @@ export const Config = z.object({
   blockedContentMode: z.union([
     z.const('show'), z.const('hide-user'), z.const('hide-related'),
   ]).default('hide-user'),
-  satori: z.union([
-    z.object({
-      platformId: z.string(),
-      platform: z.string(),
-      maxMediaBytes: z.natural().min(1).max(64 * 1024 * 1024).default(8 * 1024 * 1024),
-    }),
-    z.const(undefined),
-  ]),
   voiceWorkerSocketPath: z.string().default(''),
   voiceWorkerTimeoutMs: z.natural().min(1).max(60_000).default(5_000),
   voiceDirectIce: z.boolean().default(true),
@@ -158,7 +146,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     if (format.startsWith('slow dialogs rpc profile')) bridgeLogger.info(format, ...args)
     else bridgeLogger.debug(format, ...args)
   }
-  let satoriExporter: SatoriExporter | undefined
   const authTransfers = new AuthTransferStore()
 
   defineModels(ctx)
@@ -274,9 +261,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         }
         return
       }
-      if (event.event.type === 'message' && 'result' in event && 'created' in event.result) {
-        satoriExporter?.handleMessage(session, event.event.conversation, event.event.message, event.result)
-      }
+      platforms.emitCommittedEvent(session, event)
       return updates.publish(session, event, options)
     },
     (format, ...args) => bridgeLogger.debug(format, ...args),
@@ -295,20 +280,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()
-  if (config.satori) {
-    ctx.inject(['satori', 'http'], (scope) => {
-      const exporter = new SatoriExporter(scope, config.satori!, bridgeLogger)
-      satoriExporter = exporter
-      for (const [platformId, account] of provisionedAccounts) {
-        const platform = registry.get(platformId)
-        if (platform) exporter.start(platform, account.session)
-      }
-      return () => {
-        exporter.stop()
-        if (satoriExporter === exporter) satoriExporter = undefined
-      }
-    })
-  }
   let publishedStickerPacks: StickerDashboardPack[] = []
   const dashboard: PlatformAccountDashboardData & StickerPackDashboardData = {
     accounts: [],
@@ -398,8 +369,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       accountErrors.delete(platformId)
       publishAccounts()
       await subscriptions.ensure(provisioned.session)
-      satoriExporter?.start(platform, provisioned.session)
+      platforms.activateSession(platformId, platform, provisioned.session)
     } catch (error) {
+      platforms.deactivateSession(platformId, platform)
       provisionedAccounts.delete(platformId)
       accountErrors.set(platformId, error)
       publishAccounts()
@@ -444,7 +416,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     res.body = Buffer.concat(chunks)
   })
 
-  platforms.onChange((event, platformId) => {
+  platforms.onChange((event, platformId, platform) => {
     if (event === 'register') {
       ctx.logger('bridge').info('IM platform registered: %s', platformId)
       void ctx.database.prepared()
@@ -461,7 +433,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         ))
     } else {
       ctx.logger('bridge').info('IM platform unregistered: %s', platformId)
-      satoriExporter?.stop(platformId)
+      platforms.deactivateSession(platformId, platform)
       provisionedAccounts.delete(platformId)
       accountErrors.delete(platformId)
       publishAccounts()

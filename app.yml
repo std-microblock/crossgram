@@ -25,6 +25,12 @@
     path: /satori
     token: ${SATORI_TOKEN}
     maxRequestBodyBytes: 8388608
+- id: satori-exporter
+  name: '@mtproto-relay/satori-exporter'
+  disabled: true
+  config:
+    platformId: qqnt
+    platform: qq
 - id: satori-platform
   name: '@mtproto-relay/platform-satori'
   disabled: true

@@ -6,8 +6,10 @@ import Satori, { h, Universal, type Session } from '@satorijs/core'
 import SatoriServer from '@satorijs/plugin-server'
 import WebSocket from 'ws'
 import { Readable } from 'node:stream'
-import { SatoriExporter, type SatoriExportConfig } from './satori-export.js'
-import type { IMConversation, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession, Unsubscribe } from './platform.js'
+import { SatoriExporter, type SatoriExportConfig } from './exporter.js'
+import type {
+  IMConversation, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession, Unsubscribe,
+} from '@mtproto-relay/bridge'
 
 const session: PlatformSession = {
   platformSessionId: 'qq-session', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
