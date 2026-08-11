@@ -595,6 +595,7 @@ export class UpdateManager {
         topicId,
         replyToTlId: nativeReplyTo ?? replied?.parts[0]?.tlMessageId,
         mentioned,
+        unreadMention: mentioned,
       })
       updates.push({
         _: isEdit

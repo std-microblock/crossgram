@@ -985,6 +985,47 @@ export class MessageStore {
     })
   }
 
+  async listUnreadMentionIds(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<Set<number>> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return new Set()
+    const mentions = await this._database.get('mtproto_message_mention', {
+      platformSessionId, conversationId: conversation.id, unread: true,
+    })
+    return new Set(mentions.map((mention) => mention.tlMessageId))
+  }
+
+  async markMentionIdsRead(
+    platformSessionId: string,
+    platformConversationId: string,
+    tlMessageIds: readonly number[],
+  ): Promise<number> {
+    const uniqueIds = [...new Set(tlMessageIds)]
+    if (!uniqueIds.length) return 0
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const [conversation] = await database.get('mtproto_im_conversation', {
+        platformSessionId, platformConversationId,
+      })
+      if (!conversation) return 0
+      const query = {
+        platformSessionId,
+        conversationId: conversation.id,
+        tlMessageId: { $in: uniqueIds },
+        unread: true,
+      }
+      const rows = await database.get('mtproto_message_mention', query)
+      if (!rows.length) return 0
+      await database.set('mtproto_message_mention', query, {
+        unread: false, updatedAt: new Date(),
+      })
+      return rows.length
+    }), 'mention-content-read')
+  }
+
   async markMentionsRead(
     platformSessionId: string,
     platformConversationId: string,
