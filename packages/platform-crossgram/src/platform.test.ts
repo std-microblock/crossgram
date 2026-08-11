@@ -1448,13 +1448,14 @@ describe('QQNTPlatform mapping', () => {
     expect(members.members[0]).toMatchObject({
       user: {
         id: 'u_very_long_opaque',
-        firstName: 'Group Alias',
+        firstName: 'Profile Name',
         username: '1715311957',
         avatar: { locator: { avatarUin: '1715311957' } },
-        metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
+        metadata: { qqName: 'Profile Name' },
       },
       role: 'administrator',
       permissions: { manageMembers: true, editAnyMessage: true },
+      title: 'Group Alias',
     })
   })
 
@@ -1481,23 +1482,23 @@ describe('QQNTPlatform mapping', () => {
     ])
   })
 
-  it('can use the profile nickname instead of a conversation-scoped group alias', async () => {
-    const platform = new QQNTPlatform({ memberName: 'nickname' })
+  it('keeps the profile nickname stable and omits blank member tags', async () => {
+    const platform = new QQNTPlatform()
     platform.client.getMembers = vi.fn(async () => ({
       members: [{
         user: {
-          id: 'member', numericId: '42', name: 'Profile Name', alias: 'Group Alias',
+          id: 'member', numericId: '42', name: 'Profile Name', alias: '   ',
         },
         role: 'member' as const,
       }],
       total: 1,
     }))
-    await expect(platform.getConversationMembers(session, { id: 'group' })).resolves.toMatchObject({
-      members: [{ user: {
-        firstName: 'Profile Name',
-        metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
-      } }],
-    })
+    const page = await platform.getConversationMembers(session, { id: 'group' })
+    expect(page.members).toMatchObject([{ user: {
+      firstName: 'Profile Name',
+      metadata: { qqName: 'Profile Name' },
+    } }])
+    expect(page.members[0].title).toBeUndefined()
   })
 
   it('does not scan the full member list when a self-role probe arrives before group metadata', async () => {
@@ -1598,11 +1599,12 @@ describe('QQNTPlatform mapping', () => {
         avatar: { id: 'avatar:group:1058754719:original-v1', locator: { filePath: '/tmp/group.png' } },
       },
       message: {
+        senderTitle: 'Group Alias',
         sender: {
-          firstName: 'Group Alias',
+          firstName: 'Profile Name',
           username: '42',
           avatar: { locator: { avatarUin: '42' } },
-          metadata: { qqName: 'Profile Name', qqGroupAlias: 'Group Alias' },
+          metadata: { qqName: 'Profile Name' },
         },
       },
     })

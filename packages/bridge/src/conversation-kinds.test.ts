@@ -1211,8 +1211,8 @@ describe('conversation kinds', () => {
         id: `member-${index}`,
         firstName: index === 87 ? 'Needle User' : `Member ${index}`,
         username: String(10_000 + index),
-        metadata: index === 112 ? { qqGroupAlias: 'Target Alias' } : {},
       },
+      title: index === 112 ? 'Target Alias' : undefined,
       role: 'member' as const,
       permissions,
     }))
@@ -1256,7 +1256,7 @@ describe('conversation kinds', () => {
       filter: { _: 'channelParticipantsMentions', q: 'needle' },
       offset: 0, limit: 100, hash: Long.ZERO,
     })
-    const aliasMention = await rpc.getChannelParticipants({
+    const tagMention = await rpc.getChannelParticipants({
       _: 'channels.getParticipants', channel: group,
       filter: { _: 'channelParticipantsMentions', q: '@target alias' },
       offset: 0, limit: 100, hash: Long.ZERO,
@@ -1287,10 +1287,12 @@ describe('conversation kinds', () => {
     expect(searchedMention).toMatchObject({
       _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Needle User' }],
     })
-    expect(aliasMention).toMatchObject({
-      _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Member 112' }],
+    expect(tagMention).toMatchObject({
+      _: 'channels.channelParticipants', count: 1,
+      participants: [{ _: 'channelParticipant', rank: 'Target Alias' }],
+      users: [{ firstName: 'Member 112' }],
     })
-    for (const result of [first, second, mentions, searchedMention, aliasMention]) {
+    for (const result of [first, second, mentions, searchedMention, tagMention]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
   })
