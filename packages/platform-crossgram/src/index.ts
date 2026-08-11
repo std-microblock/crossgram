@@ -26,17 +26,11 @@ import type {
   WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireTextPart,
 } from './protocol.js'
 
-export type MemberNameMode = 'nickname' | 'groupAlias'
 
 const MIN_PROTOCOL_VERSION = 19
 const MAX_PROTOCOL_VERSION = 21
 
 export interface Config extends QQNTClientOptions {
-  /**
-   * `nickname` always exposes the QQ profile nickname.
-   * `groupAlias` prefers the conversation-scoped group card when available.
-   */
-  memberName?: MemberNameMode
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
   grayTipFilters?: string[]
   /** Generate tiny photoStrippedSize payloads after delivering the original message. */
@@ -51,7 +45,6 @@ export const Config = z.object({
   endpoint: z.string().default('http://127.0.0.1:18767/v1'),
   webSocketEndpoint: z.string(),
   token: z.string().role('secret'),
-  memberName: z.union([z.const('nickname'), z.const('groupAlias')]).default('groupAlias'),
   grayTipFilters: z.array(z.string()).default(DEFAULT_GRAY_TIP_FILTERS),
   generatePreviews: z.boolean().default(false),
   previewConcurrency: z.natural().min(1).max(8).default(2),
@@ -179,7 +172,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalog?: IMReactionContext
   private reactionCatalogPromise?: Promise<IMReactionContext>
   private reactionCatalogRetryAt = 0
-  private readonly memberName: MemberNameMode
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
   private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
@@ -225,7 +217,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (this.qqVoiceMedia) {
       this.voiceMedia = { start: (call, _session, endpoint) => this.startVoiceMedia(call, endpoint) }
     }
-    this.memberName = options.memberName ?? 'groupAlias'
     this.grayTipFilters = options.grayTipFilters ?? DEFAULT_GRAY_TIP_FILTERS
   }
 
@@ -874,17 +865,17 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       members: page.members.map((member): IMConversationMember<QQMediaLocator> => ({
         user: {
           id: member.user.id,
-          firstName: memberDisplayName(member.user, this.memberName),
+          firstName: member.user.name,
           username: member.user.numericId,
           avatar: member.user.avatar ? mapMedia(member.user.avatar) : undefined,
           metadata: {
             ...(member.user.numericId ? { qq: member.user.numericId } : {}),
             qqName: member.user.name,
-            ...(member.user.alias ? { qqGroupAlias: member.user.alias } : {}),
           },
         },
         role: member.role,
         permissions: permissions(member.role),
+        title: member.user.alias?.trim() || undefined,
       })),
       total: page.total,
       nextCursor: page.nextCursor,
@@ -1516,7 +1507,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   private mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
     const message = mapMessage(
-      input, this.memberName, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
+      input, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
       (media) => this.mediaPreviews.project(media),
     )
     return message
@@ -1768,7 +1759,6 @@ function fileVideoMimeType(name: string | undefined): string | undefined {
 
 function mapMessage(
   input: WireMessage,
-  memberName: MemberNameMode,
   reactionCatalog?: IMReactionContext,
   stickerProviderId = 'qqnt:stickers',
   registerMultiForward?: (
@@ -1785,15 +1775,15 @@ function mapMessage(
     senderId: input.senderId,
     sender: input.sender ? {
       id: input.sender.id,
-      firstName: memberDisplayName(input.sender, memberName),
+      firstName: input.sender.name,
       username: input.sender.numericId,
       avatar: input.sender.avatar ? mapMedia(input.sender.avatar) : undefined,
       metadata: {
         ...(input.sender.numericId ? { qq: input.sender.numericId } : {}),
         qqName: input.sender.name,
-        ...(input.sender.alias ? { qqGroupAlias: input.sender.alias } : {}),
       },
     } : undefined,
+    senderTitle: input.sender?.alias?.trim() || undefined,
     timestamp: input.timestamp,
     outgoing: input.outgoing,
     replyToId: input.replyToId,
@@ -2026,12 +2016,6 @@ function normalizeTextPart(
   }
 }
 
-function memberDisplayName(
-  user: { name: string, alias?: string },
-  mode: MemberNameMode,
-): string {
-  return mode === 'groupAlias' ? user.alias?.trim() || user.name : user.name
-}
 
 function permissions(role: 'owner' | 'administrator' | 'member') {
   const administrator = role === 'owner' || role === 'administrator'

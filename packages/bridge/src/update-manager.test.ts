@@ -398,9 +398,10 @@ describe('UpdateManager', () => {
       id: 'incoming', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_000,
       sender: {
         id: 'alice',
-        firstName: 'Group Alias',
+        firstName: 'Profile Name',
         avatar: { id: 'avatar-alias', kind: 'image', locator: { userId: 'alice' } },
       },
+      senderTitle: 'Group Alias',
       content: { parts: [{ type: 'text', text: 'pushed' }] },
     }
     const result = await store.ingest(session, conversation, message)
@@ -410,7 +411,10 @@ describe('UpdateManager', () => {
     expect(Buffer.from(sent[0].authKeyId).toString('hex')).toBe('0011223344556677')
     expect(sent[0].update).toMatchObject({
       _: 'updates', seq: 1,
-      updates: [{ _: 'updateNewChannelMessage', pts: 2, ptsCount: 1, message: { message: 'pushed' } }],
+      updates: [{
+        _: 'updateNewChannelMessage', pts: 2, ptsCount: 1,
+        message: { message: 'pushed', fromRank: 'Group Alias' },
+      }],
       chats: [{
         _: 'channel', title: 'Group', megagroup: true, accessHash: Long.ONE,
         photo: { _: 'chatPhoto', dcId: 1 },
@@ -418,7 +422,7 @@ describe('UpdateManager', () => {
       users: [
         { _: 'user', self: true, accessHash: Long.ONE },
         {
-          _: 'user', firstName: 'Group Alias', accessHash: Long.ONE,
+          _: 'user', firstName: 'Profile Name', accessHash: Long.ONE,
           photo: { _: 'userProfilePhoto', dcId: 1 },
         },
       ],
