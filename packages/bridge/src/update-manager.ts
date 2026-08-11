@@ -44,6 +44,45 @@ export class UpdateManager {
     private readonly _registerReactions?: (session: PlatformSession, message: IMMessage) => void,
   ) {}
 
+  private async _hydrateReactionUsers(
+    session: PlatformSession,
+    message: IMMessage,
+  ): Promise<{ ids: Map<string, number>, users: tl.RawUser[] }> {
+    const actorIds = [...new Set((message.reactionContext?.reactions ?? []).flatMap((reaction) =>
+      (reaction.recentActors ?? []).slice(0, 3).map((actor) => actor.userId)))]
+    if (!actorIds.length) return { ids: new Map(), users: [] }
+    const platform = this._registry.require(session.platformId)
+    const profiles = await Promise.all(actorIds.map(async (actorId) => {
+      try {
+        const profile = await platform.getUser?.(session, actorId)
+        if (profile) return profile
+      } catch (error) {
+        this._onTrace?.(
+          'reaction actor profile lookup failed platform=%s session=%s user=%s error=%s',
+          session.platformId, session.platformSessionId, actorId, String(error),
+        )
+      }
+      const stored = await this._store.getUser(session.platformId, actorId)
+      return stored ? toUser(stored) : { id: actorId, firstName: actorId }
+    }))
+    const rows = await this._store.upsertUsers(session, profiles)
+    return {
+      ids: new Map(rows.map((row) => [row.platformUserId, row.id])),
+      users: rows.map((row) => {
+        const user = toUser(row)
+        return makeUser({
+          id: row.id,
+          self: row.platformUserId === session.userId || undefined,
+          premium: row.platformUserId === session.userId || undefined,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          username: user.username,
+          photo: user.avatar ? makeUpdateAvatar(user.avatar.id, this._dcId, 'user') : undefined,
+        })
+      }),
+    }
+  }
+
   async publishPeerBlocked(
     session: PlatformSession,
     userId: number,
@@ -300,7 +339,14 @@ export class UpdateManager {
       session.platformSessionId, result.message,
     ) ?? result.message
     this._registerReactions?.(session, visibleMessage)
-    const reactions = makeMessageReactions(visibleMessage, session.platformSessionId)
+    const reactionUsers = await this._hydrateReactionUsers(session, visibleMessage)
+    const reactions = makeMessageReactions(
+      visibleMessage,
+      session.platformSessionId,
+      (userId) => reactionUsers.ids.get(userId),
+      platform.capabilities.reactions?.actorList === true,
+      session.userId,
+    )
     const directPeerId = displayConversation.kind === 'direct'
       ? (await this._store.getUser(session.platformId, displayConversation.id)
         ?? await this._store.upsertUser(session,
@@ -319,7 +365,7 @@ export class UpdateManager {
     pts += updates.length
     void pts
     const payload: tl.RawUpdates = {
-      _: 'updates', updates, users: [],
+      _: 'updates', updates, users: reactionUsers.users,
       chats: displayConversation.kind === 'direct' ? [] : [makeUpdateChat(displayConversation, false, this._dcId)],
       date: delivery.date, seq: delivery.seq,
     }
@@ -452,6 +498,7 @@ export class UpdateManager {
           await platform.getUser?.(session, displayConversation.id)
             ?? { id: displayConversation.id, firstName: displayConversation.title })
       : undefined
+    const reactionUsers = await this._hydrateReactionUsers(session, visibleMessage)
     const userIds = new Map((await this._store.listUsers(session.platformId))
       .map((row) => [row.platformUserId, row.id]))
     let pts = delivery.pts - delivery.ptsCount
@@ -540,6 +587,9 @@ export class UpdateManager {
               this._blockedPeers?.filterMessageReactions(session.platformSessionId, projected.source)
                 ?? projected.source,
               session.platformSessionId,
+              (userId) => userIds.get(userId),
+              platform.capabilities.reactions?.actorList === true,
+              session.userId,
             )
           : undefined,
         topicId,
@@ -567,15 +617,15 @@ export class UpdateManager {
       firstName: self.firstName, lastName: self.lastName, username: self.username,
       photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
     })
-    const users = senderRow.id === selfRow.id
-      ? [selfUser]
+    const users = uniqueUpdateUsers(senderRow.id === selfRow.id
+      ? [selfUser, ...reactionUsers.users]
       : [selfUser, makeUser({
-        id: senderRow.id,
-        firstName: sender.firstName,
-        lastName: sender.lastName,
-        username: sender.username,
-        photo: sender.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
-      })]
+          id: senderRow.id,
+          firstName: sender.firstName,
+          lastName: sender.lastName,
+          username: sender.username,
+          photo: sender.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
+        }), ...reactionUsers.users])
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []
@@ -995,22 +1045,50 @@ function conversationPeer(conversation: IMConversation, directUserId?: number): 
 function makeMessageReactions(
   message: IMMessage,
   platformSessionId: string,
+  resolveUserId?: (platformUserId: string) => number | undefined,
+  canSeeList = false,
+  selfUserId?: string,
 ): tl.RawMessageReactions {
   const definitions = new Map((message.reactionContext?.available ?? []).map((item) => [item.key, item]))
+  const toReaction = (key: string): tl.TypeReaction | undefined => {
+    const definition = definitions.get(key)
+    if (!definition) return
+    return definition.presentation.type === 'emoji'
+      ? { _: 'reactionEmoji', emoticon: definition.presentation.emoticon }
+      : { _: 'reactionCustomEmoji', documentId: Long.fromNumber(
+          customReactionDocumentId(platformSessionId, definition),
+        ) }
+  }
+  const recentReactions = (message.reactionContext?.reactions ?? []).flatMap((summary) => {
+    const reaction = toReaction(summary.key)
+    if (!reaction || !resolveUserId) return []
+    return (summary.recentActors ?? []).slice(0, 3).flatMap((actor): tl.RawMessagePeerReaction[] => {
+      const userId = resolveUserId(actor.userId)
+      return userId === undefined ? [] : [{
+        _: 'messagePeerReaction',
+        my: actor.userId === selfUserId || undefined,
+        peerId: { _: 'peerUser', userId },
+        date: actor.timestamp ?? message.timestamp,
+        reaction,
+      }]
+    })
+  })
   return {
     _: 'messageReactions',
+    canSeeList: canSeeList || undefined,
     results: (message.reactionContext?.reactions ?? []).flatMap((summary) => {
-      const definition = definitions.get(summary.key)
-      if (!definition) return []
-      const reaction: tl.TypeReaction = definition.presentation.type === 'emoji'
-        ? { _: 'reactionEmoji', emoticon: definition.presentation.emoticon }
-        : { _: 'reactionCustomEmoji', documentId: Long.fromNumber(
-            customReactionDocumentId(platformSessionId, definition),
-          ) }
-      return [{
+      const reaction = toReaction(summary.key)
+      return reaction ? [{
         _: 'reactionCount', reaction, count: summary.count,
         chosenOrder: summary.selected ? summary.selectedOrder ?? 0 : undefined,
-      } as tl.RawReactionCount]
+      } as tl.RawReactionCount] : []
     }),
+    recentReactions: recentReactions.length ? recentReactions : undefined,
   }
+}
+
+function uniqueUpdateUsers(users: tl.RawUser[]): tl.RawUser[] {
+  const unique = new Map<number, tl.RawUser>()
+  for (const user of users) if (!unique.has(user.id)) unique.set(user.id, user)
+  return [...unique.values()]
 }
