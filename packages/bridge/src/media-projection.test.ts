@@ -98,6 +98,17 @@ it('projects platform service actions as Telegram MessageService records', () =>
   })
 })
 
+it('projects a conversation-scoped sender title as a Telegram member tag', () => {
+  const source: IMMessage = {
+    id: 'member-tag', conversationId: conversation.id, senderId: 'alice', senderTitle: 'Group Alias',
+    timestamp: 1_800_000_002, content: { parts: [{ type: 'text', text: 'tagged' }] },
+  }
+  expect(projectTlMessage({
+    conversation, source, tlId: 8, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 },
+  })).toMatchObject({ _: 'message', id: 8, fromRank: 'Group Alias' })
+})
+
 it('projects phone-call service actions as native Telegram call records', () => {
   const source: IMMessage = {
     id: 'call-record', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_002,

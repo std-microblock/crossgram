@@ -18,7 +18,7 @@ const cases = [
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
   ['qqnt', qqntConfig, [
-    'endpoint', 'webSocketEndpoint', 'token', 'memberName', 'grayTipFilters',
+    'endpoint', 'webSocketEndpoint', 'token', 'grayTipFilters',
     'generatePreviews', 'previewConcurrency',
   ]],
   ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
@@ -81,7 +81,6 @@ describe('plugin config schemas', () => {
 
   it('rejects invalid values at the field path', () => {
     expect(() => bridgeConfig({ serverPort: 65_536 })).toThrow(/serverPort/)
-    expect(() => qqntConfig({ memberName: 'invalid' as any })).toThrow(/memberName/)
     expect(() => qqntConfig({ previewConcurrency: 0 })).toThrow(/previewConcurrency/)
     expect(() => discordConfig({ token: 'user-token', downloadChunkSize: 0 })).toThrow(/downloadChunkSize/)
     expect(() => matrixConfig({
