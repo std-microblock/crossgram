@@ -330,6 +330,117 @@ describe('StickerRpc', () => {
     })
   })
 
+  it('deduplicates recent aliases by canonical sticker ID and honors Telegram document hashes', async () => {
+    const { rpc, provider, sticker, query } = stickerHarness()
+    const second: IMSticker = {
+      ...sticker, stickerId: 'market:11690:second', title: 'Second',
+    }
+    const newestAt = new Date('2026-08-02T11:00:00Z')
+    const secondAt = new Date('2026-08-02T10:30:00Z')
+    const olderAt = new Date('2026-08-02T10:00:00Z')
+    vi.mocked(query.execute).mockResolvedValue([{
+      id: 1, platformSessionId: 'session', providerId: 'qq:stickers', providerStickerId: 'favorite:md5-alias',
+      attached: false, useCount: 4, lastUsedAt: newestAt,
+    }, {
+      id: 2, platformSessionId: 'session', providerId: 'qq:stickers', providerStickerId: second.stickerId,
+      attached: false, useCount: 3, lastUsedAt: secondAt,
+    }, {
+      id: 3, platformSessionId: 'session', providerId: 'qq:stickers', providerStickerId: sticker.stickerId,
+      attached: false, useCount: 2, lastUsedAt: olderAt,
+    }])
+    vi.mocked(provider.getSticker).mockImplementation(async (_context, stickerId) =>
+      stickerId === second.stickerId ? second : sticker)
+
+    const recent = await rpc.getRecentStickers({
+      _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO,
+    })
+    expect(recent._).toBe('messages.recentStickers')
+    if (recent._ !== 'messages.recentStickers') throw new Error('expected full recent stickers')
+    expect(recent.stickers).toHaveLength(2)
+    expect(recent.dates).toEqual([
+      Math.floor(newestAt.getTime() / 1000),
+      Math.floor(secondAt.getTime() / 1000),
+    ])
+    const expectedHash = telegramDocumentHash(recent.stickers.map((item) => item.id))
+    expect(recent.hash.equals(expectedHash)).toBe(true)
+
+    await expect(rpc.getRecentStickers({
+      _: 'messages.getRecentStickers', attached: false, hash: expectedHash,
+    })).resolves.toEqual({ _: 'messages.recentStickersNotModified' })
+  })
+
+  it('gives every pack cover a distinct desktop cache version and serves that pack first sticker', async () => {
+    const first: IMSticker = {
+      providerId: 'qq:stickers', stickerId: 'market:100:first', packId: '100',
+      format: 'static', mimeType: 'image/png', version: 1,
+    }
+    const second: IMSticker = {
+      providerId: 'qq:stickers', stickerId: 'market:200:first', packId: '200',
+      format: 'static', mimeType: 'image/png', version: 1,
+    }
+    const packs = new Map([
+      ['100', { providerId: 'qq:stickers', packId: '100', title: 'First', version: 1, stickers: [first] }],
+      ['200', { providerId: 'qq:stickers', packId: '200', title: 'Second', version: 1, stickers: [second] }],
+    ])
+    const provider: IMStickerProvider = {
+      listPacks: vi.fn(async () => ({ packs: [...packs.values()].map(({ stickers, ...pack }) => ({
+        ...pack, count: stickers.length,
+      })) })),
+      getPack: vi.fn(async (_context, packId) => packs.get(packId) ?? null),
+      getSticker: vi.fn(async (_context, stickerId) => [first, second].find((item) => item.stickerId === stickerId) ?? null),
+      openAsset: vi.fn(async (_context, sticker) => {
+        const bytes = Uint8Array.of(sticker.stickerId === first.stickerId ? 1 : 2)
+        return { mimeType: 'image/png', size: bytes.length, source: {
+          size: bytes.length, async *stream() { yield bytes },
+        } }
+      }),
+    }
+    const registry = {
+      entries: [['qq:stickers', provider]],
+      get: (id: string) => id === 'qq:stickers' ? provider : undefined,
+      require: (id: string) => {
+        if (id !== 'qq:stickers') throw new Error(`unknown provider ${id}`)
+        return provider
+      },
+    } as unknown as StickerProviderRegistry
+    const installed = [...packs.keys()].map((providerPackId, index) => ({
+      id: index + 1, platformSessionId: 'session', providerId: 'qq:stickers', providerPackId,
+      installedAt: new Date('2026-08-02T00:00:00Z'), sortOrder: index, archived: false, uninstalled: false,
+    }))
+    const database = {
+      get: vi.fn(async (table: string) => table === 'mtproto_sticker_set_install' ? installed : []),
+    }
+    const rpc = new StickerRpc(
+      database as never,
+      registry,
+      { platformKind: 'qq' } as IMPlatform,
+      { platformId: 'qq', platformSessionId: 'session' } as PlatformSession,
+    )
+
+    const all = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    expect(all._).toBe('messages.allStickers')
+    if (all._ !== 'messages.allStickers') throw new Error('expected sticker catalog')
+    const full = await Promise.all(all.sets.map(async (set) => {
+      const result = await rpc.getStickerSet({
+        _: 'messages.getStickerSet',
+        stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },
+        hash: 0,
+      })
+      if (result._ !== 'messages.stickerSet') throw new Error('expected full sticker set')
+      return result
+    }))
+    expect(full[0]!.set.thumbVersion).not.toBe(full[1]!.set.thumbVersion)
+    for (const set of full) {
+      expect(set.set.thumbDocumentId?.equals(set.documents[0]!.id)).toBe(true)
+    }
+    await expect(rpc.getSetThumb({
+      _: 'inputStickerSetID', id: full[0]!.set.id, accessHash: full[0]!.set.accessHash,
+    }, 0, 1)).resolves.toEqual(Uint8Array.of(1))
+    await expect(rpc.getSetThumb({
+      _: 'inputStickerSetID', id: full[1]!.set.id, accessHash: full[1]!.set.accessHash,
+    }, 0, 1)).resolves.toEqual(Uint8Array.of(2))
+  })
+
   it('coalesces summary catalogs without materializing every pack before it is opened', async () => {
     let release!: () => void
     const blocked = new Promise<void>((resolve) => { release = resolve })
@@ -609,6 +720,17 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     cacheTtlMs,
   )
   return { rpc, provider, sticker, query, database }
+}
+
+function telegramDocumentHash(ids: Long[]): Long {
+  let hash = Long.ZERO
+  for (const id of ids) {
+    hash = hash.xor(hash.shiftRightUnsigned(21))
+    hash = hash.xor(hash.shiftLeft(35))
+    hash = hash.xor(hash.shiftRightUnsigned(4))
+    hash = hash.add(id)
+  }
+  return hash
 }
 
 function wireRoundTrip<T>(object: T): T {
