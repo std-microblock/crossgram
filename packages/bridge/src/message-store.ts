@@ -86,6 +86,7 @@ const TIMESTAMP_ALLOCATION_VERSION = 1
 export const UPDATE_DELIVERY_RETENTION = 1_000
 export const ACCOUNT_UPDATE_SCOPE = 'account'
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
+const STORED_SENDER_TITLE_KEY = '__mtprotoRelaySenderTitle'
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
@@ -1831,7 +1832,7 @@ function hydrateMessage(
   senderRow: IMUserRow,
   conversationId: string,
 ): IMMessage {
-  const { replyToId, metadata } = hydrateMessageMetadata(row.metadata)
+  const { replyToId, senderTitle, metadata } = hydrateMessageMetadata(row.metadata)
   const sender = toUser(senderRow)
   return {
     id: row.primaryPlatformMessageId,
@@ -1839,6 +1840,7 @@ function hydrateMessage(
     conversationId,
     senderId: sender.id,
     sender,
+    senderTitle,
     content: hydrateMessageContent(row.content),
     timestamp: row.timestamp,
     outgoing: row.outgoing,
@@ -1890,19 +1892,25 @@ function messageMetadata(message: IMMessage): JsonObject {
   return {
     ...message.metadata,
     ...(message.replyToId !== undefined ? { [STORED_REPLY_TO_KEY]: message.replyToId } : {}),
+    ...(message.senderTitle !== undefined ? { [STORED_SENDER_TITLE_KEY]: message.senderTitle } : {}),
   }
 }
 
 function hydrateMessageMetadata(metadata: JsonObject): {
   replyToId?: string
+  senderTitle?: string
   metadata: JsonObject
 } {
   const publicMetadata = { ...metadata }
   delete publicMetadata[STORED_REPLY_TO_KEY]
+  delete publicMetadata[STORED_SENDER_TITLE_KEY]
   const replyToId = typeof metadata[STORED_REPLY_TO_KEY] === 'string'
     ? metadata[STORED_REPLY_TO_KEY]
     : undefined
-  return { replyToId, metadata: publicMetadata }
+  const senderTitle = typeof metadata[STORED_SENDER_TITLE_KEY] === 'string'
+    ? metadata[STORED_SENDER_TITLE_KEY]
+    : undefined
+  return { replyToId, senderTitle, metadata: publicMetadata }
 }
 
 export function toUser(row: IMUserRow): IMUser {

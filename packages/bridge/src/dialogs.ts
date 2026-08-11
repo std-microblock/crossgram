@@ -4473,6 +4473,7 @@ export function projectTlMessage(options: {
   return {
     _: 'message', out: source.outgoing || undefined, mentioned: mentioned || undefined, id: tlId,
     fromId,
+    fromRank: source.senderTitle,
     peerId: peerId ?? (conversation.kind === 'direct'
       ? { _: 'peerUser', userId: conversationId }
       : { _: 'peerChannel', channelId: conversationId }),
@@ -4615,9 +4616,9 @@ function memberSearchText(member: IMConversationMember<any>): string {
     member.user.firstName,
     member.user.lastName,
     member.user.username,
+    member.title,
     metadata.qq,
     metadata.qqName,
-    metadata.qqGroupAlias,
   ].filter((value): value is string | number => typeof value === 'string' || typeof value === 'number')
     .join(' ')
     .toLocaleLowerCase()

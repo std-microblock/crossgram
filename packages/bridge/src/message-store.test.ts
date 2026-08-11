@@ -309,7 +309,7 @@ describe('MessageStore', () => {
       senderId: `sender:${'s'.repeat(16_000)}`,
       sender: {
         id: `sender:${'s'.repeat(16_000)}`,
-        firstName: 'Conversation Alias',
+        firstName: 'Profile Name',
         username: '1715311957',
         avatar: {
           id: 'avatar:user:sender',
@@ -317,6 +317,7 @@ describe('MessageStore', () => {
           locator: { avatarUin: '1715311957' },
         },
       },
+      senderTitle: 'Group Alias',
       timestamp: 1_800_000_001,
       groupId: `album:${'g'.repeat(16_000)}`,
       content: {
@@ -379,7 +380,7 @@ describe('MessageStore', () => {
     })
     expect(storedSender).toMatchObject({
       id: first.message.senderUserId,
-      firstName: 'Conversation Alias',
+      firstName: 'Profile Name',
       username: '1715311957',
       avatar: { id: 'avatar:user:sender', locator: { avatarUin: '1715311957' } },
     })
@@ -390,15 +391,16 @@ describe('MessageStore', () => {
     expect(hydrated).toMatchObject([{
       sender: {
         id: message.senderId,
-        firstName: 'Conversation Alias',
+        firstName: 'Profile Name',
         username: '1715311957',
         avatar: { locator: { avatarUin: '1715311957' } },
       },
+      senderTitle: 'Group Alias',
       metadata: {},
     }])
     await store.ingest(session, conversation, hydrated[0])
     await expect(store.getUser(session.platformId, message.senderId)).resolves.toMatchObject({
-      firstName: 'Conversation Alias', username: '1715311957',
+      firstName: 'Profile Name', username: '1715311957',
     })
   })
 

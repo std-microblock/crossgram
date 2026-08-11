@@ -299,8 +299,10 @@ export interface IMMessage<TMediaLocator = unknown> {
   sourceIds?: string[]
   conversationId: string
   senderId: string
-  /** Sender profile as observed in this conversation, including any conversation-scoped display name. */
+  /** Stable global sender profile. Conversation-scoped labels belong in `senderTitle`. */
   sender?: IMUser<TMediaLocator>
+  /** Conversation-scoped member tag/title shown beside the sender's global name. */
+  senderTitle?: string
   content: IMMessageContent<TMediaLocator>
   timestamp: number
   /** Stable lexicographically sortable native ID used to preserve message order without relying on timestamps. */

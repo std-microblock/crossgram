@@ -11,9 +11,6 @@
     # from endpoint as ws://127.0.0.1:18767/v1/events/ws.
     # webSocketEndpoint: ws://127.0.0.1:18767/v1/events/ws
     # token: optional-shared-secret
-    # groupAlias (default) uses the current group's card when present.
-    # nickname always uses the user's QQ profile nickname.
-    memberName: groupAlias
     # Hide gray-tip service messages containing any entry. Set [] to keep all.
     grayTipFilters:
       - 回应了你的消息
@@ -92,9 +89,11 @@ only for older manifests without hashes during rolling upgrades.
   entity into a recent dialog.
 
 The member API keeps the QQ profile nickname and conversation-scoped group
-alias as separate fields. The adapter selects one with `memberName`, while
-preserving both values in user metadata. User avatars use QQ's fixed qlogo
-endpoint and group avatars continue to use QQNT's avatar service; both are
+alias as separate fields. The adapter always exposes the stable profile nickname
+as the Telegram user name and maps the group alias to Telegram's member tag.
+On startup, legacy rows that stored group aliases as global names are restored
+from their retained QQ profile metadata.
+User avatars use QQ's fixed qlogo endpoint and group avatars continue to use QQNT's avatar service; both are
 exposed through the same ranged media stream.
 
 Reactions are populated from QQ's downloaded cloud-control emoji config
