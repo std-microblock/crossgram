@@ -137,12 +137,13 @@ export class StickerRpc {
       platformSessionId: this._session.platformSessionId,
       attached: req.attached ?? false,
     }).orderBy('lastUsedAt', 'desc').limit(200).execute()
-    const resolvedRows = await this._resolveRowsWithRows(rows)
+    const resolvedRows = uniqueResolvedRows(await this._resolveRowsWithRows(rows))
     const resolved = resolvedRows.map((item) => item.resolved)
+    const hash = documentVectorHash(resolved)
+    if (hashMatches(req.hash, hash)) return { _: 'messages.recentStickersNotModified' }
     return {
       _: 'messages.recentStickers',
-      hash: Long.fromNumber(catalogHash(resolvedRows.map(({ row }) =>
-        `${row.providerId}:${row.providerStickerId}:${row.useCount}`))),
+      hash,
       packs: stickerPacks(resolved),
       stickers: resolved.map((item) => this._makeDocument(item)),
       dates: resolvedRows.map(({ row }) => Math.floor(row.lastUsedAt.getTime() / 1000)),
@@ -643,7 +644,10 @@ export class StickerRpc {
         size: Math.min(coverMetadata.size ?? 0, 0x7fffffff),
       }] : undefined,
       thumbDcId: cover ? this._dcId : undefined,
-      thumbVersion: cover ? STICKER_PROJECTION_VERSION : undefined,
+      // Telegram Desktop keys sticker-set thumbnail files by dc_id and
+      // thumb_version, not by set ID. A shared constant therefore aliases
+      // every pack to whichever cover was downloaded first.
+      thumbVersion: cover ? packThumbVersion(pack, cover) : undefined,
       thumbDocumentId: cover
         ? Long.fromNumber(this._documentId(pack.providerId, cover.stickerId))
         : undefined,
@@ -784,6 +788,42 @@ function packCover(pack: IMStickerPack): IMSticker | undefined {
   return pack.stickers.find((sticker) =>
     sticker.providerId === pack.cover!.providerId && sticker.stickerId === pack.cover!.stickerId)
     ?? pack.stickers[0]
+}
+
+function packThumbVersion(pack: IMStickerPackSummary, cover: IMSticker): number {
+  return stableId([
+    `sticker-thumb:v${STICKER_PROJECTION_VERSION}`,
+    pack.providerId,
+    pack.packId,
+    String(pack.version ?? 0),
+    cover.stickerId,
+    String(cover.version ?? 0),
+  ].join('\u0000'))
+}
+
+function documentVectorHash(items: ResolvedSticker[]): Long {
+  let hash = Long.ZERO
+  for (const item of items) {
+    hash = hash.xor(hash.shiftRightUnsigned(21))
+    hash = hash.xor(hash.shiftLeft(35))
+    hash = hash.xor(hash.shiftRightUnsigned(4))
+    hash = hash.add(Long.fromNumber(stableId(
+      `sticker-document:v${STICKER_PROJECTION_VERSION}:${item.providerId}:${item.sticker.stickerId}`,
+    )))
+  }
+  return hash
+}
+
+function uniqueResolvedRows<T>(
+  items: Array<{ row: T, resolved: ResolvedSticker }>,
+): Array<{ row: T, resolved: ResolvedSticker }> {
+  const seen = new Set<string>()
+  return items.filter(({ resolved }) => {
+    const key = `${resolved.providerId}\u0000${resolved.sticker.stickerId}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function uploadPlan(resolved: ResolvedSticker, asset: IMStickerAsset): IMStickerSendPlan {
