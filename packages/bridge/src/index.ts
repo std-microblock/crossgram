@@ -10,7 +10,7 @@ import zhCN from './locales/zh-CN.yml'
 import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import type { IMPlatform, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
-import { makeConfig, makeAppConfig, makeUser } from './synthetic.js'
+import { makeConfig, makeAppConfig, makeUser, parseEndpoint } from './synthetic.js'
 import {
   DialogRpc,
   type LegacyGetForumTopicsByIdRequest, type LegacyGetForumTopicsRequest,
@@ -81,6 +81,7 @@ export interface BridgeConfig {
   dcId?: number
   serverHost?: string
   serverPort?: number
+  altEndpoints?: string[]
   /** HTTP prefix for platform account assets (default: /api). */
   apiPrefix?: string
   uploadPath?: string
@@ -105,6 +106,16 @@ export const Config = z.object({
   dcId: z.natural().min(1).max(6).default(1),
   serverHost: z.string().default('127.0.0.1'),
   serverPort: z.natural().min(1).max(65_535).default(4430),
+  altEndpoints: z.array(z.transform(z.string(), (endpoint) => {
+    try {
+      parseEndpoint(endpoint)
+      return endpoint
+    } catch (error) {
+      throw new z.ValidationError(`invalid altEndpoints endpoint: ${(error as Error).message}`, {
+        path: ['altEndpoints'],
+      })
+    }
+  })).default([]),
   apiPrefix: z.string().default('/api'),
   uploadPath: z.string().default('data/bridge-uploads'),
   autoMuteGroupChats: z.boolean().default(true),
@@ -456,7 +467,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   })
 
   // ── Synthetic / config ──
-  ctx.mtproto.register('help.getConfig', async () => makeConfig(dcId, config.serverHost, config.serverPort))
+  ctx.mtproto.register('help.getConfig', async () => makeConfig(
+    dcId, config.serverHost, config.serverPort, config.altEndpoints,
+  ))
   ctx.mtproto.register('help.getAppConfig', async () => makeAppConfig())
   ctx.mtproto.register('help.getNearestDc', async () => ({
     _: 'nearestDc', country: 'US', thisDc: dcId, nearestDc: dcId,

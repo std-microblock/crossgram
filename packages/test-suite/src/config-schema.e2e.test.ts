@@ -25,6 +25,16 @@ describe('loader WebUI config discovery', () => {
     expect(Object.keys(root.dict ?? {}).length).toBeGreaterThan(0)
   })
 
+  it('serializes alternate bridge endpoints through the loader', () => {
+    const plugin = Loader.prototype.unwrapExports(bridge)
+    const serialized = JSON.parse(JSON.stringify({ schema: plugin.Config }))
+    const root = serialized.schema.refs[serialized.schema.uid]
+    expect(root.dict).toHaveProperty('altEndpoints')
+    expect(plugin.Config({})).toMatchObject({ altEndpoints: [] })
+    expect(plugin.Config({ altEndpoints: ['bridge-backup.example:8443'] }))
+      .toMatchObject({ altEndpoints: ['bridge-backup.example:8443'] })
+  })
+
   it('serializes the QQNT gray-tip filter list and its reaction-notice default through the loader', () => {
     const plugin = Loader.prototype.unwrapExports(qqnt)
     const serialized = JSON.parse(JSON.stringify({ schema: plugin.Config }))

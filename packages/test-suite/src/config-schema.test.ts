@@ -12,7 +12,7 @@ import { Config as resourcesConfig } from '../../telegram-resources/src/index.js
 
 const cases = [
   ['bridge', bridgeConfig, [
-    'dcId', 'serverHost', 'serverPort', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
+    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
     'blockedContentMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
@@ -51,6 +51,7 @@ describe('plugin config schemas', () => {
       dcId: 1,
       serverHost: '127.0.0.1',
       serverPort: 4430,
+      altEndpoints: [],
       apiPrefix: '/api',
       uploadPath: 'data/bridge-uploads',
       autoMuteGroupChats: true,
@@ -77,6 +78,27 @@ describe('plugin config schemas', () => {
     expect(discordConfig({ token: 'user-token' })).toMatchObject({
       token: 'user-token', includeBots: true, downloadChunkSize: 256 * 1024,
     })
+  })
+
+  it('validates and normalizes alternate bridge endpoints', () => {
+    expect(bridgeConfig({ altEndpoints: [
+      'bridge-backup.example:8443',
+      '203.0.113.10:4430',
+      '[2001:db8::1]:4430',
+    ] }).altEndpoints).toEqual([
+      'bridge-backup.example:8443',
+      '203.0.113.10:4430',
+      '[2001:db8::1]:4430',
+    ])
+    for (const endpoint of [
+      'bridge-backup.example',
+      'bridge-backup.example:0',
+      'bridge-backup.example:65536',
+      '2001:db8::1:4430',
+      { host: 'bridge-backup.example', port: 8443 },
+    ]) {
+      expect(() => bridgeConfig({ altEndpoints: [endpoint] as any })).toThrow(/altEndpoints/)
+    }
   })
 
   it('rejects invalid values at the field path', () => {

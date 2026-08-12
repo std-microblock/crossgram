@@ -1,6 +1,7 @@
 dcId: 网桥向 Telegram 客户端公布的数据中心 ID。
 serverHost: 向 Telegram 客户端公布的 MTProto 主机地址。
-serverPort: 向 Telegram 客户端公布的 MTProto 端口。
+serverPort: 向 Telegram 客户端公布的 MTProto 主端口。
+altEndpoints: 在同一数据中心中、紧随主地址向 Telegram 客户端公布的备用 MTProto 地址，格式为 host:port 或 [IPv6]:port。
 apiPrefix: 平台账户资源使用的 HTTP 路径前缀。
 uploadPath: 用于存储 Telegram 客户端上传文件的目录。
 autoMuteGroupChats: 默认关闭群聊通知；可在 Telegram 中为单个群聊单独开启。

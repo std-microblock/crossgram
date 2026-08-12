@@ -433,7 +433,13 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 describe('bridge login e2e', () => {
   it('authorizes an Android media DC connection and downloads a peer avatar', async () => {
     const { ctx, port, pubKey, stop } = await startApp({
-      bridgeConfig: { dcId: 1, serverHost: '10.20.30.40', serverPort: 8443 },
+      bridgeConfig: {
+        dcId: 1, serverHost: '10.20.30.40', serverPort: 8443,
+        altEndpoints: [
+          '10.20.30.41:9443',
+          '10.20.30.42:10443',
+        ],
+      },
     })
     let mainClient: TestClient | undefined
     let mediaClient: TestClient | undefined
@@ -447,10 +453,11 @@ describe('bridge login e2e', () => {
         _: 'config',
         thisDc: 1,
         webfileDcId: 1,
-        dcOptions: [{
-          _: 'dcOption', id: 1, ipAddress: '10.20.30.40', port: 8443,
-          tcpoOnly: true, static: true,
-        }],
+        dcOptions: [
+          { _: 'dcOption', id: 1, ipAddress: '10.20.30.40', port: 8443, tcpoOnly: true, static: true },
+          { _: 'dcOption', id: 1, ipAddress: '10.20.30.41', port: 9443, tcpoOnly: true, static: true },
+          { _: 'dcOption', id: 1, ipAddress: '10.20.30.42', port: 10443, tcpoOnly: true, static: true },
+        ],
       })
 
       const sent = await callRpc(mainClient, mainKey, mainSid, {

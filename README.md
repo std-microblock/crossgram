@@ -218,6 +218,17 @@ yarn build && yarn start  # 生产模式
     host: 127.0.0.1
     rsaKeyPath: ./data/rsa-key.json
 
+- id: bridge01
+  name: '@mtproto-relay/bridge'
+  config:
+    dcId: 1
+    serverHost: 192.168.1.10
+    serverPort: 4430
+    altEndpoints:
+      - 192.168.1.11:4430
+      - bridge-backup.example:8443
+      - '[2001:db8::1]:4430'
+
 - id: qqnt   # QQ 平台
   name: '@mtproto-relay/platform-qqnt'
   config:
@@ -241,6 +252,12 @@ yarn build && yarn start  # 生产模式
     proxy: http://127.0.0.1:7890    # 可选；Node 不会自动使用系统代理
 ```
 </details>
+
+`serverHost` 和 `serverPort` 是主地址；`altEndpoints` 是按配置顺序公告的同一 `dcId`
+备用地址字符串，格式为 `host:port` 或 `[IPv6]:port`（裸 IPv6 会被拒绝）。bridge 只公告
+这些地址，不做健康检查或主动 fallback；是否在主地址不可用时尝试备用地址由客户端决定。首次
+启动连接仍使用二进制补丁写入的主地址，因此补丁的 `--host` 和 `--port` 应指向
+`serverHost` / `serverPort`。
 
 Matrix 适配器当前支持未加密房间。端到端加密事件会显示明确的占位消息，
 不会把密文当作附件下载；完整配置、能力与限制见
