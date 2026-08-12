@@ -1,17 +1,40 @@
 import type { tl } from '@mtcute/core'
+import { isIP } from 'node:net'
 import Long from 'long'
 
-/** Synthesized `config` advertising only this bridge's configured DC. */
-export function makeConfig(dcId: number, host = '127.0.0.1', port = 4430): tl.TlObject {
+export interface Endpoint {
+  host: string
+  port: number
+}
+
+/** Parse an endpoint in `host:port` or `[IPv6]:port` form. */
+export function parseEndpoint(endpoint: string): Endpoint {
+  const match = /^(?:\[([^\]]+)\]|([^:\[\]\s]+)):(\d+)$/u.exec(endpoint)
+  if (!match) throw new Error('expected host:port or [IPv6]:port')
+
+  const host = match[1] ?? match[2]
+  const port = Number(match[3])
+  if (match[1] && isIP(host) !== 6) throw new Error('bracketed host must be IPv6')
+  if (port < 1 || port > 65_535) throw new Error('port must be between 1 and 65535')
+  return { host, port }
+}
+
+/** Synthesized `config` advertising this bridge's configured DC endpoints. */
+export function makeConfig(
+  dcId: number,
+  host = '127.0.0.1',
+  port = 4430,
+  altEndpoints: string[] = [],
+): tl.TlObject {
   const now = Math.floor(Date.now() / 1000)
   return {
     _: 'config', flags: 0, defaultP2pContacts: false, preloadFeaturedStickers: false,
     revokePmInbox: false, blockedMode: false, forceTryIpv6: false, date: now, expires: now + 3600,
     testMode: false, thisDc: dcId,
-    dcOptions: [{
-      _: 'dcOption', flags: 0, ipv6: false, mediaOnly: false, tcpoOnly: true, cdn: false, static: true,
+    dcOptions: [{ host, port }, ...altEndpoints.map(parseEndpoint)].map(({ host, port }) => ({
+      _: 'dcOption', flags: 0, ipv6: isIP(host) === 6, mediaOnly: false, tcpoOnly: true, cdn: false, static: true,
       id: dcId, ipAddress: host, port,
-    }],
+    })),
     dcTxtDomainName: '', chatSizeMax: 200, megagroupSizeMax: 200000, forwardedCountMax: 100,
     onlineUpdatePeriodMs: 120000, offlineBlurTimeoutMs: 5000, offlineIdleTimeoutMs: 30000,
     onlineCloudTimeoutMs: 300000, notifyCloudDelayMs: 30000, notifyDefaultDelayMs: 1500,

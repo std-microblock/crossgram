@@ -1,6 +1,7 @@
 dcId: Telegram data-center ID advertised by the bridge.
 serverHost: Public MTProto host advertised to Telegram clients.
 serverPort: Public MTProto port advertised to Telegram clients.
+altEndpoints: Alternate MTProto endpoints for the same data center, as host:port or [IPv6]:port strings, advertised after the primary endpoint.
 apiPrefix: HTTP prefix used for platform account assets.
 uploadPath: Directory used to store uploads received from Telegram clients.
 autoMuteGroupChats: Mute group chats by default; per-chat Telegram settings can override this.
