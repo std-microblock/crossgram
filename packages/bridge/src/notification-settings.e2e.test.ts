@@ -224,6 +224,101 @@ describe('notification settings RPC e2e', () => {
     ]))
   })
 
+  it('mirrors QQ group message masks in peer notify settings and dialog materialization', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise(resolve => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const groups: IMConversation[] = [
+      { id: 'mask-notify', kind: 'group', title: 'Notify', metadata: { qqGroupMsgMask: 1 } },
+      { id: 'mask-assistant', kind: 'group', title: 'Assistant', metadata: { qqGroupMsgMask: 2 } },
+      { id: 'mask-receive', kind: 'group', title: 'Receive', metadata: { qqGroupMsgMask: 4 } },
+      { id: 'mask-unspecified', kind: 'group', title: 'Unspecified', metadata: { qqGroupMsgMask: 0 } },
+      { id: 'mask-shield', kind: 'group', title: 'Shield', metadata: { qqGroupMsgMask: 3 } },
+    ]
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: groups.map(conversation => ({ conversation, unreadCount: 0 })) } },
+      async getHistory() { return { messages: [] } },
+    }
+    const settings = new NotificationSettingsStore(ctx.database, true)
+    const dialogs = createDialog(settings, targetPlatform)
+    const dispatcher = dispatcherFor(dialogs)
+    await dialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    const peer = (id: string) => ({
+      _: 'inputNotifyPeer' as const,
+      peer: { _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE },
+    })
+
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('mask-notify'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('mask-unspecified'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 123 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('mask-notify'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('mask-assistant'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('mask-receive'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+    const assistantTopic = {
+      _: 'inputNotifyForumTopic' as const,
+      peer: peer('mask-assistant').peer,
+      topMsgId: 1,
+    }
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: assistantTopic,
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 456 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: assistantTopic,
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 456 })
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('mask-unspecified'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 123 })
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('mask-shield'),
+    })).resolves.toEqual({ _: 'peerNotifySettings' })
+
+    const page = await dialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    if (page._ === 'messages.dialogsNotModified') throw new Error('expected materialized dialogs')
+    const archive = await dialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO, folderId: 1,
+    })
+    if (archive._ === 'messages.dialogsNotModified') throw new Error('expected materialized archive')
+    const muteUntilByPeer = new Map([...page.dialogs, ...archive.dialogs]
+      .filter((dialog): dialog is tl.RawDialog => dialog._ === 'dialog')
+      .map((dialog) => [
+        (dialog.peer as tl.RawPeerChannel).channelId,
+        dialog.notifySettings.muteUntil,
+      ]))
+    expect(muteUntilByPeer.get(stableId('peer:mask-notify'))).toBe(0)
+    expect(muteUntilByPeer.get(stableId('peer:mask-assistant'))).toBe(MUTE_FOREVER)
+    expect(muteUntilByPeer.get(stableId('peer:mask-receive'))).toBe(MUTE_FOREVER)
+    expect(muteUntilByPeer.get(stableId('peer:mask-unspecified'))).toBe(123)
+    expect(muteUntilByPeer.get(stableId('peer:mask-shield'))).toBeUndefined()
+  })
+
   it('round-trips group defaults and durable per-chat overrides through TL and SQLite', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
