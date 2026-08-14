@@ -255,8 +255,28 @@ export interface WireCallSignalEvent {
   timestamp: number
 }
 
+export type WireRequestKind = 'friend' | 'group-join'
+
+export type WireRequestStatus = 'pending' | 'accepted' | 'rejected'
+
+export interface WireRequest {
+  id: string
+  kind: WireRequestKind
+  status: WireRequestStatus
+  requester: { id: string, name?: string }
+  group?: { id: string, name?: string }
+  message?: string
+  timestamp?: string | number
+}
+
+export interface WireRequestPage {
+  requests: WireRequest[]
+  nextCursor?: string
+}
+
 export type WireEvent =
   | { type: 'message', conversation: WireConversation, message: WireMessage }
+  | { type: 'request', request: WireRequest }
   | WireCallSignalEvent
   | WireNativeAvsdkEvent
   | {

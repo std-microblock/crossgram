@@ -176,6 +176,41 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getConversation).toHaveBeenCalledWith('2:legacy-group')
   })
 
+  it('maps request lists and resolutions without exposing approval payloads', async () => {
+    const platform = new QQNTPlatform()
+    const request = {
+      id: 'request/opaque:42', kind: 'group-join' as const, status: 'pending' as const,
+      requester: { id: 'u_opaque', name: 'Alice' }, group: { id: 'group/opaque', name: 'Group' },
+      message: 'please approve', timestamp: '1710000000', approval: { nativePayload: 'secret' },
+    }
+    platform.client.getRequests = vi.fn(async () => ({ requests: [request] }))
+    platform.client.resolveRequest = vi.fn(async () => ({
+      id: 'friend-opaque', kind: 'friend' as const, status: 'accepted' as const,
+      requester: { id: 'u_friend' }, timestamp: 1710000001,
+    }))
+
+    const requestPage = await platform.getRequests(session, {
+      kind: 'group-join', cursor: 'opaque-cursor', limit: 25,
+    })
+    expect(requestPage).toEqual({
+      requests: [{
+        id: 'request/opaque:42', kind: 'group-join', state: 'pending',
+        requester: { id: 'u_opaque', firstName: 'Alice' },
+        group: { id: 'group/opaque', kind: 'group', title: 'Group' },
+        message: 'please approve', createdAt: '1710000000',
+      }],
+    })
+    expect(requestPage.nextCursor).toBeUndefined()
+    await expect(platform.resolveRequest(session, 'friend-opaque', 'accept')).resolves.toEqual({
+      id: 'friend-opaque', kind: 'friend', state: 'accepted',
+      requester: { id: 'u_friend', firstName: 'u_friend' }, createdAt: 1710000001,
+    })
+    expect(platform.client.getRequests).toHaveBeenCalledWith({
+      kind: 'group-join', cursor: 'opaque-cursor', limit: 25,
+    })
+    expect(platform.client.resolveRequest).toHaveBeenCalledWith('friend-opaque', 'accept')
+  })
+
   it('does not wait indefinitely for reaction resources before returning history', async () => {
     const platform = new QQNTPlatform()
     let releaseCatalog!: () => void
@@ -1148,6 +1183,42 @@ describe('QQNTPlatform mapping', () => {
     expect(logger.debug).not.toHaveBeenCalled()
     expect(logger.warn).not.toHaveBeenCalled()
     expect(logger.error).not.toHaveBeenCalled()
+    await unsubscribe()
+  })
+
+  it('maps request WebSocket events without invoking message or gray-tip paths', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const request = {
+      type: 'request' as const,
+      request: {
+        id: 'request/opaque:42', kind: 'group-join' as const, status: 'pending' as const,
+        requester: { id: 'u_opaque', name: 'Alice' }, group: { id: 'group/opaque', name: 'Group' },
+        message: 'please approve', timestamp: 1710000000,
+      },
+    }
+    const acknowledged: string[] = []
+    platform.client.subscribe = vi.fn(async (handler, signal, options) => {
+      await handler(request, 'request-event')
+      await options.onEventId?.('request-event')
+      acknowledged.push('request-event')
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(acknowledged).toEqual(['request-event']))
+
+    expect(received).toEqual([{
+      type: 'request',
+      request: {
+        id: 'request/opaque:42', kind: 'group-join', state: 'pending',
+        requester: { id: 'u_opaque', firstName: 'Alice' },
+        group: { id: 'group/opaque', kind: 'group', title: 'Group' },
+        message: 'please approve', createdAt: 1710000000,
+      },
+    }])
     await unsubscribe()
   })
 

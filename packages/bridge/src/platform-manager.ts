@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto'
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
 import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
+import { isRequestInboxConversation, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 import type {
   IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMMessageSearchPage,
   IMMessageSearchQuery, IMPlatform, PlatformSession,
@@ -235,23 +237,39 @@ export class PlatformSubscriptionManager {
   }
 
   private async _reconcileSession(platform: IMPlatform, session: PlatformSession): Promise<void> {
-    if (!platform.capabilities.history || !platform.getDialogs) return
-    const data = new PlatformDataService(
-      platform, session, this._store, this._onTrace, undefined,
-      (event) => this._enqueue(session, event),
-    )
-    let afterId: string | undefined
-    const visited = new Set<string | undefined>()
-    while (!visited.has(afterId)) {
-      visited.add(afterId)
-      const page = await data.getDialogsPage({ limit: 500, afterId })
-      if (!page.dialogs.length) return
-      const lastId = page.dialogs.at(-1)!.conversation.id
-      const hasMore = Boolean(page.nextCursor)
-        || (page.total !== undefined && visited.size * 500 < page.total)
-        || page.dialogs.length >= 500
-      if (!hasMore || lastId === afterId) return
-      afterId = lastId
+    if (platform.capabilities.history && platform.getDialogs) {
+      const data = new PlatformDataService(
+        platform, session, this._store, this._onTrace, undefined,
+        (event) => this._enqueue(session, event),
+      )
+      let afterId: string | undefined
+      const visited = new Set<string | undefined>()
+      while (!visited.has(afterId)) {
+        visited.add(afterId)
+        const page = await data.getDialogsPage({ limit: 500, afterId })
+        if (!page.dialogs.length) break
+        const lastId = page.dialogs.at(-1)!.conversation.id
+        const hasMore = Boolean(page.nextCursor)
+          || (page.total !== undefined && visited.size * 500 < page.total)
+          || page.dialogs.length >= 500
+        if (!hasMore || lastId === afterId) break
+        afterId = lastId
+      }
+    }
+    if (!platform.getRequests) return
+    let cursor: string | undefined
+    const visitedCursors = new Set<string | undefined>()
+    while (!visitedCursors.has(cursor)) {
+      visitedCursors.add(cursor)
+      const page = await platform.getRequests(session, { limit: 500, cursor })
+      // Cursor pages may overlap. Re-ingesting an unchanged request is a
+      // no-op, while a later duplicate can carry its terminal state and must
+      // edit the pending inbox projection rather than being discarded.
+      for (const request of page.requests) {
+        await this._enqueue(session, { type: 'request', request })
+      }
+      if (!page.nextCursor || page.nextCursor === cursor) break
+      cursor = page.nextCursor
     }
   }
 
@@ -342,6 +360,29 @@ export class PlatformSubscriptionManager {
     } else if (event.type === 'message-reactions') {
       const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
       if (result) return this._onEvent?.(session, { event, result }, options)
+    } else if (event.type === 'request') {
+      const stored = await this._store.ingestRequest(session, event.request)
+      const conversation = requestInboxConversation()
+      const message = requestInboxMessage(stored.request)
+      // Request persistence alone is not a delivery marker: a prior failure may
+      // have committed a legacy request row before its inbox projection. The
+      // message ingestion result determines whether this replay is a new
+      // message, an edit, or a complete no-op.
+      if (!stored.message.created && !stored.message.changed && event.delivery !== 'recovery') return
+      if (stored.message.created) {
+        return this._onEvent?.(session, {
+          event: { type: 'message', conversation, message }, result: stored.message,
+        }, options)
+      }
+      return this._onEvent?.(session, {
+        event: {
+          type: 'message-edit',
+          eventId: requestInboxEditEventId(stored.request.id, message),
+          conversation,
+          message,
+        },
+        result: stored.message,
+      }, event.delivery === 'recovery' ? { ...options, forceDelivery: true } : options)
     } else if (event.type === 'read') {
       const result = await this._store.markRead(session, event.conversationId, event.upToMessageId)
       if (result) return this._onEvent?.(session, { event, result }, options)
@@ -350,6 +391,15 @@ export class PlatformSubscriptionManager {
       return this._onEvent?.(session, { event }, options)
     }
   }
+}
+
+function requestInboxEditEventId(requestId: string, message: import('./platform.js').IMMessage): string {
+  const hash = createHash('sha256').update(JSON.stringify({
+    requestId,
+    text: message.content.parts,
+    inlineKeyboard: message.content.inlineKeyboard,
+  })).digest('hex')
+  return `bridge-request:${encodeURIComponent(requestId)}:${hash}`
 }
 
 function platformEventSummary(event: IMEvent): string {
@@ -368,6 +418,7 @@ function platformEventSummary(event: IMEvent): string {
   if (event.type === 'voice-call') {
     return `type=voice-call signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`
   }
+  if (event.type === 'request') return `type=request request=${event.request.id} kind=${event.request.kind}`
   return `type=conversation conversation=${event.conversation.id}`
 }
 
@@ -395,6 +446,8 @@ export interface PlatformEventDeliveryOptions {
   excludeConnection?: ServerConnection
   /** Treat the durable delivery as published even when no socket push was sent. */
   deliveredViaRpc?: boolean
+  /** Internal recovery path for an unchanged projection whose update was not delivered. */
+  forceDelivery?: boolean
 }
 
 export type PlatformEventPublishResult = tl.RawUpdates | void
@@ -445,9 +498,18 @@ export class PlatformDataService {
     if (!this._platform.capabilities.history || !this._platform.getDialogs) {
       return { dialogs: stored, total: stored.length }
     }
+    const requestInbox = (await this._store.readDialogs(
+      this._session.platformSessionId, ['bridge:request-inbox'],
+    ))[0]
+    const injectRequestInbox = requestInbox && query.afterId === undefined
+    const upstreamQuery = query.afterId === 'bridge:request-inbox'
+      ? { ...query, afterId: undefined }
+      : injectRequestInbox
+        ? { ...query, limit: Math.max(1, (query.limit ?? 100) - 1) }
+        : query
     let upstreamPage: IMDialogPage
     try {
-      upstreamPage = await this._platform.getDialogs(this._session, query)
+      upstreamPage = await this._platform.getDialogs(this._session, upstreamQuery)
     } catch (error) {
       if (!stored.length) throw error
       this._onTrace?.(
@@ -456,23 +518,32 @@ export class PlatformDataService {
       )
       return { dialogs: stored, total: stored.length }
     }
+    const upstreamDialogs = upstreamPage.dialogs.filter((dialog) =>
+      dialog.conversation.id !== 'bridge:request-inbox')
     const persistedDialogs = await this._store.readDialogs(
       this._session.platformSessionId,
-      upstreamPage.dialogs.map((dialog) => dialog.conversation.id),
+      upstreamDialogs.map((dialog) => dialog.conversation.id),
     )
-    await this._reconcileDialogs(upstreamPage.dialogs, persistedDialogs)
+    await this._reconcileDialogs(upstreamDialogs, persistedDialogs)
     const persisted = new Map(persistedDialogs.map((dialog) => [dialog.conversation.id, dialog]))
+    const dialogs = upstreamDialogs.map((dialog) => {
+      const previous = persisted.get(dialog.conversation.id)
+      return {
+        ...previous,
+        ...dialog,
+        conversation: { ...previous?.conversation, ...dialog.conversation },
+        lastMessage: dialog.lastMessage ?? previous?.lastMessage,
+      }
+    })
+    // Fetching one upstream entry for a limit-one request preserves its total
+    // and continuation cursor, but the synthetic inbox still consumes that
+    // requested slot.
+    const upstreamSlots = injectRequestInbox ? Math.max(0, (query.limit ?? 100) - 1) : undefined
+    const pageDialogs = upstreamSlots === undefined ? dialogs : dialogs.slice(0, upstreamSlots)
     return {
       ...upstreamPage,
-      dialogs: upstreamPage.dialogs.map((dialog) => {
-        const previous = persisted.get(dialog.conversation.id)
-        return {
-          ...previous,
-          ...dialog,
-          conversation: { ...previous?.conversation, ...dialog.conversation },
-          lastMessage: dialog.lastMessage ?? previous?.lastMessage,
-        }
-      }),
+      dialogs: injectRequestInbox ? [requestInbox, ...pageDialogs] : pageDialogs,
+      ...(injectRequestInbox && upstreamPage.total !== undefined ? { total: upstreamPage.total + 1 } : {}),
     }
   }
 
@@ -549,7 +620,8 @@ export class PlatformDataService {
     let upstreamMs = 0
     let ingestMs = 0
     let upstreamMessages = 0
-    if (this._platform.capabilities.history && this._platform.getHistory) {
+    if (!isRequestInboxConversation(conversation)
+      && this._platform.capabilities.history && this._platform.getHistory) {
       const upstreamAt = performance.now()
       this._onTrace?.('history data profile stage=upstream-start conversation=%s', conversationId)
       const page = await this._platform.getHistory(this._session, { id: conversationId }, query)

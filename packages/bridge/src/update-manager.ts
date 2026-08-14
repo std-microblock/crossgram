@@ -403,8 +403,9 @@ export class UpdateManager {
     } else {
       const platform = this._registry.require(session.platformId)
       const user = await this._store.getUser(session.platformId, displayConversation.id)
-        ?? await this._store.upsertUser(session,
-          await platform.getUser?.(session, displayConversation.id)
+        ?? await this._store.upsertUser(session, displayConversation.metadata?.bridgeOwned === true
+          ? { id: displayConversation.id, firstName: displayConversation.title }
+          : await platform.getUser?.(session, displayConversation.id)
             ?? { id: displayConversation.id, firstName: displayConversation.title })
       update = {
         _: 'updateReadHistoryInbox', peer: { _: 'peerUser', userId: user.id },
@@ -450,7 +451,7 @@ export class UpdateManager {
       ? `${session.platformSessionId}:edit:${event.eventId}`
       : `${session.platformSessionId}:message:${result.message.id}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
-    if (!delivery && !result.created && !result.changed) {
+    if (!delivery && !result.created && !result.changed && !options.forceDelivery) {
       this._onTrace?.('update publish skipped eventKey=%s reason=unchanged-message', eventKey)
       return
     }
@@ -494,8 +495,9 @@ export class UpdateManager {
       : await this._store.upsertUser(session, senderProfile)
     const directPeerRow = displayConversation.kind === 'direct'
       ? await this._store.getUser(session.platformId, displayConversation.id)
-        ?? await this._store.upsertUser(session,
-          await platform.getUser?.(session, displayConversation.id)
+        ?? await this._store.upsertUser(session, displayConversation.metadata?.bridgeOwned === true
+          ? { id: displayConversation.id, firstName: displayConversation.title }
+          : await platform.getUser?.(session, displayConversation.id)
             ?? { id: displayConversation.id, firstName: displayConversation.title })
       : undefined
     const reactionUsers = await this._hydrateReactionUsers(session, visibleMessage)

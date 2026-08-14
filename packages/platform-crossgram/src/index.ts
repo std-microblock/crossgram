@@ -9,7 +9,7 @@ import {
   IMMessageSendRejectedError, IMMessageTargetUnavailableError, messagePartText, resolvePlatformPluginId,
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
-  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMTransferOptions,
+  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMTransferOptions,
   type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
   type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
 } from '@mtproto-relay/bridge'
@@ -24,7 +24,7 @@ import { migrateLegacyQQMessageMedia } from './raw-media-migration.js'
 import { migrateLegacyQQGroupAliasUsers } from './user-name-migration.js'
 import type {
   QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
-  WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireTextPart,
+  WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireRequest, WireTextPart,
 } from './protocol.js'
 
 
@@ -359,7 +359,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               return
             }
             if (event.type === 'call-signal' && !isWireCallSignalEvent(event)) return
-            if (event.type !== 'call-signal' && isMultiForwardConversationId(event.conversation.id)) {
+            if (event.type !== 'call-signal' && event.type !== 'request'
+              && isMultiForwardConversationId(event.conversation.id)) {
               if (event.type === 'message') {
                 knownLastMessageIds.set(event.conversation.id, event.message.id)
               }
@@ -656,6 +657,29 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       })),
       nextCursor: page.nextCursor,
     }
+  }
+
+  async getRequests(
+    _session: PlatformSession,
+    query: IMRequestQuery = {},
+  ): Promise<IMRequestPage<QQMediaLocator>> {
+    const page = await this.client.getRequests({
+      kind: query.kind,
+      cursor: query.cursor,
+      limit: query.limit,
+    })
+    return {
+      requests: page.requests.map(mapRequest),
+      nextCursor: page.nextCursor,
+    }
+  }
+
+  async resolveRequest(
+    _session: PlatformSession,
+    id: string,
+    action: IMRequestAction,
+  ): Promise<IMRequest<QQMediaLocator>> {
+    return mapRequest(await this.client.resolveRequest(id, action))
   }
 
   async getHistory(
@@ -1389,6 +1413,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private mapEvent(input: Exclude<WireEvent, WireNativeAvsdkEvent>): IMEvent<QQMediaLocator> {
+    if (input.type === 'request') return { type: 'request', request: mapRequest(input.request) }
     const wireConversation = input.type === 'call-signal'
       ? {
           id: input.conversation.id,
@@ -1592,6 +1617,7 @@ function wireEventSummary(event: WireEvent): string {
   if (event.type === 'message') {
     return `type=message conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.parts.length}`
   }
+  if (event.type === 'request') return `type=request request=${event.request.id} kind=${event.request.kind}`
   if (event.type === 'message-delete') {
     return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} messages=${event.messageIds.join(',')}`
   }
@@ -1637,6 +1663,7 @@ function imEventSummary(event: IMEvent<QQMediaLocator>): string {
   if (event.type === 'read') {
     return `type=read conversation=${event.conversationId} upToMessage=${event.upToMessageId}`
   }
+  if (event.type === 'request') return `type=request request=${event.request.id} kind=${event.request.kind}`
   return `type=conversation conversation=${event.conversation.id}`
 }
 
@@ -1658,6 +1685,25 @@ function mapConversation(input: WireConversation): IMConversation<QQMediaLocator
       ...(input.participantCount === undefined ? {} : { participantsCount: input.participantCount }),
       ...(input.selfRole ? { qqSelfRole: input.selfRole } : {}),
     },
+  }
+}
+
+function mapRequest(input: WireRequest): IMRequest<QQMediaLocator> {
+  return {
+    id: input.id,
+    kind: input.kind,
+    state: input.status,
+    requester: {
+      id: input.requester.id,
+      firstName: input.requester.name ?? input.requester.id,
+    },
+    group: input.group ? {
+      id: input.group.id,
+      kind: 'group',
+      title: input.group.name ?? input.group.id,
+    } : undefined,
+    message: input.message,
+    createdAt: input.timestamp,
   }
 }
 

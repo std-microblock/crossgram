@@ -149,6 +149,33 @@ export interface IMUserPage<TMediaLocator = unknown> {
   nextCursor?: string
 }
 
+/** A pending friend or group-join request, kept separate from messages and system notifications. */
+export interface IMRequest<TMediaLocator = unknown> {
+  /** Stable opaque platform request ID. */
+  id: string
+  kind: 'friend' | 'group-join'
+  state: 'pending' | 'accepted' | 'rejected'
+  requester: IMUser<TMediaLocator>
+  group?: IMConversation<TMediaLocator>
+  message?: string
+  /** Platform-provided request creation time; adapters preserve its native representation. */
+  createdAt?: string | number
+  metadata?: JsonObject
+}
+
+export interface IMRequestQuery {
+  kind?: IMRequest['kind']
+  cursor?: string
+  limit?: number
+}
+
+export interface IMRequestPage<TMediaLocator = unknown> {
+  requests: IMRequest<TMediaLocator>[]
+  nextCursor?: string
+}
+
+export type IMRequestAction = 'accept' | 'reject'
+
 export type IMMediaKind = 'image' | 'file'
 
 export interface IMMediaPreview<TLocator = unknown> {
@@ -529,6 +556,12 @@ export type IMEvent<TMediaLocator = unknown> =
       timestamp: number
     }
   | { type: 'conversation', conversation: IMConversation<TMediaLocator> }
+  | {
+      type: 'request'
+      request: IMRequest<TMediaLocator>
+      /** Re-attempt delivery for an already persisted request projection. */
+      delivery?: 'recovery'
+    }
   | { type: 'read', conversationId: string, upToMessageId: string }
   | {
       type: 'message-reactions'
@@ -593,6 +626,12 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMDialogPage<TMediaLocator>>
   /** Address-book contacts. This is intentionally separate from recent dialogs. */
   getContacts?(session: PlatformSession, query?: IMPageQuery): Promise<IMUserPage<TMediaLocator>>
+  getRequests?(session: PlatformSession, query?: IMRequestQuery): Promise<IMRequestPage<TMediaLocator>>
+  resolveRequest?(
+    session: PlatformSession,
+    id: string,
+    action: IMRequestAction,
+  ): Promise<IMRequest<TMediaLocator>>
   getHistory?(
     session: PlatformSession,
     conversation: IMConversationRef,

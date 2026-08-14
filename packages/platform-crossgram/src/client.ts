@@ -7,7 +7,7 @@ import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
-  WireReactionActorPage, WireReactionContext, WireReactionState, WireSticker, WireStickerPack, WireStickerPackSummary,
+  WireReactionActorPage, WireReactionContext, WireReactionState, WireRequest, WireRequestPage, WireSticker, WireStickerPack, WireStickerPackSummary,
   WireTextPart,
 } from './protocol.js'
 import { uploadHighway, type QQMediaUploadPlan } from './highway.js'
@@ -94,6 +94,18 @@ export class QQNTClient {
     const status = await this.json<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }>('/status')
     this.bridgeProtocol = status.protocolVersion
     return status
+  }
+
+  getRequests(query: { kind?: 'friend' | 'group-join', cursor?: string, limit?: number } = {}): Promise<WireRequestPage> {
+    return this.json(`/requests${queryString(query)}`)
+  }
+
+  resolveRequest(id: string, action: 'accept' | 'reject'): Promise<WireRequest> {
+    return this.json(`/requests/${encodeURIComponent(id)}/resolve`, false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ action }),
+    })
   }
 
   async mediaLease(callId: string): Promise<QQNTMediaLease> {
