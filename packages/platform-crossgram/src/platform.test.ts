@@ -1437,6 +1437,7 @@ describe('QQNTPlatform mapping', () => {
       role: 'owner',
       permissions: { manageMembers: true },
     })
+    expect(dialogs.dialogs[0]!.conversation.metadata).not.toHaveProperty('qqGroupMsgMask')
     expect(platform.client.getMembers).not.toHaveBeenCalled()
     const members = await platform.getConversationMembers(session, { id: '2:1058754719' })
     expect(members.members[0]).toMatchObject({
@@ -1451,6 +1452,16 @@ describe('QQNTPlatform mapping', () => {
       permissions: { manageMembers: true, editAnyMessage: true },
       title: 'Group Alias',
     })
+  })
+
+  it('propagates QQ group message masks into conversation metadata', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: '2:assistant-group', kind: 'group' as const, title: 'Assistant Group',
+      peerUid: 'assistant-group', peerUin: '10001', chatType: 2 as const, groupMsgMask: 2 as const,
+    }] }))
+    const dialogs = await platform.getDialogs(session)
+    expect(dialogs.dialogs[0]!.conversation.metadata).toMatchObject({ qqGroupMsgMask: 2 })
   })
 
   it('allows owners and administrators to edit any message but not regular members', async () => {

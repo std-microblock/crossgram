@@ -348,6 +348,65 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(second)).not.toThrow()
   })
 
+  it('scans QQ folder masks beyond the first page without pagination gaps or duplicates', async () => {
+    const dialogs = Array.from({ length: 103 }, (_, index) => {
+      const id = `group-${String(index).padStart(3, '0')}`
+      return {
+        conversation: {
+          id, kind: 'group' as const, title: id,
+          ...(index === 101 ? { metadata: { qqGroupMsgMask: 2 } } : {}),
+        },
+        unreadCount: 0,
+      }
+    })
+    const platform: IMPlatform = {
+      platformKind: 'qq',
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async getDialogs(_session, query) {
+        const start = query?.afterId
+          ? dialogs.findIndex((dialog) => dialog.conversation.id === query.afterId) + 1
+          : 0
+        const limit = query?.limit ?? dialogs.length
+        return { dialogs: dialogs.slice(Math.max(0, start), Math.max(0, start) + limit), total: dialogs.length }
+      },
+      async getHistory() { return { messages: [] } },
+      async sendMessage() { throw new Error('unused') },
+    }
+    const rpc = new DialogRpc(platform, session)
+    const peerIds = (result: tl.messages.RawDialogs | tl.messages.RawDialogsSlice) => result.dialogs
+      .filter((dialog): dialog is tl.RawDialog => dialog._ === 'dialog')
+      .map((dialog) => (dialog.peer as tl.RawPeerChannel).channelId)
+
+    const first = await rpc.getDialogs(getDialogsRequest({ limit: 100 })) as tl.messages.RawDialogsSlice
+    expect(first._).toBe('messages.dialogsSlice')
+    expect(first.count).toBe(102)
+    expect(peerIds(first)).toEqual(Array.from({ length: 100 }, (_, index) => stableId(
+      `peer:group-${String(index).padStart(3, '0')}`,
+    )))
+
+    const second = await rpc.getDialogs(getDialogsRequest({
+      limit: 100,
+      offsetPeer: {
+        _: 'inputPeerChannel', channelId: stableId('peer:group-099'), accessHash: Long.ONE,
+      },
+    })) as tl.messages.RawDialogs
+    const visible = [...peerIds(first), ...peerIds(second)]
+    expect(visible).toEqual(Array.from({ length: 102 }, (_, index) => stableId(
+      `peer:group-${String(index >= 101 ? index + 1 : index).padStart(3, '0')}`,
+    )))
+    expect(new Set(visible)).toHaveLength(102)
+
+    const archive = await rpc.getDialogs(
+      getDialogsRequest({ folderId: 1, limit: 100 }),
+    ) as tl.messages.RawDialogs
+    expect(peerIds(archive)).toEqual([stableId('peer:group-101')])
+  })
+
   it('reports the upstream total instead of the limit-plus-one probe size', async () => {
     class LargeDialogPlatform extends DialogTestPlatform {
       override async getDialogs(): Promise<IMDialogPage> {

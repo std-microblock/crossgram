@@ -1655,6 +1655,7 @@ function mapConversation(input: WireConversation): IMConversation<QQMediaLocator
       qqPeerUid: input.peerUid,
       qq: input.peerUin,
       chatType: input.chatType,
+      ...(input.groupMsgMask === undefined ? {} : { qqGroupMsgMask: input.groupMsgMask }),
       ...(input.participantCount === undefined ? {} : { participantsCount: input.participantCount }),
       ...(input.selfRole ? { qqSelfRole: input.selfRole } : {}),
     },
