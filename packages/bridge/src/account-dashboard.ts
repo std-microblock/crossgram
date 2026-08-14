@@ -20,10 +20,41 @@ export interface PlatformAccountView {
   error?: string
 }
 
+export interface CrossGramServerConfigDc {
+  id: number
+  ip: string
+  port: number
+}
+
+export interface CrossGramServerConfig {
+  name: 'CrossGram'
+  enable_special_config: false
+  host: string
+  port: number
+  rsa_key: string
+  dcs: CrossGramServerConfigDc[]
+}
+
 export interface PlatformAccountDashboardData {
   accounts: PlatformAccountView[]
+  serverConfig: CrossGramServerConfig
   updatedAt: number
   refresh(): Promise<void>
+}
+
+export function makeCrossGramServerConfig(
+  host: string,
+  port: number,
+  publicKeyPem: string,
+): CrossGramServerConfig {
+  return {
+    name: 'CrossGram',
+    enable_special_config: false,
+    host,
+    port,
+    rsa_key: publicKeyPem.trim(),
+    dcs: Array.from({ length: 5 }, (_, index) => ({ id: index + 1, ip: host, port })),
+  }
 }
 
 export function makePlatformAccountView(

@@ -228,6 +228,8 @@ export interface WireConversation {
   peerUid: string
   peerUin: string
   chatType: 1 | 2
+  /** QQ group message policy: 0 unspecified; 1 notify; 2 group assistant; 3 shield; 4 receive silently. */
+  groupMsgMask?: 0 | 1 | 2 | 3 | 4
   avatarUrl?: string
   avatar?: WireMedia
   participantCount?: number

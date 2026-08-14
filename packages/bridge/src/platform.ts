@@ -657,6 +657,16 @@ export interface IMPlatform<TMediaLocator = unknown> {
     session: PlatformSession,
     target: IMReadTarget,
   ): Promise<void>
+  /**
+   * Reverse-sync a conversation notification mask (e.g. QQ group message mask).
+   * Platforms that lack this concept leave it undefined; the bridge only calls
+   * it when the target conversation carries platform-native mask metadata.
+   */
+  setConversationNotificationMask?(
+    session: PlatformSession,
+    conversationId: string,
+    mask: number,
+  ): Promise<void>
   getUser?(session: PlatformSession, userId: string): Promise<IMUser<TMediaLocator> | null>
   getConversationMember?(
     session: PlatformSession,

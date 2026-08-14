@@ -426,6 +426,18 @@ export class QQNTClient {
     })
   }
 
+  async setNotificationMask(chatType: number, peerUin: string, msgMask: number): Promise<void> {
+    await this.json(
+      `/conversations/${chatType}/${encodeURIComponent(peerUin)}/notification-mask`,
+      false,
+      {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ msgMask }),
+      },
+    )
+  }
+
   async getMessage(conversationId: string, messageId: string): Promise<WireMessage | null> {
     const response = await this.fetchImpl(`${this.endpoint}/messages/get`, {
       method: 'POST',
