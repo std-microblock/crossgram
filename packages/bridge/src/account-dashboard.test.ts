@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { ProvisionedPlatformAccount } from './platform-account.js'
-import { makePlatformAccountView, makeUnavailableAccountView } from './account-dashboard.js'
+import {
+  makeCrossGramServerConfig, makePlatformAccountView, makeUnavailableAccountView,
+} from './account-dashboard.js'
 
 const provisioned: ProvisionedPlatformAccount = {
   auth: {
@@ -35,5 +37,27 @@ describe('platform account dashboard projection', () => {
       .toMatchObject({ status: 'error', error: 'not ready' })
     expect(makeUnavailableAccountView('legacy', 'legacy', 'unsupported'))
       .toEqual({ platformId: 'legacy', platformKind: 'legacy', status: 'unsupported', error: undefined })
+  })
+
+  it('creates the CrossGram client connection configuration without server secrets', () => {
+    const config = makeCrossGramServerConfig('203.0.113.8', 4430, '  -----BEGIN RSA PUBLIC KEY-----\nkey\n-----END RSA PUBLIC KEY-----\n  ')
+
+    expect(config).toEqual({
+      name: 'CrossGram',
+      enable_special_config: false,
+      host: '203.0.113.8',
+      port: 4430,
+      rsa_key: '-----BEGIN RSA PUBLIC KEY-----\nkey\n-----END RSA PUBLIC KEY-----',
+      dcs: [
+        { id: 1, ip: '203.0.113.8', port: 4430 },
+        { id: 2, ip: '203.0.113.8', port: 4430 },
+        { id: 3, ip: '203.0.113.8', port: 4430 },
+        { id: 4, ip: '203.0.113.8', port: 4430 },
+        { id: 5, ip: '203.0.113.8', port: 4430 },
+      ],
+    })
+    expect(JSON.stringify(config)).not.toMatch(
+      /altEndpoints|privateKey|rsaKeyPath|token|credentials|totp/i,
+    )
   })
 })
