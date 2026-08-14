@@ -115,12 +115,16 @@ export const PlatformAccountsPage = defineComponent({
     const now = ref(Date.now())
     const refreshing = ref(false)
     const refreshError = ref<string>()
+    const serverConfig = computed(() => JSON.stringify(data.value.serverConfig, null, 2))
+    const copiedServerConfig = ref(false)
     let timer: ReturnType<typeof setInterval> | undefined
+    let copiedTimer: ReturnType<typeof setTimeout> | undefined
     onMounted(() => {
       timer = setInterval(() => { now.value = Date.now() }, 250)
     })
     onBeforeUnmount(() => {
       if (timer) clearInterval(timer)
+      if (copiedTimer) clearTimeout(copiedTimer)
     })
     const refresh = async () => {
       refreshing.value = true
@@ -132,6 +136,16 @@ export const PlatformAccountsPage = defineComponent({
       } finally {
         refreshing.value = false
       }
+    }
+    const copyServerConfig = async () => {
+      try {
+        await copyText(serverConfig.value)
+      } catch {
+        return
+      }
+      copiedServerConfig.value = true
+      if (copiedTimer) clearTimeout(copiedTimer)
+      copiedTimer = setTimeout(() => { copiedServerConfig.value = false }, 1_500)
     }
 
     return () => {
@@ -150,6 +164,24 @@ export const PlatformAccountsPage = defineComponent({
         </div>,
         default: () => <main class="accounts-content">
           {refreshError.value && <div class="dashboard-error" role="alert">刷新失败：{refreshError.value}</div>}
+          <section class="server-config-panel" aria-labelledby="server-config-heading">
+            <div class="server-config-header">
+              <div>
+                <h2 id="server-config-heading">服务器连接配置</h2>
+                <p>将以下 JSON 导入 CrossGram 客户端以连接此服务器。</p>
+              </div>
+              <button
+                type="button"
+                class="copy-button"
+                aria-label="复制服务器连接配置"
+                onClick={copyServerConfig}
+              >{copiedServerConfig.value ? '已复制' : '复制'}</button>
+            </div>
+            <pre class="server-config-code"><code>{serverConfig.value}</code></pre>
+            <span class="sr-only" aria-live="polite">
+              {copiedServerConfig.value ? '服务器连接配置已复制' : ''}
+            </span>
+          </section>
           {accounts.length
             ? <div class="account-grid">
               {accounts.map(account => <PlatformAccountCard key={account.platformId} account={account} now={now.value} />)}
@@ -325,9 +357,12 @@ export async function copyText(value: string): Promise<void> {
   input.style.position = 'fixed'
   input.style.opacity = '0'
   document.body.append(input)
-  input.select()
-  document.execCommand('copy')
-  input.remove()
+  try {
+    input.select()
+    if (!document.execCommand('copy')) throw new Error('Clipboard write failed')
+  } finally {
+    input.remove()
+  }
 }
 
 export default function apply(ctx: Context): void {

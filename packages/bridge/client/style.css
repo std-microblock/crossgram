@@ -302,6 +302,53 @@
   box-sizing: border-box;
 }
 
+.server-config-panel {
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg0);
+}
+
+.server-config-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.server-config-header h2,
+.server-config-header p {
+  margin: 0;
+}
+
+.server-config-header h2 {
+  font-size: 15px;
+}
+
+.server-config-header p {
+  margin-top: 4px;
+  color: var(--fg2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.server-config-code {
+  overflow: auto;
+  max-height: 360px;
+  margin: 14px 0 0;
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--bg1);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.server-config-code code {
+  display: block;
+  min-width: max-content;
+}
+
 .accounts-intro {
   display: flex;
   align-items: center;
@@ -659,6 +706,19 @@
   .pack-symbol {
     width: 42px;
     height: 42px;
+  }
+
+  .server-config-panel {
+    padding: 14px;
+  }
+
+  .server-config-header {
+    gap: 12px;
+  }
+
+  .server-config-code {
+    max-height: 300px;
+    padding: 12px;
   }
 
   .accounts-intro {

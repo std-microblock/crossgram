@@ -2,7 +2,7 @@
 
 import { mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PlatformAccountDashboardData } from '../src/account-dashboard.js'
 import type { StickerPackDashboardData } from '../src/sticker-dashboard.js'
 
@@ -15,7 +15,13 @@ vi.mock('@cordisjs/client', async () => {
   return { useRpc: () => ref(rpcState.data) }
 })
 
-import { StickerPacksPage } from './page.js'
+import { PlatformAccountsPage, StickerPacksPage } from './page.js'
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe('Bridge sticker pack management page', () => {
   beforeEach(() => {
@@ -54,6 +60,76 @@ describe('Bridge sticker pack management page', () => {
   })
 })
 
+describe('Bridge platform account page', () => {
+  beforeEach(() => {
+    rpcState.data = dashboardData()
+  })
+
+  it('shows one server configuration panel for multiple accounts', () => {
+    rpcState.data.accounts = [
+      { platformId: 'qq/primary', platformKind: 'qq', status: 'ready' },
+      { platformId: 'static/demo', platformKind: 'static', status: 'unsupported' },
+    ]
+    const wrapper = mountPlatformAccountsPage()
+
+    expect(wrapper.findAll('.server-config-panel')).toHaveLength(1)
+    expect(wrapper.findAll('.platform-account-card')).toHaveLength(2)
+    expect(wrapper.get('.server-config-code').text()).toBe(
+      JSON.stringify(rpcState.data.serverConfig, null, 2),
+    )
+    wrapper.unmount()
+  })
+
+  it('shows the server configuration panel with no platform accounts', () => {
+    const wrapper = mountPlatformAccountsPage()
+
+    expect(wrapper.findAll('.server-config-panel')).toHaveLength(1)
+    expect(wrapper.find('.accounts-empty').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('copies the server configuration and resets the copied state', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const wrapper = mountPlatformAccountsPage()
+    const button = wrapper.get('[aria-label="复制服务器连接配置"]')
+
+    await button.trigger('click')
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify(rpcState.data.serverConfig, null, 2))
+    expect(button.text()).toBe('已复制')
+    expect(wrapper.get('[aria-live="polite"]').text()).toContain('服务器连接配置已复制')
+
+    await vi.advanceTimersByTimeAsync(1_500)
+    expect(button.text()).toBe('复制')
+    wrapper.unmount()
+  })
+
+  it('does not show copied state when copying the server configuration fails', async () => {
+    const writeText = vi.fn(async () => { throw new Error('clipboard unavailable') })
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const wrapper = mountPlatformAccountsPage()
+
+    await wrapper.get('[aria-label="复制服务器连接配置"]').trigger('click')
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[aria-label="复制服务器连接配置"]').text()).toBe('复制')
+    wrapper.unmount()
+  })
+
+  it('does not show copied state when the fallback copy command fails', async () => {
+    vi.stubGlobal('navigator', {})
+    const execCommand = vi.fn(() => false)
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: execCommand })
+    const wrapper = mountPlatformAccountsPage()
+
+    await wrapper.get('[aria-label="复制服务器连接配置"]').trigger('click')
+    expect(execCommand).toHaveBeenCalledWith('copy')
+    expect(wrapper.get('[aria-label="复制服务器连接配置"]').text()).toBe('复制')
+    wrapper.unmount()
+    delete (document as { execCommand?: unknown }).execCommand
+  })
+})
+
 function mountPage() {
   const Layout = defineComponent({
     setup(_, { slots }) {
@@ -70,9 +146,41 @@ function mountPage() {
   })
 }
 
+function mountPlatformAccountsPage() {
+  const Layout = defineComponent({
+    setup(_, { slots }) {
+      return () => h('div', [slots.header?.(), slots.default?.()])
+    },
+  })
+  return mount(PlatformAccountsPage, {
+    global: {
+      components: {
+        'k-layout': Layout,
+        'k-icon': defineComponent({ setup: () => () => h('i') }),
+      },
+    },
+  })
+}
+
 function dashboardData(): DashboardData {
   return {
-    accounts: [], updatedAt: 0, refresh: vi.fn(async () => undefined),
+    accounts: [],
+    serverConfig: {
+      name: 'CrossGram',
+      enable_special_config: false,
+      host: '203.0.113.8',
+      port: 4430,
+      rsa_key: '-----BEGIN RSA PUBLIC KEY-----\nkey\n-----END RSA PUBLIC KEY-----',
+      dcs: [
+        { id: 1, ip: '203.0.113.8', port: 4430 },
+        { id: 2, ip: '203.0.113.8', port: 4430 },
+        { id: 3, ip: '203.0.113.8', port: 4430 },
+        { id: 4, ip: '203.0.113.8', port: 4430 },
+        { id: 5, ip: '203.0.113.8', port: 4430 },
+      ],
+    },
+    updatedAt: 0,
+    refresh: vi.fn(async () => undefined),
     stickerUpdatedAt: 0,
     refreshStickerPacks: vi.fn(async () => undefined),
     setStickerPackAssigned: vi.fn(async () => undefined),
