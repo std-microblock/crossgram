@@ -11,10 +11,11 @@ import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
-import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
+import type { IMConversation, IMMessage, IMPlatform, IMRequest, PlatformSession } from './platform.js'
 import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { ReactionRpc } from './reaction-rpc.js'
+import { requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 
 const session: PlatformSession = {
   platformSessionId: 'updates-session', platformId: 'updates-platform', userId: 'self',
@@ -100,6 +101,30 @@ describe('UpdateManager', () => {
     } })
 
     expect(sent).toEqual([])
+  })
+
+  it('forces one unchanged request recovery edit while deduplicating later retries', async () => {
+    const { store, manager, sent } = await createHarness()
+    const pending: IMRequest = {
+      id: 'request-recovery', kind: 'friend', state: 'pending', createdAt: 100,
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    await store.ingestRequest(session, pending)
+    const terminal = await store.ingestRequest(session, { ...pending, state: 'accepted' })
+    const replay = await store.ingestRequest(session, terminal.request)
+    const event = {
+      type: 'message-edit' as const,
+      eventId: 'bridge-request:request-recovery:terminal',
+      conversation: requestInboxConversation(),
+      message: requestInboxMessage(terminal.request),
+    }
+
+    await manager.publish(session, { event, result: replay.message })
+    expect(sent).toEqual([])
+    await manager.publish(session, { event, result: replay.message }, { forceDelivery: true })
+    await manager.publish(session, { event, result: replay.message }, { forceDelivery: true })
+
+    expect(sent).toHaveLength(1)
   })
 
   it('gives a paginated channel dialog the durable pts baseline for its next live update', async () => {

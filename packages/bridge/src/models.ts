@@ -70,6 +70,18 @@ export interface IMMessageRow {
   updatedAt: Date
 }
 
+/** Canonical platform request, deliberately independent from its inbox projection message. */
+export interface IMRequestRow {
+  id: number
+  platformSessionId: string
+  platformRequestId: string
+  kind: 'friend' | 'group-join'
+  state: 'pending' | 'accepted' | 'rejected'
+  request: JsonObject
+  createdAt: Date
+  updatedAt: Date
+}
+
 export interface IMMessageAliasRow {
   id: number
   platformSessionId: string
@@ -267,6 +279,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_im_conversation: IMConversationRow
     mtproto_im_user: IMUserRow
     mtproto_im_message: IMMessageRow
+    mtproto_im_request: IMRequestRow
     mtproto_im_message_alias: IMMessageAliasRow
     mtproto_message_mention: MessageMentionRow
     mtproto_im_media: IMMediaRow
@@ -336,6 +349,15 @@ export function defineModels(ctx: Context): void {
     primary: 'id', autoInc: true,
     unique: [['platformSessionId', 'conversationId', 'primaryPlatformMessageId']],
     indexes: [['conversationId', 'timestamp'], 'senderUserId'],
+  })
+
+  ctx.model.extend('mtproto_im_request', {
+    id: 'unsigned', platformSessionId: 'string', platformRequestId: 'text', kind: 'string', state: 'string',
+    request: 'json', createdAt: 'timestamp', updatedAt: 'timestamp',
+  }, {
+    primary: 'id', autoInc: true,
+    unique: [['platformSessionId', 'platformRequestId']],
+    indexes: ['platformSessionId'],
   })
 
   ctx.model.extend('mtproto_im_message_alias', {

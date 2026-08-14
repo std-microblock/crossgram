@@ -7,7 +7,7 @@ import {
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
-  type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
+  type IMReactionSummary, type IMRequestAction, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
@@ -15,6 +15,9 @@ import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
   type MessageEditResult,
 } from './message-actions.js'
+import {
+  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_REJECT_CALLBACK_DATA, isRequestInboxConversation,
+} from './request-inbox.js'
 import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
@@ -49,6 +52,8 @@ type SendMediaRequest = tl.messages.RawSendMediaRequest
 type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
 type UploadMediaRequest = tl.messages.RawUploadMediaRequest
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
+
+const requestResolutionLocks = new Map<string, Promise<void>>()
 
 interface MessageRef {
   peerId: string
@@ -472,6 +477,7 @@ export class DialogRpc {
     if (req.richMessage) throw new RpcError(400, 'DRAFT_RICH_MESSAGE_UNSUPPORTED')
     await this._hydratePeers()
     const scope = await this._resolveDraftScope(req.peer, req.replyTo)
+    this._assertWritableConversation(scope.conversationId)
     const date = Math.floor(Date.now() / 1000)
     if (hasDraftContent(req)) {
       const draft: tl.RawDraftMessage = {
@@ -565,7 +571,9 @@ export class DialogRpc {
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
     if (req.filter._ === 'inputMessagesFilterPinned') return this._emptyMessages(conversation)
-    if (this._platform.searchMessages) return this._searchPlatform(req, peerId, conversation)
+    if (this._platform.searchMessages && !isRequestInboxConversation(conversation)) {
+      return this._searchPlatform(req, peerId, conversation)
+    }
     const all = await this._loadHistory(peerId, {
       offsetId: req.offsetId, offsetDate: req.maxDate, addOffset: req.addOffset,
       limit: req.limit, maxId: req.maxId, minId: req.minId,
@@ -1309,6 +1317,25 @@ export class DialogRpc {
   async getBotCallbackAnswer(
     req: tl.messages.RawGetBotCallbackAnswerRequest,
   ): Promise<tl.messages.RawBotCallbackAnswer> {
+    await this._hydratePeers()
+    const conversationId = this._resolvePeer(req.peer)
+    const data = Buffer.from(req.data ?? []).toString('utf8')
+    const projected = await this._store?.findProjectedByTlId(
+      this._session.platformSessionId, req.msgId, conversationId,
+    )
+    const requestId = projected?.source.metadata?.bridgeRequestId
+    if (typeof requestId === 'string' && isRequestInboxConversation(this._conversation(conversationId))) {
+      const button = projected.source.content.inlineKeyboard?.rows
+        .flatMap((row) => row.buttons)
+        .find((candidate) => candidate.type === 'callback' && candidate.data === data)
+      // Terminal request projections deliberately remove buttons. Telegram may
+      // still retry the original callback, so defer static-action validation to
+      // the resolver for terminal rows while requiring a rendered button on a
+      // pending request.
+      const request = await this._store?.getRequest(this._session.platformSessionId, requestId)
+      if (!button && request?.state === 'pending') throw new RpcError(400, 'DATA_INVALID')
+      return this._resolveRequestInboxCallback(requestId, data)
+    }
     if (!this._platform.clickInlineButton) throw new RpcError(400, 'BOT_RESPONSE_TIMEOUT')
     const target = this._tlToMessage.get(req.msgId)
       ?? await this._store?.findProjectedByTlId(this._session.platformSessionId, req.msgId)
@@ -1319,7 +1346,6 @@ export class DialogRpc {
           nativeSequence: qqMessageSequenceFromMetadata(projected.source.metadata)?.toString(),
         } : undefined)
     if (!target) throw new RpcError(400, 'MESSAGE_ID_INVALID')
-    const conversationId = this._resolvePeer(req.peer)
     const conversation = this._conversation(conversationId)
     if (conversation.id !== target.peerId && conversation.parentId !== target.peerId) {
       throw new RpcError(400, 'MESSAGE_ID_INVALID')
@@ -1327,7 +1353,6 @@ export class DialogRpc {
     const message = await this._platform.getMessage?.(
       this._session, { id: target.peerId }, target.platformMessageId,
     )
-    const data = Buffer.from(req.data ?? []).toString('utf8')
     const button = message?.content.inlineKeyboard?.rows
       .flatMap((row) => row.buttons)
       .find((candidate) => candidate.type === 'callback' && candidate.data === data)
@@ -1344,6 +1369,55 @@ export class DialogRpc {
       message: answer.message,
       url: answer.url,
       cacheTime: 0,
+    }
+  }
+
+  private async _resolveRequestInboxCallback(
+    requestId: string,
+    data: string,
+  ): Promise<tl.messages.RawBotCallbackAnswer> {
+    const action: IMRequestAction | undefined = data === REQUEST_ACCEPT_CALLBACK_DATA
+      ? 'accept'
+      : data === REQUEST_REJECT_CALLBACK_DATA ? 'reject' : undefined
+    if (!action) throw new RpcError(400, 'DATA_INVALID')
+    return withRequestResolutionLock(`${this._session.platformSessionId}\0${requestId}`, async () => {
+      const request = await this._store?.getRequest(this._session.platformSessionId, requestId)
+      if (!request) throw new RpcError(400, 'REQUEST_ID_INVALID')
+      if (request.state !== 'pending') {
+        if ((request.state === 'accepted' && action === 'accept')
+          || (request.state === 'rejected' && action === 'reject')) {
+          await this._deliverRequestRecovery(request)
+          return { _: 'messages.botCallbackAnswer', message: '请求已处理', cacheTime: 0 }
+        }
+        throw new RpcError(400, 'REQUEST_STATE_CONFLICT')
+      }
+      if (!this._platform.resolveRequest) throw new RpcError(400, 'REQUEST_RESOLVE_UNAVAILABLE')
+      let resolved
+      try {
+        resolved = await this._platform.resolveRequest(this._session, request.id, action)
+      } catch {
+        throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
+      }
+      if (resolved.id !== request.id
+        || resolved.kind !== request.kind
+        || resolved.state === 'pending'
+        || (action === 'accept' && resolved.state !== 'accepted')
+        || (action === 'reject' && resolved.state !== 'rejected')) {
+        throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
+      }
+      if (!this._store) throw new RpcError(500, 'REQUEST_EVENT_UNAVAILABLE')
+      const stored = await this._store.ingestRequest(this._session, resolved)
+      await this._deliverRequestRecovery(stored.request)
+      return { _: 'messages.botCallbackAnswer', message: '请求已处理', cacheTime: 0 }
+    })
+  }
+
+  private async _deliverRequestRecovery(request: import('./platform.js').IMRequest): Promise<void> {
+    if (!this._onLocalEvent) throw new RpcError(500, 'REQUEST_EVENT_UNAVAILABLE')
+    try {
+      await this._onLocalEvent(this._session, { type: 'request', request, delivery: 'recovery' })
+    } catch {
+      throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
     }
   }
 
@@ -1431,6 +1505,7 @@ export class DialogRpc {
 
     const affected = new Set<number>()
     for (const [conversationId, targets] of grouped) {
+      this._assertWritableConversation(conversationId)
       const conversation = this._conversation(conversationId)
       const policy = this._platform.capabilities.messageActions?.delete
       const now = Math.floor(Date.now() / 1000)
@@ -1488,6 +1563,7 @@ export class DialogRpc {
     }
     await this._hydratePeers()
     const conversationId = this._resolvePeer(req.peer)
+    this._assertWritableConversation(conversationId)
     const projected = await this._store.findProjectedByTlId(
       this._session.platformSessionId, req.id, conversationId,
     )
@@ -1602,6 +1678,7 @@ export class DialogRpc {
     if (req.id.length !== req.randomId.length) throw new RpcError(400, 'RANDOM_ID_INVALID')
     await this._hydratePeers()
     const toId = this._resolveMessageTarget(req.toPeer, req.replyTo)
+    this._assertWritableConversation(toId)
     let fromId = req.fromPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._resolvePeer(req.fromPeer)
@@ -1935,6 +2012,7 @@ export class DialogRpc {
     }
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
+    this._assertWritableConversation(peerId)
     const projected = await this._store?.findProjectedByTlId(
       this._session.platformSessionId, req.msgId, peerId,
     )
@@ -2172,6 +2250,7 @@ export class DialogRpc {
 
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(req.peer, req.replyTo)
+    this._assertWritableConversation(peerId)
     const replyTarget = await this._resolveReplyTarget(peerId, req.replyTo)
     const replyToId = replyTarget?.id
     await this._hydrateMentionUsernames(req.message, req.entities)
@@ -2366,6 +2445,7 @@ export class DialogRpc {
 
     await this._hydratePeers()
     const peerId = this._resolveMessageTarget(inputPeer, replyTo)
+    this._assertWritableConversation(peerId)
     const replyTarget = await this._resolveReplyTarget(peerId, replyTo)
     const replyToId = replyTarget?.id
     const sent = await this._sendToPlatform(() => this._platform.sendMessage(this._session, { id: peerId }, {
@@ -2684,8 +2764,11 @@ export class DialogRpc {
           limit: fetchLimit,
           beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
         }
+        const requestInbox = isRequestInboxConversation(this._conversation(peerId))
         let projected: ProjectedMessage[]
-        if (negativeOffset && request.addOffset !== -1 && anchor) {
+        if (requestInbox) {
+          projected = await this._store!.readAllProjectedHistory(this._session.platformSessionId, peerId)
+        } else if (negativeOffset && request.addOffset !== -1 && anchor) {
           const [newer, older] = await Promise.all([
             this._store!.readProjectedHistory(this._session.platformSessionId, peerId, {
               ...projectionQuery,
@@ -2712,7 +2795,7 @@ export class DialogRpc {
         ])
         const usersMs = performance.now() - usersAt
         const materializeAt = performance.now()
-        const history = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
+        const materialized = projected.flatMap(({ source, parts, media }) => parts.map((part) => {
           const item: MaterializedMessage = {
             source,
             tlId: part.tlMessageId,
@@ -2722,7 +2805,10 @@ export class DialogRpc {
           }
           this._rememberMessage(item)
           return item
-        })).sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
+        }))
+        const history = requestInbox
+          ? materialized
+          : materialized.sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
         const materializeMs = performance.now() - materializeAt
         const repliesAt = performance.now()
         await this._rememberReplyTargets(history.map((item) => item.source), true)
@@ -2739,7 +2825,7 @@ export class DialogRpc {
       }
 
       const upstreamAt = performance.now()
-      await syncHistoryWindow()
+      if (!isRequestInboxConversation(this._conversation(peerId))) await syncHistoryWindow()
       const upstreamMs = performance.now() - upstreamAt
       if (anchorId && !anchor) {
         anchor = await this._store.findProjectedByTlId(
@@ -4012,6 +4098,12 @@ export class DialogRpc {
     return this._conversations.get(peerId) ?? { id: peerId, kind: 'direct', title: peerId }
   }
 
+  private _assertWritableConversation(peerId: string): void {
+    if (this._conversation(peerId).metadata?.readOnly === true) {
+      throw new RpcError(400, 'CHAT_WRITE_FORBIDDEN')
+    }
+  }
+
   private _conversationPeer(conversation: import('./platform.js').IMConversation): tl.TypePeer {
     if (this._isVirtualConversation(conversation)) {
       return { _: 'peerChat', chatId: this._peerId(conversation.id) }
@@ -4310,7 +4402,7 @@ export class DialogRpc {
     tlMessageId: number,
     excludeConnection?: ServerConnection,
   ): Promise<void> {
-    if (!this._platform.capabilities.readState?.markRead || !this._platform.markRead || tlMessageId <= 0) return
+    if (tlMessageId <= 0) return
     const projected = await this._findReadProjection(displayConversationId, tlMessageId)
     const ref = projected?.source ?? (() => {
       const known = this._tlToMessage.get(tlMessageId)
@@ -4320,10 +4412,17 @@ export class DialogRpc {
     if (!ref) return
     const target = this._conversation(ref.conversationId)
     if (target.id !== displayConversationId && target.parentId !== displayConversationId) return
+    if (isRequestInboxConversation(target)) {
+      await this._onLocalEvent?.(this._session, {
+        type: 'read', conversationId: target.id, upToMessageId: ref.id,
+      }, this._localDelivery(excludeConnection))
+      return
+    }
     // Linked merged-forward histories are synthetic, read-only conversations.
     // Forwarding their generated conversation IDs to an adapter can make the
     // upstream platform treat those IDs as real peers and create ghost chats.
     if (this._isVirtualConversation(target)) return
+    if (!this._platform.capabilities.readState?.markRead || !this._platform.markRead) return
     await this._platform.markRead(this._session, {
       conversationId: target.id,
       messageId: ref.id,
@@ -4656,6 +4755,21 @@ function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): 
   return false
 }
 
+
+async function withRequestResolutionLock<T>(
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const predecessor = requestResolutionLocks.get(key) ?? Promise.resolve()
+  const current = predecessor.catch(() => undefined).then(operation)
+  const tail = current.then(() => undefined, () => undefined)
+  requestResolutionLocks.set(key, tail)
+  try {
+    return await current
+  } finally {
+    if (requestResolutionLocks.get(key) === tail) requestResolutionLocks.delete(key)
+  }
+}
 
 function selectHistoryWindow(
   all: readonly MaterializedMessage[],

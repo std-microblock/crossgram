@@ -11,7 +11,7 @@ import {
   IMPlatformService, migrateQualifiedPlatformIds, PlatformDataService, PlatformRegistry, PlatformSubscriptionManager,
 } from './platform-manager.js'
 import type {
-  IMConversation, IMEvent, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities,
+  IMConversation, IMEvent, IMMessage, IMMessageInput, IMPlatform, IMRequest, PlatformCapabilities,
   PlatformSession, Unsubscribe,
 } from './platform.js'
 
@@ -53,6 +53,7 @@ class PushPlatform implements IMPlatform {
   subscribeCalls = 0
   unsubscribeCalls = 0
   getDialogs?: IMPlatform['getDialogs']
+  getRequests?: IMPlatform['getRequests']
   getHistory?: IMPlatform['getHistory']
   private _handler?: (event: IMEvent) => void | Promise<void>
 
@@ -741,6 +742,272 @@ describe('PlatformRegistry', () => {
     expect(registry.ids).toEqual(['push', 'second'])
     unregister()
     expect(registry.get('second')).toBeUndefined()
+  })
+
+  it('cold-syncs requests without requiring dialog history support', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const request: IMRequest = {
+      id: 'cold-request', kind: 'group-join', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' },
+      group: { id: 'group-1', kind: 'group', title: 'Group 1' },
+    }
+    platform.getRequests = vi.fn(async () => ({ requests: [request] }))
+    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([['push', platform]]), store)
+
+    await manager.ensure(session)
+    await vi.waitFor(async () => {
+      expect(await store.getRequest(session.platformSessionId, 'cold-request')).toMatchObject({
+        id: 'cold-request', state: 'pending',
+      })
+    })
+
+    expect(platform.getRequests).toHaveBeenCalledWith(session, { limit: 500, cursor: undefined })
+    await manager.stop()
+  })
+
+  it('does not let stale cold pending requests overwrite a live terminal request', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: IMEvent[] = []
+    const cold = Promise.withResolvers<{ requests: IMRequest[] }>()
+    platform.getRequests = vi.fn(async () => cold.promise)
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, value) => { committed.push(value.event) },
+    )
+    const pending: IMRequest = {
+      id: 'racing-request', kind: 'friend', state: 'pending', createdAt: 100,
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+
+    await manager.ensure(session)
+    await vi.waitFor(() => expect(platform.getRequests).toHaveBeenCalledTimes(1))
+    await platform.emit({ type: 'request', request: { ...pending, state: 'accepted' } })
+    cold.resolve({ requests: [pending] })
+    await vi.waitFor(async () => {
+      expect(await store.getRequest(session.platformSessionId, pending.id)).toMatchObject({ state: 'accepted' })
+    })
+
+    const [inboxMessage] = await store.readHistory(session.platformSessionId, 'bridge:request-inbox')
+    expect(inboxMessage).toMatchObject({ metadata: { bridgeRequestId: pending.id } })
+    expect(inboxMessage?.content.inlineKeyboard).toBeUndefined()
+    expect((await store.readDialogs(session.platformSessionId, ['bridge:request-inbox']))[0]?.unreadCount).toBe(0)
+    expect(committed.map((event) => event.type)).toEqual(['message'])
+    await manager.stop()
+  })
+
+  it('cold-syncs each request ID once and stops on a repeated request cursor', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const first: IMRequest = {
+      id: 'cursor-request-1', kind: 'friend', state: 'pending', createdAt: 100,
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    const second: IMRequest = {
+      id: 'cursor-request-2', kind: 'group-join', state: 'pending', createdAt: 101,
+      requester: { id: 'bob', firstName: 'Bob' },
+      group: { id: 'group-2', kind: 'group', title: 'Group 2' },
+    }
+    platform.getRequests = vi.fn(async (_session, query) => query?.cursor
+      ? { requests: [{ ...first, state: 'accepted' as const }, second], nextCursor: 'cursor-2' }
+      : { requests: [first], nextCursor: 'cursor-2' })
+    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([['push', platform]]), store)
+
+    await manager.ensure(session)
+    await vi.waitFor(async () => {
+      expect(await store.getRequest(session.platformSessionId, second.id)).toMatchObject({ state: 'pending' })
+    })
+
+    expect(platform.getRequests).toHaveBeenNthCalledWith(1, session, { limit: 500, cursor: undefined })
+    expect(platform.getRequests).toHaveBeenNthCalledWith(2, session, { limit: 500, cursor: 'cursor-2' })
+    expect(platform.getRequests).toHaveBeenCalledTimes(2)
+    expect(await store.getRequest(session.platformSessionId, first.id)).toMatchObject({ state: 'accepted' })
+    expect(await store.readHistory(session.platformSessionId, 'bridge:request-inbox')).toHaveLength(2)
+    await manager.stop()
+  })
+
+  it('re-delivers an unchanged persisted request only through recovery events', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: IMEvent[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, value) => { committed.push(value.event) },
+    )
+    const request: IMRequest = {
+      id: 'recovery-request', kind: 'friend', state: 'accepted', createdAt: 100,
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    await store.ingestRequest(session, request)
+    await manager.ensure(session)
+
+    await manager.ingestLocalEvent(session, { type: 'request', request })
+    expect(committed).toEqual([])
+    await manager.ingestLocalEvent(session, { type: 'request', request, delivery: 'recovery' })
+
+    expect(committed).toMatchObject([{
+      type: 'message-edit', conversation: { id: 'bridge:request-inbox' }, message: {
+        metadata: { bridgeRequestId: request.id },
+      },
+    }])
+    expect((committed[0] as Extract<IMEvent, { type: 'message-edit' }>).message.content.inlineKeyboard)
+      .toBeUndefined()
+    await manager.stop()
+  })
+
+  it('persists and projects request events independently from system messages', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: any[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, value) => { committed.push(value) },
+    )
+    const pending: IMRequest = {
+      id: 'request-1', kind: 'friend', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' }, message: 'hello', createdAt: 100,
+    }
+    await manager.ensure(session)
+    await platform.emit({ type: 'request', request: pending })
+
+    expect(await database.get('mtproto_im_request', {
+      platformSessionId: session.platformSessionId, platformRequestId: pending.id,
+    })).toMatchObject([{ kind: 'friend', state: 'pending', request: pending }])
+    expect(await store.readDialogs(session.platformSessionId, ['bridge:request-inbox'])).toMatchObject([{
+      conversation: { id: 'bridge:request-inbox', metadata: { bridgeOwned: true, readOnly: true, requestInbox: true } },
+      unreadCount: 1,
+    }])
+    expect(await store.readHistory(session.platformSessionId, 'bridge:request-inbox')).toMatchObject([{
+      id: 'bridge:request:request-1', metadata: { bridgeRequestId: 'request-1' },
+      content: { inlineKeyboard: { rows: [{ buttons: [{ text: '接受' }, { text: '拒绝' }] }] } },
+    }])
+    await platform.emit({ type: 'request', request: pending })
+    await platform.emit({ type: 'request', request: { ...pending, state: 'accepted' } })
+
+    expect(committed.map(({ event }) => event.type)).toEqual(['message', 'message-edit'])
+    expect((await store.readHistory(session.platformSessionId, 'bridge:request-inbox'))[0].content.inlineKeyboard)
+      .toBeUndefined()
+    expect((await store.readDialogs(session.platformSessionId, ['bridge:request-inbox']))[0].unreadCount).toBe(1)
+    await manager.stop()
+  })
+
+  it('persists canonical request state independently across sessions with a stable generated creation time', async () => {
+    const database = await createDatabase()
+    const store = new MessageStore(database)
+    const initial: IMRequest = {
+      id: 'stable-request', kind: 'friend', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    const otherSession = { ...session, platformSessionId: 'session-two' }
+
+    const first = await store.upsertRequest(session, initial)
+    expect(first).toMatchObject({ created: true, changed: true, previous: undefined })
+    expect(first.request.createdAt).toEqual(expect.any(Number))
+    expect(first.request.createdAt).toBeGreaterThan(0)
+    const createdAt = first.request.createdAt
+
+    const replay = await store.upsertRequest(session, initial)
+    expect(replay).toMatchObject({ created: false, changed: false })
+    expect(replay.request.createdAt).toBe(createdAt)
+    const transitioned = await store.upsertRequest(session, { ...initial, state: 'accepted' })
+    expect(transitioned).toMatchObject({
+      created: false, changed: true, previous: { state: 'pending', createdAt },
+      request: { state: 'accepted', createdAt },
+    })
+    await expect(store.upsertRequest(session, initial)).resolves.toMatchObject({
+      changed: false, previous: { state: 'accepted' }, request: { state: 'accepted', createdAt },
+    })
+    await expect(store.upsertRequest(session, { ...initial, state: 'rejected' })).resolves.toMatchObject({
+      changed: false, previous: { state: 'accepted' }, request: { state: 'accepted', createdAt },
+    })
+
+    await store.upsertRequest(otherSession, { ...initial, state: 'rejected' })
+    await expect(store.getRequest(session.platformSessionId, initial.id)).resolves.toMatchObject({
+      state: 'accepted', createdAt,
+    })
+    await expect(store.getRequest(otherSession.platformSessionId, initial.id)).resolves.toMatchObject({
+      state: 'rejected', createdAt: expect.any(Number),
+    })
+  })
+
+  it('repairs a request persisted before its inbox projection without duplicating the replay', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: IMEvent[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, value) => { committed.push(value.event) },
+    )
+    const request: IMRequest = {
+      id: 'replay-request', kind: 'friend', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    await store.upsertRequest(session, request)
+    await manager.ensure(session)
+
+    await platform.emit({ type: 'request', request })
+    await platform.emit({ type: 'request', request })
+
+    expect(committed.map((event) => event.type)).toEqual(['message'])
+    expect((await store.readHistory(session.platformSessionId, 'bridge:request-inbox'))).toHaveLength(1)
+    expect((await store.readDialogs(session.platformSessionId, ['bridge:request-inbox']))[0]?.unreadCount).toBe(1)
+    await manager.stop()
+  })
+
+  it('returns only the inbox at limit one while retaining the upstream dialog total', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const store = new MessageStore(database)
+    const inboxRequest: IMRequest = {
+      id: 'dialog-request', kind: 'friend', state: 'pending', createdAt: 100,
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([['push', platform]]), store)
+    await manager.ensure(session)
+    await platform.emit({ type: 'request', request: inboxRequest })
+    const upstream = {
+      conversation: { id: 'upstream-1', kind: 'direct' as const, title: 'Upstream 1' }, unreadCount: 0,
+    }
+    platform.getDialogs = vi.fn(async () => ({ dialogs: [upstream], total: 7, nextCursor: 'upstream-next' }))
+    const data = new PlatformDataService(platform, session, store)
+
+    await expect(data.getDialogsPage({ limit: 1 })).resolves.toMatchObject({
+      dialogs: [{ conversation: { id: 'bridge:request-inbox' } }],
+      total: 8,
+      nextCursor: 'upstream-next',
+    })
+    await manager.stop()
+  })
+
+  it('starts the page after the inbox at the upstream homepage', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const store = new MessageStore(database)
+    const manager = new PlatformSubscriptionManager(database, new PlatformRegistry([['push', platform]]), store)
+    await manager.ensure(session)
+    await platform.emit({ type: 'request', request: {
+      id: 'after-inbox-request', kind: 'friend', state: 'pending', createdAt: 100,
+      requester: { id: 'alice', firstName: 'Alice' },
+    } })
+    platform.getDialogs = vi.fn(async () => ({ dialogs: [{
+      conversation: { id: 'upstream-first', kind: 'direct' as const, title: 'Upstream first' }, unreadCount: 0,
+    }], total: 1 }))
+    const data = new PlatformDataService(platform, session, store)
+
+    await expect(data.getDialogsPage({ limit: 2, afterId: 'bridge:request-inbox' })).resolves.toMatchObject({
+      dialogs: [{ conversation: { id: 'upstream-first' } }], total: 1,
+    })
+    expect(platform.getDialogs).toHaveBeenCalledWith(session, { limit: 2, afterId: undefined })
+    await manager.stop()
   })
 
   it('migrates loader-qualified platform IDs across sessions and auth bindings', async () => {

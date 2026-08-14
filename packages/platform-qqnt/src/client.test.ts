@@ -57,6 +57,38 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
+  it('lists and resolves requests through encoded authenticated bridge routes', async () => {
+    const requests: Array<{ url: string, method?: string, body?: unknown, authorization?: string }> = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      token: 'secret',
+      fetch: vi.fn(async (input, init) => {
+        const headers = new Headers(init?.headers)
+        requests.push({
+          url: String(input), method: init?.method,
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+          authorization: headers.get('authorization') ?? undefined,
+        })
+        return Response.json(requests.length === 1 ? { requests: [], nextCursor: '12' } : { requests: [] })
+      }),
+    })
+
+    const firstPage = await client.getRequests({ kind: 'group-join', cursor: 'opaque+cursor', limit: 25 })
+    await client.getRequests({ cursor: firstPage.nextCursor })
+    await client.resolveRequest('request/opaque:42', 'accept')
+
+    expect(requests).toEqual([{
+      url: 'http://bridge.invalid/v1/requests?kind=group-join&cursor=opaque%2Bcursor&limit=25',
+      method: undefined, body: undefined, authorization: 'Bearer secret',
+    }, {
+      url: 'http://bridge.invalid/v1/requests?cursor=12',
+      method: undefined, body: undefined, authorization: 'Bearer secret',
+    }, {
+      url: 'http://bridge.invalid/v1/requests/request%2Fopaque%3A42/resolve',
+      method: 'POST', body: { action: 'accept' }, authorization: 'Bearer secret',
+    }])
+  })
+
   it('posts the exact live QQ call reference and operation to the authenticated control route', async () => {
     const requests: Array<{ url: string, method?: string, body: unknown, authorization?: string }> = []
     const client = new QQNTClient({

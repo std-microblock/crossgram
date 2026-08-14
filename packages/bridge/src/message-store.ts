@@ -1,11 +1,11 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type {
-  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMUserRow,
+  IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMRequestRow, IMUserRow,
   TlMessagePartRow,
 } from './models.js'
 import {
   messageMedia, messageText, telegramReplyToMessageId,
-  type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget,
+  type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget, type IMRequest,
   type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
   type IMUser, type JsonObject, type JsonValue, type PlatformSession,
 } from './platform.js'
@@ -15,12 +15,25 @@ import {
   TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS,
 } from './message-id.js'
 import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
+import { REQUEST_INBOX_CONVERSATION_ID, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 
 export interface IngestResult {
   message: IMMessageRow
   created: boolean
   changed: boolean
   projection: TlMessagePartRow[]
+}
+
+export interface RequestUpsertResult {
+  request: IMRequest
+  created: boolean
+  changed: boolean
+  previous?: IMRequest
+}
+
+/** One atomic request persistence and inbox-message projection. */
+export interface RequestIngestResult extends RequestUpsertResult {
+  message: IngestResult
 }
 
 export interface DeleteResult {
@@ -116,6 +129,43 @@ export class MessageStore {
   async upsertUser(session: PlatformSession, user: IMUser): Promise<IMUserRow> {
     return this._write(() => this._database.withTransaction(async (database) =>
       this._upsertUser(database, session.platformId, user, new Date())))
+  }
+
+  async upsertRequest(session: PlatformSession, request: IMRequest): Promise<RequestUpsertResult> {
+    return this._write(() => this._database.withTransaction((database) =>
+      this._upsertRequest(database, session, request, new Date())), 'request-upsert', true)
+  }
+
+  /**
+   * Persist the canonical request and its bridge-owned inbox message together.
+   * A transaction makes a failed projection retryable without creating a
+   * request/message/unread split state.
+   */
+  async ingestRequest(session: PlatformSession, request: IMRequest): Promise<RequestIngestResult> {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const now = new Date()
+      const stored = await this._upsertRequest(database, session, request, now)
+      const conversation = requestInboxConversation()
+      const conversationRow = await this._upsertConversation(database, session, conversation, undefined, now)
+      const message = await this._ingestMessage(
+        database, session, conversationRow, requestInboxMessage(stored.request), {}, now, { epochs: new Map() },
+      )
+      // The message row is the durable marker of a pending projection. It
+      // covers recovery from pre-transaction legacy rows while keeping every
+      // normal retry and terminal transition from increasing unread counts.
+      if (message.created && stored.request.state === 'pending') {
+        await database.set('mtproto_im_conversation', { id: conversationRow.id }, {
+          unreadCount: conversationRow.unreadCount + 1,
+          updatedAt: now,
+        })
+      }
+      return { ...stored, message }
+    }), 'request-ingest', true)
+  }
+
+  async getRequest(platformSessionId: string, platformRequestId: string): Promise<IMRequest | undefined> {
+    const [row] = await this._database.get('mtproto_im_request', { platformSessionId, platformRequestId })
+    return row ? requestFromRow(row) : undefined
   }
 
   async upsertUsers(session: PlatformSession, users: readonly IMUser[]): Promise<IMUserRow[]> {
@@ -538,12 +588,19 @@ export class MessageStore {
       const parts = await database.select('mtproto_tl_message_part', { messageId: message.id })
         .orderBy('ordinal').execute()
       if (!parts.length) return
-      const laterIncoming = await database.get('mtproto_im_message', {
-        conversationId: conversation.id,
-        deleted: false,
-        outgoing: false,
-        timestamp: { $gt: message.timestamp },
-      })
+      const laterIncoming = conversation.platformConversationId === REQUEST_INBOX_CONVERSATION_ID
+        ? (await database.get('mtproto_im_message', {
+            conversationId: conversation.id,
+            deleted: false,
+            outgoing: false,
+          })).filter((candidate) => candidate.timestamp > message.timestamp
+            || (candidate.timestamp === message.timestamp && candidate.id > message.id))
+        : await database.get('mtproto_im_message', {
+            conversationId: conversation.id,
+            deleted: false,
+            outgoing: false,
+            timestamp: { $gt: message.timestamp },
+          })
       await database.set('mtproto_im_conversation', { id: conversation.id }, {
         unreadCount: laterIncoming.length,
         updatedAt: new Date(),
@@ -564,6 +621,21 @@ export class MessageStore {
   ): Promise<IMConversationRow> {
     return this._write(() => this._database.withTransaction((database) =>
       this._upsertConversation(database, session, conversation, unreadCount, new Date())))
+  }
+
+  async incrementConversationUnread(
+    session: PlatformSession,
+    conversation: IMConversation,
+    amount = 1,
+  ): Promise<void> {
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new RangeError('amount must be a positive integer')
+    await this._write(() => this._database.withTransaction(async (database) => {
+      const row = await this._upsertConversation(database, session, conversation, undefined, new Date())
+      await database.set('mtproto_im_conversation', { id: row.id }, {
+        unreadCount: row.unreadCount + amount,
+        updatedAt: new Date(),
+      })
+    }), 'conversation-unread', true)
   }
 
   async listDialogs(
@@ -636,6 +708,33 @@ export class MessageStore {
       deleted: false,
       ...storedHistoryTimestampFilter(query),
     }).orderBy('timestamp', query.order ?? 'desc').limit(clampDatabaseLimit(query.limit)).execute()
+    return this._hydrateProjectedHistoryRows(rows, conversation)
+  }
+
+  /**
+   * Request Inbox pagination/search runs against its complete local projection.
+   * The inbox is expected to stay small; add a composite cursor before using
+   * this path for a large request archive.
+   */
+  async readAllProjectedHistory(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<ProjectedMessage[]> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return []
+    const rows = await this._database.select('mtproto_im_message', {
+      conversationId: conversation.id,
+      deleted: false,
+    }).orderBy('timestamp', 'desc').orderBy('id', 'desc').execute()
+    return this._hydrateProjectedHistoryRows(rows, conversation)
+  }
+
+  private async _hydrateProjectedHistoryRows(
+    rows: readonly IMMessageRow[],
+    conversation: IMConversationRow,
+  ): Promise<ProjectedMessage[]> {
     if (!rows.length) return []
     const messageIds = rows.map((row) => row.id)
     const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
@@ -1261,6 +1360,48 @@ export class MessageStore {
     return this._write(() => this._database.withTransaction(async (database) => {
       return this._allocateIds(database, scope, count)
     }))
+  }
+
+  private async _upsertRequest(
+    database: Database,
+    session: PlatformSession,
+    request: IMRequest,
+    now: Date,
+  ): Promise<RequestUpsertResult> {
+    const [existing] = await database.get('mtproto_im_request', {
+      platformSessionId: session.platformSessionId,
+      platformRequestId: request.id,
+    })
+    const previous = existing ? requestFromRow(existing) : undefined
+    // Terminal request states are monotonic. Cold list synchronization can
+    // race a live resolve event, so a stale pending (or conflicting terminal)
+    // replay must never restore buttons or replace the first terminal result.
+    const canonical: IMRequest = previous && previous.state !== 'pending'
+      ? previous
+      // The platform may omit creation time on every replay. Generate it once
+      // and preserve it in the canonical payload so a restarted projection keeps
+      // its original Telegram timestamp instead of drifting or falling back to 0.
+      : {
+          ...request,
+          createdAt: previous?.createdAt ?? request.createdAt ?? now.getTime(),
+        }
+    const stored = canonical as unknown as JsonObject
+    const changed = !existing
+      || existing.kind !== canonical.kind
+      || existing.state !== canonical.state
+      || JSON.stringify(existing.request) !== JSON.stringify(stored)
+    if (changed) {
+      await database.upsert('mtproto_im_request', [{
+        platformSessionId: session.platformSessionId,
+        platformRequestId: canonical.id,
+        kind: canonical.kind,
+        state: canonical.state,
+        request: stored,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      }], ['platformSessionId', 'platformRequestId'])
+    }
+    return { request: canonical, created: !existing, changed, previous }
   }
 
   private async _prefetchHistoryIngest(
@@ -1915,6 +2056,10 @@ function channelStateId(platformSessionId: string, channelId: number): string {
 
 function channelUpdateScope(channelId: number): string {
   return `channel:${channelId}`
+}
+
+function requestFromRow(row: IMRequestRow): IMRequest {
+  return row.request as unknown as IMRequest
 }
 
 function toConversation(row: IMConversationRow): IMConversation {
