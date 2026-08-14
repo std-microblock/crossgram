@@ -96,7 +96,8 @@ class QQNTEventHandlingError extends Error {
 }
 
 export function apply(ctx: Context, config: Config = {}): void {
-  const voiceMedia = new QQVoiceMedia(ctx)
+  const voiceMedia = new QQVoiceMedia(ctx.isolate('qqntVoiceMedia'))
+  ctx.effect(() => () => voiceMedia.close())
   const id = resolvePlatformPluginId(ctx, 'qqnt')
   const stickerProviderId = `${id}:stickers`
   defineQQNTEventCheckpointModel(ctx)
