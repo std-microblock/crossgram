@@ -62,9 +62,9 @@ function makeContext(): ServerRpcContext {
   }
 }
 
-function createDialog(folders: DialogFolderStore): DialogRpc {
+function createDialog(folders: DialogFolderStore, targetPlatform: IMPlatform = platform): DialogRpc {
   return new DialogRpc(
-    platform, session, undefined, undefined, undefined, 1,
+    targetPlatform, session, undefined, undefined, undefined, 1,
     undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
     undefined, undefined, undefined, folders,
   )
@@ -236,5 +236,82 @@ describe('dialog folders RPC e2e', () => {
     const unarchived = await roundTripRpc(secondRestart, getDialogs())
     expect(unarchived.dialogs).toHaveLength(3)
     expect(unarchived.dialogs.every((dialog: tl.RawDialog) => dialog.folderId === undefined)).toBe(true)
+  })
+
+  it('uses QQ group masks as transient folder overrides from the first query', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const maskedDialogs: IMDialog[] = [
+      { conversation: { id: 'mask-notify', kind: 'group', title: 'Notify', metadata: { qqGroupMsgMask: 1 } }, unreadCount: 0 },
+      { conversation: { id: 'mask-assistant', kind: 'group', title: 'Assistant', metadata: { qqGroupMsgMask: 2 } }, unreadCount: 0 },
+      { conversation: { id: 'mask-receive', kind: 'group', title: 'Receive', metadata: { qqGroupMsgMask: 4 } }, unreadCount: 0 },
+      { conversation: { id: 'mask-unspecified', kind: 'group', title: 'Unspecified', metadata: { qqGroupMsgMask: 0 } }, unreadCount: 0 },
+      { conversation: { id: 'mask-shield', kind: 'group', title: 'Shield', metadata: { qqGroupMsgMask: 3 } }, unreadCount: 0 },
+    ]
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs(_session, query) {
+        const start = query?.afterId
+          ? maskedDialogs.findIndex((dialog) => dialog.conversation.id === query.afterId) + 1
+          : 0
+        const limit = query?.limit ?? maskedDialogs.length
+        return { dialogs: maskedDialogs.slice(Math.max(0, start), Math.max(0, start) + limit), total: maskedDialogs.length }
+      },
+      async getHistory() { return { messages: [] } },
+    }
+    const folders = new DialogFolderStore(ctx.database)
+    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const peer = (id: string) => ({
+      _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE,
+    })
+    const ids = (result: any) => result.dialogs.map((dialog: tl.RawDialog) =>
+      (dialog.peer as tl.RawPeerChannel).channelId)
+
+    const initialMain = await roundTripRpc(dispatcher, getDialogs())
+    expect(ids(initialMain)).toEqual([
+      stableId('peer:mask-notify'), stableId('peer:mask-receive'),
+      stableId('peer:mask-unspecified'), stableId('peer:mask-shield'),
+    ])
+    const initialArchive = await roundTripRpc(dispatcher, getDialogs(1))
+    expect(initialArchive.dialogs).toMatchObject([{
+      peer: { _: 'peerChannel', channelId: stableId('peer:mask-assistant') }, folderId: 1,
+    }])
+
+    await roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [
+        { _: 'inputFolderPeer', peer: peer('mask-notify'), folderId: 1 },
+        { _: 'inputFolderPeer', peer: peer('mask-assistant'), folderId: 0 },
+        { _: 'inputFolderPeer', peer: peer('mask-receive'), folderId: 1 },
+        { _: 'inputFolderPeer', peer: peer('mask-unspecified'), folderId: 1 },
+        { _: 'inputFolderPeer', peer: peer('mask-shield'), folderId: 1 },
+      ],
+    })
+    const main = await roundTripRpc(dispatcher, getDialogs())
+    expect(ids(main)).toEqual([stableId('peer:mask-notify'), stableId('peer:mask-receive')])
+    const archive = await roundTripRpc(dispatcher, getDialogs(1))
+    expect(ids(archive)).toEqual([
+      stableId('peer:mask-assistant'), stableId('peer:mask-unspecified'), stableId('peer:mask-shield'),
+    ])
+    expect(archive.dialogs[0]).toMatchObject({ folderId: 1 })
+
+    const peerMain = await roundTripRpc(dispatcher, {
+      _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 0 }],
+    })
+    expect(ids(peerMain)).toEqual([stableId('peer:mask-notify'), stableId('peer:mask-receive')])
+    const peerArchive = await roundTripRpc(dispatcher, {
+      _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
+    })
+    expect(ids(peerArchive)).toEqual([
+      stableId('peer:mask-assistant'), stableId('peer:mask-unspecified'), stableId('peer:mask-shield'),
+    ])
   })
 })

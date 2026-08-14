@@ -32,7 +32,7 @@ import { withAutoLinkEntities } from './message-entities.js'
 import { registerVirtualConversation, virtualConversation } from './virtual-conversations.js'
 import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from './card-thumbnail.js'
 import type { DraftStore, StoredDraft } from './draft-store.js'
-import type { NotificationSettingsStore, NotificationTarget } from './notification-settings.js'
+import { MUTE_FOREVER, type NotificationSettingsStore, type NotificationTarget } from './notification-settings.js'
 import type { BlockedPeerChange, BlockedPeerStore } from './blocked-peers.js'
 import {
   decodeDialogFilterTitle, encodeDialogFilterTitle,
@@ -80,6 +80,30 @@ interface ResolvedStickerInput {
   sticker: import('./sticker-provider.js').IMStickerSendPlan
   providerId: string
   stickerId: string
+}
+
+interface QQGroupMsgMaskPolicy {
+  muteUntil: 0 | typeof MUTE_FOREVER
+  folderId: 0 | 1
+}
+
+const QQ_GROUP_MSG_MASK = {
+  UNSPECIFIED: 0,
+  NOTIFY: 1,
+  ASSISTANT: 2,
+  SHIELD: 3,
+  RECEIVE: 4,
+} as const
+
+/**
+ * QQ is authoritative for group masks: NOTIFY stays in the main list, ASSISTANT
+ * moves to Archive, and RECEIVE stays in the main list without notification.
+ * UNSPECIFIED and SHIELD deliberately leave local Telegram state untouched.
+ */
+const QQ_GROUP_MSG_MASK_POLICIES: Readonly<Record<number, QQGroupMsgMaskPolicy>> = {
+  [QQ_GROUP_MSG_MASK.NOTIFY]: { muteUntil: 0, folderId: 0 },
+  [QQ_GROUP_MSG_MASK.ASSISTANT]: { muteUntil: MUTE_FOREVER, folderId: 1 },
+  [QQ_GROUP_MSG_MASK.RECEIVE]: { muteUntil: MUTE_FOREVER, folderId: 0 },
 }
 
 interface MemberPageState {
@@ -216,11 +240,18 @@ export class DialogRpc {
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
     }
-    const loaded = archivedPeerIds.size
-      ? await this._loadDialogFolderPage(query, folderId, archivedPeerIds)
-      : folderId === 0
-        ? await this._loadDialogPage(query)
-        : { dialogs: [], total: 0 }
+    // QQ masks can move an assistant group outside the first native page, so
+    // QQ always scans its effective folder before returning any folder request.
+    // Other platforms retain the native main-list pagination fast path unless
+    // a page-level override or a durable archive row requires filtering.
+    const initialMain = this._platform.platformKind !== 'qq' && folderId === 0 && !archivedPeerIds.size
+      ? await this._loadDialogPage(query)
+      : undefined
+    const needsFolderFiltering = initialMain?.dialogs.some((dialog) =>
+      this._effectiveFolderId(dialog.conversation, archivedPeerIds) !== 0)
+    const loaded = initialMain && !needsFolderFiltering
+      ? initialMain
+      : await this._loadDialogFolderPage(query, folderId, archivedPeerIds)
     const loadMs = performance.now() - loadAt
     // Preserve the platform's authoritative order. Re-sorting each page makes
     // Telegram's last offset peer point into the middle of the upstream page,
@@ -285,7 +316,7 @@ export class DialogRpc {
     const materialized = await Promise.all(all.map((dialog) =>
       this._materializeDialog(
         dialog, drafts.get(dialog.conversation.id),
-        archivedPeerIds.has(dialog.conversation.id) ? 1 : undefined,
+        this._effectiveFolderId(dialog.conversation, archivedPeerIds) || undefined,
         dialogProjections.get(dialog.conversation.id),
       )))
     const materializeMs = performance.now() - materializeAt
@@ -352,7 +383,7 @@ export class DialogRpc {
       if (requested._ === 'inputDialogPeerFolder') {
         if (requested.folderId === 0 || requested.folderId === 1) {
           for (const dialog of loaded) {
-            if (archivedPeerIds.has(dialog.conversation.id) !== (requested.folderId === 1)) continue
+            if (this._effectiveFolderId(dialog.conversation, archivedPeerIds) !== requested.folderId) continue
             if (!seen.has(dialog.conversation.id)) selected.push(dialog)
             seen.add(dialog.conversation.id)
           }
@@ -389,7 +420,7 @@ export class DialogRpc {
     const materialized = await Promise.all(selected.map((dialog) =>
       this._materializeDialog(
         dialog, drafts.get(dialog.conversation.id),
-        archivedPeerIds.has(dialog.conversation.id) ? 1 : undefined,
+        this._effectiveFolderId(dialog.conversation, archivedPeerIds) || undefined,
       )))
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return {
@@ -3039,6 +3070,15 @@ export class DialogRpc {
     return { ...page, dialogs: dialogs.filter((dialog) => !this._isSubchannel(dialog.conversation)) }
   }
 
+  /** QQ mask folder placement is transient; durable rows remain fallback state. */
+  private _effectiveFolderId(
+    conversation: import('./platform.js').IMConversation,
+    archivedPeerIds: ReadonlySet<string>,
+  ): 0 | 1 {
+    return qqGroupMsgMaskPolicy(conversation)?.folderId
+      ?? (archivedPeerIds.has(conversation.id) ? 1 : 0)
+  }
+
   private async _loadDialogFolderPage(
     query: { limit?: number, afterId?: string },
     folderId: 0 | 1,
@@ -3046,11 +3086,13 @@ export class DialogRpc {
   ): Promise<IMDialogPage> {
     const limit = Math.max(1, query.limit ?? 100)
     const selected: IMDialog[] = []
+    const countAll = this._platform.platformKind === 'qq'
+    let matching = 0
     let afterId = query.afterId
     let scanned = 0
     let exhausted = false
     const visitedOffsets = new Set<string | undefined>()
-    while (selected.length < limit && scanned < 100_000) {
+    while ((countAll || selected.length < limit) && scanned < 100_000) {
       if (visitedOffsets.has(afterId)) break
       visitedOffsets.add(afterId)
       const batchLimit = Math.max(100, limit)
@@ -3060,8 +3102,10 @@ export class DialogRpc {
         break
       }
       scanned += page.dialogs.length
-      selected.push(...page.dialogs.filter((dialog) =>
-        archivedPeerIds.has(dialog.conversation.id) === (folderId === 1)))
+      const matches = page.dialogs.filter((dialog) =>
+        this._effectiveFolderId(dialog.conversation, archivedPeerIds) === folderId)
+      matching += matches.length
+      if (selected.length < limit) selected.push(...matches.slice(0, limit - selected.length))
       const lastId = page.dialogs.at(-1)!.conversation.id
       const hasMore = Boolean(page.nextCursor)
         || (page.total !== undefined && scanned < page.total)
@@ -3073,11 +3117,11 @@ export class DialogRpc {
       afterId = lastId
     }
     return {
-      dialogs: selected.slice(0, limit),
-      ...(selected.length > limit || !exhausted
+      dialogs: selected,
+      ...(matching > limit || !exhausted
         ? { nextCursor: afterId ?? selected.at(-1)?.conversation.id }
         : {}),
-      ...(exhausted && !query.afterId ? { total: selected.length } : {}),
+      ...(exhausted && !query.afterId ? { total: matching } : {}),
     }
   }
 
@@ -4253,10 +4297,7 @@ export class DialogRpc {
 
   async getNotifySettings(req: tl.account.RawGetNotifySettingsRequest): Promise<tl.RawPeerNotifySettings> {
     await this._hydratePeers()
-    return this._notificationSettings?.get(
-      this._session.platformSessionId,
-      this._notificationTarget(req.peer),
-    ) ?? { _: 'peerNotifySettings' }
+    return this._effectiveNotifySettings(this._notificationTarget(req.peer))
   }
 
   async updateNotifySettings(req: tl.account.RawUpdateNotifySettingsRequest): Promise<{
@@ -4265,10 +4306,37 @@ export class DialogRpc {
   }> {
     await this._hydratePeers()
     const target = this._notificationTarget(req.peer)
-    const settings = await this._notificationSettings?.update(
+    await this._notificationSettings?.update(
       this._session.platformSessionId, target, req.settings,
-    ) ?? { _: 'peerNotifySettings' as const }
-    return { settings, peer: this._notifyPeer(target) }
+    )
+    // Reverse-sync Telegram mute state into the QQ group message mask. Only QQ
+    // groups carry a `qqGroupMsgMask` metadata field; other conversations keep
+    // Telegram-local notification settings. Mask 2 (ASSISTANT) and 3 (SHIELD)
+    // have no Telegram-side equivalent and are never written back here.
+    if (target.type === 'peer') {
+      await this._syncQqGroupMsgMask(target.peerId, req.settings.muteUntil)
+    }
+    return { settings: await this._effectiveNotifySettings(target), peer: this._notifyPeer(target) }
+  }
+
+  private async _syncQqGroupMsgMask(peerId: string, muteUntil: number | undefined): Promise<void> {
+    const conversation = this._conversations.get(peerId)
+    if (conversation?.kind !== 'group') return
+    if (typeof conversation.metadata?.qqGroupMsgMask !== 'number') return
+    if (!this._platform.setConversationNotificationMask) return
+    // Telegram mute → QQ mask: forever/future timestamps map to mask 4 (receive
+    // without notification); 0/undefined (unmute) maps to mask 1 (notify).
+    const isMuted = muteUntil !== undefined && muteUntil !== 0
+    const mask = isMuted ? QQ_GROUP_MSG_MASK.RECEIVE : QQ_GROUP_MSG_MASK.NOTIFY
+    try {
+      await this._platform.setConversationNotificationMask(this._session, peerId, mask)
+      this._conversations.set(peerId, {
+        ...conversation,
+        metadata: { ...conversation.metadata, qqGroupMsgMask: mask },
+      })
+    } catch (error) {
+      this._onTrace?.('qq group mask sync failed: peer=%s mask=%d error=%s', peerId, mask, String(error))
+    }
   }
 
   async getNotifyExceptions(req: tl.account.RawGetNotifyExceptionsRequest): Promise<tl.RawUpdates> {
@@ -4295,9 +4363,10 @@ export class DialogRpc {
     }
     return {
       _: 'updates',
-      updates: selected.map(({ target, settings }) => ({
-        _: 'updateNotifySettings', peer: this._notifyPeer(target), notifySettings: settings,
-      })),
+      updates: await Promise.all(selected.map(async ({ target }) => ({
+        _: 'updateNotifySettings' as const,
+        peer: this._notifyPeer(target), notifySettings: await this._effectiveNotifySettings(target),
+      }))),
       users: uniqueUsers(users), chats: uniqueChats(chats),
       date: Math.floor(Date.now() / 1000), seq: 0,
     }
@@ -4315,7 +4384,7 @@ export class DialogRpc {
     return Promise.all(targets.map(async (target) => ({
       _: 'updateNotifySettings' as const,
       peer: this._notifyPeer(target),
-      notifySettings: await this._notificationSettings!.get(this._session.platformSessionId, target),
+      notifySettings: await this._effectiveNotifySettings(target),
     })))
   }
 
@@ -4360,10 +4429,19 @@ export class DialogRpc {
       : { _: 'notifyPeer', peer }
   }
 
+  private async _effectiveNotifySettings(target: NotificationTarget): Promise<tl.RawPeerNotifySettings> {
+    const persisted = await this._notificationSettings?.get(
+      this._session.platformSessionId, target,
+    ) ?? { _: 'peerNotifySettings' as const }
+    // Only peer settings mirror QQ. Topic and category targets remain Telegram-local.
+    const policy = target.type === 'peer'
+      ? qqGroupMsgMaskPolicy(this._conversations.get(target.peerId))
+      : undefined
+    return policy ? { ...persisted, muteUntil: policy.muteUntil } : persisted
+  }
+
   private _peerNotifySettings(peerId: string): Promise<tl.RawPeerNotifySettings> {
-    return this._notificationSettings?.get(
-      this._session.platformSessionId, { type: 'peer', peerId },
-    ) ?? Promise.resolve({ _: 'peerNotifySettings' })
+    return this._effectiveNotifySettings({ type: 'peer', peerId })
   }
 
   private _topicNotifySettings(peerId: string, topMsgId: number): Promise<tl.RawPeerNotifySettings> {
@@ -4486,6 +4564,14 @@ export class DialogRpc {
     // the caller still validates that this result belongs to the display peer.
     return this._store.findProjectedByTlId(this._session.platformSessionId, tlMessageId)
   }
+}
+
+function qqGroupMsgMaskPolicy(
+  conversation: import('./platform.js').IMConversation | undefined,
+): QQGroupMsgMaskPolicy | undefined {
+  if (conversation?.kind !== 'group') return
+  const mask = conversation.metadata?.qqGroupMsgMask
+  return typeof mask === 'number' ? QQ_GROUP_MSG_MASK_POLICIES[mask] : undefined
 }
 
 function makeAdminRights(permissions?: IMConversationPermissions): tl.RawChatAdminRights {

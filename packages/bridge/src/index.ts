@@ -33,7 +33,7 @@ import { verifyLoginCode } from './login-code.js'
 import { DraftStore } from './draft-store.js'
 import { NotificationSettingsStore } from './notification-settings.js'
 import {
-  makePlatformAccountView, makeUnavailableAccountView,
+  makeCrossGramServerConfig, makePlatformAccountView, makeUnavailableAccountView,
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
 import { AuthTransferStore } from './auth-transfer.js'
@@ -294,6 +294,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   let publishedStickerPacks: StickerDashboardPack[] = []
   const dashboard: PlatformAccountDashboardData & StickerPackDashboardData = {
     accounts: [],
+    serverConfig: makeCrossGramServerConfig(
+      config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, ctx.mtproto.rsaKey.publicKeyPem,
+    ),
     updatedAt: Date.now(),
     stickerAccounts: [],
     stickerPacks: [],
