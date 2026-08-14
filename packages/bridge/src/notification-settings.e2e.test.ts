@@ -400,4 +400,111 @@ describe('notification settings RPC e2e', () => {
       _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
   })
+
+  it('reverse-syncs Telegram mute state into the QQ group message mask', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise(resolve => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const qqGroup: IMConversation = {
+      id: 'qq-group', kind: 'group', title: 'QQ group',
+      metadata: { qqGroupMsgMask: 1, qq: '1058754719', chatType: 2 },
+    }
+    const nonQqGroup: IMConversation = { id: 'plain-group', kind: 'group', title: 'Plain group' }
+    const maskCalls: Array<{ conversationId: string, mask: number }> = []
+    let maskFailure: Error | undefined
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: [
+          { conversation: qqGroup, unreadCount: 0 },
+          { conversation: nonQqGroup, unreadCount: 0 },
+        ] }
+      },
+      async getHistory() { return { messages: [] } },
+      async setConversationNotificationMask(_session, conversationId, mask) {
+        if (maskFailure) throw maskFailure
+        maskCalls.push({ conversationId, mask })
+      },
+    }
+    const settings = new NotificationSettingsStore(ctx.database, true)
+    const dialogs = createDialog(settings, targetPlatform)
+    const dispatcher = dispatcherFor(dialogs)
+    await dialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    const peer = (id: string) => ({
+      _: 'inputNotifyPeer' as const,
+      peer: { _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE },
+    })
+
+    // mute → mask 4 (receive without notification)
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('qq-group'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(maskCalls).toEqual([{ conversationId: 'qq-group', mask: 4 }])
+    // overlay reflects the freshly written mask immediately
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('qq-group'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+
+    // unmute → mask 1 (notify)
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('qq-group'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(maskCalls).toEqual([
+      { conversationId: 'qq-group', mask: 4 },
+      { conversationId: 'qq-group', mask: 1 },
+    ])
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('qq-group'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
+
+    // a future timestamp also counts as muted → mask 4
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('qq-group'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 9_999_999_999 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(maskCalls.at(-1)).toEqual({ conversationId: 'qq-group', mask: 4 })
+
+    // non-QQ group (no qqGroupMsgMask metadata) must not trigger a platform call
+    const callsBeforePlain = maskCalls.length
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('plain-group'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(maskCalls.length).toBe(callsBeforePlain)
+
+    // return to mask 1 (unmute) so the overlay reflects muteUntil 0 before the
+    // failure scenario, then verify a failed mute does not block the TG response
+    // nor flip the overlay (the previous successful mask stays in effect).
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('qq-group'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(maskCalls.at(-1)).toEqual({ conversationId: 'qq-group', mask: 1 })
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('qq-group'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
+
+    maskFailure = new Error('upstream down')
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.updateNotifySettings', peer: peer('qq-group'),
+      settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    // overlay is unchanged (still mask 1) because the platform call failed
+    await expect(roundTripRpc(dispatcher, {
+      _: 'account.getNotifySettings', peer: peer('qq-group'),
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
+    maskFailure = undefined
+  })
 })
