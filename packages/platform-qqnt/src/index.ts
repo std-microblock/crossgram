@@ -770,6 +770,21 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     this.firstUnreadSeq.delete(target.conversationId)
   }
 
+  async setConversationNotificationMask(
+    _session: PlatformSession,
+    conversationId: string,
+    mask: number,
+  ): Promise<void> {
+    const conversation = this.conversations.get(conversationId)
+    if (!conversation) return
+    const chatType = conversation.metadata?.chatType
+    // The QQNT bridge notification-mask route is keyed by chatType + peerUin
+    // (the numeric group code), stored on the conversation metadata as `qq`.
+    const peerUin = conversation.metadata?.qq
+    if (typeof chatType !== 'number' || typeof peerUin !== 'string' || !peerUin) return
+    await this.client.setNotificationMask(chatType, peerUin, mask)
+  }
+
   async getConversationMembers(
     _session: PlatformSession,
     conversation: IMConversationRef,

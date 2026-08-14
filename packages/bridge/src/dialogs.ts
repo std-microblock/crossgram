@@ -4217,7 +4217,34 @@ export class DialogRpc {
     await this._notificationSettings?.update(
       this._session.platformSessionId, target, req.settings,
     )
+    // Reverse-sync Telegram mute state into the QQ group message mask. Only QQ
+    // groups carry a `qqGroupMsgMask` metadata field; other conversations keep
+    // Telegram-local notification settings. Mask 2 (ASSISTANT) and 3 (SHIELD)
+    // have no Telegram-side equivalent and are never written back here.
+    if (target.type === 'peer') {
+      await this._syncQqGroupMsgMask(target.peerId, req.settings.muteUntil)
+    }
     return { settings: await this._effectiveNotifySettings(target), peer: this._notifyPeer(target) }
+  }
+
+  private async _syncQqGroupMsgMask(peerId: string, muteUntil: number | undefined): Promise<void> {
+    const conversation = this._conversations.get(peerId)
+    if (conversation?.kind !== 'group') return
+    if (typeof conversation.metadata?.qqGroupMsgMask !== 'number') return
+    if (!this._platform.setConversationNotificationMask) return
+    // Telegram mute → QQ mask: forever/future timestamps map to mask 4 (receive
+    // without notification); 0/undefined (unmute) maps to mask 1 (notify).
+    const isMuted = muteUntil !== undefined && muteUntil !== 0
+    const mask = isMuted ? QQ_GROUP_MSG_MASK.RECEIVE : QQ_GROUP_MSG_MASK.NOTIFY
+    try {
+      await this._platform.setConversationNotificationMask(this._session, peerId, mask)
+      this._conversations.set(peerId, {
+        ...conversation,
+        metadata: { ...conversation.metadata, qqGroupMsgMask: mask },
+      })
+    } catch (error) {
+      this._onTrace?.('qq group mask sync failed: peer=%s mask=%d error=%s', peerId, mask, String(error))
+    }
   }
 
   async getNotifyExceptions(req: tl.account.RawGetNotifyExceptionsRequest): Promise<tl.RawUpdates> {

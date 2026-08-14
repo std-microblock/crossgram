@@ -2742,4 +2742,34 @@ describe('QQNTPlatform dialogs polling', () => {
 
     expect(platform.client.getDialogs).toHaveBeenCalledTimes(1)
   })
+
+  it('forwards setConversationNotificationMask to the QQNT bridge with chatType and peerUin', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getConversation = vi.fn(async () => ({
+      id: '2:group', kind: 'group' as const, title: 'Group',
+      peerUid: '1058754719', peerUin: '1058754719', chatType: 2 as const,
+    }))
+    await platform.getConversation(session, '2:group')
+
+    platform.client.setNotificationMask = vi.fn(async () => {})
+    await platform.setConversationNotificationMask!(session, '2:group', 4)
+    expect(platform.client.setNotificationMask).toHaveBeenCalledWith(2, '1058754719', 4)
+
+    // unknown conversation id → no platform call
+    platform.client.setNotificationMask = vi.fn(async () => {})
+    await platform.setConversationNotificationMask!(session, 'unknown', 1)
+    expect(platform.client.setNotificationMask).not.toHaveBeenCalled()
+  })
+
+  it('skips setConversationNotificationMask when conversation metadata lacks a numeric peerUin', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getConversation = vi.fn(async () => ({
+      id: 'bare-group', kind: 'group' as const, title: 'Bare',
+      peerUid: 'bare', peerUin: '', chatType: 2 as const,
+    }))
+    await platform.getConversation(session, 'bare-group')
+    platform.client.setNotificationMask = vi.fn(async () => {})
+    await platform.setConversationNotificationMask!(session, 'bare-group', 4)
+    expect(platform.client.setNotificationMask).not.toHaveBeenCalled()
+  })
 })
