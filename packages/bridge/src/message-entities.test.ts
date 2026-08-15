@@ -38,6 +38,16 @@ describe('withAutoLinkEntities', () => {
     expect(text.indexOf('https://')).toBe(5)
   })
 
+  it('keeps encoded QQ group query tokens while excluding Chinese punctuation', () => {
+    const qqGroupUrl = 'https://qm.qq.com/cgi-bin/qm/qr?k=Abc%2BDef%2Fghi%3D%3D&authKey=tok%252Fvalue%253D&noverify=0'
+    const text = `加入群聊：${qqGroupUrl}，欢迎。`
+
+    expect(linkTexts(text)).toEqual([qqGroupUrl])
+    expect(withAutoLinkEntities(text)).toEqual([{
+      _: 'messageEntityUrl', offset: text.indexOf(qqGroupUrl), length: qqGroupUrl.length,
+    }])
+  })
+
   it('does not produce invalid, email-fragment, or overlapping URL entities', () => {
     const text = 'mail user@example.com invalid http:// and https://covered.example/path'
     const coveredOffset = text.indexOf('https://')

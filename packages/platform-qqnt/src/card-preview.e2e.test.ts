@@ -14,6 +14,7 @@ import { QQNTPlatform } from './index.js'
 const session: PlatformSession = {
   platformSessionId: 'qqnt-card-e2e', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
 }
+const qqGroupUrl = 'https://qm.qq.com/cgi-bin/qm/qr?k=Abc%2BDef%2Fghi%3D%3D&authKey=tok%252Fvalue%253D&noverify=0'
 const disposals: Array<() => Promise<void>> = []
 
 afterEach(async () => {
@@ -32,7 +33,7 @@ describe('QQNT card preview E2E', () => {
           timestamp: 1_800_000_000, outgoing: false,
           parts: [{ type: 'card', card: {
             kind: 'link', source: '示例资讯', title: '完整分享标题', description: '完整分享摘要',
-            url: 'https://example.com/articles/42', thumbnailUrl: 'https://cdn.example.com/cover.jpg',
+            url: qqGroupUrl, thumbnailUrl: 'https://cdn.example.com/cover.jpg',
           } }],
         }] }))
         return
@@ -93,10 +94,10 @@ describe('QQNT card preview E2E', () => {
       _: 'message', message: '分享 · 示例资讯',
       entities: [{
         _: 'messageEntityTextUrl', offset: 0, length: '分享 · 示例资讯'.length,
-        url: 'https://example.com/articles/42',
+        url: qqGroupUrl,
       }],
       media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
-        _: 'webPage', url: 'https://example.com/articles/42', displayUrl: 'example.com',
+        _: 'webPage', url: qqGroupUrl, displayUrl: 'qm.qq.com',
         type: 'article', siteName: '示例资讯', title: '完整分享标题', description: '完整分享摘要',
         photo: { _: 'photo', dcId: 1, sizes: [{ _: 'photoSize', type: 'x' }] },
       } },
