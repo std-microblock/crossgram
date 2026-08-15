@@ -86,6 +86,14 @@ async function sourceBytes(source: { stream(): AsyncIterable<Uint8Array> }): Pro
   return Buffer.concat(chunks)
 }
 
+function pngDataUri(width: number, height: number): string {
+  const bytes = new Uint8Array(24)
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  new DataView(bytes.buffer).setUint32(16, width)
+  new DataView(bytes.buffer).setUint32(20, height)
+  return `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`
+}
+
 async function createSatoriServer(token?: string, limits: { maxRequestBodyBytes?: number, maxWebSocketPayload?: number } = {}) {
   const ctx = new Context()
   const fibers = [
@@ -219,6 +227,73 @@ describe('SatoriExporter', () => {
     expect(get).not.toHaveBeenCalled()
   })
 
+  it('infers missing dimensions from a non-square data URI without consuming its source', async () => {
+    const { ctx, platform } = await createExporter()
+
+    await ctx.bots[0]!.createMessage('group:42', [h.img(pngDataUri(640, 480))])
+
+    const media = (platform.sendMessage.mock.calls[0]![2].parts[0] as Extract<IMMessageInput['parts'][number], { type: 'media' }>).media
+    expect(media).toMatchObject({ kind: 'image', width: 640, height: 480 })
+    expect(await sourceBytes(media.source!)).toHaveLength(24)
+    expect(await sourceBytes(media.source!)).toHaveLength(24)
+  })
+
+  it('keeps explicit image dimensions over intrinsic dimensions', async () => {
+    const { ctx, platform } = await createExporter()
+
+    await ctx.bots[0]!.createMessage('group:42', [h.img(pngDataUri(640, 480), { width: 12, height: 34 })])
+
+    const media = (platform.sendMessage.mock.calls[0]![2].parts[0] as Extract<IMMessageInput['parts'][number], { type: 'media' }>).media
+    expect(media).toMatchObject({ kind: 'image', width: 12, height: 34 })
+  })
+
+  it('fills only the missing dimension of an image element', async () => {
+    const { ctx, platform } = await createExporter()
+
+    await ctx.bots[0]!.createMessage('group:42', [h('image', { src: pngDataUri(640, 480), width: 12 })])
+
+    const media = (platform.sendMessage.mock.calls[0]![2].parts[0] as Extract<IMMessageInput['parts'][number], { type: 'media' }>).media
+    expect(media).toMatchObject({ kind: 'image', width: 12, height: 480 })
+  })
+
+  it.each([
+    ['zero width', { width: 0, height: 60 }, { width: 640, height: 60 }],
+    ['negative height', { width: 50, height: -1 }, { width: 50, height: 480 }],
+    ['non-finite dimensions', { width: Infinity, height: NaN }, { width: 640, height: 480 }],
+  ])('treats %s as missing image dimensions', async (_name, attributes, expected) => {
+    const { ctx, platform } = await createExporter()
+
+    await ctx.bots[0]!.createMessage('group:42', [h.img(pngDataUri(640, 480), attributes)])
+
+    const media = (platform.sendMessage.mock.calls[0]![2].parts[0] as Extract<IMMessageInput['parts'][number], { type: 'media' }>).media
+    expect(media).toMatchObject({ kind: 'image', ...expected })
+  })
+
+  it.each([
+    ['unrecognized image bytes', 'data:image/png;base64,AAAA'],
+    ['unsupported image source', 'https://outside.test/image.png'],
+  ])('does not reject %s while probing dimensions', async (_name, src) => {
+    const { ctx, platform } = await createExporter()
+
+    await expect(ctx.bots[0]!.createMessage('group:42', [h.img(src)])).resolves.toHaveLength(1)
+
+    const media = (platform.sendMessage.mock.calls[0]![2].parts[0] as Extract<IMMessageInput['parts'][number], { type: 'media' }>).media
+    expect(media).toMatchObject({ kind: 'image', width: undefined, height: undefined })
+  })
+
+  it.each(['file', 'audio', 'video'])('preserves %s dimensions without reading its source', async (type) => {
+    const { ctx, platform } = await createExporter()
+    const file = vi.spyOn(ctx.http, 'file')
+
+    await ctx.bots[0]!.createMessage('group:42', [h(type, {
+      src: 'internal:qq/self/asset', width: 0, height: 0,
+    })])
+
+    const media = (platform.sendMessage.mock.calls[0]![2].parts[0] as Extract<IMMessageInput['parts'][number], { type: 'media' }>).media
+    expect(media).toMatchObject({ kind: 'file', width: 0, height: 0 })
+    expect(file).not.toHaveBeenCalled()
+  })
+
   it('rejects base64 data media exceeding the configured byte limit', async () => {
     const { ctx, platform } = await createExporter({ maxMediaBytes: 2 })
 
@@ -237,16 +312,17 @@ describe('SatoriExporter', () => {
 
     expect(Array.from(await sourceBytes(source))).toEqual([4, 5, 6])
     expect(Array.from(await sourceBytes(source))).toEqual([4, 5, 6])
-    expect(ctx.http.file).toHaveBeenCalledTimes(2)
+    expect(ctx.http.file).toHaveBeenCalledTimes(3)
   })
 
-  it('rejects internal media exceeding the configured byte limit', async () => {
+  it('limits intrinsic dimension probing to the configured media byte limit', async () => {
     const { ctx, platform } = await createExporter({ maxMediaBytes: 2 })
     vi.spyOn(ctx.http, 'file').mockResolvedValue({ data: Uint8Array.of(4, 5, 6) } as never)
 
     await ctx.bots[0]!.createMessage('group:42', [h.img('internal:qq/self/asset.png')])
     const source = (platform.sendMessage.mock.calls[0]![2].parts[0] as Extract<IMMessageInput['parts'][number], { type: 'media' }>).media.source!
 
+    expect(ctx.http.file).toHaveBeenCalledTimes(1)
     await expect(sourceBytes(source)).rejects.toThrow('Satori media exceeds size limit')
   })
 
