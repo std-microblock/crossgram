@@ -544,7 +544,8 @@ describe('UpdateManager', () => {
   it('includes clickable URL entities in live updates', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'links', kind: 'group', title: 'Links' }
-    const text = '入口：https://example.com/path?q=1，备用 example.org/docs。'
+    const qqGroupUrl = 'https://qm.qq.com/cgi-bin/qm/qr?k=Abc%2BDef%2Fghi%3D%3D&authKey=tok%252Fvalue%253D&noverify=0'
+    const text = `入口：${qqGroupUrl}，备用 example.org/docs。`
     const message: IMMessage = {
       id: 'linked-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_001,
       content: { parts: [{ type: 'text', text }] },
@@ -558,8 +559,7 @@ describe('UpdateManager', () => {
       _: 'message', message: text,
       entities: [
         {
-          _: 'messageEntityUrl', offset: text.indexOf('https://'),
-          length: 'https://example.com/path?q=1'.length,
+          _: 'messageEntityUrl', offset: text.indexOf(qqGroupUrl), length: qqGroupUrl.length,
         },
         {
           _: 'messageEntityUrl', offset: text.indexOf('example.org'),

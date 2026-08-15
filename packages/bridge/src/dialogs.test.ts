@@ -1035,7 +1035,8 @@ describe('DialogRpc', () => {
   it('exposes plain platform links as clickable Telegram entities through serialized history', async () => {
     const platform = new DialogTestPlatform()
     const first = '😀 docs: https://example.com/a_(b).'
-    const second = '官网 example.org/guide，@Bob'
+    const qqGroupUrl = 'https://qm.qq.com/cgi-bin/qm/qr?k=Abc%2BDef%2Fghi%3D%3D&authKey=tok%252Fvalue%253D&noverify=0'
+    const second = `官网 ${qqGroupUrl}，@Bob`
     platform.addMessage('alice', {
       id: 'linked', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_225,
       content: { parts: [
@@ -1064,8 +1065,7 @@ describe('DialogRpc', () => {
         length: 'https://example.com/a_(b)'.length,
       },
       {
-        _: 'messageEntityUrl', offset: text.indexOf('example.org'),
-        length: 'example.org/guide'.length,
+        _: 'messageEntityUrl', offset: text.indexOf(qqGroupUrl), length: qqGroupUrl.length,
       },
       {
         _: 'messageEntityMentionName', offset: text.indexOf('@Bob'), length: 4,
