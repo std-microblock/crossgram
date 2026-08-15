@@ -4744,7 +4744,7 @@ export function projectTlMessage(options: {
       : undefined
   if (ordinal === 0 && source.content.serviceAction) {
     return {
-      _: 'messageService', out: source.outgoing || undefined, id: tlId,
+      _: 'messageService', out: source.outgoing || undefined, silent: true, id: tlId,
       fromId,
       peerId: peerId ?? (conversation.kind === 'direct'
         ? { _: 'peerUser', userId: conversationId }

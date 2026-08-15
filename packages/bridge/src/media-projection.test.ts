@@ -84,7 +84,7 @@ const platform: IMPlatform = {
 
 const disposals: Array<() => Promise<void>> = []
 
-it('projects platform service actions as Telegram MessageService records', () => {
+it('projects gray-tip service actions as silent Telegram MessageService records', () => {
   const source: IMMessage = {
     id: 'gray-tip', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_001,
     content: { parts: [], serviceAction: { type: 'custom', text: 'Alice戳了戳你' } },
@@ -93,9 +93,22 @@ it('projects platform service actions as Telegram MessageService records', () =>
     conversation, source, tlId: 7, ordinal: 0,
     fromId: { _: 'peerUser', userId: 42 },
   })).toMatchObject({
-    _: 'messageService', id: 7,
+    _: 'messageService', id: 7, silent: true,
     action: { _: 'messageActionCustomAction', message: 'Alice戳了戳你' },
   })
+})
+
+it('keeps ordinary messages at the existing notification default', () => {
+  const source: IMMessage = {
+    id: 'ordinary-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_001,
+    content: { parts: [{ type: 'text', text: 'regular message' }] },
+  }
+  const projected = projectTlMessage({
+    conversation, source, tlId: 7, ordinal: 0,
+    fromId: { _: 'peerUser', userId: 42 },
+  })
+  expect(projected).toMatchObject({ _: 'message', id: 7, message: 'regular message' })
+  expect(projected).not.toHaveProperty('silent')
 })
 
 it('projects a conversation-scoped sender title as a Telegram member tag', () => {
@@ -134,7 +147,7 @@ it('projects phone-call service actions as native Telegram call records', () => 
     fromId: { _: 'peerUser', userId: 42 },
   })
   expect(projected).toMatchObject({
-    _: 'messageService', id: 8,
+    _: 'messageService', id: 8, silent: true,
     action: { _: 'messageActionPhoneCall', callId: Long.fromNumber(stableId('phone-call:call-record')) },
   })
   if (projected._ !== 'messageService' || projected.action._ !== 'messageActionPhoneCall') {
@@ -158,7 +171,7 @@ it('projects a custom service action with no text as an empty MessageService act
     conversation, source, tlId: 9, ordinal: 0,
     fromId: { _: 'peerUser', userId: 42 },
   })).toMatchObject({
-    _: 'messageService', id: 9,
+    _: 'messageService', id: 9, silent: true,
     action: { _: 'messageActionCustomAction', message: '' },
   })
 })

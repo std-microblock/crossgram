@@ -2844,6 +2844,79 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
+  it('forwards gray-tip service notifications silently without silencing ordinary messages', async () => {
+    const conversation: bridge.IMConversation = {
+      id: 'gray-tip-room', kind: 'group', title: 'Gray-tip room',
+    }
+    const serviceMessage: bridge.IMMessage = {
+      id: 'gray-tip', conversationId: conversation.id, senderId: 'alice', timestamp: 1_700_001_000,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Alice joined the group' } },
+    }
+    const ordinaryMessage: bridge.IMMessage = {
+      id: 'ordinary-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1_700_000_999,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: { parts: [{ type: 'text', text: 'ordinary message' }] },
+    }
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+      },
+      async getAccount() {
+        return { credentials: {}, user: { id: 'self', firstName: 'Gray-tip Test User' } }
+      },
+      async subscribe() { return () => {} },
+      async getDialogs() {
+        return { dialogs: [{ conversation, unreadCount: 0, lastMessage: serviceMessage }] }
+      },
+      async getHistory() { return { messages: [serviceMessage, ordinaryMessage] } },
+      async getUser(_session, id) { return id === 'alice' ? { id, firstName: 'Alice' } : null },
+      async sendMessage() {
+        throw new Error('sending is disabled for the gray-tip e2e platform')
+      },
+    }
+    const platformId = 'gray-tip-silent-e2e'
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, platformId)
+      const client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x34567891, 0x5abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 6)
+      const chat = dialogs.chats.find((item: any) => item.title === conversation.title)
+      const history = await callRpc(client, key, sid, {
+        _: 'messages.getHistory',
+        peer: { _: 'inputPeerChannel', channelId: chat.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 8)
+      const service = history.messages.find((message: any) => message._ === 'messageService')
+      const ordinary = history.messages.find((message: any) => message._ === 'message')
+
+      expect(service).toMatchObject({
+        _: 'messageService', silent: true,
+        action: { _: 'messageActionCustomAction', message: 'Alice joined the group' },
+      })
+      expect(ordinary).toMatchObject({ _: 'message', message: 'ordinary message', silent: false })
+      client.close()
+    } finally {
+      await stop()
+    }
+  }, 30000)
+
   it('uses native merged-forward previews without expanding virtual history', async () => {
     const parent: bridge.IMConversation = {
       id: 'parent-room', kind: 'group', title: 'Parent room',
