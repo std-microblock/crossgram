@@ -1720,6 +1720,12 @@ function mapRequest(input: WireRequest): IMRequest<QQMediaLocator> {
     } : undefined,
     message: input.message,
     createdAt: input.timestamp,
+    ...(input.source || input.reason ? {
+      metadata: {
+        ...(input.source ? { qqRequestSource: input.source } : {}),
+        ...(input.reason ? { qqRequestReason: input.reason } : {}),
+      },
+    } : {}),
   }
 }
 

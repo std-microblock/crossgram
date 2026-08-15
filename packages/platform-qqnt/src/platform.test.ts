@@ -181,7 +181,7 @@ describe('QQNTPlatform mapping', () => {
     const request = {
       id: 'request/opaque:42', kind: 'group-join' as const, status: 'pending' as const,
       requester: { id: 'u_opaque', name: 'Alice' }, group: { id: 'group/opaque', name: 'Group' },
-      message: 'please approve', timestamp: '1710000000', approval: { nativePayload: 'secret' },
+      message: 'please approve', timestamp: '1710000000', source: 'doubt' as const, reason: 'QQ 风险提示', approval: { nativePayload: 'secret' },
     }
     platform.client.getRequests = vi.fn(async () => ({ requests: [request] }))
     platform.client.resolveRequest = vi.fn(async () => ({
@@ -197,7 +197,7 @@ describe('QQNTPlatform mapping', () => {
         id: 'request/opaque:42', kind: 'group-join', state: 'pending',
         requester: { id: 'u_opaque', firstName: 'Alice' },
         group: { id: 'group/opaque', kind: 'group', title: 'Group' },
-        message: 'please approve', createdAt: '1710000000',
+        message: 'please approve', createdAt: '1710000000', metadata: { qqRequestSource: 'doubt', qqRequestReason: 'QQ 风险提示' },
       }],
     })
     expect(requestPage.nextCursor).toBeUndefined()

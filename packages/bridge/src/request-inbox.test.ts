@@ -115,6 +115,29 @@ describe('request inbox timestamps', () => {
       requester: { id: 'alice', firstName: 'Alice' },
     }).timestamp).toBe(1_710_000_000)
   })
+
+  it('labels QQ-filtered friend requests with QQ’s original reason', () => {
+    const message = requestInboxMessage({
+      id: 'filtered-request', kind: 'friend', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' },
+      metadata: { qqRequestSource: 'doubt', qqRequestReason: '疑似营销账号' },
+    })
+    expect(message.content.parts).toEqual([{
+      type: 'text',
+      text: '好友申请\n申请人：Alice\nQQ 已过滤\n风险提示：疑似营销账号\n验证信息：无\n状态：待处理',
+    }])
+  })
+
+  it.each(['', '   '])('keeps the filtered label but omits blank QQ reasons', (qqRequestReason) => {
+    const message = requestInboxMessage({
+      id: 'filtered-blank-reason', kind: 'friend', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' },
+      metadata: { qqRequestSource: 'doubt', qqRequestReason },
+    })
+    expect(message.content.parts).toEqual([{
+      type: 'text', text: '好友申请\n申请人：Alice\nQQ 已过滤\n验证信息：无\n状态：待处理',
+    }])
+  })
 })
 
 describe('request inbox read-only boundary', () => {
