@@ -29,7 +29,7 @@ import type {
 
 
 const MIN_PROTOCOL_VERSION = 19
-const MAX_PROTOCOL_VERSION = 21
+const MAX_PROTOCOL_VERSION = 22
 
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
