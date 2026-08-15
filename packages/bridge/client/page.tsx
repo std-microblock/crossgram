@@ -4,6 +4,7 @@
 import type { Context } from 'cordis'
 import { computed, defineComponent, onBeforeUnmount, onMounted, ref, resolveComponent } from 'vue'
 import { useRpc } from '@cordisjs/client'
+import jsQR from 'jsqr'
 import type { PlatformAccountDashboardData, PlatformAccountView } from '../src/account-dashboard.js'
 import type {
   StickerDashboardPack, StickerPackDashboardData,
@@ -115,16 +116,98 @@ export const PlatformAccountsPage = defineComponent({
     const now = ref(Date.now())
     const refreshing = ref(false)
     const refreshError = ref<string>()
+    const qrMessage = ref<string>()
     const serverConfig = computed(() => JSON.stringify(data.value.serverConfig, null, 2))
     const copiedServerConfig = ref(false)
     let timer: ReturnType<typeof setInterval> | undefined
     let copiedTimer: ReturnType<typeof setTimeout> | undefined
+    const approveLoginToken = async (token: string, platformId: string) => {
+      qrMessage.value = undefined
+      try {
+        const response = await fetch(`${data.value.loginTokenApprovalUrl}/${encodeURIComponent(platformId)}/approve`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token }),
+        })
+        if (!response.ok) throw new Error('二维码批准失败，请重新登录 WebUI 后重试。')
+        qrMessage.value = '已批准 Telegram 二维码登录，请在 Telegram Desktop 中继续。'
+      } catch (error) {
+        qrMessage.value = error instanceof Error ? error.message : String(error)
+      }
+    }
+    const handlePaste = (event: ClipboardEvent) => {
+      const modifiers = event as ClipboardEvent & Pick<KeyboardEvent, 'ctrlKey' | 'metaKey'>
+      if (!modifiers.ctrlKey && !modifiers.metaKey) return
+      const item = Array.from(event.clipboardData?.items ?? []).find(item => item.type.startsWith('image/'))
+      const image = item?.getAsFile()
+      if (!image) return
+      event.preventDefault()
+      void decodeLoginQr(image)
+    }
+    const decodeLoginQr = async (image: File) => {
+      const maxBytes = 8 * 1024 * 1024
+      const maxDimension = 4_096
+      const maxPixels = 16_000_000
+      if (image.size > maxBytes) {
+        qrMessage.value = '二维码图片过大，请粘贴 8MB 以内的图片。'
+        return
+      }
+      let bitmap: ImageBitmap | undefined
+      try {
+        bitmap = await createImageBitmap(image)
+        if (bitmap.width > maxDimension || bitmap.height > maxDimension || bitmap.width * bitmap.height > maxPixels) {
+          qrMessage.value = '二维码图片尺寸过大，请粘贴不超过 4096×4096 的图片。'
+          return
+        }
+        const canvas = document.createElement('canvas')
+        canvas.width = bitmap.width
+        canvas.height = bitmap.height
+        const context = canvas.getContext('2d', { willReadFrequently: true })
+        if (!context) throw new Error('无法读取二维码图片。')
+        context.drawImage(bitmap, 0, 0)
+        const result = jsQR(context.getImageData(0, 0, bitmap.width, bitmap.height).data, bitmap.width, bitmap.height)
+        if (!result) {
+          qrMessage.value = '未能在粘贴的图片中识别到二维码。'
+          return
+        }
+        const token = parseTelegramLoginUrl(result.data)
+        if (!token) {
+          qrMessage.value = '该二维码不是 Telegram 登录二维码。'
+          return
+        }
+        const accounts = data.value.accounts.filter(account => account.status === 'ready')
+        if (!accounts.length) {
+          qrMessage.value = '没有可用于批准登录的平台账号。'
+          return
+        }
+        if (accounts.length === 1) {
+          await approveLoginToken(token, accounts[0]!.platformId)
+          return
+        }
+        const choices = accounts.map((account, index) =>
+          `${index + 1}. ${account.displayName ?? account.platformId}`).join('\n')
+        const selected = window.prompt(`请选择要登录的平台账号：\n${choices}`, '1')
+        if (selected === null) return
+        const account = accounts[Number(selected) - 1]
+        if (!account) {
+          qrMessage.value = '请选择列表中的平台账号。'
+          return
+        }
+        await approveLoginToken(token, account.platformId)
+      } catch (error) {
+        qrMessage.value = error instanceof Error ? error.message : '二维码图片无法读取。'
+      } finally {
+        bitmap?.close()
+      }
+    }
     onMounted(() => {
       timer = setInterval(() => { now.value = Date.now() }, 250)
+      window.addEventListener('paste', handlePaste)
     })
     onBeforeUnmount(() => {
       if (timer) clearInterval(timer)
       if (copiedTimer) clearTimeout(copiedTimer)
+      window.removeEventListener('paste', handlePaste)
     })
     const refresh = async () => {
       refreshing.value = true
@@ -164,6 +247,7 @@ export const PlatformAccountsPage = defineComponent({
         </div>,
         default: () => <main class="accounts-content">
           {refreshError.value && <div class="dashboard-error" role="alert">刷新失败：{refreshError.value}</div>}
+          {qrMessage.value && <div class="dashboard-error" role="status">{qrMessage.value}</div>}
           <section class="server-config-panel" aria-labelledby="server-config-heading">
             <div class="server-config-header">
               <div>
@@ -346,6 +430,23 @@ export const StickerPacksPage = defineComponent({
     }
   },
 })
+
+export function parseTelegramLoginUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    const token = url.searchParams.get('token')
+    if (
+      url.protocol !== 'tg:'
+      || url.hostname !== 'login'
+      || (url.pathname && url.pathname !== '/')
+      || !token
+      || !/^[A-Za-z0-9_-]+$/.test(token)
+    ) return
+    return value
+  } catch {
+    return
+  }
+}
 
 export async function copyText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {

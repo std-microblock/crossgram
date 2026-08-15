@@ -204,6 +204,44 @@ describe('ServerSession decrypted RPC queue', () => {
     }
   })
 
+  it('serializes export and import QR login transitions', async () => {
+    const { session } = createSession()
+    const internal = session as unknown as QueuedSession
+    const exported = Long.fromInt(20)
+    const imported = Long.fromInt(21)
+    let releaseExport!: () => void
+    const exportGate = new Promise<void>(resolve => { releaseExport = resolve })
+    let markExportStarted!: () => void
+    const exportStarted = new Promise<void>(resolve => { markExportStarted = resolve })
+    let importStarted = false
+
+    internal._handleRpcCall = async (messageId) => {
+      if (messageId.eq(exported)) {
+        markExportStarted()
+        await exportGate
+      } else if (messageId.eq(imported)) {
+        importStarted = true
+      }
+    }
+
+    try {
+      const first = internal._enqueueRpcCall(
+        exported, { _: 'auth.exportLoginToken' } as never, Long.fromInt(1),
+      )
+      await exportStarted
+      const second = internal._enqueueRpcCall(
+        imported, { _: 'auth.importLoginToken' } as never, Long.fromInt(1),
+      )
+      await Promise.resolve()
+      expect(importStarted).toBe(false)
+      releaseExport()
+      await Promise.all([first, second])
+      expect(importStarted).toBe(true)
+    } finally {
+      releaseExport()
+    }
+  })
+
   it('does not hold an independent RPC behind a slow ordinary handler', async () => {
     const { session } = createSession()
     const internal = session as unknown as QueuedSession

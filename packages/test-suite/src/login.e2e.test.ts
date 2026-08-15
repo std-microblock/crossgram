@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
+import { request as httpRequest } from 'node:http'
 import { connect, type Socket } from 'node:net'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -413,6 +414,21 @@ async function waitForWebuiRoute(ctx: Context, route: string) {
   throw new Error(`webui route was not registered: ${route}`)
 }
 
+async function postChunked(port: number, path: string, chunks: Uint8Array[]): Promise<{ status: number, body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      host: '127.0.0.1', port, path, method: 'POST', headers: { 'content-type': 'application/json' },
+    }, (response) => {
+      const body: Buffer[] = []
+      response.on('data', (chunk: Buffer) => body.push(chunk))
+      response.on('end', () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(body).toString('utf8') }))
+    })
+    request.on('error', reject)
+    for (const chunk of chunks) request.write(chunk)
+    request.end()
+  })
+}
+
 async function assignStaticStickerPacksThroughDashboard(ctx: Context, platformSessionId: string) {
   const entry = await waitForWebuiRoute(ctx, '/sticker-packs')
   const data = entry.data as bridge.StickerPackDashboardData
@@ -431,6 +447,194 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 }
 
 describe('bridge login e2e', () => {
+  it('lets any account-list viewer approve QR tokens and keeps permanent keys bound', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let issuer: TestClient | undefined
+    let other: TestClient | undefined
+    try {
+      const accountA = await waitForPlatformLogin(ctx, 'static')
+      ctx.imPlatform.register(new staticPlatformPlugin.StaticPlatform({ instanceId: 'second' }), 'static-b')
+      const accountB = await waitForPlatformLogin(ctx, 'static-b')
+      issuer = await TestClient.connect(port)
+      other = await TestClient.connect(port)
+      const issuerKey = await doClientHandshake(issuer, pubKey)
+      const otherKey = await doClientHandshake(other, pubKey)
+      const issuerSession = Long.fromInt(0x77331122)
+      const otherSession = Long.fromInt(0x77331123)
+      const approvalUrl = `http://127.0.0.1:${ctx.server.port}/api/login-tokens/static/approve`
+
+      const first = await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 2)
+      const firstUrl = `tg://login?token=${Buffer.from(first.token).toString('base64url')}`
+      const invalidToken = await fetch(approvalUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: 'tg://login?token=short' }),
+      })
+      expect(invalidToken.status).toBe(400)
+      expect(await invalidToken.json()).toEqual({ error: 'AUTH_TOKEN_INVALID' })
+      const unavailableAccount = await fetch(`http://127.0.0.1:${ctx.server.port}/api/login-tokens/missing/approve`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: firstUrl }),
+      })
+      expect(unavailableAccount.status).toBe(404)
+      expect(await unavailableAccount.json()).toEqual({ error: 'PLATFORM_ACCOUNT_UNAVAILABLE' })
+      const oversized = new TextEncoder().encode(JSON.stringify({ token: 'a'.repeat(257) }))
+      const chunkedOversized = await postChunked(ctx.server.port, '/api/login-tokens/static/approve', [
+        oversized.subarray(0, 128), oversized.subarray(128),
+      ])
+      expect(chunkedOversized.status).toBe(413)
+      expect(JSON.parse(chunkedOversized.body)).toEqual({ error: 'REQUEST_TOO_LARGE' })
+      const malformed = await postChunked(ctx.server.port, '/api/login-tokens/static/approve', [Uint8Array.of(0xff)])
+      expect(malformed.status).toBe(400)
+      expect(JSON.parse(malformed.body)).toEqual({ error: 'INVALID_REQUEST' })
+      expect((await fetch(approvalUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: firstUrl }),
+      })).status).toBe(200)
+
+      expect(await callRpc(other, otherKey, otherSession, {
+        _: 'auth.importLoginToken', token: first.token,
+      }, 2)).toMatchObject({ _: 'mt_rpc_error', errorMessage: 'AUTH_TOKEN_INVALID' })
+      const exportedAuthorization = await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 4)
+      expect(exportedAuthorization).toMatchObject({
+        _: 'auth.loginTokenSuccess', authorization: { _: 'auth.authorization', user: { firstName: 'Static User' } },
+      })
+      expect(await ctx.database.get('mtproto_auth_binding', {
+        authKeyId: Buffer.from(issuerKey.authKeyId).toString('hex'),
+      })).toMatchObject([{ platformId: 'static', platformSessionId: accountA.session.id }])
+      expect(await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 1, hash: Long.ZERO,
+      }, 6)).toMatchObject({ _: expect.stringMatching(/^messages\.dialogs/) })
+
+      const second = await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 8)
+      const secondUrl = `tg://login?token=${Buffer.from(second.token).toString('base64url')}`
+      expect((await fetch(approvalUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: secondUrl }),
+      })).status).toBe(200)
+      expect(await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'auth.importLoginToken', token: second.token,
+      }, 10)).toMatchObject({ _: 'auth.loginTokenSuccess' })
+
+      const switchToken = await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 12)
+      const switchUrl = `http://127.0.0.1:${ctx.server.port}/api/login-tokens/static-b/approve`
+      expect((await fetch(switchUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: `tg://login?token=${Buffer.from(switchToken.token).toString('base64url')}` }),
+      })).status).toBe(200)
+      expect(await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'auth.importLoginToken', token: switchToken.token,
+      }, 14)).toMatchObject({ _: 'mt_rpc_error', errorMessage: 'AUTH_KEY_ALREADY_BOUND' })
+      expect(await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'auth.importLoginToken', token: switchToken.token,
+      }, 15)).toMatchObject({ _: 'mt_rpc_error', errorMessage: 'AUTH_KEY_ALREADY_BOUND' })
+      expect(await ctx.database.get('mtproto_auth_binding', {
+        authKeyId: Buffer.from(issuerKey.authKeyId).toString('hex'),
+      })).toMatchObject([{ platformId: 'static', platformSessionId: accountA.session.id }])
+      expect(accountB.session.id).not.toBe(accountA.session.id)
+      expect(await callRpc(issuer, issuerKey, issuerSession, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 1, hash: Long.ZERO,
+      }, 16)).toMatchObject({ _: expect.stringMatching(/^messages\.dialogs/) })
+    } finally {
+      other?.close()
+      issuer?.close()
+      await stop()
+    }
+  }, 30_000)
+
+  it('serializes concurrent first bindings from two connections sharing an auth key', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let first: TestClient | undefined
+    let second: TestClient | undefined
+    try {
+      const accountA = await waitForPlatformLogin(ctx, 'static')
+      ctx.imPlatform.register(new staticPlatformPlugin.StaticPlatform({ instanceId: 'second' }), 'static-b')
+      const accountB = await waitForPlatformLogin(ctx, 'static-b')
+      first = await TestClient.connect(port)
+      const key = await doClientHandshake(first, pubKey)
+      second = await TestClient.connect(port)
+      const firstSession = Long.fromInt(0x77331124)
+      const secondSession = Long.fromInt(0x77331125)
+      const [firstCode, secondCode] = await Promise.all([
+        callRpc(first, key, firstSession, {
+          _: 'auth.sendCode', phoneNumber: `+${accountA.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+          settings: { _: 'codeSettings' },
+        }, 2),
+        callRpc(second, key, secondSession, {
+          _: 'auth.sendCode', phoneNumber: `+${accountB.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+          settings: { _: 'codeSettings' },
+        }, 2),
+      ])
+      const results = await Promise.all([
+        callRpc(first, key, firstSession, {
+          _: 'auth.signIn', phoneNumber: accountA.auth.virtualPhone, phoneCodeHash: firstCode.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode(accountA.auth.totpSecret),
+        }, 4),
+        callRpc(second, key, secondSession, {
+          _: 'auth.signIn', phoneNumber: accountB.auth.virtualPhone, phoneCodeHash: secondCode.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode(accountB.auth.totpSecret),
+        }, 4),
+      ])
+      expect(results.filter(result => result._ === 'auth.authorization')).toHaveLength(1)
+      expect(results.filter(result => result.errorMessage === 'AUTH_KEY_ALREADY_BOUND')).toHaveLength(1)
+      const [binding] = await ctx.database.get('mtproto_auth_binding', {
+        authKeyId: Buffer.from(key.authKeyId).toString('hex'),
+      })
+      expect(binding).toMatchObject(results[0]!._ === 'auth.authorization'
+        ? { platformId: 'static', platformSessionId: accountA.session.id }
+        : { platformId: 'static-b', platformSessionId: accountB.session.id })
+    } finally {
+      second?.close()
+      first?.close()
+      await stop()
+    }
+  }, 30_000)
+
+  it('rolls back a newly created binding when authorization initialization fails', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let client: TestClient | undefined
+    try {
+      const account = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const session = Long.fromInt(0x77331126)
+      const sent = await callRpc(client, key, session, {
+        _: 'auth.sendCode', phoneNumber: `+${account.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      const getUser = vi.spyOn(bridge.MessageStore.prototype, 'getUser').mockResolvedValueOnce(undefined)
+      const upsertUser = vi.spyOn(bridge.MessageStore.prototype, 'upsertUser')
+        .mockRejectedValueOnce(new Error('initialization failed'))
+      try {
+        expect(await callRpc(client, key, session, {
+          _: 'auth.signIn', phoneNumber: account.auth.virtualPhone, phoneCodeHash: sent.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode(account.auth.totpSecret),
+        }, 4)).toMatchObject({ _: 'mt_rpc_error', errorMessage: 'INTERNAL: initialization failed' })
+      } finally {
+        upsertUser.mockRestore()
+        getUser.mockRestore()
+      }
+      expect(await ctx.database.get('mtproto_auth_binding', {
+        authKeyId: Buffer.from(key.authKeyId).toString('hex'),
+      })).toEqual([])
+      expect(await callRpc(client, key, session, {
+        _: 'auth.signIn', phoneNumber: account.auth.virtualPhone, phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(account.auth.totpSecret),
+      }, 6)).toMatchObject({ _: 'auth.authorization' })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('authorizes an Android media DC connection and downloads a peer avatar', async () => {
     const { ctx, port, pubKey, stop } = await startApp({
       bridgeConfig: {
@@ -475,6 +679,18 @@ describe('bridge login e2e', () => {
       }, 8)
       expect(exported).toMatchObject({
         _: 'auth.exportedAuthorization', id: expect.anything(), bytes: expect.any(Uint8Array),
+      })
+      expect(await ctx.mtproto.dispatcher.dispatch({
+        connection: {} as never,
+        apiLayer: null,
+        authKeyId: null,
+        sessionId: Long.ZERO,
+        isAuthorized: false,
+        sendUpdate: () => {},
+        getPlatformData: <T>() => undefined as T,
+        setPlatformData: () => {},
+      }, { _: 'auth.importAuthorization', id: exported.id, bytes: exported.bytes } as never)).toMatchObject({
+        _: 'mt_rpc_error', errorCode: 401, errorMessage: 'AUTH_KEY_UNREGISTERED',
       })
 
       mediaClient = await TestClient.connect(port)

@@ -136,6 +136,11 @@ export class ServerConnection {
     return this._socket.writableLength
   }
 
+  /** Remote IP address for connection-level rate limits. */
+  get remoteAddress(): string | undefined {
+    return this._socket.remoteAddress
+  }
+
   /** Human-readable peer identity for logs. */
   get label(): string {
     return `${this._socket.remoteAddress ?? '?'}:${this._socket.remotePort ?? '?'}`
