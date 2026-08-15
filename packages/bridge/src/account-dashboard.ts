@@ -38,6 +38,7 @@ export interface CrossGramServerConfig {
 export interface PlatformAccountDashboardData {
   accounts: PlatformAccountView[]
   serverConfig: CrossGramServerConfig
+  loginTokenApprovalUrl: string
   updatedAt: number
   refresh(): Promise<void>
 }

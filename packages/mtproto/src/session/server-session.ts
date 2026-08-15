@@ -102,6 +102,8 @@ const MAX_COMPLETED_MESSAGE_IDS = 4096
 const AUTHORIZATION_TRANSITION_METHODS = new Set([
   'auth.signIn',
   'auth.importAuthorization',
+  'auth.exportLoginToken',
+  'auth.importLoginToken',
 ])
 
 /** Serialize a Long to 8 little-endian bytes (matches an 8-byte auth key id). */

@@ -9,11 +9,13 @@ import type { StickerPackDashboardData } from '../src/sticker-dashboard.js'
 type DashboardData = PlatformAccountDashboardData & StickerPackDashboardData
 
 const rpcState = vi.hoisted(() => ({ data: undefined as unknown as DashboardData }))
+const qrState = vi.hoisted(() => ({ result: null as { data: string } | null }))
 
 vi.mock('@cordisjs/client', async () => {
   const { ref } = await import('vue')
   return { useRpc: () => ref(rpcState.data) }
 })
+vi.mock('jsqr', () => ({ default: vi.fn(() => qrState.result) }))
 
 import { PlatformAccountsPage, StickerPacksPage } from './page.js'
 
@@ -26,6 +28,7 @@ afterEach(() => {
 describe('Bridge sticker pack management page', () => {
   beforeEach(() => {
     rpcState.data = dashboardData()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
   })
 
   it('assigns any catalog pack to the selected account and keeps native favorites locked', async () => {
@@ -63,6 +66,7 @@ describe('Bridge sticker pack management page', () => {
 describe('Bridge platform account page', () => {
   beforeEach(() => {
     rpcState.data = dashboardData()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
   })
 
   it('shows one server configuration panel for multiple accounts', () => {
@@ -128,6 +132,67 @@ describe('Bridge platform account page', () => {
     wrapper.unmount()
     delete (document as { execCommand?: unknown }).execCommand
   })
+
+  it('approves a pasted Telegram login QR for the only ready account', async () => {
+    rpcState.data.accounts = [{ platformId: 'static', platformKind: 'static', status: 'ready' }]
+    qrState.result = { data: telegramQr() }
+    const wrapper = mountPlatformAccountsPage()
+    stubImageDecoder()
+
+    pasteImage()
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/login-tokens/static/approve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: telegramQr() }),
+    }))
+    expect(wrapper.text()).toContain('已批准 Telegram 二维码登录')
+    wrapper.unmount()
+  })
+
+  it('accepts a Meta+V image paste for Telegram login approval', async () => {
+    rpcState.data.accounts = [{ platformId: 'static', platformKind: 'static', status: 'ready' }]
+    qrState.result = { data: telegramQr() }
+    const wrapper = mountPlatformAccountsPage()
+    stubImageDecoder()
+
+    pasteImage({ metaKey: true })
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalled())
+    wrapper.unmount()
+  })
+
+  it('prompts for the target account when a pasted Telegram login QR has multiple ready accounts', async () => {
+    rpcState.data.accounts = [
+      { platformId: 'qq/primary', platformKind: 'qq', status: 'ready', displayName: 'QQ Alice' },
+      { platformId: 'static/demo', platformKind: 'static', status: 'ready', displayName: 'Static Demo' },
+    ]
+    qrState.result = { data: telegramQr() }
+    vi.spyOn(window, 'prompt').mockReturnValue('2')
+    const wrapper = mountPlatformAccountsPage()
+    stubImageDecoder()
+
+    pasteImage()
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/login-tokens/static%2Fdemo/approve', expect.objectContaining({
+      body: JSON.stringify({ token: telegramQr() }),
+    })))
+    expect(window.prompt).toHaveBeenCalledWith(expect.stringContaining('QQ Alice'), '1')
+    wrapper.unmount()
+  })
+
+  it('reports pasted images without a QR code or a Telegram login QR', async () => {
+    const wrapper = mountPlatformAccountsPage()
+    stubImageDecoder()
+
+    qrState.result = null
+    pasteImage()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('未能在粘贴的图片中识别到二维码'))
+    expect(fetch).not.toHaveBeenCalled()
+
+    qrState.result = { data: 'https://example.com/qr' }
+    pasteImage()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('该二维码不是 Telegram 登录二维码'))
+    expect(fetch).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 })
 
 function mountPage() {
@@ -162,6 +227,31 @@ function mountPlatformAccountsPage() {
   })
 }
 
+function telegramQr(): string {
+  return `tg://login?token=${Buffer.from(new Uint8Array(32).fill(7)).toString('base64url')}`
+}
+
+function pasteImage(modifiers: { ctrlKey?: boolean, metaKey?: boolean } = {}): void {
+  const file = new File(['image'], 'login.png', { type: 'image/png' })
+  const event = new Event('paste') as ClipboardEvent
+  Object.defineProperties(event, {
+    ctrlKey: { value: modifiers.ctrlKey ?? !modifiers.metaKey },
+    metaKey: { value: modifiers.metaKey ?? false },
+    clipboardData: {
+      value: { items: [{ type: 'image/png', getAsFile: () => file }] },
+    },
+  })
+  window.dispatchEvent(event)
+}
+
+function stubImageDecoder(): void {
+  vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 16, height: 16, close: vi.fn() })))
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    drawImage: vi.fn(),
+    getImageData: () => ({ data: new Uint8ClampedArray(16 * 16 * 4) }),
+  } as unknown as CanvasRenderingContext2D)
+}
+
 function dashboardData(): DashboardData {
   return {
     accounts: [],
@@ -179,6 +269,7 @@ function dashboardData(): DashboardData {
         { id: 5, ip: '203.0.113.8', port: 4430 },
       ],
     },
+    loginTokenApprovalUrl: '/api/login-tokens',
     updatedAt: 0,
     refresh: vi.fn(async () => undefined),
     stickerUpdatedAt: 0,

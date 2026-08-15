@@ -1,6 +1,5 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
-import { randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
 import { resolve } from 'node:path'
 import Long from 'long'
@@ -37,6 +36,9 @@ import {
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
 import { AuthTransferStore } from './auth-transfer.js'
+import {
+  LoginTokenStore, LoginTokenStoreFullError, LoginTokenSourceLimitError, parseTelegramLoginToken,
+} from './login-token.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { DialogFolderStore } from './dialog-folders.js'
 import {
@@ -64,6 +66,7 @@ export * from './draft-store.js'
 export * from './platform-account.js'
 export * from './account-dashboard.js'
 export * from './auth-transfer.js'
+export * from './login-token.js'
 export * from './blocked-peers.js'
 export * from './dialog-folders.js'
 export * from './voice/call-registry.js'
@@ -158,6 +161,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     else bridgeLogger.debug(format, ...args)
   }
   const authTransfers = new AuthTransferStore()
+  const loginTokens = new LoginTokenStore()
 
   defineModels(ctx)
   const store = new MessageStore(ctx.database, undefined, undefined, historyTrace)
@@ -288,6 +292,74 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, authKeyId) => calls.replay(session, authKeyId),
   )
 
+  const authorizationLocks = new Map<string, Promise<void>>()
+  const withAuthorizationLock = async <T>(authKeyId: string, callback: () => Promise<T>): Promise<T> => {
+    const previous = authorizationLocks.get(authKeyId) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>((resolve) => { release = resolve })
+    authorizationLocks.set(authKeyId, current)
+    await previous
+    try {
+      return await callback()
+    } finally {
+      release()
+      if (authorizationLocks.get(authKeyId) === current) authorizationLocks.delete(authKeyId)
+    }
+  }
+
+  const authorizePlatformSession = async (
+    rpc: ServerRpcContext,
+    identity: { platformId: string, platformSessionId: string },
+  ): Promise<tl.TlObject> => {
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    const [platformSession] = await ctx.database.get('mtproto_platform_session', {
+      id: identity.platformSessionId,
+      platformId: identity.platformId,
+      active: true,
+    })
+    if (!platformSession) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
+    const [authSession] = await ctx.database.get('mtproto_auth_session', identity)
+    if (!authSession) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    if (!registry.get(identity.platformId)) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
+
+    const authKeyId = authKeyHex(rpc.authKeyId)
+    return withAuthorizationLock(authKeyId, async () => {
+      const [binding] = await ctx.database.get('mtproto_auth_binding', { authKeyId })
+      if (
+        binding
+        && (binding.platformId !== identity.platformId || binding.platformSessionId !== identity.platformSessionId)
+      ) throw new RpcError(400, 'AUTH_KEY_ALREADY_BOUND')
+
+      const created = !binding
+      const state = created
+        ? await requireBridgeSession(rpc, identity, false)
+        : await requireBridgeSession(rpc)
+      const metadata = platformSession.metadata
+      const selfRow = await store.getUser(state.session.platformId, state.session.userId)
+        ?? await store.upsertUser(state.session, {
+          id: state.session.userId,
+          firstName: (metadata.firstName as string) ?? 'Bridge',
+          lastName: metadata.lastName as string | undefined,
+          username: metadata.username as string | undefined,
+          metadata,
+        })
+      if (created) {
+        await ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }])
+        rpc.setPlatformData(state)
+      }
+      const user = makeUser({
+        id: selfRow.id,
+        self: true,
+        premium: true,
+        firstName: (metadata.firstName as string) ?? 'Bridge',
+        lastName: metadata.lastName as string | undefined,
+        username: metadata.username as string | undefined,
+        phone: authSession.virtualPhone,
+      })
+      return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
+    })
+  }
+
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()
@@ -297,6 +369,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     serverConfig: makeCrossGramServerConfig(
       config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, ctx.mtproto.rsaKey.publicKeyPem,
     ),
+    loginTokenApprovalUrl: `${apiPrefix}/login-tokens`,
     updatedAt: Date.now(),
     stickerAccounts: [],
     stickerPacks: [],
@@ -398,6 +471,62 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     return () => clearInterval(timer)
   }, 'mtproto-bridge.account-codes')
 
+  // Security: intentionally public, matching the anonymously subscribable account-list entry boundary.
+  ctx.server.post(`${apiPrefix}/login-tokens/:platform/approve`, async (req, res) => {
+    const declaredLength = Number(req.headers.get('content-length'))
+    if (Number.isFinite(declaredLength) && declaredLength > 256) {
+      res.status = 413
+      res.json({ error: 'REQUEST_TOO_LARGE' })
+      return
+    }
+    let token: unknown
+    try {
+      const reader = req.body?.getReader()
+      if (!reader) throw new Error('request body missing')
+      const chunks: Buffer[] = []
+      let size = 0
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        size += value.byteLength
+        if (size > 256) {
+          await reader.cancel()
+          res.status = 413
+          res.json({ error: 'REQUEST_TOO_LARGE' })
+          return
+        }
+        chunks.push(Buffer.from(value))
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { token?: unknown }
+      token = body?.token
+    } catch {
+      res.status = 400
+      res.json({ error: 'INVALID_REQUEST' })
+      return
+    }
+    const parsed = typeof token === 'string' ? parseTelegramLoginToken(token) : undefined
+    const account = provisionedAccounts.get(req.params.platform)
+    if (!parsed) {
+      res.status = 400
+      res.json({ error: 'AUTH_TOKEN_INVALID' })
+      return
+    }
+    if (!account) {
+      res.status = 404
+      res.json({ error: 'PLATFORM_ACCOUNT_UNAVAILABLE' })
+      return
+    }
+    if (!loginTokens.approve(parsed, {
+      platformId: account.session.platformId,
+      platformSessionId: account.session.platformSessionId,
+    })) {
+      res.status = 400
+      res.json({ error: 'AUTH_TOKEN_INVALID' })
+      return
+    }
+    res.json({ ok: true })
+  })
+
   ctx.server.get(`${apiPrefix}/platforms/:platform/avatar`, async (req, res) => {
     const platformId = (req.params as { platform: string }).platform
     const account = provisionedAccounts.get(platformId)
@@ -496,60 +625,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: normPhone(phoneNumber) })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
     if (!verifyLoginCode(auth.totpSecret, phoneCode)) throw new RpcError(400, 'PHONE_CODE_INVALID')
-    const [ps] = await ctx.database.get('mtproto_platform_session', { id: auth.platformSessionId })
-    if (!ps) throw new RpcError(500, 'PLATFORM_SESSION_NOT_FOUND')
-
-    const session = sessionFromRow(ps)
-    const platform = registry.get(ps.platformId)
-    if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
-    if (!rpc.authKeyId) throw new RpcError(500, 'AUTH_KEY_ID_MISSING')
-    await ctx.database.upsert('mtproto_auth_binding', [{
-      authKeyId: authKeyHex(rpc.authKeyId),
-      platformId: ps.platformId,
-      platformSessionId: ps.id,
-    }])
-    const selfRow = await store.getUser(session.platformId, session.userId)
-      ?? await store.upsertUser(session, {
-        id: session.userId,
-        firstName: (ps.metadata.firstName as string) ?? 'Bridge',
-        lastName: ps.metadata.lastName as string | undefined,
-        username: ps.metadata.username as string | undefined,
-        metadata: ps.metadata,
-      })
-    const state: BridgeSessionState = {
-      generation, platform, session,
-      stickers: stickerRpcFor(platform, session),
-      dialogs: undefined as never,
-    }
-    state.dialogs = new DialogRpc(
-      platform, session, store, uploads, config.onTransferProgress, dcId, state.stickers,
-      reactionRpcFor(platform, session),
-      resources,
-      (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
-      authKeyHex(rpc.authKeyId),
-      historyTrace,
-      drafts,
-      (localSession, update, excludeAuthKeyId) => updates.publishDraft(
-        localSession, update, excludeAuthKeyId,
-      ),
-      notificationSettings,
-      selfRow.id,
-      blockedPeers,
-      dialogFolders,
-    )
-    rpc.setPlatformData(state)
-    await subscriptions.ensure(session)
-
-    const user = makeUser({
-      id: selfRow.id,
-      self: true,
-      premium: true,
-      firstName: (ps.metadata.firstName as string) ?? 'Bridge',
-      lastName: ps.metadata.lastName as string | undefined,
-      username: ps.metadata.username as string | undefined,
-      phone: phoneNumber,
+    return authorizePlatformSession(rpc, {
+      platformId: auth.platformId,
+      platformSessionId: auth.platformSessionId,
     })
-    return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
   })
 
   rpc.register('auth.exportAuthorization', async (rpc, req) => {
@@ -570,43 +649,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const request = req as tl.auth.RawImportAuthorizationRequest
     const identity = authTransfers.take(request.id, request.bytes)
     if (!identity) throw new RpcError(400, 'AUTH_BYTES_INVALID')
-
-    const [platformSession] = await ctx.database.get('mtproto_platform_session', {
-      id: identity.platformSessionId,
-      platformId: identity.platformId,
-      active: true,
-    })
-    if (!platformSession) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
-    const [authSession] = await ctx.database.get('mtproto_auth_session', {
-      platformId: identity.platformId,
-      platformSessionId: identity.platformSessionId,
-    })
-    if (!authSession) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-
-    await ctx.database.upsert('mtproto_auth_binding', [{
-      authKeyId: authKeyHex(rpc.authKeyId),
-      ...identity,
-    }])
-    const { session } = await requireBridgeSession(rpc)
-    const metadata = platformSession.metadata
-    const selfRow = await store.getUser(session.platformId, session.userId)
-      ?? await store.upsertUser(session, {
-        id: session.userId,
-        firstName: (metadata.firstName as string) ?? 'Bridge',
-        lastName: metadata.lastName as string | undefined,
-        username: metadata.username as string | undefined,
-        metadata,
-      })
-    const user = makeUser({
-      id: selfRow.id,
-      self: true,
-      premium: true,
-      firstName: (metadata.firstName as string) ?? 'Bridge',
-      lastName: metadata.lastName as string | undefined,
-      username: metadata.username as string | undefined,
-      phone: authSession.virtualPhone,
-    })
-    return { _: 'auth.authorization', flags: 0, setupPasswordRequired: false, user } as unknown as tl.TlObject
+    return authorizePlatformSession(rpc, identity)
   })
 
   // ── Messages ──
@@ -972,13 +1015,48 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       phoneCodeHash: `hash_${auth.id}`,
     } as unknown as tl.TlObject
   })
-  // Telegram Desktop probes QR login before the user has selected a phone
-  // account, so this one response remains shared until a route is bound.
-  ctx.mtproto.register('auth.exportLoginToken', async () => ({
-    _: 'auth.loginToken',
-    expires: Math.floor(Date.now() / 1000) + 60,
-    token: randomBytes(32),
-  } as unknown as tl.TlObject))
+  // A QR token belongs to the permanent auth key that requested it. An SSO
+  // account-list user can approve it once; the Desktop poll then receives login success.
+  rpc.register('auth.exportLoginToken', async (rpc) => {
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    const claim = loginTokens.claimApprovedForAuthKey(rpc.authKeyId)
+    if (claim) {
+      try {
+        const authorization = await authorizePlatformSession(rpc, claim.identity)
+        loginTokens.commit(claim)
+        return { _: 'auth.loginTokenSuccess', authorization } as unknown as tl.TlObject
+      } catch (error) {
+        loginTokens.rollback(claim)
+        throw error
+      }
+    }
+    try {
+      const token = loginTokens.issue(rpc.authKeyId, undefined, rpc.connection.remoteAddress)
+      return {
+        _: 'auth.loginToken',
+        expires: Math.floor(Date.now() / 1000) + 60,
+        token,
+      } as unknown as tl.TlObject
+    } catch (error) {
+      if (error instanceof LoginTokenSourceLimitError) throw new RpcError(420, 'FLOOD_WAIT_60')
+      if (error instanceof LoginTokenStoreFullError) throw new RpcError(500, 'AUTH_TOKEN_RETRY')
+      throw error
+    }
+  })
+  rpc.register('auth.importLoginToken', async (rpc, req) => {
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    const token = (req as unknown as { token: Uint8Array }).token
+    const claim = loginTokens.claim(token, rpc.authKeyId)
+    if (!claim) throw new RpcError(400, 'AUTH_TOKEN_INVALID')
+    try {
+      const authorization = await authorizePlatformSession(rpc, claim.identity)
+      loginTokens.commit(claim)
+      return { _: 'auth.loginTokenSuccess', authorization } as unknown as tl.TlObject
+    } catch (error) {
+      loginTokens.rollback(claim)
+      throw error
+    }
+  })
 
   for (const [method, handler] of Object.entries(startupRpcHandlers)) {
     rpc.register(method, async () => handler())
@@ -1033,8 +1111,12 @@ function createSessionResolver(
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
-  return async (rpc: ServerRpcContext): Promise<BridgeSessionState> => {
-    const cached = rpc.getPlatformData<BridgeSessionState | null>()
+  return async (
+    rpc: ServerRpcContext,
+    provisionalIdentity?: { platformId: string, platformSessionId: string },
+    cache = true,
+  ): Promise<BridgeSessionState> => {
+    const cached = cache ? rpc.getPlatformData<BridgeSessionState | null>() : undefined
     if (
       cached?.generation === generation
       && registry.get(cached.session.platformId) === cached.platform
@@ -1042,50 +1124,59 @@ function createSessionResolver(
     if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
 
     const authKeyId = authKeyHex(rpc.authKeyId)
+    const makeState = async (identity: { platformId: string, platformSessionId: string }) => {
+      const platform = registry.get(identity.platformId)
+      if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
+      const [row] = await ctx.database.get('mtproto_platform_session', {
+        id: identity.platformSessionId,
+        active: true,
+      })
+      if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
+      const session = sessionFromRow(row)
+      const selfRow = await store.getUser(session.platformId, session.userId)
+        ?? await store.upsertUser(session, {
+          id: session.userId,
+          firstName: (row.metadata.firstName as string) ?? 'Bridge',
+          lastName: row.metadata.lastName as string | undefined,
+          username: row.metadata.username as string | undefined,
+          metadata: row.metadata,
+        })
+      await subscriptions.ensure(session)
+      await onAuthorizedSession?.(session, authKeyId)
+      const state: BridgeSessionState = {
+        generation, platform, session,
+        stickers: stickerRpcFor(platform, session),
+        dialogs: undefined as never,
+      }
+      state.dialogs = new DialogRpc(
+        platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
+        reactionRpcFor(platform, session),
+        resources,
+        (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
+        authKeyId,
+        historyTrace,
+        drafts,
+        onDraftUpdate,
+        notificationSettings,
+        selfRow.id,
+        blockedPeers,
+        dialogFolders,
+      )
+      return state
+    }
+
+    if (!cache) {
+      if (!provisionalIdentity) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+      return makeState(provisionalIdentity)
+    }
+
     while (true) {
       let pending = loading.get(authKeyId)
       if (!pending) {
         pending = (async () => {
           const [binding] = await ctx.database.get('mtproto_auth_binding', { authKeyId })
           if (!binding) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-          const platform = registry.get(binding.platformId)
-          if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
-          const [row] = await ctx.database.get('mtproto_platform_session', {
-            id: binding.platformSessionId,
-            active: true,
-          })
-          if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
-          const session = sessionFromRow(row)
-          const selfRow = await store.getUser(session.platformId, session.userId)
-            ?? await store.upsertUser(session, {
-              id: session.userId,
-              firstName: (row.metadata.firstName as string) ?? 'Bridge',
-              lastName: row.metadata.lastName as string | undefined,
-              username: row.metadata.username as string | undefined,
-              metadata: row.metadata,
-            })
-          await subscriptions.ensure(session)
-          await onAuthorizedSession?.(session, authKeyId)
-          const state: BridgeSessionState = {
-            generation, platform, session,
-            stickers: stickerRpcFor(platform, session),
-            dialogs: undefined as never,
-          }
-          state.dialogs = new DialogRpc(
-            platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
-            reactionRpcFor(platform, session),
-            resources,
-            (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
-            authKeyId,
-            historyTrace,
-            drafts,
-            onDraftUpdate,
-            notificationSettings,
-            selfRow.id,
-            blockedPeers,
-            dialogFolders,
-          )
-          return state
+          return makeState(binding)
         })()
         loading.set(authKeyId, pending)
         pending.finally(() => {
