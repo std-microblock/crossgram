@@ -74,6 +74,7 @@ export * from './voice/media.js'
 export * from './voice/voice-worker-client.js'
 export * from './voice/voice-rpc.js'
 export * from './stripped-thumbnail.js'
+export * from './image-dimensions.js'
 export * from './sticker-outline.js'
 export * from './sticker-dashboard.js'
 
