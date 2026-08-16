@@ -467,7 +467,7 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
 }
 
 describe('BotFather physical MTProto e2e', () => {
-  it('round trips a BotFather-created bot through the public SDK without leaking tokens', async () => {
+  it('round trips a BotFather-created bot through the public SDK with durable token messages', async () => {
     const debug: MtprotoDebugEvent[] = []
     const { ctx, port, pubKey, stop } = await startApp({ botApi: true })
     const originalFetch = globalThis.fetch
@@ -507,8 +507,12 @@ describe('BotFather physical MTProto e2e', () => {
             ?.match(/\d+:[A-Za-z0-9_-]{43}/u)?.[0]
           if (token) return token
         }
-        throw new Error('BotFather did not deliver a transient token')
+        throw new Error('BotFather did not deliver a token')
       }
+      const getFatherHistory = () => rpc({
+        _: 'messages.getHistory', peer: { _: 'inputPeerUser', userId: father.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      })
       const waitForHistory = async (description: string) => {
         const deadline = Date.now() + 5_000
         let history: any
@@ -614,14 +618,17 @@ describe('BotFather physical MTProto e2e', () => {
       await sendToFather('/revoke physical_e2e_bot', 1006)
       await expect(replacement.api.getMe()).rejects.toMatchObject({ errorCode: 401 })
 
-      expect(JSON.stringify(debug)).not.toContain(token)
-      expect(JSON.stringify(debug)).not.toContain(replacementToken)
-      expect(JSON.stringify(history)).not.toContain(token)
-      expect(JSON.stringify(history)).not.toContain(replacementToken)
-      expect(JSON.stringify(await ctx.database.get('mtproto_im_message', {}))).not.toContain(token)
-      expect(JSON.stringify(await ctx.database.get('mtproto_im_message', {}))).not.toContain(replacementToken)
-      expect(JSON.stringify(await rpc({ _: 'updates.getDifference', pts: 0, date: 0, qts: 0 }))).not.toContain(token)
-      expect(JSON.stringify(await rpc({ _: 'updates.getDifference', pts: 0, date: 0, qts: 0 }))).not.toContain(replacementToken)
+      const fatherHistory = await getFatherHistory()
+      const messages = await ctx.database.get('mtproto_im_message', {})
+      const difference = await rpc({ _: 'updates.getDifference', pts: 0, date: 0, qts: 0 })
+      expect(JSON.stringify(debug)).toContain(token)
+      expect(JSON.stringify(debug)).toContain(replacementToken)
+      expect(JSON.stringify(fatherHistory)).toContain(token)
+      expect(JSON.stringify(fatherHistory)).toContain(replacementToken)
+      expect(JSON.stringify(messages)).toContain(token)
+      expect(JSON.stringify(messages)).toContain(replacementToken)
+      expect(JSON.stringify(difference)).toContain(token)
+      expect(JSON.stringify(difference)).toContain(replacementToken)
     } finally {
       nativeSendMessage?.mockRestore()
       sdk?.stop()

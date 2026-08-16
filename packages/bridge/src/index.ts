@@ -201,8 +201,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   }
   const updates = new UpdateManager(
     ctx.database, registry, store,
-    (authKeyId, update, excludeConnection, options) =>
-      ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection, options),
+    (authKeyId, update, excludeConnection) =>
+      ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection),
     dcId,
     (format, ...args) => bridgeLogger.debug(format, ...args),
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
@@ -290,7 +290,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   )
   systemPeers.attach(
     (session, event, options) => subscriptions.ingestLocalEvent(session, event, options),
-    (session, conversation, message, options) => updates.publishTransientMessage(session, conversation, message, options),
   )
   const unregisterRequestInbox = systemPeers.register(new RequestInboxSystemPeerProvider(
     store,

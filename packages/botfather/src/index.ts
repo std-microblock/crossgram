@@ -289,8 +289,7 @@ class BotFatherProvider implements SystemPeerProvider {
         const issued = await this._registry.create(owner, flow.name!, text)
         this._flows.delete(session.platformSessionId)
         await bootstrapBot(session, issued.bot, peers)
-        await reply(session, peer.conversation, `Bot @${issued.bot.username} created. Token generated; it is shown once in a live message.`, peers)
-        await transientToken(session, peer.conversation, issued.token, peers)
+        await reply(session, peer.conversation, `Bot @${issued.bot.username} created. Use this token: ${issued.token}`, peers)
       } catch (error) {
         if (error instanceof BotUsernameTakenError) {
           return reply(session, peer.conversation, 'That username is already taken. Try another one.', peers)
@@ -313,8 +312,7 @@ class BotFatherProvider implements SystemPeerProvider {
     if (command?.[1] === 'token') {
       const issued = await this._registry.reset(owner, command[2])
       if (!issued) return reply(session, peer.conversation, 'Bot not found or unavailable.', peers)
-      await reply(session, peer.conversation, 'Token reset. The new token is shown once in a live message.', peers)
-      await transientToken(session, peer.conversation, issued.token, peers)
+      await reply(session, peer.conversation, `Token reset. Use this new token: ${issued.token}`, peers)
       return
     }
     if (command?.[1] === 'revoke') {
@@ -428,14 +426,6 @@ async function reply(session: PlatformSession, conversation: IMConversation, tex
     conversation,
     message: systemMessage(conversation, `bridge:botfather:reply:${randomBytes(12).toString('hex')}`, text),
   })
-}
-
-async function transientToken(session: PlatformSession, conversation: IMConversation, token: string, peers: SystemPeerService): Promise<void> {
-  await peers.emitTransient(session, conversation, systemMessage(
-    conversation,
-    `bridge:botfather:token:${randomBytes(12).toString('hex')}`,
-    `Use this token once: ${token}`,
-  ), { nonCapturable: true })
 }
 
 function systemMessage(conversation: IMConversation, id: string, text: string): IMMessage {

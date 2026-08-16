@@ -1367,34 +1367,6 @@ export class MessageStore {
     }))
   }
 
-  /** Atomically reserve a live-only ID and advance the matching account update cursor. */
-  async allocateTransientMessage(platformSessionId: string, date: number): Promise<{ id: number, state: UpdateStateRow }> {
-    return this._write(() => this._database.withTransaction(async (database) => {
-      const scope = `account:${platformSessionId}`
-      const timestamp = Math.floor(Date.now() / 1_000)
-      const preferredId = clampedTimestampMessageIdBucket(
-        await this._messageIdEpoch(database, scope, timestamp, new Map()),
-        timestamp,
-      )
-      const [id] = await this._reserveSlottedMessageIds(database, scope, 1, preferredId, 'live', false, [], {}, undefined)
-      const [current] = await database.get('mtproto_update_state', { platformSessionId })
-      const state: UpdateStateRow = {
-        platformSessionId,
-        pts: (current?.pts ?? 1) + 1,
-        qts: current?.qts ?? 0,
-        seq: (current?.seq ?? 0) + 1,
-        date: Math.max(current?.date ?? 0, date),
-      }
-      await database.upsert('mtproto_update_state', [state])
-      return { id, state }
-    }))
-  }
-
-  /** Durable, content-free allocation for live-only messages in the regular account namespace. */
-  async allocateTransientMessageId(platformSessionId: string): Promise<number> {
-    return (await this.allocateTransientMessage(platformSessionId, Math.floor(Date.now() / 1_000))).id
-  }
-
   private async _upsertRequest(
     database: Database,
     session: PlatformSession,
@@ -1717,7 +1689,7 @@ export class MessageStore {
     return Array.from({ length: count }, (_, index) => first + index)
   }
 
-  /** Reserve IDs before materializing either a canonical or live-only projection. */
+  /** Reserve IDs before materializing a durable canonical projection for live or history ingestion. */
   private async _reserveSlottedMessageIds(
     database: Database,
     scope: string,

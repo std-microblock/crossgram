@@ -45,7 +45,7 @@ async function createFixture(path = ':memory:'): Promise<Fixture> {
   peers.attach(async (eventSession, event) => {
     events.push(event)
     if (event.type === 'message') imPlatform.emitCommittedEvent(eventSession, { event, result: {} as never })
-  }, async () => {})
+  })
   const father = ctx.plugin(botfather, { verifierSecret: 'test-verifier-secret' })
   await father
   const issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Echo Bot', 'echo_bot')

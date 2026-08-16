@@ -27,19 +27,13 @@ async function createFixture() {
   const peers = new SystemPeerService(ctx)
   imPlatform.activateSession('static', platform, owner)
   const events: IMEvent[] = []
-  const transientTexts: string[] = []
-  const transientOptions: Array<{ nonCapturable?: boolean } | undefined> = []
   peers.attach(
     async (_session, event) => { events.push(event) },
-    async (_session, _conversation, event, options) => {
-      transientTexts.push((event.content.parts[0] as { text: string }).text)
-      transientOptions.push(options)
-    },
   )
   botfather.apply(ctx, { verifierSecret: 'stable-test-secret' })
   await peers.bootstrap(owner)
   fixtures.push(async () => { await sqlite.dispose(); await database.dispose() })
-  return { ctx, events, peers, transientTexts, transientOptions }
+  return { ctx, events, peers }
 }
 
 function userMessage(text: string) {
@@ -80,8 +74,8 @@ describe('BotRegistry and BotFather system peer', () => {
     expect(await ctx.botRegistry.reset(owner, 'rebound_bot')).toBeUndefined()
   })
 
-  it('bootstraps BotFather and runs the per-session newbot flow without persisting a token reply', async () => {
-    const { ctx, events, peers, transientTexts, transientOptions } = await createFixture()
+  it('bootstraps BotFather and persists token replies from the per-session newbot flow', async () => {
+    const { ctx, events, peers } = await createFixture()
     expect(events.some((event) => event.type === 'message' && event.conversation.id === botfather.BOT_FATHER_CONVERSATION_ID)).toBe(true)
     const father = await peers.resolve(owner, botfather.BOT_FATHER_CONVERSATION_ID)
     if (!father) throw new Error('missing BotFather peer')
@@ -101,14 +95,12 @@ describe('BotRegistry and BotFather system peer', () => {
     expect(await ctx.botRegistry.list(owner)).toHaveLength(1)
     const persistedText = events.filter((event): event is Extract<IMEvent, { type: 'message' }> => event.type === 'message')
       .map((event) => (event.message.content.parts[0] as { text?: string }).text ?? '').join('\n')
-    expect(persistedText).toContain('Token generated')
+    expect(persistedText).toContain('Use this token')
     expect(persistedText).toContain('@my_test_bot')
     expect(persistedText).toContain('Token reset')
     expect(persistedText).toContain('revoked')
     expect(persistedText).toContain('Cancelled')
     expect(persistedText).toContain('already taken')
-    expect(persistedText).not.toMatch(/\d+:[A-Za-z0-9_-]{43}/u)
-    expect(transientTexts.join('\n')).toMatch(/\d+:[A-Za-z0-9_-]{43}/u)
-    expect(transientOptions).toEqual(expect.arrayContaining([{ nonCapturable: true }]))
+    expect(persistedText).toMatch(/\d+:[A-Za-z0-9_-]{43}/u)
   })
 })

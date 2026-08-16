@@ -50,7 +50,7 @@ async function start(path: string, token?: string, conversationId?: string): Pro
   peers.attach(async (eventSession, event) => {
     events.push(event)
     if (event.type === 'message') imPlatform.emitCommittedEvent(eventSession, { event, result: {} as never })
-  }, async () => {})
+  })
   const father = ctx.plugin(botfather, { verifierSecret: 'durable-test-verifier-secret' })
   await father
   let issued: botfather.IssuedBot | undefined
