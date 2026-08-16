@@ -558,7 +558,7 @@ __metadata:
 
 "@cordisjs/plugin-server@patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch":
   version: 1.7.0
-  resolution: "@cordisjs/plugin-server@patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch::version=1.7.0&hash=b3da26"
+  resolution: "@cordisjs/plugin-server@patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch::version=1.7.0&hash=5d9cf6"
   dependencies:
     "@standard-schema/spec": "npm:^1.0.0"
     "@types/ws": "npm:^8.18.1"
@@ -570,7 +570,7 @@ __metadata:
     ws: "npm:^8.19.0"
   peerDependencies:
     cordis: ^4.0.0-rc.6
-  checksum: 10c0/723c1fe35db52c6463db096dc08e6d4793758f504a69a56a1521a55a5bdfa855d7399578151dbf37065aa1dd7637a0642452187acaa50995b583060cb27739c7
+  checksum: 10c0/70a11a50111bc4efdd7e1c72c65467b5520500e776476dddf1ded858b9bc4756b11ce43c94b042cb9aeaaea3e10a3a644e768fc9445fbb7660f2b067be58f99c
   languageName: node
   linkType: hard
 
