@@ -744,6 +744,8 @@ describe('MessageStore', () => {
     expect(ids).toEqual([0x40000007, 0x40000009, 0x4000000b])
     expect(ids[0]).toBeLessThan(ids[1])
     expect(ids[1]).toBeLessThan(ids[2])
+    await expect(store.getOldestTlMessageId(session.platformSessionId, conversation.id))
+      .resolves.toBe(lower.projection[0].tlMessageId)
   })
 
   it('falls back to a nearby free slot when legacy adjacent IDs leave no ordered gap', async () => {

@@ -11,7 +11,7 @@ import {
 import { toUser, type MessageStore } from './message-store.js'
 import {
   cardUrl, messageMentionsUser, messagePartText, telegramReplyToMessageId,
-  type IMConversation, type IMMessage, type PlatformSession,
+  type IMConversation, type IMMessage, type IMPlatform, type PlatformSession,
 } from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
 import type { IMSticker } from './sticker-provider.js'
@@ -19,7 +19,10 @@ import type {
   CommittedPlatformEvent, PlatformEventDeliveryOptions, PlatformEventPublishResult, PlatformRegistry,
 } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
-import { registerVirtualConversation } from './virtual-conversations.js'
+import {
+  registerVirtualConversation, registerVirtualConversationMessageTarget,
+  virtualConversationMessageTarget,
+} from './virtual-conversations.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 
@@ -478,6 +481,7 @@ export class UpdateManager {
       ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
       : undefined
     const platform = this._registry.require(session.platformId)
+    await this._prepareVirtualMessageTargets(session, platform, visibleMessage)
     const selfProfile = await platform.getUser?.(session, session.userId)
       ?? {
         id: session.userId,
@@ -709,6 +713,53 @@ export class UpdateManager {
       await this._store.markUpdatePublished(eventKey)
     }
     return payload
+  }
+
+  private async _prepareVirtualMessageTargets(
+    session: PlatformSession,
+    platform: IMPlatform,
+    message: IMMessage,
+  ): Promise<void> {
+    await Promise.all(linkedConversations(message)
+      .filter((conversation) => conversation.metadata?.virtual === true)
+      .map(async (conversation) => {
+        const chatId = stableId(`peer:${conversation.id}`)
+        registerVirtualConversation(session.platformSessionId, chatId, conversation)
+        if (virtualConversationMessageTarget(session.platformSessionId, chatId)) return
+        try {
+          let tlMessageId = await this._store.getOldestTlMessageId(
+            session.platformSessionId, conversation.id,
+          )
+          if (!tlMessageId && platform.getHistory) {
+            const history = await platform.getHistory(session, { id: conversation.id }, { limit: 200 })
+            if (history.messages.length) {
+              await this._store.ingestMany(
+                session, conversation,
+                history.messages.slice().sort((left, right) =>
+                  left.timestamp - right.timestamp || left.id.localeCompare(right.id)),
+                { allocation: 'history' },
+              )
+              tlMessageId = await this._store.getOldestTlMessageId(
+                session.platformSessionId, conversation.id,
+              )
+            }
+          }
+          if (!tlMessageId) return
+          const projected = await this._store.findProjectedByTlId(
+            session.platformSessionId, tlMessageId, conversation.id,
+          )
+          if (!projected) return
+          registerVirtualConversationMessageTarget(session.platformSessionId, chatId, {
+            conversationId: conversation.id,
+            platformMessageId: projected.source.id,
+            tlMessageId,
+          })
+        } catch (error) {
+          this._onTrace?.(
+            'virtual history target failed conversation=%s error=%s', conversation.id, String(error),
+          )
+        }
+      }))
   }
 
   private async _send(
