@@ -22,6 +22,11 @@ import z from 'schemastery'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 
+export interface UpdateDeliveryOptions {
+  /** Do not retain the payload in protocol debug capture. */
+  nonCapturable?: boolean
+}
+
 export interface MtprotoConfig {
   /** TCP port to listen on (default: 4430; 0 = ephemeral) */
   port?: number
@@ -143,6 +148,7 @@ export class Mtproto extends Service {
     authKeyId: Uint8Array,
     update: tl.TypeUpdates,
     excludeConnection?: ServerConnection,
+    options?: UpdateDeliveryOptions,
   ): number {
     const candidates = [...this._sessions].filter((session) =>
       equalBytes(session.authKeyId, authKeyId) && session.connection !== excludeConnection)
@@ -155,7 +161,7 @@ export class Mtproto extends Service {
     const targets = updateSessions.length ? updateSessions : healthy.slice(0, 1)
     for (const session of targets) {
       this._applyKnownApiLayer(session)
-      session.sendUpdate(update)
+      session.sendUpdate(update, undefined, options)
     }
     return targets.length
   }

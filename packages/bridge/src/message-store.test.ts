@@ -555,6 +555,24 @@ describe('MessageStore', () => {
     expect((await store.ingest(session, channel, make('channel-2', 'channel'))).projection[0].tlMessageId).toBe(0x40000001)
   })
 
+  it('reserves transient direct-message IDs with their account update cursor', async () => {
+    const { ctx, store } = await createStore()
+    const direct = { id: 'transient-direct', kind: 'direct' as const, title: 'Transient direct' }
+    await store.advanceUpdateState(session.platformSessionId, 1, 100)
+    const transient = await store.allocateTransientMessage(session.platformSessionId, 1)
+    expect(transient.state).toMatchObject({ pts: 3, seq: 2, date: 100 })
+    expect(await ctx.database.get('mtproto_message_id_reservation', {
+      scope: `account:${session.platformSessionId}`, tlMessageId: transient.id,
+    })).toMatchObject([{ messageId: null }])
+
+    const canonical = await store.ingest(session, direct, {
+      id: 'after-transient', conversationId: direct.id, senderId: 'sender', timestamp: Math.floor(Date.now() / 1_000),
+      content: { parts: [{ type: 'text', text: 'durable' }] },
+    })
+    expect(canonical.projection[0].tlMessageId).not.toBe(transient.id)
+    expect(await store.getUpdateState(session.platformSessionId)).toEqual(transient.state)
+  })
+
   it('uses the timestamp mapping instead of a platform-provided raw Telegram message ID', async () => {
     const { store } = await createStore()
     const group = { id: 'group', kind: 'group' as const, title: 'Group' }

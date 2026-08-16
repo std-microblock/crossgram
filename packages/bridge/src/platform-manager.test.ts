@@ -1004,10 +1004,71 @@ describe('PlatformRegistry', () => {
     const data = new PlatformDataService(platform, session, store)
 
     await expect(data.getDialogsPage({ limit: 2, afterId: 'bridge:request-inbox' })).resolves.toMatchObject({
-      dialogs: [{ conversation: { id: 'upstream-first' } }], total: 1,
+      dialogs: [{ conversation: { id: 'upstream-first' } }], total: 2,
     })
     expect(platform.getDialogs).toHaveBeenCalledWith(session, { limit: 2, afterId: undefined })
     await manager.stop()
+  })
+
+  it('continues every bridge-owned system dialog before entering upstream pages', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const store = new MessageStore(database)
+    await store.upsertConversation(session, { id: 'bridge:botfather', kind: 'direct', title: 'BotFather', metadata: { bridgeOwned: true } })
+    await store.upsertConversation(session, { id: 'bridge:bot:one', kind: 'direct', title: 'Bot One', metadata: { bridgeOwned: true } })
+    await store.upsertConversation(session, { id: 'bridge:bot:two', kind: 'direct', title: 'Bot Two', metadata: { bridgeOwned: true } })
+    platform.getDialogs = vi.fn(async () => ({ dialogs: [
+      { conversation: { id: 'upstream-1', kind: 'direct' as const, title: 'Upstream 1' }, unreadCount: 0 },
+      { conversation: { id: 'upstream-2', kind: 'direct' as const, title: 'Upstream 2' }, unreadCount: 0 },
+    ], total: 2 }))
+    const data = new PlatformDataService(platform, session, store)
+    const first = await data.getDialogsPage({ limit: 1 })
+    const second = await data.getDialogsPage({ limit: 1, afterId: first.dialogs[0].conversation.id })
+    const third = await data.getDialogsPage({ limit: 1, afterId: second.dialogs[0].conversation.id })
+    const upstream = await data.getDialogsPage({ limit: 2, afterId: third.dialogs[0].conversation.id })
+    expect([first, second, third].map((page) => page.dialogs[0].conversation.id)).toEqual([
+      'bridge:bot:two', 'bridge:bot:one', 'bridge:botfather',
+    ])
+    expect(first.total).toBe(5)
+    expect(upstream.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['upstream-1', 'upstream-2'])
+  })
+
+  it('paginates more than 500 bridge-owned dialogs without duplicates', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const store = new MessageStore(database)
+    for (let index = 0; index < 501; index++) {
+      await store.upsertConversation(session, {
+        id: `bridge:bot:${String(index).padStart(3, '0')}`,
+        kind: 'direct', title: `Bot ${index}`, metadata: { bridgeOwned: true, localOnly: true },
+      })
+    }
+    const sameSecond = new Date(1_700_000_000_000)
+    for (const conversation of await database.get('mtproto_im_conversation', { platformSessionId: session.platformSessionId })) {
+      await database.set('mtproto_im_conversation', { id: conversation.id }, { updatedAt: sameSecond })
+    }
+    platform.getDialogs = vi.fn(async () => ({ dialogs: [
+      { conversation: { id: 'upstream-1', kind: 'direct' as const, title: 'Upstream 1' }, unreadCount: 0 },
+    ], total: 1 }))
+    const data = new PlatformDataService(platform, session, store)
+    const first = await data.getDialogsPage({ limit: 501 })
+    expect(first.dialogs).toHaveLength(501)
+    expect(new Set(first.dialogs.map((dialog) => dialog.conversation.id)).size).toBe(501)
+    expect(first.dialogs.every((dialog) => dialog.conversation.metadata?.bridgeOwned === true)).toBe(true)
+    expect(first.total).toBe(502)
+
+    const localFirstPage = await data.getDialogsPage({ limit: 100 })
+    const localSecondPage = await data.getDialogsPage({
+      limit: 100, afterId: localFirstPage.dialogs.at(-1)!.conversation.id,
+    })
+    expect(localSecondPage.dialogs).toHaveLength(100)
+    expect(localSecondPage.total).toBe(502)
+
+    const upstream = await data.getDialogsPage({ limit: 1, afterId: first.dialogs.at(-1)!.conversation.id })
+    expect(upstream.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['upstream-1'])
+    expect(platform.getDialogs).toHaveBeenLastCalledWith(session, { limit: 1, afterId: undefined })
   })
 
   it('migrates loader-qualified platform IDs across sessions and auth bindings', async () => {

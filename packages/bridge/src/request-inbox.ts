@@ -1,4 +1,9 @@
-import type { IMConversation, IMMessage, IMRequest, IMUser } from './platform.js'
+import type { IMConversation, IMMessage, IMRequest, IMRequestAction, IMUser, PlatformSession } from './platform.js'
+import type { MessageStore } from './message-store.js'
+import {
+  type SystemPeer, type SystemPeerCallbackInput, type SystemPeerCallbackResult, SystemPeerCallbackError, type SystemPeerProvider,
+  type SystemPeerService,
+} from './system-peer.js'
 
 export const REQUEST_INBOX_CONVERSATION_ID = 'bridge:request-inbox'
 // The inbox is a direct peer, so its synthetic sender must be that same peer.
@@ -11,7 +16,10 @@ export function requestInboxConversation(): IMConversation {
     id: REQUEST_INBOX_CONVERSATION_ID,
     kind: 'direct',
     title: '好友与群请求',
-    metadata: { bridgeOwned: true, readOnly: true, requestInbox: true },
+    metadata: {
+      bridgeOwned: true, localOnly: true, readOnly: true, requestInbox: true,
+      systemPeer: 'request-inbox', bot: true,
+    },
   }
 }
 
@@ -19,7 +27,7 @@ export function requestInboxSender(): IMUser {
   return {
     id: REQUEST_INBOX_SENDER_ID,
     firstName: '请求收件箱',
-    metadata: { bridgeOwned: true, requestInbox: true },
+    metadata: { bridgeOwned: true, localOnly: true, requestInbox: true, bot: true },
   }
 }
 
@@ -46,10 +54,111 @@ export function requestInboxMessage(request: IMRequest): IMMessage {
   }
 }
 
+/** Legacy request-inbox rows remain local-only after an upgrade. */
+export function isLocalOnlyConversation(conversation: IMConversation | undefined): boolean {
+  return conversation?.metadata?.localOnly === true
+    || (conversation?.metadata?.bridgeOwned === true && conversation.metadata?.requestInbox === true)
+}
+
 export function isRequestInboxConversation(conversation: IMConversation | undefined): boolean {
   return conversation?.id === REQUEST_INBOX_CONVERSATION_ID
     && conversation.metadata?.bridgeOwned === true
     && conversation.metadata?.requestInbox === true
+}
+
+/**
+ * Read-only system peer for durable friend and group request projections.
+ * Request persistence and event delivery remain in MessageStore and
+ * PlatformSubscriptionManager respectively, avoiding re-entrant queue waits.
+ */
+export class RequestInboxSystemPeerProvider implements SystemPeerProvider {
+  private readonly _locks = new Map<string, Promise<void>>()
+
+  constructor(
+    private readonly _store: MessageStore,
+    private readonly _resolveRequest: (
+      session: PlatformSession,
+      requestId: string,
+      action: IMRequestAction,
+    ) => Promise<IMRequest>,
+    private readonly _deliverRecovery: (session: PlatformSession, request: IMRequest) => Promise<void>,
+  ) {}
+
+  async bootstrap(session: PlatformSession, peers: SystemPeerService): Promise<void> {
+    if (await this._store.getConversation(session.platformSessionId, REQUEST_INBOX_CONVERSATION_ID)) {
+      await peers.emit(session, { type: 'conversation', conversation: requestInboxConversation() })
+    }
+  }
+
+  async resolve(_session: PlatformSession, conversationId: string): Promise<SystemPeer | undefined> {
+    return conversationId === REQUEST_INBOX_CONVERSATION_ID
+      ? { id: REQUEST_INBOX_CONVERSATION_ID, conversation: requestInboxConversation() }
+      : undefined
+  }
+
+  async callback(
+    session: PlatformSession,
+    _peer: SystemPeer,
+    input: SystemPeerCallbackInput,
+  ): Promise<SystemPeerCallbackResult> {
+    const requestId = input.message.metadata?.bridgeRequestId
+    if (typeof requestId !== 'string') throw new SystemPeerCallbackError('DATA_INVALID')
+    const action: IMRequestAction | undefined = input.data === REQUEST_ACCEPT_CALLBACK_DATA
+      ? 'accept'
+      : input.data === REQUEST_REJECT_CALLBACK_DATA ? 'reject' : undefined
+    if (!action) throw new SystemPeerCallbackError('DATA_INVALID')
+    return this._withLock(`${session.platformSessionId}\0${requestId}`, async () => {
+      const request = await this._store.getRequest(session.platformSessionId, requestId)
+      if (!request) throw new SystemPeerCallbackError('REQUEST_ID_INVALID')
+      if (request.state !== 'pending') {
+        if ((request.state === 'accepted' && action === 'accept')
+          || (request.state === 'rejected' && action === 'reject')) {
+          await this._recover(session, request)
+          return { message: '请求已处理', cacheTime: 0 }
+        }
+        throw new SystemPeerCallbackError('REQUEST_STATE_CONFLICT')
+      }
+      let resolved: IMRequest
+      try {
+        resolved = await this._resolveRequest(session, request.id, action)
+      } catch (error) {
+        if (error instanceof SystemPeerCallbackError) throw error
+        throw new SystemPeerCallbackError('REQUEST_RESOLVE_FAILED')
+      }
+      if (resolved.id !== request.id
+        || resolved.kind !== request.kind
+        || resolved.state === 'pending'
+        || (action === 'accept' && resolved.state !== 'accepted')
+        || (action === 'reject' && resolved.state !== 'rejected')) {
+        throw new SystemPeerCallbackError('REQUEST_RESOLVE_FAILED')
+      }
+      const stored = await this._store.ingestRequest(session, resolved)
+      await this._recover(session, stored.request)
+      return { message: '请求已处理', cacheTime: 0 }
+    })
+  }
+
+  private async _recover(session: PlatformSession, request: IMRequest): Promise<void> {
+    try {
+      await this._deliverRecovery(session, request)
+    } catch {
+      throw new SystemPeerCallbackError('REQUEST_RESOLVE_FAILED')
+    }
+  }
+
+  private async _withLock<T>(key: string, callback: () => Promise<T>): Promise<T> {
+    const previous = this._locks.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>((resolve) => { release = resolve })
+    this._locks.set(key, current)
+    await previous.catch(() => {})
+    try {
+      return await callback()
+    } finally {
+      release()
+      if (this._locks.get(key) === current) this._locks.delete(key)
+    }
+  }
 }
 
 function requestInboxText(request: IMRequest): string {
