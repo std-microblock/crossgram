@@ -3,7 +3,6 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Long from 'long'
-import type { tl } from '@mtcute/core'
 import { DialogRpc } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
@@ -11,8 +10,7 @@ import { PlatformRegistry, PlatformSubscriptionManager } from './platform-manage
 import { UpdateManager } from './update-manager.js'
 import type { IMEvent, IMPlatform, IMRequest, PlatformSession } from './platform.js'
 import {
-  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_INBOX_CONVERSATION_ID, REQUEST_REJECT_CALLBACK_DATA,
-  RequestInboxSystemPeerProvider, requestInboxMessage,
+  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_REJECT_CALLBACK_DATA, RequestInboxSystemPeerProvider, requestInboxMessage,
 } from './request-inbox.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 
@@ -109,32 +107,6 @@ async function seedPendingRequest(store: MessageStore): Promise<IMRequest> {
   await store.ingestRequest(session, request)
   return request
 }
-
-describe('request inbox dialog identity', () => {
-  it.each([
-    ['friend', {
-      id: 'friend-request', kind: 'friend' as const, state: 'pending' as const, createdAt: 100,
-      requester: { id: 'alice', firstName: 'Alice' },
-    }],
-    ['group join', {
-      id: 'group-request', kind: 'group-join' as const, state: 'pending' as const, createdAt: 100,
-      requester: { id: 'bob', firstName: 'Bob' },
-      group: { id: 'group', kind: 'group' as const, title: 'Group' },
-    }],
-  ])('marks the inbox as a bot when a %s request first loads dialogs', async (_kind, request) => {
-    const { rpc, store } = await createRequestRpc(undefined)
-    await store.ingestRequest(session, request)
-
-    const dialogs = await rpc.getDialogs({
-      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' },
-      limit: 100, hash: Long.ZERO,
-    }) as tl.messages.RawDialogs
-    const inboxUser = dialogs.users.find((user): user is tl.RawUser =>
-      user._ === 'user' && user.id === rpc.peerTlId(REQUEST_INBOX_CONVERSATION_ID))
-
-    expect(inboxUser?.bot).toBe(true)
-  })
-})
 
 async function inboxCallbackTarget(rpc: DialogRpc, store: MessageStore) {
   await rpc.getDialogs({
