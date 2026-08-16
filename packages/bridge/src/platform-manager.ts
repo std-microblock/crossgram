@@ -355,6 +355,46 @@ export class PlatformSubscriptionManager {
       const result = await this._store.ingest(session, event.conversation, event.message)
       return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'message-delete') {
+      if (this._registry.require(session.platformId).platformKind === 'qq' && !options?.deliveredViaRpc) {
+        const messages = await this._store.readProjectedByPlatformIds(
+          session.platformSessionId,
+          event.messageIds.map((platformMessageId) => ({
+            conversationId: event.conversation.id, platformMessageId,
+          })),
+        )
+        for (const { source } of messages) {
+          let hasText = false
+          let changed = false
+          const parts = source.content.parts.map((part) => {
+            if (part.type !== 'text' || !part.text) return part
+            hasText = true
+            if (part.entities?.some((entity) =>
+              entity.type === 'strikethrough' && entity.offset === 0 && entity.length === part.text.length)) {
+              return part
+            }
+            changed = true
+            return {
+              ...part,
+              entities: [...part.entities ?? [], {
+                type: 'strikethrough' as const, offset: 0, length: part.text.length,
+              }],
+            }
+          })
+          if (!hasText) continue
+          const message = changed ? { ...source, content: { ...source.content, parts } } : source
+          const result = await this._store.ingest(session, event.conversation, message)
+          await this._onEvent?.(session, {
+            event: {
+              type: 'message-edit',
+              eventId: `qqnt-recall:${encodeURIComponent(event.conversation.id)}:${encodeURIComponent(source.id)}`,
+              conversation: event.conversation,
+              message,
+            },
+            result,
+          }, options)
+        }
+        return
+      }
       const result = await this._store.deleteMessages(session, event.conversation, event.messageIds)
       return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'message-reactions') {
