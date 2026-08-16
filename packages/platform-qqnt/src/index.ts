@@ -691,15 +691,25 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const multiForward = this.multiForwardLocators.get(conversation.id)
     if (multiForward) {
       const messages = await this.client.getMultiForwardMessages(multiForward)
+      const senders = new Map<string, Promise<IMUser<QQMediaLocator> | null>>()
       await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
       return {
         messages: await Promise.all(messages.filter((message) => !this.isFilteredGrayTip(message))
-          .slice(0, query.limit ?? messages.length).map((message) => {
+          .slice(0, query.limit ?? messages.length).map(async (message) => {
             const mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), multiForward)
+            let sender = mapped.sender
+            if (!sender) {
+              let pending = senders.get(message.senderId)
+              if (!pending) {
+                pending = this.getUser(session, message.senderId).catch(() => null)
+                senders.set(message.senderId, pending)
+              }
+              sender = (await pending) ?? undefined
+            }
             return this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
-              ...mapped, conversationId: conversation.id,
+              ...mapped, sender, conversationId: conversation.id,
             })
-        })),
+          })),
       }
     }
     if (isMultiForwardConversationId(conversation.id)) return { messages: [] }
