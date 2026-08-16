@@ -8,11 +8,13 @@
     "service": {
       "required": [
         "imPlatform",
-        "server"
+        "server",
+        "systemPeer"
       ]
     }
   },
   "peerDependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
     "@cordisjs/plugin-server": "^1.6.0",
     "cordis": "^4.0.0-rc.5"
   },
@@ -21,6 +23,8 @@
     "schemastery": "^3.18.0"
   },
   "devDependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
+    "@cordisjs/plugin-database-sqlite": "^5.1.1",
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch",
     "@cordisjs/unyaml": "^2.0.3",
     "@mtproto-relay/platform-static": "workspace:*",

@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
+import Server from '@cordisjs/plugin-server'
 import { defineModels, IMPlatformService, SystemPeerService, type IMEvent, type PlatformSession } from '@mtproto-relay/bridge'
-import * as botfather from './index.js'
+import * as telegramBotApi from './index.js'
 
 const owner: PlatformSession = { platformId: 'static', platformSessionId: 'owner-session', userId: 'owner', credentials: {}, metadata: {} }
 const other: PlatformSession = { ...owner, platformSessionId: 'other-session', userId: 'other' }
@@ -15,7 +16,8 @@ async function createFixture() {
   const ctx = new Context()
   const database = ctx.plugin(Database)
   const sqlite = ctx.plugin(SQLiteDriver, { path: ':memory:' })
-  await Promise.all([database, sqlite])
+  const server = ctx.plugin(Server, { host: '127.0.0.1', port: 0 })
+  await Promise.all([database, sqlite, server])
   await new Promise((resolve) => setTimeout(resolve, 25))
   defineModels(ctx)
   await ctx.database.prepared()
@@ -30,14 +32,15 @@ async function createFixture() {
   peers.attach(
     async (_session, event) => { events.push(event) },
   )
-  botfather.apply(ctx, { verifierSecret: 'stable-test-secret' })
+  const api = ctx.plugin(telegramBotApi, { verifierSecret: 'stable-test-secret' })
+  await api
   await peers.bootstrap(owner)
-  fixtures.push(async () => { await sqlite.dispose(); await database.dispose() })
+  fixtures.push(async () => { await api.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose() })
   return { ctx, events, peers }
 }
 
 function userMessage(text: string) {
-  return { id: `user:${text}`, conversationId: botfather.BOT_FATHER_CONVERSATION_ID, senderId: owner.userId, content: { parts: [{ type: 'text' as const, text }] }, timestamp: 1_700_000_000, outgoing: true }
+  return { id: `user:${text}`, conversationId: telegramBotApi.BOT_FATHER_CONVERSATION_ID, senderId: owner.userId, content: { parts: [{ type: 'text' as const, text }] }, timestamp: 1_700_000_000, outgoing: true }
 }
 
 describe('BotRegistry and BotFather system peer', () => {
@@ -76,8 +79,8 @@ describe('BotRegistry and BotFather system peer', () => {
 
   it('bootstraps BotFather and persists token replies from the per-session newbot flow', async () => {
     const { ctx, events, peers } = await createFixture()
-    expect(events.some((event) => event.type === 'message' && event.conversation.id === botfather.BOT_FATHER_CONVERSATION_ID)).toBe(true)
-    const father = await peers.resolve(owner, botfather.BOT_FATHER_CONVERSATION_ID)
+    expect(events.some((event) => event.type === 'message' && event.conversation.id === telegramBotApi.BOT_FATHER_CONVERSATION_ID)).toBe(true)
+    const father = await peers.resolve(owner, telegramBotApi.BOT_FATHER_CONVERSATION_ID)
     if (!father) throw new Error('missing BotFather peer')
     expect(father.peer.conversation.metadata).toMatchObject({ bridgeOwned: true, localOnly: true, bot: true })
     await peers.receive(owner, father, userMessage('/newbot'))

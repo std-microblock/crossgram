@@ -27,7 +27,6 @@ import {
 import * as bridge from '@mtproto-relay/bridge'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
-import * as botfather from '@mtproto-relay/botfather'
 import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
@@ -392,7 +391,7 @@ async function startApp(options: {
     }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
     ...(options.botApi
-      ? [ctx.plugin(botfather, { verifierSecret: 'mtproto-e2e-botfather-verifier' }), ctx.plugin(telegramBotApi)]
+      ? [ctx.plugin(telegramBotApi, { verifierSecret: 'mtproto-e2e-botfather-verifier' })]
       : []),
     ctx.plugin(telegramResourcesPlugin),
     options.platform
@@ -492,7 +491,7 @@ describe('BotFather physical MTProto e2e', () => {
       })
       await rpc({ _: 'updates.getState' })
       const [father] = await ctx.database.get('mtproto_im_user', {
-        platformId: 'static', platformUserId: botfather.BOT_FATHER_CONVERSATION_ID,
+        platformId: 'static', platformUserId: telegramBotApi.BOT_FATHER_CONVERSATION_ID,
       })
       expect(father).toMatchObject({ username: 'BotFather', metadata: { bot: true } })
       const sendToFather = (message: string, randomId: number) => rpc({
@@ -538,7 +537,7 @@ describe('BotFather physical MTProto e2e', () => {
       const [identity] = await ctx.database.get('mtproto_bot_identity', { usernameNormalized: 'physical_e2e_bot' })
       expect(identity).toMatchObject({
         id: token.split(':')[0], ownerPlatformSessionId: account.session.id,
-        conversationId: botfather.botConversationId(identity!.id), enabled: true,
+        conversationId: telegramBotApi.botConversationId(identity!.id), enabled: true,
       })
       const [botConversation] = await ctx.database.get('mtproto_im_conversation', {
         platformSessionId: account.session.id, platformConversationId: identity!.conversationId,
