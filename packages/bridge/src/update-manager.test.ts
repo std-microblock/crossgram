@@ -597,8 +597,66 @@ describe('UpdateManager', () => {
     })
   })
 
-  it('projects live merged-forward links as resolvable chats with native preview cards', async () => {
-    const { store, manager, sent } = await createHarness()
+  it('prepares virtual deep links while forwarding messages', async () => {
+    const sourceConversation: IMConversation = { id: 'forward-source', kind: 'group', title: 'Source' }
+    const targetConversation: IMConversation = { id: 'forward-target', kind: 'group', title: 'Target' }
+    const archive: IMConversation = {
+      id: 'forward-archive', kind: 'group', title: 'Forward archive', metadata: { virtual: true },
+    }
+    const source: IMMessage = {
+      id: 'forward-source-message', conversationId: sourceConversation.id, senderId: 'alice', timestamp: 1_800_000_010,
+      content: { parts: [{
+        type: 'text', text: 'forward archive',
+        entities: [{ type: 'conversation-link', offset: 0, length: 15, conversation: archive }],
+      }] },
+    }
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities, history: true,
+        messageActions: {
+          delete: { own: { supported: true }, others: { supported: true } },
+          edit: { mode: 'native' }, forward: { mode: 'native', preservesAuthor: true },
+        },
+      },
+      async getDialogs() {
+        return {
+          dialogs: [
+            { conversation: sourceConversation, unreadCount: 0, lastMessage: source },
+            { conversation: targetConversation, unreadCount: 0 },
+          ],
+        }
+      },
+      async getHistory(_session, conversation) {
+        return conversation.id === archive.id
+          ? { messages: [{
+              id: 'forward-archive-first', conversationId: archive.id, senderId: 'bob', timestamp: 1_800_000_001,
+              content: { parts: [{ type: 'text', text: 'forwarded first' }] },
+            }] }
+          : { messages: [] }
+      },
+      async forwardMessages(_session, _from, _ids, to) {
+        return [{ ...source, id: 'forwarded-message', conversationId: to.id, timestamp: 1_800_000_011 }]
+      },
+    }
+    const { store } = await createHarness(undefined, targetPlatform)
+    const sourceProjection = await store.ingest(session, sourceConversation, source)
+    await store.upsertConversation(session, targetConversation)
+    const rpc = new DialogRpc(targetPlatform, session, store)
+    const forwarded = await rpc.forwardMessages({
+      _: 'messages.forwardMessages',
+      fromPeer: { _: 'inputPeerChannel', channelId: stableId(`peer:${sourceConversation.id}`), accessHash: Long.ONE },
+      toPeer: { _: 'inputPeerChannel', channelId: stableId(`peer:${targetConversation.id}`), accessHash: Long.ONE },
+      id: [sourceProjection.projection[0].tlMessageId], randomId: [Long.ONE],
+    }) as tl.RawUpdates
+    const update = forwarded.updates.find((item) => item._ === 'updateNewChannelMessage') as tl.RawUpdateNewChannelMessage
+    const entity = (update.message as tl.RawMessage).entities?.find(
+      (item): item is tl.RawMessageEntityTextUrl => item._ === 'messageEntityTextUrl',
+    )
+    expect(entity?.url).toMatch(new RegExp(`/bridgechat_${stableId(`peer:${archive.id}`)}/\\d+$`))
+  })
+
+  it('links live merged forwards to their first saved message across new RPC connections', async () => {
     const conversation: IMConversation = { id: 'merged-parent', kind: 'group', title: 'Parent' }
     const virtual: IMConversation = {
       id: 'merged-virtual', kind: 'group', title: 'QQ用户的聊天记录',
@@ -607,6 +665,20 @@ describe('UpdateManager', () => {
         qqMultiForwardPreview: 'Alice: 第一条\nBob: 第二条',
       },
     }
+    const forwarded = Array.from({ length: 201 }, (_, index): IMMessage => ({
+      id: `merged-${index}`, conversationId: virtual.id, senderId: 'alice', timestamp: 1_800_000_004 + index,
+      content: { parts: [{ type: 'text', text: `forwarded ${index}` }] },
+    }))
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      capabilities: { ...platform.capabilities, history: true },
+      async getDialogs() { return { dialogs: [] } },
+      async getHistory(_session, target, query) {
+        expect(target.id).toBe(virtual.id)
+        return { messages: forwarded.slice(0, query.limit ?? forwarded.length) }
+      },
+    }
+    const { store, manager, sent } = await createHarness(undefined, targetPlatform)
     const text = '查看聊天记录'
     const message: IMMessage = {
       id: 'merged-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_003,
@@ -621,7 +693,7 @@ describe('UpdateManager', () => {
     const payload = roundTrip(sent[0].update) as tl.RawUpdates
     const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
     const virtualId = stableId(`peer:${virtual.id}`)
-    const url = `https://t.me/bridgechat_${virtualId}`
+    const url = expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualId}/\\d+$`))
     expect(update.message).toMatchObject({
       _: 'message', message: text,
       entities: [{ _: 'messageEntityTextUrl', offset: 0, length: text.length, url }],
@@ -633,6 +705,18 @@ describe('UpdateManager', () => {
         },
       },
     })
+    const firstEntity = (update.message as tl.RawMessage).entities?.find(
+      (entity): entity is tl.RawMessageEntityTextUrl => entity._ === 'messageEntityTextUrl',
+    )
+    if (!firstEntity) throw new Error('merged forward update is missing its deep link')
+    const firstId = Number(new URL(firstEntity.url).pathname.split('/').at(-1))
+    const freshRpc = new DialogRpc(targetPlatform, session, store)
+    expect(freshRpc.resolveUsername({
+      _: 'contacts.resolveUsername', username: `bridgechat_${virtualId}`,
+    })).toMatchObject({ _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualId } })
+    await expect(freshRpc.getMessages({
+      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: firstId }],
+    })).resolves.toMatchObject({ messages: [{ _: 'message', id: firstId, message: 'forwarded 0' }] })
     expect(payload.chats).toMatchObject([
       { _: 'channel', title: conversation.title, megagroup: true },
       { _: 'chat', id: virtualId, title: virtual.title, participantsCount: 1 },

@@ -168,6 +168,12 @@ function requestInboxText(request: IMRequest): string {
     `申请人：${requester}`,
   ]
   if (request.kind === 'group-join') lines.push(`目标群：${request.group?.title ?? request.group?.id ?? '未知群'}`)
+  if (request.metadata?.qqRequestSource === 'doubt') {
+    lines.push('QQ 已过滤')
+    if (typeof request.metadata.qqRequestReason === 'string' && request.metadata.qqRequestReason.trim()) {
+      lines.push(`风险提示：${request.metadata.qqRequestReason}`)
+    }
+  }
   lines.push(`验证信息：${request.message || '无'}`)
   lines.push(`状态：${request.state === 'pending' ? '待处理' : request.state === 'accepted' ? '已接受' : '已拒绝'}`)
   return lines.join('\n')

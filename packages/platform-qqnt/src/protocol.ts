@@ -269,6 +269,8 @@ export interface WireRequest {
   group?: { id: string, name?: string }
   message?: string
   timestamp?: string | number
+  source?: 'doubt'
+  reason?: string
 }
 
 export interface WireRequestPage {
