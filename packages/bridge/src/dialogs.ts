@@ -178,6 +178,8 @@ export class DialogRpc {
   private readonly _memberPages = new Map<string, MemberPageState>()
   private readonly _pendingMemberPages = new Map<string, Promise<void>>()
   private readonly _searchCursors = new Map<string, string>()
+  // ponytail: session-wide queue; use per-peer queues only if folder edit throughput matters.
+  private _folderEditQueue = Promise.resolve()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peersHydratedPeerRevision = -1
@@ -475,6 +477,12 @@ export class DialogRpc {
   }
 
   async editPeerFolders(req: tl.folders.RawEditPeerFoldersRequest): Promise<tl.RawUpdates> {
+    const pending = this._folderEditQueue.then(() => this._editPeerFolders(req))
+    this._folderEditQueue = pending.then(() => undefined, () => undefined)
+    return pending
+  }
+
+  private async _editPeerFolders(req: tl.folders.RawEditPeerFoldersRequest): Promise<tl.RawUpdates> {
     if (!this._dialogFolders) throw new RpcError(500, 'FOLDER_STORE_UNAVAILABLE')
     await this._hydratePeers()
     const peers = req.folderPeers.map((entry) => {
@@ -484,6 +492,24 @@ export class DialogRpc {
       return { peerId, folderId: entry.folderId as 0 | 1 }
     })
     const changed = await this._dialogFolders.setPeerFolders(this._session.platformSessionId, peers)
+    for (const [peerId, folderId] of new Map(peers.map((peer) => [peer.peerId, peer.folderId]))) {
+      if (this._platform.platformKind !== 'qq') continue
+      const conversation = this._conversations.get(peerId)
+      if (conversation?.kind !== 'group') continue
+      if (typeof conversation.metadata?.qqGroupMsgMask !== 'number') continue
+      if (!this._platform.setConversationNotificationMask) continue
+      const mask = folderId === 1 ? QQ_GROUP_MSG_MASK.ASSISTANT : QQ_GROUP_MSG_MASK.NOTIFY
+      if (!changed.has(peerId) && conversation.metadata.qqGroupMsgMask === mask) continue
+      try {
+        await this._platform.setConversationNotificationMask(this._session, peerId, mask)
+        this._conversations.set(peerId, {
+          ...conversation,
+          metadata: { ...conversation.metadata, qqGroupMsgMask: mask },
+        })
+      } catch (error) {
+        this._onTrace?.('qq group mask sync failed: peer=%s mask=%d error=%s', peerId, mask, String(error))
+      }
+    }
     const date = Math.floor(Date.now() / 1000)
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     const pts = changed.size
