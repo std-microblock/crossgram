@@ -238,6 +238,287 @@ describe('dialog folders RPC e2e', () => {
     expect(unarchived.dialogs.every((dialog: tl.RawDialog) => dialog.folderId === undefined)).toBe(true)
   })
 
+  it('reverse-syncs QQ group masks when archive folders change', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const qqGroup = {
+      id: 'qq-group', kind: 'group' as const, title: 'QQ group', metadata: { qqGroupMsgMask: 1 },
+    }
+    const plainGroup = { id: 'plain-group', kind: 'group' as const, title: 'Plain group' }
+    const maskCalls: Array<{ conversationId: string, mask: number }> = []
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      platformKind: 'qq',
+      async getDialogs() {
+        return { dialogs: [
+          { conversation: qqGroup, unreadCount: 0 },
+          { conversation: plainGroup, unreadCount: 0 },
+        ] }
+      },
+      async getHistory() { return { messages: [] } },
+      async setConversationNotificationMask(_session, conversationId, mask) {
+        maskCalls.push({ conversationId, mask })
+      },
+    }
+    const folders = new DialogFolderStore(ctx.database)
+    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const peer = (id: string) => ({
+      _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE,
+    })
+    await roundTripRpc(dispatcher, getDialogs())
+
+    await roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: peer('plain-group'), folderId: 1 }],
+    })
+    expect(maskCalls).toEqual([])
+
+    await roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: peer('qq-group'), folderId: 1 }],
+    })
+    expect(maskCalls).toEqual([{ conversationId: 'qq-group', mask: 2 }])
+
+    await roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: peer('qq-group'), folderId: 1 }],
+    })
+    expect(maskCalls).toHaveLength(1)
+
+    await roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: peer('qq-group'), folderId: 0 }],
+    })
+    expect(maskCalls).toEqual([
+      { conversationId: 'qq-group', mask: 2 },
+      { conversationId: 'qq-group', mask: 1 },
+    ])
+  })
+
+  it('retries failed QQ group mask syncs after the archive row is persisted', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const group = {
+      id: 'retry-group', kind: 'group' as const, title: 'Retry group', metadata: { qqGroupMsgMask: 1 },
+    }
+    const maskCalls: number[] = []
+    let failFirstArchiveMask = true
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      platformKind: 'qq',
+      async getDialogs() { return { dialogs: [{ conversation: group, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [] } },
+      async setConversationNotificationMask(_session, _conversationId, mask) {
+        maskCalls.push(mask)
+        if (mask === 2 && failFirstArchiveMask) {
+          failFirstArchiveMask = false
+          throw new Error('temporary QQ failure')
+        }
+        group.metadata.qqGroupMsgMask = mask
+      },
+    }
+    const folders = new DialogFolderStore(ctx.database)
+    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const groupPeer = {
+      _: 'inputPeerChannel' as const, channelId: stableId('peer:retry-group'), accessHash: Long.ONE,
+    }
+    const archiveRequest = {
+      _: 'folders.editPeerFolders' as const,
+      folderPeers: [{ _: 'inputFolderPeer' as const, peer: groupPeer, folderId: 1 }],
+    }
+    await roundTripRpc(dispatcher, getDialogs())
+
+    await expect(roundTripRpc(dispatcher, archiveRequest)).resolves.toMatchObject({
+      _: 'updates', updates: [{ _: 'updateFolderPeers', ptsCount: 1 }],
+    })
+    expect(await folders.archivedPeerIds(session.platformSessionId)).toContain('retry-group')
+
+    expect(group.metadata.qqGroupMsgMask).toBe(1)
+    const resumedDispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    await roundTripRpc(resumedDispatcher, getDialogs())
+
+    await expect(roundTripRpc(resumedDispatcher, archiveRequest)).resolves.toMatchObject({
+      _: 'updates', updates: [{ _: 'updateFolderPeers', ptsCount: 0 }],
+    })
+    expect(maskCalls).toEqual([2, 2])
+
+    await roundTripRpc(resumedDispatcher, archiveRequest)
+    expect(maskCalls).toEqual([2, 2])
+
+    const main = await roundTripRpc(resumedDispatcher, getDialogs())
+    expect(main.dialogs).toEqual([])
+    const archive = await roundTripRpc(resumedDispatcher, getDialogs(1))
+    expect(archive.dialogs).toMatchObject([{
+      _: 'dialog', peer: { _: 'peerChannel', channelId: stableId('peer:retry-group') }, folderId: 1,
+    }])
+  })
+
+  it('recovers the folder edit queue after an invalid folder request', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const group = {
+      id: 'queue-recovery-group', kind: 'group' as const, title: 'Queue recovery group',
+      metadata: { qqGroupMsgMask: 1 },
+    }
+    const maskCalls: number[] = []
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      platformKind: 'qq',
+      async getDialogs() { return { dialogs: [{ conversation: group, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [] } },
+      async setConversationNotificationMask(_session, _conversationId, mask) {
+        maskCalls.push(mask)
+      },
+    }
+    const folders = new DialogFolderStore(ctx.database)
+    const dialogs = createDialog(folders, targetPlatform)
+    const dispatcher = dispatcherFor(dialogs)
+    const groupPeer = {
+      _: 'inputPeerChannel' as const, channelId: stableId('peer:queue-recovery-group'), accessHash: Long.ONE,
+    }
+
+    await expect(dialogs.editPeerFolders({
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 2 }],
+    })).rejects.toMatchObject({ code: 400, text: 'FOLDER_ID_INVALID' })
+
+    await expect(roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
+    })).resolves.toMatchObject({
+      _: 'updates', updates: [{ _: 'updateFolderPeers', ptsCount: 1 }],
+    })
+    expect(maskCalls).toEqual([2])
+  })
+
+  it('does not reverse-sync group masks on non-QQ platforms', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const group = {
+      id: 'metadata-group', kind: 'group' as const, title: 'Metadata group', metadata: { qqGroupMsgMask: 1 },
+    }
+    const maskCalls: Array<{ conversationId: string, mask: number }> = []
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: [{ conversation: group, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [] } },
+      async setConversationNotificationMask(_session, conversationId, mask) {
+        maskCalls.push({ conversationId, mask })
+      },
+    }
+    const folders = new DialogFolderStore(ctx.database)
+    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const groupPeer = {
+      _: 'inputPeerChannel' as const, channelId: stableId('peer:metadata-group'), accessHash: Long.ONE,
+    }
+    await roundTripRpc(dispatcher, getDialogs())
+
+    await roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
+    })
+    expect(maskCalls).toEqual([])
+  })
+
+  it('serializes archive and unarchive QQ mask reverse-syncs', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const group = {
+      id: 'queued-group', kind: 'group' as const, title: 'Queued group', metadata: { qqGroupMsgMask: 1 },
+    }
+    const maskCalls: number[] = []
+    let releaseArchiveMask!: () => void
+    const archiveMaskReleased = new Promise<void>((resolve) => { releaseArchiveMask = resolve })
+    let markArchiveMaskStarted!: () => void
+    const archiveMaskStarted = new Promise<void>((resolve) => { markArchiveMaskStarted = resolve })
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      platformKind: 'qq',
+      async getDialogs() { return { dialogs: [{ conversation: group, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [] } },
+      async setConversationNotificationMask(_session, _conversationId, mask) {
+        maskCalls.push(mask)
+        if (mask === 2) {
+          markArchiveMaskStarted()
+          await archiveMaskReleased
+        }
+      },
+    }
+    const folders = new DialogFolderStore(ctx.database)
+    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const groupPeer = {
+      _: 'inputPeerChannel' as const, channelId: stableId('peer:queued-group'), accessHash: Long.ONE,
+    }
+    await roundTripRpc(dispatcher, getDialogs())
+
+    const archive = roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
+    })
+    await archiveMaskStarted
+    const unarchive = roundTripRpc(dispatcher, {
+      _: 'folders.editPeerFolders',
+      folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 0 }],
+    })
+    await Promise.resolve()
+    expect(maskCalls).toEqual([2])
+
+    releaseArchiveMask()
+    const [archiveResult, unarchiveResult] = await Promise.all([archive, unarchive])
+    expect(maskCalls).toEqual([2, 1])
+    expect(archiveResult.updates[0]).toMatchObject({ ptsCount: 1 })
+    expect(unarchiveResult.updates[0]).toMatchObject({ ptsCount: 1 })
+    expect(archiveResult.updates[0].pts).toBeLessThan(unarchiveResult.updates[0].pts)
+    expect(await folders.archivedPeerIds(session.platformSessionId)).toEqual(new Set())
+
+    const main = await roundTripRpc(dispatcher, getDialogs())
+    expect(main.dialogs).toMatchObject([{
+      peer: { _: 'peerChannel', channelId: stableId('peer:queued-group') },
+    }])
+    const archiveDialogs = await roundTripRpc(dispatcher, getDialogs(1))
+    expect(archiveDialogs.dialogs).toEqual([])
+  })
+
   it('uses QQ group masks as transient folder overrides from the first query', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]

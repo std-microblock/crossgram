@@ -1,7 +1,7 @@
 import { Bot, h, type Universal } from '@satorijs/core'
 import type { Context } from 'cordis'
 import {
-  providerBelongsToAccount,
+  probeImageDimensions, providerBelongsToAccount,
   type IMConversation, type IMMediaInput, type IMMessage, type IMMessageInput, type IMMessagePart,
   type IMPlatform, type IMSticker, type IMStickerProvider, type IMStickerSendPlan, type IMTextEntity,
   type IngestResult, type JsonValue, type PlatformSession, type StickerProviderContext,
@@ -275,12 +275,26 @@ async function satoriInput(
       if (!src) throw new Error(`Satori ${element.type} has no src`)
       flush()
       const mimeType = stringAttr(element.attrs.type) ?? (element.type === 'audio' ? 'audio/*' : element.type === 'video' ? 'video/*' : undefined)
+      const kind = element.type === 'img' || element.type === 'image' ? 'image' : 'file'
+      const maxMediaBytes = config.maxMediaBytes ?? DEFAULT_MAX_MEDIA_BYTES
+      const source = mediaSource(ctx, src, numberAttr(element.attrs.size), maxMediaBytes)
+      let width = numberAttr(element.attrs.width)
+      let height = numberAttr(element.attrs.height)
+      if (kind === 'image') {
+        width = positiveNumberAttr(element.attrs.width)
+        height = positiveNumberAttr(element.attrs.height)
+        if (width === undefined || height === undefined) {
+          try {
+            const dimensions = await probeImageDimensions(source, maxMediaBytes)
+            width ??= dimensions?.width
+            height ??= dimensions?.height
+          } catch {}
+        }
+      }
       parts.push({ type: 'media', media: {
-        kind: element.type === 'img' || element.type === 'image' ? 'image' : 'file', name: stringAttr(element.attrs.title) ?? stringAttr(element.attrs.filename),
-        mimeType, size: numberAttr(element.attrs.size), width: numberAttr(element.attrs.width), height: numberAttr(element.attrs.height),
-        duration: numberAttr(element.attrs.duration), source: mediaSource(
-          ctx, src, numberAttr(element.attrs.size), config.maxMediaBytes ?? DEFAULT_MAX_MEDIA_BYTES,
-        ),
+        kind, name: stringAttr(element.attrs.title) ?? stringAttr(element.attrs.filename),
+        mimeType, size: numberAttr(element.attrs.size), width, height,
+        duration: numberAttr(element.attrs.duration), source,
       } satisfies IMMediaInput })
       return
     }
@@ -510,6 +524,11 @@ function stringAttr(value: unknown): string | undefined {
 function numberAttr(value: unknown): number | undefined {
   const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
   return Number.isFinite(number) && number >= 0 ? number : undefined
+}
+
+function positiveNumberAttr(value: unknown): number | undefined {
+  const number = numberAttr(value)
+  return number !== undefined && number > 0 ? number : undefined
 }
 
 function formatError(error: unknown): string {

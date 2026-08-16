@@ -1158,12 +1158,19 @@ export class MessageStore {
       platformSessionId, platformConversationId,
     })
     if (!conversation) return
-    const [message] = await this._database.select('mtproto_im_message', {
+    const [oldest] = await this._database.select('mtproto_im_message', {
       conversationId: conversation.id, deleted: false,
     }).orderBy('timestamp').limit(1).execute()
-    if (!message) return
-    const [part] = await this._database.select('mtproto_tl_message_part', { messageId: message.id })
-      .orderBy('ordinal').limit(1).execute()
+    if (!oldest) return
+    const messages = await this._database.get('mtproto_im_message', {
+      conversationId: conversation.id, deleted: false, timestamp: oldest.timestamp,
+    })
+    const [part] = await this._database.select('mtproto_tl_message_part', {
+      platformSessionId,
+      conversationId: conversation.id,
+      messageId: { $in: messages.map((message) => message.id) },
+      ordinal: 0,
+    }).orderBy('tlMessageId').limit(1).execute()
     return part?.tlMessageId
   }
 
