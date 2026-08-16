@@ -628,6 +628,7 @@ export class UpdateManager {
       ? [selfUser, ...reactionUsers.users]
       : [selfUser, makeUser({
           id: senderRow.id,
+          bot: sender.metadata?.bot === true || undefined,
           firstName: sender.firstName,
           lastName: sender.lastName,
           username: sender.username,

@@ -648,12 +648,17 @@ export class MessageStore {
           platformSessionId, platformConversationId: query.afterConversationId,
         })
       : []
-    let conversations = await this._database.select('mtproto_im_conversation', {
-      platformSessionId,
-      ...(anchor ? { updatedAt: { $lte: anchor.updatedAt } } : {}),
-    }).orderBy('updatedAt', 'desc').limit(limit + (anchor ? 1 : 0)).execute()
-    if (anchor) conversations = conversations.filter((item) => item.id !== anchor.id)
-    conversations = conversations.slice(0, limit)
+    const predicate = anchor
+      ? {
+          platformSessionId,
+          $or: [
+            { updatedAt: { $lt: anchor.updatedAt } },
+            { updatedAt: anchor.updatedAt, id: { $lt: anchor.id } },
+          ],
+        }
+      : { platformSessionId }
+    const conversations = await this._database.select('mtproto_im_conversation', predicate)
+      .orderBy('updatedAt', 'desc').orderBy('id', 'desc').limit(limit).execute()
     return this._hydrateDialogs(conversations)
   }
 
@@ -1247,7 +1252,7 @@ export class MessageStore {
         pts: (current?.pts ?? 1) + ptsCount,
         qts: current?.qts ?? 0,
         seq: (current?.seq ?? 0) + 1,
-        date,
+        date: Math.max(current?.date ?? 0, date),
       }
       await database.upsert('mtproto_update_state', [state])
       return state

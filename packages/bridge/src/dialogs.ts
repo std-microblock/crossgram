@@ -7,7 +7,7 @@ import {
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
-  type IMReactionSummary, type IMRequestAction, type IMTextEntity, type IMTransferProgress, type IMUser,
+  type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
@@ -15,9 +15,7 @@ import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
   type MessageEditResult,
 } from './message-actions.js'
-import {
-  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_REJECT_CALLBACK_DATA, isRequestInboxConversation,
-} from './request-inbox.js'
+import { isLocalOnlyConversation } from './request-inbox.js'
 import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
@@ -37,6 +35,7 @@ import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from '.
 import type { DraftStore, StoredDraft } from './draft-store.js'
 import { MUTE_FOREVER, type NotificationSettingsStore, type NotificationTarget } from './notification-settings.js'
 import type { BlockedPeerChange, BlockedPeerStore } from './blocked-peers.js'
+import { SystemPeerCallbackError, type SystemPeerService } from './system-peer.js'
 import {
   decodeDialogFilterTitle, encodeDialogFilterTitle,
   type DialogFolderStore, type StoredDialogFilter,
@@ -56,7 +55,6 @@ type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
 type UploadMediaRequest = tl.messages.RawUploadMediaRequest
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 
-const requestResolutionLocks = new Map<string, Promise<void>>()
 
 interface MessageRef {
   peerId: string
@@ -217,6 +215,7 @@ export class DialogRpc {
     private readonly _authenticatedSelfId?: number,
     private readonly _blockedPeers?: BlockedPeerStore,
     private readonly _dialogFolders?: DialogFolderStore,
+    private readonly _systemPeers?: SystemPeerService,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -633,7 +632,7 @@ export class DialogRpc {
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
     if (req.filter._ === 'inputMessagesFilterPinned') return this._emptyMessages(conversation)
-    if (this._platform.searchMessages && !isRequestInboxConversation(conversation)) {
+    if (this._platform.searchMessages && !isLocalOnlyConversation(conversation)) {
       return this._searchPlatform(req, peerId, conversation)
     }
     const all = await this._loadHistory(peerId, {
@@ -1387,18 +1386,34 @@ export class DialogRpc {
     const projected = await this._store?.findProjectedByTlId(
       this._session.platformSessionId, req.msgId, conversationId,
     )
-    const requestId = projected?.source.metadata?.bridgeRequestId
-    if (typeof requestId === 'string' && isRequestInboxConversation(this._conversation(conversationId))) {
+    const systemPeer = projected && await this._systemPeers?.resolve(this._session, conversationId)
+    if (systemPeer) {
       const button = projected.source.content.inlineKeyboard?.rows
         .flatMap((row) => row.buttons)
         .find((candidate) => candidate.type === 'callback' && candidate.data === data)
-      // Terminal request projections deliberately remove buttons. Telegram may
-      // still retry the original callback, so defer static-action validation to
-      // the resolver for terminal rows while requiring a rendered button on a
-      // pending request.
-      const request = await this._store?.getRequest(this._session.platformSessionId, requestId)
-      if (!button && request?.state === 'pending') throw new RpcError(400, 'DATA_INVALID')
-      return this._resolveRequestInboxCallback(requestId, data)
+      // Terminal provider messages deliberately remove buttons. Clients may
+      // retry the original callback, so providers validate their terminal
+      // state while pending rows must still have rendered callback data.
+      if (!button && projected.source.content.inlineKeyboard) throw new RpcError(400, 'DATA_INVALID')
+      try {
+        const answer = await this._systemPeers!.callback(this._session, systemPeer, {
+          message: projected.source,
+          data,
+        })
+        if (answer) {
+          return {
+            _: 'messages.botCallbackAnswer',
+            alert: answer.alert || undefined,
+            hasUrl: Boolean(answer.url) || undefined,
+            message: answer.message,
+            url: answer.url,
+            cacheTime: answer.cacheTime ?? 0,
+          }
+        }
+      } catch (error) {
+        if (error instanceof SystemPeerCallbackError) throw new RpcError(400, error.code)
+        throw error
+      }
     }
     if (!this._platform.clickInlineButton) throw new RpcError(400, 'BOT_RESPONSE_TIMEOUT')
     const target = this._tlToMessage.get(req.msgId)
@@ -1433,55 +1448,6 @@ export class DialogRpc {
       message: answer.message,
       url: answer.url,
       cacheTime: 0,
-    }
-  }
-
-  private async _resolveRequestInboxCallback(
-    requestId: string,
-    data: string,
-  ): Promise<tl.messages.RawBotCallbackAnswer> {
-    const action: IMRequestAction | undefined = data === REQUEST_ACCEPT_CALLBACK_DATA
-      ? 'accept'
-      : data === REQUEST_REJECT_CALLBACK_DATA ? 'reject' : undefined
-    if (!action) throw new RpcError(400, 'DATA_INVALID')
-    return withRequestResolutionLock(`${this._session.platformSessionId}\0${requestId}`, async () => {
-      const request = await this._store?.getRequest(this._session.platformSessionId, requestId)
-      if (!request) throw new RpcError(400, 'REQUEST_ID_INVALID')
-      if (request.state !== 'pending') {
-        if ((request.state === 'accepted' && action === 'accept')
-          || (request.state === 'rejected' && action === 'reject')) {
-          await this._deliverRequestRecovery(request)
-          return { _: 'messages.botCallbackAnswer', message: '请求已处理', cacheTime: 0 }
-        }
-        throw new RpcError(400, 'REQUEST_STATE_CONFLICT')
-      }
-      if (!this._platform.resolveRequest) throw new RpcError(400, 'REQUEST_RESOLVE_UNAVAILABLE')
-      let resolved
-      try {
-        resolved = await this._platform.resolveRequest(this._session, request.id, action)
-      } catch {
-        throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
-      }
-      if (resolved.id !== request.id
-        || resolved.kind !== request.kind
-        || resolved.state === 'pending'
-        || (action === 'accept' && resolved.state !== 'accepted')
-        || (action === 'reject' && resolved.state !== 'rejected')) {
-        throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
-      }
-      if (!this._store) throw new RpcError(500, 'REQUEST_EVENT_UNAVAILABLE')
-      const stored = await this._store.ingestRequest(this._session, resolved)
-      await this._deliverRequestRecovery(stored.request)
-      return { _: 'messages.botCallbackAnswer', message: '请求已处理', cacheTime: 0 }
-    })
-  }
-
-  private async _deliverRequestRecovery(request: import('./platform.js').IMRequest): Promise<void> {
-    if (!this._onLocalEvent) throw new RpcError(500, 'REQUEST_EVENT_UNAVAILABLE')
-    try {
-      await this._onLocalEvent(this._session, { type: 'request', request, delivery: 'recovery' })
-    } catch {
-      throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
     }
   }
 
@@ -2305,7 +2271,6 @@ export class DialogRpc {
     req: SendMessageRequest,
     excludeConnection?: ServerConnection,
   ): Promise<tl.TypeUpdates> {
-    if (!this._platform.capabilities.send.text) throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
     if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
     if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
       throw new RpcError(400, 'MESSAGE_TOO_LONG')
@@ -2319,17 +2284,23 @@ export class DialogRpc {
     const replyToId = replyTarget?.id
     await this._hydrateMentionUsernames(req.message, req.entities)
     const inputPart = this._inputTextPart(req.message, req.entities)
-    const sent = await this._sendToPlatform(() => this._platform.sendMessage(
-      this._session,
-      { id: peerId },
-      {
-        parts: [inputPart],
-        replyToId,
-        ...(replyTarget?.nativeSequence
-          ? { replyToNativeSequence: replyTarget.nativeSequence }
-          : {}),
-      },
-    ))
+    const systemPeer = await this._systemPeers?.resolve(this._session, peerId)
+    if (!systemPeer && !this._platform.capabilities.send.text) {
+      throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
+    }
+    const sent = systemPeer
+      ? this._systemPeers!.makeOutgoing(this._session, systemPeer, { parts: [inputPart], replyToId })
+      : await this._sendToPlatform(() => this._platform.sendMessage(
+          this._session,
+          { id: peerId },
+          {
+            parts: [inputPart],
+            replyToId,
+            ...(replyTarget?.nativeSequence
+              ? { replyToNativeSequence: replyTarget.nativeSequence }
+              : {}),
+          },
+        ))
     const source: IMMessage = {
       ...sent,
       conversationId: peerId,
@@ -2337,6 +2308,7 @@ export class DialogRpc {
       replyToId: sent.replyToId ?? replyToId,
     }
     const published = await this._publishLocalMessage(peerId, source, excludeConnection)
+    if (systemPeer) await this._systemPeers!.receive(this._session, systemPeer, source)
     if (published) {
       const update = published.updates.find((item) =>
         item._ === 'updateNewMessage' || item._ === 'updateNewChannelMessage') as
@@ -2828,9 +2800,9 @@ export class DialogRpc {
           limit: fetchLimit,
           beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
         }
-        const requestInbox = isRequestInboxConversation(this._conversation(peerId))
+        const localOnly = isLocalOnlyConversation(this._conversation(peerId))
         let projected: ProjectedMessage[]
-        if (requestInbox) {
+        if (localOnly) {
           projected = await this._store!.readAllProjectedHistory(this._session.platformSessionId, peerId)
         } else if (negativeOffset && request.addOffset !== -1 && anchor) {
           const [newer, older] = await Promise.all([
@@ -2870,12 +2842,12 @@ export class DialogRpc {
           this._rememberMessage(item)
           return item
         }))
-        const history = requestInbox
+        const history = localOnly
           ? materialized
           : materialized.sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
         const materializeMs = performance.now() - materializeAt
         const repliesAt = performance.now()
-        await this._rememberReplyTargets(history.map((item) => item.source), true)
+        await this._rememberReplyTargets(history.map((item) => item.source), !localOnly)
         await this._applyUnreadMentionState(peerId, history)
         const repliesMs = performance.now() - repliesAt
         return {
@@ -2889,7 +2861,7 @@ export class DialogRpc {
       }
 
       const upstreamAt = performance.now()
-      if (!isRequestInboxConversation(this._conversation(peerId))) await syncHistoryWindow()
+      if (!isLocalOnlyConversation(this._conversation(peerId))) await syncHistoryWindow()
       const upstreamMs = performance.now() - upstreamAt
       if (anchorId && !anchor) {
         anchor = await this._store.findProjectedByTlId(
@@ -4011,7 +3983,7 @@ export class DialogRpc {
     this._rememberUsername(user.id, user.username)
     const contact = this._contactUserIds.has(user.id)
     return makeUser({
-      id: this._userId(user.id), firstName: user.firstName,
+      id: this._userId(user.id), bot: user.metadata?.bot === true || undefined, firstName: user.firstName,
       lastName: user.lastName, username: user.username,
       contact: contact || undefined, mutualContact: contact || undefined,
       photo: user.avatar ? this._makeAvatarPhoto(user.avatar, 'user') : undefined,
@@ -4584,7 +4556,7 @@ export class DialogRpc {
     if (!ref) return
     const target = this._conversation(ref.conversationId)
     if (target.id !== displayConversationId && target.parentId !== displayConversationId) return
-    if (isRequestInboxConversation(target)) {
+    if (isLocalOnlyConversation(target)) {
       await this._onLocalEvent?.(this._session, {
         type: 'read', conversationId: target.id, upToMessageId: ref.id,
       }, this._localDelivery(excludeConnection))
@@ -4935,21 +4907,6 @@ function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): 
   return false
 }
 
-
-async function withRequestResolutionLock<T>(
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const predecessor = requestResolutionLocks.get(key) ?? Promise.resolve()
-  const current = predecessor.catch(() => undefined).then(operation)
-  const tail = current.then(() => undefined, () => undefined)
-  requestResolutionLocks.set(key, tail)
-  try {
-    return await current
-  } finally {
-    if (requestResolutionLocks.get(key) === tail) requestResolutionLocks.delete(key)
-  }
-}
 
 function selectHistoryWindow(
   all: readonly MaterializedMessage[],
