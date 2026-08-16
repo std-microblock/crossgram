@@ -1,7 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type {
   IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMRequestRow, IMUserRow,
-  TlMessagePartRow,
+  TlMessagePartRow, UpdateStateRow,
 } from './models.js'
 import {
   messageMedia, messageText, telegramReplyToMessageId,
@@ -648,12 +648,17 @@ export class MessageStore {
           platformSessionId, platformConversationId: query.afterConversationId,
         })
       : []
-    let conversations = await this._database.select('mtproto_im_conversation', {
-      platformSessionId,
-      ...(anchor ? { updatedAt: { $lte: anchor.updatedAt } } : {}),
-    }).orderBy('updatedAt', 'desc').limit(limit + (anchor ? 1 : 0)).execute()
-    if (anchor) conversations = conversations.filter((item) => item.id !== anchor.id)
-    conversations = conversations.slice(0, limit)
+    const predicate = anchor
+      ? {
+          platformSessionId,
+          $or: [
+            { updatedAt: { $lt: anchor.updatedAt } },
+            { updatedAt: anchor.updatedAt, id: { $lt: anchor.id } },
+          ],
+        }
+      : { platformSessionId }
+    const conversations = await this._database.select('mtproto_im_conversation', predicate)
+      .orderBy('updatedAt', 'desc').orderBy('id', 'desc').limit(limit).execute()
     return this._hydrateDialogs(conversations)
   }
 
@@ -1240,7 +1245,7 @@ export class MessageStore {
         pts: (current?.pts ?? 1) + ptsCount,
         qts: current?.qts ?? 0,
         seq: (current?.seq ?? 0) + 1,
-        date,
+        date: Math.max(current?.date ?? 0, date),
       }
       await database.upsert('mtproto_update_state', [state])
       return state
@@ -1360,6 +1365,34 @@ export class MessageStore {
     return this._write(() => this._database.withTransaction(async (database) => {
       return this._allocateIds(database, scope, count)
     }))
+  }
+
+  /** Atomically reserve a live-only ID and advance the matching account update cursor. */
+  async allocateTransientMessage(platformSessionId: string, date: number): Promise<{ id: number, state: UpdateStateRow }> {
+    return this._write(() => this._database.withTransaction(async (database) => {
+      const scope = `account:${platformSessionId}`
+      const timestamp = Math.floor(Date.now() / 1_000)
+      const preferredId = clampedTimestampMessageIdBucket(
+        await this._messageIdEpoch(database, scope, timestamp, new Map()),
+        timestamp,
+      )
+      const [id] = await this._reserveSlottedMessageIds(database, scope, 1, preferredId, 'live', false, [], {}, undefined)
+      const [current] = await database.get('mtproto_update_state', { platformSessionId })
+      const state: UpdateStateRow = {
+        platformSessionId,
+        pts: (current?.pts ?? 1) + 1,
+        qts: current?.qts ?? 0,
+        seq: (current?.seq ?? 0) + 1,
+        date: Math.max(current?.date ?? 0, date),
+      }
+      await database.upsert('mtproto_update_state', [state])
+      return { id, state }
+    }))
+  }
+
+  /** Durable, content-free allocation for live-only messages in the regular account namespace. */
+  async allocateTransientMessageId(platformSessionId: string): Promise<number> {
+    return (await this.allocateTransientMessage(platformSessionId, Math.floor(Date.now() / 1_000))).id
   }
 
   private async _upsertRequest(
@@ -1587,7 +1620,10 @@ export class MessageStore {
       || part.allocationVersion !== TIMESTAMP_ALLOCATION_VERSION
     ))
     if (requiresMigration) {
-      for (const part of existing) await database.remove('mtproto_tl_message_part', { id: part.id })
+      for (const part of existing) {
+        await database.remove('mtproto_tl_message_part', { id: part.id })
+        await database.remove('mtproto_message_id_reservation', { scope: part.scope, messageId: message.id })
+      }
       existing = []
     } else if (existing.length > count) {
       for (const part of existing.slice(count)) {
@@ -1633,7 +1669,7 @@ export class MessageStore {
             message.timestamp,
           )
         : orderedMessagePreferredId(bounds)
-      const ids = await this._allocateSlottedMessageIds(
+      const ids = await this._reserveSlottedMessageIds(
         database,
         scope,
         missing,
@@ -1642,6 +1678,7 @@ export class MessageStore {
         nativeSequence !== undefined || nativeOrderKey !== undefined,
         existing.map((part) => part.tlMessageId),
         bounds,
+        message.id,
       )
       await database.upsert('mtproto_tl_message_part', ids.map((tlMessageId, index) => {
         const ordinal = existing.length + index
@@ -1678,6 +1715,41 @@ export class MessageStore {
     if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
     await database.upsert('mtproto_id_counter', [{ scope, nextId }])
     return Array.from({ length: count }, (_, index) => first + index)
+  }
+
+  /** Reserve IDs before materializing either a canonical or live-only projection. */
+  private async _reserveSlottedMessageIds(
+    database: Database,
+    scope: string,
+    count: number,
+    preferredId: number,
+    allocation: 'live' | 'history',
+    centerSlots: boolean,
+    existingIds: readonly number[],
+    bounds: { lowerExclusive?: number, upperExclusive?: number },
+    messageId: number | undefined,
+  ): Promise<number[]> {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const ids = await this._allocateSlottedMessageIds(
+        database, scope, count, preferredId, allocation, centerSlots, existingIds, bounds,
+      )
+      const created: number[] = []
+      try {
+        for (const tlMessageId of ids) {
+          await database.create('mtproto_message_id_reservation', {
+            scope, tlMessageId, messageId: messageId ?? null,
+          })
+          created.push(tlMessageId)
+        }
+        return ids
+      } catch (error) {
+        for (const tlMessageId of created) {
+          await database.remove('mtproto_message_id_reservation', { scope, tlMessageId })
+        }
+        if (!isUniqueConstraint(error) || attempt === 3) throw error
+      }
+    }
+    throw new Error(`message ID reservation allocation failed: ${scope}`)
   }
 
   private async _allocateSlottedMessageIds(
@@ -1720,10 +1792,11 @@ export class MessageStore {
             bucket + TIMESTAMP_MESSAGE_ID_SLOTS - 1,
             (activeBounds.upperExclusive ?? bucket + TIMESTAMP_MESSAGE_ID_SLOTS) - 1,
           )
-          const occupied = new Set((await database.get('mtproto_tl_message_part', {
-            scope,
-            tlMessageId: { $gte: first, $lte: last },
-          })).map((part) => part.tlMessageId))
+          const [projected, transient] = await Promise.all([
+            database.get('mtproto_tl_message_part', { scope, tlMessageId: { $gte: first, $lte: last } }),
+            database.get('mtproto_message_id_reservation', { scope, tlMessageId: { $gte: first, $lte: last } }),
+          ])
+          const occupied = new Set([...projected, ...transient].map((part) => part.tlMessageId))
           const available: number[] = []
           for (let candidate = first; candidate <= last; candidate++) {
             if (existingIds.includes(candidate) || ids.includes(candidate)) continue
@@ -2263,4 +2336,8 @@ function reactionComparable(reaction: import('./models.js').IMMessageReactionRow
     recentActors: reaction.recentActors,
     definition: reaction.definition,
   }
+}
+
+function isUniqueConstraint(error: unknown): boolean {
+  return error instanceof Error && /unique|duplicate|constraint/i.test(error.message)
 }

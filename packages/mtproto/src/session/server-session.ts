@@ -150,7 +150,11 @@ export class ServerSession {
   private _authorized = false
   private _apiLayer: number | null = null
   private _responseWriterMap: TlWriterMap
-  private _pendingUpdates: Array<{ update: tl.TypeUpdates, clientSessionId?: Long }> = []
+  private _pendingUpdates: Array<{
+    update: tl.TypeUpdates
+    clientSessionId?: Long
+    options?: { nonCapturable?: boolean }
+  }> = []
   private _acceptsUpdates = false
   /** Session that last established an updates stream on this connection. */
   private _updateSessionId: Long | null = null
@@ -216,7 +220,11 @@ export class ServerSession {
    * updates stream. Before that activation, retain the legacy latest-session
    * fallback so early post-login updates remain deliverable.
    */
-  sendUpdate(update: tl.TypeUpdates, clientSessionId?: Long): void {
+  sendUpdate(
+    update: tl.TypeUpdates,
+    clientSessionId?: Long,
+    options?: { nonCapturable?: boolean },
+  ): void {
     if (!this._authorized) return
     const targetSessionId = clientSessionId
       ?? this._updateSessionId
@@ -228,7 +236,7 @@ export class ServerSession {
         this._connection.close()
         return
       }
-      this._pendingUpdates.push({ update, clientSessionId: targetSessionId })
+      this._pendingUpdates.push({ update, clientSessionId: targetSessionId, options })
       this._log.debug('queued server update until client API layer is negotiated (pending=%d)', this._pendingUpdates.length)
       return
     }
@@ -237,7 +245,7 @@ export class ServerSession {
       return
     }
     const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
-    this._sendEncryptedMessage(serialized, true, update, targetSessionId)
+    this._sendEncryptedMessage(serialized, true, update, targetSessionId, options?.nonCapturable)
   }
 
   get authKeyId(): Uint8Array | null {
@@ -1227,7 +1235,7 @@ export class ServerSession {
     if (publish && layer !== null && this._permAuthKey.ready) this._onApiLayer?.(this._permAuthKey.id, layer)
     const pending = this._pendingUpdates
     this._pendingUpdates = []
-    for (const { update, clientSessionId } of pending) this.sendUpdate(update, clientSessionId)
+    for (const { update, clientSessionId, options } of pending) this.sendUpdate(update, clientSessionId, options)
   }
 
   private _sendNewSessionCreated(): void {
@@ -1312,6 +1320,7 @@ export class ServerSession {
     isContentRelated: boolean,
     payload?: unknown,
     clientSessionId: Long = this._sessionId,
+    nonCapturable = false,
   ): void {
     const msgId = this._msgIdGen.getMessageId(isContentRelated)
     const seqNo = this._msgIdGen.getSeqNo(isContentRelated)
@@ -1323,10 +1332,12 @@ export class ServerSession {
     writer.raw(body)
 
     const encrypted = this._sendKey.encryptMessage(writer.result(), this._serverSalt, clientSessionId)
-    this._capture('server->client', 'message', payload ?? this._decodeDebugBody(body), {
-      messageId: msgId,
-      seqNo,
-    }, clientSessionId)
+    if (!nonCapturable) {
+      this._capture('server->client', 'message', payload ?? this._decodeDebugBody(body), {
+        messageId: msgId,
+        seqNo,
+      }, clientSessionId)
+    }
     this._connection.send(encrypted)
   }
 
