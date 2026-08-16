@@ -15,12 +15,6 @@ export interface SystemPeerResolution {
   readonly provider: SystemPeerProvider
 }
 
-/** Delivery metadata for live-only provider messages. */
-export interface TransientDeliveryOptions {
-  /** Do not retain the payload in protocol debug capture. */
-  nonCapturable?: boolean
-}
-
 /** Provider-neutral callback input sourced from a durable bridge message. */
 export interface SystemPeerCallbackInput {
   message: IMMessage
@@ -71,12 +65,6 @@ export class SystemPeerService extends Service {
     event: IMEvent,
     options?: PlatformEventDeliveryOptions,
   ) => Promise<PlatformEventPublishResult>
-  private _transient?: (
-    session: PlatformSession,
-    conversation: IMConversation,
-    message: IMMessage,
-    options?: TransientDeliveryOptions,
-  ) => Promise<void>
 
   constructor(ctx: Context) {
     super(ctx, 'systemPeer')
@@ -84,15 +72,8 @@ export class SystemPeerService extends Service {
 
   attach(
     ingest: (session: PlatformSession, event: IMEvent, options?: PlatformEventDeliveryOptions) => Promise<PlatformEventPublishResult>,
-    transient: (
-      session: PlatformSession,
-      conversation: IMConversation,
-      message: IMMessage,
-      options?: TransientDeliveryOptions,
-    ) => Promise<void>,
   ): void {
     this._ingest = ingest
-    this._transient = transient
   }
 
   register(provider: SystemPeerProvider): Unsubscribe {
@@ -149,16 +130,5 @@ export class SystemPeerService extends Service {
   async emit(session: PlatformSession, event: IMEvent, options?: PlatformEventDeliveryOptions): Promise<PlatformEventPublishResult> {
     if (!this._ingest) throw new Error('system peer bridge is not attached')
     return this._ingest(session, event, options)
-  }
-
-  /** Send a non-durable live-only message, used for one-time secrets. */
-  async emitTransient(
-    session: PlatformSession,
-    conversation: IMConversation,
-    message: IMMessage,
-    options?: TransientDeliveryOptions,
-  ): Promise<void> {
-    if (!this._transient) throw new Error('system peer bridge is not attached')
-    await this._transient(session, conversation, message, options)
   }
 }

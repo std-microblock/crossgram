@@ -76,7 +76,7 @@ async function createRequestRpc(
     if (event.type === 'request') await store.ingestRequest(session, event.request)
   }
   const localEvents: IMEvent[] = []
-  peers.attach(deliver, async () => {})
+  peers.attach(deliver)
   peers.register(new RequestInboxSystemPeerProvider(
     store,
     async (requestSession, requestId, action) => {
@@ -380,7 +380,6 @@ describe('request inbox callbacks', () => {
     const peers = new SystemPeerService(new Context())
     peers.attach(
       (eventSession, event, options) => subscriptions.ingestLocalEvent(eventSession, event, options),
-      async () => {},
     )
     peers.register(new RequestInboxSystemPeerProvider(
       store,

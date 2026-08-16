@@ -489,7 +489,6 @@ async function startServer(
     authKeyId: Uint8Array,
     update: tl.TypeUpdates,
     excludeConnection?: ServerConnection,
-    options?: { nonCapturable?: boolean },
   ) => number
   stop: () => Promise<void>
 }> {
@@ -590,8 +589,8 @@ async function startServer(
     port: ctx.mtproto.port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes,
     register: ctx.mtproto.register.bind(ctx.mtproto),
     broadcastUpdate: (update) => ctx.mtproto.broadcastUpdate(update),
-    sendUpdateToAuthKey: (authKeyId, update, excludeConnection, options) =>
-      ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection, options),
+    sendUpdateToAuthKey: (authKeyId, update, excludeConnection) =>
+      ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection),
     stop: () => Promise.resolve(fiber.dispose()),
   }
 }
@@ -1599,39 +1598,6 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         && (event.payload as { _?: string })._ === 'updates'
       )).map((event) => event.connectionId)).toEqual(['conn-1'])
 
-      const token = '123456789:debug-capture-must-not-retain-this-token'
-      debugEvents.length = 0
-      expect(sendUpdateToAuthKey(perm.authKeyId, {
-        _: 'updates',
-        updates: [{
-          _: 'updateNewMessage',
-          message: {
-            _: 'message', id: 102,
-            fromId: { _: 'peerUser', userId: 42 },
-            peerId: { _: 'peerUser', userId: 42 },
-            date: nowSec(), message: token,
-          },
-          pts: 3, ptsCount: 1,
-        }],
-        users: [], chats: [], date: nowSec(), seq: 2,
-      } as unknown as tl.TypeUpdates, undefined, { nonCapturable: true })).toBe(1)
-      let transient: any
-      for (let i = 0; i < 10; i++) {
-        const frame = await main.read()
-        try {
-          const update = clientDecrypt(perm, frame).object() as { _: string }
-          if (update._ === 'updates') {
-            transient = update
-            break
-          }
-        } catch { /* Ignore acknowledgements from the preceding update. */ }
-      }
-      expect(transient).toMatchObject({ updates: [{ message: { message: token } }] })
-      expect(JSON.stringify(debugEvents)).not.toContain(token)
-      expect(debugEvents.some((event) => (
-        event.direction === 'server->client'
-        && (event.payload as { _?: string })._ === 'updates'
-      ))).toBe(false)
       main.close()
       media.close()
     } finally {

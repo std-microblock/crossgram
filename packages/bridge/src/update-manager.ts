@@ -21,7 +21,6 @@ import type {
 import { makeUser } from './synthetic.js'
 import { registerVirtualConversation } from './virtual-conversations.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
-import type { TransientDeliveryOptions } from './system-peer.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 
 /** Converts committed platform events to account-scoped MTProto updates. */
@@ -34,7 +33,6 @@ export class UpdateManager {
       authKeyId: Uint8Array,
       update: tl.TypeUpdates,
       excludeConnection?: ServerConnection,
-      options?: TransientDeliveryOptions,
     ) => number,
     private readonly _dcId = 1,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
@@ -714,55 +712,11 @@ export class UpdateManager {
     return payload
   }
 
-  /**
-   * Delivers a live-only system message without persisting its content or adding
-   * it to update-difference history. This is reserved for one-time secrets.
-   */
-  async publishTransientMessage(
-    session: PlatformSession,
-    conversation: IMConversation,
-    message: IMMessage,
-    options?: TransientDeliveryOptions,
-  ): Promise<void> {
-    if (conversation.kind !== 'direct') throw new Error('transient system messages require a direct peer')
-    const [sender, peer] = await Promise.all([
-      this._store.upsertUser(session, message.sender ?? { id: message.senderId, firstName: message.senderId }),
-      this._store.getUser(session.platformId, conversation.id).then((row) => row
-        ?? this._store.upsertUser(session, { id: conversation.id, firstName: conversation.title })),
-    ])
-    const { state, id } = await this._store.allocateTransientMessage(
-      session.platformSessionId, message.timestamp,
-    )
-    const payload: tl.RawUpdates = {
-      _: 'updates',
-      updates: [{
-        _: 'updateNewMessage',
-        message: projectTlMessage({
-          conversation,
-          source: message,
-          tlId: id,
-          ordinal: 0,
-          fromId: { _: 'peerUser', userId: sender.id },
-          peerId: { _: 'peerUser', userId: peer.id },
-          entities: [],
-        }),
-        pts: state.pts,
-        ptsCount: 1,
-      }],
-      users: [makeUser({ id: sender.id, firstName: sender.firstName, username: sender.username })],
-      chats: [],
-      date: message.timestamp,
-      seq: state.seq,
-    }
-    await this._send(session.platformSessionId, payload, undefined, undefined, options)
-  }
-
   private async _send(
     platformSessionId: string,
     payload: tl.RawUpdates,
     excludeAuthKeyId?: string,
     excludeConnection?: ServerConnection,
-    options?: TransientDeliveryOptions,
   ): Promise<boolean> {
     const bindings = await this._database.get('mtproto_auth_binding', { platformSessionId })
     let delivered = 0
@@ -773,7 +727,7 @@ export class UpdateManager {
     )
     for (const binding of bindings) {
       if (!excludeConnection && binding.authKeyId === excludeAuthKeyId) continue
-      const connections = this._sendUpdate(hexBytes(binding.authKeyId), payload, excludeConnection, options)
+      const connections = this._sendUpdate(hexBytes(binding.authKeyId), payload, excludeConnection)
       delivered += connections
       this._onTrace?.(
         'update send binding session=%s authKey=%s connections=%d',
