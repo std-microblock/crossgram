@@ -146,14 +146,6 @@ export interface IdCounterRow {
   nextId: number
 }
 
-/** Shared reservation for canonical and live-only account message projections. */
-export interface MessageIdReservationRow {
-  id: number
-  scope: string
-  tlMessageId: number
-  messageId: number | null
-}
-
 export interface MessageIdEpochRow {
   scope: string
   epoch: number
@@ -293,7 +285,6 @@ declare module '@cordisjs/plugin-database' {
     mtproto_im_media: IMMediaRow
     mtproto_tl_message_part: TlMessagePartRow
     mtproto_id_counter: IdCounterRow
-    mtproto_message_id_reservation: MessageIdReservationRow
     mtproto_message_id_epoch: MessageIdEpochRow
     mtproto_update_state: UpdateStateRow
     mtproto_channel_update_state: ChannelUpdateStateRow
@@ -421,14 +412,6 @@ export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_id_counter', {
     scope: 'string', nextId: 'unsigned',
   }, { primary: 'scope' })
-
-  ctx.model.extend('mtproto_message_id_reservation', {
-    id: 'unsigned', scope: 'string', tlMessageId: 'unsigned', messageId: { type: 'unsigned', nullable: true },
-  }, {
-    primary: 'id', autoInc: true,
-    unique: [['scope', 'tlMessageId']],
-    indexes: [['scope', 'tlMessageId']],
-  })
 
   ctx.model.extend('mtproto_message_id_epoch', {
     scope: 'string', epoch: 'integer',

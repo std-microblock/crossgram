@@ -1,7 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type {
   IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMRequestRow, IMUserRow,
-  TlMessagePartRow, UpdateStateRow,
+  TlMessagePartRow,
 } from './models.js'
 import {
   messageMedia, messageText, telegramReplyToMessageId,
@@ -1592,10 +1592,7 @@ export class MessageStore {
       || part.allocationVersion !== TIMESTAMP_ALLOCATION_VERSION
     ))
     if (requiresMigration) {
-      for (const part of existing) {
-        await database.remove('mtproto_tl_message_part', { id: part.id })
-        await database.remove('mtproto_message_id_reservation', { scope: part.scope, messageId: message.id })
-      }
+      for (const part of existing) await database.remove('mtproto_tl_message_part', { id: part.id })
       existing = []
     } else if (existing.length > count) {
       for (const part of existing.slice(count)) {
@@ -1641,7 +1638,7 @@ export class MessageStore {
             message.timestamp,
           )
         : orderedMessagePreferredId(bounds)
-      const ids = await this._reserveSlottedMessageIds(
+      const ids = await this._allocateSlottedMessageIds(
         database,
         scope,
         missing,
@@ -1650,7 +1647,6 @@ export class MessageStore {
         nativeSequence !== undefined || nativeOrderKey !== undefined,
         existing.map((part) => part.tlMessageId),
         bounds,
-        message.id,
       )
       await database.upsert('mtproto_tl_message_part', ids.map((tlMessageId, index) => {
         const ordinal = existing.length + index
@@ -1687,41 +1683,6 @@ export class MessageStore {
     if (nextId - 1 > 0x7fffffff) throw new RangeError(`message ID scope exhausted: ${scope}`)
     await database.upsert('mtproto_id_counter', [{ scope, nextId }])
     return Array.from({ length: count }, (_, index) => first + index)
-  }
-
-  /** Reserve IDs before materializing a durable canonical projection for live or history ingestion. */
-  private async _reserveSlottedMessageIds(
-    database: Database,
-    scope: string,
-    count: number,
-    preferredId: number,
-    allocation: 'live' | 'history',
-    centerSlots: boolean,
-    existingIds: readonly number[],
-    bounds: { lowerExclusive?: number, upperExclusive?: number },
-    messageId: number | undefined,
-  ): Promise<number[]> {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const ids = await this._allocateSlottedMessageIds(
-        database, scope, count, preferredId, allocation, centerSlots, existingIds, bounds,
-      )
-      const created: number[] = []
-      try {
-        for (const tlMessageId of ids) {
-          await database.create('mtproto_message_id_reservation', {
-            scope, tlMessageId, messageId: messageId ?? null,
-          })
-          created.push(tlMessageId)
-        }
-        return ids
-      } catch (error) {
-        for (const tlMessageId of created) {
-          await database.remove('mtproto_message_id_reservation', { scope, tlMessageId })
-        }
-        if (!isUniqueConstraint(error) || attempt === 3) throw error
-      }
-    }
-    throw new Error(`message ID reservation allocation failed: ${scope}`)
   }
 
   private async _allocateSlottedMessageIds(
@@ -1764,11 +1725,10 @@ export class MessageStore {
             bucket + TIMESTAMP_MESSAGE_ID_SLOTS - 1,
             (activeBounds.upperExclusive ?? bucket + TIMESTAMP_MESSAGE_ID_SLOTS) - 1,
           )
-          const [projected, transient] = await Promise.all([
-            database.get('mtproto_tl_message_part', { scope, tlMessageId: { $gte: first, $lte: last } }),
-            database.get('mtproto_message_id_reservation', { scope, tlMessageId: { $gte: first, $lte: last } }),
-          ])
-          const occupied = new Set([...projected, ...transient].map((part) => part.tlMessageId))
+          const occupied = new Set((await database.get('mtproto_tl_message_part', {
+            scope,
+            tlMessageId: { $gte: first, $lte: last },
+          })).map((part) => part.tlMessageId))
           const available: number[] = []
           for (let candidate = first; candidate <= last; candidate++) {
             if (existingIds.includes(candidate) || ids.includes(candidate)) continue
@@ -2308,8 +2268,4 @@ function reactionComparable(reaction: import('./models.js').IMMessageReactionRow
     recentActors: reaction.recentActors,
     definition: reaction.definition,
   }
-}
-
-function isUniqueConstraint(error: unknown): boolean {
-  return error instanceof Error && /unique|duplicate|constraint/i.test(error.message)
 }

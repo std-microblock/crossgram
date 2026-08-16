@@ -150,10 +150,7 @@ export class ServerSession {
   private _authorized = false
   private _apiLayer: number | null = null
   private _responseWriterMap: TlWriterMap
-  private _pendingUpdates: Array<{
-    update: tl.TypeUpdates
-    clientSessionId?: Long
-  }> = []
+  private _pendingUpdates: Array<{ update: tl.TypeUpdates, clientSessionId?: Long }> = []
   private _acceptsUpdates = false
   /** Session that last established an updates stream on this connection. */
   private _updateSessionId: Long | null = null
@@ -219,10 +216,7 @@ export class ServerSession {
    * updates stream. Before that activation, retain the legacy latest-session
    * fallback so early post-login updates remain deliverable.
    */
-  sendUpdate(
-    update: tl.TypeUpdates,
-    clientSessionId?: Long,
-  ): void {
+  sendUpdate(update: tl.TypeUpdates, clientSessionId?: Long): void {
     if (!this._authorized) return
     const targetSessionId = clientSessionId
       ?? this._updateSessionId
