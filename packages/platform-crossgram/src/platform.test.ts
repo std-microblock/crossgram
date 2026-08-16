@@ -672,6 +672,77 @@ describe('QQNTPlatform mapping', () => {
     expect(archivedLocator.peerUid).toBe('archived-source-group')
   })
 
+  it('hydrates missing senders in merged-forward history from QQ user profiles', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.forwardMessages = vi.fn(async () => [{
+      id: 'merged-root', conversationId: 'outer-group', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{
+        type: 'multi-forward' as const, title: '聊天记录', preview: 'Alice: archived message',
+        locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
+      }],
+    }])
+    platform.client.getMultiForwardMessages = vi.fn(async () => [{
+      id: 'provided-sender', conversationId: 'archived-group', senderId: 'provided-alice',
+      sender: { id: 'provided-alice', name: 'Provided Alice' },
+      timestamp: 9, outgoing: false, parts: [{ type: 'text' as const, text: 'provided sender' }],
+    }, {
+      id: 'lookup-error', conversationId: 'archived-group', senderId: 'lookup-error',
+      timestamp: 8, outgoing: false, parts: [{ type: 'text' as const, text: 'lookup error' }],
+    }, {
+      id: 'lookup-null', conversationId: 'archived-group', senderId: 'lookup-null',
+      timestamp: 7, outgoing: false, parts: [{ type: 'text' as const, text: 'lookup null' }],
+    }, {
+      id: 'lookup-undefined', conversationId: 'archived-group', senderId: 'lookup-undefined',
+      timestamp: 6, outgoing: false, parts: [{ type: 'text' as const, text: 'lookup undefined' }],
+    }, {
+      id: 'archived-message', conversationId: 'archived-group', senderId: 'archived-alice',
+      timestamp: 5, outgoing: false, parts: [{ type: 'text' as const, text: 'archived message' }],
+    }, {
+      id: 'duplicate-archived-message', conversationId: 'archived-group', senderId: 'archived-alice',
+      timestamp: 4, outgoing: false, parts: [{ type: 'text' as const, text: 'duplicate archived message' }],
+    }])
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'archived-alice', name: 'Alice',
+      avatar: {
+        id: 'avatar:archived-alice', kind: 'image' as const, mimeType: 'image/jpeg',
+        locator: {
+          messageId: 'avatar:archived-alice', elementId: 'avatar:archived-alice', chatType: 1 as const,
+          peerUid: 'archived-alice', kind: 'image' as const, fileName: 'avatar.jpg',
+        },
+      },
+    }))
+    const originalGetUser = platform.getUser.bind(platform)
+    const getUser = vi.spyOn(platform, 'getUser').mockImplementation(async (userSession, userId) => {
+      if (userId === 'lookup-error') throw new Error('QQ user lookup failed')
+      if (userId === 'lookup-null') return null
+      if (userId === 'lookup-undefined') return undefined as never
+      return originalGetUser(userSession, userId)
+    })
+
+    const [merged] = await platform.forwardMessages(session, { id: 'from' }, ['a', 'b'], { id: 'to' })
+    const link = merged.content.parts[0]
+    if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+    const history = await platform.getHistory(session, link.entities[0].conversation)
+
+    expect(history.messages[0]).toMatchObject({
+      sender: { id: 'provided-alice', firstName: 'Provided Alice' },
+    })
+    expect(history.messages.slice(1, 4).map((message) => message.sender)).toEqual([undefined, undefined, undefined])
+    expect(history.messages.slice(4)).toMatchObject([{
+      sender: { id: 'archived-alice', avatar: { id: 'avatar:archived-alice:original-v1' } },
+    }, {
+      sender: { id: 'archived-alice', avatar: { id: 'avatar:archived-alice:original-v1' } },
+    }])
+    expect(getUser).not.toHaveBeenCalledWith(session, 'provided-alice')
+    expect(getUser).toHaveBeenCalledWith(session, 'lookup-error')
+    expect(getUser).toHaveBeenCalledWith(session, 'lookup-null')
+    expect(getUser).toHaveBeenCalledWith(session, 'lookup-undefined')
+    expect(platform.client.getUser).toHaveBeenCalledOnce()
+    expect(platform.client.getUser).toHaveBeenCalledWith('archived-alice')
+  })
+
   it('uses QQ merged forward only for multiple preserved-source messages', async () => {
     const platform = new QQNTPlatform()
     platform.client.forwardMessages = vi.fn(async (_from, ids, to, merged) => [{
