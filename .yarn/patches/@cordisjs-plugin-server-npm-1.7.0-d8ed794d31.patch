@@ -15,6 +15,27 @@ diff --git a/lib/index.js b/lib/index.js
 index 4ff0ca1a9bffe633a3312b42cfc4b34d67d78b75..0d89da46a7cfaaa56ea5e50e2e0bdc2dd44eec52 100644
 --- a/lib/index.js
 +++ b/lib/index.js
+@@ -251,7 +251,7 @@ var Route = class {
+     } else {
+       params = capture;
+     }
+-    this.server.ctx.logger?.("server:route").debug("match %s with params", this.path, params);
++    this.server.ctx.logger?.("server:route").debug("match %s with params", this.path, redactRouteParams(params));
+     const matched = Object.assign(Object.create(req), { params });
+     if (this.server.ctx.bail(this.server, "server/route-check", matched, this)) return;
+     return params;
+@@ -308,9 +308,9 @@ var Server = class _Server extends Service2 {
+     this._http.on("request", async (_req, _res) => {
+       const req = new Request(_req);
+       const res = new Response(_res);
+-      this.ctx.logger?.("server:request").debug("%C %s", req.method, req.url);
++      this.ctx.logger?.("server:request").debug("%C %s", req.method, redactRequestUrl(req.url));
+       _res.on("finish", () => {
+-        this.ctx.logger?.("server:response").debug("%C %s %s %s", req.method, req.url, res.status, res.statusText);
++        this.ctx.logger?.("server:response").debug("%C %s %s %s", req.method, redactRequestUrl(req.url), res.status, res.statusText);
+       });
+       try {
+         await this.ctx.waterfall(this, "server/request", req, res, async () => {
 @@ -376,7 +376,7 @@ var Server = class _Server extends Service2 {
          res.headers.set("allow", allow);
        }
@@ -23,8 +44,9 @@ index 4ff0ca1a9bffe633a3312b42cfc4b34d67d78b75..0d89da46a7cfaaa56ea5e50e2e0bdc2d
 +    this._ws = new WebSocketServer({ noServer: true, maxPayload: config.maxWebSocketPayload });
      this._http.on("upgrade", async (_req, socket, head) => {
        const req = new Request(_req);
-       this.ctx.logger?.("server:ws").debug("upgrade %s", req.path);
-@@ -391,6 +391,8 @@ var Server = class _Server extends Service2 {
+-      this.ctx.logger?.("server:ws").debug("upgrade %s", req.path);
++      this.ctx.logger?.("server:ws").debug("upgrade %s", redactRequestUrl(req.url));
+@@ -391,8 +391,10 @@ var Server = class _Server extends Service2 {
                connection = ws;
                this._ws.emit("connection", ws, _req);
                route.clients.add(ws);
@@ -32,7 +54,26 @@ index 4ff0ca1a9bffe633a3312b42cfc4b34d67d78b75..0d89da46a7cfaaa56ea5e50e2e0bdc2d
 +              });
                ws.on("close", () => {
                  route.clients.delete(ws);
-                 this.ctx.logger?.("server:ws").debug("close %s", req.path);
+-                this.ctx.logger?.("server:ws").debug("close %s", req.path);
++                this.ctx.logger?.("server:ws").debug("close %s", redactRequestUrl(req.url));
+               });
+-              this.ctx.logger?.("server:ws").debug("accept %s", req.path);
++              this.ctx.logger?.("server:ws").debug("accept %s", redactRequestUrl(req.url));
+@@ -419,6 +421,6 @@ var Server = class _Server extends Service2 {
+           }
+           if (!connection && !socket.destroyed) {
+-            this.ctx.logger?.("server:ws").warn("ws handler for %s did not call accept()", req.path);
++            this.ctx.logger?.("server:ws").warn("ws handler for %s did not call accept()", redactRequestUrl(req.url));
+             socket.destroy();
+           }
+           return;
+@@ -424,5 +426,5 @@ var Server = class _Server extends Service2 {
+         }
+-        this.ctx.logger?.("server:ws").debug("refuse %s", req.path);
++        this.ctx.logger?.("server:ws").debug("refuse %s", redactRequestUrl(req.url));
+         socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+         socket.destroy();
+       });
 @@ -489,7 +491,8 @@ var Server = class _Server extends Service2 {
      host: z.string().default("127.0.0.1").description("要监听的 IP 地址。如果将此设置为 `0.0.0.0` 将监听所有地址，包括局域网和公网地址。"),
      port: z.natural().required().max(65535).description("要监听的初始端口号。"),
@@ -43,3 +84,67 @@ index 4ff0ca1a9bffe633a3312b42cfc4b34d67d78b75..0d89da46a7cfaaa56ea5e50e2e0bdc2d
    });
  })(Server || (Server = {}));
  var index_default = Server;
+diff --git a/lib/index.js b/lib/index.js
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -495,3 +495,60 @@
+ })(Server || (Server = {}));
+ var index_default = Server;
++function redactRouteParams(params) {
++  if (!params || typeof params !== "object") return params;
++  try {
++    return Object.fromEntries(Object.entries(params).map(([key, value]) => {
++      const decoded = decodeSafely(String(value));
++      return isSensitiveName(key) || looksLikeToken(decoded) ? [key, "<redacted>"] : [key, value];
++    }));
++  } catch {
++    return "<redacted>";
++  }
++}
++function redactRequestUrl(url) {
++  try {
++    const [path, query = ""] = url.split("?", 2);
++    let redactNext = false;
++    const redactedPath = path.split("/").map((segment) => {
++      const decoded = decodeSafely(segment);
++      const redact = redactNext || looksLikeToken(decoded) || isSensitiveName(decoded) || /^([^=]+)=/.test(decoded) && isSensitiveName(decoded.split("=", 1)[0]);
++      redactNext = isSensitiveName(decoded);
++      return redact ? "<redacted>" : segment;
++    }).join("/");
++    if (!query) return redactedPath;
++    const redactedQuery = query.split("&").map((part) => {
++      const [key, value = ""] = part.split("=", 2);
++      const decodedKey = decodeSafely(key);
++      const decodedValue = decodeSafely(value);
++      return isSensitiveName(decodedKey) || looksLikeToken(decodedValue) ? `${key}=<redacted>` : part;
++    }).join("&");
++    return `${redactedPath}?${redactedQuery}`;
++  } catch {
++    return "<redacted>";
++  }
++}
++function decodeSafely(value) {
++  for (let index = 0; index < 4; index++) {
++    let decoded;
++    try {
++      decoded = decodeURIComponent(value);
++    } catch {
++      throw new Error("malformed URL encoding");
++    }
++    if (decoded === value) return decoded;
++    value = decoded;
++  }
++  try {
++    if (decodeURIComponent(value) !== value) throw new Error("URL encoding exceeds redaction depth");
++  } catch {
++    throw new Error("malformed URL encoding");
++  }
++  return value;
++}
++function isSensitiveName(value) {
++  return /token|secret|password|authorization|(?:api|access)[_-]?key|credential|session|cookie/i.test(value);
++}
++function looksLikeToken(value) {
++  return /^(?:bot)?\d+:[A-Za-z0-9_-]+$/i.test(value);
++}
+ export {
