@@ -9,7 +9,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
+import { DialogRpc, makeTlArticleMedia, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { UploadManager } from './upload-manager.js'
@@ -494,6 +494,105 @@ describe('rich-media projection', () => {
     expect(result.messages).toEqual([])
   })
 
+  it('projects interleaved text and images as one cached Telegram article', async () => {
+    const { store, peerId } = await createStore()
+    const article: IMMessage = {
+      ...album,
+      id: 'interleaved-article',
+      content: { parts: [
+        { type: 'text', text: 'opening paragraph' },
+        { type: 'media', media: {
+          id: 'first-image', kind: 'image', name: 'first.jpg', mimeType: 'image/jpeg',
+          size: 1234, width: 800, height: 600, locator: { remote: 'first-image' },
+        } },
+        { type: 'text', text: 'closing paragraph' },
+        { type: 'media', media: {
+          id: 'second-image', kind: 'image', name: 'second.jpg', mimeType: 'image/jpeg',
+          size: 5678, width: 640, height: 480, locator: { remote: 'second-image' },
+        } },
+      ] },
+    }
+    const result = await new DialogRpc({
+      ...platform, async getHistory() { return { messages: [article] } },
+    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const messages = result.messages as tl.RawMessage[]
+    const message = messages[0]!
+
+    expect(messages).toHaveLength(1)
+    expect(message.groupedId).toBeUndefined()
+    expect(message).toMatchObject({
+      _: 'message', message: 'opening paragraph\nclosing paragraph',
+      media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
+        _: 'webPage', type: 'article', cachedPage: {
+          _: 'page', blocks: [
+            { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'opening paragraph' } },
+            { _: 'pageBlockPhoto', caption: { text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } } },
+            { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'closing paragraph' } },
+            { _: 'pageBlockPhoto', caption: { text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } } },
+          ],
+        },
+      } },
+    })
+    const cachedPage = ((message.media as tl.RawMessageMediaWebPage).webpage as tl.RawWebPage).cachedPage as tl.RawPage
+    const photoBlocks = cachedPage.blocks.filter((block): block is tl.RawPageBlockPhoto => block._ === 'pageBlockPhoto')
+    const photos = cachedPage.photos as tl.RawPhoto[]
+    expect(photos).toHaveLength(2)
+    expect(photoBlocks.map((block) => block.photoId)).toEqual(photos.map((photo) => photo.id))
+    expect(makeTlArticleMedia(article, [])).toBeUndefined()
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('keeps repeated image-object parts distinct in cached articles', async () => {
+    const { store, peerId } = await createStore()
+    const image = {
+      id: 'reused-image', kind: 'image' as const, mimeType: 'image/jpeg', size: 1234,
+      width: 800, height: 600, locator: { remote: 'reused-image' },
+    }
+    const article: IMMessage = {
+      ...album,
+      id: 'reused-image-article',
+      content: { parts: [
+        { type: 'media', media: image },
+        { type: 'text', text: 'between images' },
+        { type: 'media', media: image },
+      ] },
+    }
+    const result = await new DialogRpc({
+      ...platform, async getHistory() { return { messages: [article] } },
+    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const message = result.messages[0] as tl.RawMessage
+    const cachedPage = ((message.media as tl.RawMessageMediaWebPage).webpage as tl.RawWebPage).cachedPage as tl.RawPage
+
+    expect(cachedPage.blocks.map((block) => block._)).toEqual([
+      'pageBlockPhoto', 'pageBlockParagraph', 'pageBlockPhoto',
+    ])
+    expect(cachedPage.photos).toHaveLength(2)
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('keeps a trailing single-image caption out of article projection', async () => {
+    const { store, peerId } = await createStore()
+    const captionedImage: IMMessage = {
+      ...album,
+      id: 'trailing-caption',
+      content: { parts: [
+        { type: 'media', media: {
+          id: 'only-image', kind: 'image', mimeType: 'image/jpeg', locator: { remote: 'only-image' },
+        } },
+        { type: 'text', text: 'caption after image' },
+      ] },
+    }
+    const result = await new DialogRpc({
+      ...platform, async getHistory() { return { messages: [captionedImage] } },
+    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const message = result.messages[0] as tl.RawMessage
+
+    expect(result.messages).toHaveLength(1)
+    expect(message).toMatchObject({
+      message: 'caption after image', media: { _: 'messageMediaPhoto' },
+    })
+  })
+
   it('expands mixed media into consecutive ungrouped Telegram messages', async () => {
     const { store, peerId } = await createStore()
     const rpc = new DialogRpc(platform, session, store)
@@ -844,6 +943,7 @@ describe('rich-media projection', () => {
       id: 'image-album',
       content: {
         parts: [
+          { type: 'text', text: 'album caption' },
           { type: 'media', media: { id: 'one', kind: 'image', locator: null } },
           { type: 'media', media: { id: 'two', kind: 'image', locator: null } },
         ],

@@ -3,7 +3,7 @@ import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import {
   cardUrl, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
-  messageMentionsUser, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
+  isArticleMessage, messageMentionsUser, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
@@ -69,6 +69,7 @@ interface MaterializedMessage {
   ordinal: number
   groupedId?: string
   media?: IMMediaRow
+  mediaRows?: IMMediaRow[]
   unreadMention?: boolean
 }
 
@@ -305,6 +306,7 @@ export class DialogRpc {
           ordinal: part.ordinal,
           groupedId: part.groupedId ?? undefined,
           media: stored.media.find((entry) => entry.id === part.mediaId),
+          mediaRows: stored.media,
         })).sort((left, right) => right.tlId - left.tlId)
         const existing = dialogProjections.get(stored.source.conversationId) ?? []
         dialogProjections.set(stored.source.conversationId, [...existing, ...materialized])
@@ -814,6 +816,7 @@ export class DialogRpc {
             ordinal: part.ordinal,
             groupedId: part.groupedId ?? undefined,
             media: projected.media.find((entry) => entry.id === part.mediaId),
+            mediaRows: projected.media,
           }
           this._rememberMessage(item)
           output.push(item)
@@ -901,6 +904,7 @@ export class DialogRpc {
               ordinal: part.ordinal,
               groupedId: part.groupedId ?? undefined,
               media: projected.media.find((entry) => entry.id === part.mediaId),
+              mediaRows: projected.media,
             })
           }
           ref = this._tlToMessage.get(requestedId)
@@ -920,6 +924,7 @@ export class DialogRpc {
             ordinal: part.ordinal,
             groupedId: part.groupedId ?? undefined,
             media: projected.media.find((entry) => entry.id === part.mediaId),
+            mediaRows: projected.media,
           }))
         : await this._loadHistory(ref.peerId, {
             limit: this._isVirtualConversation(this._conversation(ref.peerId)) ? 200 : 1,
@@ -2516,6 +2521,7 @@ export class DialogRpc {
         ordinal: part.ordinal,
         groupedId: part.groupedId ?? undefined,
         media: projected.media.find((entry) => entry.id === part.mediaId),
+        mediaRows: projected.media,
       }
       this._rememberMessage(item)
       const randomId = randomIds[index]
@@ -2604,6 +2610,7 @@ export class DialogRpc {
       source: projected.source, tlId: part.tlMessageId, ordinal: part.ordinal,
       groupedId: part.groupedId ?? undefined,
       media: projected.media.find((entry) => entry.id === part.mediaId),
+      mediaRows: projected.media,
     }
     this._rememberMessage(item)
     return item
@@ -2664,11 +2671,13 @@ export class DialogRpc {
     this._conversations.set(platformPeerId, source.conversation)
     const peer = this._conversationPeer(source.conversation)
     const users = source.conversation.kind === 'direct'
-      ? [this._makePeerUser({
-          id: platformPeerId,
-          firstName: source.conversation.title,
-          avatar: source.conversation.avatar,
-        })]
+      ? [this._store
+          ? await this._getPeerUser(platformPeerId, source.conversation.title)
+          : this._makePeerUser({
+              id: platformPeerId,
+              firstName: source.conversation.title,
+              avatar: source.conversation.avatar,
+            })]
       : source.lastMessage
         ? [await this._getMessageSender(source.lastMessage)]
         : []
@@ -2690,6 +2699,7 @@ export class DialogRpc {
         ordinal: part.ordinal,
         groupedId: part.groupedId ?? undefined,
         media: stored.media.find((entry) => entry.id === part.mediaId),
+        mediaRows: stored.media,
       })).sort((left, right) => right.tlId - left.tlId)
       for (const item of projected ?? []) this._rememberMessage(item)
     }
@@ -2710,6 +2720,7 @@ export class DialogRpc {
           ordinal: part.ordinal,
           groupedId: part.groupedId ?? undefined,
           media: stored.media.find((entry) => entry.id === part.mediaId),
+          mediaRows: stored.media,
         })) ?? []
       }
       readInboxMaxId = readProjection.reduce((maximum, item) => Math.max(maximum, item.tlId), 0)
@@ -2838,6 +2849,7 @@ export class DialogRpc {
             ordinal: part.ordinal,
             groupedId: part.groupedId ?? undefined,
             media: media.find((entry) => entry.id === part.mediaId),
+            mediaRows: media,
           }
           this._rememberMessage(item)
           return item
@@ -3254,13 +3266,14 @@ export class DialogRpc {
       },
       peerId: this._conversationPeer(conversation),
       groupedId: item.groupedId ?? undefined,
-      media: item.media
-        ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
+      media: makeTlArticleMedia(source, item.mediaRows ?? [], this._dcId)
+        ?? (item.media
+          ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
         : sticker?.type === 'sticker'
           ? this._stickers?.makeMessageMedia(sticker.sticker)
           : card?.type === 'card'
             ? makeTlCardPreview(card.card, this._dcId)
-            : this._conversationPreviewMedia(source),
+            : this._conversationPreviewMedia(source)),
       entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
       reactions: source.reactionContext?.reactions.length
         ? this._reactions?.messageReactions(source.conversationId, source, (id) => this._userId(id))
@@ -3313,6 +3326,7 @@ export class DialogRpc {
               ordinal: part.ordinal,
               groupedId: part.groupedId ?? undefined,
               media: projected.media.find((entry) => entry.id === part.mediaId),
+              mediaRows: projected.media,
             })
           }
         }
@@ -3330,6 +3344,7 @@ export class DialogRpc {
               ordinal: part.ordinal,
               groupedId: part.groupedId ?? undefined,
               media: projected.media.find((entry) => entry.id === part.mediaId),
+              mediaRows: projected.media,
             })
           }
         }
@@ -3358,6 +3373,7 @@ export class DialogRpc {
         ordinal: part.ordinal,
         groupedId: part.groupedId ?? undefined,
         media: projected.media.find((entry) => entry.id === part.mediaId),
+        mediaRows: projected.media,
       })
     }))
   }
@@ -3468,6 +3484,7 @@ export class DialogRpc {
         ordinal: part.ordinal,
         groupedId: part.groupedId ?? undefined,
         media: media.find((entry) => entry.id === part.mediaId),
+        mediaRows: media,
         unreadMention: true,
       })))
       .sort((left, right) => right.tlId - left.tlId)
@@ -4326,6 +4343,7 @@ export class DialogRpc {
       ordinal: part.ordinal,
       groupedId: part.groupedId ?? undefined,
       media: media.find((entry) => entry.id === part.mediaId),
+      mediaRows: media,
     }))).sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId)
     for (const item of history) this._rememberMessage(item)
     return history
@@ -4978,7 +4996,42 @@ function memberSearchText(member: IMConversationMember<any>): string {
     .toLocaleLowerCase()
 }
 
-export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {
+export function makeTlArticleMedia(
+  source: IMMessage,
+  mediaRows: readonly IMMediaRow[],
+  dcId = 1,
+): tl.RawMessageMediaWebPage | undefined {
+  if (!isArticleMessage(source)) return
+  const url = `https://crossgram.invalid/article/${encodeURIComponent(source.conversationId)}/${encodeURIComponent(source.id)}`
+  const text = messageText(source)
+  const photos: tl.RawPhoto[] = []
+  const blocks: tl.TypePageBlock[] = []
+  for (const [partIndex, part] of source.content.parts.entries()) {
+    if (part.type === 'text' && part.text.trim()) {
+      blocks.push({ _: 'pageBlockParagraph', text: { _: 'textPlain', text: part.text } })
+    } else if (part.type === 'media') {
+      const media = mediaRows.find((row) => row.partIndex === partIndex && row.platformMediaId === part.media.id)
+      if (!media) return
+      const photo = makeTlPhoto(media, source.timestamp, dcId)
+      photos.push(photo)
+      blocks.push({
+        _: 'pageBlockPhoto', photoId: photo.id,
+        caption: { _: 'pageCaption', text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } },
+      })
+    }
+  }
+  return {
+    _: 'messageMediaWebPage', manual: true, safe: true,
+    webpage: {
+      _: 'webPage', id: Long.fromNumber(stableId(`article:${source.conversationId}:${source.id}`)),
+      url, displayUrl: 'crossgram.invalid', hash: 0, type: 'article',
+      title: text.slice(0, 64), description: text.slice(0, 256),
+      cachedPage: { _: 'page', url, blocks, photos, documents: [] },
+    },
+  }
+}
+
+function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhoto {
   const id = Long.fromNumber(media.id)
   // Real Telegram media always carries a non-zero access hash. The bridge
   // resolves downloads from its durable media row, so this synthetic hash is
@@ -4991,22 +5044,31 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
     : media.preview
       ? { width: media.preview.width, height: media.preview.height }
       : { width: 1, height: 1 }
-  if (media.kind === 'image' && !isAnimatedImageMime(media.mimeType)) {
-    return {
-      _: 'messageMediaPhoto',
-      photo: {
-        _: 'photo', id, accessHash, fileReference, date: timestamp,
-        sizes: [
-          ...(media.strippedThumbnail?.byteLength ? [{
-            _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
-          }] : []),
-          ...(media.preview ? [photoPreviewSize(media.preview)] : []),
-          ...originalPhotoSizes(dimensions, media.size, Boolean(media.preview)),
-        ],
-        dcId,
-      },
-    }
+  return {
+    _: 'photo', id, accessHash, fileReference, date: timestamp,
+    sizes: [
+      ...(media.strippedThumbnail?.byteLength ? [{
+        _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
+      }] : []),
+      ...(media.preview ? [photoPreviewSize(media.preview)] : []),
+      ...originalPhotoSizes(dimensions, media.size, Boolean(media.preview)),
+    ],
+    dcId,
   }
+}
+
+export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {
+  if (media.kind === 'image' && !isAnimatedImageMime(media.mimeType)) {
+    return { _: 'messageMediaPhoto', photo: makeTlPhoto(media, timestamp, dcId) }
+  }
+  const id = Long.fromNumber(media.id)
+  const accessHash = Long.fromNumber(media.id)
+  const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
+  const dimensions = media.width && media.height
+    ? { width: media.width, height: media.height }
+    : media.preview
+      ? { width: media.preview.width, height: media.preview.height }
+      : { width: 1, height: 1 }
   const attributes: tl.TypeDocumentAttribute[] = [
     { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
   ]

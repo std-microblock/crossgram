@@ -1377,6 +1377,50 @@ describe('UpdateManager', () => {
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 3 })
   })
 
+  it('reconciles album and article projection edits with Telegram creates and deletes', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'article-edit', kind: 'group', title: 'Article edit' }
+    const album: IMMessage = {
+      id: 'article-edit-message', conversationId: conversation.id, senderId: 'alice', timestamp: 40,
+      content: { parts: [
+        { type: 'text', text: 'album caption' },
+        { type: 'media', media: { id: 'first', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+        { type: 'media', media: { id: 'second', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+      ] },
+    }
+    const created = await store.ingest(session, conversation, album)
+    await manager.publish(session, { event: { type: 'message', conversation, message: album }, result: created })
+    const [firstId, removedId] = created.projection.map((part) => part.tlMessageId)
+
+    const article: IMMessage = {
+      ...album,
+      content: { parts: [
+        { type: 'media', media: { id: 'first', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+        { type: 'text', text: 'between images' },
+        { type: 'media', media: { id: 'second', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+      ] },
+    }
+    const articleEdit = await store.ingest(session, conversation, article)
+    expect(articleEdit).toMatchObject({ addedTlMessageIds: [], removedTlMessageIds: [removedId] })
+    await manager.publish(session, {
+      event: { type: 'message-edit', eventId: 'album-to-article', conversation, message: article }, result: articleEdit,
+    })
+    expect((sent[1].update as tl.RawUpdates).updates).toMatchObject([
+      { _: 'updateEditChannelMessage', message: { id: firstId } },
+      { _: 'updateDeleteChannelMessages', messages: [removedId], ptsCount: 1 },
+    ])
+    expect(await store.findProjectedByTlId(session.platformSessionId, removedId, conversation.id)).toBeUndefined()
+
+    const albumEdit = await store.ingest(session, conversation, album)
+    expect(albumEdit.addedTlMessageIds).toHaveLength(1)
+    await manager.publish(session, {
+      event: { type: 'message-edit', eventId: 'article-to-album', conversation, message: album }, result: albumEdit,
+    })
+    expect((sent[2].update as tl.RawUpdates).updates.map((update) => update._)).toEqual([
+      'updateEditChannelMessage', 'updateNewChannelMessage',
+    ])
+  })
+
   it('reuses the reserved pts and retries delivery after a send failure', async () => {
     const { ctx, store } = await createHarness()
     const registry = new PlatformRegistry([[session.platformId, platform]])

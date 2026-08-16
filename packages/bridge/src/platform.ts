@@ -777,6 +777,17 @@ export function messageMedia<TMediaLocator>(message: IMMessage<TMediaLocator>): 
   return message.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
 }
 
+export function isArticleMessage(message: IMMessage<unknown>): boolean {
+  const media = messageMedia(message)
+  return media.length >= 2
+    && message.content.parts.every((part) => part.type === 'text' || part.type === 'media')
+    && media.every((item) => item.kind === 'image'
+      && item.mimeType !== 'image/gif' && item.mimeType !== 'image/apng')
+    && message.content.parts.some((part, index) => part.type === 'text' && part.text.trim()
+      && message.content.parts.slice(0, index).some((before) => before.type === 'media')
+      && message.content.parts.slice(index + 1).some((after) => after.type === 'media'))
+}
+
 export function messageStickers(message: IMMessage<unknown>): import('./sticker-provider.js').IMSticker[] {
   return message.content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
 }

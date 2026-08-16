@@ -4,7 +4,7 @@ import type {
   TlMessagePartRow,
 } from './models.js'
 import {
-  messageMedia, messageText, telegramReplyToMessageId,
+  isArticleMessage, messageText, telegramReplyToMessageId,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget, type IMRequest,
   type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
   type IMUser, type JsonObject, type JsonValue, type PlatformSession,
@@ -22,6 +22,8 @@ export interface IngestResult {
   created: boolean
   changed: boolean
   projection: TlMessagePartRow[]
+  addedTlMessageIds: number[]
+  removedTlMessageIds: number[]
 }
 
 export interface RequestUpsertResult {
@@ -399,7 +401,7 @@ export class MessageStore {
       const projection = historyPrefetch?.projectionsByMessageId.get(message.id)
         ?? await database.select('mtproto_tl_message_part', { messageId: message.id })
           .orderBy('ordinal').execute()
-      return { message, created: false, changed: false, projection }
+      return { message, created: false, changed: false, projection, addedTlMessageIds: [], removedTlMessageIds: [] }
     }
     if (!message) {
       message = await database.create('mtproto_im_message', {
@@ -442,13 +444,15 @@ export class MessageStore {
       ordinal,
     })), ['platformSessionId', 'conversationId', 'platformMessageId'])
 
-    const media = messageMedia(source)
+    const media = source.content.parts.flatMap((part, partIndex) => part.type === 'media'
+      ? [{ item: part.media, partIndex }]
+      : [])
     const storedMedia: IMMediaRow[] = []
-    for (const [ordinal, item] of media.entries()) {
+    for (const [ordinal, { item, partIndex }] of media.entries()) {
       const values = {
         messageId: message.id,
         ordinal,
-        partIndex: source.content.parts.findIndex((part) => part.type === 'media' && part.media === item),
+        partIndex,
         platformMediaId: item.id,
         kind: item.kind,
         name: item.name ?? null,
@@ -474,8 +478,8 @@ export class MessageStore {
       if (!stored) throw new Error('media disappeared during ingestion')
       storedMedia.push(stored)
     }
-    const projection = await this._ensureProjection(
-      database, platformSessionId, conversationRow, message, storedMedia,
+    const { projection, addedTlMessageIds, removedTlMessageIds } = await this._ensureProjection(
+      database, platformSessionId, conversationRow, message, source, storedMedia,
       options.allocation ?? 'live',
       source.nativeOrderKey,
       allocationCache,
@@ -483,7 +487,7 @@ export class MessageStore {
     await this._replaceReactions(database, message.id, source.reactionContext, now)
     historyPrefetch?.projectionsByMessageId.set(message.id, projection)
 
-    return { message, created, changed, projection }
+    return { message, created, changed, projection, addedTlMessageIds, removedTlMessageIds }
   }
 
   async deleteMessages(
@@ -1581,12 +1585,16 @@ export class MessageStore {
     platformSessionId: string,
     conversation: IMConversationRow,
     message: IMMessageRow,
+    source: IMMessage,
     media: IMMediaRow[],
     allocation: 'live' | 'history',
     nativeOrderKey: string | undefined,
     allocationCache: ProjectionAllocationCache,
-  ): Promise<TlMessagePartRow[]> {
-    const count = Math.max(1, media.length)
+  ): Promise<{ projection: TlMessagePartRow[], addedTlMessageIds: number[], removedTlMessageIds: number[] }> {
+    const article = isArticleMessage(source)
+    const addedTlMessageIds: number[] = []
+    const removedTlMessageIds: number[] = []
+    const count = article ? 1 : Math.max(1, media.length)
     const scope = conversation.kind !== 'direct'
       ? `channel:${platformSessionId}:${conversation.parentPlatformConversationId ?? conversation.platformConversationId}`
       : `account:${platformSessionId}`
@@ -1599,10 +1607,13 @@ export class MessageStore {
       || part.allocationVersion !== TIMESTAMP_ALLOCATION_VERSION
     ))
     if (requiresMigration) {
+      removedTlMessageIds.push(...existing.map((part) => part.tlMessageId))
       for (const part of existing) await database.remove('mtproto_tl_message_part', { id: part.id })
       existing = []
     } else if (existing.length > count) {
-      for (const part of existing.slice(count)) {
+      const removed = existing.slice(count)
+      removedTlMessageIds.push(...removed.map((part) => part.tlMessageId))
+      for (const part of removed) {
         await database.remove('mtproto_tl_message_part', { id: part.id })
       }
       existing = existing.slice(0, count)
@@ -1623,7 +1634,7 @@ export class MessageStore {
       }
       if (Object.keys(values).length) await database.set('mtproto_tl_message_part', { id: part.id }, values)
     }
-    const groupable = count > 1 && new Set(media.map((item) => item.kind)).size === 1
+    const groupable = !article && count > 1 && new Set(media.map((item) => item.kind)).size === 1
     let groupedId = existing.find((part) => part.groupedId)?.groupedId ?? groupedIdBeforeMigration
     if (!groupable && groupedId) {
       groupedId = null
@@ -1655,13 +1666,14 @@ export class MessageStore {
         existing.map((part) => part.tlMessageId),
         bounds,
       )
+      addedTlMessageIds.push(...ids)
       await database.upsert('mtproto_tl_message_part', ids.map((tlMessageId, index) => {
         const ordinal = existing.length + index
         return {
           platformSessionId,
           conversationId: conversation.id,
           messageId: message.id,
-          mediaId: media[ordinal]?.id ?? null,
+          mediaId: media[article ? 0 : ordinal]?.id ?? null,
           scope,
           tlMessageId,
           nativeSequence: nativeSequence ?? null,
@@ -1675,12 +1687,14 @@ export class MessageStore {
     const projection = await database.select('mtproto_tl_message_part', { messageId: message.id })
       .orderBy('ordinal').execute()
     for (const part of projection) {
-      const mediaId = media[part.ordinal]?.id ?? null
+      const mediaId = media[article ? 0 : part.ordinal]?.id ?? null
       if (part.mediaId !== mediaId || part.groupedId !== groupedId) {
         await database.set('mtproto_tl_message_part', { id: part.id }, { mediaId, groupedId })
       }
     }
-    return database.select('mtproto_tl_message_part', { messageId: message.id }).orderBy('ordinal').execute()
+    const updatedProjection = await database.select('mtproto_tl_message_part', { messageId: message.id })
+      .orderBy('ordinal').execute()
+    return { projection: updatedProjection, addedTlMessageIds, removedTlMessageIds }
   }
 
   private async _allocateIds(database: Database, scope: string, count: number): Promise<number[]> {

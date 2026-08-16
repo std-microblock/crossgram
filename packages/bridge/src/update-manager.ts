@@ -6,7 +6,7 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  makeTlCardPreview, makeTlConversationPreview, makeTlMessageMedia, projectTlMessage, stableId,
+  makeTlArticleMedia, makeTlCardPreview, makeTlConversationPreview, makeTlMessageMedia, projectTlMessage, stableId,
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
@@ -466,7 +466,9 @@ export class UpdateManager {
       ? undefined
       : stableId(`peer:${displayConversation.id}`)
     delivery ??= await this._store.prepareUpdateDelivery(
-      eventKey, session.platformSessionId, result.projection.length, event.message.timestamp, channelId,
+      eventKey, session.platformSessionId,
+      result.projection.length + result.removedTlMessageIds.length,
+      event.message.timestamp, channelId,
     )
     if (delivery.published) {
       this._onTrace?.('update publish skipped eventKey=%s reason=already-published', eventKey)
@@ -508,6 +510,7 @@ export class UpdateManager {
     const userIds = new Map((await this._store.listUsers(session.platformId))
       .map((row) => [row.platformUserId, row.id]))
     let pts = delivery.pts - delivery.ptsCount
+    const addedTlMessageIds = new Set(result.addedTlMessageIds)
     const updates: tl.TypeUpdate[] = []
     for (const part of result.projection) {
       const projected = await this._store.findProjectedByTlId(
@@ -580,13 +583,14 @@ export class UpdateManager {
         groupedId: part.groupedId ?? undefined,
         fromId: { _: 'peerUser', userId: event.message.outgoing ? selfRow.id : senderRow.id },
         peerId: directPeerRow ? { _: 'peerUser', userId: directPeerRow.id } : undefined,
-        media: media
-          ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
+        media: makeTlArticleMedia(projected.source, projected.media, this._dcId)
+          ?? (media
+            ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
           : sticker?.type === 'sticker'
             ? this._projectSticker?.(session, sticker.sticker)
             : card?.type === 'card'
               ? makeTlCardPreview(card.card, this._dcId)
-              : makeConversationPreviewMedia(projected.source, session.platformSessionId),
+              : makeConversationPreviewMedia(projected.source, session.platformSessionId)),
         entities: makeMessageEntities(projected.source, session.platformSessionId, userIds),
         reactions: visibleMessage.reactionContext?.reactions.length
           ? makeMessageReactions(
@@ -604,13 +608,24 @@ export class UpdateManager {
         unreadMention: mentioned,
       })
       updates.push({
-        _: isEdit
+        _: isEdit && !addedTlMessageIds.has(part.tlMessageId)
           ? event.conversation.kind !== 'direct' ? 'updateEditChannelMessage' : 'updateEditMessage'
           : event.conversation.kind !== 'direct' ? 'updateNewChannelMessage' : 'updateNewMessage',
         message,
         pts: ++pts,
         ptsCount: 1,
       } as tl.TypeUpdate)
+    }
+    if (isEdit && result.removedTlMessageIds.length) {
+      updates.push(channelId === undefined
+        ? {
+            _: 'updateDeleteMessages', messages: result.removedTlMessageIds,
+            pts: delivery.pts, ptsCount: result.removedTlMessageIds.length,
+          }
+        : {
+            _: 'updateDeleteChannelMessages', channelId, messages: result.removedTlMessageIds,
+            pts: delivery.pts, ptsCount: result.removedTlMessageIds.length,
+          })
     }
     if (!updates.length) {
       this._onTrace?.('update publish skipped eventKey=%s reason=no-projected-updates', eventKey)
