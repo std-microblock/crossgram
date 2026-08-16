@@ -10,8 +10,9 @@ import { PlatformRegistry, PlatformSubscriptionManager } from './platform-manage
 import { UpdateManager } from './update-manager.js'
 import type { IMEvent, IMPlatform, IMRequest, PlatformSession } from './platform.js'
 import {
-  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_REJECT_CALLBACK_DATA, requestInboxMessage,
+  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_REJECT_CALLBACK_DATA, RequestInboxSystemPeerProvider, requestInboxMessage,
 } from './request-inbox.js'
+import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 
 const session: PlatformSession = {
   platformSessionId: 'request-rpc-session', platformId: 'request-rpc', userId: 'self', credentials: {}, metadata: {},
@@ -65,18 +66,31 @@ async function createRequestRpc(
   }
   const store = new MessageStore(ctx.database)
   let failLocalDelivery = options.failLocalDeliveryOnce ?? false
+  const peers = new SystemPeerService(ctx)
+  const deliver = async (_session: PlatformSession, event: IMEvent) => {
+    if (failLocalDelivery) {
+      failLocalDelivery = false
+      throw new Error('simulated update delivery failure')
+    }
+    localEvents.push(event)
+    if (event.type === 'request') await store.ingestRequest(session, event.request)
+  }
+  const localEvents: IMEvent[] = []
+  peers.attach(deliver)
+  peers.register(new RequestInboxSystemPeerProvider(
+    store,
+    async (requestSession, requestId, action) => {
+      if (!resolveRequest) throw new SystemPeerCallbackError('REQUEST_RESOLVE_UNAVAILABLE')
+      return resolveRequest(requestSession, requestId, action)
+    },
+    async (requestSession, request) => { await peers.emit(requestSession, { type: 'request', request, delivery: 'recovery' }) },
+  ))
   const createRpc = (localEvents: IMEvent[]) => new DialogRpc(
     platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
-    async (_session, event) => {
-      if (failLocalDelivery) {
-        failLocalDelivery = false
-        throw new Error('simulated update delivery failure')
-      }
-      localEvents.push(event)
-      if (event.type === 'request') await store.ingestRequest(session, event.request)
-    }, undefined, undefined, options.drafts ? { list: async () => [], save: async () => {}, remove: async () => {} } as any : undefined,
+    async (_session, event) => deliver(session, event), undefined, undefined,
+    options.drafts ? { list: async () => [], save: async () => {}, remove: async () => {} } as any : undefined,
+    undefined, undefined, undefined, undefined, undefined, peers,
   )
-  const localEvents: IMEvent[] = []
   const rpc = createRpc(localEvents)
   const createSiblingRpc = () => {
     const localEvents: IMEvent[] = []
@@ -114,6 +128,29 @@ describe('request inbox timestamps', () => {
       id: 'numeric-timestamp', kind: 'friend', state: 'pending', createdAt: '1710000000',
       requester: { id: 'alice', firstName: 'Alice' },
     }).timestamp).toBe(1_710_000_000)
+  })
+
+  it('labels QQ-filtered friend requests with QQ’s original reason', () => {
+    const message = requestInboxMessage({
+      id: 'filtered-request', kind: 'friend', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' },
+      metadata: { qqRequestSource: 'doubt', qqRequestReason: '疑似营销账号' },
+    })
+    expect(message.content.parts).toEqual([{
+      type: 'text',
+      text: '好友申请\n申请人：Alice\nQQ 已过滤\n风险提示：疑似营销账号\n验证信息：无\n状态：待处理',
+    }])
+  })
+
+  it.each(['', '   '])('keeps the filtered label but omits blank QQ reasons', (qqRequestReason) => {
+    const message = requestInboxMessage({
+      id: 'filtered-blank-reason', kind: 'friend', state: 'pending',
+      requester: { id: 'alice', firstName: 'Alice' },
+      metadata: { qqRequestSource: 'doubt', qqRequestReason },
+    })
+    expect(message.content.parts).toEqual([{
+      type: 'text', text: '好友申请\n申请人：Alice\nQQ 已过滤\n验证信息：无\n状态：待处理',
+    }])
   })
 })
 
@@ -363,9 +400,22 @@ describe('request inbox callbacks', () => {
       (eventSession, committed, options) => updateManager.publish(eventSession, committed, options),
     )
     await subscriptions.ensure(session)
+    const peers = new SystemPeerService(new Context())
+    peers.attach(
+      (eventSession, event, options) => subscriptions.ingestLocalEvent(eventSession, event, options),
+    )
+    peers.register(new RequestInboxSystemPeerProvider(
+      store,
+      async (requestSession, requestId, action) => {
+        if (!resolveRequest) throw new SystemPeerCallbackError('REQUEST_RESOLVE_UNAVAILABLE')
+        return resolveRequest(requestSession, requestId, action)
+      },
+      async (requestSession, request) => { await peers.emit(requestSession, { type: 'request', request, delivery: 'recovery' }) },
+    ))
     const rpc = new DialogRpc(
       platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
       (eventSession, event, options) => subscriptions.ingestLocalEvent(eventSession, event, options),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, peers,
     )
     await seedPendingRequest(store)
     const target = await inboxCallbackTarget(rpc, store)

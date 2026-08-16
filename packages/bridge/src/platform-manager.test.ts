@@ -10,6 +10,7 @@ import { MessageStore } from './message-store.js'
 import {
   IMPlatformService, migrateQualifiedPlatformIds, PlatformDataService, PlatformRegistry, PlatformSubscriptionManager,
 } from './platform-manager.js'
+import { UpdateManager } from './update-manager.js'
 import type {
   IMConversation, IMEvent, IMMessage, IMMessageInput, IMPlatform, IMRequest, PlatformCapabilities,
   PlatformSession, Unsubscribe,
@@ -79,6 +80,10 @@ class PushPlatform implements IMPlatform {
   }
 }
 
+class QQPlatform extends PushPlatform {
+  readonly platformKind = 'qq'
+}
+
 function incoming(id: string, conversationId = 'room'): IMMessage {
   return {
     id, conversationId, senderId: 'alice', timestamp: Number(id.replace(/\D/g, '')) || 1,
@@ -111,6 +116,192 @@ describe('PlatformSubscriptionManager', () => {
     } }])
     expect(ingest).not.toHaveBeenCalled()
     expect(await store.readHistory(session.platformSessionId, conversation.id)).toEqual([])
+    await manager.stop()
+  })
+
+  it('turns QQ deletes into idempotent strikethrough edits while other platforms still delete', async () => {
+    const database = await createDatabase()
+    const qq = new QQPlatform()
+    const other = new PushPlatform()
+    const qqSession = { ...session, platformId: 'qq' }
+    const otherSession = { ...session, platformSessionId: 'other-session' }
+    const registry = new PlatformRegistry([['qq', qq] as const, ['push', other] as const])
+    const store = new MessageStore(database)
+    const sent: tl.TypeUpdates[] = []
+    let throwRecallDelivery = false
+    await database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: qqSession.platformId,
+      platformSessionId: qqSession.platformSessionId,
+    })
+    await database.create('mtproto_auth_binding', {
+      authKeyId: '8899aabbccddeeff', platformId: otherSession.platformId,
+      platformSessionId: otherSession.platformSessionId,
+    })
+    const updates = new UpdateManager(database, registry, store, (_authKeyId, update) => {
+      if (throwRecallDelivery && (update as tl.RawUpdates).updates.some((item) =>
+        item._ === 'updateEditMessage' || item._ === 'updateEditChannelMessage')) {
+        throwRecallDelivery = false
+        throw new Error('recall delivery failed')
+      }
+      sent.push(update)
+      return 1
+    })
+    const manager = new PlatformSubscriptionManager(
+      database, registry, store, undefined,
+      (activeSession, event, options) => updates.publish(activeSession, event, options),
+    )
+    const conversation: IMConversation = { id: 'recall-room', kind: 'group', title: 'Recall Room' }
+    const recalled: IMMessage = {
+      id: 'qq-recalled', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { parts: [
+        { type: 'text', text: 'first' },
+        { type: 'media', media: { id: 'photo', kind: 'image' } },
+        { type: 'text', text: 'second' },
+      ] },
+    }
+    await manager.ensure(qqSession)
+    await manager.ensure(otherSession)
+    await qq.emit({ type: 'message', conversation, message: recalled })
+    await qq.emit({
+      type: 'message-delete', eventId: 'qq-recall', conversation,
+      messageIds: [recalled.id], timestamp: 2,
+    })
+
+    const original = ((sent[0] as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage).message
+    const edit = ((sent[1] as tl.RawUpdates).updates[0] as tl.RawUpdateEditChannelMessage).message
+    expect(edit).toMatchObject({
+      id: original.id,
+      message: 'first\nsecond',
+      entities: [
+        { _: 'messageEntityStrike', offset: 0, length: 5 },
+        { _: 'messageEntityStrike', offset: 6, length: 6 },
+      ],
+    })
+    expect(await store.readHistory(qqSession.platformSessionId, conversation.id)).toMatchObject([{
+      id: recalled.id,
+      content: { parts: [
+        { type: 'text', entities: [{ type: 'strikethrough', offset: 0, length: 5 }] },
+        { type: 'media' },
+        { type: 'text', entities: [{ type: 'strikethrough', offset: 0, length: 6 }] },
+      ] },
+    }])
+
+    await qq.emit({
+      type: 'message-delete', eventId: 'qq-recall-duplicate', conversation,
+      messageIds: [recalled.id], timestamp: 3,
+    })
+    expect(sent).toHaveLength(2)
+
+    const multiFirst: IMMessage = {
+      id: 'qq-multi-first', conversationId: conversation.id, senderId: 'alice', timestamp: 4,
+      content: { parts: [{ type: 'text', text: 'first recall target' }] },
+    }
+    const multiSecond: IMMessage = {
+      id: 'qq-multi-second', conversationId: conversation.id, senderId: 'alice', timestamp: 5,
+      content: { parts: [{ type: 'text', text: 'second recall target' }] },
+    }
+    await qq.emit({ type: 'message', conversation, message: multiFirst })
+    await qq.emit({ type: 'message', conversation, message: multiSecond })
+    const multiOriginalIds = sent.slice(-2).map((payload) =>
+      ((payload as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage).message.id)
+    const beforeMultiRecall = sent.length
+    await qq.emit({
+      type: 'message-delete', eventId: 'qq-multi-recall', conversation,
+      messageIds: [multiFirst.id, multiSecond.id], timestamp: 6,
+    })
+    const multiEdits = sent.slice(beforeMultiRecall).map((payload) =>
+      (payload as tl.RawUpdates).updates[0] as tl.RawUpdateEditChannelMessage)
+    expect(multiEdits).toHaveLength(2)
+    expect(multiEdits.map((update) => update.message.id).sort((left, right) => left - right))
+      .toEqual(multiOriginalIds.sort((left, right) => left - right))
+    expect(multiEdits.map((update) => (update.message as tl.RawMessage).entities)).toEqual([
+      [{ _: 'messageEntityStrike', offset: 0, length: 'first recall target'.length }],
+      [{ _: 'messageEntityStrike', offset: 0, length: 'second recall target'.length }],
+    ])
+    await qq.emit({
+      type: 'message-delete', eventId: 'qq-multi-recall-duplicate', conversation,
+      messageIds: [multiFirst.id, multiSecond.id], timestamp: 7,
+    })
+    expect(sent).toHaveLength(beforeMultiRecall + 2)
+
+    const retry: IMMessage = {
+      id: 'qq-retry', conversationId: conversation.id, senderId: 'alice', timestamp: 8,
+      content: { parts: [{ type: 'text', text: 'retry me' }] },
+    }
+    const beforeRetryRecall = sent.length
+    await qq.emit({ type: 'message', conversation, message: retry })
+    throwRecallDelivery = true
+    const retryRecall = {
+      type: 'message-delete' as const, eventId: 'qq-retry-recall', conversation,
+      messageIds: [retry.id], timestamp: 9,
+    }
+    await expect(qq.emit(retryRecall)).rejects.toThrow('recall delivery failed')
+    expect(sent).toHaveLength(beforeRetryRecall + 1)
+    await qq.emit(retryRecall)
+    expect(sent).toHaveLength(beforeRetryRecall + 2)
+    expect((sent.at(-1) as tl.RawUpdates).updates).toMatchObject([{
+      _: 'updateEditChannelMessage', message: { message: 'retry me' },
+    }])
+    await qq.emit({
+      ...retryRecall, eventId: 'qq-retry-recall-duplicate', timestamp: 10,
+    })
+    expect(sent).toHaveLength(beforeRetryRecall + 2)
+
+    const mediaOnly: IMMessage = {
+      id: 'qq-media-only', conversationId: conversation.id, senderId: 'alice', timestamp: 8,
+      content: { parts: [{ type: 'media', media: { id: 'photo-only', kind: 'image' } }] },
+    }
+    await qq.emit({ type: 'message', conversation, message: mediaOnly })
+    const beforeIgnoredDeletes = sent.length
+    await qq.emit({
+      type: 'message-delete', eventId: 'qq-unmapped', conversation,
+      messageIds: ['unmapped'], timestamp: 9,
+    })
+    await qq.emit({
+      type: 'message-delete', eventId: 'qq-media-only', conversation,
+      messageIds: [mediaOnly.id], timestamp: 10,
+    })
+    expect(sent).toHaveLength(beforeIgnoredDeletes)
+    const storedMediaOnly = (await store.readHistory(qqSession.platformSessionId, conversation.id))
+      .find((message) => message.id === mediaOnly.id)
+    expect(storedMediaOnly).toMatchObject({
+      id: mediaOnly.id, content: { parts: [{ type: 'media' }] },
+    })
+
+    const localDelete = incoming('qq-local-delete', conversation.id)
+    await manager.ingestLocalEvent(qqSession, { type: 'message', conversation, message: localDelete }, {
+      deliveredViaRpc: true,
+    })
+    const localReplacement = incoming('qq-local-replacement', conversation.id)
+    await manager.ingestLocalEvent(qqSession, { type: 'message', conversation, message: localReplacement }, {
+      deliveredViaRpc: true,
+    })
+    await manager.ingestLocalEvent(qqSession, {
+      type: 'message-delete', eventId: 'local-delete:qq-local-delete', conversation,
+      messageIds: [localDelete.id], timestamp: 11,
+    }, { deliveredViaRpc: true })
+    await manager.ingestLocalEvent(qqSession, {
+      type: 'message-delete', eventId: 'local-edit-replace:qq-local-replacement:replacement', conversation,
+      messageIds: [localReplacement.id], timestamp: 12,
+    }, { deliveredViaRpc: true })
+    expect((sent.at(-1) as tl.RawUpdates).updates).toMatchObject([{
+      _: 'updateDeleteChannelMessages', messages: expect.any(Array),
+    }])
+    expect(await store.readHistory(qqSession.platformSessionId, conversation.id)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: localDelete.id }),
+      expect.objectContaining({ id: localReplacement.id }),
+    ]))
+
+    const normal = incoming('normal-delete', conversation.id)
+    await other.emit({ type: 'message', conversation, message: normal })
+    await other.emit({
+      type: 'message-delete', eventId: 'normal-delete', conversation,
+      messageIds: [normal.id], timestamp: 13,
+    })
+    expect((sent.at(-1) as tl.RawUpdates).updates).toMatchObject([{
+      _: 'updateDeleteChannelMessages', messages: expect.any(Array),
+    }])
+    expect(await store.readHistory(otherSession.platformSessionId, conversation.id)).toEqual([])
     await manager.stop()
   })
 
@@ -1004,10 +1195,71 @@ describe('PlatformRegistry', () => {
     const data = new PlatformDataService(platform, session, store)
 
     await expect(data.getDialogsPage({ limit: 2, afterId: 'bridge:request-inbox' })).resolves.toMatchObject({
-      dialogs: [{ conversation: { id: 'upstream-first' } }], total: 1,
+      dialogs: [{ conversation: { id: 'upstream-first' } }], total: 2,
     })
     expect(platform.getDialogs).toHaveBeenCalledWith(session, { limit: 2, afterId: undefined })
     await manager.stop()
+  })
+
+  it('continues every bridge-owned system dialog before entering upstream pages', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const store = new MessageStore(database)
+    await store.upsertConversation(session, { id: 'bridge:botfather', kind: 'direct', title: 'BotFather', metadata: { bridgeOwned: true } })
+    await store.upsertConversation(session, { id: 'bridge:bot:one', kind: 'direct', title: 'Bot One', metadata: { bridgeOwned: true } })
+    await store.upsertConversation(session, { id: 'bridge:bot:two', kind: 'direct', title: 'Bot Two', metadata: { bridgeOwned: true } })
+    platform.getDialogs = vi.fn(async () => ({ dialogs: [
+      { conversation: { id: 'upstream-1', kind: 'direct' as const, title: 'Upstream 1' }, unreadCount: 0 },
+      { conversation: { id: 'upstream-2', kind: 'direct' as const, title: 'Upstream 2' }, unreadCount: 0 },
+    ], total: 2 }))
+    const data = new PlatformDataService(platform, session, store)
+    const first = await data.getDialogsPage({ limit: 1 })
+    const second = await data.getDialogsPage({ limit: 1, afterId: first.dialogs[0].conversation.id })
+    const third = await data.getDialogsPage({ limit: 1, afterId: second.dialogs[0].conversation.id })
+    const upstream = await data.getDialogsPage({ limit: 2, afterId: third.dialogs[0].conversation.id })
+    expect([first, second, third].map((page) => page.dialogs[0].conversation.id)).toEqual([
+      'bridge:bot:two', 'bridge:bot:one', 'bridge:botfather',
+    ])
+    expect(first.total).toBe(5)
+    expect(upstream.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['upstream-1', 'upstream-2'])
+  })
+
+  it('paginates more than 500 bridge-owned dialogs without duplicates', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const store = new MessageStore(database)
+    for (let index = 0; index < 501; index++) {
+      await store.upsertConversation(session, {
+        id: `bridge:bot:${String(index).padStart(3, '0')}`,
+        kind: 'direct', title: `Bot ${index}`, metadata: { bridgeOwned: true, localOnly: true },
+      })
+    }
+    const sameSecond = new Date(1_700_000_000_000)
+    for (const conversation of await database.get('mtproto_im_conversation', { platformSessionId: session.platformSessionId })) {
+      await database.set('mtproto_im_conversation', { id: conversation.id }, { updatedAt: sameSecond })
+    }
+    platform.getDialogs = vi.fn(async () => ({ dialogs: [
+      { conversation: { id: 'upstream-1', kind: 'direct' as const, title: 'Upstream 1' }, unreadCount: 0 },
+    ], total: 1 }))
+    const data = new PlatformDataService(platform, session, store)
+    const first = await data.getDialogsPage({ limit: 501 })
+    expect(first.dialogs).toHaveLength(501)
+    expect(new Set(first.dialogs.map((dialog) => dialog.conversation.id)).size).toBe(501)
+    expect(first.dialogs.every((dialog) => dialog.conversation.metadata?.bridgeOwned === true)).toBe(true)
+    expect(first.total).toBe(502)
+
+    const localFirstPage = await data.getDialogsPage({ limit: 100 })
+    const localSecondPage = await data.getDialogsPage({
+      limit: 100, afterId: localFirstPage.dialogs.at(-1)!.conversation.id,
+    })
+    expect(localSecondPage.dialogs).toHaveLength(100)
+    expect(localSecondPage.total).toBe(502)
+
+    const upstream = await data.getDialogsPage({ limit: 1, afterId: first.dialogs.at(-1)!.conversation.id })
+    expect(upstream.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['upstream-1'])
+    expect(platform.getDialogs).toHaveBeenLastCalledWith(session, { limit: 1, afterId: undefined })
   })
 
   it('migrates loader-qualified platform IDs across sessions and auth bindings', async () => {

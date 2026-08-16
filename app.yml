@@ -15,6 +15,11 @@
   name: '@mtproto-relay/bridge'
   config:
     serverHost: 127.0.0.1
+- id: telegram-bot-api
+  name: '@mtproto-relay/telegram-bot-api'
+  disabled: true
+  config:
+    verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}
 - id: satori-core
   name: '@satorijs/core'
   disabled: true

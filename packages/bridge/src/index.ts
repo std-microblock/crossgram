@@ -49,8 +49,12 @@ import { CallRegistry, type VoiceMediaStartProvider, type VoiceWorkerClient } fr
 import type { VoiceCallMediaProvider } from './voice/media.js'
 import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
+import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
+import { RequestInboxSystemPeerProvider } from './request-inbox.js'
 
 export * from './platform.js'
+export { defineModels } from './models.js'
+export { stableId } from './dialogs.js'
 export * from './message-store.js'
 export * from './message-actions.js'
 export * from './platform-manager.js'
@@ -73,7 +77,9 @@ export * from './voice/call-registry.js'
 export * from './voice/media.js'
 export * from './voice/voice-worker-client.js'
 export * from './voice/voice-rpc.js'
+export * from './system-peer.js'
 export * from './stripped-thumbnail.js'
+export * from './image-dimensions.js'
 export * from './sticker-outline.js'
 export * from './sticker-dashboard.js'
 
@@ -151,6 +157,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const platforms = new IMPlatformService(ctx)
   const stickerProviders = new IMStickerService(ctx)
   const resources = new TelegramResourceService(ctx)
+  const systemPeers = new SystemPeerService(ctx)
   const registry = platforms.registry
   const rpc = ctx.mtproto
   const dcId = config.dcId ?? 1
@@ -281,10 +288,30 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     },
     (format, ...args) => bridgeLogger.debug(format, ...args),
   )
+  systemPeers.attach(
+    (session, event, options) => subscriptions.ingestLocalEvent(session, event, options),
+  )
+  const unregisterRequestInbox = systemPeers.register(new RequestInboxSystemPeerProvider(
+    store,
+    async (session, requestId, action) => {
+      const resolveRequest = registry.require(session.platformId).resolveRequest
+      if (!resolveRequest) throw new SystemPeerCallbackError('REQUEST_RESOLVE_UNAVAILABLE')
+      return resolveRequest(session, requestId, action)
+    },
+    async (session, request) => {
+      await subscriptions.ingestLocalEvent(session, { type: 'request', request, delivery: 'recovery' })
+    },
+  ))
+  ctx.effect(() => unregisterRequestInbox, 'mtproto-bridge.request-inbox')
+  platforms.onSessionChange((event, binding) => {
+    if (event === 'activate') void systemPeers.bootstrap(binding.session).catch((error) => {
+      bridgeLogger.warn('system peer bootstrap failed: %s', String(error))
+    })
+  })
   const requireBridgeSession = createSessionResolver(
     ctx, registry, stickerRpcFor, reactionRpcFor, resources, store, drafts, notificationSettings, blockedPeers,
     dialogFolders,
-    subscriptions, uploads, generation,
+    subscriptions, uploads, systemPeers, generation,
     (localSession, update, excludeAuthKeyId) => updates.publishDraft(
       localSession, update, excludeAuthKeyId,
     ),
@@ -346,6 +373,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       if (created) {
         await ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }])
         rpc.setPlatformData(state)
+        void updates.retryPending(state.session.platformSessionId).catch((error) => bridgeLogger.warn(
+          'pending update retry failed session=%s error=%s', state.session.platformSessionId, String(error),
+        ))
       }
       const user = makeUser({
         id: selfRow.id,
@@ -1098,6 +1128,7 @@ function createSessionResolver(
   dialogFolders: DialogFolderStore,
   subscriptions: PlatformSubscriptionManager,
   uploads: UploadManager,
+  systemPeers: SystemPeerService,
   generation: object,
   onDraftUpdate: (
     session: PlatformSession,
@@ -1161,6 +1192,7 @@ function createSessionResolver(
         selfRow.id,
         blockedPeers,
         dialogFolders,
+        systemPeers,
       )
       return state
     }

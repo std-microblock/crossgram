@@ -245,7 +245,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@cordisjs/plugin-database-sqlite@npm:5.1.1":
+"@cordisjs/plugin-database-sqlite@npm:5.1.1, @cordisjs/plugin-database-sqlite@npm:^5.1.1":
   version: 5.1.1
   resolution: "@cordisjs/plugin-database-sqlite@npm:5.1.1"
   dependencies:
@@ -1831,6 +1831,7 @@ __metadata:
     "@mtproto-relay/mtproto": "workspace:*"
     "@vue/test-utils": "npm:^2.4.6"
     happy-dom: "npm:^18.0.1"
+    jsqr: "npm:^1.4.0"
     linkify-it: "npm:^6.1.0"
     long: "npm:^5.3.0"
     schemastery: "npm:^3.18.0"
@@ -1975,6 +1976,27 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/telegram-bot-api@workspace:packages/telegram-bot-api":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/telegram-bot-api@workspace:packages/telegram-bot-api"
+  dependencies:
+    "@cordisjs/plugin-database": "npm:^4.0.0"
+    "@cordisjs/plugin-database-sqlite": "npm:^5.1.1"
+    "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch"
+    "@cordisjs/unyaml": "npm:^2.0.3"
+    "@mtproto-relay/bridge": "workspace:*"
+    "@mtproto-relay/platform-static": "workspace:*"
+    cordis: "npm:^4.0.0-rc.5"
+    node-telegram-bot-api: "npm:2.0.0-alpha.3"
+    schemastery: "npm:^3.18.0"
+    vitest: "npm:^2.1.9"
+  peerDependencies:
+    "@cordisjs/plugin-database": ^4.0.0
+    "@cordisjs/plugin-server": ^1.6.0
+    cordis: ^4.0.0-rc.5
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/telegram-resources@workspace:*, @mtproto-relay/telegram-resources@workspace:packages/telegram-resources":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/telegram-resources@workspace:packages/telegram-resources"
@@ -2014,6 +2036,7 @@ __metadata:
     "@satorijs/core": "npm:^4.6.0"
     cordis: "npm:^4.0.0-rc.5"
     long: "npm:^5.3.0"
+    node-telegram-bot-api: "npm:2.0.0-alpha.3"
   languageName: unknown
   linkType: soft
 
@@ -5152,6 +5175,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"jsqr@npm:^1.4.0":
+  version: 1.4.0
+  resolution: "jsqr@npm:1.4.0"
+  checksum: 10c0/69fbfe4c866a04c97b377901a166544a583bfc76b838c275efa9af058d64e5612267079b1e96ea7b6434385803571b1c6a97a43c85f4373e8afa4f4034fc916c
+  languageName: node
+  linkType: hard
+
 "kleur@npm:^3.0.3":
   version: 3.0.3
   resolution: "kleur@npm:3.0.3"
@@ -5163,13 +5193,6 @@ __metadata:
   version: 4.1.5
   resolution: "kleur@npm:4.1.5"
   checksum: 10c0/e9de6cb49657b6fa70ba2d1448fd3d691a5c4370d8f7bbf1c2f64c24d461270f2117e1b0afe8cb3114f13bbd8e51de158c2a224953960331904e636a5e4c0f2a
-  languageName: node
-  linkType: hard
-
-"jsqr@npm:^1.4.0":
-  version: 1.4.0
-  resolution: "jsqr@npm:1.4.0"
-  checksum: 10c0/69fbfe4c866a04c97b377901a166544a583bfc76b838c275efa9af058d64e5612267079b1e96ea7b6434385803571b1c6a97a43c85f4373e8afa4f4034fc916c
   languageName: node
   linkType: hard
 
@@ -5548,6 +5571,13 @@ __metadata:
   bin:
     node-gyp: bin/node-gyp.js
   checksum: 10c0/424077bc9e9bbe953a8e86db473ba818cbc6a121714008c977fd589e21e5f0c811fbf22faac730dc7182450b5e52df301811d01ae3373898658d999b7710f4e6
+  languageName: node
+  linkType: hard
+
+"node-telegram-bot-api@npm:2.0.0-alpha.3":
+  version: 2.0.0-alpha.3
+  resolution: "node-telegram-bot-api@npm:2.0.0-alpha.3"
+  checksum: 10c0/955b3550190e43d7af51f4f4cbcf964dd8ce4005f62a1a68b2cc9070438f241f41dd182cd8c43bbfcb2507b4016bb29d825c3cc851820cd9ceb787f20cfe9e24
   languageName: node
   linkType: hard
 

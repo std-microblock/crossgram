@@ -15,6 +15,7 @@ import { LogManager, generateKeyAndIvFromNonce, createAesIgeForMessage, findKeyB
 import { NodePlatform } from '@mtcute/node'
 import { ObfuscatedPacketCodec } from '@mtcute/core'
 import Long from 'long'
+import { Bot } from 'node-telegram-bot-api'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -26,6 +27,7 @@ import {
 import * as bridge from '@mtproto-relay/bridge'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
+import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
@@ -101,6 +103,10 @@ class TestClient {
   read(): Promise<Uint8Array> {
     if (this._frames.length > 0) return Promise.resolve(this._frames.shift()!)
     return new Promise((res) => { this._waiter = res })
+  }
+
+  defer(frames: readonly Uint8Array[]): void {
+    this._frames.unshift(...frames)
   }
 
   close(): void { this._sock.destroy() }
@@ -222,13 +228,22 @@ async function sendRawRpc(
   method: string,
 ): Promise<any> {
   await client.send(clientEncrypt(key, body, key.salt, sessionId, sub))
-  for (let i = 0; i < 12; i++) {
-    const reader = clientDecrypt(key, await readRpcFrame(client, method))
-    const rpcResult = decodeRpcResult(reader)
-    if (rpcResult) return rpcResult.result
-    try { reader.object() } catch { /* service msg */ }
+  const deferred: Uint8Array[] = []
+  try {
+    for (let i = 0; i < 12; i++) {
+      const frame = await readRpcFrame(client, method)
+      const reader = clientDecrypt(key, frame)
+      const rpcResult = decodeRpcResult(reader)
+      if (rpcResult) return rpcResult.result
+      try {
+        const update = reader.object() as { _?: string }
+        if (update._ === 'updates' || update._ === 'updateShort') deferred.push(frame)
+      } catch { /* service msg */ }
+    }
+    throw new Error('no rpc_result')
+  } finally {
+    client.defer(deferred)
   }
-  throw new Error('no rpc_result')
 }
 
 function decodeRpcResult(reader: TlBinaryReader): { requestMessageId: Long, result: any } | null {
@@ -360,6 +375,7 @@ async function startApp(options: {
   authKeyStorePath?: string
   bridgeConfig?: bridge.BridgeConfig
   platform?: { id: string, adapter: bridge.IMPlatform }
+  botApi?: boolean
 } = {}) {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
@@ -374,6 +390,9 @@ async function startApp(options: {
       authKeyStorePath: options.authKeyStorePath,
     }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
+    ...(options.botApi
+      ? [ctx.plugin(telegramBotApi, { verifierSecret: 'mtproto-e2e-botfather-verifier' })]
+      : []),
     ctx.plugin(telegramResourcesPlugin),
     options.platform
       ? ctx.plugin(makePlatformPlugin(options.platform.id, options.platform.adapter))
@@ -445,6 +464,179 @@ function makePlatformPlugin(id: string, platform: bridge.IMPlatform) {
   plugin.inject = ['imPlatform']
   return plugin
 }
+
+describe('BotFather physical MTProto e2e', () => {
+  it('round trips a BotFather-created bot through the public SDK with durable token messages', async () => {
+    const debug: MtprotoDebugEvent[] = []
+    const { ctx, port, pubKey, stop } = await startApp({ botApi: true })
+    const originalFetch = globalThis.fetch
+    let client: TestClient | undefined
+    let sdk: Bot | undefined
+    let polling: Promise<void> | undefined
+    let nativeSendMessage: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      ctx.mtproto.onDebug.add((event) => debug.push(event))
+      const account = await waitForPlatformLogin(ctx, 'static')
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const session = Long.fromInt(0x42_424_242)
+      let sub = 2
+      const rpc = (request: object) => callRpc(client!, key, session, request, sub += 2)
+      const sent = await rpc({
+        _: 'auth.sendCode', phoneNumber: `+${account.auth.virtualPhone}`, apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      })
+      await rpc({
+        _: 'auth.signIn', phoneNumber: account.auth.virtualPhone, phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(account.auth.totpSecret),
+      })
+      await rpc({ _: 'updates.getState' })
+      const [father] = await ctx.database.get('mtproto_im_user', {
+        platformId: 'static', platformUserId: telegramBotApi.BOT_FATHER_CONVERSATION_ID,
+      })
+      expect(father).toMatchObject({ username: 'BotFather', metadata: { bot: true } })
+      const sendToFather = (message: string, randomId: number) => rpc({
+        _: 'messages.sendMessage', peer: { _: 'inputPeerUser', userId: father.id, accessHash: Long.ZERO },
+        message, randomId: Long.fromNumber(randomId),
+      })
+      const readToken = async () => {
+        for (let index = 0; index < 12; index++) {
+          const update = await readPush(client!, key)
+          const messages = update.updates?.map((item: any) => item.message?.message).filter(Boolean) ?? []
+          const token = messages.find((text: string) => /\d+:[A-Za-z0-9_-]{43}/u.test(text))
+            ?.match(/\d+:[A-Za-z0-9_-]{43}/u)?.[0]
+          if (token) return token
+        }
+        throw new Error('BotFather did not deliver a token')
+      }
+      const getFatherHistory = () => rpc({
+        _: 'messages.getHistory', peer: { _: 'inputPeerUser', userId: father.id, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      })
+      const waitForHistory = async (description: string) => {
+        const deadline = Date.now() + 5_000
+        let history: any
+        while (Date.now() < deadline) {
+          history = await rpc({
+            _: 'messages.getHistory', peer: { _: 'inputPeerUser', userId: botUser.id, accessHash: Long.ZERO },
+            offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+          })
+          const texts = history.messages.map((message: any) => message.message)
+          if (texts.filter((text: string) => text === 'physical hello').length === 1
+            && texts.filter((text: string) => text === 'echo: physical hello').length === 1) return history
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        throw new Error(`timed out waiting for ${description}: ${JSON.stringify(history)}`)
+      }
+
+      await sendToFather('/newbot', 1001)
+      await sendToFather('Physical E2E Bot', 1002)
+      await sendToFather('physical_e2e_bot', 1003)
+      const token = await readToken()
+      expect(token).toMatch(/^\d+:[A-Za-z0-9_-]{43}$/u)
+
+      const [identity] = await ctx.database.get('mtproto_bot_identity', { usernameNormalized: 'physical_e2e_bot' })
+      expect(identity).toMatchObject({
+        id: token.split(':')[0], ownerPlatformSessionId: account.session.id,
+        conversationId: telegramBotApi.botConversationId(identity!.id), enabled: true,
+      })
+      const [botConversation] = await ctx.database.get('mtproto_im_conversation', {
+        platformSessionId: account.session.id, platformConversationId: identity!.conversationId,
+      })
+      const [botUser] = await ctx.database.get('mtproto_im_user', {
+        platformId: 'static', platformUserId: identity!.conversationId,
+      })
+      expect(botConversation).toMatchObject({ kind: 'direct', title: 'Physical E2E Bot', metadata: { bot: true } })
+      expect(botUser).toMatchObject({ platformUserId: identity!.conversationId, firstName: 'Physical E2E Bot' })
+      const dialogs = await rpc({
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      })
+      expect(dialogs.dialogs).toContainEqual(expect.objectContaining({ peer: { _: 'peerUser', userId: botUser.id } }))
+      expect(dialogs.users).toContainEqual(expect.objectContaining({ id: botUser.id, firstName: 'Physical E2E Bot' }))
+
+      const localOrigin = new URL(ctx.server.baseUrl).origin
+      let firstPoll!: () => void
+      let firstPollFailed!: (error: unknown) => void
+      let advancedPoll!: () => void
+      const firstPollingRequest = new Promise<void>((resolve, reject) => { firstPoll = resolve; firstPollFailed = reject })
+      const advancedPollingRequest = new Promise<void>((resolve) => { advancedPoll = resolve })
+      let pollRequests = 0
+      const guardedFetch: typeof fetch = async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : input instanceof URL ? input.href : input)
+        if (!['127.0.0.1', '::1', 'localhost'].includes(url.hostname) || url.origin !== localOrigin) {
+          const error = new Error(`SDK attempted non-loopback origin: ${url.origin}`)
+          firstPollFailed(error)
+          throw error
+        }
+        if (url.pathname.endsWith('/getUpdates')) {
+          pollRequests++
+          if (pollRequests === 1) firstPoll()
+          if (pollRequests === 2) advancedPoll()
+        }
+        return originalFetch(input, init)
+      }
+      let replySent!: () => void
+      let replyFailed!: (error: unknown) => void
+      let received = 0
+      const reply = new Promise<void>((resolve, reject) => { replySent = resolve; replyFailed = reject })
+      sdk = new Bot(token, { apiRoot: ctx.server.baseUrl, fetch: guardedFetch })
+      sdk.on('message', async (event) => {
+        try {
+          received++
+          expect(event.message?.text).toBe('physical hello')
+          await event.reply('echo: physical hello')
+          replySent()
+        } catch (error) { replyFailed(error) }
+      })
+      polling = sdk.startPolling(undefined, { timeout: 1, retry: false })
+      await firstPollingRequest
+      expect(sdk.isRunning()).toBe(true)
+
+      nativeSendMessage = vi.spyOn(ctx.imPlatform.require('static'), 'sendMessage')
+      await rpc({
+        _: 'messages.sendMessage', peer: { _: 'inputPeerUser', userId: botUser.id, accessHash: Long.ZERO },
+        message: 'physical hello', randomId: Long.fromNumber(1004),
+      })
+      await reply
+      await advancedPollingRequest
+      expect(received).toBe(1)
+      const history = await waitForHistory('the MTProto and SDK messages')
+      expect(history.messages.filter((message: any) => message.message === 'physical hello')).toHaveLength(1)
+      expect(history.messages.filter((message: any) => message.message === 'echo: physical hello')).toHaveLength(1)
+      const canonical = await ctx.database.get('mtproto_im_message', { conversationId: botConversation.id })
+      expect(canonical.filter(message => message.text === 'physical hello')).toHaveLength(1)
+      expect(canonical.filter(message => message.text === 'echo: physical hello')).toHaveLength(1)
+      expect(nativeSendMessage).not.toHaveBeenCalled()
+
+      await sendToFather('/token physical_e2e_bot', 1005)
+      const replacementToken = await readToken()
+      await expect(polling).rejects.toMatchObject({ errorCode: 401 })
+      expect(sdk.isRunning()).toBe(false)
+      const replacement = new Bot(replacementToken, { apiRoot: ctx.server.baseUrl, fetch: guardedFetch })
+      await expect(replacement.api.getMe()).resolves.toMatchObject({ username: 'physical_e2e_bot' })
+      await sendToFather('/revoke physical_e2e_bot', 1006)
+      await expect(replacement.api.getMe()).rejects.toMatchObject({ errorCode: 401 })
+
+      const fatherHistory = await getFatherHistory()
+      const messages = await ctx.database.get('mtproto_im_message', {})
+      const difference = await rpc({ _: 'updates.getDifference', pts: 0, date: 0, qts: 0 })
+      expect(JSON.stringify(debug)).toContain(token)
+      expect(JSON.stringify(debug)).toContain(replacementToken)
+      expect(JSON.stringify(fatherHistory)).toContain(token)
+      expect(JSON.stringify(fatherHistory)).toContain(replacementToken)
+      expect(JSON.stringify(messages)).toContain(token)
+      expect(JSON.stringify(messages)).toContain(replacementToken)
+      expect(JSON.stringify(difference)).toContain(token)
+      expect(JSON.stringify(difference)).toContain(replacementToken)
+    } finally {
+      nativeSendMessage?.mockRestore()
+      sdk?.stop()
+      await polling?.catch(() => {})
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+})
 
 describe('bridge login e2e', () => {
   it('lets any account-list viewer approve QR tokens and keeps permanent keys bound', async () => {
@@ -2171,7 +2363,7 @@ describe('bridge login e2e', () => {
           title: 'Static Plugin Stickers', installedDate: expect.any(Number),
           thumbs: [expect.objectContaining({ _: 'photoSize' })],
           thumbDcId: 1,
-          thumbVersion: 7,
+          thumbVersion: 1237283681,
           thumbDocumentId: expect.any(Long),
         },
         documents: expect.arrayContaining([expect.objectContaining({ _: 'document', mimeType: 'image/webp' })]),
@@ -2408,7 +2600,16 @@ describe('bridge login e2e', () => {
         },
         'static-reaction-event-1',
       )
-      const pushedReaction = await readPush(resumed, key)
+      let pushedReaction: any
+      for (let index = 0; index < 12; index++) {
+        const update = await readPush(resumed, key)
+        if (update.updates?.some((item: any) => item._ === 'updateMessageReactions'
+          && item.msgId === reactionMessage.id
+          && item.reactions?.results?.some((reaction: any) => reaction.reaction?.emoticon === '❤️' && reaction.count === 4))) {
+          pushedReaction = update
+          break
+        }
+      }
       expect(pushedReaction).toMatchObject({
         _: 'updates',
         updates: [{

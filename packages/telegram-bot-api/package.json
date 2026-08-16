@@ -1,0 +1,38 @@
+{
+  "name": "@mtproto-relay/telegram-bot-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {
+    "service": {
+      "required": [
+        "imPlatform",
+        "server",
+        "systemPeer"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
+    "@cordisjs/plugin-server": "^1.6.0",
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@mtproto-relay/bridge": "workspace:*",
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
+    "@cordisjs/plugin-database-sqlite": "^5.1.1",
+    "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch",
+    "@cordisjs/unyaml": "^2.0.3",
+    "@mtproto-relay/platform-static": "workspace:*",
+    "cordis": "^4.0.0-rc.5",
+    "node-telegram-bot-api": "2.0.0-alpha.3",
+    "vitest": "^2.1.9"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}

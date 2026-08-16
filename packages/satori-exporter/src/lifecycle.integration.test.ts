@@ -54,7 +54,10 @@ async function installSatoriScope(ctx: Context) {
 describe('standalone Satori exporter lifecycle', () => {
   it('provisions, unregisters, and reloads a platform without retaining stale Satori bots', async () => {
     const ctx = new Context()
-    const mtproto = { register: vi.fn(), broadcastUpdate: vi.fn(), sendUpdateToAuthKey: vi.fn() }
+    const mtproto = {
+      register: vi.fn(), broadcastUpdate: vi.fn(), sendUpdateToAuthKey: vi.fn(),
+      rsaKey: { publicKeyPem: '-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----' },
+    }
     const webui = { addEntry: vi.fn(() => ({ mutate: vi.fn() })) }
     const provideMtproto = ctx.provide('mtproto', mtproto as never)
     const provideWebui = ctx.provide('webui', webui as never)

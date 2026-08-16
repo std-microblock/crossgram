@@ -7,7 +7,7 @@ import {
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
-  type IMReactionSummary, type IMRequestAction, type IMTextEntity, type IMTransferProgress, type IMUser,
+  type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
@@ -15,9 +15,7 @@ import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
   type MessageEditResult,
 } from './message-actions.js'
-import {
-  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_REJECT_CALLBACK_DATA, isRequestInboxConversation,
-} from './request-inbox.js'
+import { isLocalOnlyConversation } from './request-inbox.js'
 import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
@@ -29,11 +27,15 @@ import type { ReactionRpc } from './reaction-rpc.js'
 import type { TelegramResourceService } from './resource-provider.js'
 import { probeImageDimensions } from './image-dimensions.js'
 import { withAutoLinkEntities } from './message-entities.js'
-import { registerVirtualConversation, virtualConversation } from './virtual-conversations.js'
+import {
+  registerVirtualConversation, registerVirtualConversationMessageTarget,
+  virtualConversation, virtualConversationMessageTarget, type VirtualMessageTarget,
+} from './virtual-conversations.js'
 import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from './card-thumbnail.js'
 import type { DraftStore, StoredDraft } from './draft-store.js'
 import { MUTE_FOREVER, type NotificationSettingsStore, type NotificationTarget } from './notification-settings.js'
 import type { BlockedPeerChange, BlockedPeerStore } from './blocked-peers.js'
+import { SystemPeerCallbackError, type SystemPeerService } from './system-peer.js'
 import {
   decodeDialogFilterTitle, encodeDialogFilterTitle,
   type DialogFolderStore, type StoredDialogFilter,
@@ -53,7 +55,6 @@ type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
 type UploadMediaRequest = tl.messages.RawUploadMediaRequest
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 
-const requestResolutionLocks = new Map<string, Promise<void>>()
 
 interface MessageRef {
   peerId: string
@@ -178,6 +179,8 @@ export class DialogRpc {
   private readonly _memberPages = new Map<string, MemberPageState>()
   private readonly _pendingMemberPages = new Map<string, Promise<void>>()
   private readonly _searchCursors = new Map<string, string>()
+  // ponytail: session-wide queue; use per-peer queues only if folder edit throughput matters.
+  private _folderEditQueue = Promise.resolve()
   private readonly _actions: PlatformMessageActions
   private _peersHydratedAt = 0
   private _peersHydratedPeerRevision = -1
@@ -212,6 +215,7 @@ export class DialogRpc {
     private readonly _authenticatedSelfId?: number,
     private readonly _blockedPeers?: BlockedPeerStore,
     private readonly _dialogFolders?: DialogFolderStore,
+    private readonly _systemPeers?: SystemPeerService,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -282,6 +286,7 @@ export class DialogRpc {
     // absent during cold start. The no-store path still allocates Telegram IDs
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
+    await this._prepareVirtualMessageTargets(all.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []))
     const projectionsAt = performance.now()
     const dialogProjections = new Map<string, MaterializedMessage[]>()
     if (this._store) {
@@ -475,6 +480,12 @@ export class DialogRpc {
   }
 
   async editPeerFolders(req: tl.folders.RawEditPeerFoldersRequest): Promise<tl.RawUpdates> {
+    const pending = this._folderEditQueue.then(() => this._editPeerFolders(req))
+    this._folderEditQueue = pending.then(() => undefined, () => undefined)
+    return pending
+  }
+
+  private async _editPeerFolders(req: tl.folders.RawEditPeerFoldersRequest): Promise<tl.RawUpdates> {
     if (!this._dialogFolders) throw new RpcError(500, 'FOLDER_STORE_UNAVAILABLE')
     await this._hydratePeers()
     const peers = req.folderPeers.map((entry) => {
@@ -484,6 +495,24 @@ export class DialogRpc {
       return { peerId, folderId: entry.folderId as 0 | 1 }
     })
     const changed = await this._dialogFolders.setPeerFolders(this._session.platformSessionId, peers)
+    for (const [peerId, folderId] of new Map(peers.map((peer) => [peer.peerId, peer.folderId]))) {
+      if (this._platform.platformKind !== 'qq') continue
+      const conversation = this._conversations.get(peerId)
+      if (conversation?.kind !== 'group') continue
+      if (typeof conversation.metadata?.qqGroupMsgMask !== 'number') continue
+      if (!this._platform.setConversationNotificationMask) continue
+      const mask = folderId === 1 ? QQ_GROUP_MSG_MASK.ASSISTANT : QQ_GROUP_MSG_MASK.NOTIFY
+      if (!changed.has(peerId) && conversation.metadata.qqGroupMsgMask === mask) continue
+      try {
+        await this._platform.setConversationNotificationMask(this._session, peerId, mask)
+        this._conversations.set(peerId, {
+          ...conversation,
+          metadata: { ...conversation.metadata, qqGroupMsgMask: mask },
+        })
+      } catch (error) {
+        this._onTrace?.('qq group mask sync failed: peer=%s mask=%d error=%s', peerId, mask, String(error))
+      }
+    }
     const date = Math.floor(Date.now() / 1000)
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     const pts = changed.size
@@ -566,6 +595,7 @@ export class DialogRpc {
     const selectAt = performance.now()
     const visible = await this._visibleMessages(all)
     const { filtered, start, page } = selectHistoryWindow(visible, req)
+    await this._prepareVirtualMessageTargets(page.map((item) => item.source))
     const selectMs = performance.now() - selectAt
     const conversation = this._conversation(peerId)
     const sendersAt = performance.now()
@@ -578,7 +608,7 @@ export class DialogRpc {
     const result = {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
-      messages: page.map((item) => this._makeMessage(item)),
+      messages: await this._projectMessages(page),
       topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
@@ -602,7 +632,7 @@ export class DialogRpc {
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
     if (req.filter._ === 'inputMessagesFilterPinned') return this._emptyMessages(conversation)
-    if (this._platform.searchMessages && !isRequestInboxConversation(conversation)) {
+    if (this._platform.searchMessages && !isLocalOnlyConversation(conversation)) {
       return this._searchPlatform(req, peerId, conversation)
     }
     const all = await this._loadHistory(peerId, {
@@ -626,7 +656,7 @@ export class DialogRpc {
     return {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
-      messages: page.map((item) => this._makeMessage(item)), topics: [],
+      messages: await this._projectMessages(page), topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
         ...this._linkedChats(page.map((item) => item.source)),
@@ -659,7 +689,7 @@ export class DialogRpc {
     return {
       _: page.length < filtered.length ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length ? { count: filtered.length } : {}),
-      messages: page.map((item) => this._makeMessage(item)), topics: [],
+      messages: await this._projectMessages(page), topics: [],
       chats: conversation.kind === 'direct' ? [] : [this._makeChat(
         conversation.parentId ? this._conversation(conversation.parentId) : conversation,
       )],
@@ -757,7 +787,7 @@ export class DialogRpc {
     return {
       _: sliced ? 'messages.messagesSlice' : 'messages.messages',
       ...(sliced ? { count: upstream.total ?? page.length + (upstream.nextCursor ? 1 : 0) } : {}),
-      messages: page.map((item) => this._makeMessage(item)), topics: [],
+      messages: await this._projectMessages(page), topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
         ...this._linkedChats(page.map((item) => item.source)),
@@ -900,7 +930,7 @@ export class DialogRpc {
         continue
       }
       const referencedUsers = await this._messageUsers(found.source)
-      messages.push(this._makeMessage(found))
+      messages.push(await this._projectMessage(found))
       linkedSources.push(found.source)
       for (const user of referencedUsers) users.set(user.id, user)
     }
@@ -1034,6 +1064,8 @@ export class DialogRpc {
     this._conversations.set(conversation.id, conversation)
     this._peerToTl.set(conversation.id, tlId)
     this._tlToPeer.set(tlId, conversation.id)
+    const first = virtualConversationMessageTarget(this._session.platformSessionId, tlId)
+    if (first) this._rememberVirtualMessageTarget(first)
     return {
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: tlId },
       chats: [this._makeChat(conversation)], users: [],
@@ -1199,7 +1231,7 @@ export class DialogRpc {
     return {
       _: 'messages.forumTopics', count,
       topics: page.map((item) => item.topic),
-      messages: page.map((item) => this._makeMessage(item.top)),
+      messages: await this._projectMessages(page.map((item) => item.top)),
       chats: [this._makeChat(parent)], users: uniqueUsers([...users, this._makeSelfUser()]), pts,
     }
   }
@@ -1245,7 +1277,7 @@ export class DialogRpc {
     const pts = await this._channelPts(this._conversation(parentId))
     return {
       _: 'messages.channelMessages', pts, count: filtered.length,
-      messages: page.map((item) => this._makeMessage(item)), topics: [topic],
+      messages: await this._projectMessages(page), topics: [topic],
       chats: [this._makeChat(this._conversation(parentId))],
       users: uniqueUsers([...users, this._makeSelfUser()]),
     }
@@ -1354,18 +1386,34 @@ export class DialogRpc {
     const projected = await this._store?.findProjectedByTlId(
       this._session.platformSessionId, req.msgId, conversationId,
     )
-    const requestId = projected?.source.metadata?.bridgeRequestId
-    if (typeof requestId === 'string' && isRequestInboxConversation(this._conversation(conversationId))) {
+    const systemPeer = projected && await this._systemPeers?.resolve(this._session, conversationId)
+    if (systemPeer) {
       const button = projected.source.content.inlineKeyboard?.rows
         .flatMap((row) => row.buttons)
         .find((candidate) => candidate.type === 'callback' && candidate.data === data)
-      // Terminal request projections deliberately remove buttons. Telegram may
-      // still retry the original callback, so defer static-action validation to
-      // the resolver for terminal rows while requiring a rendered button on a
-      // pending request.
-      const request = await this._store?.getRequest(this._session.platformSessionId, requestId)
-      if (!button && request?.state === 'pending') throw new RpcError(400, 'DATA_INVALID')
-      return this._resolveRequestInboxCallback(requestId, data)
+      // Terminal provider messages deliberately remove buttons. Clients may
+      // retry the original callback, so providers validate their terminal
+      // state while pending rows must still have rendered callback data.
+      if (!button && projected.source.content.inlineKeyboard) throw new RpcError(400, 'DATA_INVALID')
+      try {
+        const answer = await this._systemPeers!.callback(this._session, systemPeer, {
+          message: projected.source,
+          data,
+        })
+        if (answer) {
+          return {
+            _: 'messages.botCallbackAnswer',
+            alert: answer.alert || undefined,
+            hasUrl: Boolean(answer.url) || undefined,
+            message: answer.message,
+            url: answer.url,
+            cacheTime: answer.cacheTime ?? 0,
+          }
+        }
+      } catch (error) {
+        if (error instanceof SystemPeerCallbackError) throw new RpcError(400, error.code)
+        throw error
+      }
     }
     if (!this._platform.clickInlineButton) throw new RpcError(400, 'BOT_RESPONSE_TIMEOUT')
     const target = this._tlToMessage.get(req.msgId)
@@ -1400,55 +1448,6 @@ export class DialogRpc {
       message: answer.message,
       url: answer.url,
       cacheTime: 0,
-    }
-  }
-
-  private async _resolveRequestInboxCallback(
-    requestId: string,
-    data: string,
-  ): Promise<tl.messages.RawBotCallbackAnswer> {
-    const action: IMRequestAction | undefined = data === REQUEST_ACCEPT_CALLBACK_DATA
-      ? 'accept'
-      : data === REQUEST_REJECT_CALLBACK_DATA ? 'reject' : undefined
-    if (!action) throw new RpcError(400, 'DATA_INVALID')
-    return withRequestResolutionLock(`${this._session.platformSessionId}\0${requestId}`, async () => {
-      const request = await this._store?.getRequest(this._session.platformSessionId, requestId)
-      if (!request) throw new RpcError(400, 'REQUEST_ID_INVALID')
-      if (request.state !== 'pending') {
-        if ((request.state === 'accepted' && action === 'accept')
-          || (request.state === 'rejected' && action === 'reject')) {
-          await this._deliverRequestRecovery(request)
-          return { _: 'messages.botCallbackAnswer', message: '请求已处理', cacheTime: 0 }
-        }
-        throw new RpcError(400, 'REQUEST_STATE_CONFLICT')
-      }
-      if (!this._platform.resolveRequest) throw new RpcError(400, 'REQUEST_RESOLVE_UNAVAILABLE')
-      let resolved
-      try {
-        resolved = await this._platform.resolveRequest(this._session, request.id, action)
-      } catch {
-        throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
-      }
-      if (resolved.id !== request.id
-        || resolved.kind !== request.kind
-        || resolved.state === 'pending'
-        || (action === 'accept' && resolved.state !== 'accepted')
-        || (action === 'reject' && resolved.state !== 'rejected')) {
-        throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
-      }
-      if (!this._store) throw new RpcError(500, 'REQUEST_EVENT_UNAVAILABLE')
-      const stored = await this._store.ingestRequest(this._session, resolved)
-      await this._deliverRequestRecovery(stored.request)
-      return { _: 'messages.botCallbackAnswer', message: '请求已处理', cacheTime: 0 }
-    })
-  }
-
-  private async _deliverRequestRecovery(request: import('./platform.js').IMRequest): Promise<void> {
-    if (!this._onLocalEvent) throw new RpcError(500, 'REQUEST_EVENT_UNAVAILABLE')
-    try {
-      await this._onLocalEvent(this._session, { type: 'request', request, delivery: 'recovery' })
-    } catch {
-      throw new RpcError(400, 'REQUEST_RESOLVE_FAILED')
     }
   }
 
@@ -1690,14 +1689,14 @@ export class DialogRpc {
         const item = await this._projectedItem(part.tlMessageId, conversationId)
         updates.push({
           _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
-          message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+          message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
         } as tl.TypeUpdate)
       }
     } else {
       const item = await this._projectedItem(req.id, conversationId)
       updates.push({
         _: this._isTelegramChannel(conversation) ? 'updateEditChannelMessage' : 'updateEditMessage',
-        message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+        message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
       } as tl.TypeUpdate)
     }
     return this._updates(conversation, updates, now)
@@ -1764,7 +1763,7 @@ export class DialogRpc {
       }
       updates.push({
         _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
-        message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+        message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
       } as tl.TypeUpdate)
     }
     return this._updates(conversation, updates, Math.floor(Date.now() / 1000))
@@ -2272,7 +2271,6 @@ export class DialogRpc {
     req: SendMessageRequest,
     excludeConnection?: ServerConnection,
   ): Promise<tl.TypeUpdates> {
-    if (!this._platform.capabilities.send.text) throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
     if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
     if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
       throw new RpcError(400, 'MESSAGE_TOO_LONG')
@@ -2286,17 +2284,23 @@ export class DialogRpc {
     const replyToId = replyTarget?.id
     await this._hydrateMentionUsernames(req.message, req.entities)
     const inputPart = this._inputTextPart(req.message, req.entities)
-    const sent = await this._sendToPlatform(() => this._platform.sendMessage(
-      this._session,
-      { id: peerId },
-      {
-        parts: [inputPart],
-        replyToId,
-        ...(replyTarget?.nativeSequence
-          ? { replyToNativeSequence: replyTarget.nativeSequence }
-          : {}),
-      },
-    ))
+    const systemPeer = await this._systemPeers?.resolve(this._session, peerId)
+    if (!systemPeer && !this._platform.capabilities.send.text) {
+      throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
+    }
+    const sent = systemPeer
+      ? this._systemPeers!.makeOutgoing(this._session, systemPeer, { parts: [inputPart], replyToId })
+      : await this._sendToPlatform(() => this._platform.sendMessage(
+          this._session,
+          { id: peerId },
+          {
+            parts: [inputPart],
+            replyToId,
+            ...(replyTarget?.nativeSequence
+              ? { replyToNativeSequence: replyTarget.nativeSequence }
+              : {}),
+          },
+        ))
     const source: IMMessage = {
       ...sent,
       conversationId: peerId,
@@ -2304,6 +2308,7 @@ export class DialogRpc {
       replyToId: sent.replyToId ?? replyToId,
     }
     const published = await this._publishLocalMessage(peerId, source, excludeConnection)
+    if (systemPeer) await this._systemPeers!.receive(this._session, systemPeer, source)
     if (published) {
       const update = published.updates.find((item) =>
         item._ === 'updateNewMessage' || item._ === 'updateNewChannelMessage') as
@@ -2339,7 +2344,7 @@ export class DialogRpc {
         { _: 'updateMessageID', id, randomId: req.randomId },
         {
           _: channel ? 'updateNewChannelMessage' : 'updateNewMessage',
-          message: this._makeMessage(item), pts, ptsCount: 1,
+          message: await this._projectMessage(item), pts, ptsCount: 1,
         } as tl.TypeUpdate,
       ],
       users: channel
@@ -2519,7 +2524,7 @@ export class DialogRpc {
       }
       updates.push({
         _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
-        message: this._makeMessage(item), pts: ++pts, ptsCount: 1,
+        message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
       } as tl.TypeUpdate)
     }
     const target = this._conversation(peerId)
@@ -2728,7 +2733,7 @@ export class DialogRpc {
       unreadMentionsCount = [...(this._memoryMentionStates.get(platformPeerId)?.values() ?? [])]
         .filter((unread) => unread).length
     }
-    const message = topItem ? this._makeMessage(topItem) : undefined
+    const message = topItem ? await this._projectMessage(topItem) : undefined
     const pts = this._isTelegramChannel(source.conversation)
       ? await this._channelPts(source.conversation)
       : undefined
@@ -2795,9 +2800,9 @@ export class DialogRpc {
           limit: fetchLimit,
           beforeTimestamp: request.offsetDate && request.offsetDate > 0 ? request.offsetDate : undefined,
         }
-        const requestInbox = isRequestInboxConversation(this._conversation(peerId))
+        const localOnly = isLocalOnlyConversation(this._conversation(peerId))
         let projected: ProjectedMessage[]
-        if (requestInbox) {
+        if (localOnly) {
           projected = await this._store!.readAllProjectedHistory(this._session.platformSessionId, peerId)
         } else if (negativeOffset && request.addOffset !== -1 && anchor) {
           const [newer, older] = await Promise.all([
@@ -2837,12 +2842,12 @@ export class DialogRpc {
           this._rememberMessage(item)
           return item
         }))
-        const history = requestInbox
+        const history = localOnly
           ? materialized
           : materialized.sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
         const materializeMs = performance.now() - materializeAt
         const repliesAt = performance.now()
-        await this._rememberReplyTargets(history.map((item) => item.source), true)
+        await this._rememberReplyTargets(history.map((item) => item.source), !localOnly)
         await this._applyUnreadMentionState(peerId, history)
         const repliesMs = performance.now() - repliesAt
         return {
@@ -2856,7 +2861,7 @@ export class DialogRpc {
       }
 
       const upstreamAt = performance.now()
-      if (!isRequestInboxConversation(this._conversation(peerId))) await syncHistoryWindow()
+      if (!isLocalOnlyConversation(this._conversation(peerId))) await syncHistoryWindow()
       const upstreamMs = performance.now() - upstreamAt
       if (anchorId && !anchor) {
         anchor = await this._store.findProjectedByTlId(
@@ -3220,6 +3225,15 @@ export class DialogRpc {
     }
   }
 
+  private async _projectMessages(items: readonly MaterializedMessage[]): Promise<tl.TypeMessage[]> {
+    await this._prepareVirtualMessageTargets(items.map((item) => item.source))
+    return items.map((item) => this._makeMessage(item))
+  }
+
+  private async _projectMessage(item: MaterializedMessage): Promise<tl.TypeMessage> {
+    return (await this._projectMessages([item]))[0]!
+  }
+
   private _makeMessage(item: MaterializedMessage): tl.TypeMessage {
     const source = this._blockedPeers?.filterMessageReactions(
       this._session.platformSessionId, item.source,
@@ -3540,6 +3554,48 @@ export class DialogRpc {
     return output.length ? output : undefined
   }
 
+  private async _prepareVirtualMessageTargets(messages: readonly IMMessage[]): Promise<void> {
+    if (!this._platform.getHistory) return
+    const conversations = new Map<string, import('./platform.js').IMConversation>()
+    for (const message of messages) {
+      for (const part of message.content.parts) {
+        if (part.type !== 'text') continue
+        for (const entity of part.entities ?? []) {
+          if (entity.type === 'conversation-link' && this._isVirtualConversation(entity.conversation)) {
+            conversations.set(entity.conversation.id, entity.conversation)
+          }
+        }
+      }
+    }
+    await Promise.all([...conversations.values()].map(async (conversation) => {
+      const chatId = this._peerId(conversation.id)
+      const existing = virtualConversationMessageTarget(this._session.platformSessionId, chatId)
+      if (existing) {
+        this._rememberVirtualMessageTarget(existing)
+        return
+      }
+      this._conversationLinkUrl(conversation)
+      try {
+        // Keep the target in the same upstream window that a fresh RPC can
+        // load for messages.getMessages; do not link to an unresolvable page.
+        const history = await this._loadHistory(conversation.id, { limit: 200 })
+        const first = history
+          .filter((item) => item.ordinal === 0)
+          .sort((left, right) => left.source.timestamp - right.source.timestamp || left.tlId - right.tlId)[0]
+        if (!first) return
+        const target = {
+          conversationId: conversation.id,
+          platformMessageId: first.source.id,
+          tlMessageId: first.tlId,
+        }
+        registerVirtualConversationMessageTarget(this._session.platformSessionId, chatId, target)
+        this._rememberVirtualMessageTarget(target)
+      } catch {
+        // A failed optional lookup leaves the virtual conversation addressable.
+      }
+    }))
+  }
+
   private _conversationPreviewMedia(source: IMMessage): tl.RawMessageMediaWebPage | undefined {
     const linked = source.content.parts
       .filter((part) => part.type === 'text')
@@ -3557,6 +3613,16 @@ export class DialogRpc {
     const chatId = this._peerId(conversation.id)
     this._conversations.set(conversation.id, conversation)
     return registerVirtualConversation(this._session.platformSessionId, chatId, conversation)
+  }
+
+  private _rememberVirtualMessageTarget(target: VirtualMessageTarget): void {
+    this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}`, target.tlMessageId)
+    this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}\u00000`, target.tlMessageId)
+    this._tlToMessage.set(target.tlMessageId, {
+      peerId: target.conversationId,
+      platformMessageId: target.platformMessageId,
+      ordinal: 0,
+    })
   }
 
   private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
@@ -3917,7 +3983,7 @@ export class DialogRpc {
     this._rememberUsername(user.id, user.username)
     const contact = this._contactUserIds.has(user.id)
     return makeUser({
-      id: this._userId(user.id), firstName: user.firstName,
+      id: this._userId(user.id), bot: user.metadata?.bot === true || undefined, firstName: user.firstName,
       lastName: user.lastName, username: user.username,
       contact: contact || undefined, mutualContact: contact || undefined,
       photo: user.avatar ? this._makeAvatarPhoto(user.avatar, 'user') : undefined,
@@ -4490,7 +4556,7 @@ export class DialogRpc {
     if (!ref) return
     const target = this._conversation(ref.conversationId)
     if (target.id !== displayConversationId && target.parentId !== displayConversationId) return
-    if (isRequestInboxConversation(target)) {
+    if (isLocalOnlyConversation(target)) {
       await this._onLocalEvent?.(this._session, {
         type: 'read', conversationId: target.id, upToMessageId: ref.id,
       }, this._localDelivery(excludeConnection))
@@ -4841,21 +4907,6 @@ function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): 
   return false
 }
 
-
-async function withRequestResolutionLock<T>(
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const predecessor = requestResolutionLocks.get(key) ?? Promise.resolve()
-  const current = predecessor.catch(() => undefined).then(operation)
-  const tail = current.then(() => undefined, () => undefined)
-  requestResolutionLocks.set(key, tail)
-  try {
-    return await current
-  } finally {
-    if (requestResolutionLocks.get(key) === tail) requestResolutionLocks.delete(key)
-  }
-}
 
 function selectHistoryWindow(
   all: readonly MaterializedMessage[],

@@ -5,7 +5,7 @@ import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { Service, type Context } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
-import { isRequestInboxConversation, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
+import { isLocalOnlyConversation, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 import type {
   IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMMessageSearchPage,
   IMMessageSearchQuery, IMPlatform, PlatformSession,
@@ -355,6 +355,46 @@ export class PlatformSubscriptionManager {
       const result = await this._store.ingest(session, event.conversation, event.message)
       return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'message-delete') {
+      if (this._registry.require(session.platformId).platformKind === 'qq' && !options?.deliveredViaRpc) {
+        const messages = await this._store.readProjectedByPlatformIds(
+          session.platformSessionId,
+          event.messageIds.map((platformMessageId) => ({
+            conversationId: event.conversation.id, platformMessageId,
+          })),
+        )
+        for (const { source } of messages) {
+          let hasText = false
+          let changed = false
+          const parts = source.content.parts.map((part) => {
+            if (part.type !== 'text' || !part.text) return part
+            hasText = true
+            if (part.entities?.some((entity) =>
+              entity.type === 'strikethrough' && entity.offset === 0 && entity.length === part.text.length)) {
+              return part
+            }
+            changed = true
+            return {
+              ...part,
+              entities: [...part.entities ?? [], {
+                type: 'strikethrough' as const, offset: 0, length: part.text.length,
+              }],
+            }
+          })
+          if (!hasText) continue
+          const message = changed ? { ...source, content: { ...source.content, parts } } : source
+          const result = await this._store.ingest(session, event.conversation, message)
+          await this._onEvent?.(session, {
+            event: {
+              type: 'message-edit',
+              eventId: `qqnt-recall:${encodeURIComponent(event.conversation.id)}:${encodeURIComponent(source.id)}`,
+              conversation: event.conversation,
+              message,
+            },
+            result,
+          }, options)
+        }
+        return
+      }
       const result = await this._store.deleteMessages(session, event.conversation, event.messageIds)
       return this._onEvent?.(session, { event, result }, options)
     } else if (event.type === 'message-reactions') {
@@ -498,14 +538,24 @@ export class PlatformDataService {
     if (!this._platform.capabilities.history || !this._platform.getDialogs) {
       return { dialogs: stored, total: stored.length }
     }
-    const requestInbox = (await this._store.readDialogs(
-      this._session.platformSessionId, ['bridge:request-inbox'],
-    ))[0]
-    const injectRequestInbox = requestInbox && query.afterId === undefined
-    const upstreamQuery = query.afterId === 'bridge:request-inbox'
-      ? { ...query, afterId: undefined }
-      : injectRequestInbox
-        ? { ...query, limit: Math.max(1, (query.limit ?? 100) - 1) }
+    // Bridge-owned peers are a fully local prefix. Enumerate it in batches so
+    // the cursor remains independent from adapters and is never capped at 500.
+    const allBridgeOwned = await this._bridgeOwnedDialogs()
+    const ownedAnchor = query.afterId === undefined
+      ? -1
+      : allBridgeOwned.findIndex((dialog) => dialog.conversation.id === query.afterId)
+    const continuingBridgeOwned = ownedAnchor >= 0
+    const bridgeOwned = query.afterId === undefined || continuingBridgeOwned
+      ? allBridgeOwned.slice(ownedAnchor + 1, ownedAnchor + 1 + (query.limit ?? 100))
+      : []
+    const bridgeOwnedRemaining = continuingBridgeOwned && ownedAnchor + 1 + bridgeOwned.length < allBridgeOwned.length
+    const injectBridgeOwned = bridgeOwned.length > 0
+    // A local cursor must never be forwarded upstream. Fetch one upstream row
+    // only to retain its total while the local prefix still has another page.
+    const upstreamQuery = continuingBridgeOwned
+      ? { ...query, afterId: undefined, limit: bridgeOwnedRemaining ? 1 : Math.max(1, (query.limit ?? 100) - bridgeOwned.length) }
+      : injectBridgeOwned
+        ? { ...query, limit: Math.max(1, (query.limit ?? 100) - bridgeOwned.length) }
         : query
     let upstreamPage: IMDialogPage
     try {
@@ -519,7 +569,7 @@ export class PlatformDataService {
       return { dialogs: stored, total: stored.length }
     }
     const upstreamDialogs = upstreamPage.dialogs.filter((dialog) =>
-      dialog.conversation.id !== 'bridge:request-inbox')
+      dialog.conversation.metadata?.bridgeOwned !== true)
     const persistedDialogs = await this._store.readDialogs(
       this._session.platformSessionId,
       upstreamDialogs.map((dialog) => dialog.conversation.id),
@@ -538,12 +588,36 @@ export class PlatformDataService {
     // Fetching one upstream entry for a limit-one request preserves its total
     // and continuation cursor, but the synthetic inbox still consumes that
     // requested slot.
-    const upstreamSlots = injectRequestInbox ? Math.max(0, (query.limit ?? 100) - 1) : undefined
+    const upstreamSlots = injectBridgeOwned ? Math.max(0, (query.limit ?? 100) - bridgeOwned.length) : undefined
     const pageDialogs = upstreamSlots === undefined ? dialogs : dialogs.slice(0, upstreamSlots)
     return {
       ...upstreamPage,
-      dialogs: injectRequestInbox ? [requestInbox, ...pageDialogs] : pageDialogs,
-      ...(injectRequestInbox && upstreamPage.total !== undefined ? { total: upstreamPage.total + 1 } : {}),
+      dialogs: injectBridgeOwned ? [...bridgeOwned, ...pageDialogs] : pageDialogs,
+      ...(upstreamPage.total !== undefined
+        ? { total: upstreamPage.total + allBridgeOwned.length }
+        : {}),
+    }
+  }
+
+  private async _bridgeOwnedDialogs(): Promise<IMDialog[]> {
+    const dialogs: IMDialog[] = []
+    const seen = new Set<string>()
+    let afterConversationId: string | undefined
+    while (true) {
+      const batch = await this._store.listDialogs(this._session.platformSessionId, {
+        limit: 100,
+        afterConversationId,
+      })
+      if (!batch.length) return dialogs
+      for (const dialog of batch) {
+        if (dialog.conversation.metadata?.bridgeOwned === true && !seen.has(dialog.conversation.id)) {
+          seen.add(dialog.conversation.id)
+          dialogs.push(dialog)
+        }
+      }
+      const next = batch.at(-1)!.conversation.id
+      if (batch.length < 100 || next === afterConversationId) return dialogs
+      afterConversationId = next
     }
   }
 
@@ -620,7 +694,7 @@ export class PlatformDataService {
     let upstreamMs = 0
     let ingestMs = 0
     let upstreamMessages = 0
-    if (!isRequestInboxConversation(conversation)
+    if (!isLocalOnlyConversation(conversation)
       && this._platform.capabilities.history && this._platform.getHistory) {
       const upstreamAt = performance.now()
       this._onTrace?.('history data profile stage=upstream-start conversation=%s', conversationId)
