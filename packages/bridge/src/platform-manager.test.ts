@@ -885,6 +885,8 @@ describe('IMPlatformService', () => {
         created: true,
         changed: true,
         projection: [],
+        addedTlMessageIds: [],
+        removedTlMessageIds: [],
         message: {
           id: 1,
           platformSessionId: replacement.platformSessionId,
