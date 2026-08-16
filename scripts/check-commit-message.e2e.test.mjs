@@ -41,7 +41,7 @@ test('git commit rejects a Claude co-author and accepts a normal commit', async 
   await writeFile(file, 'third\n')
   await git(repo, 'add', 'file.txt')
   await assert.rejects(
-    git(repo, 'commit', '-m', 'test: reject Claude co-author', '-m', 'Co-authored-by: Claude <noreply@anthropic.com>'),
+    git(repo, 'commit', '-m', 'test: reject Claude co-author', '-m', 'Co-authored-by: Anthropic Claude <noreply@anthropic.com>'),
     error => error.code === 1 && error.stderr.includes('Claude must not be listed as a co-author'),
   )
 

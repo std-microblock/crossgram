@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 
-if git interpret-trailers --parse "$1" | grep -Eiq '^[[:space:]]*co-authored-by:[[:space:]]*claude([[:space:]]|<|$)'; then
+if git interpret-trailers --parse "$1" \
+  | grep -Ei '^[[:space:]]*co-authored-by:' \
+  | sed -E 's/^[^:]+:[[:space:]]*//; s/[[:space:]]*<.*$//' \
+  | grep -Eiq '(^|[^[:alnum:]_])claude([^[:alnum:]_]|$)'; then
   echo 'Commit rejected: Claude must not be listed as a co-author.' >&2
   exit 1
 fi

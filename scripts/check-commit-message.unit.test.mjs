@@ -31,6 +31,8 @@ test('rejects Claude co-author trailers case-insensitively', async () => {
     'Co-authored-by: Claude <noreply@anthropic.com>',
     'co-authored-by: claude code <noreply@anthropic.com>',
     'CO-AUTHORED-BY: Claude Opus <noreply@anthropic.com>',
+    'Co-authored-by: Anthropic Claude <noreply@anthropic.com>',
+    'Co-authored-by: Pairing with CLAUDE Code <noreply@anthropic.com>',
   ]) {
     await assert.rejects(
       check(`fix: handle reconnect\n\n${trailer}\n`),
