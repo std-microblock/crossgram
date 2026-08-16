@@ -1597,7 +1597,6 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         event.direction === 'server->client'
         && (event.payload as { _?: string })._ === 'updates'
       )).map((event) => event.connectionId)).toEqual(['conn-1'])
-
       main.close()
       media.close()
     } finally {
