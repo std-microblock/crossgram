@@ -1818,20 +1818,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@mtproto-relay/botfather@workspace:packages/botfather":
-  version: 0.0.0-use.local
-  resolution: "@mtproto-relay/botfather@workspace:packages/botfather"
-  dependencies:
-    "@cordisjs/plugin-database-sqlite": "npm:^5.1.1"
-    "@mtproto-relay/bridge": "workspace:*"
-    schemastery: "npm:^3.18.0"
-    vitest: "npm:^2.1.9"
-  peerDependencies:
-    "@cordisjs/plugin-database": ^4.0.0
-    cordis: ^4.0.0-rc.5
-  languageName: unknown
-  linkType: soft
-
 "@mtproto-relay/bridge@workspace:*, @mtproto-relay/bridge@workspace:packages/bridge":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/bridge@workspace:packages/bridge"
@@ -1994,6 +1980,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/telegram-bot-api@workspace:packages/telegram-bot-api"
   dependencies:
+    "@cordisjs/plugin-database": "npm:^4.0.0"
+    "@cordisjs/plugin-database-sqlite": "npm:^5.1.1"
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch"
     "@cordisjs/unyaml": "npm:^2.0.3"
     "@mtproto-relay/bridge": "workspace:*"
@@ -2003,6 +1991,7 @@ __metadata:
     schemastery: "npm:^3.18.0"
     vitest: "npm:^2.1.9"
   peerDependencies:
+    "@cordisjs/plugin-database": ^4.0.0
     "@cordisjs/plugin-server": ^1.6.0
     cordis: ^4.0.0-rc.5
   languageName: unknown

@@ -2,18 +2,30 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from 'cordis'
 import type { Database } from '@cordisjs/plugin-database'
 import type { Request, Response } from '@cordisjs/plugin-server'
-import type { BotIdentity, BotRegistry } from '@mtproto-relay/botfather'
 import {
   stableId, type CommittedPlatformEvent, type IMConversation, type IMMessage, type JsonObject, type PlatformSession, type SystemPeerService,
 } from '@mtproto-relay/bridge'
 import z from 'schemastery'
+import { registerBotFather } from './botfather.js'
+import { defineBotModels } from './bot-models.js'
 import { defineTelegramBotApiModels, type BotApiChatRow, type BotApiStateRow } from './models.js'
+import { BotRegistry, type BotIdentity } from './registry.js'
 import { postPublicWebhook } from './webhook.js'
 
-export interface Config {}
-export const Config = z.object({})
+export interface Config {
+  verifierSecret: string
+}
+
+export const Config = z.object({
+  verifierSecret: z.string().role('secret').required(),
+})
+
 export const name = 'telegram-bot-api'
-export const inject = ['database', 'model', 'imPlatform', 'server', 'botRegistry', 'systemPeer']
+export const inject = ['database', 'model', 'imPlatform', 'server', 'systemPeer']
+
+export { BOT_FATHER_CONVERSATION_ID, botConversationId, validUsername } from './botfather.js'
+export { BotRegistry, BotUsernameTakenError } from './registry.js'
+export type { BotIdentity, BotOwner, IssuedBot } from './registry.js'
 
 interface TelegramUser { id: number, is_bot: boolean, first_name: string, username?: string }
 interface TelegramChat { id: number, type: 'private', first_name?: string, username?: string }
@@ -449,8 +461,11 @@ class BotRuntime {
   }
 }
 
-export function apply(ctx: Context, _config: Config = {}): void {
+export function apply(ctx: Context, config: Config): void {
+  defineBotModels(ctx)
   defineTelegramBotApiModels(ctx)
+  const registry = new BotRegistry(ctx, config.verifierSecret)
+  const unregister = registerBotFather(ctx, registry)
   const runtimes = new Map<string, BotRuntime>()
   const runtime = (bot: BotIdentity) => {
     let current = runtimes.get(bot.id)
@@ -517,7 +532,7 @@ export function apply(ctx: Context, _config: Config = {}): void {
     }
   }).catch((error) => report('webhook recovery failed', error))
   ctx.effect(() => () => {
-    get.dispose(); post.dispose(); stopCommitted(); stopChanged(); stopSession()
+    get.dispose(); post.dispose(); stopCommitted(); stopChanged(); stopSession(); unregister()
     for (const current of runtimes.values()) current.dispose()
   }, 'telegram-bot-api')
 }

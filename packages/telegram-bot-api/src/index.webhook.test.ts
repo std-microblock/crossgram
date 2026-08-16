@@ -4,7 +4,6 @@ import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import { defineModels, IMPlatformService, SystemPeerService, type IMEvent, type PlatformSession } from '@mtproto-relay/bridge'
-import * as botfather from '@mtproto-relay/botfather'
 
 const postPublicWebhook = vi.fn()
 vi.mock('./webhook.js', () => ({ postPublicWebhook }))
@@ -36,13 +35,11 @@ async function createFixture(): Promise<Fixture> {
     events.push(event)
     if (event.type === 'message') imPlatform.emitCommittedEvent(eventSession, { event, result: {} as never })
   })
-  const father = ctx.plugin(botfather, { verifierSecret: 'test-verifier-secret' })
-  await father
-  const issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Webhook Bot', 'webhook_bot')
-  const api = ctx.plugin(telegramBotApi, {})
+  const api = ctx.plugin(telegramBotApi, { verifierSecret: 'test-verifier-secret' })
   await api
+  const issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Webhook Bot', 'webhook_bot')
   const fixture = { ctx, token: issued.token, conversationId: issued.bot.conversationId, events, async stop() {
-    await api.dispose(); await father.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose()
+    await api.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose()
   } }
   fixtures.push(fixture)
   return fixture

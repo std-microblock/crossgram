@@ -9,7 +9,6 @@ import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import { Bot } from 'node-telegram-bot-api'
 import { defineModels, IMPlatformService, SystemPeerService, type IMEvent, type IMMessage, type PlatformSession } from '@mtproto-relay/bridge'
-import * as botfather from '@mtproto-relay/botfather'
 import * as telegramBotApi from './index.js'
 
 const session: PlatformSession = { platformId: 'static', platformSessionId: 'bot-owner', userId: 'owner', credentials: {}, metadata: { firstName: 'Owner' } }
@@ -46,13 +45,11 @@ async function createFixture(path = ':memory:'): Promise<Fixture> {
     events.push(event)
     if (event.type === 'message') imPlatform.emitCommittedEvent(eventSession, { event, result: {} as never })
   })
-  const father = ctx.plugin(botfather, { verifierSecret: 'test-verifier-secret' })
-  await father
-  const issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Echo Bot', 'echo_bot')
-  const api = ctx.plugin(telegramBotApi, {})
+  const api = ctx.plugin(telegramBotApi, { verifierSecret: 'test-verifier-secret' })
   await api
+  const issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Echo Bot', 'echo_bot')
   const fixture = { ctx, token: issued.token, conversationId: issued.bot.conversationId, events, async stop() {
-    await api.dispose(); await father.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose()
+    await api.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose()
   } }
   fixtures.push(fixture)
   return fixture

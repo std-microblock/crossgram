@@ -8,12 +8,12 @@ import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
 import { defineModels, IMPlatformService, SystemPeerService, type IMEvent, type PlatformSession } from '@mtproto-relay/bridge'
-import * as botfather from '@mtproto-relay/botfather'
 
 const postPublicWebhook = vi.fn().mockRejectedValue(new Error('offline'))
 vi.mock('./webhook.js', () => ({ postPublicWebhook }))
 
 const telegramBotApi = await import('./index.js')
+type IssuedBot = import('./index.js').IssuedBot
 
 const session: PlatformSession = { platformId: 'static', platformSessionId: 'durable-owner', userId: 'owner', credentials: {}, metadata: { firstName: 'Owner' } }
 const platform = { capabilities: { history: false, send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 }, conversations: { groups: false, channels: false, subchannels: false } }, async subscribe() { return () => {} }, async sendMessage() { throw new Error('unused') } }
@@ -51,17 +51,15 @@ async function start(path: string, token?: string, conversationId?: string): Pro
     events.push(event)
     if (event.type === 'message') imPlatform.emitCommittedEvent(eventSession, { event, result: {} as never })
   })
-  const father = ctx.plugin(botfather, { verifierSecret: 'durable-test-verifier-secret' })
-  await father
-  let issued: botfather.IssuedBot | undefined
-  if (!token) issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Durable Echo', 'durable_echo')
-  const api = ctx.plugin(telegramBotApi, {})
+  const api = ctx.plugin(telegramBotApi, { verifierSecret: 'durable-test-verifier-secret' })
   await api
+  let issued: IssuedBot | undefined
+  if (!token) issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Durable Echo', 'durable_echo')
   const bot = issued?.bot ?? (await ctx.botRegistry.verifyToken(token!))
   if (!bot) throw new Error('durable bot did not restore')
   return {
     ctx, token: issued?.token ?? token!, conversationId: issued?.bot.conversationId ?? conversationId ?? bot.conversationId, events,
-    async stop() { await api.dispose(); await father.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose() },
+    async stop() { await api.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose() },
   }
 }
 
