@@ -5,6 +5,8 @@ import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { AuthKeyDataStore } from './auth-key-data-store.js'
+import type { AuthKeyStore } from './auth-key-store.js'
+import { ServerAuthKey } from './server-auth-key.js'
 import { ServerSession } from './server-session.js'
 import { getServerReaderMap } from '../rpc/server-reader-map.js'
 
@@ -143,7 +145,7 @@ describe('ServerSession decrypted RPC queue', () => {
       },
     } as never, sessionId)
 
-    expect(internal._handleBindTempAuthKey).toHaveBeenCalledWith(messageId, bindRequest, sessionId)
+    expect(internal._handleBindTempAuthKey).toHaveBeenCalledWith(messageId, bindRequest, sessionId, 227)
     expect(dispatch).not.toHaveBeenCalled()
   })
 
@@ -378,7 +380,218 @@ describe('ServerSession decrypted RPC queue', () => {
   })
 })
 
-function createSession(dispatch = vi.fn()): {
+describe('ServerSession auth.bindTempAuthKey', () => {
+  it('rejects a forged wrapped binding without replacing identity, API layer, or saving the temp key', async () => {
+    const keyStore: AuthKeyStore = {
+      get: vi.fn(),
+      save: vi.fn(),
+    }
+    const { session, logger } = createSession(vi.fn(), keyStore)
+    const crypto = new NodeCryptoProvider()
+    const internal = session as unknown as {
+      _permAuthKey: ServerAuthKey
+      _tempAuthKey: ServerAuthKey | null
+      _apiLayer: number | null
+      _handleRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    const currentKey = Uint8Array.from({ length: 256 }, (_, index) => index)
+    const victimKey = Uint8Array.from({ length: 256 }, (_, index) => (index + 1) & 0xff)
+    const tempKey = Uint8Array.from({ length: 256 }, (_, index) => (index + 2) & 0xff)
+    const victimId = new Uint8Array(crypto.sha1(victimKey).subarray(-8))
+    const originalId = new Uint8Array(crypto.sha1(currentKey).subarray(-8))
+    internal._permAuthKey.setup(currentKey)
+    internal._tempAuthKey = new ServerAuthKey(crypto, logger as unknown as Logger, getServerReaderMap())
+    internal._tempAuthKey.setup(tempKey)
+    internal._apiLayer = null
+    const storedGet = keyStore.get as ReturnType<typeof vi.fn>
+    const storedSave = keyStore.save as ReturnType<typeof vi.fn>
+    storedGet.mockResolvedValue({ key: victimKey, apiLayer: 220 })
+    const messageId = Long.fromInt(10)
+    const sessionId = Long.fromInt(11)
+
+    await internal._handleRpcCall(
+      messageId,
+      wrappedBindRequest(Long.fromBytesLE(Array.from(victimId)), new Uint8Array(40)),
+      sessionId,
+    )
+
+    expect(storedGet).toHaveBeenCalledWith(victimId)
+    expect(storedSave).not.toHaveBeenCalled()
+    expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(originalId))
+    expect(internal._apiLayer).toBeNull()
+    expect(internal._sendEncryptedMessage).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      true,
+      expect.objectContaining({
+        _: 'rpc_result',
+        reqMsgId: messageId,
+        result: { _: 'mt_rpc_error', errorCode: 400, errorMessage: 'ENCRYPTED_MESSAGE_INVALID' },
+      }),
+      sessionId,
+    )
+  })
+
+  it('returns INTERNAL without changing identity or API layer when the permanent-key lookup fails', async () => {
+    const keyStore: AuthKeyStore = {
+      get: vi.fn().mockRejectedValue(new Error('store unavailable')),
+      save: vi.fn(),
+    }
+    const { session, logger } = createSession(vi.fn(), keyStore)
+    const crypto = new NodeCryptoProvider()
+    const internal = session as unknown as {
+      _permAuthKey: ServerAuthKey
+      _tempAuthKey: ServerAuthKey | null
+      _apiLayer: number | null
+      _handleRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    const currentKey = Uint8Array.from({ length: 256 }, (_, index) => index)
+    const requestedKey = Uint8Array.from({ length: 256 }, (_, index) => (index + 1) & 0xff)
+    const originalId = new Uint8Array(crypto.sha1(currentKey).subarray(-8))
+    internal._permAuthKey.setup(currentKey)
+    internal._tempAuthKey = new ServerAuthKey(crypto, logger as unknown as Logger, getServerReaderMap())
+    internal._tempAuthKey.setup(Uint8Array.from({ length: 256 }, (_, index) => (index + 2) & 0xff))
+    const messageId = Long.fromInt(20)
+    const sessionId = Long.fromInt(21)
+
+    await internal._handleRpcCall(
+      messageId,
+      wrappedBindRequest(Long.fromBytesLE(Array.from(crypto.sha1(requestedKey).subarray(-8))), new Uint8Array(40)),
+      sessionId,
+    )
+
+    expect(keyStore.save).not.toHaveBeenCalled()
+    expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(originalId))
+    expect(internal._apiLayer).toBeNull()
+    expect(internal._sendEncryptedMessage).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      true,
+      expect.objectContaining({
+        result: { _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL' },
+      }),
+      sessionId,
+    )
+  })
+
+  it('returns INTERNAL without committing a candidate identity when temp-key persistence fails', async () => {
+    const crypto = new NodeCryptoProvider()
+    const currentKey = Uint8Array.from({ length: 256 }, (_, index) => index)
+    const candidateKey = Uint8Array.from({ length: 256 }, (_, index) => (index + 1) & 0xff)
+    const candidateId = new Uint8Array(crypto.sha1(candidateKey).subarray(-8))
+    const keyStore: AuthKeyStore = {
+      get: vi.fn().mockResolvedValue({ key: candidateKey, apiLayer: 220 }),
+      save: vi.fn().mockRejectedValue(new Error('store unavailable')),
+    }
+    const { session, logger } = createSession(vi.fn(), keyStore)
+    const internal = session as unknown as {
+      _permAuthKey: ServerAuthKey
+      _tempAuthKey: ServerAuthKey | null
+      _apiLayer: number | null
+      _verifyBindInner: ReturnType<typeof vi.fn>
+      _handleRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    const originalId = new Uint8Array(crypto.sha1(currentKey).subarray(-8))
+    internal._permAuthKey.setup(currentKey)
+    internal._tempAuthKey = new ServerAuthKey(crypto, logger as unknown as Logger, getServerReaderMap())
+    internal._tempAuthKey.setup(Uint8Array.from({ length: 256 }, (_, index) => (index + 2) & 0xff))
+    internal._verifyBindInner = vi.fn().mockReturnValue(true)
+    const messageId = Long.fromInt(30)
+    const sessionId = Long.fromInt(31)
+
+    await internal._handleRpcCall(
+      messageId,
+      wrappedBindRequest(Long.fromBytesLE(Array.from(candidateId)), new Uint8Array(40)),
+      sessionId,
+    )
+
+    expect(keyStore.save).toHaveBeenCalledOnce()
+    expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(originalId))
+    expect(internal._apiLayer).toBeNull()
+    expect(internal._sendEncryptedMessage).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      true,
+      expect.objectContaining({
+        result: { _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL' },
+      }),
+      sessionId,
+    )
+  })
+
+  it('serializes competing binds before a following RPC observes the final identity', async () => {
+    const crypto = new NodeCryptoProvider()
+    const currentKey = Uint8Array.from({ length: 256 }, (_, index) => index)
+    const firstKey = Uint8Array.from({ length: 256 }, (_, index) => (index + 1) & 0xff)
+    const secondKey = Uint8Array.from({ length: 256 }, (_, index) => (index + 2) & 0xff)
+    const firstId = new Uint8Array(crypto.sha1(firstKey).subarray(-8))
+    const secondId = new Uint8Array(crypto.sha1(secondKey).subarray(-8))
+    const saved: Array<{ id: Uint8Array, permanentKeyId: Uint8Array | undefined }> = []
+    let releaseFirstSave!: () => void
+    const firstSave = new Promise<void>((resolve) => { releaseFirstSave = resolve })
+    let markFirstSave!: () => void
+    const firstSaveStarted = new Promise<void>((resolve) => { markFirstSave = resolve })
+    const keyStore: AuthKeyStore = {
+      get: vi.fn((id: Uint8Array) => {
+        if (Array.from(id).join() === Array.from(firstId).join()) return { key: firstKey }
+        if (Array.from(id).join() === Array.from(secondId).join()) return { key: secondKey }
+        return undefined
+      }),
+      save: vi.fn((id, record) => {
+        saved.push({ id: new Uint8Array(id), permanentKeyId: record.permanentKeyId })
+        if (saved.length === 1) {
+          markFirstSave()
+          return firstSave
+        }
+      }),
+    }
+    const dispatch = vi.fn().mockResolvedValue({ _: 'boolTrue' })
+    const { session, logger } = createSession(dispatch, keyStore)
+    const internal = session as unknown as {
+      _permAuthKey: ServerAuthKey
+      _tempAuthKey: ServerAuthKey | null
+      _apiLayer: number | null
+      _verifyBindInner: ReturnType<typeof vi.fn>
+      _enqueueRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+    }
+    internal._permAuthKey.setup(currentKey)
+    internal._tempAuthKey = new ServerAuthKey(crypto, logger as unknown as Logger, getServerReaderMap())
+    internal._tempAuthKey.setup(Uint8Array.from({ length: 256 }, (_, index) => (index + 3) & 0xff))
+    internal._apiLayer = 220
+    internal._verifyBindInner = vi.fn().mockReturnValue(true)
+    const sessionId = Long.fromInt(40)
+    const bind = (id: Uint8Array) => ({
+      _: 'auth.bindTempAuthKey',
+      permAuthKeyId: Long.fromBytesLE(Array.from(id)),
+      nonce: Long.fromInt(41),
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      encryptedMessage: new Uint8Array(40),
+    } as never)
+
+    const firstBind = internal._enqueueRpcCall(Long.fromInt(42), bind(firstId), sessionId)
+    await firstSaveStarted
+    const secondBind = internal._enqueueRpcCall(Long.fromInt(43), bind(secondId), sessionId)
+    const followingRpc = internal._enqueueRpcCall(Long.fromInt(44), { _: 'help.getConfig' } as never, sessionId)
+
+    await Promise.resolve()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(keyStore.get).toHaveBeenCalledTimes(1)
+
+    releaseFirstSave()
+    await Promise.all([firstBind, secondBind, followingRpc])
+
+    expect(saved).toHaveLength(2)
+    expect(Array.from(saved[0].permanentKeyId!)).toEqual(Array.from(firstId))
+    expect(Array.from(saved[1].permanentKeyId!)).toEqual(Array.from(secondId))
+    expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(secondId))
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ authKeyId: secondId }),
+      { _: 'help.getConfig' },
+    )
+  })
+})
+
+function createSession(dispatch = vi.fn(), keyStore?: AuthKeyStore): {
   session: ServerSession
   logger: { error: ReturnType<typeof vi.fn>, warn: ReturnType<typeof vi.fn> }
 } {
@@ -395,6 +608,7 @@ function createSession(dispatch = vi.fn()): {
     Long.ZERO,
     { dispatch },
     new AuthKeyDataStore(),
+    keyStore,
   )
   // RPC result serialization and logging are independent of transport
   // encryption. Stub the send boundary so this unit test can exercise the
@@ -409,4 +623,28 @@ function sendRpcError(session: ServerSession, errorCode: number, errorMessage: s
   })._sendRpcResult(Long.fromString('1234', true, 16), {
     _: 'mt_rpc_error', errorCode, errorMessage,
   }, method)
+}
+
+function wrappedBindRequest(permAuthKeyId: Long, encryptedMessage: Uint8Array): never {
+  return {
+    _: 'invokeWithLayer',
+    layer: 220,
+    query: {
+      _: 'initConnection',
+      apiId: 1,
+      deviceModel: 'test',
+      systemVersion: 'test',
+      appVersion: 'test',
+      systemLangCode: 'en',
+      langPack: '',
+      langCode: 'en',
+      query: {
+        _: 'auth.bindTempAuthKey',
+        permAuthKeyId,
+        nonce: Long.fromInt(12),
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        encryptedMessage,
+      },
+    },
+  } as never
 }

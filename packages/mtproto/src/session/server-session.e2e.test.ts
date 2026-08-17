@@ -446,6 +446,31 @@ async function bindTempAuthKey(
   expect(await readRpcResult(client, temp)).toEqual({ _: 'boolTrue' })
 }
 
+async function sendForgedBindTempAuthKey(
+  client: TestClient,
+  victim: ClientKey,
+  attacker: ClientKey,
+  temp: ClientKey,
+  sessionId: Long,
+  wrapper: 'bare' | 'initialized' | 'gzip',
+): Promise<void> {
+  const bindRequest = {
+    _: 'auth.bindTempAuthKey',
+    permAuthKeyId: Long.fromBytesLE(Array.from(victim.authKeyId)),
+    nonce: Long.fromBytesLE(Array.from(crypto.randomBytes(8))),
+    expiresAt: nowSec() + 3600,
+    // This claims the victim's permanent identity, but is sealed by the
+    // attacker's key and therefore cannot prove possession of the victim key.
+    encryptedMessage: u8.concat3(attacker.authKeyId, crypto.randomBytes(16), crypto.randomBytes(16)),
+  }
+  const request = wrapper === 'initialized'
+    ? serializeInitializedRpc(bindRequest)
+    : wrapper === 'gzip'
+      ? invokeWithLayerPacked(bindRequest, gzipSync)
+      : TlBinaryWriter.serializeObject(__tlWriterMap, bindRequest as { _: string })
+  await client.send(clientEncrypt(temp, request, temp.salt, sessionId, 4))
+}
+
 /** Decrypt a server→client message, returning the inner object reader positioned at the body. */
 function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap = __tlReaderMap): TlBinaryReader {
   expect(typed.equal(data.subarray(0, 8), key.authKeyId)).toBe(true)
@@ -1380,6 +1405,72 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       const config = await readRpcResult(client, temp)
       expect(config._).toBe('config')
       client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it.each([
+    ['bare', 'bare'],
+    ['initConnection', 'initialized'],
+    ['gzip_packed', 'gzip'],
+  ] as const)('rejects a forged %s temp-key bind without persisting it or switching to the victim identity', async (_name, wrapper) => {
+    await crypto.initialize?.()
+    const storePath = join(mkdtempSync(join(tmpdir(), 'mtproto-forged-bind-')), 'auth-keys.json')
+    const store = new FileAuthKeyStore(storePath)
+    const { port, pubKey, register, stop } = await startServer(undefined, { authKeyStore: store })
+    const rpcAuthKeyIds: Array<Uint8Array | null> = []
+    register('help.getAppConfig', async (rpc) => {
+      rpcAuthKeyIds.push(rpc.authKeyId ? new Uint8Array(rpc.authKeyId) : null)
+      return { _: 'help.appConfig', hash: 1, config: { _: 'jsonObject', value: [] } }
+    })
+    try {
+      const victimClient = await TestClient.connect(port)
+      const victim = await doClientHandshake(victimClient, pubKey, false)
+      const victimSessionId = new Long(0x45454545, 0x45454545)
+      await victimClient.send(clientEncrypt(
+        victim,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        victim.salt,
+        victimSessionId,
+        4,
+      ))
+      expect(await readRpcResult(victimClient, victim)).toMatchObject({ _: 'config', thisDc: 1 })
+      expect(store.get(victim.authKeyId)).toMatchObject({ key: victim.authKey })
+      victimClient.close()
+
+      const attackerClient = await TestClient.connect(port)
+      const attacker = await doClientHandshake(attackerClient, pubKey, false)
+      const temp = await doClientHandshake(attackerClient, pubKey, true)
+      const sessionId = new Long(0x56565656, 0x56565656)
+      await sendForgedBindTempAuthKey(attackerClient, victim, attacker, temp, sessionId, wrapper)
+
+      expect(await readRpcResult(attackerClient, temp)).toEqual({
+        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'ENCRYPTED_MESSAGE_INVALID',
+      })
+      expect(store.get(temp.authKeyId)).toBeUndefined()
+
+      const bareRequest = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'help.getAppConfig', hash: 0,
+      } as { _: string })
+      await attackerClient.send(clientEncrypt(temp, bareRequest, temp.salt, sessionId, 8))
+      expect(await readRpcResult(attackerClient, temp)).toEqual({
+        _: 'mt_rpc_error', errorCode: 400, errorMessage: 'CONNECTION_NOT_INITED',
+      })
+
+      await attackerClient.send(clientEncrypt(
+        temp,
+        serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }),
+        temp.salt,
+        sessionId,
+        12,
+      ))
+      expect(await readRpcResult(attackerClient, temp)).toMatchObject({ _: 'help.appConfig', hash: 1 })
+      expect(rpcAuthKeyIds).toHaveLength(1)
+      expect(rpcAuthKeyIds[0]).not.toBeNull()
+      expect(typed.equal(rpcAuthKeyIds[0]!, victim.authKeyId)).toBe(false)
+      expect(typed.equal(rpcAuthKeyIds[0]!, attacker.authKeyId)).toBe(true)
+      attackerClient.close()
     } finally {
       await stop()
     }

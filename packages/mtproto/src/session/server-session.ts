@@ -100,6 +100,7 @@ const MAX_COMPLETED_MESSAGE_IDS = 4096
 // Calls received after one of them must not observe the old authorization
 // state, but unrelated API calls may execute concurrently.
 const AUTHORIZATION_TRANSITION_METHODS = new Set([
+  'auth.bindTempAuthKey',
   'auth.signIn',
   'auth.importAuthorization',
   'auth.exportLoginToken',
@@ -692,9 +693,7 @@ export class ServerSession {
         break
 
       case 'auth.bindTempAuthKey':
-        await this._handleBindTempAuthKey(
-          msgId, obj as unknown as tl.auth.RawBindTempAuthKeyRequest, clientSessionId,
-        )
+        await this._enqueueRpcCall(msgId, obj as unknown as tl.RpcMethod, clientSessionId)
         break
 
       default:
@@ -918,46 +917,75 @@ export class ServerSession {
    * Handle auth.bindTempAuthKey — binds the temporary (PFS) key to the permanent
    * key. The request arrives encrypted with the temp key; its `encryptedMessage`
    * is a `bind_auth_key_inner` sealed with the *permanent* key using the old
-   * MTProto message encryption. We decrypt and verify it, then reply boolTrue.
+   * MTProto message encryption. Verify the requested permanent key before making
+   * it this session's identity or persisting the temporary-key association.
    */
   private async _handleBindTempAuthKey(
     msgId: Long,
     req: tl.auth.RawBindTempAuthKeyRequest,
     clientSessionId: Long,
+    apiLayer: number | null = null,
   ): Promise<void> {
     const permanentId = longToBytesLE(req.permAuthKeyId)
-    if (!this._permAuthKey.match(permanentId)) {
-      const permanent = await this._keyStore?.get(permanentId)
-      if (permanent && !permanent.permanentKeyId) {
-        const replacedFreshKey = this._permAuthKey.ready
-        this._permAuthKey.setup(permanent.key)
-        if (permanent.apiLayer !== undefined) this._setApiLayer(permanent.apiLayer, false)
-        this._log.info(
-          replacedFreshKey
-            ? 'replaced fresh permanent key with requested key %h for temp-key binding'
-            : 'loaded permanent key %h for direct temp-key binding',
-          this._permAuthKey.id,
-        )
-      }
-    }
-    const ok = this._verifyBindInner(req)
-    if (ok) {
+    let candidate: ServerAuthKey | null = this._permAuthKey.match(permanentId)
+      ? this._permAuthKey
+      : null
+    let storedPermanent: StoredAuthKey | undefined
+
+    if (!candidate) {
       try {
-        await this._keyStore?.save(this._tempAuthKey!.id, {
-          key: this._tempAuthKey!.key,
-          permanentKeyId: new Uint8Array(this._permAuthKey.id),
-          expiresAt: req.expiresAt,
-        })
+        storedPermanent = await this._keyStore?.get(permanentId)
       } catch (err) {
-        this._log.warn('failed to persist bound temp auth key: %s', err instanceof Error ? err.message : err)
+        this._log.warn('failed to load permanent auth key for temp-key binding: %s', err instanceof Error ? err.message : err)
+        this._sendRpcResult(msgId, {
+          _: 'mt_rpc_error',
+          errorCode: 500,
+          errorMessage: 'INTERNAL',
+        } as mtp.RawMt_rpc_error, 'auth.bindTempAuthKey', clientSessionId)
+        return
       }
-      this._log.info('temp key bound to perm key (temp id = %h)', this._tempAuthKey?.id)
-    } else {
-      this._log.warn('bindTempAuthKey verification failed, replying boolTrue anyway')
+      if (storedPermanent && !storedPermanent.permanentKeyId) {
+        const storedCandidate = new ServerAuthKey(this._crypto, this._log, this._readerMap)
+        storedCandidate.setup(storedPermanent.key)
+        if (storedCandidate.match(permanentId)) candidate = storedCandidate
+      }
     }
-    // Reply boolTrue — Telegram Desktop only needs this to consider the temp key
-    // bound. `boolTrue` is a bare Bool that mtcute's writer map can't serialize
-    // as an object, so build the rpc_result manually: id(4) + req_msg_id(8) + boolTrue(4).
+
+    if (!candidate || !this._verifyBindInner(req, candidate)) {
+      this._log.warn('bindTempAuthKey verification failed')
+      this._sendRpcResult(msgId, {
+        _: 'mt_rpc_error',
+        errorCode: 400,
+        errorMessage: 'ENCRYPTED_MESSAGE_INVALID',
+      } as mtp.RawMt_rpc_error, 'auth.bindTempAuthKey', clientSessionId)
+      return
+    }
+
+    try {
+      await this._keyStore?.save(this._tempAuthKey!.id, {
+        key: this._tempAuthKey!.key,
+        permanentKeyId: new Uint8Array(candidate.id),
+        expiresAt: req.expiresAt,
+      })
+    } catch (err) {
+      this._log.warn('failed to persist bound temp auth key: %s', err instanceof Error ? err.message : err)
+      this._sendRpcResult(msgId, {
+        _: 'mt_rpc_error',
+        errorCode: 500,
+        errorMessage: 'INTERNAL',
+      } as mtp.RawMt_rpc_error, 'auth.bindTempAuthKey', clientSessionId)
+      return
+    }
+
+    if (candidate !== this._permAuthKey) {
+      this._permAuthKey.setup(candidate.key)
+      if (storedPermanent?.apiLayer !== undefined) this._setApiLayer(storedPermanent.apiLayer, false)
+      this._log.info('loaded permanent key %h for temp-key binding', this._permAuthKey.id)
+    }
+    if (apiLayer !== null) this._setApiLayer(apiLayer)
+    this._log.info('temp key bound to perm key (temp id = %h)', this._tempAuthKey?.id)
+    // `boolTrue` is a bare Bool that mtcute's writer map can't serialize as an
+    // object, so build the rpc_result manually: id(4) + req_msg_id(8) + boolTrue(4).
     const writer = TlBinaryWriter.manual(4 + 8 + 4)
     writer.uint(RPC_RESULT_ID)
     writer.long(msgId)
@@ -968,29 +996,24 @@ export class ServerSession {
     this._log.verbose('>>> rpc_result boolTrue for bindTempAuthKey %s', msgId.toString(16))
   }
 
-  /**
-   * Decrypt and verify the `encrypted_message` from auth.bindTempAuthKey.
-   * Returns true if the binding is consistent. Verification is best-effort:
-   * a mismatch is logged but does not abort the bind (the client only cares
-   * about the boolTrue reply).
-   */
-  private _verifyBindInner(req: tl.auth.RawBindTempAuthKeyRequest): boolean {
+  /** Decrypt and verify the `encrypted_message` from auth.bindTempAuthKey. */
+  private _verifyBindInner(req: tl.auth.RawBindTempAuthKeyRequest, permanent: ServerAuthKey): boolean {
     try {
-      if (!this._permAuthKey.ready || !this._tempAuthKey?.ready) return false
+      if (!permanent.ready || !this._tempAuthKey?.ready) return false
 
       const enc = req.encryptedMessage
       if (enc.length < 24 + 16) return false
 
       const keyId = enc.subarray(0, 8)
-      if (!typed.equal(keyId, this._permAuthKey.id)) {
-        this._log.warn('bindTempAuthKey: encrypted_message key id %h != perm key id %h', keyId, this._permAuthKey.id)
+      if (!typed.equal(keyId, permanent.id)) {
+        this._log.warn('bindTempAuthKey: encrypted_message key id %h != perm key id %h', keyId, permanent.id)
         return false
       }
 
       const msgKey = enc.subarray(8, 24)
       const encData = enc.subarray(24)
       // The client encrypts with the OLD MTProto message scheme, client=true.
-      const ige = createAesIgeForMessageOld(this._crypto, this._permAuthKey.key, msgKey, true)
+      const ige = createAesIgeForMessageOld(this._crypto, permanent.key, msgKey, true)
       const dec = ige.decrypt(encData)
       if (dec.length < 32) return false
 
@@ -1015,7 +1038,7 @@ export class ServerSession {
       const bind = inner as mtp.RawMt_bind_auth_key_inner
 
       const tempIdOk = typed.equal(longToBytesLE(bind.tempAuthKeyId), this._tempAuthKey.id)
-      const permIdOk = typed.equal(longToBytesLE(bind.permAuthKeyId), this._permAuthKey.id)
+      const permIdOk = typed.equal(longToBytesLE(bind.permAuthKeyId), permanent.id)
       const nonceOk = bind.nonce.eq(req.nonce)
       const expiryOk = bind.expiresAt === req.expiresAt
         && req.expiresAt > Math.floor(Date.now() / 1000)
@@ -1070,10 +1093,24 @@ export class ServerSession {
     request: tl.RpcMethod,
     clientSessionId: Long,
   ): Promise<void> {
+    const unwrapped = unwrapRpcRequest(request)
+
+    // A wrapped bind must prove the requested permanent identity before its
+    // invokeWithLayer value can affect this session. The bare form is handled
+    // in _processDecryptedMessage; wrapped binds arrive here after unwrapping.
+    if (unwrapped.request._ === 'auth.bindTempAuthKey') {
+      await this._handleBindTempAuthKey(
+        msgId,
+        unwrapped.request as tl.auth.RawBindTempAuthKeyRequest,
+        clientSessionId,
+        unwrapped.apiLayer,
+      )
+      return
+    }
+
     // invokeWithLayer is the one authoritative source of the client's API layer.
     // Capture it on the MTProto session before constructing the handler context
     // or serializing this request's response. Later unwrapped requests reuse it.
-    const unwrapped = unwrapRpcRequest(request)
     if (
       unwrapped.request._ === 'updates.getState'
       || unwrapped.request._ === 'updates.getDifference'
@@ -1106,21 +1143,6 @@ export class ServerSession {
         errorCode: 500,
         errorMessage: 'MSG_WAIT_FAILED',
       } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
-      return
-    }
-
-    // TDLib sends auth.bindTempAuthKey through the same invokeWithLayer /
-    // initConnection / gzip_packed envelopes as ordinary API calls. The bare
-    // form is handled in _processDecryptedMessage, but a wrapped bind reaches
-    // this RPC path after its envelopes are removed. Keep it inside the
-    // session because it mutates MTProto key state and must never be delegated
-    // to an application-level RPC handler.
-    if (unwrapped.request._ === 'auth.bindTempAuthKey') {
-      await this._handleBindTempAuthKey(
-        msgId,
-        unwrapped.request as tl.auth.RawBindTempAuthKeyRequest,
-        clientSessionId,
-      )
       return
     }
 
