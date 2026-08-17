@@ -22,16 +22,16 @@
     "schemastery": "^3.18.0"
   },
   "devDependencies": {
-    "@cordisjs/plugin-database": "^4.0.0",
+    "@cordisjs/plugin-database": "^4.1.1",
     "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch",
     "@cordisjs/plugin-http": "patch:@cordisjs/plugin-http@npm%3A1.5.1#~/.yarn/patches/@cordisjs-plugin-http-npm-1.5.1-ce3c6bdf99.patch",
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch",
     "@satorijs/core": "^4.6.0",
     "@satorijs/plugin-server": "patch:@satorijs/plugin-server@npm%3A2.9.1#~/.yarn/patches/@satorijs-plugin-server-npm-2.9.1-7c53ae5ba4.patch",
     "@types/ws": "^8.18.1",
-    "cordis": "^4.0.0-rc.5",
-    "vitest": "^2.1.9",
-    "ws": "^8.18.0"
+    "cordis": "4.0.0-rc.7",
+    "vitest": "^4.1.10",
+    "ws": "^8.21.3"
   },
   "scripts": {
     "test": "vitest run",

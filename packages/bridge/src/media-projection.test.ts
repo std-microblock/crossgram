@@ -298,12 +298,15 @@ describe('rich-media projection', () => {
       kind: 'file', name: 'voice.ogg', mimeType: 'audio/ogg', size: 42, width: null, height: null,
       duration: 7, voice: true, preview: null, strippedThumbnail: null, locator: { remote: 'voice' },
     }, 1)) as tl.RawMessageMediaDocument
-    expect(projected).toMatchObject({
-      _: 'messageMediaDocument', document: {
-        _: 'document', mimeType: 'audio/ogg', size: 42,
-        attributes: expect.arrayContaining([{ _: 'documentAttributeAudio', voice: true, duration: 7 }]),
-      },
-    })
+    expect(projected._).toBe('messageMediaDocument')
+    const document = projected.document
+    expect(document._).toBe('document')
+    if (document._ !== 'document') throw new Error('voice media should deserialize to a document')
+    expect(document.mimeType).toBe('audio/ogg')
+    expect(document.size).toBe(42)
+    const audio = document.attributes.find((attribute) => attribute._ === 'documentAttributeAudio') as tl.RawDocumentAttributeAudio | undefined
+    expect(audio?.voice).toBe(true)
+    expect(audio?.duration).toBe(7)
   })
 
   it('returns sticker/reaction direct URLs and leaves stream-only assets on upload.getFile fallback', async () => {

@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@cordisjs/plugin-database": "^4.0.0",
+    "@cordisjs/plugin-database": "^4.1.1",
     "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch",
-    "@cordisjs/plugin-http": "^1.5.0",
-    "@cordisjs/plugin-loader": "^1.0.0-rc.4",
+    "@cordisjs/plugin-http": "^1.5.1",
+    "@cordisjs/plugin-loader": "^1.0.0-rc.5",
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch",
-    "@cordisjs/plugin-webui": "^0.8.1",
+    "@cordisjs/plugin-webui": "^0.8.2",
     "@fuman/io": "^0.0.20",
     "@fuman/utils": "^0.0.20",
     "@mtcute/core": "^0.30.3",
@@ -24,8 +24,8 @@
     "@mtproto-relay/satori-exporter": "workspace:*",
     "@mtproto-relay/telegram-resources": "workspace:*",
     "@satorijs/core": "^4.6.0",
-    "cordis": "^4.0.0-rc.5",
-    "long": "^5.3.0",
-    "node-telegram-bot-api": "2.0.0-alpha.3"
+    "cordis": "4.0.0-rc.7",
+    "long": "^5.3.2",
+    "node-telegram-bot-api": "^1.2.0"
   }
 }

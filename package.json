@@ -38,15 +38,15 @@
     "prepare": "husky"
   },
   "devDependencies": {
-    "@cordisjs/client": "^0.8.1",
+    "@cordisjs/client": "^0.8.2",
     "@cordisjs/unyaml": "^2.0.3",
-    "@types/node": "^25.3.5",
+    "@types/node": "^26.2.0",
     "cross-env": "^10.1.0",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.2",
     "husky": "^9.1.7",
     "tsx": "npm:@cordiverse/tsx@4.19.3-fix.3",
     "typescript": "^5.9.3",
-    "vitest": "^2.1.9",
+    "vitest": "^4.1.10",
     "yakumo": "^3.2.1",
     "yakumo-esbuild": "^3.0.2",
     "yakumo-tsc": "^3.0.1"
@@ -54,7 +54,7 @@
   "dependencies": {
     "@cordisjs/plugin-cli": "^1.1.2",
     "@cordisjs/plugin-cli-cordis": "^1.0.5",
-    "@cordisjs/plugin-database": "^4.0.2",
+    "@cordisjs/plugin-database": "^4.1.1",
     "@cordisjs/plugin-database-sqlite": "patch:@cordisjs/plugin-database-sqlite@npm%3A5.1.1#~/.yarn/patches/@cordisjs-plugin-database-sqlite-npm-5.1.1-4045a03a61.patch",
     "@cordisjs/plugin-database-webui": "^0.5.0",
     "@cordisjs/plugin-env": "^1.0.1",
@@ -65,7 +65,7 @@
     "@cordisjs/plugin-http-webui": "^0.5.0",
     "@cordisjs/plugin-include": "^1.0.4",
     "@cordisjs/plugin-insight": "^4.5.1",
-    "@cordisjs/plugin-loader": "^1.0.0-rc.4",
+    "@cordisjs/plugin-loader": "^1.0.0-rc.5",
     "@cordisjs/plugin-loader-webui": "^0.10.1",
     "@cordisjs/plugin-logger-console": "^1.0.0",
     "@cordisjs/plugin-logger-webui": "^0.6.1",
@@ -74,16 +74,16 @@
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch",
     "@cordisjs/plugin-server-acl": "^1.0.1",
     "@cordisjs/plugin-server-webui": "^0.5.0",
-    "@cordisjs/plugin-sso": "^0.2.2",
+    "@cordisjs/plugin-sso": "^0.2.3",
     "@cordisjs/plugin-sso-oauth": "^0.2.3",
     "@cordisjs/plugin-sso-password": "^0.2.2",
     "@cordisjs/plugin-sso-server": "^0.2.2",
     "@cordisjs/plugin-timer": "^1.1.2",
-    "@cordisjs/plugin-webui": "^0.8.1",
+    "@cordisjs/plugin-webui": "^0.8.2",
     "@cordisjs/plugin-webui-sso": "^0.2.6",
     "@satorijs/core": "patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch",
     "@satorijs/plugin-server": "patch:@satorijs/plugin-server@npm%3A2.9.1#~/.yarn/patches/@satorijs-plugin-server-npm-2.9.1-7c53ae5ba4.patch",
-    "cordis": "^4.0.0-rc.5"
+    "cordis": "4.0.0-rc.7"
   },
   "repository": {
     "type": "git",

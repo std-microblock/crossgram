@@ -7,7 +7,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
-import { Bot } from 'node-telegram-bot-api'
+import Bot from 'node-telegram-bot-api'
 import { defineModels, IMPlatformService, SystemPeerService, type IMEvent, type IMMessage, type PlatformSession } from '@mtproto-relay/bridge'
 import * as telegramBotApi from './index.js'
 
@@ -148,12 +148,12 @@ describe('dynamic Telegram Bot API', () => {
       return originalFetch(input, init)
     }))
     await fetch(endpoint(fixture, 'getMe'))
-    const bot = new Bot(fixture.token, { apiRoot: fixture.ctx.server.baseUrl })
-    bot.on('message', async (event) => { await event.reply(`echo: ${event.message!.text}`) })
+    const bot = new Bot(fixture.token, { baseApiUrl: fixture.ctx.server.baseUrl })
+    bot.on('message', async (message) => { await bot.sendMessage(message.chat.id, `echo: ${message.text}`) })
     const polling = bot.startPolling()
     try {
       await userMessage(fixture, 'SDK')
       await vi.waitFor(() => expect(fixture.events.some((event) => event.type === 'message' && event.message.outgoing === false && (event.message.content.parts[0] as { text: string }).text === 'echo: SDK')).toBe(true), { timeout: 10_000, interval: 25 })
-    } finally { bot.stop(); await polling }
+    } finally { await bot.stopPolling(); await polling }
   }, 15_000)
 })

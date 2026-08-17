@@ -166,7 +166,8 @@ describe('Bridge platform account page', () => {
       { platformId: 'static/demo', platformKind: 'static', status: 'ready', displayName: 'Static Demo' },
     ]
     qrState.result = { data: telegramQr() }
-    vi.spyOn(window, 'prompt').mockReturnValue('2')
+    const prompt = vi.fn(() => '2')
+    vi.stubGlobal('prompt', prompt)
     const wrapper = mountPlatformAccountsPage()
     stubImageDecoder()
 
@@ -174,7 +175,7 @@ describe('Bridge platform account page', () => {
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/login-tokens/static%2Fdemo/approve', expect.objectContaining({
       body: JSON.stringify({ token: telegramQr() }),
     })))
-    expect(window.prompt).toHaveBeenCalledWith(expect.stringContaining('QQ Alice'), '1')
+    expect(prompt).toHaveBeenCalledWith(expect.stringContaining('QQ Alice'), '1')
     wrapper.unmount()
   })
 

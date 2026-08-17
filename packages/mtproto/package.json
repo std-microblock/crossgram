@@ -15,7 +15,7 @@
     "@mtcute/node": "^0.30.3",
     "@mtcute/tl-runtime": "^0.30.3",
     "@mtcute/tl-utils": "^0.30.3",
-    "long": "^5.3.0",
+    "long": "^5.3.2",
     "schemastery": "^3.18.0"
   }
 }

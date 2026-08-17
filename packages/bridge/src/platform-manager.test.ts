@@ -9,6 +9,7 @@ import { defineModels } from './models.js'
 import { MessageStore } from './message-store.js'
 import {
   IMPlatformService, migrateQualifiedPlatformIds, PlatformDataService, PlatformRegistry, PlatformSubscriptionManager,
+  type CommittedPlatformEvent,
 } from './platform-manager.js'
 import { UpdateManager } from './update-manager.js'
 import type {
@@ -904,7 +905,7 @@ describe('IMPlatformService', () => {
           updatedAt: new Date(),
         },
       },
-    })
+    } as CommittedPlatformEvent)
     service.deactivateSession('push', first)
     expect(service.sessions).toEqual([{ registrationId: 'push', platform: second, session: replacement }])
     service.deactivateSession('push', second)

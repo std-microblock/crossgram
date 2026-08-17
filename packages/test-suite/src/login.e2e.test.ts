@@ -15,7 +15,7 @@ import { LogManager, generateKeyAndIvFromNonce, createAesIgeForMessage, findKeyB
 import { NodePlatform } from '@mtcute/node'
 import { ObfuscatedPacketCodec } from '@mtcute/core'
 import Long from 'long'
-import { Bot } from 'node-telegram-bot-api'
+import Bot from 'node-telegram-bot-api'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -579,18 +579,20 @@ describe('BotFather physical MTProto e2e', () => {
       let replyFailed!: (error: unknown) => void
       let received = 0
       const reply = new Promise<void>((resolve, reject) => { replySent = resolve; replyFailed = reject })
-      sdk = new Bot(token, { apiRoot: ctx.server.baseUrl, fetch: guardedFetch })
-      sdk.on('message', async (event) => {
+      const pollingErrors = vi.fn()
+      sdk = new Bot(token, { baseApiUrl: ctx.server.baseUrl, request: { fetch: guardedFetch }, polling: { params: { timeout: 1 } } })
+      sdk.on('polling_error', pollingErrors)
+      sdk.on('message', async (message) => {
         try {
           received++
-          expect(event.message?.text).toBe('physical hello')
-          await event.reply('echo: physical hello')
+          expect(message.text).toBe('physical hello')
+          await sdk.sendMessage(message.chat.id, 'echo: physical hello')
           replySent()
         } catch (error) { replyFailed(error) }
       })
-      polling = sdk.startPolling(undefined, { timeout: 1, retry: false })
+      polling = sdk.startPolling()
       await firstPollingRequest
-      expect(sdk.isRunning()).toBe(true)
+      expect(sdk.isPolling()).toBe(true)
 
       nativeSendMessage = vi.spyOn(ctx.imPlatform.require('static'), 'sendMessage')
       await rpc({
@@ -610,12 +612,14 @@ describe('BotFather physical MTProto e2e', () => {
 
       await sendToFather('/token physical_e2e_bot', 1005)
       const replacementToken = await readToken()
-      await expect(polling).rejects.toMatchObject({ errorCode: 401 })
-      expect(sdk.isRunning()).toBe(false)
-      const replacement = new Bot(replacementToken, { apiRoot: ctx.server.baseUrl, fetch: guardedFetch })
-      await expect(replacement.api.getMe()).resolves.toMatchObject({ username: 'physical_e2e_bot' })
+      await expect(polling).resolves.toBeUndefined()
+      await vi.waitFor(() => expect(pollingErrors).toHaveBeenCalledWith(expect.objectContaining({ code: 'ETELEGRAM' })))
+      expect(sdk.isPolling()).toBe(true)
+      await sdk.stopPolling()
+      const replacement = new Bot(replacementToken, { baseApiUrl: ctx.server.baseUrl, request: { fetch: guardedFetch } })
+      await expect(replacement.getMe()).resolves.toMatchObject({ username: 'physical_e2e_bot' })
       await sendToFather('/revoke physical_e2e_bot', 1006)
-      await expect(replacement.api.getMe()).rejects.toMatchObject({ errorCode: 401 })
+      await expect(replacement.getMe()).rejects.toMatchObject({ response: { status: 401 } })
 
       const fatherHistory = await getFatherHistory()
       const messages = await ctx.database.get('mtproto_im_message', {})
@@ -630,7 +634,7 @@ describe('BotFather physical MTProto e2e', () => {
       expect(JSON.stringify(difference)).toContain(replacementToken)
     } finally {
       nativeSendMessage?.mockRestore()
-      sdk?.stop()
+      await sdk?.stopPolling()
       await polling?.catch(() => {})
       client?.close()
       await stop()

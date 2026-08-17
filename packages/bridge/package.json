@@ -31,17 +31,17 @@
     "@mtproto-relay/mtproto": "workspace:*",
     "jsqr": "^1.4.0",
     "linkify-it": "^6.1.0",
-    "long": "^5.3.0",
+    "long": "^5.3.2",
     "schemastery": "^3.18.0",
     "tlds": "^1.261.0"
   },
   "devDependencies": {
-    "@cordisjs/client": "^0.8.1",
+    "@cordisjs/client": "^0.8.2",
     "@fuman/io": "^0.0.20",
     "@fuman/utils": "^0.0.20",
     "@mtcute/node": "^0.30.3",
-    "@vue/test-utils": "^2.4.6",
-    "happy-dom": "^18.0.1",
-    "vue": "^3.5.33"
+    "@vue/test-utils": "^2.4.11",
+    "happy-dom": "^20.11.2",
+    "vue": "^3.5.41"
   }
 }
