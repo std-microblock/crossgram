@@ -7,7 +7,7 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import {
-  RpcDispatcher, isBareVector, type RpcResult, type ServerRpcContext,
+  isBareVector, type RpcResult, type ServerRpcContext,
 } from '@mtproto-relay/mtproto'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { DialogRpc, stableId } from './dialogs.js'
@@ -15,6 +15,7 @@ import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
+import { createCordisRpcTestHarness, type CordisRpcTestHarness } from './rpc-test-harness.js'
 import { UpdateManager } from './update-manager.js'
 
 const RPC_RESULT_ID = 0xf35c6d01
@@ -46,25 +47,25 @@ function makeContext(): ServerRpcContext {
   }
 }
 
-function dispatcherFor(dialogs: DialogRpc): RpcDispatcher {
-  const dispatcher = new RpcDispatcher()
-  dispatcher.register('messages.getDialogs', async (_context, request) =>
+function rpcHarnessFor(dialogs: DialogRpc): CordisRpcTestHarness {
+  const rpcHarness = createCordisRpcTestHarness()
+  rpcHarness.register('messages.getDialogs', async (_context, request) =>
     dialogs.getDialogs(request as tl.messages.RawGetDialogsRequest))
-  dispatcher.register('messages.getHistory', async (_context, request) =>
+  rpcHarness.register('messages.getHistory', async (_context, request) =>
     dialogs.getHistory(request as tl.messages.RawGetHistoryRequest))
-  dispatcher.register('messages.getUnreadMentions', async (_context, request) =>
+  rpcHarness.register('messages.getUnreadMentions', async (_context, request) =>
     dialogs.getUnreadMentions(request as tl.messages.RawGetUnreadMentionsRequest))
-  dispatcher.register('messages.readMentions', async (_context, request) =>
+  rpcHarness.register('messages.readMentions', async (_context, request) =>
     dialogs.readMentions(request as tl.messages.RawReadMentionsRequest))
-  dispatcher.register('channels.readMessageContents', async (_context, request) =>
+  rpcHarness.register('channels.readMessageContents', async (_context, request) =>
     dialogs.readChannelMessageContents(request as tl.channels.RawReadMessageContentsRequest))
-  return dispatcher
+  return rpcHarness
 }
 
-async function roundTripRpc(dispatcher: RpcDispatcher, query: tl.RpcMethod): Promise<unknown> {
+async function roundTripRpc(rpcHarness: CordisRpcTestHarness, query: tl.RpcMethod): Promise<unknown> {
   const requestBytes = TlBinaryWriter.serializeObject(__tlWriterMap, query)
   const decodedRequest = new TlBinaryReader(getServerReaderMap(), requestBytes).object() as tl.RpcMethod
-  const result = await dispatcher.dispatch(makeContext(), decodedRequest)
+  const result = await rpcHarness.dispatch(makeContext(), decodedRequest)
   return decodeRpcResult(encodeRpcResult(Long.fromNumber(0x228), result))
 }
 
@@ -167,8 +168,8 @@ describe('unread mention navigation RPC e2e', () => {
     }
 
     const dialogs = new DialogRpc(platform, session, store)
-    const dispatcher = dispatcherFor(dialogs)
-    const page = await roundTripRpc(dispatcher, {
+    const rpcHarness = rpcHarnessFor(dialogs)
+    const page = await roundTripRpc(rpcHarness, {
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
     }) as tl.messages.RawDialogs
@@ -183,13 +184,13 @@ describe('unread mention navigation RPC e2e', () => {
       // can jump to the earliest outstanding mention.
       offsetId: 1, addOffset: -100, limit: 100, maxId: 0, minId: 0,
     }
-    const unread = await roundTripRpc(dispatcher, request) as tl.messages.RawMessages
+    const unread = await roundTripRpc(rpcHarness, request) as tl.messages.RawMessages
     expect(unread.messages).toMatchObject([
       { _: 'message', message: 'reply ping', mentioned: true, mediaUnread: true },
       { _: 'message', message: '@Current ping', mentioned: true, mediaUnread: true },
     ])
 
-    const history = await roundTripRpc(dispatcher, {
+    const history = await roundTripRpc(rpcHarness, {
       _: 'messages.getHistory', peer, offsetId: 0, offsetDate: 0,
       addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
     }) as tl.messages.RawMessages
@@ -204,13 +205,13 @@ describe('unread mention navigation RPC e2e', () => {
     const replyMessage = unread.messages.find((message): message is tl.RawMessage =>
       message._ === 'message' && message.message === 'reply ping')
     if (!replyMessage) throw new Error('missing unread reply')
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'channels.readMessageContents',
       channel: { _: 'inputChannel', channelId: peer.channelId, accessHash: peer.accessHash },
       id: [replyMessage.id],
     })).resolves.toMatchObject({ _: 'boolTrue' })
 
-    const resumed = dispatcherFor(new DialogRpc(platform, session, store))
+    const resumed = rpcHarnessFor(new DialogRpc(platform, session, store))
     await expect(roundTripRpc(resumed, request)).resolves.toMatchObject({
       messages: [{ message: '@Current ping', mentioned: true, mediaUnread: true }],
     })
@@ -222,7 +223,7 @@ describe('unread mention navigation RPC e2e', () => {
       _: 'messages.readMentions', peer,
     })).resolves.toMatchObject({ _: 'messages.affectedHistory', ptsCount: 0, offset: 0 })
 
-    const acknowledged = dispatcherFor(new DialogRpc(platform, session, store))
+    const acknowledged = rpcHarnessFor(new DialogRpc(platform, session, store))
     await expect(roundTripRpc(acknowledged, request)).resolves.toMatchObject({ messages: [] })
     const acknowledgedHistory = await roundTripRpc(acknowledged, {
       _: 'messages.getHistory', peer, offsetId: 0, offsetDate: 0,

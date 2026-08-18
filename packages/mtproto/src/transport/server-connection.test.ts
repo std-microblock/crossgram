@@ -38,7 +38,6 @@ function mockSocket(overrides: Partial<Record<'write' | 'end' | 'destroy' | 'wri
 /** Build a connection whose transport was already detected (abridged). */
 function makeConnection(socket: Socket): ServerConnection {
   const connection = new ServerConnection(socket, crypto, log)
-  connection.start()
   socket.emit('data', Buffer.from([0xef])) // abridged tag byte
   return connection
 }

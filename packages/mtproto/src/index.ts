@@ -1,9 +1,16 @@
 export { Config, Mtproto, default } from './service.js'
 export type { MtprotoConfig } from './service.js'
 
-export { RpcDispatcher, bareVector, isBareVector, unwrapRpcRequest } from './rpc/dispatcher.js'
-export type { RpcDispatch, RpcHandler, RpcResult, BareBool, BareVector, UnwrappedRpcRequest } from './rpc/dispatcher.js'
-export type { ServerRpcContext } from './rpc/context.js'
+export { bareVector, isBareVector, unwrapRpcRequest } from './rpc/protocol.js'
+export type { RpcHandler, RpcResult, BareBool, BareVector, UnwrappedRpcRequest } from './rpc/protocol.js'
+export { dispatchRpcRoute, invokeRpc, registerRpcRoute } from './rpc/router.js'
+export type {
+  CordisServerRpcContext,
+  MtprotoConnectionScope,
+  MtprotoPacketScope,
+  MtprotoRpcScope,
+  ServerRpcContext,
+} from './rpc/context.js'
 export {
   CURRENT_API_LAYER,
   getApiLayerReaderMap,

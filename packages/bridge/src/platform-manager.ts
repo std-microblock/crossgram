@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
 import type { ServerConnection } from '@mtproto-relay/mtproto'
-import { Service, type Context } from 'cordis'
+import { Context, Service, type Fiber } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
 import { isLocalOnlyConversation, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
@@ -75,10 +75,7 @@ export function resolvePlatformPluginId(ctx: Context, fallback?: string): string
 /** Cordis-owned adapter registry exposed as `ctx.imPlatform`. */
 export class IMPlatformService extends Service {
   readonly registry: PlatformRegistry
-  private readonly _listeners = new Set<PlatformRegistryListener>()
   private readonly _activeSessions = new Map<string, ActivePlatformSession>()
-  private readonly _sessionListeners = new Set<PlatformSessionListener>()
-  private readonly _committedEventListeners = new Set<CommittedPlatformEventListener>()
 
   constructor(ctx: Context) {
     super(ctx, 'imPlatform')
@@ -120,21 +117,17 @@ export class IMPlatformService extends Service {
   }
 
   onSessionChange(listener: PlatformSessionListener): Unsubscribe {
-    return this.ctx.effect(() => {
-      this._sessionListeners.add(listener)
-      return () => this._sessionListeners.delete(listener)
-    }, 'imPlatform.onSessionChange')
+    const dispose = this.ctx.on('im-platform/session', listener)
+    return () => { dispose() }
   }
 
   onCommittedEvent(listener: CommittedPlatformEventListener): Unsubscribe {
-    return this.ctx.effect(() => {
-      this._committedEventListeners.add(listener)
-      return () => this._committedEventListeners.delete(listener)
-    }, 'imPlatform.onCommittedEvent')
+    const dispose = this.ctx.on('im-platform/event-committed', listener)
+    return () => { dispose() }
   }
 
   emitCommittedEvent(session: PlatformSession, event: CommittedPlatformEvent): void {
-    for (const listener of [...this._committedEventListeners]) listener(session, event)
+    this.ctx.emit('im-platform/event-committed', session, event)
   }
 
   /** Register an adapter for the lifetime of the calling Cordis plugin fiber. */
@@ -150,28 +143,55 @@ export class IMPlatformService extends Service {
   }
 
   onChange(listener: PlatformRegistryListener): Unsubscribe {
-    return this.ctx.effect(() => {
-      this._listeners.add(listener)
-      return () => this._listeners.delete(listener)
-    }, 'imPlatform.onChange')
+    const dispose = this.ctx.on('im-platform/change', listener)
+    return () => { dispose() }
   }
 
   private _emit(event: PlatformRegistryEvent, registrationId: string, platform: IMPlatform): void {
-    for (const listener of this._listeners) listener(event, registrationId, platform)
+    this.ctx.emit('im-platform/change', event, registrationId, platform)
   }
 
   private _emitSession(event: PlatformSessionEvent, binding: ActivePlatformSession): void {
-    for (const listener of [...this._sessionListeners]) listener(event, binding)
+    this.ctx.emit('im-platform/session', event, binding)
   }
+}
+
+interface PlatformSessionFiberState {
+  context?: Context
+  tail: Promise<PlatformEventPublishResult>
+  pending: number
+}
+
+interface PlatformSessionFiberConfig {
+  open(ctx: Context): Promise<Unsubscribe>
+}
+
+async function platformSessionFiber(ctx: Context, config: PlatformSessionFiberConfig) {
+  return config.open(ctx)
+}
+
+interface PlatformEventFiberConfig {
+  session: PlatformSession
+  event: IMEvent
+  options?: PlatformEventDeliveryOptions
+  run(ctx: Context): Promise<PlatformEventPublishResult>
+  result?: PlatformEventPublishResult
+}
+
+async function platformEventFiber(ctx: Context, config: PlatformEventFiberConfig) {
+  const eventCtx = ctx.extend({
+    bridgeEvent: { event: config.event, options: config.options },
+  })
+  config.result = await config.run(eventCtx)
 }
 
 /** Owns one durable event subscription per active platform session. */
 export class PlatformSubscriptionManager {
   private readonly _subscriptions = new Map<string, {
     platformId: string
-    pending: Promise<Unsubscribe>
+    fiber: Fiber
+    state: PlatformSessionFiberState
   }>()
-  private readonly _eventQueues = new Map<string, Promise<PlatformEventPublishResult>>()
 
   constructor(
     private readonly _database: Database,
@@ -184,6 +204,7 @@ export class PlatformSubscriptionManager {
       options?: PlatformEventDeliveryOptions,
     ) => PlatformEventPublishResult | Promise<PlatformEventPublishResult>,
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
+    private readonly _ctx: Context = new Context(),
   ) {}
 
   async startActiveSessions(platformId?: string): Promise<void> {
@@ -205,33 +226,45 @@ export class PlatformSubscriptionManager {
   async ensure(session: PlatformSession): Promise<void> {
     const existing = this._subscriptions.get(session.platformSessionId)
     if (existing) {
-      await existing.pending
+      await existing.fiber
       return
     }
     const platform = this._registry.require(session.platformId)
+    const state: PlatformSessionFiberState = { tail: Promise.resolve(), pending: 0 }
     this._onTrace?.(
       'platform subscription start platform=%s session=%s', session.platformId, session.platformSessionId,
     )
-    const pending = platform.subscribe(session, async (event) => {
-      await this._enqueue(session, event)
-    })
-    this._subscriptions.set(session.platformSessionId, { platformId: session.platformId, pending })
-    try {
-      await pending
-      this._onTrace?.(
-        'platform subscription ready platform=%s session=%s', session.platformId, session.platformSessionId,
-      )
-      void this._reconcileSession(platform, session).catch((error) => {
+    const fiber = this._ctx.plugin(platformSessionFiber, {
+      open: async (fiberCtx) => {
+        const sessionCtx = fiberCtx.extend({ bridgeSession: { platform, session } })
+        state.context = sessionCtx
+        const unsubscribe = await platform.subscribe(session, async (event) => {
+          await this._enqueue(session, event)
+        })
         this._onTrace?.(
-          'platform startup reconciliation failed platform=%s session=%s error=%s',
-          session.platformId, session.platformSessionId, formatError(error),
+          'platform subscription ready platform=%s session=%s', session.platformId, session.platformSessionId,
         )
-        this._onError(error, session)
-      })
+        void this._reconcileSession(platform, session).catch((error) => {
+          this._onTrace?.(
+            'platform startup reconciliation failed platform=%s session=%s error=%s',
+            session.platformId, session.platformSessionId, formatError(error),
+          )
+          this._onError(error, session)
+        })
+        return async () => {
+          await state.tail.catch(() => {})
+          await unsubscribe()
+        }
+      },
+    })
+    this._subscriptions.set(session.platformSessionId, { platformId: session.platformId, fiber, state })
+    try {
+      await fiber
     } catch (error) {
-      if (this._subscriptions.get(session.platformSessionId)?.pending === pending) {
+      if (this._subscriptions.get(session.platformSessionId)?.fiber === fiber) {
         this._subscriptions.delete(session.platformSessionId)
       }
+      await fiber.dispose()
       throw error
     }
   }
@@ -289,21 +322,13 @@ export class PlatformSubscriptionManager {
     const selected = [...this._subscriptions.entries()]
       .filter(([, subscription]) => subscription.platformId === platformId)
     for (const [sessionId] of selected) this._subscriptions.delete(sessionId)
-    const unsubscribes = await Promise.allSettled(selected.map(([, subscription]) => subscription.pending))
-    await Promise.allSettled(unsubscribes.map(async (result) => {
-      if (result.status === 'fulfilled') await result.value()
-    }))
+    await Promise.allSettled(selected.map(([, subscription]) => subscription.fiber.dispose()))
   }
 
   async stop(): Promise<void> {
-    const subscriptions = [...this._subscriptions.values()].map((subscription) => subscription.pending)
+    const subscriptions = [...this._subscriptions.values()].map((subscription) => subscription.fiber)
     this._subscriptions.clear()
-    const queues = [...this._eventQueues.values()]
-    await Promise.allSettled(queues)
-    const unsubscribes = await Promise.allSettled(subscriptions)
-    await Promise.allSettled(unsubscribes.map(async (result) => {
-      if (result.status === 'fulfilled') await result.value()
-    }))
+    await Promise.allSettled(subscriptions.map((fiber) => fiber.dispose()))
   }
 
   private _enqueue(
@@ -312,13 +337,41 @@ export class PlatformSubscriptionManager {
     options?: PlatformEventDeliveryOptions,
   ): Promise<PlatformEventPublishResult> {
     const key = session.platformSessionId
+    const subscription = this._subscriptions.get(key)
+    if (!subscription) {
+      return this.ensure(session).then(() => this._enqueue(session, event, options))
+    }
     this._onTrace?.(
       'platform event enqueue platform=%s session=%s %s queued=%s',
-      session.platformId, key, platformEventSummary(event), this._eventQueues.has(key),
+      session.platformId, key, platformEventSummary(event), subscription.state.pending > 0,
     )
-    const previous = this._eventQueues.get(key) ?? Promise.resolve()
-    const current = previous.catch(() => {}).then(() => this._ingestEvent(session, event, options))
-    this._eventQueues.set(key, current)
+    const previous = subscription.state.tail
+    const current = previous.catch(() => {}).then(async () => {
+      const parent = subscription.state.context
+      if (!parent) throw new Error(`platform session fiber is not initialized: ${key}`)
+      const config: PlatformEventFiberConfig = {
+        session,
+        event,
+        options,
+        run: (eventCtx) => eventCtx.waterfall(
+          eventCtx,
+          'bridge/platform-event',
+          session,
+          event,
+          options,
+          () => this._ingestEvent(eventCtx, session, event, options),
+        ),
+      }
+      const fiber = parent.plugin(platformEventFiber, config)
+      try {
+        await fiber
+        return config.result
+      } finally {
+        await fiber.dispose()
+      }
+    })
+    subscription.state.pending++
+    subscription.state.tail = current
     current.catch((error) => {
       this._onTrace?.(
         'platform event failed platform=%s session=%s %s error=%s',
@@ -326,12 +379,14 @@ export class PlatformSubscriptionManager {
       )
       this._onError(error, session)
     }).finally(() => {
-      if (this._eventQueues.get(key) === current) this._eventQueues.delete(key)
+      subscription.state.pending--
+      if (subscription.state.tail === current) subscription.state.tail = Promise.resolve()
     })
     return current
   }
 
   private async _ingestEvent(
+    eventCtx: Context,
     session: PlatformSession,
     event: IMEvent,
     options?: PlatformEventDeliveryOptions,
@@ -345,7 +400,7 @@ export class PlatformSubscriptionManager {
         session.platformId, session.platformSessionId, event.conversation.id, event.message.id,
         result.created, result.changed, result.projection.length,
       )
-      const published = await this._onEvent?.(session, { event, result }, options)
+      const published = await this._publishCommitted(eventCtx, session, { event, result }, options)
       this._onTrace?.(
         'platform message committed platform=%s session=%s conversation=%s message=%s',
         session.platformId, session.platformSessionId, event.conversation.id, event.message.id,
@@ -353,7 +408,7 @@ export class PlatformSubscriptionManager {
       return published
     } else if (event.type === 'message-edit') {
       const result = await this._store.ingest(session, event.conversation, event.message)
-      return this._onEvent?.(session, { event, result }, options)
+      return this._publishCommitted(eventCtx, session, { event, result }, options)
     } else if (event.type === 'message-delete') {
       if (this._registry.require(session.platformId).platformKind === 'qq' && !options?.deliveredViaRpc) {
         const messages = await this._store.readProjectedByPlatformIds(
@@ -383,7 +438,7 @@ export class PlatformSubscriptionManager {
           if (!hasText) continue
           const message = changed ? { ...source, content: { ...source.content, parts } } : source
           const result = await this._store.ingest(session, event.conversation, message)
-          await this._onEvent?.(session, {
+          await this._publishCommitted(eventCtx, session, {
             event: {
               type: 'message-edit',
               eventId: `qqnt-recall:${encodeURIComponent(event.conversation.id)}:${encodeURIComponent(source.id)}`,
@@ -396,10 +451,10 @@ export class PlatformSubscriptionManager {
         return
       }
       const result = await this._store.deleteMessages(session, event.conversation, event.messageIds)
-      return this._onEvent?.(session, { event, result }, options)
+      return this._publishCommitted(eventCtx, session, { event, result }, options)
     } else if (event.type === 'message-reactions') {
       const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
-      if (result) return this._onEvent?.(session, { event, result }, options)
+      if (result) return this._publishCommitted(eventCtx, session, { event, result }, options)
     } else if (event.type === 'request') {
       const stored = await this._store.ingestRequest(session, event.request)
       const conversation = requestInboxConversation()
@@ -410,11 +465,11 @@ export class PlatformSubscriptionManager {
       // message, an edit, or a complete no-op.
       if (!stored.message.created && !stored.message.changed && event.delivery !== 'recovery') return
       if (stored.message.created) {
-        return this._onEvent?.(session, {
+        return this._publishCommitted(eventCtx, session, {
           event: { type: 'message', conversation, message }, result: stored.message,
         }, options)
       }
-      return this._onEvent?.(session, {
+      return this._publishCommitted(eventCtx, session, {
         event: {
           type: 'message-edit',
           eventId: requestInboxEditEventId(stored.request.id, message),
@@ -425,11 +480,29 @@ export class PlatformSubscriptionManager {
       }, event.delivery === 'recovery' ? { ...options, forceDelivery: true } : options)
     } else if (event.type === 'read') {
       const result = await this._store.markRead(session, event.conversationId, event.upToMessageId)
-      if (result) return this._onEvent?.(session, { event, result }, options)
+      if (result) return this._publishCommitted(eventCtx, session, { event, result }, options)
     } else if (event.type === 'voice-call') {
       // Calls are intentionally transient and bypass every database/journal path.
-      return this._onEvent?.(session, { event }, options)
+      return this._publishCommitted(eventCtx, session, { event }, options)
     }
+  }
+
+  private async _publishCommitted(
+    eventCtx: Context,
+    session: PlatformSession,
+    event: CommittedPlatformEvent,
+    options?: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
+    const result = await eventCtx.waterfall(
+      eventCtx,
+      'bridge/platform-event/publish',
+      session,
+      event,
+      options,
+      () => Promise.resolve(this._onEvent?.(session, event, options)),
+    )
+    await eventCtx.parallel(eventCtx, 'im-platform/event-committed', session, event)
+    return result
   }
 }
 

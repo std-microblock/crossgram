@@ -3,7 +3,11 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import { LogManager } from '@mtcute/core/utils.js'
 import { NodePlatform } from '@mtcute/node'
+import { connect as connectTcp } from 'node:net'
+import { once } from 'node:events'
+import Long from 'long'
 import { Mtproto } from './service.js'
+import type { ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair } from './crypto/rsa-keygen.js'
 import type { ServerSession } from './session/server-session.js'
 import type { ServerConnection } from './transport/server-connection.js'
@@ -58,17 +62,46 @@ function fakeSession(
   }
 }
 
-async function makeService(): Promise<{ service: Mtproto, stop: () => Promise<void> }> {
+async function makeService(): Promise<{ ctx: Context, service: Mtproto, stop: () => Promise<void> }> {
   const ctx = new Context()
   const service = new Mtproto(ctx, {
     port: 0, host: '127.0.0.1', rsaKey: generateRsaKeyPair(), log,
   })
   const generator = service[Service.init]()
-  await generator.next()
+  const initialized = await generator.next()
   return {
+    ctx,
     service,
-    stop: async () => { await generator.return(undefined) },
+    stop: async () => {
+      if (typeof initialized.value === 'function') await initialized.value()
+      await generator.return(undefined)
+    },
   }
+}
+
+function makeRpcContext(ctx: Context, request: { _: string }): ServerRpcContext {
+  const connection = fakeConnection(0) as unknown as ServerConnection
+  const connectionScope = {
+    id: 'conn-test', connection, session: {} as ServerSession,
+    remoteAddress: '127.0.0.1', remotePort: 10000,
+  }
+  const rpc = ctx.extend({
+    mtprotoConnection: connectionScope,
+    mtprotoPacket: { connection: connectionScope, sequence: 1, data: new Uint8Array([1]) },
+    mtprotoRpc: {
+      connection: connectionScope, request, messageId: Long.ONE, receivedAt: Date.now(),
+    },
+    connection,
+    apiLayer: 228,
+    authKeyId: new Uint8Array(8).fill(1),
+    sessionId: Long.ONE,
+    isAuthorized: true,
+    sendUpdate: () => {},
+    getPlatformData: <T>() => undefined as T,
+    setPlatformData: () => {},
+  })
+  Object.defineProperty(rpc, 'cordis', { value: rpc })
+  return rpc as unknown as ServerRpcContext
 }
 
 function sessionsOf(service: Mtproto): Set<FakeSession> {
@@ -155,6 +188,102 @@ describe('Mtproto stalled-connection handling', () => {
       vi.advanceTimersByTime(10_000)
       expect(stalled.connection.close).not.toHaveBeenCalled()
     } finally {
+      await stop()
+    }
+  })
+})
+
+describe('Mtproto Cordis-native RPC pipeline', () => {
+  it('runs middleware and a method route in a short-lived derived-context fiber', async () => {
+    const { ctx, service, stop } = await makeService()
+    const order: string[] = []
+    let handlerContext: ServerRpcContext | undefined
+    const middlewareDispose = ctx.on('mtproto/rpc', async function (request, next) {
+      expect(Context.is(this)).toBe(true)
+      expect(this.mtprotoRpc.request).toBe(request)
+      order.push('middleware:before')
+      const result = await next()
+      order.push('middleware:after')
+      return result
+    })
+    const routeFiber = ctx.plugin((routeCtx) => {
+      routeCtx.mtproto.register('test.echo', async (rpc, request) => {
+        handlerContext = rpc
+        order.push('handler')
+        return { _: 'test.echoResult', value: (request as any).value } as never
+      })
+    })
+    await routeFiber
+    try {
+      const request = { _: 'test.echo', value: 'hello' } as never
+      const parent = makeRpcContext(ctx, request)
+      const parentFiber = (parent as unknown as Context).fiber
+      const result = await service.dispatch(parent, request)
+
+      expect(result).toEqual({ _: 'test.echoResult', value: 'hello' })
+      expect(order).toEqual(['middleware:before', 'handler', 'middleware:after'])
+      expect(Context.is(handlerContext)).toBe(true)
+      expect((handlerContext as unknown as Context).fiber).not.toBe(parentFiber)
+      expect(handlerContext?.mtprotoConnection?.id).toBe('conn-test')
+      expect(handlerContext?.mtprotoRpc?.request).toBe(request)
+    } finally {
+      middlewareDispose()
+      await routeFiber.dispose()
+      await stop()
+    }
+  })
+
+  it('removes method routes automatically when their owner fiber unloads', async () => {
+    const { ctx, service, stop } = await makeService()
+    const routeFiber = ctx.plugin((routeCtx) => {
+      routeCtx.mtproto.register('test.lifecycle', async () => ({ _: 'boolTrue' }))
+    })
+    await routeFiber
+    const request = { _: 'test.lifecycle' } as never
+    try {
+      expect(await service.dispatch(makeRpcContext(ctx, request), request)).toEqual({ _: 'boolTrue' })
+      await routeFiber.dispose()
+      expect(await service.dispatch(makeRpcContext(ctx, request), request)).toMatchObject({
+        _: 'mt_rpc_error', errorMessage: 'METHOD_NOT_IMPLEMENTED: test.lifecycle',
+      })
+    } finally {
+      await routeFiber.dispose()
+      await stop()
+    }
+  })
+})
+
+describe('Mtproto connection fibers', () => {
+  it('creates a derived connection context and disposes its fiber when the socket closes', async () => {
+    const { ctx, service, stop } = await makeService()
+    const states: string[] = []
+    let openedScope: import('./rpc/context.js').MtprotoConnectionScope | undefined
+    const dispose = ctx.on('mtproto/connection', function (scope, state) {
+      expect(Context.is(this)).toBe(true)
+      expect(this.mtprotoConnection).toBe(scope)
+      expect(this.fiber.name).toBe('connectionFiber')
+      states.push(state)
+      if (state === 'open') openedScope = scope
+    })
+    const socket = connectTcp({ host: '127.0.0.1', port: service.port })
+    try {
+      await once(socket, 'connect')
+      const connectionFibers = (service as unknown as { _connectionFibers: Map<string, import('cordis').Fiber> })
+        ._connectionFibers
+      await vi.waitFor(() => expect(connectionFibers.size).toBe(1))
+      const connectionFiber = [...connectionFibers.values()][0]
+      await connectionFiber.await()
+      expect(openedScope?.connection.label).toContain('127.0.0.1')
+      socket.destroy()
+      await once(socket, 'close')
+      await connectionFiber.dispose()
+      await vi.waitFor(() => {
+        expect(connectionFibers.size).toBe(0)
+      })
+      await vi.waitFor(() => expect(states).toEqual(['open', 'close']))
+    } finally {
+      dispose()
+      socket.destroy()
       await stop()
     }
   })

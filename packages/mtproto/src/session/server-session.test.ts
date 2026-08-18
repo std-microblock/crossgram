@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { Context } from 'cordis'
 import type { Logger } from '@mtcute/core/utils.js'
 import { __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
@@ -33,6 +34,33 @@ describe('ServerSession RPC error logging', () => {
       '1234', 'messages.search', 500, 'METHOD_NOT_IMPLEMENTED: messages.search',
     )
     expect(logger.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('ServerSession Cordis packet pipeline', () => {
+  it('wraps each decoded frame in a derived context before protocol processing', async () => {
+    const { session, context } = createSession()
+    const data = new Uint8Array([1, 2, 3, 4])
+    const order: string[] = []
+    const process = vi.fn(async (_data: Uint8Array, packetCtx: Context) => {
+      order.push('processor')
+      expect(packetCtx.mtprotoPacket.data).toBe(data)
+    })
+    ;(session as unknown as { _processRawData: typeof process })._processRawData = process
+    context.on('mtproto/packet', async function (packet, next) {
+      order.push('middleware:before')
+      expect(Context.is(this)).toBe(true)
+      expect(this.mtprotoConnection.id).toBe('test')
+      expect(this.mtprotoPacket).toBe(packet)
+      expect(packet.sequence).toBe(1)
+      await next()
+      order.push('middleware:after')
+    })
+
+    await (session as unknown as { _onRawData(data: Uint8Array): Promise<void> })._onRawData(data)
+
+    expect(process).toHaveBeenCalledOnce()
+    expect(order).toEqual(['middleware:before', 'processor', 'middleware:after'])
   })
 })
 
@@ -593,28 +621,36 @@ describe('ServerSession auth.bindTempAuthKey', () => {
 
 function createSession(dispatch = vi.fn(), keyStore?: AuthKeyStore): {
   session: ServerSession
+  context: Context
   logger: { error: ReturnType<typeof vi.fn>, warn: ReturnType<typeof vi.fn> }
 } {
   const logger = {
     error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn(), verbose: vi.fn(),
   }
+  const connection = {} as never
+  const connectionScope = {
+    id: 'test', connection, session: undefined as never,
+  }
+  const context = new Context().extend({ mtprotoConnection: connectionScope })
   const session = new ServerSession(
-    {} as never,
+    context,
+    connection,
     new NodeCryptoProvider(),
     getServerReaderMap(),
     __tlWriterMap,
     logger as unknown as Logger,
     '',
     Long.ZERO,
-    { dispatch },
+    dispatch,
     new AuthKeyDataStore(),
     keyStore,
   )
+  connectionScope.session = session as never
   // RPC result serialization and logging are independent of transport
   // encryption. Stub the send boundary so this unit test can exercise the
   // actual response path without establishing an auth key first.
   ;(session as unknown as { _sendEncryptedMessage: () => void })._sendEncryptedMessage = vi.fn()
-  return { session, logger }
+  return { session, context, logger }
 }
 
 function sendRpcError(session: ServerSession, errorCode: number, errorMessage: string, method: string): void {

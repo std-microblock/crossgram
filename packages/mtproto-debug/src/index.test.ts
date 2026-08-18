@@ -13,12 +13,7 @@ describe('MTProto debug Cordis entry', () => {
     let apiRoute!: { path: string, callback: (req: any, res: any) => Promise<void> }
 
     const ctx = {
-      mtproto: {
-        onDebug: {
-          add: (listener: (event: MtprotoDebugEvent) => void) => listeners.add(listener),
-          remove: (listener: (event: MtprotoDebugEvent) => void) => listeners.delete(listener),
-        },
-      },
+      mtproto: {},
       webui: {
         addEntry(entryFiles: typeof files, value: MtprotoDebugData) {
           files = entryFiles
@@ -32,6 +27,13 @@ describe('MTProto debug Cordis entry', () => {
         },
       },
       throttle: (callback: () => void) => callback,
+      on(name: string, listener: (event: MtprotoDebugEvent) => void) {
+        expect(name).toBe('mtproto/debug')
+        listeners.add(listener)
+        const dispose = () => listeners.delete(listener)
+        cleanups.push(dispose)
+        return dispose
+      },
       effect(callback: () => () => void) {
         cleanups.push(callback())
       },
@@ -91,7 +93,7 @@ describe('MTProto debug Cordis entry', () => {
     const listeners = new Set<(event: MtprotoDebugEvent) => void>()
     let data!: MtprotoDebugData
     const ctx = {
-      mtproto: { onDebug: { add: (value: any) => listeners.add(value), remove: () => undefined } },
+      mtproto: {},
       webui: {
         addEntry: (_files: unknown, value: MtprotoDebugData) => {
           data = value
@@ -100,6 +102,10 @@ describe('MTProto debug Cordis entry', () => {
       },
       server: { get: () => undefined },
       throttle: (callback: () => void) => callback,
+      on: (_name: string, listener: (event: MtprotoDebugEvent) => void) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
       effect: (callback: () => () => void) => callback(),
     }
     apply(ctx as never, { initiallyPaused: true })

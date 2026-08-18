@@ -3,7 +3,6 @@ import type { IPacketCodec } from '@mtcute/core'
 import type { ICryptoProvider, Logger } from '@mtcute/core/utils.js'
 import { IntermediatePacketCodec, PaddedIntermediatePacketCodec } from '@mtcute/core'
 import { Bytes } from '@fuman/io'
-import { Emitter } from '@fuman/utils'
 import { AbridgedPacketCodec, createServerObfuscation } from './server-obfuscation.js'
 
 /**
@@ -25,16 +24,9 @@ import { AbridgedPacketCodec, createServerObfuscation } from './server-obfuscati
  * 3. On send: call the codec's `encode()`, write the result to the socket.
  */
 export class ServerConnection {
-  /** Emitted when a complete framed packet is decoded */
-  readonly onMessage = new Emitter<Uint8Array>()
-  /** Emitted when the connection is closed */
-  readonly onClose = new Emitter<void>()
-  /** Emitted when the connection is first established */
-  readonly onReady = new Emitter<void>()
-
   private _closed = false
-  private _closeEmitted = false
   private _recvBuffer = Bytes.alloc(65536)
+  private _messageHandler: ((data: Uint8Array) => void) | null = null
   /** Codec is `null` until the transport is detected from the first bytes. */
   private _codec: IPacketCodec | null = null
   /**
@@ -48,36 +40,38 @@ export class ServerConnection {
   private readonly _onDrain = (): void => {
     this._backpressuredSince = null
   }
+  private readonly _onData = (data: Buffer): void => this._handleData(data)
+  private readonly _onError = (error: Error): void => {
+    this._log.warn('socket error: %s', error.message)
+  }
+  private readonly _onClose = (): void => {
+    this._closed = true
+    this._backpressuredSince = null
+  }
 
   constructor(
     private readonly _socket: Socket,
     private readonly _crypto: ICryptoProvider,
     private readonly _log: Logger,
   ) {
-    _socket.on('data', (data: Buffer) => this._handleData(data))
+    _socket.on('data', this._onData)
     _socket.on('drain', this._onDrain)
-    _socket.on('error', (err: Error) => {
-      this._log.warn('socket error: %s', err.message)
-    })
-    _socket.on('close', () => {
-      this._closed = true
-      _socket.off('drain', this._onDrain)
-      if (!this._closeEmitted) {
-        this._closeEmitted = true
-        this.onClose.emit()
-      }
-    })
+    _socket.on('error', this._onError)
+    _socket.on('close', this._onClose)
   }
 
-  /**
-   * Start the connection.
-   *
-   * Note: we do NOT send anything to the client. In MTProto transport the
-   * client speaks first (sending its transport tag / obfuscation header), and
-   * the server replies with framed data directly — never echoing a tag.
-   */
-  start(): void {
-    this.onReady.emit()
+  /** Install the single frame consumer owned by this connection fiber. */
+  listen(handler: (data: Uint8Array) => void): () => void {
+    if (this._messageHandler) throw new Error('MTProto connection already has a frame consumer')
+    this._messageHandler = handler
+    return () => {
+      this._messageHandler = null
+    }
+  }
+
+  /** Temporarily replace the frame consumer while a handshake owns the socket. */
+  replaceMessageHandler(handler: ((data: Uint8Array) => void) | null): void {
+    this._messageHandler = handler
   }
 
   /**
@@ -155,6 +149,15 @@ export class ServerConnection {
     this._socket.destroy()
   }
 
+  /** Detach all native socket listeners owned by this transport wrapper. */
+  dispose(): void {
+    this._messageHandler = null
+    this._socket.off('data', this._onData)
+    this._socket.off('drain', this._onDrain)
+    this._socket.off('error', this._onError)
+    this._socket.off('close', this._onClose)
+  }
+
   private _handleData(data: Buffer): void {
     if (this._closed) return
 
@@ -179,7 +182,7 @@ export class ServerConnection {
         frame.then((f) => {
           if (f !== null) {
             this._log.verbose('decoded frame: %d bytes', f.length)
-            this.onMessage.emit(f)
+            this._messageHandler?.(f)
           }
         })
         break
@@ -190,7 +193,7 @@ export class ServerConnection {
       }
 
       this._log.debug('decoded frame: %d bytes', frame.length)
-      this.onMessage.emit(frame)
+      this._messageHandler?.(frame)
     }
 
     this._recvBuffer.reclaim()

@@ -7,13 +7,14 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import {
-  RpcDispatcher, isBareVector, type RpcResult, type ServerRpcContext,
+  isBareVector, type RpcResult, type ServerRpcContext,
 } from '@mtproto-relay/mtproto'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { DialogFolderStore } from './dialog-folders.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { defineModels } from './models.js'
 import type { IMDialog, IMPlatform, PlatformSession } from './platform.js'
+import { createCordisRpcTestHarness, type CordisRpcTestHarness } from './rpc-test-harness.js'
 
 const RPC_RESULT_ID = 0xf35c6d01
 const VECTOR_ID = 0x1cb5c415
@@ -70,24 +71,24 @@ function createDialog(folders: DialogFolderStore, targetPlatform: IMPlatform = p
   )
 }
 
-function dispatcherFor(dialogs: DialogRpc): RpcDispatcher {
-  const dispatcher = new RpcDispatcher()
-  dispatcher.register('messages.getDialogs', async (_context, request) =>
+function rpcHarnessFor(dialogs: DialogRpc): CordisRpcTestHarness {
+  const rpcHarness = createCordisRpcTestHarness()
+  rpcHarness.register('messages.getDialogs', async (_context, request) =>
     dialogs.getDialogs(request as tl.messages.RawGetDialogsRequest))
-  dispatcher.register('messages.getPeerDialogs', async (_context, request) =>
+  rpcHarness.register('messages.getPeerDialogs', async (_context, request) =>
     dialogs.getPeerDialogs(request as tl.messages.RawGetPeerDialogsRequest))
-  dispatcher.register('messages.getDialogFilters', async () => dialogs.getDialogFilters())
-  dispatcher.register('messages.updateDialogFilter', async (_context, request) => {
+  rpcHarness.register('messages.getDialogFilters', async () => dialogs.getDialogFilters())
+  rpcHarness.register('messages.updateDialogFilter', async (_context, request) => {
     await dialogs.updateDialogFilter(request as tl.messages.RawUpdateDialogFilterRequest)
     return { _: 'boolTrue' }
   })
-  dispatcher.register('messages.updateDialogFiltersOrder', async (_context, request) => {
+  rpcHarness.register('messages.updateDialogFiltersOrder', async (_context, request) => {
     await dialogs.updateDialogFiltersOrder(request as tl.messages.RawUpdateDialogFiltersOrderRequest)
     return { _: 'boolTrue' }
   })
-  dispatcher.register('folders.editPeerFolders', async (_context, request) =>
+  rpcHarness.register('folders.editPeerFolders', async (_context, request) =>
     dialogs.editPeerFolders(request as tl.folders.RawEditPeerFoldersRequest))
-  return dispatcher
+  return rpcHarness
 }
 
 function getDialogs(
@@ -101,10 +102,10 @@ function getDialogs(
   }
 }
 
-async function roundTripRpc(dispatcher: RpcDispatcher, query: tl.RpcMethod): Promise<any> {
+async function roundTripRpc(rpcHarness: CordisRpcTestHarness, query: tl.RpcMethod): Promise<any> {
   const requestBytes = TlBinaryWriter.serializeObject(__tlWriterMap, query)
   const decodedRequest = new TlBinaryReader(getServerReaderMap(), requestBytes).object() as tl.RpcMethod
-  const result = await dispatcher.dispatch(makeContext(), decodedRequest)
+  const result = await rpcHarness.dispatch(makeContext(), decodedRequest)
   return decodeRpcResult(encodeRpcResult(Long.fromNumber(0x228), result))
 }
 
@@ -156,16 +157,16 @@ describe('dialog folders RPC e2e', () => {
     })
 
     const folders = new DialogFolderStore(ctx.database)
-    const dispatcher = dispatcherFor(createDialog(folders))
+    const rpcHarness = rpcHarnessFor(createDialog(folders))
     const groupPeer = {
       _: 'inputPeerChannel' as const, channelId: stableId('peer:group-a'), accessHash: Long.ONE,
     }
     const channelPeer = {
       _: 'inputPeerChannel' as const, channelId: stableId('peer:channel-a'), accessHash: Long.ONE,
     }
-    await roundTripRpc(dispatcher, getDialogs())
+    await roundTripRpc(rpcHarness, getDialogs())
 
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'messages.updateDialogFilter', id: 2,
       filter: {
         _: 'dialogFilter', id: 2, groups: true, excludeArchived: true,
@@ -178,12 +179,12 @@ describe('dialog folders RPC e2e', () => {
         pinnedPeers: [groupPeer], includePeers: [groupPeer, channelPeer], excludePeers: [],
       },
     })).resolves.toEqual({ _: 'boolTrue' })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'messages.updateDialogFiltersOrder', order: [2, 0],
     })).resolves.toEqual({ _: 'boolTrue' })
 
-    const resumedDispatcher = dispatcherFor(createDialog(new DialogFolderStore(ctx.database)))
-    const filters = await roundTripRpc(resumedDispatcher, { _: 'messages.getDialogFilters' })
+    const resumedHarness = rpcHarnessFor(createDialog(new DialogFolderStore(ctx.database)))
+    const filters = await roundTripRpc(resumedHarness, { _: 'messages.getDialogFilters' })
     expect(filters.filters.map((filter: tl.TypeDialogFilter) => filter._)).toEqual([
       'dialogFilter', 'dialogFilterDefault',
     ])
@@ -196,7 +197,7 @@ describe('dialog folders RPC e2e', () => {
       pinnedPeers: [groupPeer], includePeers: [groupPeer, channelPeer],
     })
 
-    const archived = await roundTripRpc(resumedDispatcher, {
+    const archived = await roundTripRpc(resumedHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
     })
@@ -206,30 +207,30 @@ describe('dialog folders RPC e2e', () => {
         folderPeers: [{ _: 'folderPeer', folderId: 1 }],
       }],
     })
-    await expect(roundTripRpc(resumedDispatcher, {
+    await expect(roundTripRpc(resumedHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
     })).resolves.toMatchObject({
       _: 'updates', updates: [{ _: 'updateFolderPeers', ptsCount: 0 }],
     })
 
-    const main = await roundTripRpc(resumedDispatcher, getDialogs(0))
+    const main = await roundTripRpc(resumedHarness, getDialogs(0))
     expect(main.dialogs.map((dialog: tl.RawDialog) => dialog.peer)).toEqual([
       { _: 'peerUser', userId: stableId('peer:alice') },
       { _: 'peerChannel', channelId: stableId('peer:channel-a') },
     ])
-    const archive = await roundTripRpc(resumedDispatcher, getDialogs(1))
+    const archive = await roundTripRpc(resumedHarness, getDialogs(1))
     expect(archive.dialogs).toMatchObject([{
       _: 'dialog', peer: { _: 'peerChannel', channelId: stableId('peer:group-a') }, folderId: 1,
     }])
-    const peerArchive = await roundTripRpc(resumedDispatcher, {
+    const peerArchive = await roundTripRpc(resumedHarness, {
       _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
     })
     expect(peerArchive.dialogs).toMatchObject([{
       _: 'dialog', peer: { _: 'peerChannel', channelId: stableId('peer:group-a') }, folderId: 1,
     }])
 
-    const secondRestart = dispatcherFor(createDialog(new DialogFolderStore(ctx.database)))
+    const secondRestart = rpcHarnessFor(createDialog(new DialogFolderStore(ctx.database)))
     await roundTripRpc(secondRestart, getDialogs(1))
     await expect(roundTripRpc(secondRestart, {
       _: 'folders.editPeerFolders',
@@ -283,16 +284,16 @@ describe('dialog folders RPC e2e', () => {
       },
       async getHistory() { return { messages: [] } },
     }
-    const dispatcher = dispatcherFor(createDialog(new DialogFolderStore(ctx.database), targetPlatform))
+    const rpcHarness = rpcHarnessFor(createDialog(new DialogFolderStore(ctx.database), targetPlatform))
 
-    const first = await roundTripRpc(dispatcher, getDialogs())
+    const first = await roundTripRpc(rpcHarness, getDialogs())
     expect(first).toMatchObject({ _: 'messages.dialogsSlice', count: 130 })
     expect(first.dialogs).toHaveLength(100)
     expect(first.dialogs.slice(0, 40).every((dialog: tl.RawDialog) => dialog.folderId === 1)).toBe(true)
     const last = first.dialogs.at(-1) as tl.RawDialog
     const lastMessage = first.messages.find((message: tl.RawMessage) => message.id === last.topMessage) as tl.RawMessage
 
-    const second = await roundTripRpc(dispatcher, getDialogs(undefined, {
+    const second = await roundTripRpc(rpcHarness, getDialogs(undefined, {
       offsetPeer: {
         _: 'inputPeerChannel', channelId: stableId('peer:android-dialog-099'), accessHash: Long.ONE,
       },
@@ -307,7 +308,7 @@ describe('dialog folders RPC e2e', () => {
       )),
     )
 
-    const explicitMain = await roundTripRpc(dispatcher, getDialogs(0))
+    const explicitMain = await roundTripRpc(rpcHarness, getDialogs(0))
     expect(explicitMain.dialogs).toHaveLength(90)
     expect(explicitMain.dialogs.every((dialog: tl.RawDialog) => dialog.folderId === undefined)).toBe(true)
   })
@@ -343,31 +344,31 @@ describe('dialog folders RPC e2e', () => {
       },
     }
     const folders = new DialogFolderStore(ctx.database)
-    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const rpcHarness = rpcHarnessFor(createDialog(folders, targetPlatform))
     const peer = (id: string) => ({
       _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE,
     })
-    await roundTripRpc(dispatcher, getDialogs())
+    await roundTripRpc(rpcHarness, getDialogs())
 
-    await roundTripRpc(dispatcher, {
+    await roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: peer('plain-group'), folderId: 1 }],
     })
     expect(maskCalls).toEqual([])
 
-    await roundTripRpc(dispatcher, {
+    await roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: peer('qq-group'), folderId: 1 }],
     })
     expect(maskCalls).toEqual([{ conversationId: 'qq-group', mask: 2 }])
 
-    await roundTripRpc(dispatcher, {
+    await roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: peer('qq-group'), folderId: 1 }],
     })
     expect(maskCalls).toHaveLength(1)
 
-    await roundTripRpc(dispatcher, {
+    await roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: peer('qq-group'), folderId: 0 }],
     })
@@ -408,7 +409,7 @@ describe('dialog folders RPC e2e', () => {
       },
     }
     const folders = new DialogFolderStore(ctx.database)
-    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const rpcHarness = rpcHarnessFor(createDialog(folders, targetPlatform))
     const groupPeer = {
       _: 'inputPeerChannel' as const, channelId: stableId('peer:retry-group'), accessHash: Long.ONE,
     }
@@ -416,28 +417,28 @@ describe('dialog folders RPC e2e', () => {
       _: 'folders.editPeerFolders' as const,
       folderPeers: [{ _: 'inputFolderPeer' as const, peer: groupPeer, folderId: 1 }],
     }
-    await roundTripRpc(dispatcher, getDialogs())
+    await roundTripRpc(rpcHarness, getDialogs())
 
-    await expect(roundTripRpc(dispatcher, archiveRequest)).resolves.toMatchObject({
+    await expect(roundTripRpc(rpcHarness, archiveRequest)).resolves.toMatchObject({
       _: 'updates', updates: [{ _: 'updateFolderPeers', ptsCount: 1 }],
     })
     expect(await folders.archivedPeerIds(session.platformSessionId)).toContain('retry-group')
 
     expect(group.metadata.qqGroupMsgMask).toBe(1)
-    const resumedDispatcher = dispatcherFor(createDialog(folders, targetPlatform))
-    await roundTripRpc(resumedDispatcher, getDialogs())
+    const resumedHarness = rpcHarnessFor(createDialog(folders, targetPlatform))
+    await roundTripRpc(resumedHarness, getDialogs())
 
-    await expect(roundTripRpc(resumedDispatcher, archiveRequest)).resolves.toMatchObject({
+    await expect(roundTripRpc(resumedHarness, archiveRequest)).resolves.toMatchObject({
       _: 'updates', updates: [{ _: 'updateFolderPeers', ptsCount: 0 }],
     })
     expect(maskCalls).toEqual([2, 2])
 
-    await roundTripRpc(resumedDispatcher, archiveRequest)
+    await roundTripRpc(resumedHarness, archiveRequest)
     expect(maskCalls).toEqual([2, 2])
 
-    const main = await roundTripRpc(resumedDispatcher, getDialogs(0))
+    const main = await roundTripRpc(resumedHarness, getDialogs(0))
     expect(main.dialogs).toEqual([])
-    const archive = await roundTripRpc(resumedDispatcher, getDialogs(1))
+    const archive = await roundTripRpc(resumedHarness, getDialogs(1))
     expect(archive.dialogs).toMatchObject([{
       _: 'dialog', peer: { _: 'peerChannel', channelId: stableId('peer:retry-group') }, folderId: 1,
     }])
@@ -470,7 +471,7 @@ describe('dialog folders RPC e2e', () => {
     }
     const folders = new DialogFolderStore(ctx.database)
     const dialogs = createDialog(folders, targetPlatform)
-    const dispatcher = dispatcherFor(dialogs)
+    const rpcHarness = rpcHarnessFor(dialogs)
     const groupPeer = {
       _: 'inputPeerChannel' as const, channelId: stableId('peer:queue-recovery-group'), accessHash: Long.ONE,
     }
@@ -480,7 +481,7 @@ describe('dialog folders RPC e2e', () => {
       folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 2 }],
     })).rejects.toMatchObject({ code: 400, text: 'FOLDER_ID_INVALID' })
 
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
     })).resolves.toMatchObject({
@@ -513,13 +514,13 @@ describe('dialog folders RPC e2e', () => {
       },
     }
     const folders = new DialogFolderStore(ctx.database)
-    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const rpcHarness = rpcHarnessFor(createDialog(folders, targetPlatform))
     const groupPeer = {
       _: 'inputPeerChannel' as const, channelId: stableId('peer:metadata-group'), accessHash: Long.ONE,
     }
-    await roundTripRpc(dispatcher, getDialogs())
+    await roundTripRpc(rpcHarness, getDialogs())
 
-    await roundTripRpc(dispatcher, {
+    await roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
     })
@@ -559,18 +560,18 @@ describe('dialog folders RPC e2e', () => {
       },
     }
     const folders = new DialogFolderStore(ctx.database)
-    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const rpcHarness = rpcHarnessFor(createDialog(folders, targetPlatform))
     const groupPeer = {
       _: 'inputPeerChannel' as const, channelId: stableId('peer:queued-group'), accessHash: Long.ONE,
     }
-    await roundTripRpc(dispatcher, getDialogs())
+    await roundTripRpc(rpcHarness, getDialogs())
 
-    const archive = roundTripRpc(dispatcher, {
+    const archive = roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 1 }],
     })
     await archiveMaskStarted
-    const unarchive = roundTripRpc(dispatcher, {
+    const unarchive = roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [{ _: 'inputFolderPeer', peer: groupPeer, folderId: 0 }],
     })
@@ -585,11 +586,11 @@ describe('dialog folders RPC e2e', () => {
     expect(archiveResult.updates[0].pts).toBeLessThan(unarchiveResult.updates[0].pts)
     expect(await folders.archivedPeerIds(session.platformSessionId)).toEqual(new Set())
 
-    const main = await roundTripRpc(dispatcher, getDialogs())
+    const main = await roundTripRpc(rpcHarness, getDialogs())
     expect(main.dialogs).toMatchObject([{
       peer: { _: 'peerChannel', channelId: stableId('peer:queued-group') },
     }])
-    const archiveDialogs = await roundTripRpc(dispatcher, getDialogs(1))
+    const archiveDialogs = await roundTripRpc(rpcHarness, getDialogs(1))
     expect(archiveDialogs.dialogs).toEqual([])
   })
 
@@ -623,24 +624,24 @@ describe('dialog folders RPC e2e', () => {
       async getHistory() { return { messages: [] } },
     }
     const folders = new DialogFolderStore(ctx.database)
-    const dispatcher = dispatcherFor(createDialog(folders, targetPlatform))
+    const rpcHarness = rpcHarnessFor(createDialog(folders, targetPlatform))
     const peer = (id: string) => ({
       _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE,
     })
     const ids = (result: any) => result.dialogs.map((dialog: tl.RawDialog) =>
       (dialog.peer as tl.RawPeerChannel).channelId)
 
-    const initialMain = await roundTripRpc(dispatcher, getDialogs(0))
+    const initialMain = await roundTripRpc(rpcHarness, getDialogs(0))
     expect(ids(initialMain)).toEqual([
       stableId('peer:mask-notify'), stableId('peer:mask-receive'),
       stableId('peer:mask-unspecified'), stableId('peer:mask-shield'),
     ])
-    const initialArchive = await roundTripRpc(dispatcher, getDialogs(1))
+    const initialArchive = await roundTripRpc(rpcHarness, getDialogs(1))
     expect(initialArchive.dialogs).toMatchObject([{
       peer: { _: 'peerChannel', channelId: stableId('peer:mask-assistant') }, folderId: 1,
     }])
 
-    await roundTripRpc(dispatcher, {
+    await roundTripRpc(rpcHarness, {
       _: 'folders.editPeerFolders',
       folderPeers: [
         { _: 'inputFolderPeer', peer: peer('mask-notify'), folderId: 1 },
@@ -650,19 +651,19 @@ describe('dialog folders RPC e2e', () => {
         { _: 'inputFolderPeer', peer: peer('mask-shield'), folderId: 1 },
       ],
     })
-    const main = await roundTripRpc(dispatcher, getDialogs(0))
+    const main = await roundTripRpc(rpcHarness, getDialogs(0))
     expect(ids(main)).toEqual([stableId('peer:mask-notify'), stableId('peer:mask-receive')])
-    const archive = await roundTripRpc(dispatcher, getDialogs(1))
+    const archive = await roundTripRpc(rpcHarness, getDialogs(1))
     expect(ids(archive)).toEqual([
       stableId('peer:mask-assistant'), stableId('peer:mask-unspecified'), stableId('peer:mask-shield'),
     ])
     expect(archive.dialogs[0]).toMatchObject({ folderId: 1 })
 
-    const peerMain = await roundTripRpc(dispatcher, {
+    const peerMain = await roundTripRpc(rpcHarness, {
       _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 0 }],
     })
     expect(ids(peerMain)).toEqual([stableId('peer:mask-notify'), stableId('peer:mask-receive')])
-    const peerArchive = await roundTripRpc(dispatcher, {
+    const peerArchive = await roundTripRpc(rpcHarness, {
       _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
     })
     expect(ids(peerArchive)).toEqual([

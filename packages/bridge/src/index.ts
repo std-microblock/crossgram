@@ -283,10 +283,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         }
         return
       }
-      platforms.emitCommittedEvent(session, event)
       return updates.publish(session, event, options)
     },
     (format, ...args) => bridgeLogger.debug(format, ...args),
+    ctx,
   )
   systemPeers.attach(
     (session, event, options) => subscriptions.ingestLocalEvent(session, event, options),

@@ -123,7 +123,7 @@ export function getApiLayerReaderMap(layer: number): TlReaderMap | null {
  * Generate one server-side reader containing every distinct constructor and
  * method from every mirrored layer. Constructor IDs are the wire identity, so
  * unchanged entries naturally deduplicate while historical request IDs remain
- * available before invokeWithLayer reaches the dispatcher.
+ * available before invokeWithLayer enters the RPC event pipeline.
  */
 export function getHistoricalApiLayerReaderMap(): TlReaderMap {
   if (historicalReaderMap) return historicalReaderMap

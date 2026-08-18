@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
-import { RpcDispatcher, type RpcResult, type ServerRpcContext } from '@mtproto-relay/mtproto'
+import { type RpcResult, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import Long from 'long'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import type { IMPlatform, PlatformSession } from './platform.js'
+import { createCordisRpcTestHarness, type CordisRpcTestHarness } from './rpc-test-harness.js'
 
 const RPC_RESULT_ID = 0xf35c6d01
 
@@ -62,10 +63,10 @@ function decodeRpcResult(bytes: Uint8Array): any {
   return reader.object()
 }
 
-async function roundTripRpc(dispatcher: RpcDispatcher, query: tl.RpcMethod): Promise<any> {
+async function roundTripRpc(rpcHarness: CordisRpcTestHarness, query: tl.RpcMethod): Promise<any> {
   const requestBytes = TlBinaryWriter.serializeObject(__tlWriterMap, androidEnvelope(query))
   const decodedRequest = new TlBinaryReader(getServerReaderMap(), requestBytes).object() as tl.RpcMethod
-  const result = await dispatcher.dispatch(makeContext(), decodedRequest)
+  const result = await rpcHarness.dispatch(makeContext(), decodedRequest)
   return decodeRpcResult(encodeRpcResult(Long.fromNumber(0x228), result))
 }
 
@@ -119,13 +120,13 @@ describe('Telegram Android member pagination e2e', () => {
       async sendMessage() { throw new Error('send is disabled') },
     }
     const dialogs = new DialogRpc(platform, session)
-    const dispatcher = new RpcDispatcher()
-    dispatcher.register('messages.getDialogs', async (_context, request) =>
+    const rpcHarness = createCordisRpcTestHarness()
+    rpcHarness.register('messages.getDialogs', async (_context, request) =>
       dialogs.getDialogs(request as tl.messages.RawGetDialogsRequest))
-    dispatcher.register('channels.getParticipants', async (_context, request) =>
+    rpcHarness.register('channels.getParticipants', async (_context, request) =>
       dialogs.getChannelParticipants(request as tl.channels.RawGetParticipantsRequest))
 
-    await roundTripRpc(dispatcher, {
+    await roundTripRpc(rpcHarness, {
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
     })
@@ -134,15 +135,15 @@ describe('Telegram Android member pagination e2e', () => {
       channelId: stableId('peer:qq-group'),
       accessHash: Long.ZERO,
     }
-    const first = await roundTripRpc(dispatcher, {
+    const first = await roundTripRpc(rpcHarness, {
       _: 'channels.getParticipants', channel, filter: { _: 'channelParticipantsRecent' },
       offset: 0, limit: 100, hash: Long.ZERO,
     })
-    const second = await roundTripRpc(dispatcher, {
+    const second = await roundTripRpc(rpcHarness, {
       _: 'channels.getParticipants', channel, filter: { _: 'channelParticipantsRecent' },
       offset: 100, limit: 25, hash: Long.ZERO,
     })
-    const mention = await roundTripRpc(dispatcher, {
+    const mention = await roundTripRpc(rpcHarness, {
       _: 'channels.getParticipants', channel,
       filter: { _: 'channelParticipantsMentions', q: 'android target' },
       offset: 0, limit: 100, hash: Long.ZERO,

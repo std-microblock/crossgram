@@ -28,7 +28,7 @@ import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { generateRsaKeyPair, type ServerRsaKey } from '../crypto/rsa-keygen.js'
-import { bareVector } from '../rpc/dispatcher.js'
+import { bareVector } from '../rpc/protocol.js'
 import { getApiLayerReaderMap } from '../rpc/api-layer.js'
 import { FileAuthKeyStore, type AuthKeyStore } from './auth-key-store.js'
 
@@ -503,6 +503,7 @@ async function startServer(
   onDebug?: MtprotoDebugListener,
   options: { rsaKey?: ServerRsaKey, authKeyStore?: AuthKeyStore } = {},
 ): Promise<{
+  ctx: Context
   port: number
   pubKey: any
   uploadedParts: Uint8Array[]
@@ -525,7 +526,7 @@ async function startServer(
     port: 0, host: '127.0.0.1', rsaKey, log, authKeyStore: options.authKeyStore,
   })
   await fiber
-  if (onDebug) ctx.mtproto.onDebug.add(onDebug)
+  const disposeDebug = onDebug ? ctx.on('mtproto/debug', onDebug) : undefined
 
   ctx.mtproto.register('help.getConfig', async () => ({
     _: 'config', flags: 0, defaultP2pContacts: false, preloadFeaturedStickers: false,
@@ -611,16 +612,66 @@ async function startServer(
 
   const pubKey = findKeyByFingerprints([rsaKey.fingerprint])!
   return {
+    ctx,
     port: ctx.mtproto.port, pubKey, uploadedParts, transferAuthKeyIds, downloadBytes,
     register: ctx.mtproto.register.bind(ctx.mtproto),
     broadcastUpdate: (update) => ctx.mtproto.broadcastUpdate(update),
     sendUpdateToAuthKey: (authKeyId, update, excludeConnection) =>
       ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection),
-    stop: () => Promise.resolve(fiber.dispose()),
+    stop: async () => {
+      disposeDebug?.()
+      await fiber.dispose()
+    },
   }
 }
 
 describe('e2e: obfuscated transport + PFS + RPC', () => {
+  it('routes a real encrypted RPC through packet and RPC derived-context fibers', async () => {
+    await crypto.initialize?.()
+    const { ctx, port, pubKey, stop } = await startServer()
+    const packetSequences: number[] = []
+    const rpcFibers: string[] = []
+    const disposePacket = ctx.on('mtproto/packet', async function (packet, next) {
+      expect(Context.is(this)).toBe(true)
+      expect(this.mtprotoPacket).toBe(packet)
+      expect(this.mtprotoConnection.id).toBe(packet.connection.id)
+      packetSequences.push(packet.sequence)
+      await next()
+    })
+    const disposeRpc = ctx.on('mtproto/rpc', async function (request, next) {
+      if (request._ === 'help.getConfig') {
+        expect(Context.is(this)).toBe(true)
+        expect(this.mtprotoRpc.request).toBe(request)
+        expect(this.mtprotoRpc.connection).toBe(this.mtprotoConnection)
+        expect(this.mtprotoPacket.connection).toBe(this.mtprotoConnection)
+        rpcFibers.push(this.fiber.name)
+      }
+      return next()
+    })
+    const client = await TestClient.connect(port)
+    try {
+      const key = await doClientHandshake(client, pubKey, false)
+      const clientSessionId = new Long(0x31313131, 0x31313131)
+      await client.send(clientEncrypt(
+        key,
+        serializeInitializedRpc({ _: 'help.getConfig' }),
+        key.salt,
+        clientSessionId,
+        4,
+      ))
+
+      expect(await readRpcResult(client, key)).toMatchObject({ _: 'config', thisDc: 1 })
+      expect(packetSequences.length).toBeGreaterThan(1)
+      expect(packetSequences).toEqual([...packetSequences].sort((left, right) => left - right))
+      expect(rpcFibers).toEqual(['rpcInvocationFiber'])
+    } finally {
+      disposeRpc()
+      disposePacket()
+      client.close()
+      await stop()
+    }
+  })
+
   it('continues req_DH_params on a different TCP connection than req_pq', async () => {
     await crypto.initialize?.()
     const { port, pubKey, stop } = await startServer()

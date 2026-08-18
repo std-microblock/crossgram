@@ -1,5 +1,14 @@
 import 'cordis'
-import type { IMPlatformService } from './platform-manager.js'
+import type {
+  ActivePlatformSession,
+  CommittedPlatformEvent,
+  IMPlatformService,
+  PlatformEventDeliveryOptions,
+  PlatformEventPublishResult,
+  PlatformRegistryEvent,
+  PlatformSessionEvent,
+} from './platform-manager.js'
+import type { IMEvent, IMPlatform, PlatformSession } from './platform.js'
 import type { IMStickerService } from './sticker-provider.js'
 import type { TelegramResourceService } from './resource-provider.js'
 import type { SystemPeerService } from './system-peer.js'
@@ -10,5 +19,37 @@ declare module 'cordis' {
     imSticker: IMStickerService
     telegramResource: TelegramResourceService
     systemPeer: SystemPeerService
+    /** Present on one active platform-session fiber and its descendants. */
+    bridgeSession: {
+      platform: IMPlatform
+      session: PlatformSession
+    }
+    /** Present on the short-lived fiber processing one platform event. */
+    bridgeEvent: {
+      event: IMEvent
+      options?: PlatformEventDeliveryOptions
+    }
+  }
+
+  interface Events {
+    'im-platform/change'(
+      event: PlatformRegistryEvent,
+      registrationId: string,
+      platform: IMPlatform,
+    ): void
+    'im-platform/session'(event: PlatformSessionEvent, binding: ActivePlatformSession): void
+    'im-platform/event-committed'(session: PlatformSession, event: CommittedPlatformEvent): void
+    'bridge/platform-event'(
+      session: PlatformSession,
+      event: IMEvent,
+      options: PlatformEventDeliveryOptions | undefined,
+      next: () => Promise<PlatformEventPublishResult>,
+    ): Promise<PlatformEventPublishResult>
+    'bridge/platform-event/publish'(
+      session: PlatformSession,
+      event: CommittedPlatformEvent,
+      options: PlatformEventDeliveryOptions | undefined,
+      next: () => Promise<PlatformEventPublishResult>,
+    ): Promise<PlatformEventPublishResult>
   }
 }

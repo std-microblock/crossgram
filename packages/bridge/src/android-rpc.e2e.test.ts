@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
-import { RpcDispatcher, isBareVector, type RpcResult, type ServerRpcContext } from '@mtproto-relay/mtproto'
+import { isBareVector, type RpcResult, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import Long from 'long'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { androidRpcHandlers } from './android-rpc.js'
+import { createCordisRpcTestHarness } from './rpc-test-harness.js'
 
 const RPC_RESULT_ID = 0xf35c6d01
 const VECTOR_ID = 0x1cb5c415
@@ -82,14 +83,14 @@ function decodeRpcResult(bytes: Uint8Array): unknown {
 }
 
 async function roundTripRpc(query: tl.RpcMethod): Promise<unknown> {
-  const dispatcher = new RpcDispatcher()
+  const rpcHarness = createCordisRpcTestHarness()
   for (const [method, handler] of Object.entries(androidRpcHandlers)) {
-    dispatcher.register(method, async (_context, request) => handler(request))
+    rpcHarness.register(method, async (_context, request) => handler(request))
   }
 
   const requestBytes = TlBinaryWriter.serializeObject(__tlWriterMap, androidEnvelope(query))
   const decodedRequest = new TlBinaryReader(getServerReaderMap(), requestBytes).object() as tl.RpcMethod
-  const result = await dispatcher.dispatch(makeContext(), decodedRequest)
+  const result = await rpcHarness.dispatch(makeContext(), decodedRequest)
   return decodeRpcResult(encodeRpcResult(Long.fromNumber(0x228), result))
 }
 

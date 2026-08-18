@@ -7,13 +7,14 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import {
-  RpcDispatcher, isBareVector, type RpcResult, type ServerRpcContext,
+  isBareVector, type RpcResult, type ServerRpcContext,
 } from '@mtproto-relay/mtproto'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { defineModels } from './models.js'
 import { MUTE_FOREVER, NotificationSettingsStore } from './notification-settings.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
+import { createCordisRpcTestHarness, type CordisRpcTestHarness } from './rpc-test-harness.js'
 
 const RPC_RESULT_ID = 0xf35c6d01
 const VECTOR_ID = 0x1cb5c415
@@ -82,30 +83,30 @@ function createDialog(settings: NotificationSettingsStore, targetPlatform: IMPla
   )
 }
 
-function dispatcherFor(
+function rpcHarnessFor(
   dialogs: DialogRpc,
   onReset?: (updates: tl.RawUpdateNotifySettings[]) => void,
-): RpcDispatcher {
-  const dispatcher = new RpcDispatcher()
-  dispatcher.register('account.getNotifySettings', async (_context, request) =>
+): CordisRpcTestHarness {
+  const rpcHarness = createCordisRpcTestHarness()
+  rpcHarness.register('account.getNotifySettings', async (_context, request) =>
     dialogs.getNotifySettings(request as tl.account.RawGetNotifySettingsRequest))
-  dispatcher.register('account.updateNotifySettings', async (_context, request) => {
+  rpcHarness.register('account.updateNotifySettings', async (_context, request) => {
     await dialogs.updateNotifySettings(request as tl.account.RawUpdateNotifySettingsRequest)
     return { _: 'boolTrue' }
   })
-  dispatcher.register('account.resetNotifySettings', async () => {
+  rpcHarness.register('account.resetNotifySettings', async () => {
     onReset?.(await dialogs.resetNotifySettings())
     return { _: 'boolTrue' }
   })
-  dispatcher.register('account.getNotifyExceptions', async (_context, request) =>
+  rpcHarness.register('account.getNotifyExceptions', async (_context, request) =>
     dialogs.getNotifyExceptions(request as tl.account.RawGetNotifyExceptionsRequest))
-  return dispatcher
+  return rpcHarness
 }
 
-async function roundTripRpc(dispatcher: RpcDispatcher, query: tl.RpcMethod): Promise<unknown> {
+async function roundTripRpc(rpcHarness: CordisRpcTestHarness, query: tl.RpcMethod): Promise<unknown> {
   const requestBytes = TlBinaryWriter.serializeObject(__tlWriterMap, query)
   const decodedRequest = new TlBinaryReader(getServerReaderMap(), requestBytes).object() as tl.RpcMethod
-  const result = await dispatcher.dispatch(makeContext(), decodedRequest)
+  const result = await rpcHarness.dispatch(makeContext(), decodedRequest)
   return decodeRpcResult(encodeRpcResult(Long.fromNumber(0x228), result))
 }
 
@@ -196,7 +197,7 @@ describe('notification settings RPC e2e', () => {
     }
     const settings = new NotificationSettingsStore(ctx.database, true)
     const dialogs = createDialog(settings, targetPlatform)
-    await expect(roundTripRpc(dispatcherFor(dialogs), {
+    await expect(roundTripRpc(rpcHarnessFor(dialogs), {
       _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
     const page = roundTripObject(await dialogs.getDialogs({
@@ -249,7 +250,7 @@ describe('notification settings RPC e2e', () => {
     }
     const settings = new NotificationSettingsStore(ctx.database, true)
     const dialogs = createDialog(settings, targetPlatform)
-    const dispatcher = dispatcherFor(dialogs)
+    const rpcHarness = rpcHarnessFor(dialogs)
     await dialogs.getDialogs({
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
@@ -259,22 +260,22 @@ describe('notification settings RPC e2e', () => {
       peer: { _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE },
     })
 
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('mask-notify'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
     })).resolves.toEqual({ _: 'boolTrue' })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('mask-unspecified'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: 123 },
     })).resolves.toEqual({ _: 'boolTrue' })
 
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-notify'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-assistant'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-receive'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
     const assistantTopic = {
@@ -282,17 +283,17 @@ describe('notification settings RPC e2e', () => {
       peer: peer('mask-assistant').peer,
       topMsgId: 1,
     }
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: assistantTopic,
       settings: { _: 'inputPeerNotifySettings', muteUntil: 456 },
     })).resolves.toEqual({ _: 'boolTrue' })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: assistantTopic,
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 456 })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-unspecified'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 123 })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-shield'),
     })).resolves.toEqual({ _: 'peerNotifySettings' })
 
@@ -336,9 +337,9 @@ describe('notification settings RPC e2e', () => {
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
     })
-    const dispatcher = dispatcherFor(dialogs)
+    const rpcHarness = rpcHarnessFor(dialogs)
 
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
 
@@ -346,7 +347,7 @@ describe('notification settings RPC e2e', () => {
       _: 'inputNotifyPeer' as const,
       peer: { _: 'inputPeerChannel' as const, channelId: stableId('peer:group-1'), accessHash: Long.ONE },
     }
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer,
       settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
     })).resolves.toEqual({ _: 'boolTrue' })
@@ -363,11 +364,11 @@ describe('notification settings RPC e2e', () => {
     })
 
     const resetUpdates: tl.RawUpdateNotifySettings[][] = []
-    const resumedDispatcher = dispatcherFor(resumedDialogs, updates => resetUpdates.push(updates))
-    await expect(roundTripRpc(resumedDispatcher, {
+    const resumedHarness = rpcHarnessFor(resumedDialogs, updates => resetUpdates.push(updates))
+    await expect(roundTripRpc(resumedHarness, {
       _: 'account.getNotifySettings', peer,
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
-    await expect(roundTripRpc(resumedDispatcher, {
+    await expect(roundTripRpc(resumedHarness, {
       _: 'account.getNotifyExceptions', peer: { _: 'inputNotifyChats' },
     })).resolves.toMatchObject({
       _: 'updates',
@@ -378,7 +379,7 @@ describe('notification settings RPC e2e', () => {
       }],
     })
 
-    await expect(roundTripRpc(resumedDispatcher, {
+    await expect(roundTripRpc(resumedHarness, {
       _: 'account.resetNotifySettings',
     })).resolves.toEqual({ _: 'boolTrue' })
     expect(resetUpdates[0]).toEqual(expect.arrayContaining([
@@ -393,10 +394,10 @@ describe('notification settings RPC e2e', () => {
         notifySettings: { _: 'peerNotifySettings' },
       },
     ]))
-    await expect(roundTripRpc(resumedDispatcher, {
+    await expect(roundTripRpc(resumedHarness, {
       _: 'account.getNotifySettings', peer,
     })).resolves.toEqual({ _: 'peerNotifySettings' })
-    await expect(roundTripRpc(resumedDispatcher, {
+    await expect(roundTripRpc(resumedHarness, {
       _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
   })
@@ -435,7 +436,7 @@ describe('notification settings RPC e2e', () => {
     }
     const settings = new NotificationSettingsStore(ctx.database, true)
     const dialogs = createDialog(settings, targetPlatform)
-    const dispatcher = dispatcherFor(dialogs)
+    const rpcHarness = rpcHarnessFor(dialogs)
     await dialogs.getDialogs({
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
@@ -446,18 +447,18 @@ describe('notification settings RPC e2e', () => {
     })
 
     // mute → mask 4 (receive without notification)
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('qq-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
     })).resolves.toEqual({ _: 'boolTrue' })
     expect(maskCalls).toEqual([{ conversationId: 'qq-group', mask: 4 }])
     // overlay reflects the freshly written mask immediately
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('qq-group'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
 
     // unmute → mask 1 (notify)
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('qq-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
     })).resolves.toEqual({ _: 'boolTrue' })
@@ -465,12 +466,12 @@ describe('notification settings RPC e2e', () => {
       { conversationId: 'qq-group', mask: 4 },
       { conversationId: 'qq-group', mask: 1 },
     ])
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('qq-group'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
 
     // a future timestamp also counts as muted → mask 4
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('qq-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: 9_999_999_999 },
     })).resolves.toEqual({ _: 'boolTrue' })
@@ -478,7 +479,7 @@ describe('notification settings RPC e2e', () => {
 
     // non-QQ group (no qqGroupMsgMask metadata) must not trigger a platform call
     const callsBeforePlain = maskCalls.length
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('plain-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
     })).resolves.toEqual({ _: 'boolTrue' })
@@ -487,22 +488,22 @@ describe('notification settings RPC e2e', () => {
     // return to mask 1 (unmute) so the overlay reflects muteUntil 0 before the
     // failure scenario, then verify a failed mute does not block the TG response
     // nor flip the overlay (the previous successful mask stays in effect).
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('qq-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
     })).resolves.toEqual({ _: 'boolTrue' })
     expect(maskCalls.at(-1)).toEqual({ conversationId: 'qq-group', mask: 1 })
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('qq-group'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
 
     maskFailure = new Error('upstream down')
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('qq-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
     })).resolves.toEqual({ _: 'boolTrue' })
     // overlay is unchanged (still mask 1) because the platform call failed
-    await expect(roundTripRpc(dispatcher, {
+    await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('qq-group'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
     maskFailure = undefined

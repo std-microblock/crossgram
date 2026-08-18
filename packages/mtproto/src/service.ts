@@ -1,4 +1,4 @@
-import { Context, Service } from 'cordis'
+import { Context, Service, type Fiber } from 'cordis'
 import { Server, type Socket } from 'node:net'
 import { resolve } from 'node:path'
 import { __tlWriterMap, LogManager, type ICryptoProvider, type Logger } from '@mtcute/core/utils.js'
@@ -12,11 +12,11 @@ import { RpcDependencyRegistry, ServerSession } from './session/server-session.j
 import { PqChallengeStore } from './session/server-authorization.js'
 import { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './session/auth-key-store.js'
 import { AuthKeyDataStore } from './session/auth-key-data-store.js'
-import { RpcDispatcher, type RpcHandler, type RpcResult } from './rpc/dispatcher.js'
-import type { ServerRpcContext } from './rpc/context.js'
+import type { RpcHandler, RpcResult } from './rpc/protocol.js'
+import { invokeRpc, registerRpcRoute } from './rpc/router.js'
+import type { MtprotoConnectionScope, ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
 import { createCordisLogManager } from './cordis-logger.js'
-import { Emitter } from '@fuman/utils'
 import type { MtprotoDebugEvent } from './debug.js'
 import z from 'schemastery'
 import enUS from './locales/en-US.yml'
@@ -55,28 +55,28 @@ export const Config = z.object({
   'zh-CN': zhCN,
 })
 
-/**
- * A connection that has been write-backpressured for this long (the peer is
- * not consuming bytes) is presumed stalled and is closed so the client
- * reconnects and re-syncs via updates.getDifference.
- */
 const STALL_TIMEOUT_MS = 30_000
 const STALL_WATCH_INTERVAL_MS = 5_000
 
+interface ConnectionFiberConfig {
+  open(ctx: Context): void | (() => void | Promise<void>)
+}
+
+function connectionFiber(ctx: Context, config: ConnectionFiberConfig) {
+  return config.open(ctx)
+}
+
 /**
- * The MTProto server, as a native cordis service (`ctx.mtproto`).
+ * Cordis-native MTProto server.
  *
- * Owns the TCP listener and per-connection MTProto sessions directly (the
- * `@cordisjs/plugin-server` pattern). Backend plugins inject `mtproto` and
- * register RPC handlers via {@link register} — each
- * registration is a `ctx.effect`, so a backend hot-reloads (or unloads) cleanly
- * while the listener and live connections stay up.
+ * The service owns only process-wide resources. Every accepted TCP connection
+ * is a child fiber, every RPC is a short-lived child fiber of that connection,
+ * and protocol extension points are Cordis events dispatched with derived
+ * contexts carrying the current connection/packet/RPC metadata.
  */
 export class Mtproto extends Service {
   static Config = Config
   readonly rsaKey: ServerRsaKey
-  readonly dispatcher = new RpcDispatcher()
-  readonly onDebug = new Emitter<MtprotoDebugEvent>()
 
   private readonly _crypto: ICryptoProvider
   private readonly _readerMap: TlReaderMap
@@ -86,6 +86,7 @@ export class Mtproto extends Service {
   private readonly _log: Logger
   private readonly _sessions = new Set<ServerSession>()
   private readonly _sockets = new Set<Socket>()
+  private readonly _connectionFibers = new Map<string, Fiber>()
   private readonly _authApiLayers = new Map<string, number>()
   private readonly _rpcDependencies = new RpcDependencyRegistry()
   private readonly _pqChallenges = new PqChallengeStore()
@@ -121,12 +122,19 @@ export class Mtproto extends Service {
     return addr && typeof addr === 'object' ? addr.port : (this.config.port ?? 4430)
   }
 
-  /** Register an RPC handler, tied to the calling fiber (HMR-safe). */
-  register(method: string, handler: RpcHandler): () => void {
-    return this.ctx.effect(() => {
-      this.dispatcher.register(method, handler)
-      return () => this.dispatcher.unregister(method)
-    }, `mtproto.register(${method})`)
+  /**
+   * Register one RPC route on the calling plugin's fiber.
+   *
+   * The routed Cordis event keeps registration HMR-safe and lets the
+   * dispatch context select listeners through normal derived-context filters.
+   */
+  register(method: string, handler: RpcHandler): () => boolean {
+    return registerRpcRoute(this.ctx, method, handler)
+  }
+
+  /** Dispatch a decoded RPC through a short-lived invocation fiber. */
+  async dispatch(source: ServerRpcContext, request: tl.RpcMethod): Promise<RpcResult> {
+    return invokeRpc(this.ctx, source, request)
   }
 
   /** Broadcast a server-initiated update to all authorized, non-stalled sessions. */
@@ -146,9 +154,6 @@ export class Mtproto extends Service {
   ): number {
     const candidates = [...this._sessions].filter((session) =>
       equalBytes(session.authKeyId, authKeyId) && session.connection !== excludeConnection)
-    // A stalled connection accepts bytes into its kernel/Node buffers forever
-    // without the peer ever reading them. Skip it so the update is delivered
-    // on a live connection (or left pending for updates.getDifference).
     const healthy = candidates.filter((session) =>
       session.connection.stalledForMs < STALL_TIMEOUT_MS)
     const updateSessions = healthy.filter((session) => session.acceptsUpdates)
@@ -168,15 +173,16 @@ export class Mtproto extends Service {
     const host = this.config.host ?? '127.0.0.1'
     const port = this.config.port ?? 4430
 
-    await new Promise<void>((res) => {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => reject(error)
+      server.once('error', onError)
       server.listen(port, host, () => {
+        server.off('error', onError)
         this._log.info('listening on %s:%d', host, this.port)
-        res()
+        resolve()
       })
     })
 
-    // Reap stalled connections so a client whose TCP path went black (but the
-    // socket still reports ESTABLISHED) reconnects and re-syncs updates.
     const stallWatcher = setInterval(() => {
       for (const session of this._sessions) {
         const stalled = session.connection.stalledForMs
@@ -190,33 +196,62 @@ export class Mtproto extends Service {
     }, STALL_WATCH_INTERVAL_MS)
     stallWatcher.unref?.()
 
-    yield () => new Promise<void>((res) => {
+    yield async () => {
       clearInterval(stallWatcher)
       for (const socket of this._sockets) socket.destroy()
+      await Promise.allSettled([...this._connectionFibers.values()].map((fiber) => fiber.dispose()))
+      this._connectionFibers.clear()
       this._sockets.clear()
-      server.close(() => { this._server = null; res() })
-    })
+      await new Promise<void>((resolve) => {
+        if (!server.listening) return resolve()
+        server.close(() => resolve())
+      })
+      this._server = null
+    }
   }
 
   private _handleConnection(socket: Socket): void {
     const connectionId = `conn-${++this._connectionSeq}`
+    this._sockets.add(socket)
+
+    const fiber = this.ctx.plugin(connectionFiber, {
+      open: (ctx) => this._openConnection(ctx, socket, connectionId),
+    })
+    this._connectionFibers.set(connectionId, fiber)
+
+    const dispose = () => {
+      this._sockets.delete(socket)
+      this._connectionFibers.delete(connectionId)
+      void fiber.dispose()
+    }
+    socket.once('close', dispose)
+    void fiber.await().catch((error) => {
+      this._log.error('failed to initialize connection %s: %s', connectionId, error)
+      socket.destroy()
+    })
+  }
+
+  private _openConnection(ctx: Context, socket: Socket, connectionId: string) {
     const connLog = this._log.create(`conn:${socket.remoteAddress}:${socket.remotePort}`)
     socket.setNoDelay(true)
     socket.setKeepAlive(true)
-    this._sockets.add(socket)
-    socket.on('close', () => this._sockets.delete(socket))
-
-    this.onDebug.emit({
-      direction: 'client->server', phase: 'connection', connectionId,
-      timestamp: Date.now(), payload: {
-        _: 'connection_opened',
-        remoteAddress: socket.remoteAddress ?? null,
-        remotePort: socket.remotePort ?? null,
-      },
-    })
 
     const connection = new ServerConnection(socket, this._crypto, connLog)
+    const scope = {
+      id: connectionId,
+      connection,
+      session: undefined as unknown as ServerSession,
+      remoteAddress: socket.remoteAddress,
+      remotePort: socket.remotePort,
+    } satisfies MtprotoConnectionScope
+    const connectionCtx = ctx.extend({ mtprotoConnection: scope })
+    const debug = (event: Omit<MtprotoDebugEvent, 'connectionId'>) => {
+      const scoped = { ...event, connectionId }
+      connectionCtx.emit(connectionCtx, 'mtproto/debug', scoped)
+    }
+
     const session = new ServerSession(
+      connectionCtx,
       connection,
       this._crypto,
       this._readerMap,
@@ -224,26 +259,52 @@ export class Mtproto extends Service {
       connLog,
       this.rsaKey.privateKeyPem,
       Long.fromString(this.rsaKey.fingerprint, true, 16),
-      { dispatch: (ctx, request) => this._dispatch(ctx, request) },
+      (rpc, request) => this.dispatch(rpc, request),
       this._authKeyData,
       this._authKeyStore,
-      (event) => this.onDebug.emit({ ...event, connectionId }),
+      debug,
       (authKeyId, layer) => { void this._rememberApiLayer(authKeyId, layer) },
       (authKeyId) => this._authApiLayers.get(bytesHex(authKeyId)),
       this._rpcDependencies,
       this._pqChallenges,
     )
+    scope.session = session
     this._sessions.add(session)
-    connection.onClose.add(() => {
-      this._sessions.delete(session)
-      this.onDebug.emit({
-        direction: 'client->server', phase: 'connection', connectionId,
-        timestamp: Date.now(), payload: { _: 'connection_closed' },
-      })
+
+    debug({
+      direction: 'client->server', phase: 'connection', timestamp: Date.now(),
+      payload: {
+        _: 'connection_opened',
+        remoteAddress: socket.remoteAddress ?? null,
+        remotePort: socket.remotePort ?? null,
+      },
     })
+    connectionCtx.emit(connectionCtx, 'mtproto/connection', scope, 'open')
 
     session.start()
-    connection.start()
+
+    let closeEmitted = false
+    const emitClose = () => {
+      if (closeEmitted) return
+      closeEmitted = true
+      debug({
+        direction: 'client->server', phase: 'connection', timestamp: Date.now(),
+        payload: { _: 'connection_closed' },
+      })
+      connectionCtx.emit(connectionCtx, 'mtproto/connection', scope, 'close')
+    }
+    socket.once('close', emitClose)
+
+    let disposed = false
+    return async () => {
+      if (disposed) return
+      disposed = true
+      socket.off('close', emitClose)
+      this._sessions.delete(session)
+      emitClose()
+      connection.dispose()
+      connection.close()
+    }
   }
 
   private async _rememberApiLayer(authKeyId: Uint8Array, layer: number): Promise<void> {
@@ -268,10 +329,6 @@ export class Mtproto extends Service {
     if (!authKeyId) return
     const layer = this._authApiLayers.get(bytesHex(authKeyId))
     if (layer !== undefined) session.applyApiLayer(layer)
-  }
-
-  private async _dispatch(ctx: ServerRpcContext, request: tl.RpcMethod): Promise<RpcResult> {
-    return this.dispatcher.dispatch(ctx, request)
   }
 }
 

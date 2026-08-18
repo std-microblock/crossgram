@@ -1,5 +1,6 @@
 import type { ICryptoProvider, Logger } from '@mtcute/core/utils.js'
 import type { mtp, tl } from '@mtcute/core'
+import type { Context } from 'cordis'
 import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { typed, u8 } from '@fuman/utils'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
@@ -12,8 +13,9 @@ import type { AuthKeyDataStore } from './auth-key-data-store.js'
 import { ServerMessageIdGenerator } from './message-id.js'
 import { doServerAuthorization, PqChallengeStore } from './server-authorization.js'
 import type { ServerConnection } from '../transport/server-connection.js'
-import { isBareVector, isRpcRequestObject, unwrapRpcRequest } from '../rpc/dispatcher.js'
-import type { RpcDispatch, ServerRpcContext, RpcResult, BareVector } from '../rpc/dispatcher.js'
+import { isBareVector, isRpcRequestObject, unwrapRpcRequest } from '../rpc/protocol.js'
+import type { RpcHandler, ServerRpcContext, RpcResult, BareVector } from '../rpc/protocol.js'
+import type { MtprotoPacketScope } from '../rpc/context.js'
 import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 
@@ -131,7 +133,7 @@ function boolBytes(value: boolean): Uint8Array {
  * 1. On connect: run the DH handshake (unencrypted messages)
  * 2. After handshake: send `new_session_created`
  * 3. For each incoming encrypted message: decrypt → handle (container/rpc/service) → respond
- * 4. RPC calls are dispatched to the RpcDispatcher; responses sent as `rpc_result`
+ * 4. RPC calls are dispatched through the Cordis RPC event pipeline; responses are sent as `rpc_result`
  * 5. Updates can be pushed to the client at any time (after handshake)
  */
 export class ServerSession {
@@ -158,6 +160,7 @@ export class ServerSession {
   private _queuedAcks = new Map<string, { sessionId: Long, msgIds: Long[] }>()
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
+  private _packetSequence = 0
   private _processingMessages = new Map<string, Promise<void>>()
   private _completedMessageIds = new Map<string, true>()
   // Only authorization transitions form a barrier. Serializing every API RPC
@@ -166,6 +169,7 @@ export class ServerSession {
   private _authorizationTransitionProcessing: Promise<void> = Promise.resolve()
 
   constructor(
+    private readonly _context: Context,
     private readonly _connection: ServerConnection,
     private readonly _crypto: ICryptoProvider,
     private readonly _readerMap: TlReaderMap,
@@ -173,7 +177,7 @@ export class ServerSession {
     private readonly _log: Logger,
     private readonly _rsaPrivateKeyPem: string,
     private readonly _rsaKeyFingerprint: Long,
-    private readonly _dispatcher: RpcDispatch,
+    private readonly _dispatchRpc: RpcHandler,
     private readonly _authKeyData: AuthKeyDataStore,
     private readonly _keyStore?: AuthKeyStore,
     private readonly _debug?: MtprotoDebugListener,
@@ -197,18 +201,20 @@ export class ServerSession {
    * Start the session: begin handshake when data arrives.
    */
   start(): void {
+    if (this._msgHandler) return
     const onMsg = (data: Uint8Array) => {
       this._onRawData(data).catch((err) => {
         this._log.error('unhandled error in message processing: %s', err)
       })
     }
     this._msgHandler = onMsg
-    this._connection.onMessage.add(onMsg)
-
-    const onClose = () => {
-      this._log.debug('connection closed')
-    }
-    this._connection.onClose.add(onClose)
+    this._context.effect(() => {
+      const dispose = this._connection.listen(onMsg)
+      return () => {
+        dispose()
+        if (this._msgHandler === onMsg) this._msgHandler = null
+      }
+    }, 'mtproto.session.frames')
   }
 
   /**
@@ -265,6 +271,21 @@ export class ServerSession {
   // ── Internal: data handling ──
 
   private async _onRawData(data: Uint8Array): Promise<void> {
+    const packet: MtprotoPacketScope = {
+      connection: this._context.mtprotoConnection,
+      sequence: ++this._packetSequence,
+      data,
+    }
+    const packetCtx = this._context.extend({ mtprotoPacket: packet })
+    await packetCtx.waterfall(
+      packetCtx,
+      'mtproto/packet',
+      packet,
+      () => this._processRawData(data, packetCtx),
+    )
+  }
+
+  private async _processRawData(data: Uint8Array, packetCtx: Context): Promise<void> {
     if (!this._authorized) {
       // Returning API and media connections may present either a permanent key
       // or a temporary PFS key before any plaintext handshake.
@@ -272,7 +293,7 @@ export class ServerSession {
       if (!firstKeyId.every(b => b === 0)) {
         const stored = await this._keyStore?.get(firstKeyId)
         if (stored && await this._adoptStoredAuthKey(stored)) {
-          await this._onRawData(data) // re-process this frame, now authorized
+          await this._processRawData(data, packetCtx) // re-process this frame, now authorized
           return
         }
         this._sendAuthKeyNotFound(firstKeyId)
@@ -319,7 +340,7 @@ export class ServerSession {
       // Service frames must not wait behind slow RPC dispatches. The RPC path
       // retains this value and restores it immediately before dispatching.
       this._sessionId = clientSessionId
-      this._handleDecryptedMessage(msgId, seqNo, reader, clientSessionId).catch((err) => {
+      this._handleDecryptedMessage(msgId, seqNo, reader, clientSessionId, packetCtx).catch((err) => {
         this._log.error('error handling message %s: %s', msgId.toString(16), err)
       })
     })
@@ -414,10 +435,7 @@ export class ServerSession {
     let resumed: ResumeStoredAuthKey | null = null
     try {
       // Replace handler to capture subsequent unencrypted messages during handshake
-      if (normalHandler) {
-        this._connection.onMessage.remove(normalHandler)
-      }
-      this._connection.onMessage.add(tempHandler)
+      this._connection.replaceMessageHandler(tempHandler)
 
       const recvPlain = async (): Promise<Uint8Array> => {
         if (handshakeError) throw handshakeError
@@ -508,11 +526,7 @@ export class ServerSession {
         this._connection.close()
       }
     } finally {
-      this._connection.onMessage.remove(tempHandler)
-      if (normalHandler) {
-        this._msgHandler = normalHandler
-        this._connection.onMessage.add(normalHandler)
-      }
+      this._connection.replaceMessageHandler(normalHandler)
     }
 
     if (resumed) {
@@ -563,6 +577,7 @@ export class ServerSession {
     seqNo: number,
     reader: TlBinaryReader,
     clientSessionId: Long = this._sessionId,
+    packetCtx: Context = this._context,
   ): Promise<void> {
     const key = msgId.toString()
     let resolveCompletion!: () => void
@@ -576,7 +591,7 @@ export class ServerSession {
     }
 
     try {
-      await this._processDecryptedMessage(msgId, seqNo, reader, clientSessionId)
+      await this._processDecryptedMessage(msgId, seqNo, reader, clientSessionId, packetCtx)
     } finally {
       if (this._processingMessages.get(key) === completion) {
         this._processingMessages.delete(key)
@@ -594,6 +609,7 @@ export class ServerSession {
     seqNo: number,
     reader: TlBinaryReader,
     clientSessionId: Long,
+    packetCtx: Context = this._context,
   ): Promise<void> {
     this._msgIdGen.observeClientMsgId(msgId)
 
@@ -621,7 +637,7 @@ export class ServerSession {
           const innerBody = reader.raw(innerLength)
           const innerReader = new TlBinaryReader(this._readerMap, innerBody)
           try {
-            await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader, clientSessionId)
+            await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader, clientSessionId, packetCtx)
           } catch (error) {
             this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error, clientSessionId)
           }
@@ -693,12 +709,12 @@ export class ServerSession {
         break
 
       case 'auth.bindTempAuthKey':
-        await this._enqueueRpcCall(msgId, obj as unknown as tl.RpcMethod, clientSessionId)
+        await this._enqueueRpcCall(msgId, obj as unknown as tl.RpcMethod, clientSessionId, packetCtx)
         break
 
       default:
         if (isRpcRequestObject(objId)) {
-          await this._enqueueRpcCall(msgId, obj as unknown as tl.RpcMethod, clientSessionId)
+          await this._enqueueRpcCall(msgId, obj as unknown as tl.RpcMethod, clientSessionId, packetCtx)
         } else if ((seqNo & 1) !== 0) {
           const errorMessage = `METHOD_NOT_IMPLEMENTED: ${objId}`
           this._log.error(
@@ -1070,11 +1086,12 @@ export class ServerSession {
     msgId: Long,
     request: tl.RpcMethod,
     clientSessionId: Long,
+    packetCtx: Context = this._context,
   ): Promise<void> {
     const method = unwrapRpcRequest(request).request._
     if (AUTHORIZATION_TRANSITION_METHODS.has(method)) {
       const scheduled = this._authorizationTransitionProcessing.then(
-        () => this._handleRpcCall(msgId, request, clientSessionId),
+        () => this._handleRpcCall(msgId, request, clientSessionId, packetCtx),
       )
       this._authorizationTransitionProcessing = scheduled.catch((err) => {
         this._log.error('error handling RPC message %s: %s', msgId.toString(16), err)
@@ -1085,13 +1102,14 @@ export class ServerSession {
 
     const precedingAuthorizationTransitions = this._authorizationTransitionProcessing
     await precedingAuthorizationTransitions
-    await this._handleRpcCall(msgId, request, clientSessionId)
+    await this._handleRpcCall(msgId, request, clientSessionId, packetCtx)
   }
 
   private async _handleRpcCall(
     msgId: Long,
     request: tl.RpcMethod,
     clientSessionId: Long,
+    packetCtx: Context = this._context,
   ): Promise<void> {
     const unwrapped = unwrapRpcRequest(request)
 
@@ -1146,19 +1164,25 @@ export class ServerSession {
       return
     }
 
-    const ctx: ServerRpcContext = {
+    const ctx = packetCtx.extend({
+      mtprotoRpc: {
+        connection: this._context.mtprotoConnection,
+        request: unwrapped.request,
+        messageId: msgId,
+        receivedAt: Date.now(),
+      },
       connection: this._connection,
       apiLayer: this._apiLayer,
-      authKeyId: this._permAuthKey.ready ? this._permAuthKey.id : null,
+      authKeyId: this._permAuthKey.ready ? new Uint8Array(this._permAuthKey.id) : null,
       sessionId: clientSessionId,
       isAuthorized: this._authorized,
       sendUpdate: (update) => this.sendUpdate(update, clientSessionId),
       getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
       setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),
-    }
+    }) as unknown as ServerRpcContext
 
     try {
-      const result = await this._dispatcher.dispatch(ctx, unwrapped.request)
+      const result = await this._dispatchRpc(ctx, unwrapped.request)
       this._sendRpcResult(msgId, result, unwrapped.request._, clientSessionId)
     } catch (err) {
       this._log.error('RPC dispatch error for %s: %s', unwrapped.request._, err instanceof Error ? err.stack : err)

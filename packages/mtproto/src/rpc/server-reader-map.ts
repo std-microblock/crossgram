@@ -28,7 +28,7 @@ req_pq#60469778 nonce:int128 = ResPQ;
  * layer history mirrored by this project.
  *
  * Keep them as an explicit server compatibility surface: constructor IDs are
- * the wire identity, while the shared method names let the normal dispatcher
+ * the wire identity, while the shared method names let the normal RPC route pipeline
  * route them to the canonical handlers after decoding.
  */
 const TELEGRAM_ANDROID_COMPAT_SCHEMA = `

@@ -474,8 +474,8 @@ describe('BotFather physical MTProto e2e', () => {
     let sdk: Bot | undefined
     let polling: Promise<void> | undefined
     let nativeSendMessage: ReturnType<typeof vi.spyOn> | undefined
+    const disposeDebug = ctx.on('mtproto/debug', (event) => debug.push(event))
     try {
-      ctx.mtproto.onDebug.add((event) => debug.push(event))
       const account = await waitForPlatformLogin(ctx, 'static')
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
@@ -633,6 +633,7 @@ describe('BotFather physical MTProto e2e', () => {
       expect(JSON.stringify(difference)).toContain(token)
       expect(JSON.stringify(difference)).toContain(replacementToken)
     } finally {
+      disposeDebug()
       nativeSendMessage?.mockRestore()
       await sdk?.stopPolling()
       await polling?.catch(() => {})
@@ -876,7 +877,7 @@ describe('bridge login e2e', () => {
       expect(exported).toMatchObject({
         _: 'auth.exportedAuthorization', id: expect.anything(), bytes: expect.any(Uint8Array),
       })
-      expect(await ctx.mtproto.dispatcher.dispatch({
+      expect(await ctx.mtproto.dispatch({
         connection: {} as never,
         apiLayer: null,
         authKeyId: null,
@@ -1242,7 +1243,7 @@ describe('bridge login e2e', () => {
   it('returns direct and group sends as unsequenced reconciliations without same-auth-key echoes', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     const debugEvents: MtprotoDebugEvent[] = []
-    ctx.mtproto.onDebug.add((event) => debugEvents.push(event))
+    const disposeDebug = ctx.on('mtproto/debug', (event) => debugEvents.push(event))
     let requester: TestClient | undefined
     let parallel: TestClient | undefined
     try {
@@ -1317,6 +1318,7 @@ describe('bridge login e2e', () => {
       })
       expect(echoedUpdates).toEqual([])
     } finally {
+      disposeDebug()
       parallel?.close()
       requester?.close()
       await stop()

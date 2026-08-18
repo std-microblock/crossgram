@@ -93,6 +93,64 @@ function incoming(id: string, conversationId = 'room'): IMMessage {
 }
 
 describe('PlatformSubscriptionManager', () => {
+  it('processes each platform event in a derived-context fiber and Cordis waterfall pipeline', async () => {
+    const database = await createDatabase()
+    const ctx = new Context()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const order: string[] = []
+    const contexts: Context[] = []
+    const committed: CommittedPlatformEvent[] = []
+    ctx.on('bridge/platform-event', async function (activeSession, event, _options, next) {
+      expect(Context.is(this)).toBe(true)
+      expect(this.bridgeSession.session).toBe(activeSession)
+      expect(this.bridgeEvent.event).toBe(event)
+      contexts.push(this)
+      order.push('ingest:before')
+      const result = await next()
+      order.push('ingest:after')
+      return result
+    })
+    ctx.on('bridge/platform-event/publish', async function (_activeSession, event, _options, next) {
+      expect(this.bridgeEvent.event).toBeTruthy()
+      order.push('publish:before')
+      const result = await next()
+      order.push('publish:after')
+      return result
+    })
+    ctx.on('im-platform/event-committed', (_activeSession, event) => {
+      committed.push(event)
+      order.push('committed')
+    })
+    const manager = new PlatformSubscriptionManager(
+      database,
+      new PlatformRegistry([['push', platform]]),
+      store,
+      undefined,
+      async () => {
+        order.push('publisher')
+        return { _: 'updates', updates: [], users: [], chats: [], date: 1, seq: 1 }
+      },
+      undefined,
+      ctx,
+    )
+    const conversation: IMConversation = { id: 'fiber-room', kind: 'group', title: 'Fiber room' }
+    const event: IMEvent = { type: 'message', conversation, message: incoming('fiber-1', conversation.id) }
+    await manager.ensure(session)
+
+    const result = await manager.ingestLocalEvent(session, event)
+
+    expect(result).toMatchObject({ _: 'updates' })
+    expect(order).toEqual([
+      'ingest:before', 'publish:before', 'publisher', 'publish:after', 'committed', 'ingest:after',
+    ])
+    expect(committed).toHaveLength(1)
+    expect(contexts[0].bridgeSession).toEqual({ platform, session })
+    expect(contexts[0].bridgeEvent).toEqual({ event, options: undefined })
+    expect(contexts[0].fiber.name).toBe('platformEventFiber')
+    await manager.stop()
+  })
+
   it('delivers voice calls transiently without persisting their exact platform reference', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

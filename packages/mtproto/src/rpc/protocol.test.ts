@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import type { ServerRpcContext } from './context.js'
-import { isRpcRequestObject, RpcDispatcher, unwrapRpcRequest } from './dispatcher.js'
+import { isRpcRequestObject, unwrapRpcRequest } from './protocol.js'
+import { invokeRpc, registerRpcRoute } from './router.js'
 
 function makeContext(): ServerRpcContext {
   return {
@@ -17,11 +19,11 @@ function makeContext(): ServerRpcContext {
   }
 }
 
-describe('RpcDispatcher', () => {
+describe('Cordis RPC routing', () => {
   it('returns METHOD_NOT_IMPLEMENTED for unregistered methods', async () => {
-    const dispatcher = new RpcDispatcher()
+    const ctx = new Context()
 
-    await expect(dispatcher.dispatch(makeContext(), {
+    await expect(invokeRpc(ctx, makeContext(), {
       _: 'help.getNearestDc',
     } as tl.RpcMethod)).resolves.toEqual({
       _: 'mt_rpc_error',
@@ -80,17 +82,18 @@ describe('RpcDispatcher', () => {
   })
 
   it('does not erase a retained layer for later unwrapped calls', async () => {
-    const dispatcher = new RpcDispatcher()
+    const ctx = new Context()
     const context = { ...makeContext(), apiLayer: 224 }
-    dispatcher.register('help.getAppConfig', async (ctx) => ({
-      _: 'help.appConfig', hash: ctx.apiLayer ?? 0, config: { _: 'jsonObject', value: [] },
+    const dispose = registerRpcRoute(ctx, 'help.getAppConfig', async (rpc) => ({
+      _: 'help.appConfig', hash: rpc.apiLayer ?? 0, config: { _: 'jsonObject', value: [] },
     }))
 
-    const result = await dispatcher.dispatch(context, {
+    const result = await invokeRpc(ctx, context, {
       _: 'help.getAppConfig', hash: 0,
     } as tl.RpcMethod) as tl.help.RawAppConfig
 
     expect(result.hash).toBe(224)
     expect(context.apiLayer).toBe(224)
+    dispose()
   })
 })

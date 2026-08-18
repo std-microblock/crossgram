@@ -104,9 +104,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     scheduleFlush()
   }
 
-  ctx.mtproto.onDebug.add(onDebug)
+  ctx.on('mtproto/debug', onDebug)
   ctx.effect(() => () => {
-    ctx.mtproto.onDebug.remove(onDebug)
     if (flushTimer) clearTimeout(flushTimer)
     flushTimer = undefined
     pending = []
