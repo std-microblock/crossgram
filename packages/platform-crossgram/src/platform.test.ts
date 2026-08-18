@@ -1218,6 +1218,108 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
+  it('pauses WebSocket reconnects while the QQNT kernel is not ready', async () => {
+    vi.useFakeTimers()
+    const retrySession = { ...session, platformSessionId: 'qq-session-not-ready' }
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const status = vi.spyOn(platform.client, 'status')
+      .mockResolvedValueOnce({ protocolVersion: 22, ready: false })
+      .mockResolvedValueOnce({ protocolVersion: 22, ready: false })
+      .mockResolvedValueOnce({ protocolVersion: 22, ready: false })
+      .mockResolvedValue({ protocolVersion: 22, ready: true, selfUin: '10000' })
+    const subscribe = vi.spyOn(platform.client, 'subscribe')
+      .mockRejectedValueOnce(new Error('Unexpected server response: 503'))
+      .mockImplementation(async (_handler, signal) => {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      })
+
+    const unsubscribe = await platform.subscribe(retrySession, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    expect(status).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(status).toHaveBeenCalledTimes(1)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(status).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(status).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(status).toHaveBeenCalledTimes(3)
+
+    await vi.advanceTimersByTimeAsync(3_999)
+    expect(status).toHaveBeenCalledTimes(3)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(status).toHaveBeenCalledTimes(4)
+    expect(subscribe).toHaveBeenCalledTimes(2)
+
+    await unsubscribe()
+  })
+
+  it('exponentially backs off ordinary WebSocket failures up to recovery', async () => {
+    vi.useFakeTimers()
+    const retrySession = { ...session, platformSessionId: 'qq-session-stream-retry' }
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    vi.spyOn(platform.client, 'status').mockResolvedValue({
+      protocolVersion: 22, ready: true, selfUin: '10000',
+    })
+    const subscribe = vi.spyOn(platform.client, 'subscribe')
+      .mockRejectedValue(new Error('socket closed before the opening handshake'))
+
+    const unsubscribe = await platform.subscribe(retrySession, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(subscribe).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(3)
+
+    await vi.advanceTimersByTimeAsync(3_999)
+    expect(subscribe).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(4)
+
+    await vi.advanceTimersByTimeAsync(7_999)
+    expect(subscribe).toHaveBeenCalledTimes(4)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(5)
+
+    await vi.advanceTimersByTimeAsync(15_999)
+    expect(subscribe).toHaveBeenCalledTimes(5)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(6)
+
+    await vi.advanceTimersByTimeAsync(31_999)
+    expect(subscribe).toHaveBeenCalledTimes(6)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(7)
+
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(subscribe).toHaveBeenCalledTimes(7)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(8)
+
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(subscribe).toHaveBeenCalledTimes(8)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(subscribe).toHaveBeenCalledTimes(9)
+
+    await unsubscribe()
+  })
+
   it('drops native AVSDK frames without delivering, reconnecting, or logging each frame', async () => {
     const logger = {
       debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),

@@ -340,6 +340,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     let attempt = 0
     let failedEventId: string | undefined
     let consecutiveEventFailures = 0
+    let consecutiveStreamFailures = 0
     while (!signal.aborted) {
       attempt++
       let reconnectDelayMs = WEBSOCKET_RECONNECT_BASE_DELAY_MS
@@ -349,6 +350,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       )
       try {
         await this.client.subscribe(async (event, eventId) => {
+          // Receiving any frame proves that the transport is healthy. Future
+          // connection failures start a fresh backoff sequence instead of
+          // inheriting an outage that has already recovered.
+          consecutiveStreamFailures = 0
           try {
             if (event.type === 'native-avsdk') {
               if (event.version !== 1
@@ -429,10 +434,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             lastEventId = eventId
           },
         })
-        if (!signal.aborted) this.logger?.warn(
-          'WebSocket stream ended session=%s attempt=%d lastEventId=%s; reconnecting',
-          platformSessionId, attempt, lastEventId ?? '<none>',
-        )
+        if (!signal.aborted) {
+          reconnectDelayMs = reconnectBackoffDelay(++consecutiveStreamFailures)
+          this.logger?.warn(
+            'WebSocket stream ended session=%s attempt=%d lastEventId=%s failures=%d retryDelayMs=%d; reconnecting',
+            platformSessionId, attempt, lastEventId ?? '<none>',
+            consecutiveStreamFailures, reconnectDelayMs,
+          )
+        }
       } catch (error) {
         if (signal.aborted) return
         if (error instanceof QQNTEventHandlingError) {
@@ -441,10 +450,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             failedEventId = error.eventId
             consecutiveEventFailures = 1
           }
-          reconnectDelayMs = Math.min(
-            WEBSOCKET_RECONNECT_MAX_DELAY_MS,
-            WEBSOCKET_RECONNECT_BASE_DELAY_MS * 2 ** Math.min(consecutiveEventFailures - 1, 16),
-          )
+          reconnectDelayMs = reconnectBackoffDelay(consecutiveEventFailures)
           this.logger?.error(
             'WebSocket event handling failed session=%s attempt=%d streamEventId=%s lastEventId=%s failures=%d retryDelayMs=%d error=%s',
             platformSessionId, attempt, error.eventId ?? '<none>', lastEventId ?? '<none>',
@@ -453,14 +459,48 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         } else {
           failedEventId = undefined
           consecutiveEventFailures = 0
+          reconnectDelayMs = reconnectBackoffDelay(++consecutiveStreamFailures)
           this.logger?.warn(
-            'WebSocket stream failed session=%s attempt=%d lastEventId=%s error=%s; reconnecting',
-            platformSessionId, attempt, lastEventId ?? '<none>', formatError(error),
+            'WebSocket stream failed session=%s attempt=%d lastEventId=%s failures=%d retryDelayMs=%d error=%s; reconnecting',
+            platformSessionId, attempt, lastEventId ?? '<none>',
+            consecutiveStreamFailures, reconnectDelayMs, formatError(error),
           )
+          if (await this.pauseSubscriptionWhileKernelNotReady(platformSessionId, signal)) {
+            consecutiveStreamFailures = 0
+            continue
+          }
         }
       }
       await abortableDelay(reconnectDelayMs, signal)
     }
+  }
+
+  private async pauseSubscriptionWhileKernelNotReady(
+    platformSessionId: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    let observedNotReady = false
+    let failures = 0
+    while (!signal.aborted) {
+      try {
+        const status = await this.client.status()
+        if (status.ready) return observedNotReady
+        observedNotReady = true
+      } catch (error) {
+        if (!observedNotReady) return false
+        this.logger?.warn(
+          'QQNT readiness check failed session=%s failures=%d error=%s; subscription remains paused',
+          platformSessionId, failures + 1, formatError(error),
+        )
+      }
+      const retryDelayMs = reconnectBackoffDelay(++failures)
+      this.logger?.warn(
+        'QQNT kernel is not ready session=%s failures=%d retryDelayMs=%d; WebSocket subscription paused',
+        platformSessionId, failures, retryDelayMs,
+      )
+      await abortableDelay(retryDelayMs, signal)
+    }
+    return observedNotReady
   }
 
   private async subscribeDialogsLoop(
@@ -2121,6 +2161,13 @@ async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
       resolve()
     }
   })
+}
+
+function reconnectBackoffDelay(failures: number): number {
+  return Math.min(
+    WEBSOCKET_RECONNECT_MAX_DELAY_MS,
+    WEBSOCKET_RECONNECT_BASE_DELAY_MS * 2 ** Math.min(Math.max(0, failures - 1), 16),
+  )
 }
 
 async function waitAtMost(promise: Promise<unknown>, milliseconds: number): Promise<void> {
