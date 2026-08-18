@@ -16,6 +16,33 @@ export interface RpcMethodSnapshot extends DistributionSnapshot {
   lastSeenAt: number
 }
 
+export interface RpcMethodCountSnapshot {
+  method: string
+  count: number
+}
+
+export type RpcFailureCategory =
+  | 'not-implemented'
+  | 'bad-request'
+  | 'unauthorized'
+  | 'rate-limit'
+  | 'internal'
+  | 'other'
+
+export interface RpcFailureSnapshot {
+  category: RpcFailureCategory
+  errorCode: number
+  count: number
+  rate: number
+  lastSeenAt: number
+}
+
+export interface MissingRpcSnapshot {
+  method: string
+  count: number
+  lastSeenAt: number
+}
+
 export interface SlowRpcSample {
   at: number
   method: string
@@ -44,6 +71,21 @@ export interface RuntimeSnapshot {
   heapTotalBytes: number
   externalBytes: number
   arrayBuffersBytes: number
+  heapLimitBytes: number
+  heapAvailableBytes: number
+  mallocedBytes: number
+  peakMallocedBytes: number
+  nativeContexts: number
+  detachedContexts: number
+  cgroupMemoryCurrentBytes: number
+  cgroupMemoryPeakBytes: number
+  cgroupMemoryHighBytes: number
+  cgroupMemoryMaxBytes: number
+  cgroupAnonBytes: number
+  cgroupFileBytes: number
+  cgroupKernelBytes: number
+  cgroupShmemBytes: number
+  cgroupSwapBytes: number
   eventLoopUtilization: number
   eventLoopDelayMeanMs: number
   eventLoopDelayP90Ms: number
@@ -67,6 +109,12 @@ export interface StatisticsPoint {
   cpuPercent: number
   rssBytes: number
   heapUsedBytes: number
+  externalBytes: number
+  arrayBuffersBytes: number
+  cgroupMemoryCurrentBytes: number
+  cgroupAnonBytes: number
+  cgroupFileBytes: number
+  cgroupSwapBytes: number
   eventLoopDelayP99Ms: number
   gcDurationMs: number
 }
@@ -86,6 +134,13 @@ export interface StatisticsSnapshot {
   }
   runtime: RuntimeSnapshot
   methods: RpcMethodSnapshot[]
+  methodDistribution: RpcMethodCountSnapshot[]
+  failures: RpcFailureSnapshot[]
+  missingRpcs: {
+    count: number
+    uniqueMethods: number
+    methods: MissingRpcSnapshot[]
+  }
   ips: IpSnapshot[]
   slowest: SlowRpcSample[]
 }

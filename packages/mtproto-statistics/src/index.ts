@@ -76,12 +76,20 @@ export function apply(ctx: Context, config: Config = {}): void {
     const started = performance.now()
     let result: RpcResult | undefined
     let failed = false
+    let errorCode: number | undefined
+    let errorMessage: string | undefined
     try {
       result = await next()
       failed = isRpcError(result)
+      if (failed) {
+        errorCode = (result as { errorCode?: number }).errorCode
+        errorMessage = (result as { errorMessage?: string }).errorMessage
+      }
       return result
     } catch (error) {
       failed = true
+      errorCode = 500
+      errorMessage = error instanceof Error ? error.message : String(error)
       throw error
     } finally {
       collector.recordRpc({
@@ -90,6 +98,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         connectionId: this.mtprotoConnection.id,
         remoteAddress: this.mtprotoConnection.remoteAddress,
         error: failed,
+        errorCode,
+        errorMessage,
       })
     }
   }, { prepend: true })

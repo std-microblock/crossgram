@@ -1,7 +1,8 @@
 import type { MtprotoConnectionScope, MtprotoTrafficSample } from '@mtproto-relay/mtproto'
 import { LatencyHistogram } from './histogram.js'
 import type {
-  IpSnapshot, RpcMethodSnapshot, RuntimeSnapshot, SlowRpcSample,
+  IpSnapshot, MissingRpcSnapshot, RpcFailureCategory, RpcFailureSnapshot, RpcMethodCountSnapshot, RpcMethodSnapshot,
+  RuntimeSnapshot, SlowRpcSample,
   StatisticsPoint, StatisticsSeries, StatisticsSnapshot,
 } from './types.js'
 
@@ -22,6 +23,13 @@ interface IpState {
   lastSeenAt: number
 }
 
+interface RpcFailureState {
+  category: RpcFailureCategory
+  errorCode: number
+  count: number
+  lastSeenAt: number
+}
+
 export interface CollectorOptions {
   slowThresholdMs: number
   topMethods: number
@@ -31,7 +39,12 @@ export interface CollectorOptions {
 
 const EMPTY_RUNTIME: RuntimeSnapshot = {
   cpuPercent: 0, rssBytes: 0, heapUsedBytes: 0, heapTotalBytes: 0, externalBytes: 0,
-  arrayBuffersBytes: 0, eventLoopUtilization: 0, eventLoopDelayMeanMs: 0,
+  arrayBuffersBytes: 0, heapLimitBytes: 0, heapAvailableBytes: 0, mallocedBytes: 0,
+  peakMallocedBytes: 0, nativeContexts: 0, detachedContexts: 0,
+  cgroupMemoryCurrentBytes: 0, cgroupMemoryPeakBytes: 0, cgroupMemoryHighBytes: 0,
+  cgroupMemoryMaxBytes: 0, cgroupAnonBytes: 0, cgroupFileBytes: 0,
+  cgroupKernelBytes: 0, cgroupShmemBytes: 0, cgroupSwapBytes: 0,
+  eventLoopUtilization: 0, eventLoopDelayMeanMs: 0,
   eventLoopDelayP90Ms: 0, eventLoopDelayP99Ms: 0, gcCount: 0, gcDurationMs: 0,
   uptimeSeconds: 0,
 }
@@ -44,10 +57,13 @@ export class StatisticsCollector {
   private readonly intervalRpc = new LatencyHistogram()
   private readonly intervalPacket = new LatencyHistogram()
   private readonly methods = new Map<string, MethodState>()
+  private readonly failures = new Map<string, RpcFailureState>()
+  private readonly missingRpcs = new Map<string, { count: number, lastSeenAt: number }>()
   private readonly ips = new Map<string, IpState>()
   private readonly connections = new Map<string, string>()
   private readonly slowest: SlowRpcSample[] = []
   private rpcErrors = 0
+  private missingRpcCount = 0
   private intervalRpcErrors = 0
   private packetBytes = 0
   private receivedBytes = 0
@@ -111,6 +127,8 @@ export class StatisticsCollector {
     connectionId: string
     remoteAddress?: string
     error: boolean
+    errorCode?: number
+    errorMessage?: string
     at?: number
   }): void {
     const at = input.at ?? Date.now()
@@ -119,6 +137,22 @@ export class StatisticsCollector {
     if (input.error) {
       this.rpcErrors++
       this.intervalRpcErrors++
+      const errorCode = input.errorCode ?? 500
+      const category = classifyRpcFailure(errorCode, input.errorMessage)
+      const key = `${category}:${errorCode}`
+      const failure = this.failures.get(key) ?? {
+        category, errorCode, count: 0, lastSeenAt: at,
+      }
+      failure.count++
+      failure.lastSeenAt = at
+      this.failures.set(key, failure)
+      if (category === 'not-implemented') {
+        const missing = this.missingRpcs.get(input.method) ?? { count: 0, lastSeenAt: at }
+        missing.count++
+        missing.lastSeenAt = at
+        this.missingRpcs.set(input.method, missing)
+        this.missingRpcCount++
+      }
     }
     let method = this.methods.get(input.method)
     if (!method) {
@@ -166,6 +200,12 @@ export class StatisticsCollector {
       cpuPercent: runtime.cpuPercent,
       rssBytes: runtime.rssBytes,
       heapUsedBytes: runtime.heapUsedBytes,
+      externalBytes: runtime.externalBytes,
+      arrayBuffersBytes: runtime.arrayBuffersBytes,
+      cgroupMemoryCurrentBytes: runtime.cgroupMemoryCurrentBytes,
+      cgroupAnonBytes: runtime.cgroupAnonBytes,
+      cgroupFileBytes: runtime.cgroupFileBytes,
+      cgroupSwapBytes: runtime.cgroupSwapBytes,
       eventLoopDelayP99Ms: runtime.eventLoopDelayP99Ms,
       gcDurationMs: runtime.gcDurationMs,
     }
@@ -216,6 +256,13 @@ export class StatisticsCollector {
       },
       runtime,
       methods: this.methodSnapshots(),
+      methodDistribution: this.methodCountSnapshots(),
+      failures: this.failureSnapshots(rpc.count),
+      missingRpcs: {
+        count: this.missingRpcCount,
+        uniqueMethods: this.missingRpcs.size,
+        methods: this.missingRpcSnapshots(),
+      },
       ips: this.ipSnapshots(),
       slowest: [...this.slowest],
     }
@@ -228,8 +275,11 @@ export class StatisticsCollector {
     this.intervalRpc.reset()
     this.intervalPacket.reset()
     this.methods.clear()
+    this.failures.clear()
+    this.missingRpcs.clear()
     this.slowest.length = 0
     this.rpcErrors = 0
+    this.missingRpcCount = 0
     this.intervalRpcErrors = 0
     this.packetBytes = 0
     this.receivedBytes = 0
@@ -262,6 +312,27 @@ export class StatisticsCollector {
         errorRate: ratio(state.errors, distribution.count), lastSeenAt: state.lastSeenAt,
       }
     }).sort((left, right) => right.p90Ms - left.p90Ms || right.count - left.count)
+      .slice(0, this.options.topMethods)
+  }
+
+  private failureSnapshots(total: number): RpcFailureSnapshot[] {
+    return [...this.failures.values()].map((failure) => ({
+      ...failure,
+      rate: ratio(failure.count, total),
+    })).sort((left, right) => right.count - left.count || right.lastSeenAt - left.lastSeenAt)
+  }
+
+  private methodCountSnapshots(): RpcMethodCountSnapshot[] {
+    return [...this.methods.entries()].map(([method, state]) => ({
+      method, count: state.histogram.count,
+    })).sort((left, right) => right.count - left.count || left.method.localeCompare(right.method))
+      .slice(0, this.options.topMethods)
+  }
+
+  private missingRpcSnapshots(): MissingRpcSnapshot[] {
+    return [...this.missingRpcs.entries()].map(([method, state]) => ({
+      method, count: state.count, lastSeenAt: state.lastSeenAt,
+    })).sort((left, right) => right.count - left.count || right.lastSeenAt - left.lastSeenAt)
       .slice(0, this.options.topMethods)
   }
 
@@ -336,7 +407,22 @@ function aggregatePoints(points: StatisticsPoint[]): StatisticsPoint {
     cpuPercent: average('cpuPercent'),
     rssBytes: last.rssBytes,
     heapUsedBytes: last.heapUsedBytes,
+    externalBytes: last.externalBytes,
+    arrayBuffersBytes: last.arrayBuffersBytes,
+    cgroupMemoryCurrentBytes: last.cgroupMemoryCurrentBytes,
+    cgroupAnonBytes: last.cgroupAnonBytes,
+    cgroupFileBytes: last.cgroupFileBytes,
+    cgroupSwapBytes: last.cgroupSwapBytes,
     eventLoopDelayP99Ms: maximum('eventLoopDelayP99Ms'),
     gcDurationMs: sum('gcDurationMs'),
   }
+}
+
+function classifyRpcFailure(errorCode: number, errorMessage?: string): RpcFailureCategory {
+  if (errorMessage?.startsWith('METHOD_NOT_IMPLEMENTED:')) return 'not-implemented'
+  if (errorCode === 401 || errorMessage?.includes('AUTH_KEY_UNREGISTERED')) return 'unauthorized'
+  if (errorCode === 429 || errorMessage?.includes('FLOOD_WAIT')) return 'rate-limit'
+  if (errorCode === 400) return 'bad-request'
+  if (errorCode >= 500) return 'internal'
+  return 'other'
 }

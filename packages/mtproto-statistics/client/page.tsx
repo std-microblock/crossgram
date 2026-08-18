@@ -5,12 +5,20 @@ import type { Context } from 'cordis'
 import { computed, defineComponent, ref, resolveComponent } from 'vue'
 import { useRpc } from '@cordisjs/client'
 import type {
-  MtprotoStatisticsData, RpcMethodSnapshot, StatisticsPoint,
+  MissingRpcSnapshot, MtprotoStatisticsData, RpcFailureSnapshot, RpcMethodSnapshot, StatisticsPoint,
 } from '../src/types.js'
 import './style.css'
 
 type DashboardTab = 'overview' | 'rpc' | 'network' | 'runtime'
 type Range = 'seconds' | 'minutes' | 'hours'
+
+interface PieSlice {
+  label: string
+  value: number
+  color: string
+}
+
+const PIE_COLORS = ['#4f8cff', '#a970ff', '#39b980', '#e49b3d', '#e05d6f', '#37a0c9', '#8fba3b', '#d878b2']
 
 const Sparkline = defineComponent({
   name: 'StatisticsSparkline',
@@ -56,6 +64,48 @@ const MetricCard = defineComponent({
   },
 })
 
+const PieChart = defineComponent({
+  name: 'StatisticsPieChart',
+  props: {
+    title: { type: String, required: true },
+    slices: { type: Array as () => PieSlice[], required: true },
+    totalLabel: { type: String, default: '' },
+  },
+  setup(props) {
+    const visible = computed(() => props.slices.filter(slice => slice.value > 0))
+    const total = computed(() => visible.value.reduce((sum, slice) => sum + slice.value, 0))
+    const background = computed(() => {
+      if (!total.value) return 'conic-gradient(var(--border) 0 100%)'
+      let cursor = 0
+      return `conic-gradient(${visible.value.map((slice) => {
+        const start = cursor
+        cursor += slice.value / total.value * 100
+        return `${slice.color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`
+      }).join(',')})`
+    })
+    return () => <section class="statistics-panel statistics-pie-panel">
+      <h2>{props.title}</h2>
+      <div class="statistics-pie-body">
+        <div class="statistics-pie" style={{ background: background.value }}>
+          <div class="statistics-pie-center">
+            <strong>{formatInteger(total.value)}</strong>
+            <span>{props.totalLabel}</span>
+          </div>
+        </div>
+        <div class="statistics-pie-legend">{visible.value.length
+          ? visible.value.map(slice => <div class="statistics-pie-legend-row">
+              <i style={{ background: slice.color }} />
+              <span title={slice.label}>{slice.label}</span>
+              <b>{formatInteger(slice.value)}</b>
+              <small>{formatPercent(slice.value / total.value)}</small>
+            </div>)
+          : <div class="statistics-empty">暂无数据</div>}
+        </div>
+      </div>
+    </section>
+  },
+})
+
 export const StatisticsPage = defineComponent({
   name: 'MtprotoStatisticsPage',
   setup() {
@@ -70,6 +120,9 @@ export const StatisticsPage = defineComponent({
     const traffic = values(point => point.receivedBytes + point.sentBytes)
     const cpu = values(point => point.cpuPercent)
     const memory = values(point => point.rssBytes)
+    const cgroupMemory = values(point => point.cgroupMemoryCurrentBytes)
+    const external = values(point => point.externalBytes)
+    const arrayBuffers = values(point => point.arrayBuffersBytes)
     const loop = values(point => point.eventLoopDelayP99Ms)
 
     const reset = async () => {
@@ -84,6 +137,17 @@ export const StatisticsPage = defineComponent({
     return () => {
       const Layout = resolveComponent('k-layout') as ReturnType<typeof defineComponent>
       const snapshot = data.value.snapshot
+      const methodSlices = snapshot.methodDistribution.slice(0, 7).map((method, index) => ({
+        label: method.method, value: method.count, color: PIE_COLORS[index]!,
+      }))
+      const representedMethods = methodSlices.reduce((sum, slice) => sum + slice.value, 0)
+      if (snapshot.rpc.count > representedMethods) methodSlices.push({
+        label: '其他', value: snapshot.rpc.count - representedMethods, color: PIE_COLORS[7]!,
+      })
+      const resultSlices: PieSlice[] = [
+        { label: '成功', value: snapshot.rpc.count - snapshot.rpc.errors, color: '#39b980' },
+        { label: '失败', value: snapshot.rpc.errors, color: '#e05d6f' },
+      ]
       return <Layout class="mtproto-statistics-page">{
         {
           header: () => <div class="statistics-toolbar">
@@ -122,7 +186,17 @@ export const StatisticsPage = defineComponent({
                 <MetricCard label="P99 / 最大" value={`${formatMs(snapshot.rpc.p99Ms)} / ${formatMs(snapshot.rpc.maxMs)}`} detail="长尾耗时" points={rpcP90.value} color="#a970ff" />
                 <MetricCard label="错误率" value={formatPercent(snapshot.rpc.errorRate)} detail={`${snapshot.rpc.errors} 次错误`} points={values(point => point.rpcErrors).value} color="#e05d6f" />
               </section>
+              <section class="statistics-two-column">
+                <PieChart title="RPC 方法占比" slices={methodSlices} totalLabel="调用" />
+                <PieChart title="RPC 成功 / 失败" slices={resultSlices} totalLabel="调用" />
+              </section>
               <Panel title="RPC 方法耗时排行"><MethodTable rows={snapshot.methods} /></Panel>
+              <section class="statistics-two-column">
+                <Panel title="RPC 失败类型"><FailureTable rows={snapshot.failures} /></Panel>
+                <Panel title={`不存在的 RPC Hit（${snapshot.missingRpcs.count}）`}>
+                  <MissingRpcTable rows={snapshot.missingRpcs.methods} />
+                </Panel>
+              </section>
               <Panel title="慢请求与突发长尾"><SlowTable rows={snapshot.slowest} /></Panel>
             </>}
             {tab.value === 'network' && <>
@@ -138,9 +212,16 @@ export const StatisticsPage = defineComponent({
               <section class="statistics-grid">
                 <MetricCard label="CPU" value={`${snapshot.runtime.cpuPercent.toFixed(1)}%`} detail={`ELU ${snapshot.runtime.eventLoopUtilization.toFixed(1)}%`} points={cpu.value} color="#e05d6f" />
                 <MetricCard label="RSS" value={formatBytes(snapshot.runtime.rssBytes)} detail={`Heap ${formatBytes(snapshot.runtime.heapUsedBytes)}`} points={memory.value} color="#37a0c9" />
+                <MetricCard label="Cgroup 总内存" value={formatBytes(snapshot.runtime.cgroupMemoryCurrentBytes)} detail={`峰值 ${formatBytes(snapshot.runtime.cgroupMemoryPeakBytes)} · 上限 ${formatLimit(snapshot.runtime.cgroupMemoryMaxBytes)}`} points={cgroupMemory.value} color="#4f8cff" />
+                <MetricCard label="Cgroup Anon" value={formatBytes(snapshot.runtime.cgroupAnonBytes)} detail={`File ${formatBytes(snapshot.runtime.cgroupFileBytes)} · Kernel ${formatBytes(snapshot.runtime.cgroupKernelBytes)}`} points={values(point => point.cgroupAnonBytes).value} color="#a970ff" />
+                <MetricCard label="Cgroup Swap" value={formatBytes(snapshot.runtime.cgroupSwapBytes)} detail={`Shmem ${formatBytes(snapshot.runtime.cgroupShmemBytes)} · High ${formatLimit(snapshot.runtime.cgroupMemoryHighBytes)}`} points={values(point => point.cgroupSwapBytes).value} color="#e05d6f" />
+                <MetricCard label="V8 Heap" value={`${formatBytes(snapshot.runtime.heapUsedBytes)} / ${formatBytes(snapshot.runtime.heapTotalBytes)}`} detail={`限制 ${formatBytes(snapshot.runtime.heapLimitBytes)} · 可用 ${formatBytes(snapshot.runtime.heapAvailableBytes)}`} points={values(point => point.heapUsedBytes).value} color="#37a0c9" />
                 <MetricCard label="事件循环 P99" value={formatMs(snapshot.runtime.eventLoopDelayP99Ms)} detail={`均值 ${formatMs(snapshot.runtime.eventLoopDelayMeanMs)} · P90 ${formatMs(snapshot.runtime.eventLoopDelayP90Ms)}`} points={loop.value} color="#a970ff" />
                 <MetricCard label="GC 时间" value={formatMs(snapshot.runtime.gcDurationMs)} detail={`${snapshot.runtime.gcCount} 次 / 当前采样周期`} points={values(point => point.gcDurationMs).value} color="#e49b3d" />
-                <MetricCard label="External" value={formatBytes(snapshot.runtime.externalBytes)} detail={`ArrayBuffers ${formatBytes(snapshot.runtime.arrayBuffersBytes)}`} points={[]} />
+                <MetricCard label="External" value={formatBytes(snapshot.runtime.externalBytes)} detail={`ArrayBuffers ${formatBytes(snapshot.runtime.arrayBuffersBytes)}`} points={external.value} />
+                <MetricCard label="ArrayBuffers" value={formatBytes(snapshot.runtime.arrayBuffersBytes)} detail="Buffer / TypedArray backing stores" points={arrayBuffers.value} color="#8fba3b" />
+                <MetricCard label="V8 Malloc" value={formatBytes(snapshot.runtime.mallocedBytes)} detail={`峰值 ${formatBytes(snapshot.runtime.peakMallocedBytes)}`} points={[]} color="#e49b3d" />
+                <MetricCard label="V8 Context" value={String(snapshot.runtime.nativeContexts)} detail={`Detached ${snapshot.runtime.detachedContexts}`} points={[]} color="#d878b2" />
                 <MetricCard label="运行时间" value={formatDuration(snapshot.runtime.uptimeSeconds)} detail={`统计始于 ${formatTime(snapshot.startedAt)}`} points={[]} color="#39b980" />
               </section>
             </>}
@@ -164,6 +245,25 @@ const MethodTable = defineComponent({
     return () => <Table headers={['方法', '次数', '平均', 'P90', 'P99', '最大', '错误率']} rows={props.rows.map(row => [
       <code title={row.method}>{row.method}</code>, formatInteger(row.count), formatMs(row.averageMs),
       formatMs(row.p90Ms), formatMs(row.p99Ms), formatMs(row.maxMs), formatPercent(row.errorRate),
+    ])} />
+  },
+})
+
+const FailureTable = defineComponent({
+  props: { rows: { type: Array as () => RpcFailureSnapshot[], required: true } },
+  setup(props) {
+    return () => <Table headers={['类型', '错误码', '次数', '总调用占比', '最后出现']} rows={props.rows.map(row => [
+      failureCategoryLabel(row.category), row.errorCode, formatInteger(row.count),
+      formatPercent(row.rate), formatTime(row.lastSeenAt),
+    ])} />
+  },
+})
+
+const MissingRpcTable = defineComponent({
+  props: { rows: { type: Array as () => MissingRpcSnapshot[], required: true } },
+  setup(props) {
+    return () => <Table headers={['方法', 'Hit', '最后出现']} rows={props.rows.map(row => [
+      <code title={row.method}>{row.method}</code>, formatInteger(row.count), formatTime(row.lastSeenAt),
     ])} />
   },
 })
@@ -238,6 +338,21 @@ function formatBytes(value: number): string {
     unit++
   }
   return `${amount.toFixed(unit ? 1 : 0)} ${units[unit]}`
+}
+
+function formatLimit(value: number): string {
+  return value > 0 ? formatBytes(value) : '无限制 / 不可用'
+}
+
+function failureCategoryLabel(category: RpcFailureSnapshot['category']): string {
+  return {
+    'not-implemented': '不存在 / 未实现',
+    'bad-request': '请求错误',
+    unauthorized: '未授权',
+    'rate-limit': '限流',
+    internal: '内部错误',
+    other: '其他',
+  }[category]
 }
 
 function formatRate(value: number): string {

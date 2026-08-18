@@ -63,23 +63,44 @@ describe('MTProto statistics Muon entry e2e', () => {
       { _: 'messages.getHistory' },
       async () => ({ _: 'messages.messages' }),
     )
+    await listeners.get('mtproto/rpc')!.listener.call(
+      { mtprotoConnection: connection },
+      { _: 'unknown.method' },
+      async () => ({
+        _: 'mt_rpc_error', errorCode: 500,
+        errorMessage: 'METHOD_NOT_IMPLEMENTED: unknown.method',
+      }),
+    )
 
     expect(mutations).toBe(0)
     await vi.advanceTimersByTimeAsync(1_000)
     expect(mutations).toBe(1)
     expect(data.snapshot).toMatchObject({
       activeConnections: 1,
-      rpc: { count: 1, errors: 0 },
+      rpc: { count: 2, errors: 1 },
       packets: { count: 1, bytes: 128 },
       traffic: { receivedBytes: 4_096, sentBytes: 2_048 },
     })
-    expect(data.snapshot.methods[0]?.method).toBe('messages.getHistory')
+    expect(data.snapshot.methods.find(method => method.method === 'messages.getHistory')).toBeTruthy()
+    expect(data.snapshot.methodDistribution).toEqual(expect.arrayContaining([
+      { method: 'messages.getHistory', count: 1 },
+      { method: 'unknown.method', count: 1 },
+    ]))
+    expect(data.snapshot.failures).toEqual([
+      expect.objectContaining({ category: 'not-implemented', count: 1 }),
+    ])
+    expect(data.snapshot.missingRpcs).toMatchObject({
+      count: 1, uniqueMethods: 1,
+      methods: [expect.objectContaining({ method: 'unknown.method', count: 1 })],
+    })
     expect(data.snapshot.ips[0]).toMatchObject({ address: '198.51.100.8', activeConnections: 1 })
     expect(data.series.seconds).toHaveLength(1)
 
     await data.reset()
     expect(data.snapshot.rpc.count).toBe(0)
     expect(data.snapshot.activeConnections).toBe(1)
+    expect(data.snapshot.failures).toEqual([])
+    expect(data.snapshot.missingRpcs).toEqual({ count: 0, uniqueMethods: 0, methods: [] })
     expect(data.series.seconds).toEqual([])
     cleanups.forEach(cleanup => cleanup())
   })

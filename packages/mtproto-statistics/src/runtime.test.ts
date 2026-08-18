@@ -8,6 +8,10 @@ describe('RuntimeMonitor', () => {
       const snapshot = monitor.sample()
       expect(snapshot.rssBytes).toBeGreaterThan(0)
       expect(snapshot.heapTotalBytes).toBeGreaterThan(0)
+      expect(snapshot.heapLimitBytes).toBeGreaterThan(snapshot.heapTotalBytes)
+      expect(snapshot.heapAvailableBytes).toBeGreaterThan(0)
+      expect(snapshot.nativeContexts).toBeGreaterThan(0)
+      expect(snapshot.peakMallocedBytes).toBeGreaterThanOrEqual(snapshot.mallocedBytes)
       for (const value of Object.values(snapshot)) expect(Number.isFinite(value)).toBe(true)
     } finally {
       monitor.dispose()

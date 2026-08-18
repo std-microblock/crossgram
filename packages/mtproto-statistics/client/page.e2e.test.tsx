@@ -29,6 +29,10 @@ describe('MTProto statistics dashboard e2e', () => {
     await wrapper.findAll('.statistics-tabs button')[1]!.trigger('click')
     expect(wrapper.text()).toContain('RPC 方法耗时排行')
     expect(wrapper.text()).toContain('错误率')
+    expect(wrapper.text()).toContain('RPC 方法占比')
+    expect(wrapper.text()).toContain('不存在的 RPC Hit')
+    expect(wrapper.text()).toContain('unknown.method')
+    expect(wrapper.findAll('.statistics-pie')).toHaveLength(2)
 
     await wrapper.findAll('.statistics-tabs button')[2]!.trigger('click')
     expect(wrapper.text()).toContain('来源 IP')
@@ -38,6 +42,8 @@ describe('MTProto statistics dashboard e2e', () => {
     await wrapper.findAll('.statistics-tabs button')[3]!.trigger('click')
     expect(wrapper.text()).toContain('事件循环 P99')
     expect(wrapper.text()).toContain('GC 时间')
+    expect(wrapper.text()).toContain('Cgroup Anon')
+    expect(wrapper.text()).toContain('V8 Malloc')
     wrapper.unmount()
   })
 
@@ -63,7 +69,10 @@ function statisticsData(): MtprotoStatisticsData {
     at: Date.now(), rpcCount: 8, rpcErrors: 1, rpcP90Ms: 128, rpcP99Ms: 256,
     packetCount: 12, packetP90Ms: 4, receivedBytes: 8_192, sentBytes: 4_096,
     activeConnections: 2, cpuPercent: 24, rssBytes: 128 * 1024 * 1024,
-    heapUsedBytes: 64 * 1024 * 1024, eventLoopDelayP99Ms: 8, gcDurationMs: 2,
+    heapUsedBytes: 64 * 1024 * 1024, externalBytes: 8 * 1024 * 1024,
+    arrayBuffersBytes: 4 * 1024 * 1024, cgroupMemoryCurrentBytes: 160 * 1024 * 1024,
+    cgroupAnonBytes: 128 * 1024 * 1024, cgroupFileBytes: 16 * 1024 * 1024,
+    cgroupSwapBytes: 0, eventLoopDelayP99Ms: 8, gcDurationMs: 2,
   }
   return {
     snapshot: {
@@ -84,7 +93,14 @@ function statisticsData(): MtprotoStatisticsData {
       runtime: {
         cpuPercent: 24, rssBytes: 128 * 1024 * 1024, heapUsedBytes: 64 * 1024 * 1024,
         heapTotalBytes: 96 * 1024 * 1024, externalBytes: 8 * 1024 * 1024,
-        arrayBuffersBytes: 4 * 1024 * 1024, eventLoopUtilization: 30,
+        arrayBuffersBytes: 4 * 1024 * 1024, heapLimitBytes: 1024 * 1024 * 1024,
+        heapAvailableBytes: 800 * 1024 * 1024, mallocedBytes: 2 * 1024 * 1024,
+        peakMallocedBytes: 4 * 1024 * 1024, nativeContexts: 3, detachedContexts: 0,
+        cgroupMemoryCurrentBytes: 160 * 1024 * 1024, cgroupMemoryPeakBytes: 192 * 1024 * 1024,
+        cgroupMemoryHighBytes: 1400 * 1024 * 1024, cgroupMemoryMaxBytes: 1800 * 1024 * 1024,
+        cgroupAnonBytes: 128 * 1024 * 1024, cgroupFileBytes: 16 * 1024 * 1024,
+        cgroupKernelBytes: 8 * 1024 * 1024, cgroupShmemBytes: 1024 * 1024,
+        cgroupSwapBytes: 0, eventLoopUtilization: 30,
         eventLoopDelayMeanMs: 2, eventLoopDelayP90Ms: 4, eventLoopDelayP99Ms: 8,
         gcCount: 1, gcDurationMs: 2, uptimeSeconds: 3_600,
       },
@@ -93,6 +109,15 @@ function statisticsData(): MtprotoStatisticsData {
         p50Ms: 64, p90Ms: 128, p95Ms: 250, p99Ms: 500, errors: 1,
         errorRate: 0.05, lastSeenAt: Date.now(),
       }],
+      methodDistribution: [{ method: 'messages.getHistory', count: 20 }],
+      failures: [{
+        category: 'not-implemented', errorCode: 500, count: 1,
+        rate: 0.0125, lastSeenAt: Date.now(),
+      }],
+      missingRpcs: {
+        count: 1, uniqueMethods: 1,
+        methods: [{ method: 'unknown.method', count: 1, lastSeenAt: Date.now() }],
+      },
       ips: [{
         address: '203.0.113.9', activeConnections: 2, totalConnections: 5,
         receivedBytes: 2_000_000, sentBytes: 1_000_000,

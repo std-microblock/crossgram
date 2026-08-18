@@ -32,6 +32,10 @@ describe('StatisticsCollector', () => {
       },
     })
     expect(snapshot.methods[0]).toMatchObject({ method: 'messages.sendMessage', errors: 1 })
+    expect(snapshot.methodDistribution).toEqual(expect.arrayContaining([
+      { method: 'messages.getHistory', count: 1 },
+      { method: 'messages.sendMessage', count: 1 },
+    ]))
     expect(snapshot.ips).toEqual([expect.objectContaining({
       address: '203.0.113.7', activeConnections: 1, rpcCount: 2,
       receivedBytesPerSecond: 2_048, sentBytesPerSecond: 1_024,
@@ -57,6 +61,8 @@ describe('StatisticsCollector', () => {
     expect(collector.snapshot(runtime())).toMatchObject({
       startedAt: 4_000, activeConnections: 1, totalConnections: 1,
       rpc: { count: 0 }, traffic: { receivedBytes: 0, sentBytes: 0 },
+      failures: [],
+      missingRpcs: { count: 0, uniqueMethods: 0, methods: [] },
     })
     expect(collector.series.seconds).toEqual([])
   })
@@ -74,6 +80,38 @@ describe('StatisticsCollector', () => {
     collector.sample(runtime(), 1, 3_600_001)
     expect(collector.series.hours).toEqual([expect.objectContaining({ at: 3_599_999, rpcCount: 1 })])
   })
+
+  it('classifies RPC failures and counts missing-method hits independently', () => {
+    const collector = createCollector()
+    collector.recordRpc({
+      method: 'unknown.method', durationMs: 2, connectionId: 'conn', error: true,
+      errorCode: 500, errorMessage: 'METHOD_NOT_IMPLEMENTED: unknown.method', at: 1_000,
+    })
+    collector.recordRpc({
+      method: 'messages.getHistory', durationMs: 3, connectionId: 'conn', error: true,
+      errorCode: 400, errorMessage: 'FILE_ID_INVALID', at: 2_000,
+    })
+    collector.recordRpc({
+      method: 'messages.getHistory', durationMs: 4, connectionId: 'conn', error: false, at: 3_000,
+    })
+
+    const snapshot = collector.sample(runtime(), 1, 4_000)
+    expect(snapshot.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: 'not-implemented', errorCode: 500, count: 1, rate: 0.33 }),
+      expect.objectContaining({ category: 'bad-request', errorCode: 400, count: 1, rate: 0.33 }),
+    ]))
+    expect(snapshot.missingRpcs).toEqual({
+      count: 1,
+      uniqueMethods: 1,
+      methods: [expect.objectContaining({ method: 'unknown.method', count: 1 })],
+    })
+
+    collector.reset(5_000)
+    expect(collector.snapshot(runtime())).toMatchObject({
+      failures: [],
+      missingRpcs: { count: 0, uniqueMethods: 0, methods: [] },
+    })
+  })
 })
 
 function createCollector(overrides: Partial<ConstructorParameters<typeof StatisticsCollector>[0]> = {}) {
@@ -89,7 +127,12 @@ function fakeConnection(id: string, remoteAddress: string): MtprotoConnectionSco
 function runtime(): RuntimeSnapshot {
   return {
     cpuPercent: 12.5, rssBytes: 100, heapUsedBytes: 50, heapTotalBytes: 80,
-    externalBytes: 5, arrayBuffersBytes: 2, eventLoopUtilization: 7,
+    externalBytes: 5, arrayBuffersBytes: 2, heapLimitBytes: 200, heapAvailableBytes: 120,
+    mallocedBytes: 4, peakMallocedBytes: 8, nativeContexts: 2, detachedContexts: 0,
+    cgroupMemoryCurrentBytes: 140, cgroupMemoryPeakBytes: 160, cgroupMemoryHighBytes: 180,
+    cgroupMemoryMaxBytes: 220, cgroupAnonBytes: 100, cgroupFileBytes: 20,
+    cgroupKernelBytes: 15, cgroupShmemBytes: 5, cgroupSwapBytes: 0,
+    eventLoopUtilization: 7,
     eventLoopDelayMeanMs: 1, eventLoopDelayP90Ms: 2, eventLoopDelayP99Ms: 4,
     gcCount: 1, gcDurationMs: 3, uptimeSeconds: 10,
   }
