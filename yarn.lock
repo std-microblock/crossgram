@@ -1904,6 +1904,23 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/mtproto-statistics@workspace:packages/mtproto-statistics":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/mtproto-statistics@workspace:packages/mtproto-statistics"
+  dependencies:
+    "@cordisjs/client": "npm:^0.8.2"
+    "@vue/test-utils": "npm:^2.4.11"
+    happy-dom: "npm:^20.11.2"
+    schemastery: "npm:^3.18.0"
+    vitest: "npm:^4.1.10"
+    vue: "npm:^3.5.41"
+  peerDependencies:
+    "@cordisjs/plugin-webui": ^0.8.1
+    "@mtproto-relay/mtproto": "workspace:*"
+    cordis: ^4.0.0-rc.5
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/mtproto@workspace:*, @mtproto-relay/mtproto@workspace:packages/mtproto":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/mtproto@workspace:packages/mtproto"

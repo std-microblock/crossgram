@@ -1,0 +1,37 @@
+{
+  "name": "@mtproto-relay/mtproto-statistics",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./client/index.ts"
+  },
+  "cordis": {
+    "public": [
+      "dist"
+    ],
+    "service": {
+      "required": [
+        "mtproto",
+        "webui"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@cordisjs/plugin-webui": "^0.8.1",
+    "@mtproto-relay/mtproto": "workspace:*",
+    "cordis": "^4.0.0-rc.5"
+  },
+  "devDependencies": {
+    "@cordisjs/client": "^0.8.2",
+    "@vue/test-utils": "^2.4.11",
+    "happy-dom": "^20.11.2",
+    "vitest": "^4.1.10",
+    "vue": "^3.5.41"
+  },
+  "dependencies": {
+    "schemastery": "^3.18.0"
+  }
+}

@@ -26,6 +26,7 @@ export { AbridgedPacketCodec, ServerObfuscatedCodec, createServerObfuscation } f
 export { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore, type StoredAuthKey } from './session/auth-key-store.js'
 export { ServerSession } from './session/server-session.js'
 export type { MtprotoDebugEvent, MtprotoDebugListener, MtprotoDebugDirection, MtprotoDebugPhase } from './debug.js'
+export type { MtprotoTrafficSample } from './rpc/context.js'
 export { ServerAuthKey } from './session/server-auth-key.js'
 export { ServerMessageIdGenerator } from './session/message-id.js'
 export { doServerAuthorization } from './session/server-authorization.js'

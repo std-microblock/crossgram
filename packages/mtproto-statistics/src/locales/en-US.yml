@@ -1,0 +1,5 @@
+sampleIntervalMs: Interval between runtime samples and Muon updates.
+slowThresholdMs: RPC latency threshold used to retain slow-spike samples.
+historySeconds: Number of one-second samples retained in memory.
+topMethods: Maximum RPC method rows published to the dashboard.
+topIps: Maximum source IP rows published to the dashboard.

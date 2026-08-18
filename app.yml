@@ -74,6 +74,12 @@
   config:
     maxEvents: 2000
     initiallyPaused: true
+- id: mtproto-statistics
+  name: '@mtproto-relay/mtproto-statistics'
+  config:
+    sampleIntervalMs: 1000
+    slowThresholdMs: 1000
+    historySeconds: 900
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:

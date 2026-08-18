@@ -1,0 +1,5 @@
+sampleIntervalMs: 运行指标采样与 Muon 实时同步的时间间隔。
+slowThresholdMs: 保留慢请求突发样本的 RPC 耗时阈值。
+historySeconds: 内存中保留的一秒粒度样本数量。
+topMethods: 仪表盘展示的 RPC 方法最大行数。
+topIps: 仪表盘展示的来源 IP 最大行数。

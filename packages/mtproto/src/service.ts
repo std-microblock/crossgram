@@ -14,7 +14,7 @@ import { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './sessi
 import { AuthKeyDataStore } from './session/auth-key-data-store.js'
 import type { RpcHandler, RpcResult } from './rpc/protocol.js'
 import { invokeRpc, registerRpcRoute } from './rpc/router.js'
-import type { MtprotoConnectionScope, ServerRpcContext } from './rpc/context.js'
+import type { MtprotoConnectionScope, MtprotoTrafficSample, ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
 import { createCordisLogManager } from './cordis-logger.js'
 import type { MtprotoDebugEvent } from './debug.js'
@@ -236,15 +236,27 @@ export class Mtproto extends Service {
     socket.setNoDelay(true)
     socket.setKeepAlive(true)
 
-    const connection = new ServerConnection(socket, this._crypto, connLog)
-    const scope = {
+    let connectionCtx!: Context
+    let scope!: MtprotoConnectionScope
+    let trafficObserverEnabled = true
+    const connection = new ServerConnection(socket, this._crypto, connLog, (sample) => {
+      if (!trafficObserverEnabled) return
+      try {
+        const event: MtprotoTrafficSample = { ...sample, connection: scope }
+        connectionCtx.emit(connectionCtx, 'mtproto/traffic', event)
+      } catch (error) {
+        trafficObserverEnabled = false
+        connLog.error('MTProto traffic observer failed and was disabled: %s', error)
+      }
+    })
+    scope = {
       id: connectionId,
       connection,
       session: undefined as unknown as ServerSession,
       remoteAddress: socket.remoteAddress,
       remotePort: socket.remotePort,
     } satisfies MtprotoConnectionScope
-    const connectionCtx = ctx.extend({ mtprotoConnection: scope })
+    connectionCtx = ctx.extend({ mtprotoConnection: scope })
     const debug = (event: Omit<MtprotoDebugEvent, 'connectionId'>) => {
       const scoped = { ...event, connectionId }
       connectionCtx.emit(connectionCtx, 'mtproto/debug', scoped)

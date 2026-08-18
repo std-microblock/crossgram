@@ -20,6 +20,14 @@ export interface MtprotoPacketScope {
   data: Uint8Array
 }
 
+/** Raw TCP traffic observed at the transport boundary. */
+export interface MtprotoTrafficSample {
+  connection: MtprotoConnectionScope
+  direction: 'received' | 'sent'
+  bytes: number
+  timestamp: number
+}
+
 /** Metadata attached to the short-lived fiber of one RPC invocation. */
 export interface MtprotoRpcScope {
   connection: MtprotoConnectionScope

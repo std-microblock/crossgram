@@ -4,7 +4,7 @@ import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import { LogManager } from '@mtcute/core/utils.js'
 import { NodePlatform } from '@mtcute/node'
 import type { Socket } from 'node:net'
-import { ServerConnection } from './server-connection.js'
+import { ServerConnection, type TransportTrafficSample } from './server-connection.js'
 
 const crypto = new NodeCryptoProvider()
 const log = new LogManager('test', new NodePlatform()).create('test')
@@ -36,13 +36,24 @@ function mockSocket(overrides: Partial<Record<'write' | 'end' | 'destroy' | 'wri
 }
 
 /** Build a connection whose transport was already detected (abridged). */
-function makeConnection(socket: Socket): ServerConnection {
-  const connection = new ServerConnection(socket, crypto, log)
+function makeConnection(socket: Socket, onTraffic?: (sample: TransportTrafficSample) => void): ServerConnection {
+  const connection = new ServerConnection(socket, crypto, log, onTraffic)
   socket.emit('data', Buffer.from([0xef])) // abridged tag byte
   return connection
 }
 
 describe('ServerConnection stall tracking', () => {
+  it('reports real socket bytes at the transport boundary', () => {
+    const samples: TransportTrafficSample[] = []
+    const connection = makeConnection(mockSocket(), sample => samples.push(sample))
+    connection.send(Buffer.from('hello'))
+
+    expect(samples[0]).toMatchObject({ direction: 'received', bytes: 1 })
+    expect(samples[1]).toMatchObject({ direction: 'sent' })
+    expect(samples[1]!.bytes).toBeGreaterThan(5)
+    expect(samples.every(sample => Number.isFinite(sample.timestamp))).toBe(true)
+  })
+
   it('reports healthy while the socket accepts writes without backpressure', () => {
     const write = vi.fn(() => true)
     const connection = makeConnection(mockSocket({ write }))

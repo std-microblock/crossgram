@@ -5,6 +5,12 @@ import { IntermediatePacketCodec, PaddedIntermediatePacketCodec } from '@mtcute/
 import { Bytes } from '@fuman/io'
 import { AbridgedPacketCodec, createServerObfuscation } from './server-obfuscation.js'
 
+export interface TransportTrafficSample {
+  direction: 'received' | 'sent'
+  bytes: number
+  timestamp: number
+}
+
 /**
  * A single client TCP connection, with MTProto transport framing handled by an
  * mtcute-compatible `IPacketCodec`.
@@ -53,6 +59,7 @@ export class ServerConnection {
     private readonly _socket: Socket,
     private readonly _crypto: ICryptoProvider,
     private readonly _log: Logger,
+    private readonly _onTraffic?: (sample: TransportTrafficSample) => void,
   ) {
     _socket.on('data', this._onData)
     _socket.on('drain', this._onDrain)
@@ -99,6 +106,7 @@ export class ServerConnection {
     const result = this._codec.encode(data, writable)
     const write = () => {
       const encoded = writable.result()
+      this._onTraffic?.({ direction: 'sent', bytes: encoded.length, timestamp: Date.now() })
       if (closeAfterWrite) {
         this._closed = true
         this._socket.end(encoded)
@@ -161,6 +169,7 @@ export class ServerConnection {
   private _handleData(data: Buffer): void {
     if (this._closed) return
 
+    this._onTraffic?.({ direction: 'received', bytes: data.length, timestamp: Date.now() })
     this._log.debug('received %d bytes from socket', data.length)
 
     // Append data to receive buffer using the sync write API

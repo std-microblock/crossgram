@@ -3,6 +3,7 @@ import type { tl } from '@mtcute/core'
 import type {
   MtprotoConnectionScope,
   MtprotoPacketScope,
+  MtprotoTrafficSample,
   MtprotoRpcScope,
   CordisServerRpcContext,
 } from './rpc/context.js'
@@ -24,6 +25,7 @@ declare module 'cordis' {
   interface Events {
     'mtproto/connection'(connection: MtprotoConnectionScope, state: 'open' | 'close'): void
     'mtproto/debug'(event: MtprotoDebugEvent): void
+    'mtproto/traffic'(sample: MtprotoTrafficSample): void
     'mtproto/packet'(
       this: Context,
       packet: MtprotoPacketScope,
