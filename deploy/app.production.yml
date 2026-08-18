@@ -45,3 +45,11 @@
         busyTimeout: 5000
 - id: webui
   name: '@cordisjs/plugin-webui'
+- id: mtproto-statistics
+  name: '@mtproto-relay/mtproto-statistics'
+  config:
+    sampleIntervalMs: 1000
+    slowThresholdMs: 1000
+    historySeconds: 900
+    topMethods: 40
+    topIps: 100
