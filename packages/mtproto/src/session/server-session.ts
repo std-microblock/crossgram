@@ -1111,6 +1111,7 @@ export class ServerSession {
     clientSessionId: Long,
     packetCtx: Context = this._context,
   ): Promise<void> {
+    if (this._connection.closed) return
     const unwrapped = unwrapRpcRequest(request)
 
     // A wrapped bind must prove the requested permanent identity before its
@@ -1163,6 +1164,11 @@ export class ServerSession {
       } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
       return
     }
+    // The connection fiber is disposed as soon as its socket closes. Requests
+    // released from an authorization/dependency queue after that point cannot
+    // deliver a result and must not try to create an RPC child fiber from the
+    // now-inactive packet context.
+    if (this._connection.closed) return
 
     const ctx = packetCtx.extend({
       mtprotoRpc: {

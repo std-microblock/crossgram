@@ -138,6 +138,11 @@ export class ServerConnection {
     return this._socket.writableLength
   }
 
+  /** Whether the transport can no longer deliver RPC results to its peer. */
+  get closed(): boolean {
+    return this._closed
+  }
+
   /** Remote IP address for connection-level rate limits. */
   get remoteAddress(): string | undefined {
     return this._socket.remoteAddress

@@ -145,6 +145,31 @@ type QueuedSession = {
 }
 
 describe('ServerSession decrypted RPC queue', () => {
+  it('drops a queued RPC when its connection closes while waiting for dependencies', async () => {
+    const dispatch = vi.fn().mockResolvedValue({ _: 'boolTrue' })
+    const { session, connection } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & {
+      _apiLayer: number
+      _waitForRpcDependencies: ReturnType<typeof vi.fn>
+    }
+    internal._apiLayer = 228
+    let release!: () => void
+    const waiting = new Promise<boolean>((resolve) => { release = () => resolve(true) })
+    internal._waitForRpcDependencies = vi.fn(() => waiting)
+
+    const pending = internal._handleRpcCall(
+      Long.fromInt(12),
+      { _: 'invokeAfterMsg', msgId: Long.fromInt(8), query: { _: 'help.getConfig' } } as never,
+      Long.fromInt(13),
+    )
+    await vi.waitFor(() => expect(internal._waitForRpcDependencies).toHaveBeenCalledOnce())
+    connection.closed = true
+    release()
+    await pending
+
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
   it('routes a wrapped auth.bindTempAuthKey to MTProto key handling instead of RPC dispatch', async () => {
     const dispatch = vi.fn()
     const { session } = createSession(dispatch)
@@ -622,19 +647,20 @@ describe('ServerSession auth.bindTempAuthKey', () => {
 function createSession(dispatch = vi.fn(), keyStore?: AuthKeyStore): {
   session: ServerSession
   context: Context
+  connection: { closed: boolean }
   logger: { error: ReturnType<typeof vi.fn>, warn: ReturnType<typeof vi.fn> }
 } {
   const logger = {
     error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn(), verbose: vi.fn(),
   }
-  const connection = {} as never
+  const connection = { closed: false }
   const connectionScope = {
     id: 'test', connection, session: undefined as never,
   }
   const context = new Context().extend({ mtprotoConnection: connectionScope })
   const session = new ServerSession(
     context,
-    connection,
+    connection as never,
     new NodeCryptoProvider(),
     getServerReaderMap(),
     __tlWriterMap,
@@ -650,7 +676,7 @@ function createSession(dispatch = vi.fn(), keyStore?: AuthKeyStore): {
   // encryption. Stub the send boundary so this unit test can exercise the
   // actual response path without establishing an auth key first.
   ;(session as unknown as { _sendEncryptedMessage: () => void })._sendEncryptedMessage = vi.fn()
-  return { session, context, logger }
+  return { session, context, connection, logger }
 }
 
 function sendRpcError(session: ServerSession, errorCode: number, errorMessage: string, method: string): void {

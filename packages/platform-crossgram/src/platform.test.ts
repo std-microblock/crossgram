@@ -34,6 +34,25 @@ afterEach(async () => {
 })
 
 describe('QQNTPlatform mapping', () => {
+  it('maps QQNT ranged-read past EOF responses to an empty Telegram chunk', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.downloadFile = vi.fn(async function* () {
+      throw new Error('QQNT native media 400: {"retcode":-5503008,"retmsg":"download range out of filesize"}')
+    })
+    const media: IMMedia<QQMediaLocator> = {
+      id: 'file', kind: 'file', size: 1024,
+      locator: {
+        messageId: 'message', elementId: 'element', chatType: 2, peerUid: 'group',
+        kind: 'file', fileName: 'file.bin', fileUuid: 'uuid',
+      },
+    }
+
+    await expect(collect(platform.downloadMedia(session, media, { offset: 1024, limit: 512 })))
+      .resolves.toEqual([])
+    await expect(collect(platform.downloadMedia(session, media, { offset: 0, limit: 512 })))
+      .rejects.toThrow('download range out of filesize')
+  })
+
   it('projects QQ bot markdown and native buttons into Telegram-compatible entities and markup', async () => {
     expect(parseQQMarkdown(
       '**粗体** *斜体* ~~删除~~ `代码` [文档](https://example.com/docs)',

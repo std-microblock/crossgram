@@ -93,8 +93,10 @@ describe('ServerConnection stall tracking', () => {
     const socket = mockSocket({ write: () => false })
     const connection = makeConnection(socket)
     connection.send(Buffer.from('frame'))
+    expect(connection.closed).toBe(false)
 
     connection.close()
+    expect(connection.closed).toBe(true)
     expect(socket.destroy).toHaveBeenCalledOnce()
     expect((socket as unknown as { off: ReturnType<typeof vi.fn> }).off).toHaveBeenCalledWith('drain', expect.any(Function))
     expect(connection.stalledForMs).toBe(0)

@@ -1096,15 +1096,22 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
     if (media.locator.deferred) return
     let transferred = 0
-    for await (const chunk of this.client.downloadFile(media.locator, {
-      signal: options.signal, offset: options.offset, limit: options.limit,
-    })) {
-      transferred += chunk.length
-      await options.onProgress?.({
-        phase: 'download', mediaIndex: 0, transferredBytes: transferred,
-        totalBytes: rangedSize(media.size, options.offset, options.limit),
-      })
-      yield chunk
+    try {
+      for await (const chunk of this.client.downloadFile(media.locator, {
+        signal: options.signal, offset: options.offset, limit: options.limit,
+      })) {
+        transferred += chunk.length
+        await options.onProgress?.({
+          phase: 'download', mediaIndex: 0, transferredBytes: transferred,
+          totalBytes: rangedSize(media.size, options.offset, options.limit),
+        })
+        yield chunk
+      }
+    } catch (error) {
+      // Telegram probes the next chunk to learn EOF. QQNT reports this normal
+      // ranged-read terminator as HTTP 400 instead of an empty response.
+      if ((options.offset ?? 0) > 0 && isQQNTDownloadPastEnd(error)) return
+      throw error
     }
   }
 
@@ -2116,6 +2123,13 @@ function rangedSize(size: number | undefined, offset = 0, limit?: number): numbe
   if (size === undefined) return limit
   const available = Math.max(0, size - Math.max(0, Math.trunc(offset)))
   return limit === undefined ? available : Math.min(available, Math.max(0, Math.trunc(limit)))
+}
+
+function isQQNTDownloadPastEnd(error: unknown): boolean {
+  return error instanceof Error && (
+    /"retcode"\s*:\s*-5503008/u.test(error.message)
+    || /download range out of filesize/iu.test(error.message)
+  )
 }
 
 function isNativeForwardRejection(error: unknown): boolean {
