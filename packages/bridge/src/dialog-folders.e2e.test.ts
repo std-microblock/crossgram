@@ -90,10 +90,14 @@ function dispatcherFor(dialogs: DialogRpc): RpcDispatcher {
   return dispatcher
 }
 
-function getDialogs(folderId?: number): tl.messages.RawGetDialogsRequest {
+function getDialogs(
+  folderId?: number,
+  overrides: Partial<tl.messages.RawGetDialogsRequest> = {},
+): tl.messages.RawGetDialogsRequest {
   return {
     _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
     offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO, folderId,
+    ...overrides,
   }
 }
 
@@ -209,7 +213,7 @@ describe('dialog folders RPC e2e', () => {
       _: 'updates', updates: [{ _: 'updateFolderPeers', ptsCount: 0 }],
     })
 
-    const main = await roundTripRpc(resumedDispatcher, getDialogs())
+    const main = await roundTripRpc(resumedDispatcher, getDialogs(0))
     expect(main.dialogs.map((dialog: tl.RawDialog) => dialog.peer)).toEqual([
       { _: 'peerUser', userId: stableId('peer:alice') },
       { _: 'peerChannel', channelId: stableId('peer:channel-a') },
@@ -236,6 +240,76 @@ describe('dialog folders RPC e2e', () => {
     const unarchived = await roundTripRpc(secondRestart, getDialogs())
     expect(unarchived.dialogs).toHaveLength(3)
     expect(unarchived.dialogs.every((dialog: tl.RawDialog) => dialog.folderId === undefined)).toBe(true)
+  })
+
+  it('keeps an unscoped Android page full when QQ archive conversion removes main-list rows', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const source = Array.from({ length: 130 }, (_, index): IMDialog => {
+      const id = `android-dialog-${String(index).padStart(3, '0')}`
+      return {
+        conversation: {
+          id, kind: 'group', title: id,
+          metadata: { qqGroupMsgMask: index < 40 ? 2 : 1 },
+        },
+        unreadCount: 0,
+        lastMessage: {
+          id: `message-${index}`, conversationId: id, senderId: id,
+          timestamp: 2_000_000_000 - index,
+          content: { parts: [{ type: 'text', text: id }] },
+        },
+      }
+    })
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      platformKind: 'qq',
+      async getDialogs(_session, query) {
+        const start = query?.afterId
+          ? source.findIndex((dialog) => dialog.conversation.id === query.afterId) + 1
+          : 0
+        const limit = query?.limit ?? source.length
+        return {
+          dialogs: source.slice(Math.max(0, start), Math.max(0, start) + limit),
+          total: source.length,
+        }
+      },
+      async getHistory() { return { messages: [] } },
+    }
+    const dispatcher = dispatcherFor(createDialog(new DialogFolderStore(ctx.database), targetPlatform))
+
+    const first = await roundTripRpc(dispatcher, getDialogs())
+    expect(first).toMatchObject({ _: 'messages.dialogsSlice', count: 130 })
+    expect(first.dialogs).toHaveLength(100)
+    expect(first.dialogs.slice(0, 40).every((dialog: tl.RawDialog) => dialog.folderId === 1)).toBe(true)
+    const last = first.dialogs.at(-1) as tl.RawDialog
+    const lastMessage = first.messages.find((message: tl.RawMessage) => message.id === last.topMessage) as tl.RawMessage
+
+    const second = await roundTripRpc(dispatcher, getDialogs(undefined, {
+      offsetPeer: {
+        _: 'inputPeerChannel', channelId: stableId('peer:android-dialog-099'), accessHash: Long.ONE,
+      },
+      offsetId: last.topMessage,
+      offsetDate: lastMessage.date,
+    }))
+    expect(second.dialogs).toHaveLength(30)
+    expect(second.dialogs.map((dialog: tl.RawDialog) =>
+      (dialog.peer as tl.RawPeerChannel).channelId)).toEqual(
+      Array.from({ length: 30 }, (_, index) => stableId(
+        `peer:android-dialog-${String(index + 100).padStart(3, '0')}`,
+      )),
+    )
+
+    const explicitMain = await roundTripRpc(dispatcher, getDialogs(0))
+    expect(explicitMain.dialogs).toHaveLength(90)
+    expect(explicitMain.dialogs.every((dialog: tl.RawDialog) => dialog.folderId === undefined)).toBe(true)
   })
 
   it('reverse-syncs QQ group masks when archive folders change', async () => {
@@ -361,7 +435,7 @@ describe('dialog folders RPC e2e', () => {
     await roundTripRpc(resumedDispatcher, archiveRequest)
     expect(maskCalls).toEqual([2, 2])
 
-    const main = await roundTripRpc(resumedDispatcher, getDialogs())
+    const main = await roundTripRpc(resumedDispatcher, getDialogs(0))
     expect(main.dialogs).toEqual([])
     const archive = await roundTripRpc(resumedDispatcher, getDialogs(1))
     expect(archive.dialogs).toMatchObject([{
@@ -556,7 +630,7 @@ describe('dialog folders RPC e2e', () => {
     const ids = (result: any) => result.dialogs.map((dialog: tl.RawDialog) =>
       (dialog.peer as tl.RawPeerChannel).channelId)
 
-    const initialMain = await roundTripRpc(dispatcher, getDialogs())
+    const initialMain = await roundTripRpc(dispatcher, getDialogs(0))
     expect(ids(initialMain)).toEqual([
       stableId('peer:mask-notify'), stableId('peer:mask-receive'),
       stableId('peer:mask-unspecified'), stableId('peer:mask-shield'),
@@ -576,7 +650,7 @@ describe('dialog folders RPC e2e', () => {
         { _: 'inputFolderPeer', peer: peer('mask-shield'), folderId: 1 },
       ],
     })
-    const main = await roundTripRpc(dispatcher, getDialogs())
+    const main = await roundTripRpc(dispatcher, getDialogs(0))
     expect(ids(main)).toEqual([stableId('peer:mask-notify'), stableId('peer:mask-receive')])
     const archive = await roundTripRpc(dispatcher, getDialogs(1))
     expect(ids(archive)).toEqual([

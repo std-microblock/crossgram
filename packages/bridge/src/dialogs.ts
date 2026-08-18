@@ -235,8 +235,11 @@ export class DialogRpc {
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
       ? undefined
       : this._resolveKnownInputPeer(req.offsetPeer)
-    const folderId = req.folderId ?? 0
-    if (folderId !== 0 && folderId !== 1) throw new RpcError(400, 'FOLDER_ID_INVALID')
+    const requestedFolderId = req.folderId
+    if (requestedFolderId !== undefined && requestedFolderId !== 0 && requestedFolderId !== 1) {
+      throw new RpcError(400, 'FOLDER_ID_INVALID')
+    }
+    const folderId = requestedFolderId as 0 | 1 | undefined
     const archivedPeerIds = await this._dialogFolders?.archivedPeerIds(
       this._session.platformSessionId,
     ) ?? new Set<string>()
@@ -245,18 +248,25 @@ export class DialogRpc {
       limit: clampLimit(req.limit) + 1,
       afterId: requestedOffsetPeer,
     }
+    // Android omits folder_id for its global dialog feed and expects archived
+    // rows to remain in that page (with dialog.folder_id=1). Removing them makes
+    // a short page look like end-of-list, so the client never requests page 2.
+    // Explicit folder 0/1 requests are folder-scoped and still need filtering.
+    const unscoped = folderId === undefined
+      ? await this._loadDialogPage(query)
+      : undefined
     // QQ masks can move an assistant group outside the first native page, so
-    // QQ always scans its effective folder before returning any folder request.
+    // QQ always scans its effective folder before returning a scoped request.
     // Other platforms retain the native main-list pagination fast path unless
     // a page-level override or a durable archive row requires filtering.
-    const initialMain = this._platform.platformKind !== 'qq' && folderId === 0 && !archivedPeerIds.size
+    const initialMain = !unscoped && this._platform.platformKind !== 'qq' && folderId === 0 && !archivedPeerIds.size
       ? await this._loadDialogPage(query)
       : undefined
     const needsFolderFiltering = initialMain?.dialogs.some((dialog) =>
       this._effectiveFolderId(dialog.conversation, archivedPeerIds) !== 0)
-    const loaded = initialMain && !needsFolderFiltering
+    const loaded = unscoped ?? (initialMain && !needsFolderFiltering
       ? initialMain
-      : await this._loadDialogFolderPage(query, folderId, archivedPeerIds)
+      : await this._loadDialogFolderPage(query, folderId as 0 | 1, archivedPeerIds))
     const loadMs = performance.now() - loadAt
     // Preserve the platform's authoritative order. Re-sorting each page makes
     // Telegram's last offset peer point into the middle of the upstream page,

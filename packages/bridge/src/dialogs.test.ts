@@ -348,13 +348,13 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(second)).not.toThrow()
   })
 
-  it('scans QQ folder masks beyond the first page without pagination gaps or duplicates', async () => {
+  it('keeps archived QQ rows in unscoped Android pagination and scopes explicit folders', async () => {
     const dialogs = Array.from({ length: 103 }, (_, index) => {
       const id = `group-${String(index).padStart(3, '0')}`
       return {
         conversation: {
           id, kind: 'group' as const, title: id,
-          ...(index === 101 ? { metadata: { qqGroupMsgMask: 2 } } : {}),
+          ...(index < 30 ? { metadata: { qqGroupMsgMask: 2 } } : {}),
         },
         unreadCount: 0,
       }
@@ -384,10 +384,14 @@ describe('DialogRpc', () => {
 
     const first = await rpc.getDialogs(getDialogsRequest({ limit: 100 })) as tl.messages.RawDialogsSlice
     expect(first._).toBe('messages.dialogsSlice')
-    expect(first.count).toBe(102)
+    expect(first.count).toBe(103)
     expect(peerIds(first)).toEqual(Array.from({ length: 100 }, (_, index) => stableId(
       `peer:group-${String(index).padStart(3, '0')}`,
     )))
+    expect(first.dialogs.slice(0, 30).every((dialog) =>
+      dialog._ === 'dialog' && dialog.folderId === 1)).toBe(true)
+    expect(first.dialogs.slice(30).every((dialog) =>
+      dialog._ === 'dialog' && dialog.folderId === undefined)).toBe(true)
 
     const second = await rpc.getDialogs(getDialogsRequest({
       limit: 100,
@@ -396,15 +400,24 @@ describe('DialogRpc', () => {
       },
     })) as tl.messages.RawDialogs
     const visible = [...peerIds(first), ...peerIds(second)]
-    expect(visible).toEqual(Array.from({ length: 102 }, (_, index) => stableId(
-      `peer:group-${String(index >= 101 ? index + 1 : index).padStart(3, '0')}`,
+    expect(visible).toEqual(Array.from({ length: 103 }, (_, index) => stableId(
+      `peer:group-${String(index).padStart(3, '0')}`,
     )))
-    expect(new Set(visible)).toHaveLength(102)
+    expect(new Set(visible)).toHaveLength(103)
+
+    const main = await rpc.getDialogs(
+      getDialogsRequest({ folderId: 0, limit: 100 }),
+    ) as tl.messages.RawDialogs
+    expect(peerIds(main)).toEqual(Array.from({ length: 73 }, (_, index) => stableId(
+      `peer:group-${String(index + 30).padStart(3, '0')}`,
+    )))
 
     const archive = await rpc.getDialogs(
       getDialogsRequest({ folderId: 1, limit: 100 }),
     ) as tl.messages.RawDialogs
-    expect(peerIds(archive)).toEqual([stableId('peer:group-101')])
+    expect(peerIds(archive)).toEqual(Array.from({ length: 30 }, (_, index) => stableId(
+      `peer:group-${String(index).padStart(3, '0')}`,
+    )))
   })
 
   it('reports the upstream total instead of the limit-plus-one probe size', async () => {
