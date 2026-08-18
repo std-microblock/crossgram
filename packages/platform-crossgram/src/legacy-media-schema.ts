@@ -28,11 +28,17 @@ interface LegacyQQMediaAnimationRow {
   updatedAt: Date
 }
 
+interface QQNTMigrationRow {
+  id: string
+  completedAt: Date
+}
+
 declare module '@cordisjs/plugin-database' {
   interface Tables {
     mtproto_qqnt_media_cache: LegacyQQMediaCacheRow
     mtproto_qqnt_media_preview: LegacyQQMediaPreviewRow
     mtproto_qqnt_media_animation: LegacyQQMediaAnimationRow
+    mtproto_qqnt_migration: QQNTMigrationRow
   }
 }
 
@@ -52,4 +58,7 @@ export function defineLegacyQQMediaSchema(ctx: Context): void {
   ctx.model.extend('mtproto_qqnt_media_animation', {
     key: 'string', animated: 'boolean', updatedAt: 'timestamp',
   }, { primary: 'key', indexes: ['updatedAt'] })
+  ctx.model.extend('mtproto_qqnt_migration', {
+    id: 'string', completedAt: 'timestamp',
+  }, { primary: 'id' })
 }

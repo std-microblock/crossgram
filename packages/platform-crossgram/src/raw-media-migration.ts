@@ -13,6 +13,9 @@ export interface RawMediaMigrationResult {
   files: number
 }
 
+const RAW_MESSAGE_MEDIA_MIGRATION = 'raw-message-media-v1'
+const MIGRATION_BATCH_SIZE = 250
+
 /**
  * Reverts message media created by the removed server-side preview/transcode
  * pipeline. Sticker and reaction cache rows are deliberately left untouched.
@@ -25,77 +28,87 @@ export async function migrateLegacyQQMessageMedia(
   const result: RawMediaMigrationResult = {
     mediaRows: 0, messages: 0, previewRows: 0, cacheRows: 0, animationRows: 0, files: 0,
   }
-  const sessions = await database.get('mtproto_platform_session', { platformId })
-  const sessionIds = sessions.map((session) => session.id)
-  if (!sessionIds.length) {
-    result.animationRows = (await database.get('mtproto_qqnt_media_animation', {})).length
-    if (result.animationRows) await database.remove('mtproto_qqnt_media_animation', {})
-    return result
-  }
-  const messages = await database.get('mtproto_im_message', {
-    platformSessionId: { $in: sessionIds },
-  })
-  const messageIds = messages.map((message) => message.id)
-  if (!messageIds.length) {
-    result.animationRows = (await database.get('mtproto_qqnt_media_animation', {})).length
-    if (result.animationRows) await database.remove('mtproto_qqnt_media_animation', {})
-    return result
-  }
+  const [completed] = await database.get('mtproto_qqnt_migration', { id: RAW_MESSAGE_MEDIA_MIGRATION })
+  if (completed) return result
 
-  const mediaRows = await database.get('mtproto_im_media', { messageId: { $in: messageIds } })
+  const sessions = await database.get('mtproto_platform_session', { platformId })
+  const sessionIds = new Set(sessions.map((session) => session.id))
   const previewKeys = new Set<string>()
   const cachedPaths = new Set<string>()
-  const messageContent = new Map(messages.map((message) => [message.id, cloneJson(message.content)]))
-  const changedMessages = new Set<number>()
+  const changedMessageIds = new Set<number>()
 
-  await database.withTransaction(async (transaction) => {
-    for (const row of mediaRows) {
-      const locator = qqLocator(row.locator)
-      if (!locator || !isLegacyLocalProjection(row, locator)) continue
-      if (locator.previewKey) previewKeys.add(locator.previewKey)
-      const previewLocator = row.preview && qqLocator(row.preview.locator)
-      if (previewLocator?.previewKey) previewKeys.add(previewLocator.previewKey)
-      const removePreview = Boolean(previewLocator && hasLegacyLocalMarker(previewLocator))
-      if (locator.cachedPath) cachedPaths.add(locator.cachedPath)
-      const cleanedLocator = rawLocator(locator)
-      const transformed = isTranscodedRow(row, locator)
-      const raw = transformed ? rawMediaValues(row, cleanedLocator) : undefined
-      await transaction.set('mtproto_im_media', { id: row.id }, {
-        ...raw,
-        locator: cleanedLocator as unknown as JsonValue,
-        ...(removePreview ? { preview: null } : {}),
-        strippedThumbnail: null,
+  if (sessionIds.size) {
+    let afterId = 0
+    while (true) {
+      const mediaRows = await database.select('mtproto_im_media', { id: { $gt: afterId } })
+        .orderBy('id').limit(MIGRATION_BATCH_SIZE).execute()
+      if (!mediaRows.length) break
+      afterId = mediaRows.at(-1)!.id
+      const messages = await database.get('mtproto_im_message', {
+        id: { $in: [...new Set(mediaRows.map((row) => row.messageId))] },
       })
-      result.mediaRows++
+      const scopedMessages = new Map(messages
+        .filter((message) => sessionIds.has(message.platformSessionId))
+        .map((message) => [message.id, message]))
+      const messageContent = new Map<number, JsonValue>()
+      const changedInBatch = new Set<number>()
 
-      const content = messageContent.get(row.messageId)
-      if (rewriteStoredPart(content, row.partIndex, {
-        ...raw,
-        id: raw?.platformMediaId ?? row.platformMediaId,
-        locator: cleanedLocator,
-        ...(removePreview ? { preview: undefined } : {}),
-        strippedThumbnail: undefined,
-      })) changedMessages.add(row.messageId)
-    }
-    for (const messageId of changedMessages) {
-      await transaction.set('mtproto_im_message', { id: messageId }, {
-        content: messageContent.get(messageId)!, updatedAt: new Date(),
+      await database.withTransaction(async (transaction) => {
+        for (const row of mediaRows) {
+          const message = scopedMessages.get(row.messageId)
+          if (!message) continue
+          const locator = qqLocator(row.locator)
+          if (!locator || !isLegacyLocalProjection(row, locator)) continue
+          if (locator.previewKey) previewKeys.add(locator.previewKey)
+          const previewLocator = row.preview && qqLocator(row.preview.locator)
+          if (previewLocator?.previewKey) previewKeys.add(previewLocator.previewKey)
+          const removePreview = Boolean(previewLocator && hasLegacyLocalMarker(previewLocator))
+          if (locator.cachedPath) cachedPaths.add(locator.cachedPath)
+          const cleanedLocator = rawLocator(locator)
+          const transformed = isTranscodedRow(row, locator)
+          const raw = transformed ? rawMediaValues(row, cleanedLocator) : undefined
+          await transaction.set('mtproto_im_media', { id: row.id }, {
+            ...raw,
+            locator: cleanedLocator as unknown as JsonValue,
+            ...(removePreview ? { preview: null } : {}),
+            strippedThumbnail: null,
+          })
+          result.mediaRows++
+
+          const content = messageContent.get(message.id) ?? cloneJson(message.content)
+          messageContent.set(message.id, content)
+          if (rewriteStoredPart(content, row.partIndex, {
+            ...raw,
+            id: raw?.platformMediaId ?? row.platformMediaId,
+            locator: cleanedLocator,
+            ...(removePreview ? { preview: undefined } : {}),
+            strippedThumbnail: undefined,
+          })) changedInBatch.add(message.id)
+        }
+        for (const messageId of changedInBatch) {
+          await transaction.set('mtproto_im_message', { id: messageId }, {
+            content: messageContent.get(messageId)!, updatedAt: new Date(),
+          })
+          changedMessageIds.add(messageId)
+        }
       })
+      if (mediaRows.length < MIGRATION_BATCH_SIZE) break
     }
-    // No runtime path consumes these former transform tables anymore. Purge
-    // every row, including orphaned assets no longer referenced by messages.
-    const previewRows = await transaction.get('mtproto_qqnt_media_preview', {})
-    result.previewRows = previewRows.length
-    if (previewRows.length) await transaction.remove('mtproto_qqnt_media_preview', {})
-    const cacheRows = await transaction.get('mtproto_qqnt_media_cache', {})
-    result.cacheRows = cacheRows.length
-    for (const row of cacheRows) cachedPaths.add(row.path)
-    if (cacheRows.length) await transaction.remove('mtproto_qqnt_media_cache', {})
-    const animationRows = await transaction.get('mtproto_qqnt_media_animation', {})
-    result.animationRows = animationRows.length
-    if (animationRows.length) await transaction.remove('mtproto_qqnt_media_animation', {})
-  })
-  result.messages = changedMessages.size
+  }
+  result.messages = changedMessageIds.size
+
+  // No runtime path consumes these former transform tables anymore. Purge
+  // every row, including orphaned assets no longer referenced by messages.
+  const previewRows = await database.get('mtproto_qqnt_media_preview', {})
+  result.previewRows = previewRows.length
+  if (previewRows.length) await database.remove('mtproto_qqnt_media_preview', {})
+  const cacheRows = await database.get('mtproto_qqnt_media_cache', {})
+  result.cacheRows = cacheRows.length
+  for (const row of cacheRows) cachedPaths.add(row.path)
+  if (cacheRows.length) await database.remove('mtproto_qqnt_media_cache', {})
+  const animationRows = await database.get('mtproto_qqnt_media_animation', {})
+  result.animationRows = animationRows.length
+  if (animationRows.length) await database.remove('mtproto_qqnt_media_animation', {})
 
   const root = resolve(mediaCachePath)
   for (const path of cachedPaths) {
@@ -104,6 +117,10 @@ export async function migrateLegacyQQMessageMedia(
     if (!child || child.startsWith('..') || resolve(root, child) !== target) continue
     await rm(target, { force: true }).then(() => result.files++).catch(() => undefined)
   }
+  await database.upsert('mtproto_qqnt_migration', [{
+    id: RAW_MESSAGE_MEDIA_MIGRATION,
+    completedAt: new Date(),
+  }])
   return result
 }
 

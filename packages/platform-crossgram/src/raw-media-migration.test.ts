@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -95,9 +95,15 @@ describe('legacy QQ message media migration', () => {
     })
     const [nativeRow] = await ctx.database.get('mtproto_im_media', { messageId: nativeIngested.message.id })
 
+    const getSpy = vi.spyOn(ctx.database, 'get')
     await expect(migrateLegacyQQMessageMedia(ctx.database, 'qqnt', cacheRoot)).resolves.toEqual({
       mediaRows: 2, messages: 2, previewRows: 1, cacheRows: 1, animationRows: 1, files: 1,
     })
+    const messageQueries = getSpy.mock.calls
+      .filter(([table]) => table === 'mtproto_im_message')
+      .map(([, query]) => query as Record<string, unknown>)
+    expect(messageQueries).not.toHaveLength(0)
+    expect(messageQueries.every((query) => 'id' in query && !('platformSessionId' in query))).toBe(true)
     const [migrated] = await ctx.database.get('mtproto_im_media', { id: row!.id })
     expect(migrated).toMatchObject({
       platformMediaId: 'gif:original-v1', kind: 'image', name: 'animation.gif', mimeType: 'image/gif',
@@ -122,6 +128,11 @@ describe('legacy QQ message media migration', () => {
     await expect(ctx.database.get('mtproto_qqnt_media_cache', {})).resolves.toEqual([])
     await expect(ctx.database.get('mtproto_qqnt_media_animation', {})).resolves.toEqual([])
     await expect(readFile(cachedPath)).rejects.toThrow()
+    await expect(ctx.database.get('mtproto_qqnt_migration', { id: 'raw-message-media-v1' }))
+      .resolves.toHaveLength(1)
+    await expect(migrateLegacyQQMessageMedia(ctx.database, 'qqnt', cacheRoot)).resolves.toEqual({
+      mediaRows: 0, messages: 0, previewRows: 0, cacheRows: 0, animationRows: 0, files: 0,
+    })
   })
 })
 
