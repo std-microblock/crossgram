@@ -288,6 +288,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (format, ...args) => bridgeLogger.debug(format, ...args),
     ctx,
   )
+  platforms.attachLocalMessageIngress(
+    (session, conversation, message) => subscriptions.ingestLocalEvent(session, { type: 'message', conversation, message }),
+  )
   systemPeers.attach(
     (session, event, options) => subscriptions.ingestLocalEvent(session, event, options),
   )

@@ -76,6 +76,11 @@ export function resolvePlatformPluginId(ctx: Context, fallback?: string): string
 export class IMPlatformService extends Service {
   readonly registry: PlatformRegistry
   private readonly _activeSessions = new Map<string, ActivePlatformSession>()
+  private _ingestLocalMessage?: (
+    session: PlatformSession,
+    conversation: IMConversation,
+    message: IMMessage,
+  ) => Promise<PlatformEventPublishResult>
 
   constructor(ctx: Context) {
     super(ctx, 'imPlatform')
@@ -124,6 +129,21 @@ export class IMPlatformService extends Service {
   onCommittedEvent(listener: CommittedPlatformEventListener): Unsubscribe {
     const dispose = this.ctx.on('im-platform/event-committed', listener)
     return () => { dispose() }
+  }
+
+  attachLocalMessageIngress(
+    ingest: (session: PlatformSession, conversation: IMConversation, message: IMMessage) => Promise<PlatformEventPublishResult>,
+  ): void {
+    this._ingestLocalMessage = ingest
+  }
+
+  async ingestLocalMessage(
+    session: PlatformSession,
+    conversation: IMConversation,
+    message: IMMessage,
+  ): Promise<PlatformEventPublishResult> {
+    if (!this._ingestLocalMessage) throw new Error('platform message ingress is not attached')
+    return this._ingestLocalMessage(session, conversation, message)
   }
 
   emitCommittedEvent(session: PlatformSession, event: CommittedPlatformEvent): void {

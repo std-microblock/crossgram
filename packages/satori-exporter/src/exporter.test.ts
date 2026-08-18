@@ -53,6 +53,9 @@ class TestPlatform implements IMPlatform {
 
 async function createExporter(satori: Partial<SatoriExportConfig> = {}) {
   const ctx = new Context()
+  const ingestLocalMessage = vi.fn(async () => ({}))
+  const disposePlatform = ctx.provide('imPlatform', { ingestLocalMessage } as never)
+  disposals.push({ dispose: disposePlatform })
   const fibers = [ctx.plugin(Http), ctx.plugin(Satori)]
   disposals.push(...fibers)
   await Promise.all(fibers)
@@ -60,7 +63,7 @@ async function createExporter(satori: Partial<SatoriExportConfig> = {}) {
   const exporter = new SatoriExporter(ctx, { platformId: 'qqnt', platform: 'qq', ...satori }, { warn: warnings })
   const platform = new TestPlatform()
   exporter.start(platform, session)
-  return { ctx, exporter, platform, warnings }
+  return { ctx, exporter, platform, warnings, ingestLocalMessage }
 }
 
 async function openSocket(url: URL): Promise<WebSocket> {
@@ -96,6 +99,8 @@ function pngDataUri(width: number, height: number): string {
 
 async function createSatoriServer(token?: string, limits: { maxRequestBodyBytes?: number, maxWebSocketPayload?: number } = {}) {
   const ctx = new Context()
+  const disposePlatform = ctx.provide('imPlatform', { ingestLocalMessage: vi.fn(async () => ({})) } as never)
+  disposals.push({ dispose: disposePlatform })
   const fibers = [
     ctx.plugin(Http),
     ctx.plugin(Server, { host: '127.0.0.1', port: 0, maxWebSocketPayload: limits.maxWebSocketPayload }),
@@ -153,8 +158,12 @@ describe('SatoriExporter', () => {
     expect(platform.subscribe).not.toHaveBeenCalled()
   })
 
-  it('sends pure text through the provisioned canonical platform session', async () => {
-    const { ctx, platform } = await createExporter()
+  it('sends pure text through the canonical session and ingests the forced outgoing result', async () => {
+    const { ctx, platform, ingestLocalMessage } = await createExporter()
+    platform.sendMessage.mockResolvedValueOnce({
+      id: 'sent:1', conversationId: 'provider:wrong', senderId: 'self', timestamp: 1_700_000_001,
+      outgoing: false, content: { parts: [{ type: 'text', text: 'hello' }] },
+    })
 
     await expect(ctx.bots[0]!.createMessage('group:42', [h.text('hello')]))
       .resolves.toMatchObject([{ id: 'sent:1', channel: { id: 'group:42' } }])
@@ -163,6 +172,11 @@ describe('SatoriExporter', () => {
       { id: 'group:42' },
       { parts: [{ type: 'text', text: 'hello' }] },
     )
+    expect(ingestLocalMessage).toHaveBeenCalledWith(session, {
+      id: 'group:42', kind: 'group', title: 'group:42',
+    }, expect.objectContaining({
+      id: 'sent:1', conversationId: 'group:42', outgoing: true,
+    }))
     expect(platform.getConversation).toHaveBeenCalledWith(session, 'group:42')
     expect(platform.subscribe).not.toHaveBeenCalled()
   })
@@ -895,6 +909,8 @@ describe('SatoriExporter', () => {
 
   it('serves Satori meta and message.create through the patched server plugin', async () => {
     const ctx = new Context()
+    const disposePlatform = ctx.provide('imPlatform', { ingestLocalMessage: vi.fn(async () => ({})) } as never)
+    disposals.push({ dispose: disposePlatform })
     const fibers = [
       ctx.plugin(Http),
       ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),

@@ -149,10 +149,12 @@ export class SatoriExporter {
     if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) throw new Error('Satori exporter bot is no longer active')
     const message = await platform.sendMessage(session, { id: channelId }, input)
     if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) throw new Error('Satori exporter bot is no longer active')
+    const outgoing = { ...message, conversationId: conversation.id, outgoing: true }
+    await this._ctx.imPlatform.ingestLocalMessage(session, conversation, outgoing)
     return [{
-      id: message.id,
-      content: (await this._messageElements(message, conversation, platform, session)).join(''),
-      createdAt: message.timestamp * 1_000,
+      id: outgoing.id,
+      content: (await this._messageElements(outgoing, conversation, platform, session)).join(''),
+      createdAt: outgoing.timestamp * 1_000,
       channel: satoriChannel(conversation),
       ...(conversation.kind === 'direct' ? {} : { guild: satoriGuild(conversation) }),
       user: satoriUser(message.senderId, message.sender),

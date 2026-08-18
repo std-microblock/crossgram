@@ -52,7 +52,7 @@ async function installSatoriScope(ctx: Context) {
 }
 
 describe('standalone Satori exporter lifecycle', () => {
-  it('provisions, unregisters, and reloads a platform without retaining stale Satori bots', async () => {
+  it('ingests Satori messages when the provider suppresses its own echo, then reloads without stale bots', async () => {
     const ctx = new Context()
     const mtproto = {
       register: vi.fn(), broadcastUpdate: vi.fn(), sendUpdateToAuthKey: vi.fn(),
@@ -99,6 +99,24 @@ describe('standalone Satori exporter lifecycle', () => {
       },
     })
     await vi.waitFor(() => expect(received).toEqual(['incoming:1']))
+
+    const [activeSession] = await ctx.database.get('mtproto_platform_session', { platformId: 'qqnt', active: true })
+    if (!activeSession) throw new Error('missing active bridge session')
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: 'qqnt', platformSessionId: activeSession.id,
+    })
+    await ctx.bots[0]!.createMessage('group:42', [h.text('sent through Satori')])
+    await vi.waitFor(async () => expect(await ctx.database.get('mtproto_im_message', {
+      platformSessionId: activeSession.id, primaryPlatformMessageId: 'sent',
+    })).toMatchObject([{ outgoing: true, text: 'sent through Satori' }]))
+    await vi.waitFor(() => expect(mtproto.sendUpdateToAuthKey).toHaveBeenCalledWith(
+      expect.any(Uint8Array), expect.objectContaining({
+        _: 'updates', updates: [expect.objectContaining({
+          _: 'updateNewChannelMessage', message: expect.objectContaining({ message: 'sent through Satori' }),
+        })],
+      }), undefined,
+    ))
+    expect(received).toEqual(['incoming:1'])
 
     unregister()
     await vi.waitFor(() => expect(ctx.bots).toHaveLength(0))

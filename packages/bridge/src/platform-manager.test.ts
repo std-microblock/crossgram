@@ -92,6 +92,21 @@ function incoming(id: string, conversationId = 'room'): IMMessage {
   }
 }
 
+describe('IMPlatformService', () => {
+  it('forwards only local messages through its attached Bridge ingress', async () => {
+    const service = new IMPlatformService(new Context())
+    const conversation: IMConversation = { id: 'room', kind: 'group', title: 'Room' }
+    const message = incoming('local', conversation.id)
+    const ingest = vi.fn(async () => ({} as never))
+
+    await expect(service.ingestLocalMessage(session, conversation, message)).rejects.toThrow('platform message ingress is not attached')
+    service.attachLocalMessageIngress(ingest)
+    await service.ingestLocalMessage(session, conversation, message)
+
+    expect(ingest).toHaveBeenCalledWith(session, conversation, message)
+  })
+})
+
 describe('PlatformSubscriptionManager', () => {
   it('processes each platform event in a derived-context fiber and Cordis waterfall pipeline', async () => {
     const database = await createDatabase()
