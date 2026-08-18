@@ -597,6 +597,59 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('publishes a new article as a native rich message', async () => {
+    const definition = {
+      key: 'custom:live-article',
+      presentation: {
+        type: 'custom' as const, alt: '😀', resource: {
+          version: 1, format: 'static' as const, mimeType: 'image/webp' as const,
+          width: 100, height: 100, size: 4,
+        },
+      },
+    }
+    const reactions = new ReactionRpc(platform, session)
+    const { store, manager, sent } = await createHarness(
+      undefined, platform, undefined, 1, undefined,
+      (_session, message) => reactions.registerContext(message.conversationId, message.reactionContext),
+    )
+    const conversation: IMConversation = { id: 'live-rich-article', kind: 'group', title: 'Live Article' }
+    const article: IMMessage = {
+      id: 'live-rich-article-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_003,
+      content: { parts: [
+        { type: 'text', text: '@Bob 😀', entities: [
+          { type: 'mention', offset: 0, length: 4, userId: 'bob' },
+          { type: 'custom-emoji', offset: 5, length: 2, definition },
+        ] },
+        { type: 'media', media: { id: 'first', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+        { type: 'text', text: 'between images' },
+        { type: 'media', media: { id: 'second', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+      ] },
+      reactionContext: { available: [definition], reactions: [], maxSelected: 1 },
+    }
+    const result = await store.ingest(session, conversation, article)
+    await manager.publish(session, { event: { type: 'message', conversation, message: article }, result })
+
+    const payload = roundTrip(sent[0]!.update) as tl.RawUpdates
+    const message = (payload.updates[0] as tl.RawUpdateNewChannelMessage).message as tl.RawMessage
+    expect(message.media).toBeUndefined()
+    expect(message.richMessage).toMatchObject({
+      _: 'richMessage',
+      blocks: [
+        { _: 'pageBlockParagraph' },
+        { _: 'pageBlockPhoto' },
+        { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'between images' } },
+        { _: 'pageBlockPhoto' },
+      ],
+    })
+    const text = (message.richMessage!.blocks[0] as tl.RawPageBlockParagraph).text as tl.RawTextConcat
+    expect(text.texts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _: 'textMentionName', userId: expect.any(Number) }),
+      expect.objectContaining({ _: 'textCustomEmoji', alt: '😀' }),
+    ]))
+    const emoji = text.texts.find((item): item is tl.RawTextCustomEmoji => item._ === 'textCustomEmoji')
+    expect(reactions.getCustomEmojiDocuments([emoji!.documentId])).toHaveLength(1)
+  })
+
   it('prepares virtual deep links while forwarding messages', async () => {
     const sourceConversation: IMConversation = { id: 'forward-source', kind: 'group', title: 'Source' }
     const targetConversation: IMConversation = { id: 'forward-target', kind: 'group', title: 'Target' }
@@ -1409,6 +1462,26 @@ describe('UpdateManager', () => {
       { _: 'updateEditChannelMessage', message: { id: firstId } },
       { _: 'updateDeleteChannelMessages', messages: [removedId], ptsCount: 1 },
     ])
+    const articleMessage = ((sent[1].update as tl.RawUpdates).updates[0] as tl.RawUpdateEditChannelMessage)
+      .message as tl.RawMessage
+    expect(articleMessage.media).toBeUndefined()
+    expect(articleMessage.richMessage).toMatchObject({
+      _: 'richMessage',
+      blocks: [
+        { _: 'pageBlockPhoto' },
+        { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'between images' } },
+        { _: 'pageBlockPhoto' },
+      ],
+      photos: [{ _: 'photo' }, { _: 'photo' }],
+    })
+    const photos = articleMessage.richMessage!.photos as tl.RawPhoto[]
+    const photoBlocks = articleMessage.richMessage!.blocks
+      .filter((block): block is tl.RawPageBlockPhoto => block._ === 'pageBlockPhoto')
+    expect(photoBlocks.map((block) => block.photoId)).toEqual(photos.map((photo) => photo.id))
+    const roundTripped = roundTrip(sent[1].update) as tl.RawUpdates
+    const roundTrippedArticle = (roundTripped.updates[0] as tl.RawUpdateEditChannelMessage)
+      .message as tl.RawMessage
+    expect(roundTrippedArticle).toMatchObject({ richMessage: { _: 'richMessage' }, media: undefined })
     expect(await store.findProjectedByTlId(session.platformSessionId, removedId, conversation.id)).toBeUndefined()
 
     const albumEdit = await store.ingest(session, conversation, album)

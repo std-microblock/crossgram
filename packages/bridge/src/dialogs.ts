@@ -7,7 +7,7 @@ import {
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
-  type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
+  type IMReactionDefinition, type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
@@ -3264,6 +3264,13 @@ export class DialogRpc {
     const conversation = this._conversation(source.conversationId)
     const sticker = source.content.parts.find((part) => part.type === 'sticker')
     const card = source.content.parts.find((part) => part.type === 'card')
+    const richMessage = makeTlArticleMedia(
+      source, item.mediaRows ?? [], this._dcId, this._userId.bind(this),
+      this._reactions ? (definition) => {
+        const reaction = this._reactions!.toTlReaction(source.conversationId, definition)
+        return reaction._ === 'reactionCustomEmoji' ? reaction.documentId.toNumber() : undefined
+      } : undefined,
+    )
     const reply = this._messageReplyHeader(source)
     return projectTlMessage({
       conversation,
@@ -3276,9 +3283,9 @@ export class DialogRpc {
       },
       peerId: this._conversationPeer(conversation),
       groupedId: item.groupedId ?? undefined,
-      media: makeTlArticleMedia(source, item.mediaRows ?? [], this._dcId)
-        ?? (item.media
-          ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
+      richMessage,
+      media: richMessage ? undefined : (item.media
+        ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
         : sticker?.type === 'sticker'
           ? this._stickers?.makeMessageMedia(sticker.sticker)
           : card?.type === 'card'
@@ -4815,6 +4822,7 @@ export function projectTlMessage(options: {
   fromId: tl.TypePeer
   peerId?: tl.TypePeer
   media?: tl.TypeMessageMedia
+  richMessage?: tl.RawRichMessage
   entities?: tl.TypeMessageEntity[]
   reactions?: tl.RawMessageReactions
   replyToTlId?: number
@@ -4824,7 +4832,7 @@ export function projectTlMessage(options: {
 }): tl.TypeMessage {
   const {
     conversation, source, tlId, ordinal,
-    groupedId, fromId, peerId, media, entities, reactions, replyToTlId, topicId,
+    groupedId, fromId, peerId, media, richMessage, entities, reactions, replyToTlId, topicId,
     mentioned, unreadMention,
   } = options
   const conversationId = stableId(`peer:${conversation.id}`)
@@ -4864,6 +4872,7 @@ export function projectTlMessage(options: {
     message: text,
     entities: ordinal === 0 ? withAutoLinkEntities(text, entities) : undefined,
     media,
+    richMessage,
     groupedId: groupedId ? Long.fromString(groupedId) : undefined,
     reactions,
     replyMarkup: ordinal === 0 ? makeTlInlineKeyboard(source.content.inlineKeyboard) : undefined,
@@ -5010,15 +5019,27 @@ export function makeTlArticleMedia(
   source: IMMessage,
   mediaRows: readonly IMMediaRow[],
   dcId = 1,
-): tl.RawMessageMediaWebPage | undefined {
+  userId?: (platformUserId: string) => number,
+  customEmojiId?: (definition: IMReactionDefinition) => number | undefined,
+): tl.RawRichMessage | undefined {
   if (!isArticleMessage(source)) return
-  const url = `https://crossgram.invalid/article/${encodeURIComponent(source.conversationId)}/${encodeURIComponent(source.id)}`
-  const text = messageText(source)
   const photos: tl.RawPhoto[] = []
   const blocks: tl.TypePageBlock[] = []
   for (const [partIndex, part] of source.content.parts.entries()) {
     if (part.type === 'text' && part.text.trim()) {
-      blocks.push({ _: 'pageBlockParagraph', text: { _: 'textPlain', text: part.text } })
+      const quotes = validArticleEntities(part.text, part.entities).filter((entity) => entity.type === 'blockquote')
+      const boundaries = [...new Set([0, part.text.length, ...quotes.flatMap((entity) => [
+        entity.offset, entity.offset + entity.length,
+      ])])].sort((left, right) => left - right)
+      for (let index = 0; index + 1 < boundaries.length; index++) {
+        const start = boundaries[index]!
+        const end = boundaries[index + 1]!
+        if (start === end) continue
+        const text = makeTlRichText(part.text, part.entities, start, end, userId, customEmojiId)
+        blocks.push(quotes.some((entity) => entity.offset <= start && entity.offset + entity.length >= end)
+          ? { _: 'pageBlockBlockquote', text, caption: { _: 'textEmpty' } }
+          : { _: 'pageBlockParagraph', text })
+      }
     } else if (part.type === 'media') {
       const media = mediaRows.find((row) => row.partIndex === partIndex && row.platformMediaId === part.media.id)
       if (!media) return
@@ -5030,15 +5051,57 @@ export function makeTlArticleMedia(
       })
     }
   }
-  return {
-    _: 'messageMediaWebPage', manual: true, safe: true,
-    webpage: {
-      _: 'webPage', id: Long.fromNumber(stableId(`article:${source.conversationId}:${source.id}`)),
-      url, displayUrl: 'crossgram.invalid', hash: 0, type: 'article',
-      title: text.slice(0, 64), description: text.slice(0, 256),
-      cachedPage: { _: 'page', url, blocks, photos, documents: [] },
-    },
+  return { _: 'richMessage', blocks, photos, documents: [] }
+}
+
+function validArticleEntities(text: string, entities?: readonly IMTextEntity[]): IMTextEntity[] {
+  return (entities ?? []).filter((entity) => Number.isInteger(entity.offset)
+    && Number.isInteger(entity.length) && entity.offset >= 0 && entity.length > 0
+    && entity.offset + entity.length <= text.length)
+}
+
+function makeTlRichText(
+  text: string,
+  entities: readonly IMTextEntity[] | undefined,
+  start = 0,
+  end = text.length,
+  userId?: (platformUserId: string) => number,
+  customEmojiId?: (definition: IMReactionDefinition) => number | undefined,
+): tl.TypeRichText {
+  const valid = validArticleEntities(text, entities).filter((entity) => entity.type !== 'blockquote'
+    && entity.offset < end && entity.offset + entity.length > start)
+  const boundaries = [...new Set([start, end, ...valid.flatMap((entity) => [
+    Math.max(start, entity.offset), Math.min(end, entity.offset + entity.length),
+  ])])].sort((left, right) => left - right)
+  const segments: tl.TypeRichText[] = []
+  for (let index = 0; index + 1 < boundaries.length; index++) {
+    const segmentStart = boundaries[index]!
+    const segmentEnd = boundaries[index + 1]!
+    if (segmentStart === segmentEnd) continue
+    let segment: tl.TypeRichText = { _: 'textPlain', text: text.slice(segmentStart, segmentEnd) }
+    for (const entity of valid.filter((item) => item.offset <= segmentStart && item.offset + item.length >= segmentEnd)
+      .sort((left, right) => right.offset - left.offset || left.length - right.length)) {
+      if (entity.type === 'bold') segment = { _: 'textBold', text: segment }
+      else if (entity.type === 'italic') segment = { _: 'textItalic', text: segment }
+      else if (entity.type === 'underline') segment = { _: 'textUnderline', text: segment }
+      else if (entity.type === 'strikethrough') segment = { _: 'textStrike', text: segment }
+      else if (entity.type === 'code' || entity.type === 'pre') segment = { _: 'textFixed', text: segment }
+      else if (entity.type === 'text-link') segment = { _: 'textUrl', text: segment, url: entity.url, webpageId: Long.ZERO }
+      else if (entity.type === 'mention' && userId) segment = { _: 'textMentionName', text: segment, userId: userId(entity.userId) }
+      else if (entity.type === 'custom-emoji' && entity.definition.presentation.type === 'custom') {
+        const id = customEmojiId?.(entity.definition)
+        if (id !== undefined) segment = { _: 'textCustomEmoji', documentId: Long.fromNumber(id), alt: text.slice(segmentStart, segmentEnd) }
+      } else if (entity.type === 'conversation-link') {
+        segment = {
+          _: 'textUrl', text: segment,
+          url: `https://t.me/bridgechat_${stableId(`peer:${entity.conversation.id}`)}`,
+          webpageId: Long.ZERO,
+        }
+      }
+    }
+    segments.push(segment)
   }
+  return segments.length === 1 ? segments[0]! : { _: 'textConcat', texts: segments }
 }
 
 function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhoto {

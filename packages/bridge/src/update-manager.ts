@@ -575,6 +575,11 @@ export class UpdateManager {
           true,
         )
       }
+      const richMessage = makeTlArticleMedia(
+        projected.source, projected.media, this._dcId,
+        (platformUserId) => requiredUserId(userIds, platformUserId),
+        (definition) => customReactionDocumentId(session.platformSessionId, definition),
+      )
       const message = projectTlMessage({
         conversation: displayConversation,
         source: projected.source,
@@ -583,9 +588,9 @@ export class UpdateManager {
         groupedId: part.groupedId ?? undefined,
         fromId: { _: 'peerUser', userId: event.message.outgoing ? selfRow.id : senderRow.id },
         peerId: directPeerRow ? { _: 'peerUser', userId: directPeerRow.id } : undefined,
-        media: makeTlArticleMedia(projected.source, projected.media, this._dcId)
-          ?? (media
-            ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
+        richMessage,
+        media: richMessage ? undefined : (media
+          ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
           : sticker?.type === 'sticker'
             ? this._projectSticker?.(session, sticker.sticker)
             : card?.type === 'card'

@@ -12,6 +12,7 @@ import Long from 'long'
 import { DialogRpc, makeTlArticleMedia, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
+import { ReactionRpc } from './reaction-rpc.js'
 import { UploadManager } from './upload-manager.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
@@ -497,13 +498,16 @@ describe('rich-media projection', () => {
     expect(result.messages).toEqual([])
   })
 
-  it('projects interleaved text and images as one cached Telegram article', async () => {
+  it('projects interleaved text and images as one native Telegram rich message', async () => {
     const { store, peerId } = await createStore()
     const article: IMMessage = {
       ...album,
       id: 'interleaved-article',
       content: { parts: [
-        { type: 'text', text: 'opening paragraph' },
+        { type: 'text', text: 'opening bold paragraph', entities: [
+          { type: 'bold', offset: 8, length: 4 },
+          { type: 'italic', offset: 8, length: 14 },
+        ] },
         { type: 'media', media: {
           id: 'first-image', kind: 'image', name: 'first.jpg', mimeType: 'image/jpeg',
           size: 1234, width: 800, height: 600, locator: { remote: 'first-image' },
@@ -524,28 +528,86 @@ describe('rich-media projection', () => {
     expect(messages).toHaveLength(1)
     expect(message.groupedId).toBeUndefined()
     expect(message).toMatchObject({
-      _: 'message', message: 'opening paragraph\nclosing paragraph',
-      media: { _: 'messageMediaWebPage', manual: true, safe: true, webpage: {
-        _: 'webPage', type: 'article', cachedPage: {
-          _: 'page', blocks: [
-            { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'opening paragraph' } },
-            { _: 'pageBlockPhoto', caption: { text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } } },
-            { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'closing paragraph' } },
-            { _: 'pageBlockPhoto', caption: { text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } } },
-          ],
-        },
-      } },
+      _: 'message', message: 'opening bold paragraph\nclosing paragraph',
+      richMessage: { _: 'richMessage', blocks: [
+        { _: 'pageBlockParagraph', text: { _: 'textConcat', texts: [
+          { _: 'textPlain', text: 'opening ' },
+          { _: 'textItalic', text: { _: 'textBold', text: { _: 'textPlain', text: 'bold' } } },
+          { _: 'textItalic', text: { _: 'textPlain', text: ' paragraph' } },
+        ] } },
+        { _: 'pageBlockPhoto', caption: { text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } } },
+        { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'closing paragraph' } },
+        { _: 'pageBlockPhoto', caption: { text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } } },
+      ] },
     })
-    const cachedPage = ((message.media as tl.RawMessageMediaWebPage).webpage as tl.RawWebPage).cachedPage as tl.RawPage
-    const photoBlocks = cachedPage.blocks.filter((block): block is tl.RawPageBlockPhoto => block._ === 'pageBlockPhoto')
-    const photos = cachedPage.photos as tl.RawPhoto[]
+    expect(message.media).toBeUndefined()
+    const richMessage = message.richMessage!
+    const photoBlocks = richMessage.blocks.filter((block): block is tl.RawPageBlockPhoto => block._ === 'pageBlockPhoto')
+    const photos = richMessage.photos as tl.RawPhoto[]
     expect(photos).toHaveLength(2)
     expect(photoBlocks.map((block) => block.photoId)).toEqual(photos.map((photo) => photo.id))
     expect(makeTlArticleMedia(article, [])).toBeUndefined()
-    expect(() => wireRoundTrip(result)).not.toThrow()
+    expect(wireRoundTrip(result).messages[0]).toMatchObject({ richMessage: { _: 'richMessage' }, media: undefined })
   })
 
-  it('keeps repeated image-object parts distinct in cached articles', async () => {
+  it('preserves mentions, custom emoji, and partial blockquotes in rich-message history', async () => {
+    const { store, peerId } = await createStore()
+    const definition = {
+      key: 'custom:article',
+      presentation: {
+        type: 'custom' as const, alt: '😀', resource: {
+          version: 1, format: 'static' as const, mimeType: 'image/webp' as const,
+          width: 100, height: 100, size: 4,
+        },
+      },
+    }
+    const article: IMMessage = {
+      ...album,
+      id: 'rich-entities-history',
+      content: { parts: [
+        { type: 'text', text: 'intro @Bob quote 😀 outro', entities: [
+          { type: 'mention', offset: 6, length: 4, userId: 'bob' },
+          { type: 'blockquote', offset: 11, length: 5 },
+          { type: 'custom-emoji', offset: 17, length: 2, definition },
+        ] },
+        { type: 'media', media: { id: 'history-first', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+        { type: 'text', text: 'full quote', entities: [{ type: 'blockquote', offset: 0, length: 10 }] },
+        { type: 'media', media: { id: 'history-second', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+      ] },
+      reactionContext: { available: [definition], reactions: [], maxSelected: 1 },
+    }
+    const reactions = new ReactionRpc(platform, session)
+    const result = await new DialogRpc(
+      { ...platform, async getHistory() { return { messages: [article] } }, },
+      session, store, undefined, undefined, 1, undefined, reactions,
+    ).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const message = result.messages[0] as tl.RawMessage
+    const richMessage = message.richMessage!
+
+    expect(message.media).toBeUndefined()
+    expect(richMessage.blocks.map((block) => block._)).toEqual([
+      'pageBlockParagraph', 'pageBlockBlockquote', 'pageBlockParagraph',
+      'pageBlockPhoto', 'pageBlockBlockquote', 'pageBlockPhoto',
+    ])
+    const initialText = (richMessage.blocks[0] as tl.RawPageBlockParagraph).text as tl.RawTextConcat
+    expect(initialText.texts).toEqual(expect.arrayContaining([
+      { _: 'textPlain', text: 'intro ' },
+      { _: 'textMentionName', text: { _: 'textPlain', text: '@Bob' }, userId: expect.any(Number) },
+    ]))
+    expect(richMessage.blocks[1]).toMatchObject({
+      _: 'pageBlockBlockquote', text: { _: 'textPlain', text: 'quote' }, caption: { _: 'textEmpty' },
+    })
+    expect(richMessage.blocks[4]).toMatchObject({
+      _: 'pageBlockBlockquote', text: { _: 'textPlain', text: 'full quote' }, caption: { _: 'textEmpty' },
+    })
+    const customText = (richMessage.blocks[2] as tl.RawPageBlockParagraph).text as tl.RawTextConcat
+    const emoji = customText.texts.find((item): item is tl.RawTextCustomEmoji => item._ === 'textCustomEmoji')
+    expect(emoji).toMatchObject({ _: 'textCustomEmoji', alt: '😀' })
+    expect(reactions.getCustomEmojiDocuments([emoji!.documentId])).toHaveLength(1)
+    expect(wireRoundTrip(result)).toMatchObject({ messages: [{ richMessage: { _: 'richMessage' } }] })
+  })
+
+  it('keeps repeated image-object parts distinct in rich messages', async () => {
     const { store, peerId } = await createStore()
     const image = {
       id: 'reused-image', kind: 'image' as const, mimeType: 'image/jpeg', size: 1234,
@@ -564,12 +626,13 @@ describe('rich-media projection', () => {
       ...platform, async getHistory() { return { messages: [article] } },
     }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const message = result.messages[0] as tl.RawMessage
-    const cachedPage = ((message.media as tl.RawMessageMediaWebPage).webpage as tl.RawWebPage).cachedPage as tl.RawPage
+    const richMessage = message.richMessage!
 
-    expect(cachedPage.blocks.map((block) => block._)).toEqual([
+    expect(message.media).toBeUndefined()
+    expect(richMessage.blocks.map((block) => block._)).toEqual([
       'pageBlockPhoto', 'pageBlockParagraph', 'pageBlockPhoto',
     ])
-    expect(cachedPage.photos).toHaveLength(2)
+    expect(richMessage.photos).toHaveLength(2)
     expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
