@@ -16,6 +16,7 @@ import {
   type MessageEditResult,
 } from './message-actions.js'
 import { isLocalOnlyConversation } from './request-inbox.js'
+import { RecentPromiseCache } from './recent-promise-cache.js'
 import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
@@ -160,8 +161,8 @@ export class DialogRpc {
   private readonly _unreadMentionCounts = new Map<string, number>()
   private _nextMessageId = 1
   private _pts = 1
-  private readonly _sentByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
-  private readonly _sentMediaByRandomId = new Map<string, Promise<tl.TypeUpdates>>()
+  private readonly _sentByRandomId = new RecentPromiseCache<tl.TypeUpdates>(1_024)
+  private readonly _sentMediaByRandomId = new RecentPromiseCache<tl.TypeUpdates>(1_024)
   private _selfId = 0
   private _selfUser?: IMUser
   private readonly _data?: PlatformDataService
@@ -1412,12 +1413,7 @@ export class DialogRpc {
       return result
     })
     this._sentByRandomId.set(randomId, pending)
-    try {
-      return await pending
-    } catch (error) {
-      this._sentByRandomId.delete(randomId)
-      throw error
-    }
+    return pending
   }
 
   async getBotCallbackAnswer(
@@ -2417,12 +2413,7 @@ export class DialogRpc {
     if (existing) return existing
     const pending = send()
     this._sentMediaByRandomId.set(randomId, pending)
-    try {
-      return await pending
-    } catch (error) {
-      this._sentMediaByRandomId.delete(randomId)
-      throw error
-    }
+    return pending
   }
 
   private async _resolveUploadedMedia(media: tl.TypeInputMedia): Promise<ResolvedMediaUpload> {

@@ -7,6 +7,7 @@ import Long from 'long'
 import { __tlReaderMapWithCompat, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import {
+  collectNewestEntriesById,
   CURRENT_API_LAYER,
   getApiLayerReaderMap,
   getApiLayerWriterMap,
@@ -36,6 +37,20 @@ const message: tl.RawMessage = {
 }
 
 describe('API layer response writers', () => {
+  it('keeps only the newest definition for each historical constructor ID', () => {
+    const oldestOnly = { id: 1, name: 'oldest-only' }
+    const replaced = { id: 2, name: 'old-definition' }
+    const replacement = { id: 2, name: 'new-definition' }
+    const newestOnly = { id: 3, name: 'newest-only' }
+    const layers = new Map([
+      [100, [oldestOnly, replaced]],
+      [200, [replacement, newestOnly]],
+    ])
+
+    expect(collectNewestEntriesById([100, 200], layer => layers.get(layer) ?? []))
+      .toEqual([oldestOnly, replacement, newestOnly])
+  })
+
   it.each([
     198, 200, 204, 216, 220, 222, 223, 224, 226,
   ])('writes the Message constructor sourced from the local schema for layer %i', (layer) => {

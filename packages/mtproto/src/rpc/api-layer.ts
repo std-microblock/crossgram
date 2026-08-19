@@ -38,7 +38,6 @@ const availableLayers = [...schemaRecords.values()]
   .sort((a, b) => a.requestedLayer - b.requestedLayer)
 const schemaWriterCache = new WeakMap<TlWriterMap, Map<number, TlWriterMap>>()
 const readerCache = new Map<number, TlReaderMap>()
-const entriesCache = new Map<number, TlEntry[]>()
 let historicalReaderMap: TlReaderMap | null = null
 
 const int53Fields = new Set(
@@ -127,11 +126,16 @@ export function getApiLayerReaderMap(layer: number): TlReaderMap | null {
  */
 export function getHistoricalApiLayerReaderMap(): TlReaderMap {
   if (historicalReaderMap) return historicalReaderMap
-  const uniqueEntries = new Map<number, TlEntry>()
-  for (const record of availableLayers) {
-    for (const entry of loadSchemaEntries(record.requestedLayer)) uniqueEntries.set(entry.id, entry)
-  }
-  const code = generateReaderCodeForTlEntries([...uniqueEntries.values()], {
+  // Do not retain every parsed snapshot. The mirrored history currently
+  // contains more than one million entry objects across all layers, while
+  // the final reader only needs the newest definition for each constructor
+  // ID. Keeping the per-layer arrays alive made the production heap grow by
+  // hundreds of megabytes immediately at startup.
+  const uniqueEntries = collectNewestEntriesById(
+    availableLayers.map(record => record.requestedLayer),
+    loadSchemaEntries,
+  )
+  const code = generateReaderCodeForTlEntries(uniqueEntries, {
     variableName: 'm',
     includeMethods: true,
     includeMethodResults: true,
@@ -141,9 +145,18 @@ export function getHistoricalApiLayerReaderMap(): TlReaderMap {
   return historicalReaderMap
 }
 
+export function collectNewestEntriesById<T extends { id: number }>(
+  sources: Iterable<number>,
+  load: (source: number) => Iterable<T>,
+): T[] {
+  const entries = new Map<number, T>()
+  for (const source of sources) {
+    for (const entry of load(source)) entries.set(entry.id, entry)
+  }
+  return [...entries.values()]
+}
+
 function loadSchemaEntries(schemaLayer: number): TlEntry[] {
-  const cached = entriesCache.get(schemaLayer)
-  if (cached) return cached
   const record = schemaRecords.get(schemaLayer)
   if (!record?.file || !record.sha256) throw new Error(`missing local Telegram schema for layer ${schemaLayer}`)
   const schema = readFileSync(new URL(`../../schema/api/${record.file}`, import.meta.url), 'utf8')
@@ -151,7 +164,6 @@ function loadSchemaEntries(schemaLayer: number): TlEntry[] {
   if (digest !== record.sha256) throw new Error(`Telegram schema layer ${schemaLayer} failed SHA-256 validation`)
   const entries = parseTlToEntries(schema, { panicOnError: true })
   normalizeMtcuteInt53(entries)
-  entriesCache.set(schemaLayer, entries)
   return entries
 }
 
