@@ -34,6 +34,19 @@ describe('MemoryAuthKeyStore', () => {
     store.save(id(3), { key: key(0xdd), permanentKeyId: id(1), expiresAt: 1 })
     expect(store.get(id(3))).toBeUndefined()
   })
+
+  it('revokes a permanent key together with its temporary keys', () => {
+    const store = new MemoryAuthKeyStore()
+    store.save(id(1), { key: key(0xaa) })
+    store.save(id(2), { key: key(0xbb), permanentKeyId: id(1), expiresAt: 4_000_000_000 })
+    store.save(id(3), { key: key(0xcc) })
+
+    expect(store.delete(id(1))).toBe(true)
+    expect(store.get(id(1))).toBeUndefined()
+    expect(store.get(id(2))).toBeUndefined()
+    expect(store.get(id(3))).toEqual({ key: key(0xcc) })
+    expect(store.delete(id(1))).toBe(false)
+  })
 })
 
 describe('FileAuthKeyStore', () => {
@@ -65,6 +78,18 @@ describe('FileAuthKeyStore', () => {
     expect(store.get(id(7))).toEqual({
       key: key(0x42), permanentKeyId: undefined, expiresAt: undefined, apiLayer: undefined,
     })
+  })
+
+  it('persists permanent and temporary key revocation', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
+    const store = new FileAuthKeyStore(path)
+    store.save(id(1), { key: key(0xaa) })
+    store.save(id(2), { key: key(0xbb), permanentKeyId: id(1), expiresAt: 4_000_000_000 })
+
+    expect(store.delete(id(1))).toBe(true)
+    const resumed = new FileAuthKeyStore(path)
+    expect(resumed.get(id(1))).toBeUndefined()
+    expect(resumed.get(id(2))).toBeUndefined()
   })
 
   it('starts empty when the file does not exist', () => {

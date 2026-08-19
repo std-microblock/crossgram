@@ -1,6 +1,6 @@
 import type { mtp, tl } from '@mtcute/core'
 import type Long from 'long'
-import type { ServerRpcContext } from './context.js'
+import type { MtprotoClientInfo, ServerRpcContext } from './context.js'
 import { RpcError, RpcErrors, isRpcError, toRpcError } from './errors.js'
 
 /**
@@ -39,6 +39,8 @@ export interface UnwrappedRpcRequest {
   request: tl.RpcMethod
   /** Layer declared by invokeWithLayer, if this request negotiated one. */
   apiLayer: number | null
+  /** Device/application metadata declared by initConnection, if present. */
+  clientInfo: MtprotoClientInfo | null
   /** Earlier MTProto message ids that must finish before this request runs. */
   afterMessageIds: readonly Long[]
 }
@@ -62,6 +64,7 @@ export function isRpcRequestObject(method: string): boolean {
 export function unwrapRpcRequest(request: tl.RpcMethod): UnwrappedRpcRequest {
   let req = request
   let apiLayer: number | null = null
+  let clientInfo: MtprotoClientInfo | null = null
   const afterMessageIds: Long[] = []
   for (;;) {
     const method = req._
@@ -71,7 +74,21 @@ export function unwrapRpcRequest(request: tl.RpcMethod): UnwrappedRpcRequest {
       req = wrapper.query
       continue
     }
-    if (method === 'initConnection' || method === 'invokeWithoutUpdates') {
+    if (method === 'initConnection') {
+      const wrapper = req as unknown as tl.RawInitConnectionRequest<tl.RpcMethod>
+      clientInfo = {
+        apiId: wrapper.apiId,
+        deviceModel: wrapper.deviceModel,
+        systemVersion: wrapper.systemVersion,
+        appVersion: wrapper.appVersion,
+        systemLangCode: wrapper.systemLangCode,
+        langPack: wrapper.langPack,
+        langCode: wrapper.langCode,
+      }
+      req = wrapper.query
+      continue
+    }
+    if (method === 'invokeWithoutUpdates') {
       req = (req as unknown as { query: tl.RpcMethod }).query
       continue
     }
@@ -91,7 +108,7 @@ export function unwrapRpcRequest(request: tl.RpcMethod): UnwrappedRpcRequest {
       req = (req as unknown as { query: tl.RpcMethod }).query
       continue
     }
-    return { request: req, apiLayer, afterMessageIds }
+    return { request: req, apiLayer, clientInfo, afterMessageIds }
   }
 }
 

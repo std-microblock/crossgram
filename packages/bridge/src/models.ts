@@ -27,6 +27,30 @@ export interface AuthBindingRow {
   platformSessionId: string
 }
 
+export interface ClientAuthorizationRow {
+  authKeyId: string
+  platformSessionId: string
+  apiId: number
+  deviceModel: string
+  platform: string
+  systemVersion: string
+  appName: string
+  appVersion: string
+  dateCreated: number
+  dateActive: number
+  ip: string
+  country: string
+  region: string
+  encryptedRequestsDisabled: boolean
+  callRequestsDisabled: boolean
+  unconfirmed: boolean
+}
+
+export interface AuthorizationSettingsRow {
+  platformSessionId: string
+  ttlDays: number
+}
+
 export interface IMConversationRow {
   id: number
   platformSessionId: string
@@ -276,6 +300,8 @@ declare module '@cordisjs/plugin-database' {
     mtproto_auth_session: AuthSessionRow
     mtproto_platform_session: PlatformSessionRow
     mtproto_auth_binding: AuthBindingRow
+    mtproto_client_authorization: ClientAuthorizationRow
+    mtproto_authorization_settings: AuthorizationSettingsRow
     mtproto_im_conversation: IMConversationRow
     mtproto_im_user: IMUserRow
     mtproto_im_message: IMMessageRow
@@ -317,6 +343,17 @@ export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_auth_binding', {
     authKeyId: 'string', platformId: 'string', platformSessionId: 'string',
   }, { primary: 'authKeyId' })
+
+  ctx.model.extend('mtproto_client_authorization', {
+    authKeyId: 'string', platformSessionId: 'string', apiId: 'integer', deviceModel: 'string',
+    platform: 'string', systemVersion: 'string', appName: 'string', appVersion: 'string',
+    dateCreated: 'unsigned', dateActive: 'unsigned', ip: 'string', country: 'string', region: 'string',
+    encryptedRequestsDisabled: 'boolean', callRequestsDisabled: 'boolean', unconfirmed: 'boolean',
+  }, { primary: 'authKeyId', indexes: ['platformSessionId'] })
+
+  ctx.model.extend('mtproto_authorization_settings', {
+    platformSessionId: 'string', ttlDays: 'unsigned',
+  }, { primary: 'platformSessionId' })
 
   ctx.model.extend('mtproto_im_conversation', {
     id: 'unsigned', platformSessionId: 'string', platformConversationId: 'text', kind: 'string', title: 'text',

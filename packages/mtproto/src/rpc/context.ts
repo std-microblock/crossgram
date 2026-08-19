@@ -11,6 +11,23 @@ export interface MtprotoConnectionScope {
   session: ServerSession
   remoteAddress?: string
   remotePort?: number
+  /** Wall-clock time when this TCP connection was accepted. */
+  connectedAt?: number
+  /** Most recent decoded API RPC received on this connection. */
+  lastActiveAt?: number
+  /** Client metadata announced by initConnection. */
+  clientInfo?: MtprotoClientInfo
+}
+
+/** Stable device/application metadata announced by Telegram's initConnection wrapper. */
+export interface MtprotoClientInfo {
+  apiId: number
+  deviceModel: string
+  systemVersion: string
+  appVersion: string
+  systemLangCode: string
+  langPack: string
+  langCode: string
 }
 
 /** Metadata attached to the derived context of one decoded transport packet. */
@@ -52,6 +69,12 @@ export interface ServerRpcContext {
   connection: ServerConnection
   /** API layer declared by invokeWithLayer, retained for the whole MTProto session. */
   readonly apiLayer: number | null
+  /** Client metadata retained from the latest initConnection on this connection. */
+  readonly clientInfo?: MtprotoClientInfo
+  /** Wall-clock time when this TCP connection was accepted. */
+  readonly connectedAt?: number
+  /** Wall-clock time of this decoded RPC. */
+  readonly lastActiveAt?: number
   /** The permanent auth key id (8 bytes), or null before authorization. */
   authKeyId: Uint8Array | null
   /** The client's MTProto session id. */

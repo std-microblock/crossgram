@@ -18,6 +18,8 @@ export interface AuthKeyStore {
   get(id: Uint8Array): Promise<StoredAuthKey | undefined> | StoredAuthKey | undefined
   /** Persist a permanent key or temporary key association under its 8-byte id. */
   save(id: Uint8Array, record: StoredAuthKey): Promise<void> | void
+  /** Revoke a permanent key and every temporary key bound to it. */
+  delete(id: Uint8Array): Promise<boolean> | boolean
 }
 
 function toHex(u: Uint8Array): string {
@@ -47,6 +49,18 @@ export class MemoryAuthKeyStore implements AuthKeyStore {
 
   save(id: Uint8Array, record: StoredAuthKey): void {
     this._keys.set(toHex(id), record)
+  }
+
+  delete(id: Uint8Array): boolean {
+    const idHex = toHex(id)
+    let deleted = this._keys.delete(idHex)
+    for (const [key, record] of this._keys) {
+      if (record.permanentKeyId && toHex(record.permanentKeyId) === idHex) {
+        this._keys.delete(key)
+        deleted = true
+      }
+    }
+    return deleted
   }
 }
 
@@ -102,6 +116,23 @@ export class FileAuthKeyStore implements AuthKeyStore {
       expiresAt: record.expiresAt,
       apiLayer: record.apiLayer,
     })
+    this._flush()
+  }
+
+  delete(id: Uint8Array): boolean {
+    const idHex = toHex(id)
+    let deleted = this._keys.delete(idHex)
+    for (const [key, record] of this._keys) {
+      if (record.permanentKeyId === idHex) {
+        this._keys.delete(key)
+        deleted = true
+      }
+    }
+    if (deleted) this._flush()
+    return deleted
+  }
+
+  private _flush(): void {
     mkdirSync(dirname(this._path), { recursive: true })
     const temporaryPath = `${this._path}.tmp`
     writeFileSync(temporaryPath, JSON.stringify(Object.fromEntries(this._keys)))

@@ -38,6 +38,7 @@ describe('Cordis RPC routing', () => {
       query: { _: 'help.getAppConfig', hash: 0 },
     } as tl.RpcMethod)
     expect(unwrapped.apiLayer).toBe(225)
+    expect(unwrapped.clientInfo).toBeNull()
     expect(unwrapped.request).toEqual({ _: 'help.getAppConfig', hash: 0 })
     expect(unwrapped.afterMessageIds).toEqual([])
   })
@@ -58,6 +59,15 @@ describe('Cordis RPC routing', () => {
     } as unknown as tl.RpcMethod)
 
     expect(unwrapped.apiLayer).toBe(228)
+    expect(unwrapped.clientInfo).toEqual({
+      apiId: 1,
+      deviceModel: 'Android',
+      systemVersion: 'test',
+      appVersion: 'test',
+      systemLangCode: 'en',
+      langPack: 'android',
+      langCode: 'en',
+    })
     expect(unwrapped.request._).toBe('messages.sendMessage')
     expect(unwrapped.afterMessageIds).toEqual([dependency])
   })

@@ -16,6 +16,7 @@ import type { ServerConnection } from '../transport/server-connection.js'
 import { isBareVector, isRpcRequestObject, unwrapRpcRequest } from '../rpc/protocol.js'
 import type { RpcHandler, ServerRpcContext, RpcResult, BareVector } from '../rpc/protocol.js'
 import type { MtprotoPacketScope } from '../rpc/context.js'
+import type { MtprotoClientInfo } from '../rpc/context.js'
 import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 
@@ -152,6 +153,7 @@ export class ServerSession {
   private _serverSalt = Long.ZERO
   private _authorized = false
   private _apiLayer: number | null = null
+  private _clientInfo: MtprotoClientInfo | undefined
   private _responseWriterMap: TlWriterMap
   private _pendingUpdates: Array<{ update: tl.TypeUpdates, clientSessionId?: Long }> = []
   private _acceptsUpdates = false
@@ -1113,6 +1115,12 @@ export class ServerSession {
   ): Promise<void> {
     if (this._connection.closed) return
     const unwrapped = unwrapRpcRequest(request)
+    const now = Date.now()
+    if (unwrapped.clientInfo) {
+      this._clientInfo = unwrapped.clientInfo
+      this._context.mtprotoConnection.clientInfo = unwrapped.clientInfo
+    }
+    this._context.mtprotoConnection.lastActiveAt = now
 
     // A wrapped bind must prove the requested permanent identity before its
     // invokeWithLayer value can affect this session. The bare form is handled
@@ -1175,10 +1183,13 @@ export class ServerSession {
         connection: this._context.mtprotoConnection,
         request: unwrapped.request,
         messageId: msgId,
-        receivedAt: Date.now(),
+        receivedAt: now,
       },
       connection: this._connection,
       apiLayer: this._apiLayer,
+      clientInfo: this._clientInfo,
+      connectedAt: this._context.mtprotoConnection.connectedAt,
+      lastActiveAt: now,
       authKeyId: this._permAuthKey.ready ? new Uint8Array(this._permAuthKey.id) : null,
       sessionId: clientSessionId,
       isAuthorized: this._authorized,

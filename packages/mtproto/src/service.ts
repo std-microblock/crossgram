@@ -165,6 +165,17 @@ export class Mtproto extends Service {
     return targets.length
   }
 
+  /** Revoke one permanent authorization and disconnect every connection using it. */
+  async revokeAuthKey(authKeyId: Uint8Array): Promise<boolean> {
+    const deleted = await this._authKeyStore.delete(authKeyId)
+    this._authKeyData.delete(authKeyId)
+    this._authApiLayers.delete(bytesHex(authKeyId))
+    for (const session of [...this._sessions]) {
+      if (equalBytes(session.authKeyId, authKeyId)) session.connection.close()
+    }
+    return deleted
+  }
+
   async* [Service.init]() {
     await this._crypto.initialize?.()
 
@@ -255,6 +266,7 @@ export class Mtproto extends Service {
       session: undefined as unknown as ServerSession,
       remoteAddress: socket.remoteAddress,
       remotePort: socket.remotePort,
+      connectedAt: Date.now(),
     } satisfies MtprotoConnectionScope
     connectionCtx = ctx.extend({ mtprotoConnection: scope })
     const debug = (event: Omit<MtprotoDebugEvent, 'connectionId'>) => {

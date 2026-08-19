@@ -7,6 +7,7 @@ export { dispatchRpcRoute, invokeRpc, registerRpcRoute } from './rpc/router.js'
 export type {
   CordisServerRpcContext,
   MtprotoConnectionScope,
+  MtprotoClientInfo,
   MtprotoPacketScope,
   MtprotoRpcScope,
   ServerRpcContext,

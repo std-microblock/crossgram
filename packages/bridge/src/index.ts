@@ -51,6 +51,7 @@ import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 import { RequestInboxSystemPeerProvider } from './request-inbox.js'
+import { ActiveSessionStore, registerActiveSessionRpc } from './active-sessions.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
@@ -82,6 +83,7 @@ export * from './stripped-thumbnail.js'
 export * from './image-dimensions.js'
 export * from './sticker-outline.js'
 export * from './sticker-dashboard.js'
+export * from './active-sessions.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui']
@@ -171,6 +173,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const loginTokens = new LoginTokenStore()
 
   defineModels(ctx)
+  const activeSessions = new ActiveSessionStore(
+    ctx.database,
+    authKeyId => ctx.mtproto.revokeAuthKey(authKeyId),
+  )
   const store = new MessageStore(ctx.database, undefined, undefined, historyTrace)
   const drafts = new DraftStore(ctx.database)
   const notificationSettings = new NotificationSettingsStore(
@@ -326,8 +332,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       localSession, update, excludeAuthKeyId,
     ),
     config.onTransferProgress, dcId, historyTrace,
-    (session, authKeyId) => calls.replay(session, authKeyId),
+    async (session, authKeyId, rpcContext) => {
+      await activeSessions.touch(rpcContext, session)
+      await calls.replay(session, authKeyId)
+    },
   )
+  registerActiveSessionRpc(rpc, activeSessions, async rpcContext =>
+    (await requireBridgeSession(rpcContext)).session)
 
   const authorizationLocks = new Map<string, Promise<void>>()
   const withAuthorizationLock = async <T>(authKeyId: string, callback: () => Promise<T>): Promise<T> => {
@@ -1148,7 +1159,11 @@ function createSessionResolver(
   onTransferProgress?: BridgeConfig['onTransferProgress'],
   dcId = 1,
   historyTrace?: (format: string, ...args: unknown[]) => void,
-  onAuthorizedSession?: (session: PlatformSession, authKeyId: string) => void | Promise<void>,
+  onAuthorizedSession?: (
+    session: PlatformSession,
+    authKeyId: string,
+    rpc: ServerRpcContext,
+  ) => void | Promise<void>,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
@@ -1183,7 +1198,7 @@ function createSessionResolver(
           metadata: row.metadata,
         })
       await subscriptions.ensure(session)
-      await onAuthorizedSession?.(session, authKeyId)
+      await onAuthorizedSession?.(session, authKeyId, rpc)
       const state: BridgeSessionState = {
         generation, platform, session,
         stickers: stickerRpcFor(platform, session),

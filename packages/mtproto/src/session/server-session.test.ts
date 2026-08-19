@@ -438,6 +438,7 @@ describe('ServerSession auth.bindTempAuthKey', () => {
     const keyStore: AuthKeyStore = {
       get: vi.fn(),
       save: vi.fn(),
+      delete: vi.fn(),
     }
     const { session, logger } = createSession(vi.fn(), keyStore)
     const crypto = new NodeCryptoProvider()
@@ -489,6 +490,7 @@ describe('ServerSession auth.bindTempAuthKey', () => {
     const keyStore: AuthKeyStore = {
       get: vi.fn().mockRejectedValue(new Error('store unavailable')),
       save: vi.fn(),
+      delete: vi.fn(),
     }
     const { session, logger } = createSession(vi.fn(), keyStore)
     const crypto = new NodeCryptoProvider()
@@ -535,6 +537,7 @@ describe('ServerSession auth.bindTempAuthKey', () => {
     const keyStore: AuthKeyStore = {
       get: vi.fn().mockResolvedValue({ key: candidateKey, apiLayer: 220 }),
       save: vi.fn().mockRejectedValue(new Error('store unavailable')),
+      delete: vi.fn(),
     }
     const { session, logger } = createSession(vi.fn(), keyStore)
     const internal = session as unknown as {
@@ -597,6 +600,7 @@ describe('ServerSession auth.bindTempAuthKey', () => {
           return firstSave
         }
       }),
+      delete: vi.fn(),
     }
     const dispatch = vi.fn().mockResolvedValue({ _: 'boolTrue' })
     const { session, logger } = createSession(dispatch, keyStore)
