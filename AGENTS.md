@@ -8,11 +8,11 @@ QQNT 的协议实现端应该在本项目同目录下的 qqnt-bridge 文件夹
 
 代码修改流程：
 
-1. 确认是否已在一个独立的 worktree，如果没有则创建
+1. 确认是否已在一个独立的 worktree，如果没有则创建（统一放在 CWD 的 .worktrees/ 目录下，不一定是 git 目录下！）
 2. 在 worktree 内进行修改和测试
 3. 完成后等待用户 review （如果用户要求自行迭代可跳过此步）
 4. 提交 commit，并 rebase merge 到主分支
 5. push 主分支
-6. 删除 worktree
+6. 删除 worktree 和创建的临时分支
 
 如果主分支有其他更改，rebase 的时候需要保留这些更改（可以先 stash）
