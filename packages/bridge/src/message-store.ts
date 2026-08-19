@@ -1111,14 +1111,14 @@ export class MessageStore {
     platformSessionId: string,
     platformConversationId: string,
     tlMessageIds: readonly number[],
-  ): Promise<number> {
+  ): Promise<number[]> {
     const uniqueIds = [...new Set(tlMessageIds)]
-    if (!uniqueIds.length) return 0
+    if (!uniqueIds.length) return []
     return this._write(() => this._database.withTransaction(async (database) => {
       const [conversation] = await database.get('mtproto_im_conversation', {
         platformSessionId, platformConversationId,
       })
-      if (!conversation) return 0
+      if (!conversation) return []
       const query = {
         platformSessionId,
         conversationId: conversation.id,
@@ -1126,31 +1126,31 @@ export class MessageStore {
         unread: true,
       }
       const rows = await database.get('mtproto_message_mention', query)
-      if (!rows.length) return 0
+      if (!rows.length) return []
       await database.set('mtproto_message_mention', query, {
         unread: false, updatedAt: new Date(),
       })
-      return rows.length
+      return rows.map((row) => row.tlMessageId).sort((left, right) => left - right)
     }), 'mention-content-read')
   }
 
   async markMentionsRead(
     platformSessionId: string,
     platformConversationId: string,
-  ): Promise<number> {
+  ): Promise<number[]> {
     return this._write(() => this._database.withTransaction(async (database) => {
       const [conversation] = await database.get('mtproto_im_conversation', {
         platformSessionId, platformConversationId,
       })
-      if (!conversation) return 0
+      if (!conversation) return []
       const rows = await database.get('mtproto_message_mention', {
         platformSessionId, conversationId: conversation.id, unread: true,
       })
-      if (!rows.length) return 0
+      if (!rows.length) return []
       await database.set('mtproto_message_mention', {
         platformSessionId, conversationId: conversation.id, unread: true,
       }, { unread: false, updatedAt: new Date() })
-      return rows.length
+      return rows.map((row) => row.tlMessageId).sort((left, right) => left - right)
     }), 'mention-read')
   }
 

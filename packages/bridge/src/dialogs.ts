@@ -54,6 +54,13 @@ type SendMediaRequest = tl.messages.RawSendMediaRequest
 type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
 type UploadMediaRequest = tl.messages.RawUploadMediaRequest
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
+type MentionReadPublisher = (
+  session: PlatformSession,
+  conversation: IMConversation,
+  tlMessageIds: readonly number[],
+  topMsgId: number | undefined,
+  excludeConnection?: ServerConnection,
+) => Promise<{ pts: number, ptsCount: number }>
 
 
 interface MessageRef {
@@ -711,21 +718,35 @@ export class DialogRpc {
 
   async readMentions(
     req: tl.messages.RawReadMentionsRequest,
+    excludeConnection?: ServerConnection,
+    publishMentionRead?: MentionReadPublisher,
   ): Promise<tl.messages.RawAffectedHistory> {
     await this._hydratePeers()
     const conversationId = await this._resolveMentionConversation(req.peer, req.topMsgId)
+    let changedIds: number[]
     if (this._store) {
-      await this._store.markMentionsRead(this._session.platformSessionId, conversationId)
+      changedIds = await this._store.markMentionsRead(this._session.platformSessionId, conversationId)
       this._unreadMentionCounts.set(conversationId, 0)
     } else {
+      changedIds = []
       const states = this._memoryMentionStates.get(conversationId)
-      if (states) for (const id of states.keys()) states.set(id, false)
+      if (states) {
+        for (const [id, unread] of states) {
+          if (unread) changedIds.push(id)
+          states.set(id, false)
+        }
+      }
     }
+    const published = changedIds.length
+      ? await this._publishMentionRead(
+          conversationId, changedIds, req.topMsgId, excludeConnection, publishMentionRead,
+        )
+      : undefined
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return {
       _: 'messages.affectedHistory',
-      pts: state?.pts ?? this._pts,
-      ptsCount: 0,
+      pts: published?.pts ?? state?.pts ?? this._pts,
+      ptsCount: published?.ptsCount ?? 0,
       offset: 0,
     }
   }
@@ -1204,10 +1225,16 @@ export class DialogRpc {
     return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
-  async readChannelMessageContents(req: tl.channels.RawReadMessageContentsRequest): Promise<tl.TlObject> {
+  async readChannelMessageContents(
+    req: tl.channels.RawReadMessageContentsRequest,
+    excludeConnection?: ServerConnection,
+    publishMentionRead?: MentionReadPublisher,
+  ): Promise<tl.TlObject> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
-    await this._markMentionContentsRead(conversation.id, req.id)
+    await this._markMentionContentsRead(
+      conversation.id, req.id, excludeConnection, publishMentionRead,
+    )
     return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
@@ -4628,6 +4655,8 @@ export class DialogRpc {
   private async _markMentionContentsRead(
     displayConversationId: string,
     tlMessageIds: readonly number[],
+    excludeConnection?: ServerConnection,
+    publishMentionRead?: MentionReadPublisher,
   ): Promise<void> {
     const idsByConversation = new Map<string, number[]>()
     for (const tlMessageId of new Set(tlMessageIds)) {
@@ -4642,19 +4671,48 @@ export class DialogRpc {
       idsByConversation.set(target.id, ids)
     }
     for (const [conversationId, ids] of idsByConversation) {
+      let changedIds: number[]
       if (this._store) {
-        const changed = await this._store.markMentionIdsRead(
+        changedIds = await this._store.markMentionIdsRead(
           this._session.platformSessionId, conversationId, ids,
         )
         const count = this._unreadMentionCounts.get(conversationId)
-        if (changed && count !== undefined) {
-          this._unreadMentionCounts.set(conversationId, Math.max(0, count - changed))
+        if (changedIds.length && count !== undefined) {
+          this._unreadMentionCounts.set(conversationId, Math.max(0, count - changedIds.length))
         }
       } else {
+        changedIds = []
         const states = this._memoryMentionStates.get(conversationId)
-        for (const id of ids) if (states?.has(id)) states.set(id, false)
+        for (const id of ids) {
+          if (states?.get(id) === true) changedIds.push(id)
+          if (states?.has(id)) states.set(id, false)
+        }
+      }
+      if (changedIds.length) {
+        await this._publishMentionRead(
+          conversationId, changedIds, undefined, excludeConnection, publishMentionRead,
+        )
       }
     }
+  }
+
+  private async _publishMentionRead(
+    conversationId: string,
+    tlMessageIds: readonly number[],
+    topMsgId: number | undefined,
+    excludeConnection?: ServerConnection,
+    publishMentionRead?: MentionReadPublisher,
+  ): Promise<{ pts: number, ptsCount: number } | undefined> {
+    if (!publishMentionRead) return
+    const target = this._conversation(conversationId)
+    const display = target.parentId ? this._conversation(target.parentId) : target
+    return publishMentionRead(
+      this._session,
+      display,
+      tlMessageIds,
+      topMsgId ?? (target.parentId ? this._conversationToTopic.get(target.id) : undefined),
+      excludeConnection,
+    )
   }
 
   private async _findReadProjection(

@@ -26,6 +26,11 @@ import {
 import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 
+export interface MentionReadPublishResult {
+  pts: number
+  ptsCount: number
+}
+
 /** Converts committed platform events to account-scoped MTProto updates. */
 export class UpdateManager {
   constructor(
@@ -222,6 +227,73 @@ export class UpdateManager {
       _: 'updates', updates: accountUpdates, users: [], chats: [],
       date: Math.floor(Date.now() / 1000), seq: state.seq,
     }, excludeAuthKeyId)
+  }
+
+  /** Publishes mention-content acknowledgements to every other authorized device. */
+  async publishMentionRead(
+    session: PlatformSession,
+    conversation: IMConversation,
+    tlMessageIds: readonly number[],
+    topMsgId: number | undefined,
+    excludeConnection?: ServerConnection,
+  ): Promise<MentionReadPublishResult> {
+    const messageIds = [...new Set(tlMessageIds)]
+      .filter((id) => Number.isSafeInteger(id) && id > 0)
+      .sort((left, right) => left - right)
+    if (!messageIds.length) {
+      const state = await this._store.getUpdateState(session.platformSessionId)
+      return { pts: state.pts, ptsCount: 0 }
+    }
+
+    const date = Math.floor(Date.now() / 1000)
+    const channelId = conversation.kind === 'direct'
+      ? undefined
+      : stableId(`peer:${conversation.id}`)
+    const eventKey = [
+      session.platformSessionId,
+      'mention-read',
+      channelId === undefined ? 'account' : `channel:${channelId}`,
+      topMsgId ?? 0,
+      ...messageIds,
+    ].join(':')
+    const delivery = await this._store.prepareUpdateDelivery(
+      eventKey,
+      session.platformSessionId,
+      messageIds.length,
+      date,
+      channelId,
+    )
+    const update: tl.TypeUpdate = channelId === undefined
+      ? {
+          _: 'updateReadMessagesContents',
+          messages: messageIds,
+          pts: delivery.pts,
+          ptsCount: delivery.ptsCount,
+        }
+      : {
+          _: 'updateChannelReadMessagesContents',
+          channelId,
+          topMsgId,
+          messages: messageIds,
+        }
+    const payload: tl.RawUpdates = {
+      _: 'updates',
+      updates: [update],
+      users: [],
+      chats: channelId === undefined ? [] : [makeUpdateChat(conversation, Boolean(topMsgId), this._dcId)],
+      date: delivery.date,
+      seq: delivery.seq,
+    }
+    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    await this._send(session.platformSessionId, payload, undefined, excludeConnection)
+    // The initiating connection acknowledged the same mutation through its RPC
+    // result, while offline devices can still recover the retained payload via
+    // updates.getDifference / updates.getChannelDifference.
+    await this._store.markUpdatePublished(eventKey)
+
+    if (channelId === undefined) return { pts: delivery.pts, ptsCount: delivery.ptsCount }
+    const state = await this._store.getUpdateState(session.platformSessionId)
+    return { pts: state.pts, ptsCount: 0 }
   }
 
   /** Sends an ephemeral phone update without adding call data to the update journal. */

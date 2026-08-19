@@ -47,7 +47,10 @@ function makeContext(): ServerRpcContext {
   }
 }
 
-function rpcHarnessFor(dialogs: DialogRpc): CordisRpcTestHarness {
+function rpcHarnessFor(
+  dialogs: DialogRpc,
+  publishMentionRead?: NonNullable<Parameters<DialogRpc['readMentions']>[2]>,
+): CordisRpcTestHarness {
   const rpcHarness = createCordisRpcTestHarness()
   rpcHarness.register('messages.getDialogs', async (_context, request) =>
     dialogs.getDialogs(request as tl.messages.RawGetDialogsRequest))
@@ -56,9 +59,11 @@ function rpcHarnessFor(dialogs: DialogRpc): CordisRpcTestHarness {
   rpcHarness.register('messages.getUnreadMentions', async (_context, request) =>
     dialogs.getUnreadMentions(request as tl.messages.RawGetUnreadMentionsRequest))
   rpcHarness.register('messages.readMentions', async (_context, request) =>
-    dialogs.readMentions(request as tl.messages.RawReadMentionsRequest))
+    dialogs.readMentions(request as tl.messages.RawReadMentionsRequest, undefined, publishMentionRead))
   rpcHarness.register('channels.readMessageContents', async (_context, request) =>
-    dialogs.readChannelMessageContents(request as tl.channels.RawReadMessageContentsRequest))
+    dialogs.readChannelMessageContents(
+      request as tl.channels.RawReadMessageContentsRequest, undefined, publishMentionRead,
+    ))
   return rpcHarness
 }
 
@@ -168,7 +173,15 @@ describe('unread mention navigation RPC e2e', () => {
     }
 
     const dialogs = new DialogRpc(platform, session, store)
-    const rpcHarness = rpcHarnessFor(dialogs)
+    const mentionReadPublishes: Array<{
+      conversation: IMConversation
+      tlMessageIds: readonly number[]
+      topMsgId: number | undefined
+    }> = []
+    const rpcHarness = rpcHarnessFor(dialogs, async (_session, publishedConversation, tlMessageIds, topMsgId) => {
+      mentionReadPublishes.push({ conversation: publishedConversation, tlMessageIds, topMsgId })
+      return { pts: 1, ptsCount: 0 }
+    })
     const page = await roundTripRpc(rpcHarness, {
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
@@ -210,8 +223,19 @@ describe('unread mention navigation RPC e2e', () => {
       channel: { _: 'inputChannel', channelId: peer.channelId, accessHash: peer.accessHash },
       id: [replyMessage.id],
     })).resolves.toMatchObject({ _: 'boolTrue' })
+    expect(mentionReadPublishes).toMatchObject([{
+      conversation: { id: conversation.id, kind: conversation.kind, title: conversation.title },
+      tlMessageIds: [replyMessage.id],
+      topMsgId: undefined,
+    }])
 
-    const resumed = rpcHarnessFor(new DialogRpc(platform, session, store))
+    const resumed = rpcHarnessFor(
+      new DialogRpc(platform, session, store),
+      async (_session, publishedConversation, tlMessageIds, topMsgId) => {
+        mentionReadPublishes.push({ conversation: publishedConversation, tlMessageIds, topMsgId })
+        return { pts: 1, ptsCount: 0 }
+      },
+    )
     await expect(roundTripRpc(resumed, request)).resolves.toMatchObject({
       messages: [{ message: '@Current ping', mentioned: true, mediaUnread: true }],
     })
@@ -222,6 +246,18 @@ describe('unread mention navigation RPC e2e', () => {
     await expect(roundTripRpc(resumed, {
       _: 'messages.readMentions', peer,
     })).resolves.toMatchObject({ _: 'messages.affectedHistory', ptsCount: 0, offset: 0 })
+    expect(mentionReadPublishes).toMatchObject([
+      {
+        conversation: { id: conversation.id, kind: conversation.kind, title: conversation.title },
+        tlMessageIds: [replyMessage.id], topMsgId: undefined,
+      },
+      {
+        conversation: { id: conversation.id, kind: conversation.kind, title: conversation.title },
+        tlMessageIds: [unread.messages.find((message): message is tl.RawMessage =>
+          message._ === 'message' && message.message === '@Current ping')!.id],
+        topMsgId: undefined,
+      },
+    ])
 
     const acknowledged = rpcHarnessFor(new DialogRpc(platform, session, store))
     await expect(roundTripRpc(acknowledged, request)).resolves.toMatchObject({ messages: [] })

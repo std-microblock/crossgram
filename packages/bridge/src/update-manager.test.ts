@@ -1084,6 +1084,66 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('fans mention acknowledgements out to other devices and retains account difference recovery', async () => {
+    const { ctx, manager, sent } = await createHarness()
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '1021324354657687', platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+    })
+    const requester = {} as ServerConnection
+    const conversation: IMConversation = { id: 'mention-direct', kind: 'direct', title: 'Mention Direct' }
+
+    await expect(manager.publishMentionRead(
+      session, conversation, [31, 17, 31], undefined, requester,
+    )).resolves.toEqual({ pts: 3, ptsCount: 2 })
+
+    expect(sent.map(({ authKeyId }) => Buffer.from(authKeyId).toString('hex')).sort()).toEqual([
+      '0011223344556677', '1021324354657687',
+    ])
+    expect(sent.every(({ excludeConnection }) => excludeConnection === requester)).toBe(true)
+    expect(sent.map(({ update }) => (update as tl.RawUpdates).updates[0])).toMatchObject([
+      { _: 'updateReadMessagesContents', messages: [17, 31], pts: 3, ptsCount: 2 },
+      { _: 'updateReadMessagesContents', messages: [17, 31], pts: 3, ptsCount: 2 },
+    ])
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toMatchObject({
+      _: 'updates.difference',
+      otherUpdates: [{ _: 'updateReadMessagesContents', messages: [17, 31], pts: 3, ptsCount: 2 }],
+      state: { pts: 3 },
+    })
+    expect(() => roundTrip(sent[0].update)).not.toThrow()
+  })
+
+  it('retains channel mention acknowledgements for channel difference recovery', async () => {
+    const { manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'mention-channel', kind: 'group', title: 'Mention Channel' }
+    const channelId = stableId(`peer:${conversation.id}`)
+
+    await expect(manager.publishMentionRead(
+      session, conversation, [44], undefined,
+    )).resolves.toEqual({ pts: 1, ptsCount: 0 })
+    expect(sent[0].update).toMatchObject({
+      _: 'updates',
+      updates: [{ _: 'updateChannelReadMessagesContents', channelId, messages: [44] }],
+    })
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toMatchObject({
+      _: 'updates.difference',
+      otherUpdates: [{ _: 'updateChannelTooLong', channelId, pts: 2 }],
+    })
+    await expect(manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: { _: 'inputChannel', channelId, accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+    })).resolves.toMatchObject({
+      _: 'updates.channelDifference', pts: 2,
+      otherUpdates: [{ _: 'updateChannelReadMessagesContents', channelId, messages: [44] }],
+    })
+    expect(() => roundTrip(sent[0].update)).not.toThrow()
+  })
+
   it('emits one update per mixed-media projection without an invalid Telegram album', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'channel', kind: 'channel', title: 'Channel' }

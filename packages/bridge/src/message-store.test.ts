@@ -66,7 +66,8 @@ describe('MessageStore', () => {
       { source: { id: second.id }, parts: [{ tlMessageId: secondId, ordinal: 0 }] },
       { source: { id: first.id }, parts: [{ tlMessageId: firstId, ordinal: 0 }] },
     ])
-    await expect(store.markMentionsRead(session.platformSessionId, conversation.id)).resolves.toBe(2)
+    await expect(store.markMentionsRead(session.platformSessionId, conversation.id))
+      .resolves.toEqual([firstId, secondId].sort((left, right) => left - right))
     await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(0)
 
     await store.setMessageMentioned(session.platformSessionId, conversation.id, secondId, true, true)

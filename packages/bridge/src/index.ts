@@ -724,8 +724,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getUnreadMentions(
       req as tl.messages.RawGetUnreadMentionsRequest,
     ))
-  rpc.register('messages.readMentions', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.readMentions(req as tl.messages.RawReadMentionsRequest))
+  rpc.register('messages.readMentions', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return state.dialogs.readMentions(
+      req as tl.messages.RawReadMentionsRequest,
+      rpc.connection,
+      (session, conversation, tlMessageIds, topMsgId, excludeConnection) => updates.publishMentionRead(
+        session, conversation, tlMessageIds, topMsgId, excludeConnection,
+      ),
+    )
+  })
   rpc.register('messages.readHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.readHistory(
       req as tl.messages.RawReadHistoryRequest, rpc.connection,
@@ -893,10 +901,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.readChannelHistory(
       req as tl.channels.RawReadHistoryRequest, rpc.connection,
     ))
-  rpc.register('channels.readMessageContents', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.readChannelMessageContents(
+  rpc.register('channels.readMessageContents', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return state.dialogs.readChannelMessageContents(
       req as tl.channels.RawReadMessageContentsRequest,
-    ))
+      rpc.connection,
+      (session, conversation, tlMessageIds, topMsgId, excludeConnection) => updates.publishMentionRead(
+        session, conversation, tlMessageIds, topMsgId, excludeConnection,
+      ),
+    )
+  })
   rpc.register('channels.getParticipant', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipant(req as tl.channels.RawGetParticipantRequest))
   rpc.register('channels.getParticipants', async (rpc, req) =>
