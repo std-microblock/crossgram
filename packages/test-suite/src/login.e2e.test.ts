@@ -3124,7 +3124,7 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
-  it('uses native merged-forward previews without expanding virtual history', async () => {
+  it('uses native merged-forward previews with virtual history deep-link targets', async () => {
     const parent: bridge.IMConversation = {
       id: 'parent-room', kind: 'group', title: 'Parent room',
     }
@@ -3258,11 +3258,11 @@ describe('bridge login e2e', () => {
           webpage: {
             _: 'webPage', type: 'telegram_message', title: virtual.title,
             description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-            url: `https://t.me/bridgechat_${virtualChat.id}`,
+            url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualChat.id}/[1-9][0-9]*$`)),
           },
         },
       })
-      expect(historyCalls).toEqual([parent.id])
+      expect(historyCalls).toEqual([virtual.id, parent.id])
 
       expect(handler).toBeTypeOf('function')
       const liveMerged: bridge.IMMessage = {
@@ -3278,12 +3278,12 @@ describe('bridge login e2e', () => {
             _: 'message', message: '查看聊天记录',
             entities: [{
               _: 'messageEntityTextUrl',
-              url: `https://t.me/bridgechat_${virtualChat.id}`,
+              url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualChat.id}/[1-9][0-9]*$`)),
             }],
             media: { webpage: {
               _: 'webPage', title: virtual.title,
               description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-              url: `https://t.me/bridgechat_${virtualChat.id}`,
+              url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualChat.id}/[1-9][0-9]*$`)),
             } },
           },
         }],
@@ -3315,10 +3315,10 @@ describe('bridge login e2e', () => {
         media: { webpage: {
           _: 'webPage', title: innerVirtual.title,
           description: 'Carol: inner first message',
-          url: `https://t.me/bridgechat_${innerChat.id}`,
+          url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${innerChat.id}/[1-9][0-9]*$`)),
         } },
       })
-      expect(historyCalls).toEqual([parent.id, parent.id, virtual.id])
+      expect(historyCalls).toEqual([virtual.id, parent.id, virtual.id, parent.id, innerVirtual.id])
       await expect(callRpc(fresh, key, freshSid, {
         _: 'messages.readHistory', peer, maxId: outerHistory.messages[0].id,
       }, 12)).resolves.toMatchObject({ _: 'messages.affectedMessages' })
@@ -3334,7 +3334,7 @@ describe('bridge login e2e', () => {
       }, 15)).toMatchObject({
         messages: [{ _: 'message', message: 'inner last message' }, { _: 'message', message: 'inner first message' }],
       })
-      expect(historyCalls).toEqual([parent.id, parent.id, virtual.id, parent.id, innerVirtual.id])
+      expect(historyCalls).toEqual([virtual.id, parent.id, virtual.id, parent.id, innerVirtual.id, innerVirtual.id])
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getFullChat', chatId: virtualChat.id,
       }, 17)).toMatchObject({
