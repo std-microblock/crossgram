@@ -11,6 +11,26 @@ import { ServerAuthKey } from './server-auth-key.js'
 import { ServerSession } from './server-session.js'
 import { getServerReaderMap } from '../rpc/server-reader-map.js'
 
+describe('ServerAuthKey ID normalization', () => {
+  it('copies the final eight bytes from a Buffer view into a standalone Uint8Array', () => {
+    const digest = Buffer.from([0xa0, 0xa1, 0xa2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xb0])
+    const view = digest.subarray(3, 12)
+    const key = new ServerAuthKey(
+      { sha1: vi.fn(() => view) } as any,
+      { verbose: vi.fn() } as any,
+      getServerReaderMap(),
+    )
+
+    key.setup(new Uint8Array(128))
+
+    expect(key.id).toBeInstanceOf(Uint8Array)
+    expect(Buffer.isBuffer(key.id)).toBe(false)
+    expect([...key.id]).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    view[8] = 0xff
+    expect([...key.id]).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+  })
+})
+
 describe('ServerSession RPC error logging', () => {
   it('logs implemented RPC failures at error level with method and wire error details', () => {
     const { session, logger } = createSession()

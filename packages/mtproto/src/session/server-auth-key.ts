@@ -48,7 +48,7 @@ export class ServerAuthKey {
     this.key = authKey
     this.clientSalt = authKey.subarray(88, 120)
     this.serverSalt = authKey.subarray(96, 128)
-    this.id = this._crypto.sha1(authKey).subarray(-8)
+    this.id = new Uint8Array(this._crypto.sha1(authKey).subarray(-8))
     this._log.verbose('server auth key set up, id = %h', this.id)
   }
 
