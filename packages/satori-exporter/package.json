@@ -35,7 +35,7 @@
     "ws": "^8.21.3"
   },
   "scripts": {
-    "test": "vitest run",
-    "test:e2e": "vitest run src/lifecycle.integration.test.ts"
+    "test": "vitest run --config ../../vitest.config.mts packages/satori-exporter",
+    "test:e2e": "vitest run --config ../../vitest.config.mts packages/satori-exporter/src/lifecycle.integration.test.ts"
   }
 }

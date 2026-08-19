@@ -23,7 +23,7 @@
   },
   "scripts": {
     "generate:proto": "protoc --proto_path=proto --es_out=src/generated --es_opt=target=ts proto/qqnt/highway.proto",
-    "test": "vitest run",
-    "test:e2e": "QQNT_BRIDGE_E2E=1 vitest run src/e2e.test.ts"
+    "test": "vitest run --config ../../vitest.config.mts packages/platform-crossgram",
+    "test:e2e": "QQNT_BRIDGE_E2E=1 vitest run --config ../../vitest.mtproto-e2e.config.mts packages/platform-crossgram/src/e2e.test.ts"
   }
 }

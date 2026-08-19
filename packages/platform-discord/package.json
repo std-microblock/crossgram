@@ -19,7 +19,7 @@
     "vitest": "^4.1.10"
   },
   "scripts": {
-    "test": "vitest run",
-    "test:e2e": "DISCORD_USERBOT_E2E=1 vitest run src/e2e.test.ts"
+    "test": "vitest run --config ../../vitest.config.mts packages/platform-discord",
+    "test:e2e": "DISCORD_USERBOT_E2E=1 vitest run --config ../../vitest.mtproto-e2e.config.mts packages/platform-discord/src/e2e.test.ts"
   }
 }

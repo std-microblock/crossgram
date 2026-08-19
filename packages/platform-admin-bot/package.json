@@ -23,6 +23,6 @@
     "vitest": "^4.1.10"
   },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run --config ../../vitest.config.mts packages/platform-admin-bot"
   }
 }
