@@ -146,7 +146,7 @@ export class QQNTClient {
     options: { name?: string, signal?: AbortSignal } = {},
   ): Promise<WireFlashTransferResult> {
     if (this.bridgeProtocol === undefined) await this.status()
-    if (this.bridgeProtocol! < 25) throw new Error('QQNT bridge protocol 25 is required for QQ Flash Transfer')
+    if (this.bridgeProtocol! < 26) throw new Error('QQNT bridge protocol 26 is required for QQ Flash Transfer')
     if (!media.length) throw new Error('QQ Flash Transfer requires at least one file')
     const manifest: WireFlashTransferManifest = {
       name: options.name,

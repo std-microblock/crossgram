@@ -82,7 +82,7 @@ describe('QQNTClient streaming transport', () => {
     server = createServer(async (request, response) => {
       response.setHeader('content-type', 'application/json')
       if (request.url === '/status') {
-        response.end(JSON.stringify({ protocolVersion: 25, ready: true }))
+        response.end(JSON.stringify({ protocolVersion: 26, ready: true }))
         return
       }
       const encoded = request.headers['x-qqnt-flash-manifest']

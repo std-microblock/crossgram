@@ -8,7 +8,7 @@
 3. **本地 Unix socket PCM 媒体通道** —— 语音通话的 48 kHz s16le 音频帧传输。
 
 协议版本由 `qqnt-bridge` 在 `/v1/status` 中返回，当前服务端版本为
-`25`。`platform-crossgram` 适配器当前支持的版本范围为 `19` 到 `25`；
+`26`。`platform-crossgram` 适配器当前支持的版本范围为 `19` 到 `26`；
 高于或低于该范围的版本会被适配器拒绝。两个仓库的协议类型定义分别在
 `packages/platform-crossgram/src/protocol.ts`（适配器侧，`Wire*` 类型）
 与 `qqnt-bridge/src/protocol.ts`（服务端侧，`QQ*` 类型）中。
