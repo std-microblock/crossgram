@@ -805,7 +805,7 @@ describe('PlatformDataService', () => {
     expect(readHistory).toHaveBeenCalledOnce()
   })
 
-  it('revalidates every concurrent and sequential history sync', async () => {
+  it('coalesces concurrent history syncs but revalidates the next sequential read', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
@@ -821,11 +821,48 @@ describe('PlatformDataService', () => {
       data.syncHistory(conversation.id, { limit: 50 }),
       data.syncHistory(conversation.id, { limit: 50 }),
     ])
-    expect(getHistory).toHaveBeenCalledTimes(3)
+    expect(getHistory).toHaveBeenCalledOnce()
     expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
 
     await data.syncHistory(conversation.id, { limit: 50 })
-    expect(getHistory).toHaveBeenCalledTimes(4)
+    expect(getHistory).toHaveBeenCalledTimes(2)
+  })
+
+  it('checks an upstream history page for recovery candidates in one bulk lookup', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'bulk-history-room', kind: 'group', title: 'Bulk history' }
+    const stored = Array.from({ length: 40 }, (_, index) => ({
+      ...incoming(String(index + 1), conversation.id),
+      sourceIds: [`alias-${index + 1}`],
+    }))
+    const store = new MessageStore(database)
+    await store.ingestMany(session, conversation, stored, { allocation: 'history' })
+    const latest = {
+      ...incoming('41', conversation.id),
+      sourceIds: ['alias-41'],
+    }
+    platform.getHistory = vi.fn(async () => ({ messages: [latest, ...stored.slice().reverse()] }))
+    const readExisting = vi.spyOn(store, 'readExistingPlatformMessageIds')
+    const findProjected = vi.spyOn(store, 'findProjectedByPlatformId')
+    const recovered: string[] = []
+    const data = new PlatformDataService(
+      platform, session, store, undefined, undefined,
+      async (event) => {
+        recovered.push(event.message.id)
+        await store.ingest(session, event.conversation, event.message)
+      },
+    )
+
+    await data.syncHistory(conversation.id, { limit: 50 })
+
+    expect(readExisting).toHaveBeenCalledOnce()
+    expect(readExisting.mock.calls[0]?.[2]).toHaveLength(82)
+    expect(findProjected).not.toHaveBeenCalled()
+    expect(recovered).toEqual(['41'])
+    await expect(store.readHistory(session.platformSessionId, conversation.id, { limit: 50 }))
+      .resolves.toHaveLength(41)
   })
 
   it('revalidates every exact and anchored history window', async () => {

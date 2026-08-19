@@ -588,6 +588,7 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
   private readonly _dialogPageLoads = new Map<string, Promise<IMDialogPage>>()
+  private readonly _historyLoads = new Map<string, Promise<IMMessage[]>>()
   private readonly _dialogReconciliationRevisions = new Map<string, string>()
   private readonly _dialogReconciliationJobs = new Map<string, Promise<void>>()
   private _dialogReconciliationTail: Promise<void> = Promise.resolve()
@@ -792,12 +793,27 @@ export class PlatformDataService {
   }
 
   async getHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<IMHistoryPage> {
-    return { messages: await this._loadHistory(conversationId, query, true) }
+    return { messages: await this._coalescedHistoryLoad(conversationId, query, true) }
   }
 
   /** Fetch and persist one upstream page before every read; HTTP ETag handles unchanged QQNT responses. */
   async syncHistory(conversationId: string, query: IMHistoryQuery = { limit: 100 }): Promise<void> {
-    await this._loadHistory(conversationId, query, false)
+    await this._coalescedHistoryLoad(conversationId, query, false)
+  }
+
+  private _coalescedHistoryLoad(
+    conversationId: string,
+    query: IMHistoryQuery,
+    readStored: boolean,
+  ): Promise<IMMessage[]> {
+    const key = historyLoadKey(conversationId, query, readStored)
+    const active = this._historyLoads.get(key)
+    if (active) return active
+    const pending = this._loadHistory(conversationId, query, readStored).finally(() => {
+      if (this._historyLoads.get(key) === pending) this._historyLoads.delete(key)
+    })
+    this._historyLoads.set(key, pending)
+    return pending
   }
 
   private async _loadHistory(
@@ -809,13 +825,19 @@ export class PlatformDataService {
     this._onTrace?.(
       'history data profile stage=start conversation=%s limit=%d', conversationId, query.limit ?? 100,
     )
-    let conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
+    let [conversation, storedDialogs] = await Promise.all([
+      this._store.getConversation(this._session.platformSessionId, conversationId),
+      this._store.readDialogs(this._session.platformSessionId, [conversationId]),
+    ])
     if (!conversation) {
       await this.getDialogs()
-      conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
+      ;[conversation, storedDialogs] = await Promise.all([
+        this._store.getConversation(this._session.platformSessionId, conversationId),
+        this._store.readDialogs(this._session.platformSessionId, [conversationId]),
+      ])
     }
     conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
-    const [storedDialog] = await this._store.readDialogs(this._session.platformSessionId, [conversationId])
+    const [storedDialog] = storedDialogs
     const conversationMs = performance.now() - startedAt
 
     let upstreamMs = 0
@@ -835,11 +857,17 @@ export class PlatformDataService {
         this._publishRecovered && baseline && !query.cursor && !query.before && !query.after
         && !this._dialogReconciliationJobs.has(conversationId),
       )
+      const existingIds = canPublish
+        ? new Set(await this._store.readExistingPlatformMessageIds(
+            this._session.platformSessionId,
+            conversationId,
+            page.messages.flatMap((message) => [message.id, ...(message.sourceIds ?? [])]),
+          ))
+        : new Set<string>()
       for (const message of page.messages.slice().sort((left, right) =>
         left.timestamp - right.timestamp || left.id.localeCompare(right.id))) {
-        const existing = await this._store.findProjectedByPlatformId(
-          this._session.platformSessionId, conversationId, message.id,
-        )
+        const existing = [message.id, ...(message.sourceIds ?? [])]
+          .some((platformMessageId) => existingIds.has(platformMessageId))
         const isNewer = baseline && (
           message.timestamp > baseline.timestamp
           || (message.timestamp === baseline.timestamp && message.id.localeCompare(baseline.id) > 0)
@@ -947,6 +975,24 @@ function dialogRevision(dialog: IMDialog): string {
     dialog.lastMessage?.senderId ?? null,
     dialog.lastMessage?.content ?? null,
     dialog.lastMessage?.metadata ?? null,
+  ])
+}
+
+function historyLoadKey(
+  conversationId: string,
+  query: IMHistoryQuery,
+  readStored: boolean,
+): string {
+  return JSON.stringify([
+    conversationId,
+    readStored,
+    query.cursor ?? null,
+    query.limit ?? null,
+    query.afterId ?? null,
+    query.before?.id ?? null,
+    query.before?.timestamp ?? null,
+    query.after?.id ?? null,
+    query.after?.timestamp ?? null,
   ])
 }
 

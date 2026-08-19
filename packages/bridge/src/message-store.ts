@@ -865,6 +865,33 @@ export class MessageStore {
     }))
   }
 
+  async readExistingPlatformMessageIds(
+    platformSessionId: string,
+    platformConversationId: string,
+    platformMessageIds: readonly string[],
+  ): Promise<string[]> {
+    const uniqueIds = [...new Set(platformMessageIds)]
+    if (!uniqueIds.length) return []
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return []
+    const aliases = await this._database.get('mtproto_im_message_alias', {
+      platformSessionId,
+      conversationId: conversation.id,
+      platformMessageId: { $in: uniqueIds },
+    })
+    if (!aliases.length) return []
+    const liveRows = await this._database.get('mtproto_im_message', {
+      id: { $in: [...new Set(aliases.map((alias) => alias.messageId))] },
+      deleted: false,
+    })
+    const liveMessageIds = new Set(liveRows.map((row) => row.id))
+    return aliases
+      .filter((alias) => liveMessageIds.has(alias.messageId))
+      .map((alias) => alias.platformMessageId)
+  }
+
   async findProjectedByTlId(
     platformSessionId: string,
     tlMessageId: number,

@@ -173,6 +173,33 @@ describe('MessageStore', () => {
     expect(projectionTables.filter((table) => table === 'mtproto_im_media')).toHaveLength(1)
   })
 
+  it('checks many platform message aliases without hydrating their projections', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'existing-aliases', kind: 'group' as const, title: 'Existing aliases' }
+    await store.ingestMany(session, conversation, Array.from({ length: 40 }, (_, index) => ({
+      id: `message-${index}`,
+      sourceIds: [`alias-${index}`],
+      conversationId: conversation.id,
+      senderId: `sender-${index % 4}`,
+      timestamp: index + 1,
+      content: { parts: [{ type: 'text' as const, text: `message ${index}` }] },
+    })), { allocation: 'history' })
+    const get = vi.spyOn(ctx.database, 'get')
+
+    const existing = await store.readExistingPlatformMessageIds(
+      session.platformSessionId,
+      conversation.id,
+      ['missing', ...Array.from({ length: 40 }, (_, index) => `alias-${index}`)],
+    )
+
+    expect(existing.sort()).toEqual(Array.from({ length: 40 }, (_, index) => `alias-${index}`).sort())
+    expect(get.mock.calls.map(([table]) => table)).toEqual([
+      'mtproto_im_conversation',
+      'mtproto_im_message_alias',
+      'mtproto_im_message',
+    ])
+  })
+
   it('persists only reaction definitions that are active on the message', async () => {
     const { ctx, store } = await createStore()
     const conversation = { id: 'reaction-write-amplification', kind: 'group' as const, title: 'Group' }
