@@ -213,6 +213,7 @@ export class Mtproto extends Service {
       await Promise.allSettled([...this._connectionFibers.values()].map((fiber) => fiber.dispose()))
       this._connectionFibers.clear()
       this._sockets.clear()
+      this._rpcDependencies.clear()
       await new Promise<void>((resolve) => {
         if (!server.listening) return resolve()
         server.close(() => resolve())

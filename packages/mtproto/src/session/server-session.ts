@@ -5,6 +5,7 @@ import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { typed, u8 } from '@fuman/utils'
 import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
 import { createAesIgeForMessageOld } from '@mtcute/core/utils.js'
+import { createHash } from 'node:crypto'
 import Long from 'long'
 import { ServerAuthKey } from './server-auth-key.js'
 import { unpackPackedData } from './packed-data.js'
@@ -29,6 +30,48 @@ const GZIP_PACKED_ID = 0x3072CFA1
 const VECTOR_ID = 0x1CB5C415
 const MAX_GZIP_NESTING = 4
 const MAX_SHARED_COMPLETED_MESSAGE_IDS = 16_384
+const MAX_RPC_REPLAY_ENTRIES = 4_096
+const MAX_RPC_REPLAY_BYTES = 32 * 1024 * 1024
+const RPC_REPLAY_TTL_MS = 2 * 60 * 1_000
+const MAX_SHARED_RPC_INFLIGHT = 512
+const MAX_SHARED_RPC_INFLIGHT_PER_AUTH_KEY = 64
+const MAX_ACTIVE_RPCS_PER_CONNECTION = 16
+const MAX_PENDING_RPCS_PER_CONNECTION = 64
+const RPC_READ_PAUSE_THRESHOLD = 32
+const RPC_READ_RESUME_THRESHOLD = 16
+const FRAME_READ_PAUSE_COUNT = 32
+const FRAME_READ_RESUME_COUNT = 16
+const FRAME_READ_PAUSE_BYTES = 4 * 1024 * 1024
+const FRAME_READ_RESUME_BYTES = 2 * 1024 * 1024
+const MAX_QUEUED_FRAMES = 128
+const MAX_QUEUED_FRAME_BYTES = 16 * 1024 * 1024
+
+interface RpcReply {
+  reqMsgId: Long
+  body: Uint8Array
+  method?: string
+  resultKind: string
+  errorCode?: number
+  errorMessage?: string
+}
+
+interface RpcReplayEntry {
+  promise: Promise<RpcReply>
+  completedAt: number | null
+  bytes: number
+}
+
+class RpcReplayLimitError extends Error {
+  constructor() {
+    super('shared RPC replay registry is at capacity')
+  }
+}
+
+class RpcConnectionClosedError extends Error {
+  constructor() {
+    super('MTProto connection closed while RPC was queued')
+  }
+}
 
 /**
  * Tracks invokeAfterMsg dependencies across TCP connections that share the
@@ -38,7 +81,12 @@ const MAX_SHARED_COMPLETED_MESSAGE_IDS = 16_384
 export class RpcDependencyRegistry {
   private readonly _processing = new Map<string, Promise<void>>()
   private readonly _completed = new Map<string, true>()
+  private readonly _replays = new Map<string, RpcReplayEntry>()
+  private readonly _inFlightByAuth = new Map<string, number>()
   private readonly _startedAtSeconds = Math.floor(Date.now() / 1000)
+  private _replayBytes = 0
+  private _inFlight = 0
+  private _generation = 0
 
   register(authKeyId: Uint8Array, msgId: Long, processing: Promise<void>): void {
     this._processing.set(this._key(authKeyId, msgId), processing)
@@ -69,10 +117,106 @@ export class RpcDependencyRegistry {
     return (msgId.high >>> 0) < this._startedAtSeconds
   }
 
-  private _key(authKeyId: Uint8Array, msgId: Long): string {
+  clear(): void {
+    this._generation += 1
+    this._processing.clear()
+    this._completed.clear()
+    this._replays.clear()
+    this._inFlightByAuth.clear()
+    this._replayBytes = 0
+    this._inFlight = 0
+  }
+
+  /**
+   * Coalesce the same RPC across reconnecting sockets and retain a bounded
+   * serialized reply so a later retransmission can be answered without
+   * executing the handler again.
+   */
+  execute(
+    authKeyId: Uint8Array,
+    msgId: Long,
+    requestFingerprint: string,
+    execute: () => Promise<RpcReply>,
+  ): Promise<RpcReply> {
+    const now = Date.now()
+    this._pruneReplays(now)
+    const key = `${this._key(authKeyId, msgId)}:${requestFingerprint}`
+    const existing = this._replays.get(key)
+    if (existing) {
+      if (existing.completedAt !== null) {
+        this._replays.delete(key)
+        this._replays.set(key, existing)
+      }
+      return existing.promise
+    }
+
+    const authScope = this._authScope(authKeyId)
+    if (
+      this._inFlight >= MAX_SHARED_RPC_INFLIGHT
+      || (this._inFlightByAuth.get(authScope) ?? 0) >= MAX_SHARED_RPC_INFLIGHT_PER_AUTH_KEY
+    ) {
+      throw new RpcReplayLimitError()
+    }
+
+    this._inFlight += 1
+    const generation = this._generation
+    this._inFlightByAuth.set(authScope, (this._inFlightByAuth.get(authScope) ?? 0) + 1)
+    const entry: RpcReplayEntry = {
+      completedAt: null,
+      bytes: 0,
+      promise: undefined as unknown as Promise<RpcReply>,
+    }
+    const promise = Promise.resolve().then(execute)
+    entry.promise = promise
+    this._replays.set(key, entry)
+
+    void promise.then((reply) => {
+      if (generation !== this._generation) return
+      entry.completedAt = Date.now()
+      entry.bytes = reply.body.byteLength
+      this._replayBytes += entry.bytes
+      this._replays.delete(key)
+      this._replays.set(key, entry)
+      this._pruneReplays(entry.completedAt)
+    }, () => {
+      if (generation !== this._generation) return
+      this._deleteReplay(key, entry)
+    }).finally(() => {
+      if (generation !== this._generation) return
+      this._inFlight -= 1
+      const remaining = (this._inFlightByAuth.get(authScope) ?? 1) - 1
+      if (remaining > 0) this._inFlightByAuth.set(authScope, remaining)
+      else this._inFlightByAuth.delete(authScope)
+    })
+    return promise
+  }
+
+  private _pruneReplays(now: number): void {
+    for (const [key, entry] of this._replays) {
+      if (entry.completedAt === null) continue
+      if (
+        now - entry.completedAt <= RPC_REPLAY_TTL_MS
+        && this._replays.size <= MAX_RPC_REPLAY_ENTRIES
+        && this._replayBytes <= MAX_RPC_REPLAY_BYTES
+      ) break
+      this._deleteReplay(key, entry)
+    }
+  }
+
+  private _deleteReplay(key: string, entry: RpcReplayEntry): void {
+    if (this._replays.get(key) !== entry) return
+    this._replays.delete(key)
+    if (entry.completedAt !== null) this._replayBytes -= entry.bytes
+  }
+
+  private _authScope(authKeyId: Uint8Array): string {
     let scope = ''
     for (const byte of authKeyId) scope += byte.toString(16).padStart(2, '0')
-    return `${scope}:${msgId.toString()}`
+    return scope
+  }
+
+  private _key(authKeyId: Uint8Array, msgId: Long): string {
+    return `${this._authScope(authKeyId)}:${msgId.toString()}`
   }
 }
 
@@ -159,12 +303,22 @@ export class ServerSession {
   private _acceptsUpdates = false
   /** Session that last established an updates stream on this connection. */
   private _updateSessionId: Long | null = null
-  private _queuedAcks = new Map<string, { sessionId: Long, msgIds: Long[] }>()
+  private _queuedAcks = new Map<string, { sessionId: Long, msgIds: Long[], ids: Set<string> }>()
+  private _scheduledAckFlushes = new Set<string>()
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
   private _packetSequence = 0
+  private _frameQueue: Uint8Array[] = []
+  private _queuedFrameBytes = 0
+  private _drainingFrames = false
+  private _frameReadPaused = false
+  private _authResume: { key: string, promise: Promise<boolean> } | null = null
   private _processingMessages = new Map<string, Promise<void>>()
   private _completedMessageIds = new Map<string, true>()
+  private _activeRpcCount = 0
+  private _rpcWaiters: Array<(release: (() => void) | null) => void> = []
+  private _rpcReadPaused = false
+  private _disposed = false
   // Only authorization transitions form a barrier. Serializing every API RPC
   // lets one slow history/download request stall all later calls while pings
   // still succeed, leaving Telegram with a deceptively half-alive connection.
@@ -205,14 +359,18 @@ export class ServerSession {
   start(): void {
     if (this._msgHandler) return
     const onMsg = (data: Uint8Array) => {
-      this._onRawData(data).catch((err) => {
-        this._log.error('unhandled error in message processing: %s', err)
-      })
+      this._enqueueRawFrame(data)
     }
     this._msgHandler = onMsg
     this._context.effect(() => {
       const dispose = this._connection.listen(onMsg)
       return () => {
+        this._disposed = true
+        this._frameQueue = []
+        this._queuedFrameBytes = 0
+        this._releasePendingRpcWaiters()
+        this._queuedAcks.clear()
+        this._scheduledAckFlushes.clear()
         dispose()
         if (this._msgHandler === onMsg) this._msgHandler = null
       }
@@ -272,6 +430,71 @@ export class ServerSession {
 
   // ── Internal: data handling ──
 
+  private _enqueueRawFrame(data: Uint8Array): void {
+    if (this._disposed || this._connection.closed) return
+    if (
+      this._frameQueue.length >= MAX_QUEUED_FRAMES
+      || this._queuedFrameBytes + data.byteLength > MAX_QUEUED_FRAME_BYTES
+    ) {
+      this._log.warn(
+        'incoming MTProto frame queue overflow (%d frames, %d bytes); closing connection',
+        this._frameQueue.length,
+        this._queuedFrameBytes,
+      )
+      this._connection.close()
+      return
+    }
+
+    this._frameQueue.push(data)
+    this._queuedFrameBytes += data.byteLength
+    this._updateFrameReadPressure()
+    if (!this._drainingFrames) void this._drainRawFrames()
+  }
+
+  private async _drainRawFrames(): Promise<void> {
+    if (this._drainingFrames) return
+    this._drainingFrames = true
+    try {
+      while (!this._disposed && !this._connection.closed) {
+        const data = this._frameQueue.shift()
+        if (!data) break
+        this._queuedFrameBytes -= data.byteLength
+        this._updateFrameReadPressure()
+        try {
+          await this._onRawData(data)
+        } catch (err) {
+          this._log.error('unhandled error in message processing: %s', err)
+        }
+      }
+    } finally {
+      this._drainingFrames = false
+      this._updateFrameReadPressure()
+      if (!this._disposed && !this._connection.closed && this._frameQueue.length) {
+        void this._drainRawFrames()
+      }
+    }
+  }
+
+  private _updateFrameReadPressure(): void {
+    if (
+      !this._frameReadPaused
+      && (
+        this._frameQueue.length >= FRAME_READ_PAUSE_COUNT
+        || this._queuedFrameBytes >= FRAME_READ_PAUSE_BYTES
+      )
+    ) {
+      this._frameReadPaused = true
+      this._connection.pauseReading()
+    } else if (
+      this._frameReadPaused
+      && this._frameQueue.length <= FRAME_READ_RESUME_COUNT
+      && this._queuedFrameBytes <= FRAME_READ_RESUME_BYTES
+    ) {
+      this._frameReadPaused = false
+      if (!this._rpcReadPaused) this._connection.resumeReading()
+    }
+  }
+
   private async _onRawData(data: Uint8Array): Promise<void> {
     const packet: MtprotoPacketScope = {
       connection: this._context.mtprotoConnection,
@@ -293,8 +516,7 @@ export class ServerSession {
       // or a temporary PFS key before any plaintext handshake.
       const firstKeyId = data.subarray(0, 8)
       if (!firstKeyId.every(b => b === 0)) {
-        const stored = await this._keyStore?.get(firstKeyId)
-        if (stored && await this._adoptStoredAuthKey(stored)) {
+        if (await this._resumeStoredAuthKey(firstKeyId)) {
           await this._processRawData(data, packetCtx) // re-process this frame, now authorized
           return
         }
@@ -346,6 +568,29 @@ export class ServerSession {
         this._log.error('error handling message %s: %s', msgId.toString(16), err)
       })
     })
+  }
+
+  private _resumeStoredAuthKey(keyId: Uint8Array): Promise<boolean> {
+    if (this._authorized) {
+      return Promise.resolve(this._permAuthKey.match(keyId) || Boolean(this._tempAuthKey?.match(keyId)))
+    }
+
+    const key = Buffer.from(keyId).toString('hex')
+    if (this._authResume) {
+      if (this._authResume.key === key) return this._authResume.promise
+      return this._authResume.promise.then(() => (
+        this._permAuthKey.match(keyId) || Boolean(this._tempAuthKey?.match(keyId))
+      ))
+    }
+
+    const promise = Promise.resolve().then(async () => {
+      const stored = await this._keyStore?.get(keyId)
+      return Boolean(stored && await this._adoptStoredAuthKey(stored))
+    }).finally(() => {
+      if (this._authResume?.promise === promise) this._authResume = null
+    })
+    this._authResume = { key, promise }
+    return promise
   }
 
   /**
@@ -939,11 +1184,11 @@ export class ServerSession {
    * it this session's identity or persisting the temporary-key association.
    */
   private async _handleBindTempAuthKey(
-    msgId: Long,
+    _msgId: Long,
     req: tl.auth.RawBindTempAuthKeyRequest,
-    clientSessionId: Long,
+    _clientSessionId: Long,
     apiLayer: number | null = null,
-  ): Promise<void> {
+  ): Promise<RpcResult> {
     const permanentId = longToBytesLE(req.permAuthKeyId)
     let candidate: ServerAuthKey | null = this._permAuthKey.match(permanentId)
       ? this._permAuthKey
@@ -955,12 +1200,11 @@ export class ServerSession {
         storedPermanent = await this._keyStore?.get(permanentId)
       } catch (err) {
         this._log.warn('failed to load permanent auth key for temp-key binding: %s', err instanceof Error ? err.message : err)
-        this._sendRpcResult(msgId, {
+        return {
           _: 'mt_rpc_error',
           errorCode: 500,
           errorMessage: 'INTERNAL',
-        } as mtp.RawMt_rpc_error, 'auth.bindTempAuthKey', clientSessionId)
-        return
+        } as mtp.RawMt_rpc_error
       }
       if (storedPermanent && !storedPermanent.permanentKeyId) {
         const storedCandidate = new ServerAuthKey(this._crypto, this._log, this._readerMap)
@@ -971,12 +1215,11 @@ export class ServerSession {
 
     if (!candidate || !this._verifyBindInner(req, candidate)) {
       this._log.warn('bindTempAuthKey verification failed')
-      this._sendRpcResult(msgId, {
+      return {
         _: 'mt_rpc_error',
         errorCode: 400,
         errorMessage: 'ENCRYPTED_MESSAGE_INVALID',
-      } as mtp.RawMt_rpc_error, 'auth.bindTempAuthKey', clientSessionId)
-      return
+      } as mtp.RawMt_rpc_error
     }
 
     try {
@@ -987,12 +1230,11 @@ export class ServerSession {
       })
     } catch (err) {
       this._log.warn('failed to persist bound temp auth key: %s', err instanceof Error ? err.message : err)
-      this._sendRpcResult(msgId, {
+      return {
         _: 'mt_rpc_error',
         errorCode: 500,
         errorMessage: 'INTERNAL',
-      } as mtp.RawMt_rpc_error, 'auth.bindTempAuthKey', clientSessionId)
-      return
+      } as mtp.RawMt_rpc_error
     }
 
     if (candidate !== this._permAuthKey) {
@@ -1002,16 +1244,7 @@ export class ServerSession {
     }
     if (apiLayer !== null) this._setApiLayer(apiLayer)
     this._log.info('temp key bound to perm key (temp id = %h)', this._tempAuthKey?.id)
-    // `boolTrue` is a bare Bool that mtcute's writer map can't serialize as an
-    // object, so build the rpc_result manually: id(4) + req_msg_id(8) + boolTrue(4).
-    const writer = TlBinaryWriter.manual(4 + 8 + 4)
-    writer.uint(RPC_RESULT_ID)
-    writer.long(msgId)
-    writer.uint(BOOL_TRUE_ID)
-    this._sendEncryptedMessage(
-      writer.result(), true, { _: 'rpc_result', reqMsgId: msgId, result: { _: 'boolTrue' } }, clientSessionId,
-    )
-    this._log.verbose('>>> rpc_result boolTrue for bindTempAuthKey %s', msgId.toString(16))
+    return { _: 'boolTrue' }
   }
 
   /** Decrypt and verify the `encrypted_message` from auth.bindTempAuthKey. */
@@ -1115,68 +1348,120 @@ export class ServerSession {
   ): Promise<void> {
     if (this._connection.closed) return
     const unwrapped = unwrapRpcRequest(request)
+    const method = unwrapped.request._
     const now = Date.now()
     if (unwrapped.clientInfo) {
       this._clientInfo = unwrapped.clientInfo
       this._context.mtprotoConnection.clientInfo = unwrapped.clientInfo
     }
     this._context.mtprotoConnection.lastActiveAt = now
+    if (method !== 'auth.bindTempAuthKey') {
+      if (
+        method === 'updates.getState'
+        || method === 'updates.getDifference'
+        || method === 'updates.getChannelDifference'
+      ) {
+        this._acceptsUpdates = true
+        this._updateSessionId = clientSessionId
+      }
+      if (unwrapped.apiLayer !== null) {
+        this._setApiLayer(unwrapped.apiLayer)
+      } else if (this._apiLayer === null && this._permAuthKey.ready) {
+        const inherited = this._getApiLayer?.(this._permAuthKey.id)
+        if (inherited !== undefined) this._setApiLayer(inherited, false)
+      }
+    }
+
+    let debugResult: RpcResult | undefined
+    const execute = async (): Promise<RpcReply> => {
+      const release = await this._acquireRpcSlot()
+      if (!release) {
+        if (this._disposed || this._connection.closed) throw new RpcConnectionClosedError()
+        debugResult = {
+          _: 'mt_rpc_error', errorCode: 500, errorMessage: 'SERVER_BUSY',
+        } as mtp.RawMt_rpc_error
+        return this._buildRpcReply(msgId, debugResult, method)
+      }
+      try {
+        const result = await this._executeRpcCall(
+          msgId, unwrapped, clientSessionId, packetCtx, now,
+        )
+        debugResult = result
+        return this._buildRpcReply(msgId, result, method)
+      } finally {
+        release()
+      }
+    }
+
+    let reply: RpcReply
+    try {
+      const authKeyId = this._permAuthKey.ready ? this._permAuthKey.id : null
+      // Binding a fresh temporary key mutates this connection's crypto state and
+      // therefore cannot be replayed from another socket's execution.
+      reply = authKeyId && method !== 'auth.bindTempAuthKey' && this._dependencyRegistry
+        ? await this._dependencyRegistry.execute(authKeyId, msgId, this._rpcFingerprint(request), execute)
+        : await execute()
+    } catch (error) {
+      if (error instanceof RpcConnectionClosedError) return
+      if (!(error instanceof RpcReplayLimitError)) throw error
+      this._log.warn('shared RPC replay registry is full; rejecting %s', method)
+      debugResult = {
+        _: 'mt_rpc_error', errorCode: 500, errorMessage: 'SERVER_BUSY',
+      } as mtp.RawMt_rpc_error
+      reply = this._buildRpcReply(msgId, debugResult, method)
+    }
+
+    if (!this._connection.closed) this._sendRpcReply(reply, clientSessionId, debugResult)
+  }
+
+  private async _executeRpcCall(
+    msgId: Long,
+    unwrapped: ReturnType<typeof unwrapRpcRequest>,
+    clientSessionId: Long,
+    packetCtx: Context,
+    now: number,
+  ): Promise<RpcResult> {
 
     // A wrapped bind must prove the requested permanent identity before its
     // invokeWithLayer value can affect this session. The bare form is handled
     // in _processDecryptedMessage; wrapped binds arrive here after unwrapping.
     if (unwrapped.request._ === 'auth.bindTempAuthKey') {
-      await this._handleBindTempAuthKey(
+      return this._handleBindTempAuthKey(
         msgId,
         unwrapped.request as tl.auth.RawBindTempAuthKeyRequest,
         clientSessionId,
         unwrapped.apiLayer,
       )
-      return
     }
 
     // invokeWithLayer is the one authoritative source of the client's API layer.
     // Capture it on the MTProto session before constructing the handler context
     // or serializing this request's response. Later unwrapped requests reuse it.
-    if (
-      unwrapped.request._ === 'updates.getState'
-      || unwrapped.request._ === 'updates.getDifference'
-      || unwrapped.request._ === 'updates.getChannelDifference'
-    ) {
-      this._acceptsUpdates = true
-      this._updateSessionId = clientSessionId
-    }
-    if (unwrapped.apiLayer !== null) {
-      this._setApiLayer(unwrapped.apiLayer)
-    } else if (this._apiLayer === null && this._permAuthKey.ready) {
-      const inherited = this._getApiLayer?.(this._permAuthKey.id)
-      if (inherited !== undefined) this._setApiLayer(inherited, false)
-    }
     if (this._apiLayer === null) {
       // The API layer is not part of the DH handshake and cannot be inferred
       // from a bare RPC. Telegram clients retry this request after receiving
       // CONNECTION_NOT_INITED with invokeWithLayer(initConnection(...)).
-      this._sendRpcResult(msgId, {
+      return {
         _: 'mt_rpc_error',
         errorCode: 400,
         errorMessage: 'CONNECTION_NOT_INITED',
-      } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
-      return
+      } as mtp.RawMt_rpc_error
     }
 
     if (!await this._waitForRpcDependencies(msgId, unwrapped.afterMessageIds)) {
-      this._sendRpcResult(msgId, {
+      return {
         _: 'mt_rpc_error',
         errorCode: 500,
         errorMessage: 'MSG_WAIT_FAILED',
-      } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
-      return
+      } as mtp.RawMt_rpc_error
     }
     // The connection fiber is disposed as soon as its socket closes. Requests
     // released from an authorization/dependency queue after that point cannot
     // deliver a result and must not try to create an RPC child fiber from the
     // now-inactive packet context.
-    if (this._connection.closed) return
+    if (this._connection.closed) {
+      throw new RpcConnectionClosedError()
+    }
 
     const ctx = packetCtx.extend({
       mtprotoRpc: {
@@ -1199,16 +1484,96 @@ export class ServerSession {
     }) as unknown as ServerRpcContext
 
     try {
-      const result = await this._dispatchRpc(ctx, unwrapped.request)
-      this._sendRpcResult(msgId, result, unwrapped.request._, clientSessionId)
+      return await this._dispatchRpc(ctx, unwrapped.request)
     } catch (err) {
       this._log.error('RPC dispatch error for %s: %s', unwrapped.request._, err instanceof Error ? err.stack : err)
-      this._sendRpcResult(msgId, {
+      return {
         _: 'mt_rpc_error',
         errorCode: 500,
         errorMessage: 'INTERNAL',
-      } as mtp.RawMt_rpc_error, unwrapped.request._, clientSessionId)
+      } as mtp.RawMt_rpc_error
     }
+  }
+
+  private _acquireRpcSlot(): Promise<(() => void) | null> {
+    if (this._disposed || this._connection.closed) return Promise.resolve(null)
+    if (this._activeRpcCount < MAX_ACTIVE_RPCS_PER_CONNECTION) {
+      this._activeRpcCount += 1
+      return Promise.resolve(this._rpcSlotRelease())
+    }
+    if (this._rpcWaiters.length >= MAX_PENDING_RPCS_PER_CONNECTION) {
+      this._log.warn(
+        'per-connection RPC queue overflow (%d active, %d pending)',
+        this._activeRpcCount,
+        this._rpcWaiters.length,
+      )
+      return Promise.resolve(null)
+    }
+    if (!this._rpcReadPaused && this._rpcWaiters.length >= RPC_READ_PAUSE_THRESHOLD) {
+      this._rpcReadPaused = true
+      this._connection.pauseReading()
+    }
+    return new Promise(resolve => this._rpcWaiters.push(resolve))
+  }
+
+  private _rpcSlotRelease(): () => void {
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const next = this._rpcWaiters.shift()
+      if (next && !this._disposed && !this._connection.closed) {
+        next(this._rpcSlotRelease())
+      } else {
+        this._activeRpcCount = Math.max(0, this._activeRpcCount - 1)
+        next?.(null)
+      }
+      if (this._rpcReadPaused && this._rpcWaiters.length <= RPC_READ_RESUME_THRESHOLD) {
+        this._rpcReadPaused = false
+        if (!this._frameReadPaused) this._connection.resumeReading()
+      }
+    }
+  }
+
+  private _releasePendingRpcWaiters(): void {
+    for (const resolve of this._rpcWaiters.splice(0)) resolve(null)
+    this._activeRpcCount = 0
+    this._rpcReadPaused = false
+  }
+
+  private _rpcFingerprint(request: tl.RpcMethod): string {
+    const hash = createHash('sha256')
+    const visit = (value: unknown): void => {
+      if (value === null) return void hash.update('null;')
+      if (value === undefined) return void hash.update('undefined;')
+      if (Long.isLong(value)) return void hash.update(`long:${value.low}:${value.high}:${value.unsigned};`)
+      if (value instanceof Uint8Array) {
+        hash.update(`bytes:${value.byteLength}:`)
+        hash.update(Buffer.from(value.buffer, value.byteOffset, value.byteLength))
+        hash.update(';')
+        return
+      }
+      if (Array.isArray(value)) {
+        hash.update(`array:${value.length}:[`)
+        for (const item of value) visit(item)
+        hash.update('];')
+        return
+      }
+      if (typeof value === 'object') {
+        const record = value as Record<string, unknown>
+        const keys = Object.keys(record).sort()
+        hash.update(`object:${keys.length}:{`)
+        for (const key of keys) {
+          hash.update(`${key.length}:${key}=`)
+          visit(record[key])
+        }
+        hash.update('};')
+        return
+      }
+      hash.update(`${typeof value}:${String(value)};`)
+    }
+    visit(request)
+    return hash.digest('hex').slice(0, 32)
   }
 
   private async _waitForRpcDependencies(msgId: Long, dependencies: readonly Long[]): Promise<boolean> {
@@ -1311,6 +1676,10 @@ export class ServerSession {
     method?: string,
     clientSessionId: Long = this._sessionId,
   ): void {
+    this._sendRpcReply(this._buildRpcReply(reqMsgId, result, method), clientSessionId, result)
+  }
+
+  private _buildRpcReply(reqMsgId: Long, result: RpcResult, method?: string): RpcReply {
     const kind = (result as { _: string })._
 
     let resultBytes: Uint8Array
@@ -1331,21 +1700,37 @@ export class ServerSession {
     writer.long(reqMsgId)
     writer.raw(resultBytes)
 
+    const error = kind === 'mt_rpc_error' ? result as mtp.RawMt_rpc_error : undefined
+    return {
+      reqMsgId,
+      body: writer.result(),
+      method,
+      resultKind: kind,
+      errorCode: error?.errorCode,
+      errorMessage: error?.errorMessage,
+    }
+  }
+
+  private _sendRpcReply(reply: RpcReply, clientSessionId: Long, debugResult?: RpcResult): void {
     this._sendEncryptedMessage(
-      writer.result(), true, { _: 'rpc_result', reqMsgId: reqMsgId, result }, clientSessionId,
+      reply.body,
+      true,
+      debugResult === undefined
+        ? undefined
+        : { _: 'rpc_result', reqMsgId: reply.reqMsgId, result: debugResult },
+      clientSessionId,
     )
-    if (kind === 'mt_rpc_error') {
-      const error = result as mtp.RawMt_rpc_error
+    if (reply.resultKind === 'mt_rpc_error') {
       const args = [
-        reqMsgId.toString(16), method ?? 'unknown', error.errorCode, error.errorMessage,
+        reply.reqMsgId.toString(16), reply.method ?? 'unknown', reply.errorCode ?? 500, reply.errorMessage ?? 'INTERNAL',
       ] as const
-      if (error.errorMessage.startsWith('METHOD_NOT_IMPLEMENTED:')) {
+      if ((reply.errorMessage ?? '').startsWith('METHOD_NOT_IMPLEMENTED:')) {
         this._log.warn('>>> rpc_error for %s (%s): %d %s', ...args)
       } else {
         this._log.error('>>> rpc_error for %s (%s): %d %s', ...args)
       }
     } else {
-      this._log.verbose('>>> rpc_result for %s: %s', reqMsgId.toString(16), kind)
+      this._log.verbose('>>> rpc_result for %s: %s', reply.reqMsgId.toString(16), reply.resultKind)
     }
   }
 
@@ -1386,10 +1771,12 @@ export class ServerSession {
     writer.raw(body)
 
     const encrypted = this._sendKey.encryptMessage(writer.result(), this._serverSalt, clientSessionId)
-    this._capture('server->client', 'message', payload ?? this._decodeDebugBody(body), {
-      messageId: msgId,
-      seqNo,
-    }, clientSessionId)
+    if (this._debug) {
+      this._capture('server->client', 'message', payload ?? this._decodeDebugBody(body), {
+        messageId: msgId,
+        seqNo,
+      }, clientSessionId)
+    }
     this._connection.send(encrypted)
   }
 
@@ -1448,11 +1835,23 @@ export class ServerSession {
     const key = clientSessionId.toString()
     let queued = this._queuedAcks.get(key)
     if (!queued) {
-      queued = { sessionId: clientSessionId, msgIds: [] }
+      queued = { sessionId: clientSessionId, msgIds: [], ids: new Set() }
       this._queuedAcks.set(key, queued)
     }
+    const messageKey = msgId.toString()
+    if (queued.ids.has(messageKey)) return
+    queued.ids.add(messageKey)
     queued.msgIds.push(msgId)
-    if (queued.msgIds.length >= 10) this._flushAcks(clientSessionId)
+    if (queued.msgIds.length >= 10) {
+      this._flushAcks(clientSessionId)
+      return
+    }
+    if (this._scheduledAckFlushes.has(key)) return
+    this._scheduledAckFlushes.add(key)
+    queueMicrotask(() => {
+      this._scheduledAckFlushes.delete(key)
+      if (!this._disposed && !this._connection.closed) this._flushAcks(clientSessionId)
+    })
   }
 
   private _flushAcks(clientSessionId: Long): void {
@@ -1460,6 +1859,7 @@ export class ServerSession {
     const queued = this._queuedAcks.get(key)
     if (!queued?.msgIds.length) return
     this._queuedAcks.delete(key)
+    this._scheduledAckFlushes.delete(key)
 
     const ack: mtp.RawMt_msgs_ack = {
       _: 'mt_msgs_ack',

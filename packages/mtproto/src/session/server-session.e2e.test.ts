@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes, write, type ISyncWritable } from '@fuman/io'
 import { connect, type Socket } from 'node:net'
@@ -947,6 +947,64 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('acks a slow RPC immediately and executes a retransmitted message id only once', async () => {
+    await crypto.initialize?.()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const { port, pubKey, register, stop } = await startServer(event => debugEvents.push(event))
+    let calls = 0
+    let releaseSlow!: () => void
+    const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+    let markSlowStarted!: () => void
+    const slowStarted = new Promise<void>(resolve => { markSlowStarted = resolve })
+    register('help.getAppConfig', async () => {
+      calls += 1
+      markSlowStarted()
+      await slowGate
+      return { _: 'help.appConfig', hash: calls, config: { _: 'jsonObject', value: [] } }
+    })
+
+    let client: TestClient | undefined
+    try {
+      client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x72727272, 0x72727272)
+      const messageId = makeMsgId(56)
+      const encrypted = clientEncryptWithMessageId(
+        perm,
+        serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }),
+        perm.salt,
+        sessionId,
+        messageId,
+      )
+
+      await client.send(encrypted)
+      await slowStarted
+      await vi.waitFor(() => expect(debugEvents.some((event) => {
+        if (event.direction !== 'server->client') return false
+        const payload = event.payload as { _?: string, msgIds?: Long[] }
+        return payload._ === 'mt_msgs_ack'
+          && Boolean(payload.msgIds?.some(id => id.toString() === messageId.toString()))
+      })).toBe(true))
+
+      await client.send(encrypted)
+      await new Promise<void>(resolve => setTimeout(resolve, 30))
+      expect(calls).toBe(1)
+
+      releaseSlow()
+      const first = await readRpcResultEnvelope(client, perm)
+      const second = await readRpcResultEnvelope(client, perm)
+      expect(first.requestMessageId.toString()).toBe(messageId.toString())
+      expect(second.requestMessageId.toString()).toBe(messageId.toString())
+      expect(first.result).toMatchObject({ _: 'help.appConfig', hash: 1 })
+      expect(second.result).toMatchObject({ _: 'help.appConfig', hash: 1 })
+      expect(calls).toBe(1)
+    } finally {
+      releaseSlow()
+      client?.close()
+      await stop()
+    }
+  })
+
   it('echoes every ping message id and keeps accepting RPCs on the same socket', async () => {
     await crypto.initialize?.()
     const { port, pubKey, register, stop } = await startServer()
@@ -1060,9 +1118,13 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         _: 'mt_ping', pingId: Long.fromInt(7),
       } as { _: string })
       await client.send(clientEncrypt(perm, ping, perm.salt, sessionB, 64))
-      const pongFrame = await client.read()
-      expect(serverSessionId(perm, pongFrame).toString()).toBe(sessionB.toString())
-      expect(clientDecrypt(perm, pongFrame).object()).toMatchObject({ _: 'mt_pong', pingId: Long.fromInt(7) })
+      const pong = await readServerObject(
+        client,
+        perm,
+        value => value._ === 'mt_pong',
+      )
+      expect(pong.sessionId.toString()).toBe(sessionB.toString())
+      expect(pong.value).toMatchObject({ _: 'mt_pong', pingId: Long.fromInt(7) })
 
       releaseRpc()
       const response = await readRpcResultEnvelope(client, perm)
@@ -1586,7 +1648,12 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         _: 'invokeWithLayer', layer: 224, query: getDialogs,
       } as { _: string })
       await client.send(clientEncrypt(perm, wrapped, perm.salt, sessionLong, 8))
-      const queued = clientDecrypt(perm, await client.read(), ayugramReaderMap!).object() as any
+      const queued = (await readServerObject(
+        client,
+        perm,
+        value => value._ === 'updates',
+        ayugramReaderMap!,
+      )).value as any
       expect(queued.updates).toMatchObject([{ message: { _: 'message', id: 99, message: 'queued before layer negotiation' } }])
       const first = await readRpcResult(client, perm, ayugramReaderMap!)
       expect(first.messages).toMatchObject([{ _: 'message', message: 'layer:224' }])
@@ -1923,17 +1990,39 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       await first.stop()
     }
 
+    const persisted = new FileAuthKeyStore(storePath)
+    let tempKeyLookups = 0
+    let releaseLookup!: () => void
+    const lookupGate = new Promise<void>(resolve => { releaseLookup = resolve })
+    const delayedStore: AuthKeyStore = {
+      get: async (id) => {
+        if (typed.equal(id, temp.authKeyId)) {
+          tempKeyLookups += 1
+          await lookupGate
+        }
+        return persisted.get(id)
+      },
+      save: (id, record) => persisted.save(id, record),
+      delete: id => persisted.delete(id),
+    }
     const second = await startServer(undefined, {
-      rsaKey, authKeyStore: new FileAuthKeyStore(storePath),
+      rsaKey, authKeyStore: delayedStore,
     })
     try {
       const client = await TestClient.connect(second.port)
       const sessionId = new Long(0x32323232, 0x32323232)
       const bareRequest = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' } as { _: string })
-      await client.send(clientEncrypt(temp, bareRequest, temp.salt, sessionId, 4))
+      const firstFrame = clientEncrypt(temp, bareRequest, temp.salt, sessionId, 4)
+      const secondFrame = clientEncrypt(temp, bareRequest, temp.salt, sessionId, 8)
+      await Promise.all([client.send(firstFrame), client.send(secondFrame)])
+      await vi.waitFor(() => expect(tempKeyLookups).toBe(1))
+      releaseLookup()
       expect(await readRpcResult(client, temp)).toMatchObject({ _: 'config', thisDc: 1 })
+      expect(await readRpcResult(client, temp)).toMatchObject({ _: 'config', thisDc: 1 })
+      expect(tempKeyLookups).toBe(1)
       client.close()
     } finally {
+      releaseLookup()
       await second.stop()
     }
   })
@@ -2126,6 +2215,28 @@ async function readEncryptedObject(client: TestClient, key: ClientKey, type: str
     } catch { /* Ignore service messages not represented by the test reader. */ }
   }
   throw new Error(`no ${type} received`)
+}
+
+async function readServerObject(
+  client: TestClient,
+  key: ClientKey,
+  predicate: (value: any) => boolean,
+  readerMap: TlReaderMap = __tlReaderMap,
+): Promise<{ value: any, sessionId: Long }> {
+  for (let index = 0; index < 10; index++) {
+    const frame = await client.read()
+    const sessionId = serverSessionId(key, frame)
+    let value: any
+    try {
+      value = clientDecrypt(key, frame, readerMap).object()
+    } catch {
+      // Layer-specific API readers do not include MTProto service objects such
+      // as msgs_ack. Decode those with the base transport map and keep scanning.
+      value = clientDecrypt(key, frame, __tlReaderMap).object()
+    }
+    if (predicate(value)) return { value, sessionId }
+  }
+  throw new Error('no matching MTProto server object received')
 }
 
 /** Read encrypted frames until an rpc_result is found; return the inner result object. */

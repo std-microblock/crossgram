@@ -17,11 +17,15 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function mockSocket(overrides: Partial<Record<'write' | 'end' | 'destroy' | 'writableLength' | 'remoteAddress' | 'remotePort', unknown>> = {}): Socket {
+function mockSocket(overrides: Partial<Record<
+  'write' | 'end' | 'destroy' | 'pause' | 'resume' | 'writableLength' | 'remoteAddress' | 'remotePort', unknown
+>> = {}): Socket {
   const socket = new EventEmitter() as unknown as Socket
   ;(socket as unknown as { write: unknown }).write = overrides.write ?? vi.fn(() => true)
   ;(socket as unknown as { end: unknown }).end = overrides.end ?? vi.fn()
   ;(socket as unknown as { destroy: unknown }).destroy = overrides.destroy ?? vi.fn()
+  ;(socket as unknown as { pause: unknown }).pause = overrides.pause ?? vi.fn(() => socket)
+  ;(socket as unknown as { resume: unknown }).resume = overrides.resume ?? vi.fn(() => socket)
   Object.defineProperty(socket, 'writableLength', {
     get: () => (overrides.writableLength as number) ?? 0,
   })
@@ -85,6 +89,20 @@ describe('ServerConnection stall tracking', () => {
     const connection = makeConnection(mockSocket({ writableLength: 4096 }))
     expect(connection.bufferedBytes).toBe(4096)
     expect(connection.label).toBe('127.0.0.1:12345')
+  })
+
+  it('pauses and resumes socket reads idempotently for bounded session queues', () => {
+    const pause = vi.fn()
+    const resume = vi.fn()
+    const connection = makeConnection(mockSocket({ pause, resume }))
+
+    connection.pauseReading()
+    connection.pauseReading()
+    expect(pause).toHaveBeenCalledOnce()
+
+    connection.resumeReading()
+    connection.resumeReading()
+    expect(resume).toHaveBeenCalledOnce()
   })
 
   it('stops counting after close and detaches the drain listener', () => {

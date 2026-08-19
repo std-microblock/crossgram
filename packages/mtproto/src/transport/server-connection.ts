@@ -31,6 +31,7 @@ export interface TransportTrafficSample {
  */
 export class ServerConnection {
   private _closed = false
+  private _readPaused = false
   private _recvBuffer = Bytes.alloc(65536)
   private _messageHandler: ((data: Uint8Array) => void) | null = null
   /** Codec is `null` until the transport is detected from the first bytes. */
@@ -52,6 +53,7 @@ export class ServerConnection {
   }
   private readonly _onClose = (): void => {
     this._closed = true
+    this._readPaused = false
     this._backpressuredSince = null
   }
 
@@ -143,6 +145,20 @@ export class ServerConnection {
     return this._closed
   }
 
+  /** Pause kernel-to-userland reads while the session drains bounded work. */
+  pauseReading(): void {
+    if (this._closed || this._readPaused) return
+    this._readPaused = true
+    this._socket.pause()
+  }
+
+  /** Resume reads after both frame and RPC queues fall below their low watermarks. */
+  resumeReading(): void {
+    if (this._closed || !this._readPaused) return
+    this._readPaused = false
+    this._socket.resume()
+  }
+
   /** Remote IP address for connection-level rate limits. */
   get remoteAddress(): string | undefined {
     return this._socket.remoteAddress
@@ -157,6 +173,7 @@ export class ServerConnection {
   close(): void {
     if (this._closed) return
     this._closed = true
+    this._readPaused = false
     this._backpressuredSince = null
     this._socket.off('drain', this._onDrain)
     this._socket.destroy()

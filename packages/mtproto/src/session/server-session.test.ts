@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import type { Logger } from '@mtcute/core/utils.js'
-import { __tlWriterMap } from '@mtcute/core/utils.js'
+import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { AuthKeyDataStore } from './auth-key-data-store.js'
 import type { AuthKeyStore } from './auth-key-store.js'
 import { ServerAuthKey } from './server-auth-key.js'
-import { ServerSession } from './server-session.js'
+import { RpcDependencyRegistry, ServerSession } from './server-session.js'
 import { getServerReaderMap } from '../rpc/server-reader-map.js'
 
 describe('ServerAuthKey ID normalization', () => {
@@ -81,6 +81,89 @@ describe('ServerSession Cordis packet pipeline', () => {
 
     expect(process).toHaveBeenCalledOnce()
     expect(order).toEqual(['middleware:before', 'processor', 'middleware:after'])
+  })
+
+  it('serializes queued frames and applies socket read backpressure at the high watermark', async () => {
+    const { session, connection } = createSession()
+    const internal = session as unknown as {
+      _enqueueRawFrame(data: Uint8Array): void
+      _onRawData: ReturnType<typeof vi.fn>
+    }
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+    let markFirstStarted!: () => void
+    const firstStarted = new Promise<void>(resolve => { markFirstStarted = resolve })
+    internal._onRawData = vi.fn(async (data: Uint8Array) => {
+      if (data[0] === 0) {
+        markFirstStarted()
+        await firstGate
+      }
+    })
+
+    internal._enqueueRawFrame(Uint8Array.of(0))
+    await firstStarted
+    for (let index = 1; index <= 40; index++) internal._enqueueRawFrame(Uint8Array.of(index))
+
+    expect(internal._onRawData).toHaveBeenCalledTimes(1)
+    expect(connection.pauseReading).toHaveBeenCalledOnce()
+    releaseFirst()
+    await vi.waitFor(() => expect(internal._onRawData).toHaveBeenCalledTimes(41))
+    expect(connection.resumeReading).toHaveBeenCalledOnce()
+  })
+
+  it('closes a connection whose decoded-frame backlog exceeds the hard cap', async () => {
+    const { session, connection } = createSession()
+    const internal = session as unknown as {
+      _enqueueRawFrame(data: Uint8Array): void
+      _onRawData: ReturnType<typeof vi.fn>
+    }
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+    let markFirstStarted!: () => void
+    const firstStarted = new Promise<void>(resolve => { markFirstStarted = resolve })
+    internal._onRawData = vi.fn(async (data: Uint8Array) => {
+      if (data[0] === 0) {
+        markFirstStarted()
+        await firstGate
+      }
+    })
+
+    internal._enqueueRawFrame(Uint8Array.of(0))
+    await firstStarted
+    for (let index = 0; index < 129; index++) internal._enqueueRawFrame(Uint8Array.of(1))
+
+    expect(connection.close).toHaveBeenCalledOnce()
+    releaseFirst()
+  })
+
+  it('coalesces concurrent stored-key lookup and adoption for the same connection', async () => {
+    let releaseLookup!: () => void
+    const lookupGate = new Promise<void>(resolve => { releaseLookup = resolve })
+    const stored = { key: new Uint8Array(256) }
+    const keyStore: AuthKeyStore = {
+      get: vi.fn(async () => {
+        await lookupGate
+        return stored
+      }),
+      save: vi.fn(),
+      delete: vi.fn(),
+    }
+    const { session } = createSession(vi.fn(), keyStore)
+    const internal = session as unknown as {
+      _resumeStoredAuthKey(id: Uint8Array): Promise<boolean>
+      _adoptStoredAuthKey: ReturnType<typeof vi.fn>
+    }
+    internal._adoptStoredAuthKey = vi.fn().mockResolvedValue(true)
+    const id = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8)
+
+    const first = internal._resumeStoredAuthKey(id)
+    const second = internal._resumeStoredAuthKey(new Uint8Array(id))
+    await Promise.resolve()
+    expect(keyStore.get).toHaveBeenCalledOnce()
+    releaseLookup()
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true])
+    expect(internal._adoptStoredAuthKey).toHaveBeenCalledOnce()
   })
 })
 
@@ -165,6 +248,116 @@ type QueuedSession = {
 }
 
 describe('ServerSession decrypted RPC queue', () => {
+  it('acknowledges a slow RPC before its handler completes', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    const dispatch = vi.fn(async () => {
+      markStarted()
+      await gate
+      return { _: 'boolTrue' }
+    })
+    const { session } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & { _apiLayer: number }
+    internal._apiLayer = 228
+    const request = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getNearestDc' })
+
+    const processing = internal._processDecryptedMessage(
+      Long.fromInt(100), 1, new TlBinaryReader(getServerReaderMap(), request), Long.fromInt(7),
+    )
+    await started
+    await Promise.resolve()
+
+    const send = (session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
+    expect(send.mock.calls.some((call) => call[1] === false && call[2] === undefined)).toBe(true)
+    expect(dispatch).toHaveBeenCalledOnce()
+
+    release()
+    await processing
+  })
+
+  it('coalesces an in-flight RPC and replays its serialized result across connections', async () => {
+    const registry = new RpcDependencyRegistry()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    const dispatch = vi.fn(async () => {
+      markStarted()
+      await gate
+      return { _: 'boolTrue' }
+    })
+    const first = createSession(dispatch, undefined, registry)
+    const second = createSession(dispatch, undefined, registry)
+    const key = Uint8Array.from({ length: 256 }, (_, index) => index)
+    for (const session of [first.session, second.session]) {
+      const state = session as unknown as { _permAuthKey: ServerAuthKey, _apiLayer: number }
+      state._permAuthKey.setup(key)
+      state._apiLayer = 228
+    }
+    const messageId = Long.fromInt(120)
+    const request = { _: 'help.getNearestDc' } as never
+
+    const original = (first.session as unknown as QueuedSession)._handleRpcCall(
+      messageId, request, Long.fromInt(1),
+    )
+    await started
+    const duplicate = (second.session as unknown as QueuedSession)._handleRpcCall(
+      messageId, request, Long.fromInt(2),
+    )
+    await Promise.resolve()
+    expect(dispatch).toHaveBeenCalledOnce()
+
+    release()
+    await Promise.all([original, duplicate])
+    expect(dispatch).toHaveBeenCalledOnce()
+    const firstSend = (first.session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
+    const secondSend = (second.session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
+    expect(firstSend).toHaveBeenCalledOnce()
+    expect(secondSend).toHaveBeenCalledOnce()
+    expect(firstSend.mock.calls[0]![0]).toEqual(secondSend.mock.calls[0]![0])
+
+    await (second.session as unknown as QueuedSession)._handleRpcCall(
+      messageId, request, Long.fromInt(3),
+    )
+    expect(dispatch).toHaveBeenCalledOnce()
+    expect(secondSend).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds per-connection RPC work and returns SERVER_BUSY after the pending queue fills', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const dispatch = vi.fn(async () => {
+      await gate
+      return { _: 'boolTrue' }
+    })
+    const { session, connection } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & { _apiLayer: number }
+    internal._apiLayer = 228
+    const calls = Array.from({ length: 81 }, (_, index) => internal._handleRpcCall(
+      Long.fromInt(1_000 + index),
+      { _: 'help.getNearestDc' } as never,
+      Long.fromInt(9),
+    ))
+
+    await vi.waitFor(() => {
+      const send = (session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
+      expect(send).toHaveBeenCalledOnce()
+    })
+    expect(dispatch).toHaveBeenCalledTimes(16)
+    expect(connection.pauseReading).toHaveBeenCalledOnce()
+    const send = (session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
+    expect(decodeRpcReply(send.mock.calls[0]![0]).result).toEqual({
+      _: 'mt_rpc_error', errorCode: 500, errorMessage: 'SERVER_BUSY',
+    })
+
+    release()
+    await Promise.all(calls)
+    expect(dispatch).toHaveBeenCalledTimes(80)
+    expect(connection.resumeReading).toHaveBeenCalledOnce()
+  })
+
   it('drops a queued RPC when its connection closes while waiting for dependencies', async () => {
     const dispatch = vi.fn().mockResolvedValue({ _: 'boolTrue' })
     const { session, connection } = createSession(dispatch)
@@ -198,7 +391,7 @@ describe('ServerSession decrypted RPC queue', () => {
       _handleBindTempAuthKey: ReturnType<typeof vi.fn>
     }
     internal._apiLayer = 227
-    internal._handleBindTempAuthKey = vi.fn().mockResolvedValue(undefined)
+    internal._handleBindTempAuthKey = vi.fn().mockResolvedValue({ _: 'boolTrue' })
     const messageId = Long.fromInt(12)
     const sessionId = Long.fromInt(13)
     const bindRequest = {
@@ -494,16 +687,17 @@ describe('ServerSession auth.bindTempAuthKey', () => {
     expect(storedSave).not.toHaveBeenCalled()
     expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(originalId))
     expect(internal._apiLayer).toBeNull()
-    expect(internal._sendEncryptedMessage).toHaveBeenCalledWith(
-      expect.any(Uint8Array),
-      true,
-      expect.objectContaining({
-        _: 'rpc_result',
-        reqMsgId: messageId,
-        result: { _: 'mt_rpc_error', errorCode: 400, errorMessage: 'ENCRYPTED_MESSAGE_INVALID' },
-      }),
-      sessionId,
-    )
+    const [body, contentRelated, payload, sentSessionId] = internal._sendEncryptedMessage.mock.calls[0]!
+    expect(contentRelated).toBe(true)
+    expect(payload).toMatchObject({ _: 'rpc_result', result: {
+      _: 'mt_rpc_error', errorCode: 400, errorMessage: 'ENCRYPTED_MESSAGE_INVALID',
+    } })
+    expect(sentSessionId).toEqual(sessionId)
+    const reply = decodeRpcReply(body)
+    expect(reply.requestMessageId.toString()).toBe(messageId.toString())
+    expect(reply.result).toEqual({
+      _: 'mt_rpc_error', errorCode: 400, errorMessage: 'ENCRYPTED_MESSAGE_INVALID',
+    })
   })
 
   it('returns INTERNAL without changing identity or API layer when the permanent-key lookup fails', async () => {
@@ -539,14 +733,15 @@ describe('ServerSession auth.bindTempAuthKey', () => {
     expect(keyStore.save).not.toHaveBeenCalled()
     expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(originalId))
     expect(internal._apiLayer).toBeNull()
-    expect(internal._sendEncryptedMessage).toHaveBeenCalledWith(
-      expect.any(Uint8Array),
-      true,
-      expect.objectContaining({
-        result: { _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL' },
-      }),
-      sessionId,
-    )
+    const [body, contentRelated, payload, sentSessionId] = internal._sendEncryptedMessage.mock.calls[0]!
+    expect(contentRelated).toBe(true)
+    expect(payload).toMatchObject({ _: 'rpc_result', result: {
+      _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL',
+    } })
+    expect(sentSessionId).toEqual(sessionId)
+    expect(decodeRpcReply(body).result).toEqual({
+      _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL',
+    })
   })
 
   it('returns INTERNAL without committing a candidate identity when temp-key persistence fails', async () => {
@@ -585,14 +780,15 @@ describe('ServerSession auth.bindTempAuthKey', () => {
     expect(keyStore.save).toHaveBeenCalledOnce()
     expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(originalId))
     expect(internal._apiLayer).toBeNull()
-    expect(internal._sendEncryptedMessage).toHaveBeenCalledWith(
-      expect.any(Uint8Array),
-      true,
-      expect.objectContaining({
-        result: { _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL' },
-      }),
-      sessionId,
-    )
+    const [body, contentRelated, payload, sentSessionId] = internal._sendEncryptedMessage.mock.calls[0]!
+    expect(contentRelated).toBe(true)
+    expect(payload).toMatchObject({ _: 'rpc_result', result: {
+      _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL',
+    } })
+    expect(sentSessionId).toEqual(sessionId)
+    expect(decodeRpcReply(body).result).toEqual({
+      _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL',
+    })
   })
 
   it('serializes competing binds before a following RPC observes the final identity', async () => {
@@ -668,16 +864,31 @@ describe('ServerSession auth.bindTempAuthKey', () => {
   })
 })
 
-function createSession(dispatch = vi.fn(), keyStore?: AuthKeyStore): {
+function createSession(
+  dispatch = vi.fn(),
+  keyStore?: AuthKeyStore,
+  dependencyRegistry?: RpcDependencyRegistry,
+): {
   session: ServerSession
   context: Context
-  connection: { closed: boolean }
+  connection: {
+    closed: boolean
+    close: ReturnType<typeof vi.fn>
+    pauseReading: ReturnType<typeof vi.fn>
+    resumeReading: ReturnType<typeof vi.fn>
+  }
   logger: { error: ReturnType<typeof vi.fn>, warn: ReturnType<typeof vi.fn> }
 } {
   const logger = {
     error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn(), verbose: vi.fn(),
   }
-  const connection = { closed: false }
+  const connection = {
+    closed: false,
+    close: vi.fn(),
+    pauseReading: vi.fn(),
+    resumeReading: vi.fn(),
+  }
+  connection.close.mockImplementation(() => { connection.closed = true })
   const connectionScope = {
     id: 'test', connection, session: undefined as never,
   }
@@ -694,6 +905,10 @@ function createSession(dispatch = vi.fn(), keyStore?: AuthKeyStore): {
     dispatch,
     new AuthKeyDataStore(),
     keyStore,
+    undefined,
+    undefined,
+    undefined,
+    dependencyRegistry,
   )
   connectionScope.session = session as never
   // RPC result serialization and logging are independent of transport
@@ -701,6 +916,17 @@ function createSession(dispatch = vi.fn(), keyStore?: AuthKeyStore): {
   // actual response path without establishing an auth key first.
   ;(session as unknown as { _sendEncryptedMessage: () => void })._sendEncryptedMessage = vi.fn()
   return { session, context, connection, logger }
+}
+
+function decodeRpcReply(body: Uint8Array): { requestMessageId: Long, result: any } {
+  const reader = new TlBinaryReader(__tlReaderMap, body)
+  expect(reader.uint()).toBe(0xf35c6d01)
+  const requestMessageId = reader.long(true)
+  const resultId = reader.uint()
+  if (resultId === 0x997275b5) return { requestMessageId, result: { _: 'boolTrue' } }
+  if (resultId === 0xbc799737) return { requestMessageId, result: { _: 'boolFalse' } }
+  reader.pos -= 4
+  return { requestMessageId, result: reader.object() }
 }
 
 function sendRpcError(session: ServerSession, errorCode: number, errorMessage: string, method: string): void {
