@@ -109,6 +109,21 @@ function sessionsOf(service: Mtproto): Set<FakeSession> {
 }
 
 describe('Mtproto stalled-connection handling', () => {
+  it('reports open and authorized connection counts for management consumers', async () => {
+    const { service, stop } = await makeService()
+    try {
+      const authorized = fakeSession(authKeyA, fakeConnection(0), true)
+      const unauthorized = fakeSession(null as unknown as Uint8Array, fakeConnection(0), false)
+      sessionsOf(service).add(authorized)
+      sessionsOf(service).add(unauthorized)
+
+      expect(service.activeConnectionCount).toBe(2)
+      expect(service.authorizedConnectionCount).toBe(1)
+    } finally {
+      await stop()
+    }
+  })
+
   it('sendUpdateToAuthKey skips a stalled connection and delivers on a healthy one', async () => {
     const { service, stop } = await makeService()
     try {

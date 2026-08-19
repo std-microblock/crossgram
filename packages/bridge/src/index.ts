@@ -55,6 +55,7 @@ import { RequestInboxSystemPeerProvider } from './request-inbox.js'
 import { ActiveSessionStore, registerActiveSessionRpc } from './active-sessions.js'
 import { ConversationViewService } from './conversation-view.js'
 import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.js'
+import { BridgeManagementError, BridgeManagementService } from './management-service.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
@@ -88,11 +89,12 @@ export * from './image-dimensions.js'
 export * from './sticker-outline.js'
 export * from './sticker-dashboard.js'
 export * from './active-sessions.js'
+export * from './management-service.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui', 'updateStore']
 export const provide = [
-  'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'conversationView', 'mtprotoBridge',
+  'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'conversationView', 'mtprotoBridge', 'bridgeManagement',
 ]
 
 export interface BridgeConfig {
@@ -490,18 +492,20 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     routes: ['/platform-accounts', '/sticker-packs'],
   }, dashboard)
 
+  const currentAccounts = (now = Date.now()) => registry.ids.sort().map((platformId) => {
+    const platform = registry.require(platformId)
+    const kind = platform.platformKind ?? platformId
+    const account = provisionedAccounts.get(platformId)
+    if (account) return makePlatformAccountView(platformId, kind, account, apiPrefix, now)
+    if (!platform.getAccount) return makeUnavailableAccountView(platformId, kind, 'unsupported')
+    const error = accountErrors.get(platformId)
+    return makeUnavailableAccountView(platformId, kind, error ? 'error' : 'loading', error)
+  })
+
   const publishAccounts = (now = Date.now()) => {
     dashboardEntry.mutate((value) => {
       value.updatedAt = now
-      value.accounts = registry.ids.sort().map((platformId) => {
-        const platform = registry.require(platformId)
-        const kind = platform.platformKind ?? platformId
-        const account = provisionedAccounts.get(platformId)
-        if (account) return makePlatformAccountView(platformId, kind, account, apiPrefix, now)
-        if (!platform.getAccount) return makeUnavailableAccountView(platformId, kind, 'unsupported')
-        const error = accountErrors.get(platformId)
-        return makeUnavailableAccountView(platformId, kind, error ? 'error' : 'loading', error)
-      })
+      value.accounts = currentAccounts(now)
     })
   }
 
@@ -554,6 +558,43 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
   }
 
+  const approveLoginToken = (platformId: string, token: string) => {
+    const parsed = parseTelegramLoginToken(token)
+    if (!parsed) throw new BridgeManagementError('AUTH_TOKEN_INVALID')
+    const account = provisionedAccounts.get(platformId)
+    if (!account) throw new BridgeManagementError('PLATFORM_ACCOUNT_UNAVAILABLE')
+    if (!loginTokens.approve(parsed, {
+      platformId: account.session.platformId,
+      platformSessionId: account.session.platformSessionId,
+    })) throw new BridgeManagementError('AUTH_TOKEN_INVALID')
+  }
+
+  new BridgeManagementService(ctx, {
+    serverConfig: () => dashboard.serverConfig,
+    accounts: currentAccounts,
+    registeredPlatformIds: () => registry.ids,
+    activeSessions: () => platforms.sessions.map(binding => binding.session),
+    refresh: () => dashboard.refresh(),
+    approveLoginToken,
+    stickers: () => ({
+      accounts: dashboard.stickerAccounts,
+      packs: dashboard.stickerPacks,
+      updatedAt: dashboard.stickerUpdatedAt,
+    }),
+    refreshStickers: () => dashboard.refreshStickerPacks(),
+    setStickerPackAssigned: async (platformSessionId, providerId, packId, assigned) => {
+      const pack = publishedStickerPacks.find(item => item.providerId === providerId && item.packId === packId)
+      if (!pack) throw new BridgeManagementError('STICKER_PACK_NOT_FOUND', '表情包不存在，请刷新后重试。')
+      const assignment = pack.assignments.find(item => item.platformSessionId === platformSessionId)
+      if (!assignment) throw new BridgeManagementError('STICKER_ACCOUNT_NOT_FOUND', '目标账号不存在，请刷新后重试。')
+      if (!assigned && assignment.automatic) {
+        throw new BridgeManagementError('STICKER_ASSIGNMENT_AUTOMATIC', '账号固有表情包不能取消关联。')
+      }
+      await setStickerPackAssignment(ctx.database, platformSessionId, providerId, packId, assigned)
+      await publishStickerPacks()
+    },
+  })
+
   ctx.effect(() => {
     const timer = setInterval(() => publishAccounts(), 1_000)
     return () => clearInterval(timer)
@@ -592,24 +633,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       res.json({ error: 'INVALID_REQUEST' })
       return
     }
-    const parsed = typeof token === 'string' ? parseTelegramLoginToken(token) : undefined
-    const account = provisionedAccounts.get(req.params.platform)
-    if (!parsed) {
-      res.status = 400
-      res.json({ error: 'AUTH_TOKEN_INVALID' })
-      return
-    }
-    if (!account) {
-      res.status = 404
-      res.json({ error: 'PLATFORM_ACCOUNT_UNAVAILABLE' })
-      return
-    }
-    if (!loginTokens.approve(parsed, {
-      platformId: account.session.platformId,
-      platformSessionId: account.session.platformSessionId,
-    })) {
-      res.status = 400
-      res.json({ error: 'AUTH_TOKEN_INVALID' })
+    try {
+      if (typeof token !== 'string') throw new BridgeManagementError('AUTH_TOKEN_INVALID')
+      approveLoginToken(req.params.platform, token)
+    } catch (error) {
+      if (!(error instanceof BridgeManagementError)) throw error
+      res.status = error.code === 'PLATFORM_ACCOUNT_UNAVAILABLE' ? 404 : 400
+      res.json({ error: error.code })
       return
     }
     res.json({ ok: true })

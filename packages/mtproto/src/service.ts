@@ -122,6 +122,20 @@ export class Mtproto extends Service {
     return addr && typeof addr === 'object' ? addr.port : (this.config.port ?? 4430)
   }
 
+  /** Number of currently open MTProto transport connections. */
+  get activeConnectionCount(): number {
+    return this._sessions.size
+  }
+
+  /** Number of open transports that have selected an auth key. */
+  get authorizedConnectionCount(): number {
+    let count = 0
+    for (const session of this._sessions) {
+      if (session.authKeyId) count++
+    }
+    return count
+  }
+
   /**
    * Register one RPC route on the calling plugin's fiber.
    *
