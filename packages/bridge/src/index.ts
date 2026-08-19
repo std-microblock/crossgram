@@ -788,6 +788,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getChannelMessages(req as tl.channels.RawGetMessagesRequest))
   rpc.register('messages.search', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
+  rpc.register('messages.getSearchCounters', async (rpc, req) => bareVector(
+    await (await requireBridgeSession(rpc)).dialogs.getSearchCounters(
+      req as tl.messages.RawGetSearchCountersRequest,
+    ),
+  ))
   rpc.register('messages.getUnreadMentions', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getUnreadMentions(
       req as tl.messages.RawGetUnreadMentionsRequest,

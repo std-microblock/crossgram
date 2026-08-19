@@ -104,11 +104,6 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'messages.getSavedDialogs': () => ({
     _: 'messages.savedDialogs', dialogs: [], messages: [], chats: [], users: [],
   } as unknown as tl.TlObject),
-  'messages.getSearchCounters': request => bareVector(
-    (request as tl.messages.RawGetSearchCountersRequest).filters.map(filter => ({
-      _: 'messages.searchCounter', filter, count: 0,
-    } as unknown as tl.TlObject)),
-  ),
   'messages.getSearchResultsPositions': () => ({
     _: 'messages.searchResultsPositions', count: 0, positions: [],
   } as unknown as tl.TlObject),

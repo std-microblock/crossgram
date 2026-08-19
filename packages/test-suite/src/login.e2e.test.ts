@@ -2267,19 +2267,46 @@ describe('bridge login e2e', () => {
           }),
         }),
       })]))
+      const sharedMediaCount = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.search',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO }, q: '',
+        filter: { _: 'inputMessagesFilterPhotoVideo' }, minDate: 0, maxDate: 0,
+        offsetId: 0, addOffset: 0, limit: 0, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 80)
+      expect(sharedMediaCount).toMatchObject({
+        _: 'messages.messagesSlice', count: 1, messages: [],
+      })
+      const sharedMediaCounters = await callRpc(resumed, key, resumedSid, {
+        _: 'messages.getSearchCounters',
+        peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
+        filters: [
+          { _: 'inputMessagesFilterPhotos' },
+          { _: 'inputMessagesFilterDocument' },
+          { _: 'inputMessagesFilterVideo' },
+          { _: 'inputMessagesFilterUrl' },
+        ],
+      }, 82)
+      expect(sharedMediaCounters).toMatchObject([
+        { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterPhotos' } },
+        { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterDocument' } },
+        { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterVideo' }, count: 0 },
+        { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterUrl' }, count: 0 },
+      ])
+      expect(sharedMediaCounters[0].count).toBeGreaterThan(0)
+      expect(sharedMediaCounters[1].count).toBeGreaterThan(0)
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'messages.readHistory',
         peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO }, maxId: 0x40000010,
-      }, 81)).toMatchObject({ _: 'messages.affectedMessages', ptsCount: 0 })
+      }, 84)).toMatchObject({ _: 'messages.affectedMessages', ptsCount: 0 })
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'messages.getScheduledHistory',
         peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO }, hash: Long.ZERO,
-      }, 83)).toMatchObject({ _: 'messages.messages', messages: [] })
+      }, 86)).toMatchObject({ _: 'messages.messages', messages: [] })
       const blockedChannelDifference = await callRpc(resumed, key, resumedSid, {
         _: 'updates.getChannelDifference', force: true,
         channel: { _: 'inputChannel', channelId: generalChannel.id, accessHash: Long.ZERO },
         filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
-      }, 85)
+      }, 88)
       expect(blockedChannelDifference).toMatchObject({
         _: 'updates.channelDifference', final: true,
         otherUpdates: [expect.objectContaining({

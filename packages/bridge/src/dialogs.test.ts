@@ -743,7 +743,7 @@ describe('DialogRpc', () => {
       _: 'messages.messagesSlice', messages: [{ _: 'message', message: 'needle native-1' }],
     })
     expect(platform.queries[0]).toEqual({
-      query: 'needle', cursor: undefined, limit: 1, fromUserId: 'alice',
+      query: 'needle', cursor: undefined, limit: 200, fromUserId: 'alice',
       minTimestamp: 1_700_000_000, maxTimestamp: 1_800_000_000, mediaKind: undefined,
     })
 

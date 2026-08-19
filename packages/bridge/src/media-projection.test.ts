@@ -273,6 +273,135 @@ function wireRoundTrip<T>(object: T): T {
   return new TlBinaryReader(__tlReaderMap, bytes).object() as T
 }
 
+describe('shared-media search', () => {
+  it('classifies photos, videos, files, GIFs, audio, voice, and links', async () => {
+    const { store } = await createStore()
+    const searched: IMMessage[] = [
+      mediaMessage('search-document', 'document', 'report.pdf', 'application/pdf'),
+      {
+        id: 'search-video-album', sourceIds: ['search-video-1', 'search-video-2'],
+        conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_020,
+        content: { parts: [
+          { type: 'text', text: 'video album' },
+          { type: 'media', media: media('video-1', 'file', 'one.mp4', 'video/mp4') },
+          { type: 'media', media: media('video-2', 'file', 'two.mp4', 'video/mp4') },
+        ] },
+      },
+      mediaMessage('search-photo', 'photo', 'photo.png', 'image/png', 'image'),
+      mediaMessage('search-gif', 'gif', 'animation.gif', 'image/gif', 'image'),
+      mediaMessage('search-music', 'music', 'song.mp3', 'audio/mpeg'),
+      {
+        ...mediaMessage('search-voice', 'voice', 'voice.ogg', 'audio/ogg'),
+        content: { parts: [
+          { type: 'text', text: 'voice' },
+          { type: 'media', media: { ...media('voice', 'file', 'voice.ogg', 'audio/ogg'), voice: true } },
+        ] },
+      },
+      {
+        id: 'search-link', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_070,
+        content: { parts: [{ type: 'text', text: 'visit https://example.com/path' }] },
+      },
+    ]
+    const queries: import('./platform.js').IMMessageSearchQuery[] = []
+    const searchable: IMPlatform = {
+      ...platform,
+      async searchMessages(_session, _conversation, query) {
+        queries.push(query)
+        const coarse = searched.filter((message) => !query.mediaKind || message.content.parts.some((part) =>
+          part.type === 'media' && part.media.kind === query.mediaKind))
+        const start = Number(query.cursor ?? 0)
+        const limit = Math.min(query.limit ?? 50, 1)
+        return {
+          messages: coarse.slice(start, start + limit),
+          nextCursor: start + limit < coarse.length ? String(start + limit) : undefined,
+        }
+      },
+    }
+    const rpc = new DialogRpc(searchable, session, store)
+    await rpc.getDialogs(dialogsRequest())
+    const peer = {
+      _: 'inputPeerUser' as const, userId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO,
+    }
+    const search = async (filter: tl.TypeMessagesFilter, limit = 100, offsetId = 0) => rpc.search({
+      _: 'messages.search', peer, q: '', filter,
+      minDate: 0, maxDate: 0, offsetId, addOffset: 0, limit,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    })
+    const texts = (result: tl.messages.TypeMessages) => result._ === 'messages.messagesNotModified'
+      ? []
+      : result.messages.map((message) => message._ === 'message' ? message.message : '')
+
+    expect(texts(await search({ _: 'inputMessagesFilterPhotos' }))).toEqual(['photo'])
+    expect(texts(await search({ _: 'inputMessagesFilterPhotoVideo' }))).toEqual([
+      'video album', '', 'photo',
+    ])
+    expect(texts(await search({ _: 'inputMessagesFilterDocument' }))).toEqual(['document'])
+    expect(texts(await search({ _: 'inputMessagesFilterGif' }))).toEqual(['gif'])
+    expect(texts(await search({ _: 'inputMessagesFilterMusic' }))).toEqual(['music'])
+    expect(texts(await search({ _: 'inputMessagesFilterVoice' }))).toEqual(['voice'])
+    expect(texts(await search({ _: 'inputMessagesFilterUrl' }))).toEqual([
+      'visit https://example.com/path',
+    ])
+
+    const firstVideo = await search({ _: 'inputMessagesFilterVideo' }, 1)
+    expect(texts(firstVideo)).toEqual(['video album'])
+    expect(queries.filter((query) => query.mediaKind === 'file').slice(-2).map((query) => query.cursor))
+      .toEqual([undefined, '1'])
+    if (firstVideo._ === 'messages.messagesNotModified') throw new Error('expected video result')
+    const firstVideoId = (firstVideo.messages[0] as tl.RawMessage).id
+    expect(texts(await search({ _: 'inputMessagesFilterVideo' }, 1, firstVideoId))).toEqual([''])
+  })
+
+  it('returns non-zero counters and count-only desktop results for available media', async () => {
+    const { store } = await createStore()
+    const rpc = new DialogRpc(platform, session, store)
+    await rpc.getDialogs(dialogsRequest())
+    const peer = {
+      _: 'inputPeerUser' as const, userId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO,
+    }
+    const countOnly = await rpc.search({
+      _: 'messages.search', peer, q: '', filter: { _: 'inputMessagesFilterPhotos' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 0,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    })
+    expect(countOnly).toMatchObject({ _: 'messages.messagesSlice', count: 1, messages: [] })
+
+    await expect(rpc.getSearchCounters({
+      _: 'messages.getSearchCounters', peer,
+      filters: [
+        { _: 'inputMessagesFilterPhotos' },
+        { _: 'inputMessagesFilterDocument' },
+        { _: 'inputMessagesFilterVideo' },
+      ],
+    })).resolves.toMatchObject([
+      { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterPhotos' }, count: 1 },
+      { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterDocument' }, count: 1 },
+      { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterVideo' }, count: 0 },
+    ])
+    expect(() => wireRoundTrip(countOnly)).not.toThrow()
+  })
+})
+
+function media(id: string, kind: 'image' | 'file', name: string, mimeType: string) {
+  return { id, kind, name, mimeType, size: 42, locator: { remote: id } } as const
+}
+
+function mediaMessage(
+  id: string,
+  text: string,
+  name: string,
+  mimeType: string,
+  kind: 'image' | 'file' = 'file',
+): IMMessage {
+  return {
+    id, conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_010,
+    content: { parts: [
+      { type: 'text', text },
+      { type: 'media', media: media(id, kind, name, mimeType) },
+    ] },
+  }
+}
+
 describe('rich-media projection', () => {
   it('projects raw GIF/APNG images as documents with client-decodable metadata', () => {
     for (const mimeType of ['image/gif', 'image/apng']) {
@@ -309,6 +438,19 @@ describe('rich-media projection', () => {
     const audio = document.attributes.find((attribute) => attribute._ === 'documentAttributeAudio') as tl.RawDocumentAttributeAudio | undefined
     expect(audio?.voice).toBe(true)
     expect(audio?.duration).toBe(7)
+  })
+
+  it('marks ordinary audio documents as Telegram music', () => {
+    const projected = makeTlMessageMedia({
+      id: 93, messageId: 1, ordinal: 0, partIndex: 0, platformMediaId: 'music',
+      kind: 'file', name: 'song.mp3', mimeType: 'audio/mpeg', size: 4200,
+      width: null, height: null, duration: 123, voice: null,
+      preview: null, strippedThumbnail: null, locator: { remote: 'music' },
+    }, 1) as tl.RawMessageMediaDocument
+    expect(projected.document).toMatchObject({
+      _: 'document',
+      attributes: expect.arrayContaining([{ _: 'documentAttributeAudio', duration: 123 }]),
+    })
   })
 
   it('returns sticker/reaction direct URLs and leaves stream-only assets on upload.getFile fallback', async () => {

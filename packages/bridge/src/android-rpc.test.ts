@@ -60,11 +60,6 @@ const requests: Record<string, tl.RpcMethod> = {
     _: 'messages.getSavedDialogs', offsetDate: 0, offsetId: 0,
     offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
   },
-  'messages.getSearchCounters': {
-    _: 'messages.getSearchCounters',
-    peer: self,
-    filters: [{ _: 'inputMessagesFilterPhotos' }, { _: 'inputMessagesFilterVideo' }],
-  },
   'messages.getSearchResultsPositions': {
     _: 'messages.getSearchResultsPositions', peer: self,
     filter: { _: 'inputMessagesFilterPhotoVideo' }, offsetId: 0, limit: 100,
@@ -121,17 +116,6 @@ describe('Telegram Android optional RPC responses', () => {
     )).toMatchObject({
       _: 'emojiKeywordsDifference', langCode: 'zh-hans', fromVersion: 42, version: 42, keywords: [],
     })
-  })
-
-  it('returns one zero search counter for every requested filter', () => {
-    expect(androidRpcHandlers['messages.getSearchCounters'](requests['messages.getSearchCounters']))
-      .toEqual({
-        _: 'vector',
-        items: [
-          { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterPhotos' }, count: 0 },
-          { _: 'messages.searchCounter', filter: { _: 'inputMessagesFilterVideo' }, count: 0 },
-        ],
-      })
   })
 
   it('returns one zeroed view record for every requested message id', () => {

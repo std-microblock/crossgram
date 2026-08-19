@@ -78,6 +78,12 @@ interface MaterializedMessage {
   unreadMention?: boolean
 }
 
+interface SearchCursorState {
+  upstreamCursor?: string
+  exhausted: boolean
+  pending: MaterializedMessage[]
+}
+
 interface ResolvedMediaUpload {
   media: IMMediaInput
   upload: UploadedFile
@@ -184,7 +190,7 @@ export class DialogRpc {
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
   private readonly _memberPages = new Map<string, MemberPageState>()
   private readonly _pendingMemberPages = new Map<string, Promise<void>>()
-  private readonly _searchCursors = new Map<string, string>()
+  private readonly _searchCursors = new Map<string, SearchCursorState>()
   // ponytail: session-wide queue; use per-peer queues only if folder edit throughput matters.
   private _folderEditQueue = Promise.resolve()
   private readonly _actions: PlatformMessageActions
@@ -653,9 +659,10 @@ export class DialogRpc {
     if (this._platform.searchMessages && !isLocalOnlyConversation(conversation)) {
       return this._searchPlatform(req, peerId, conversation)
     }
+    const requestedLimit = clampLimit(req.limit)
     const all = await this._loadHistory(peerId, {
       offsetId: req.offsetId, offsetDate: req.maxDate, addOffset: req.addOffset,
-      limit: req.limit, maxId: req.maxId, minId: req.minId,
+      limit: Math.max(1, requestedLimit), maxId: req.maxId, minId: req.minId,
     })
     const query = req.q.toLocaleLowerCase()
     const visible = await this._visibleMessages(all)
@@ -669,11 +676,13 @@ export class DialogRpc {
       return matchesMessageFilter(item, req.filter)
     })
     const start = Math.max(0, req.addOffset)
-    const page = filtered.slice(start, start + clampLimit(req.limit))
+    const page = filtered.slice(start, start + requestedLimit)
     const users = await this._messageSenders(page.map((item) => item.source))
+    const count = filtered.length
+    const sliced = requestedLimit === 0 ? count > 0 : page.length < count || start > 0
     return {
-      _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
-      ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
+      _: sliced ? 'messages.messagesSlice' : 'messages.messages',
+      ...(sliced ? { count } : {}),
       messages: await this._projectMessages(page), topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
@@ -681,6 +690,34 @@ export class DialogRpc {
       ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
+  }
+
+  async getSearchCounters(
+    req: tl.messages.RawGetSearchCountersRequest,
+  ): Promise<tl.messages.RawSearchCounter[]> {
+    if (req.peer._ === 'inputPeerSelf') {
+      return req.filters.map((filter) => ({ _: 'messages.searchCounter', filter, count: 0 }))
+    }
+    const counters: tl.messages.RawSearchCounter[] = []
+    for (const filter of req.filters) {
+      if (!supportsSharedMediaFilter(filter)) {
+        counters.push({ _: 'messages.searchCounter', filter, count: 0 })
+        continue
+      }
+      const result = await this.search({
+        _: 'messages.search', peer: req.peer, savedPeerId: req.savedPeerId,
+        topMsgId: req.topMsgId, q: '', filter,
+        minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 0,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      })
+      const count = result._ === 'messages.messagesSlice' || result._ === 'messages.channelMessages'
+        ? result.count
+        : result._ === 'messages.messages'
+          ? result.messages.length
+          : 0
+      counters.push({ _: 'messages.searchCounter', inexact: count > 0 || undefined, filter, count })
+    }
+    return counters
   }
 
   async getUnreadMentions(
@@ -763,11 +800,11 @@ export class DialogRpc {
     const fingerprint = JSON.stringify([
       peerId, req.q, req.filter._, fromUserId ?? '', req.minDate, req.maxDate,
     ])
-    const cursor = req.offsetId > 0
+    const cursorState = req.offsetId > 0
       ? this._searchCursors.get(`${fingerprint}:${req.offsetId}`)
       : undefined
     let maxTimestamp = req.maxDate > 0 ? req.maxDate : undefined
-    if (req.offsetId > 0 && !cursor) {
+    if (req.offsetId > 0 && !cursorState) {
       const stored = this._store
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, req.offsetId, peerId)
         : undefined
@@ -776,49 +813,64 @@ export class DialogRpc {
         maxTimestamp = Math.min(maxTimestamp ?? anchorTimestamp, anchorTimestamp)
       }
     }
-    const fetchLimit = Math.max(1, Math.min(
-      clampLimit(req.limit) + Math.max(0, req.addOffset),
-      200,
-    ))
-    const query = {
-      query: req.q,
-      cursor,
-      limit: fetchLimit,
-      fromUserId,
-      minTimestamp: req.minDate > 0 ? req.minDate : undefined,
-      maxTimestamp,
-      mediaKind: searchMediaKind(req.filter),
-    } as const
-    const upstream = this._data
-      ? await this._data.searchMessages(peerId, query)
-      : await this._platform.searchMessages!(this._session, { id: peerId }, query)
-    const materialized = await this._materializeSearchMessages(peerId, upstream.messages)
-    const normalizedQuery = req.q.toLocaleLowerCase()
-    const visible = await this._visibleMessages(materialized)
-    const filtered = visible.filter((item) => {
-      if (req.offsetId > 0 && !cursor && item.tlId >= req.offsetId) return false
-      if (req.minDate > 0 && item.source.timestamp <= req.minDate) return false
-      if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
-      if (req.maxId > 0 && item.tlId >= req.maxId) return false
-      if (req.minId > 0 && item.tlId <= req.minId) return false
-      if (normalizedQuery && !messageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
-      return matchesMessageFilter(item, req.filter)
-    })
+    const requestedLimit = clampLimit(req.limit)
     const start = Math.max(0, req.addOffset)
-    const page = filtered.slice(start, start + clampLimit(req.limit))
-    if (upstream.nextCursor && page.length) {
-      this._searchCursors.set(`${fingerprint}:${page.at(-1)!.tlId}`, upstream.nextCursor)
-      while (this._searchCursors.size > 1024) {
-        const oldest = this._searchCursors.keys().next().value as string | undefined
-        if (!oldest) break
-        this._searchCursors.delete(oldest)
-      }
+    const target = Math.max(1, requestedLimit + start)
+    const candidates = cursorState?.pending.slice() ?? []
+    let upstreamCursor = cursorState?.upstreamCursor
+    let exhausted = cursorState?.exhausted ?? false
+    const normalizedQuery = req.q.toLocaleLowerCase()
+    for (
+      let requestCount = 0;
+      candidates.length < target && !exhausted && requestCount < 100;
+      requestCount++
+    ) {
+      const query = {
+        query: req.q,
+        cursor: upstreamCursor,
+        // Broad pages prevent sparse bridge-side filters (especially links
+        // and video subtypes) from stopping at unrelated native results.
+        limit: 200,
+        fromUserId,
+        minTimestamp: req.minDate > 0 ? req.minDate : undefined,
+        maxTimestamp,
+        mediaKind: searchMediaKind(req.filter),
+      } as const
+      const upstream = this._data
+        ? await this._data.searchMessages(peerId, query)
+        : await this._platform.searchMessages!(this._session, { id: peerId }, query)
+      const materialized = await this._materializeSearchMessages(peerId, upstream.messages)
+      const visible = await this._visibleMessages(materialized)
+      candidates.push(...visible.filter((item) => {
+        if (req.offsetId > 0 && !cursorState && item.tlId >= req.offsetId) return false
+        if (req.minDate > 0 && item.source.timestamp <= req.minDate) return false
+        if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
+        if (req.maxId > 0 && item.tlId >= req.maxId) return false
+        if (req.minId > 0 && item.tlId <= req.minId) return false
+        if (normalizedQuery && !messageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
+        return matchesMessageFilter(item, req.filter)
+      }))
+      upstreamCursor = upstream.nextCursor
+      if (!upstreamCursor) exhausted = true
+    }
+    const page = candidates.slice(start, start + requestedLimit)
+    const pending = candidates.slice(start + page.length)
+    const hasMore = pending.length > 0 || Boolean(upstreamCursor)
+    if (page.length && hasMore) {
+      this._rememberSearchCursor(`${fingerprint}:${page.at(-1)!.tlId}`, {
+        upstreamCursor, exhausted, pending,
+      })
     }
     const users = await this._messageSenders(page.map((item) => item.source))
-    const sliced = Boolean(upstream.nextCursor || cursor || req.offsetId > 0 || start > 0)
+    const count = exhausted
+      ? candidates.length
+      : Math.max(1, start + page.length + (hasMore ? 1 : 0))
+    const sliced = Boolean(
+      hasMore || cursorState || req.offsetId > 0 || start > 0 || requestedLimit === 0 && count > 0,
+    )
     return {
       _: sliced ? 'messages.messagesSlice' : 'messages.messages',
-      ...(sliced ? { count: upstream.total ?? page.length + (upstream.nextCursor ? 1 : 0) } : {}),
+      ...(sliced ? { count } : {}),
       messages: await this._projectMessages(page), topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
@@ -826,6 +878,15 @@ export class DialogRpc {
       ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
+  }
+
+  private _rememberSearchCursor(key: string, state: SearchCursorState): void {
+    this._searchCursors.set(key, state)
+    while (this._searchCursors.size > 1024) {
+      const oldest = this._searchCursors.keys().next().value as string | undefined
+      if (!oldest) break
+      this._searchCursors.delete(oldest)
+    }
   }
 
   private async _materializeSearchMessages(
@@ -4826,17 +4887,61 @@ function rangesOverlap(
 
 function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessagesFilter): boolean {
   if (filter._ === 'inputMessagesFilterEmpty') return true
-  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterPhotoVideo') {
-    return item.media?.kind === 'image'
+  const media = item.media
+  const animatedImage = isAnimatedImageMime(media?.mimeType)
+  const video = media?.kind === 'file' && media.mimeType?.startsWith('video/') === true
+  const voice = media?.kind === 'file' && media.voice === true
+  const music = media?.kind === 'file' && !voice && media.mimeType?.startsWith('audio/') === true
+  if (filter._ === 'inputMessagesFilterPhotos') return media?.kind === 'image' && !animatedImage
+  if (filter._ === 'inputMessagesFilterVideo') return video
+  if (filter._ === 'inputMessagesFilterPhotoVideo') {
+    return media?.kind === 'image' && !animatedImage || video
   }
-  if (filter._ === 'inputMessagesFilterDocument') return item.media?.kind === 'file'
+  if (filter._ === 'inputMessagesFilterDocument') {
+    return media?.kind === 'file' && !video && !voice && !music && !animatedImage
+  }
+  if (filter._ === 'inputMessagesFilterUrl') return item.ordinal === 0 && messageHasLink(item.source)
+  if (filter._ === 'inputMessagesFilterGif') return Boolean(media && animatedImage)
+  if (filter._ === 'inputMessagesFilterVoice') return voice
+  if (filter._ === 'inputMessagesFilterMusic') return music
+  if (filter._ === 'inputMessagesFilterRoundVoice') return voice
   return false
 }
 
 function searchMediaKind(filter: tl.TypeMessagesFilter): 'image' | 'file' | undefined {
-  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterPhotoVideo') return 'image'
-  if (filter._ === 'inputMessagesFilterDocument') return 'file'
+  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterGif') return 'image'
+  if (
+    filter._ === 'inputMessagesFilterVideo'
+    || filter._ === 'inputMessagesFilterDocument'
+    || filter._ === 'inputMessagesFilterVoice'
+    || filter._ === 'inputMessagesFilterMusic'
+    || filter._ === 'inputMessagesFilterRoundVoice'
+    || filter._ === 'inputMessagesFilterRoundVideo'
+  ) return 'file'
   return undefined
+}
+
+function supportsSharedMediaFilter(filter: tl.TypeMessagesFilter): boolean {
+  return filter._ === 'inputMessagesFilterPhotos'
+    || filter._ === 'inputMessagesFilterVideo'
+    || filter._ === 'inputMessagesFilterPhotoVideo'
+    || filter._ === 'inputMessagesFilterDocument'
+    || filter._ === 'inputMessagesFilterUrl'
+    || filter._ === 'inputMessagesFilterGif'
+    || filter._ === 'inputMessagesFilterVoice'
+    || filter._ === 'inputMessagesFilterMusic'
+    || filter._ === 'inputMessagesFilterRoundVoice'
+}
+
+function messageHasLink(message: IMMessage): boolean {
+  return message.content.parts.some((part) => {
+    if (part.type === 'card') return Boolean(cardUrl(part.card))
+    if (part.type !== 'text') return false
+    if (part.entities?.some((entity) =>
+      entity.type === 'text-link' || entity.type === 'conversation-link')) return true
+    return Boolean(withAutoLinkEntities(part.text)?.some((entity) =>
+      entity._ === 'messageEntityUrl' || entity._ === 'messageEntityTextUrl'))
+  })
 }
 
 /** Stable positive signed-int ID used for synthetic Telegram entities. */
@@ -5215,6 +5320,9 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   if (media.voice) attributes.push({
     _: 'documentAttributeAudio', voice: true, duration: media.duration ?? 0,
   })
+  else if (media.mimeType?.startsWith('audio/')) attributes.push({
+    _: 'documentAttributeAudio', duration: media.duration ?? 0,
+  })
   else if (media.mimeType?.startsWith('video/')) attributes.push({
     _: 'documentAttributeVideo',
     nosound: media.mimeType === 'video/webm' ? true : undefined,
@@ -5343,6 +5451,9 @@ function documentAttributes(media: Pick<IMMedia<any>, 'name' | 'mimeType' | 'wid
   })
   if (media.voice) attributes.push({
     _: 'documentAttributeAudio', voice: true, duration: media.duration ?? 0,
+  })
+  else if (media.mimeType?.startsWith('audio/')) attributes.push({
+    _: 'documentAttributeAudio', duration: media.duration ?? 0,
   })
   else if (media.mimeType?.startsWith('video/')) attributes.push({
     _: 'documentAttributeVideo',
