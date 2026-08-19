@@ -1373,6 +1373,7 @@ export class ServerSession {
     }
 
     let debugResult: RpcResult | undefined
+    const afterResponse: Array<() => void | Promise<void>> = []
     const execute = async (): Promise<RpcReply> => {
       const release = await this._acquireRpcSlot()
       if (!release) {
@@ -1384,7 +1385,7 @@ export class ServerSession {
       }
       try {
         const result = await this._executeRpcCall(
-          msgId, unwrapped, clientSessionId, packetCtx, now,
+          msgId, unwrapped, clientSessionId, packetCtx, now, afterResponse,
         )
         debugResult = result
         return this._buildRpcReply(msgId, result, method)
@@ -1411,7 +1412,22 @@ export class ServerSession {
       reply = this._buildRpcReply(msgId, debugResult, method)
     }
 
-    if (!this._connection.closed) this._sendRpcReply(reply, clientSessionId, debugResult)
+    if (!this._connection.closed) {
+      this._sendRpcReply(reply, clientSessionId, debugResult)
+      if (reply.resultKind !== 'mt_rpc_error') {
+        for (const task of afterResponse) {
+          try {
+            await task()
+          } catch (error) {
+            this._log.error(
+              'after-response task failed for %s: %s',
+              method,
+              error instanceof Error ? error.stack ?? error.message : error,
+            )
+          }
+        }
+      }
+    }
   }
 
   private async _executeRpcCall(
@@ -1420,6 +1436,7 @@ export class ServerSession {
     clientSessionId: Long,
     packetCtx: Context,
     now: number,
+    afterResponse: Array<() => void | Promise<void>>,
   ): Promise<RpcResult> {
 
     // A wrapped bind must prove the requested permanent identity before its
@@ -1479,6 +1496,7 @@ export class ServerSession {
       sessionId: clientSessionId,
       isAuthorized: this._authorized,
       sendUpdate: (update) => this.sendUpdate(update, clientSessionId),
+      afterResponse: (task) => afterResponse.push(task),
       getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
       setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),
     }) as unknown as ServerRpcContext

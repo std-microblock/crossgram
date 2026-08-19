@@ -237,11 +237,18 @@ class ProductionSessionAdapter final : public SessionAdapter {
                                             : tgcalls::ProtocolVersion::V0;
     descriptor.initialNetworkType = tgcalls::NetworkType::Ethernet;
 
-    // Pinned InstanceImpl consumes rtcServers, not Descriptor::endpoints. The fixed ABI has no
-    // STUN/TURN scheme or TURN credentials, so legacy INET and relay records are rejected in
-    // Start rather than fabricated as RtcServer values. A LAN-only, P2P-enabled session keeps
-    // rtcServers empty for the controlled-local path.
-    descriptor.rtcServers.clear();
+    descriptor.rtcServers.reserve(parameters_.rtc_servers.size());
+    for (const auto& server : parameters_.rtc_servers) {
+      tgcalls::RtcServer target;
+      target.id = server.id;
+      target.host = server.host;
+      target.port = server.port;
+      target.login = server.username;
+      target.password = server.password;
+      target.isTurn = server.is_turn;
+      target.isTcp = server.is_tcp;
+      descriptor.rtcServers.push_back(std::move(target));
+    }
     descriptor.endpoints.reserve(parameters_.endpoints.size());
     for (const auto& endpoint : parameters_.endpoints) {
       tgcalls::Endpoint target;

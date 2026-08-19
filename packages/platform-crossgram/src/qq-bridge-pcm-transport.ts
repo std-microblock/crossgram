@@ -18,7 +18,11 @@ const TOKEN_BYTES = 32
 const AUTH_BYTES = 1 + LEASE_ID_BYTES + TOKEN_BYTES
 const PCM_FRAME_BYTES = QQ_VOICE_PCM_FORMAT.bytesPerFrame
 const MAX_RETAINED_FRAMES = 4
-const MAX_RETAINED_BYTES = (5 + PCM_FRAME_BYTES) * MAX_RETAINED_FRAMES
+// A Unix stream may coalesce the gateway's real-time writes into a pipe-sized
+// burst. Frames are parsed and dropped immediately when no reader is waiting,
+// so this bounds one transient read rather than retained audio.
+const MAX_WIRE_BURST_FRAMES = 64
+const MAX_WIRE_BURST_BYTES = (5 + PCM_FRAME_BYTES) * MAX_WIRE_BURST_FRAMES
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000
 
 export interface QQBridgePcmTransportOptions {
@@ -138,7 +142,7 @@ class QQBridgePcmConnection implements QQVoiceMediaConnection {
 
   private readonly onData = (chunk: Buffer) => {
     if (this.closed) return
-    if (chunk.byteLength + this.pending.byteLength > MAX_RETAINED_BYTES) return this.fail()
+    if (chunk.byteLength + this.pending.byteLength > MAX_WIRE_BURST_BYTES) return this.fail()
     this.pending = this.pending.byteLength ? Buffer.concat([this.pending, chunk]) : Buffer.from(chunk)
     while (this.pending.byteLength >= 5) {
       const type = this.pending[0]!
@@ -233,7 +237,7 @@ async function connectAndAuthenticate(
       )
     }
     const data = (chunk: Buffer) => {
-      if (chunk.byteLength + pending.byteLength > 6 + MAX_RETAINED_BYTES) return finish(new QQBridgePcmTransportError())
+      if (chunk.byteLength + pending.byteLength > 6 + MAX_WIRE_BURST_BYTES) return finish(new QQBridgePcmTransportError())
       pending = pending.byteLength ? Buffer.concat([pending, chunk]) : Buffer.from(chunk)
       if (pending.byteLength < 5) return
       const type = pending[0]!

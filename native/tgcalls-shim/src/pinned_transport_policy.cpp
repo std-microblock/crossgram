@@ -3,11 +3,10 @@
 namespace crossgram::tgcalls_shim {
 
 bool IsControlledLocalP2p(const SessionParameters& parameters) noexcept {
-  if (!parameters.config.enable_p2p) return false;
   for (const auto& endpoint : parameters.endpoints) {
     if (endpoint.type != CROSSGRAM_TGCALLS_ENDPOINT_LAN) return false;
   }
-  return true;
+  return parameters.config.enable_p2p || !parameters.rtc_servers.empty();
 }
 
 }  // namespace crossgram::tgcalls_shim

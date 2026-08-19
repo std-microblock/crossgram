@@ -9,3 +9,7 @@ blockedContentMode: 拉黑用户内容显示策略：show 保留 Telegram 默认
 voiceWorkerSocketPath: Rust 语音工作进程的本地 Unix socket 路径；留空以禁用语音通话。
 voiceWorkerTimeoutMs: 单次本地语音工作进程请求允许的最长毫秒数。
 voiceDirectIce: 仅当配置的 MTProto 主机为回环地址时允许直接 ICE。
+voiceTurnHost: 向 Telegram 和原生语音工作进程公布的 TURN 主机；留空以禁用 TURN。
+voiceTurnPort: 向 Telegram 和原生语音工作进程公布的 TURN 端口。
+voiceTurnSharedSecret: Coturn REST 认证共享密钥，仅用于派生单次通话凭据。
+voiceTurnTtlSeconds: 派生的单次通话 TURN 凭据有效期（秒）。

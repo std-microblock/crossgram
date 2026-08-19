@@ -48,6 +48,16 @@ void SessionParameters::Wipe() noexcept {
     WipeBytes(&endpoint.type, sizeof(endpoint.type));
   }
   endpoints.clear();
+  for (auto& server : rtc_servers) {
+    WipeBytes(&server.id, sizeof(server.id));
+    if (!server.host.empty()) WipeBytes(server.host.data(), server.host.size());
+    WipeBytes(&server.port, sizeof(server.port));
+    if (!server.username.empty()) WipeBytes(server.username.data(), server.username.size());
+    if (!server.password.empty()) WipeBytes(server.password.data(), server.password.size());
+    WipeBytes(&server.is_turn, sizeof(server.is_turn));
+    WipeBytes(&server.is_tcp, sizeof(server.is_tcp));
+  }
+  rtc_servers.clear();
 }
 
 Session::Session(SessionParameters parameters,

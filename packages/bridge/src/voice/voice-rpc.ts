@@ -59,9 +59,12 @@ export class VoiceRpc {
     session: PlatformSession,
     request: tl.phone.RawAcceptCallRequest,
     excludeAuthKeyId?: string,
+    afterResponse?: (task: () => void | Promise<void>) => void,
   ): Promise<tl.phone.RawPhoneCall> {
     try {
-      return await this._calls.accept(session, peer(request.peer), request.gB, request.protocol, excludeAuthKeyId)
+      return await this._calls.accept(
+        session, peer(request.peer), request.gB, request.protocol, excludeAuthKeyId, afterResponse,
+      )
     } catch (error) {
       throw asRpcError(error)
     }

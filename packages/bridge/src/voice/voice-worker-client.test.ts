@@ -128,7 +128,7 @@ function openSocketCount(client: VoiceWorkerSocketClient): number {
   return (client as unknown as { _sockets: Set<Socket> })._sockets.size
 }
 
-describe('voice worker IPC v2 codec', () => {
+describe('voice worker IPC v3 codec', () => {
   it('advertises the exact protocol implemented by the pinned native tgcalls adapter', () => {
     const client = new VoiceWorkerSocketClient({ socketPath: '/unused/worker.sock' })
 
@@ -139,7 +139,7 @@ describe('voice worker IPC v2 codec', () => {
     client.close()
   })
 
-  it('encodes fixed-width v2 request fields and rejects malformed responses', () => {
+  it('encodes fixed-width v3 request fields and rejects malformed responses', () => {
     const frame = encodeVoiceWorkerRequest({
       tag: 0x04, callId: 9n, gA: new Uint8Array(256).fill(3), expectedFingerprint: Long.NEG_ONE,
       config: {
@@ -150,15 +150,36 @@ describe('voice worker IPC v2 codec', () => {
         }],
       },
     })
-    expect(frame.readUInt32BE(0)).toBe(325)
-    expect([...frame.subarray(4, 6)]).toEqual([2, 0x04])
+    expect(frame.readUInt32BE(0)).toBe(326)
+    expect([...frame.subarray(4, 6)]).toEqual([3, 0x04])
     expect(frame.readBigUInt64BE(6)).toBe(9n)
     expect(frame.subarray(4 + 2 + 8 + 256, 4 + 2 + 8 + 256 + 8))
       .toEqual(Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]))
     expect(frame[4 + 2 + 8 + 256 + 8 + 1 + 4 + 4]! & 1).toBe(0)
     expect(() => decodeVoiceWorkerResponse(Uint8Array.of(1, 0x86))).toThrow(VoiceCallError)
-    expect(() => decodeVoiceWorkerResponse(Uint8Array.of(2, 0x86, 0))).toThrow(VoiceCallError)
-    expect(() => decodeVoiceWorkerResponse(Uint8Array.of(2, 0xff, 0))).toThrow(VoiceCallError)
+    expect(() => decodeVoiceWorkerResponse(Uint8Array.of(3, 0x86, 0))).toThrow(VoiceCallError)
+    expect(() => decodeVoiceWorkerResponse(Uint8Array.of(3, 0xff, 0))).toThrow(VoiceCallError)
+  })
+
+  it('encodes bounded TURN REST credentials for the native worker', () => {
+    const frame = encodeVoiceWorkerRequest({
+      tag: 0x03, callId: 11n, gB: new Uint8Array(256).fill(4),
+      config: {
+        initializationTimeoutMs: 5_000, receiveTimeoutMs: 5_000,
+        enableP2p: true, allowTcp: false, protocolV1: true,
+        enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
+        rtcServers: [{
+          id: 7, host: 'turn.example.test', port: 3478,
+          username: '1900000000:call', password: 'credential', turn: true, tcp: false,
+        }],
+      },
+    })
+
+    expect(frame[4]).toBe(3)
+    expect(frame[4 + 2 + 8 + 256 + 11]).toBe(1)
+    expect(frame.includes(Buffer.from('turn.example.test'))).toBe(true)
+    expect(frame.includes(Buffer.from('1900000000:call'))).toBe(true)
+    expect(frame.includes(Buffer.from('credential'))).toBe(true)
   })
 })
 
@@ -195,12 +216,12 @@ describeUnix('VoiceWorkerSocketClient', () => {
     const fingerprint = Long.fromInt(-7)
     const server = await fakeServer((request, socket) => {
       switch (tag(request)) {
-        case 0x01: socket.end(response(Buffer.concat([Buffer.from([2, 0x81]), Buffer.from(gaHash)]))); break
-        case 0x02: socket.end(response(Buffer.concat([Buffer.from([2, 0x82]), Buffer.from(gB)]))); break
-        case 0x03: socket.end(response(Buffer.concat([Buffer.from([2, 0x83]), Buffer.from(gA), i64le(fingerprint)]))); break
-        case 0x04: socket.end(response(Buffer.concat([Buffer.from([2, 0x84]), i64le(fingerprint)]))); break
-        case 0x05: socket.end(response(Buffer.concat([Buffer.from([2, 0x85]), request.subarray(14, 22)]))); break
-        case 0x06: socket.end(response(Uint8Array.of(2, 0x86))); break
+        case 0x01: socket.end(response(Buffer.concat([Buffer.from([3, 0x81]), Buffer.from(gaHash)]))); break
+        case 0x02: socket.end(response(Buffer.concat([Buffer.from([3, 0x82]), Buffer.from(gB)]))); break
+        case 0x03: socket.end(response(Buffer.concat([Buffer.from([3, 0x83]), Buffer.from(gA), i64le(fingerprint)]))); break
+        case 0x04: socket.end(response(Buffer.concat([Buffer.from([3, 0x84]), i64le(fingerprint)]))); break
+        case 0x05: socket.end(response(Buffer.concat([Buffer.from([3, 0x85]), request.subarray(14, 22)]))); break
+        case 0x06: socket.end(response(Uint8Array.of(3, 0x86))); break
         default: socket.destroy()
       }
     })
@@ -233,14 +254,14 @@ describeUnix('VoiceWorkerSocketClient', () => {
     const server = await fakeServer((request, socket) => {
       switch (tag(request)) {
         case 0x03:
-          socket.end(response(Buffer.concat([Buffer.from([2, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
+          socket.end(response(Buffer.concat([Buffer.from([3, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
           return
         case 0x0b:
           if (workerAcknowledged) {
-            socket.end(response(Buffer.from([2, 0x8d])))
+            socket.end(response(Buffer.from([3, 0x8d])))
             return
           }
-          socket.end(response(Buffer.from([2, 0x8c, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 2, 4, 5])))
+          socket.end(response(Buffer.from([3, 0x8c, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 2, 4, 5])))
           return
         case 0x0c:
           ackRequests++
@@ -250,7 +271,7 @@ describeUnix('VoiceWorkerSocketClient', () => {
           }
           workerAcknowledged = true
           acknowledged.resolve()
-          socket.end(response(Buffer.from([2, 0x8e, 0, 0, 0, 0, 0, 0, 0, 1])))
+          socket.end(response(Buffer.from([3, 0x8e, 0, 0, 0, 0, 0, 0, 0, 1])))
           return
         default:
           socket.destroy()
@@ -283,11 +304,11 @@ describeUnix('VoiceWorkerSocketClient', () => {
     const server = await fakeServer((request, socket) => {
       switch (tag(request)) {
         case 0x03:
-          socket.end(response(Buffer.concat([Buffer.from([2, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
+          socket.end(response(Buffer.concat([Buffer.from([3, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
           return
         case 0x0b:
           polls++
-          socket.end(response(Buffer.from([2, 0x8c, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 4])))
+          socket.end(response(Buffer.from([3, 0x8c, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 4])))
           return
         default:
           socket.destroy()
@@ -317,7 +338,7 @@ describeUnix('VoiceWorkerSocketClient', () => {
     const server = await fakeServer((request, socket) => {
       switch (tag(request)) {
         case 0x03:
-          socket.end(response(Buffer.concat([Buffer.from([2, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
+          socket.end(response(Buffer.concat([Buffer.from([3, 0x83]), Buffer.alloc(256, 7), i64le(Long.ONE)])))
           return
         case 0x0b:
           socket.once('close', () => pollClosed.resolve())
@@ -325,7 +346,7 @@ describeUnix('VoiceWorkerSocketClient', () => {
           return
         case 0x06:
           hangupSeen.resolve()
-          socket.end(response(Buffer.from([2, 0x86])))
+          socket.end(response(Buffer.from([3, 0x86])))
           return
         default:
           socket.destroy()
@@ -367,7 +388,7 @@ describeUnix('VoiceWorkerSocketClient', () => {
         socket.end()
         return
       }
-      socket.end(response(Buffer.concat([Buffer.from([2, 0x85]), request.subarray(14, 22)])))
+      socket.end(response(Buffer.concat([Buffer.from([3, 0x85]), request.subarray(14, 22)])))
     })
     const client = new VoiceWorkerSocketClient({ socketPath: server.path })
 
@@ -394,18 +415,18 @@ describeUnix('VoiceWorkerSocketClient', () => {
             socket.end()
             return
           }
-          socket.end(response(Buffer.concat([Buffer.from([2, 0x87]), request.subarray(14, 22), capability])))
+          socket.end(response(Buffer.concat([Buffer.from([3, 0x87]), request.subarray(14, 22), capability])))
           return
         }
         case 0x08:
           expect(request.subarray(14, 46)).toEqual(capability)
-          socket.end(response(Uint8Array.of(2, 0x88)))
+          socket.end(response(Uint8Array.of(3, 0x88)))
           return
         case 0x09:
-          socket.end(response(Buffer.concat([Buffer.from([2, 0x89]), Buffer.alloc(1_920, 4)])))
+          socket.end(response(Buffer.concat([Buffer.from([3, 0x89]), Buffer.alloc(1_920, 4)])))
           return
         case 0x0a:
-          socket.end(response(Uint8Array.of(2, 0x8b)))
+          socket.end(response(Uint8Array.of(3, 0x8b)))
           return
         default:
           socket.destroy()
@@ -435,8 +456,8 @@ describeUnix('VoiceWorkerSocketClient', () => {
 
   it('does not retry signaling worker errors or invalid responses', async () => {
     const cases: Array<{ reply: Buffer, code: string }> = [
-      { reply: response(Uint8Array.of(2, 0xff, 2)), code: 'CALL_OCCUPY_FAILED' },
-      { reply: response(Uint8Array.of(2, 0x85)), code: 'CALL_MEDIA_UNAVAILABLE' },
+      { reply: response(Uint8Array.of(3, 0xff, 2)), code: 'CALL_OCCUPY_FAILED' },
+      { reply: response(Uint8Array.of(3, 0x85)), code: 'CALL_MEDIA_UNAVAILABLE' },
     ]
     for (const testCase of cases) {
       const server = await fakeServer((_request, socket) => socket.end(testCase.reply))
@@ -463,7 +484,7 @@ describeUnix('VoiceWorkerSocketClient', () => {
     const server = await fakeServer((request, socket) => {
       requestCount++
       if (requestCount === 1) return
-      socket.end(response(Buffer.concat([Buffer.from([2, 0x85]), request.subarray(14, 22)])))
+      socket.end(response(Buffer.concat([Buffer.from([3, 0x85]), request.subarray(14, 22)])))
     })
     const client = new VoiceWorkerSocketClient({ socketPath: server.path, timeoutMs: 1_000 })
 
@@ -486,7 +507,7 @@ describeUnix('VoiceWorkerSocketClient', () => {
 
   it('fails closed for worker errors, bad frames, short reads, timeouts, and aborts', async () => {
     const cases: Array<{ reply: (socket: Socket) => void, timeoutMs?: number, abort?: boolean, code: string }> = [
-      { reply: (socket) => socket.end(response(Uint8Array.of(2, 0xff, 2))), code: 'CALL_OCCUPY_FAILED' },
+      { reply: (socket) => socket.end(response(Uint8Array.of(3, 0xff, 2))), code: 'CALL_OCCUPY_FAILED' },
       { reply: (socket) => socket.end(Buffer.from([0, 1, 0, 1, 2])), code: 'CALL_MEDIA_UNAVAILABLE' },
       { reply: (socket) => socket.end(Buffer.from([0, 0, 0, 2, 2])), code: 'CALL_MEDIA_UNAVAILABLE' },
       { reply: () => {}, timeoutMs: 20, code: 'CALL_MEDIA_UNAVAILABLE' },
@@ -508,7 +529,7 @@ describeUnix('VoiceWorkerSocketClient', () => {
     const gB = new Uint8Array(256).fill(7)
     const server = await fakeServer((request, socket) => {
       expect(tag(request)).toBe(0x02)
-      socket.end(response(Buffer.concat([Buffer.from([2, 0x82]), Buffer.from(gB)])))
+      socket.end(response(Buffer.concat([Buffer.from([3, 0x82]), Buffer.from(gB)])))
     })
     const registry = new CallRegistry({ worker: new VoiceWorkerSocketClient({ socketPath: server.path }) })
 

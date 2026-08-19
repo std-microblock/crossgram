@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define CROSSGRAM_TGCALLS_SHIM_ABI_VERSION UINT32_C(3)
+#define CROSSGRAM_TGCALLS_SHIM_ABI_VERSION UINT32_C(4)
 #define CROSSGRAM_TGCALLS_SHIM_PCM_SAMPLE_RATE_HZ 48000u
 #define CROSSGRAM_TGCALLS_SHIM_PCM_CHANNELS 1u
 #define CROSSGRAM_TGCALLS_SHIM_PCM_SAMPLE_BYTES 2u
@@ -26,6 +26,7 @@ extern "C" {
 #define CROSSGRAM_TGCALLS_SHIM_PCM_QUEUE_CAPACITY 4u
 #define CROSSGRAM_TGCALLS_SHIM_AUTH_KEY_BYTES 256u
 #define CROSSGRAM_TGCALLS_SHIM_MAX_ENDPOINTS 16u
+#define CROSSGRAM_TGCALLS_SHIM_MAX_RTC_SERVERS 16u
 #define CROSSGRAM_TGCALLS_SHIM_MAX_SIGNAL_BYTES 32768u
 
 /** Opaque full session handle. */
@@ -75,6 +76,17 @@ typedef struct crossgram_tgcalls_endpoint {
   crossgram_tgcalls_endpoint_type type;
   uint8_t peer_tag[16];
 } crossgram_tgcalls_endpoint;
+
+/** One STUN/TURN server consumed by InstanceImpl's WebRTC ICE allocator. */
+typedef struct crossgram_tgcalls_rtc_server {
+  uint8_t id;
+  crossgram_tgcalls_string_view host;
+  uint16_t port;
+  crossgram_tgcalls_string_view username;
+  crossgram_tgcalls_string_view password;
+  uint8_t is_turn;
+  uint8_t is_tcp;
+} crossgram_tgcalls_rtc_server;
 
 /**
  * Public, non-secret transport options. Fields are copied synchronously.
@@ -141,6 +153,8 @@ CROSSGRAM_TGCALLS_SHIM_API crossgram_tgcalls_shim_status crossgram_tgcalls_sessi
     const crossgram_tgcalls_session_auth* auth,
     const crossgram_tgcalls_endpoint* endpoints,
     uint32_t endpoint_count,
+    const crossgram_tgcalls_rtc_server* rtc_servers,
+    uint32_t rtc_server_count,
     const crossgram_tgcalls_session_callbacks* callbacks,
     crossgram_tgcalls_shim** out_session);
 

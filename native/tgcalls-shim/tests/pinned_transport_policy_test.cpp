@@ -36,6 +36,10 @@ int main() {
   local.config.enable_p2p = 0;
   Check(!IsControlledLocalP2p(local));
 
+  SessionParameters turn;
+  turn.rtc_servers.push_back({7, "turn.example.test", 3478, "user", "password", true, false});
+  Check(IsControlledLocalP2p(turn));
+
   for (const auto type : {CROSSGRAM_TGCALLS_ENDPOINT_INET, CROSSGRAM_TGCALLS_ENDPOINT_UDP_RELAY,
                           CROSSGRAM_TGCALLS_ENDPOINT_TCP_RELAY}) {
     auto unsupported = LocalParameters();

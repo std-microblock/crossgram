@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import type { VoiceWorkerCall } from '@mtproto-relay/bridge'
-import { VoiceMediaAttachment, VoiceWorkerSocketClient } from '@mtproto-relay/bridge'
+import { VOICE_WORKER_PROTOCOL_VERSION, VoiceMediaAttachment, VoiceWorkerSocketClient } from '@mtproto-relay/bridge'
 import { Context } from 'cordis'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { QQNTPlatform } from './index.js'
@@ -108,7 +108,7 @@ const TEST_CALL_ID = 1n
 
 async function fakeControl(socketPath: string, tag: 0x0d | 0x0e | 0x0f, data?: Uint8Array): Promise<Buffer> {
   const payload = Buffer.allocUnsafe(2 + 8 + (data?.byteLength ?? 0))
-  payload[0] = 2
+  payload[0] = VOICE_WORKER_PROTOCOL_VERSION
   payload[1] = tag
   payload.writeBigUInt64BE(TEST_CALL_ID, 2)
   if (data) payload.set(data, 10)
@@ -158,8 +158,8 @@ async function fakeControl(socketPath: string, tag: 0x0d | 0x0e | 0x0f, data?: U
 async function takeCapture(socketPath: string): Promise<Uint8Array | undefined> {
   const response = await fakeControl(socketPath, 0x0d)
   try {
-    if (response.equals(Buffer.from([2, 0x8a]))) return
-    if (response.byteLength === 2 + 1_920 && response[0] === 2 && response[1] === 0x89) {
+    if (response.equals(Buffer.from([VOICE_WORKER_PROTOCOL_VERSION, 0x8a]))) return
+    if (response.byteLength === 2 + 1_920 && response[0] === VOICE_WORKER_PROTOCOL_VERSION && response[1] === 0x89) {
       return new Uint8Array(response.subarray(2))
     }
     throw new Error('fake worker capture response is invalid')
@@ -181,7 +181,7 @@ async function waitForCapture(socketPath: string): Promise<Uint8Array> {
 async function injectPlayout(socketPath: string, value: Uint8Array): Promise<void> {
   const response = await fakeControl(socketPath, 0x0e, value)
   try {
-    expect(response).toEqual(Buffer.from([2, 0x88]))
+    expect(response).toEqual(Buffer.from([VOICE_WORKER_PROTOCOL_VERSION, 0x88]))
   } finally {
     response.fill(0)
   }
@@ -190,7 +190,7 @@ async function injectPlayout(socketPath: string, value: Uint8Array): Promise<voi
 async function fakeStats(socketPath: string): Promise<{ captured: number, playout: number }> {
   const response = await fakeControl(socketPath, 0x0f)
   try {
-    if (response.byteLength !== 10 || response[0] !== 2 || response[1] !== 0x8f) {
+    if (response.byteLength !== 10 || response[0] !== VOICE_WORKER_PROTOCOL_VERSION || response[1] !== 0x8f) {
       throw new Error('fake worker stats response is invalid')
     }
     return { captured: response.readUInt32BE(2), playout: response.readUInt32BE(6) }

@@ -2,7 +2,7 @@
 
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 pub const MAX_FRAME_BYTES: usize = 65_536;
 pub const MAX_SIGNAL_BYTES: usize = 32_768;
 pub const PCM_FRAME_BYTES: usize = 1_920;
@@ -10,6 +10,7 @@ pub const PCM_CAPABILITY_BYTES: usize = 32;
 pub const DH_PUBLIC_BYTES: usize = 256;
 pub const GA_HASH_BYTES: usize = 32;
 pub const MAX_ENDPOINTS: usize = 16;
+pub const MAX_RTC_SERVERS: usize = 16;
 pub const MAX_HOST_BYTES: usize = 255;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,17 @@ pub struct MediaEndpoint {
     pub peer_tag: [u8; 16],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RtcServer {
+    pub id: u8,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub is_turn: bool,
+    pub is_tcp: bool,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaStartConfig {
@@ -44,14 +56,16 @@ pub struct MediaStartConfig {
     pub enable_ns: bool,
     pub enable_agc: bool,
     pub endpoints: Vec<MediaEndpoint>,
+    pub rtc_servers: Vec<RtcServer>,
 }
 
 impl MediaStartConfig {
     pub fn validate(&self) -> Result<(), IpcError> {
         if self.initialization_timeout_ms == 0
             || self.receive_timeout_ms == 0
-            || (self.endpoints.is_empty() && !self.enable_p2p)
+            || (self.endpoints.is_empty() && self.rtc_servers.is_empty() && !self.enable_p2p)
             || self.endpoints.len() > MAX_ENDPOINTS
+            || self.rtc_servers.len() > MAX_RTC_SERVERS
         {
             return Err(IpcError::Malformed);
         }
@@ -62,6 +76,22 @@ impl MediaStartConfig {
                 || endpoint.ipv4.contains('\0')
                 || endpoint.ipv6.contains('\0')
                 || (endpoint.ipv4.is_empty() && endpoint.ipv6.is_empty())
+        }) {
+            return Err(IpcError::Malformed);
+        }
+        if self.rtc_servers.iter().any(|server| {
+            server.id == 0
+                || server.port == 0
+                || server.host.is_empty()
+                || server.host.len() > MAX_HOST_BYTES
+                || server.username.len() > MAX_HOST_BYTES
+                || server.password.len() > MAX_HOST_BYTES
+                || server.host.contains('\0')
+                || server.username.contains('\0')
+                || server.password.contains('\0')
+                || (server.is_turn && (server.username.is_empty() || server.password.is_empty()))
+                || (!server.is_turn && (!server.username.is_empty() || !server.password.is_empty()))
+                || (server.is_tcp && !server.is_turn)
         }) {
             return Err(IpcError::Malformed);
         }
@@ -647,7 +677,11 @@ impl<'a> PayloadReader<'a> {
             return Err(IpcError::Malformed);
         }
         let endpoint_count = usize::from(self.u8()?);
-        if endpoint_count > MAX_ENDPOINTS || (endpoint_count == 0 && flags & 1 == 0) {
+        let rtc_server_count = usize::from(self.u8()?);
+        if endpoint_count > MAX_ENDPOINTS
+            || rtc_server_count > MAX_RTC_SERVERS
+            || (endpoint_count == 0 && rtc_server_count == 0 && flags & 1 == 0)
+        {
             return Err(IpcError::Malformed);
         }
         let mut endpoints = Vec::with_capacity(endpoint_count);
@@ -676,6 +710,31 @@ impl<'a> PayloadReader<'a> {
                 peer_tag,
             });
         }
+        let mut rtc_servers = Vec::with_capacity(rtc_server_count);
+        for _ in 0..rtc_server_count {
+            let id = self.u8()?;
+            let port =
+                u16::from_be_bytes(self.take(2)?.try_into().map_err(|_| IpcError::Malformed)?);
+            let server_flags = self.u8()?;
+            if server_flags & !3 != 0 {
+                return Err(IpcError::Malformed);
+            }
+            let host =
+                String::from_utf8(self.bytes(MAX_HOST_BYTES)?).map_err(|_| IpcError::Malformed)?;
+            let username =
+                String::from_utf8(self.bytes(MAX_HOST_BYTES)?).map_err(|_| IpcError::Malformed)?;
+            let password =
+                String::from_utf8(self.bytes(MAX_HOST_BYTES)?).map_err(|_| IpcError::Malformed)?;
+            rtc_servers.push(RtcServer {
+                id,
+                host,
+                port,
+                username,
+                password,
+                is_turn: server_flags & 1 != 0,
+                is_tcp: server_flags & 2 != 0,
+            });
+        }
         let config = MediaStartConfig {
             is_outgoing: is_outgoing == 1,
             initialization_timeout_ms,
@@ -687,6 +746,7 @@ impl<'a> PayloadReader<'a> {
             enable_ns: flags & 16 != 0,
             enable_agc: flags & 32 != 0,
             endpoints,
+            rtc_servers,
         };
         config.validate()?;
         Ok(config)
@@ -761,6 +821,7 @@ impl PayloadWriter {
             | (u8::from(config.enable_ns) << 4)
             | (u8::from(config.enable_agc) << 5));
         self.u8(u8::try_from(config.endpoints.len()).map_err(|_| IpcError::Malformed)?);
+        self.u8(u8::try_from(config.rtc_servers.len()).map_err(|_| IpcError::Malformed)?);
         for endpoint in &config.endpoints {
             self.i64(endpoint.id);
             self.output.extend_from_slice(&endpoint.port.to_be_bytes());
@@ -768,6 +829,14 @@ impl PayloadWriter {
             self.array(&endpoint.peer_tag);
             self.bytes(endpoint.ipv4.as_bytes(), MAX_HOST_BYTES)?;
             self.bytes(endpoint.ipv6.as_bytes(), MAX_HOST_BYTES)?;
+        }
+        for server in &config.rtc_servers {
+            self.u8(server.id);
+            self.output.extend_from_slice(&server.port.to_be_bytes());
+            self.u8(u8::from(server.is_turn) | (u8::from(server.is_tcp) << 1));
+            self.bytes(server.host.as_bytes(), MAX_HOST_BYTES)?;
+            self.bytes(server.username.as_bytes(), MAX_HOST_BYTES)?;
+            self.bytes(server.password.as_bytes(), MAX_HOST_BYTES)?;
         }
         Ok(())
     }
@@ -799,11 +868,20 @@ mod tests {
                 kind: EndpointKind::UdpRelay,
                 peer_tag: [1; 16],
             }],
+            rtc_servers: vec![RtcServer {
+                id: 7,
+                host: "turn.example.test".into(),
+                port: 3478,
+                username: "1900000000:call".into(),
+                password: "credential".into(),
+                is_turn: true,
+                is_tcp: false,
+            }],
         }
     }
 
     #[test]
-    fn request_round_trips_are_exact_for_v2() {
+    fn request_round_trips_are_exact_for_v3() {
         let requests = vec![
             Request::PrepareCaller { call_id: 9 },
             Request::PrepareRecipient {
@@ -873,13 +951,13 @@ mod tests {
         );
         assert_eq!(
             recipient_bytes,
-            [2, 0x84, 0xf9, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+            [3, 0x84, 0xf9, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
         );
         assert_eq!(
             encode_response(&Response::SignalForwarded { request_id: 9 }).unwrap(),
-            [2, 0x85, 0, 0, 0, 0, 0, 0, 0, 9]
+            [3, 0x85, 0, 0, 0, 0, 0, 0, 0, 9]
         );
-        assert_eq!(encode_response(&Response::HungUp).unwrap(), vec![2, 0x86]);
+        assert_eq!(encode_response(&Response::HungUp).unwrap(), vec![3, 0x86]);
         let attached = Response::MediaAttached {
             request_id: 9,
             capability: [7; PCM_CAPABILITY_BYTES],
@@ -895,7 +973,7 @@ mod tests {
             decode_response(&encode_response(&pcm).unwrap()).unwrap(),
             pcm
         );
-        assert_eq!(decode_response(&[2, 0x8a]).unwrap(), Response::PcmPending);
+        assert_eq!(decode_response(&[3, 0x8a]).unwrap(), Response::PcmPending);
     }
 
     #[test]
@@ -903,6 +981,7 @@ mod tests {
         let mut direct = config(true);
         direct.enable_p2p = true;
         direct.endpoints.clear();
+        direct.rtc_servers.clear();
         assert_eq!(
             decode_request(
                 &encode_request(&Request::CompleteCaller {
@@ -919,6 +998,7 @@ mod tests {
 
         let mut relay = config(true);
         relay.endpoints.clear();
+        relay.rtc_servers.clear();
         assert!(
             encode_request(&Request::CompleteCaller {
                 call_id: 9,
@@ -930,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_lengths_have_no_v1_fields_or_trailing_data() {
+    fn exact_lengths_have_no_trailing_data() {
         assert_eq!(
             encode_request(&Request::CompleteRecipient {
                 call_id: 9,
@@ -940,7 +1020,31 @@ mod tests {
             })
             .unwrap()
             .len(),
-            2 + 8 + DH_PUBLIC_BYTES + 8 + 1 + 4 + 4 + 1 + 1 + 8 + 2 + 1 + 16 + 2 + 9 + 2
+            2 + 8
+                + DH_PUBLIC_BYTES
+                + 8
+                + 1
+                + 4
+                + 4
+                + 1
+                + 1
+                + 1
+                + 8
+                + 2
+                + 1
+                + 16
+                + 2
+                + 9
+                + 2
+                + 1
+                + 2
+                + 1
+                + 2
+                + 17
+                + 2
+                + 15
+                + 2
+                + 10
         );
         assert_eq!(
             encode_request(&Request::Signal {

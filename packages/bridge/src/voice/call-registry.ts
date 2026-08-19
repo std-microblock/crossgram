@@ -2,7 +2,9 @@ import { createHmac, randomBytes } from 'node:crypto'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import type { PlatformSession } from '../platform.js'
-import { VoiceMediaAttachment, type VoiceCallMediaProvider, type VoiceWorkerMediaEndpoint } from './media.js'
+import {
+  VoiceMediaAttachment, type VoiceCallMediaProvider, type VoiceMediaTerminalPhase, type VoiceWorkerMediaEndpoint,
+} from './media.js'
 import type { VoiceWorkerEvent, VoiceWorkerMediaStartConfig } from './voice-worker-client.js'
 
 export type VoiceCallState = 'initializing' | 'requested' | 'received' | 'accepted' | 'active' | 'discarded'
@@ -106,6 +108,8 @@ export interface CallRegistryOptions {
   readonly media?: VoiceCallMediaProvider
   /** Required to make a call media-active; absent providers fail closed. */
   readonly mediaStartProvider?: VoiceMediaStartProvider
+  /** Redacted lifecycle diagnostics; never includes call IDs or media. */
+  readonly onMediaDiagnostic?: (phase: VoiceMediaTerminalPhase, code: string) => void
 }
 
 export interface CallRequest {
@@ -227,6 +231,7 @@ export class CallRegistry {
   private readonly _replay?: (session: PlatformSession, update: tl.RawUpdatePhoneCall, authKeyId: string) => number | Promise<number>
   private readonly _media?: VoiceCallMediaProvider
   private readonly _mediaStartProvider?: VoiceMediaStartProvider
+  private readonly _onMediaDiagnostic?: CallRegistryOptions['onMediaDiagnostic']
   readonly #incomingHmacSecret = randomBytes(32)
 
   constructor(options: CallRegistryOptions = {}) {
@@ -239,6 +244,7 @@ export class CallRegistry {
     this._replay = options.replay
     this._media = options.media
     this._mediaStartProvider = options.mediaStartProvider
+    this._onMediaDiagnostic = options.onMediaDiagnostic
   }
 
   async request(input: CallRequest): Promise<tl.phone.RawPhoneCall> {
@@ -380,6 +386,7 @@ export class CallRegistry {
     gB: Uint8Array,
     protocol: tl.TypePhoneCallProtocol,
     excludeAuthKeyId?: string,
+    afterResponse?: (task: () => void | Promise<void>) => void,
   ): Promise<tl.phone.RawPhoneCall> {
     this._requireAudioProtocol(protocol)
     this._requirePublicValue(gB)
@@ -391,7 +398,7 @@ export class CallRegistry {
         return this._wrapPhoneCall(this._waiting(call))
       }
       if (call.state === 'accepted') {
-        await this._finishAccept(call, excludeAuthKeyId)
+        await this._finishAcceptAfterResponse(call, excludeAuthKeyId, afterResponse)
         return this._wrapPhoneCall(this._waiting(call))
       }
       // phone.receivedCall is only a delivery/ringing acknowledgement. Some
@@ -427,7 +434,7 @@ export class CallRegistry {
       call.keyFingerprint = cloneLong(status.keyFingerprint).toSigned()
       call.state = 'accepted'
       await this._publishTransition(call, excludeAuthKeyId)
-      await this._finishAccept(call, excludeAuthKeyId)
+      await this._finishAcceptAfterResponse(call, excludeAuthKeyId, afterResponse)
       // Telegram Desktop requires phone.acceptCall to return phoneCallWaiting;
       // phoneCallAccepted is the caller-side update, while the recipient moves
       // forward on the subsequent active phoneCall update.
@@ -855,7 +862,7 @@ export class CallRegistry {
         throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
       }
       const media = await this._media.start(this._workerCall(call), call.session, endpoint)
-      const attachment = new VoiceMediaAttachment(media, endpoint)
+      const attachment = new VoiceMediaAttachment(media, endpoint, this._onMediaDiagnostic)
       call.media = attachment
       void attachment.finished.then(() => this._terminalMedia(call))
     } catch {
@@ -882,6 +889,21 @@ export class CallRegistry {
     // phoneCallAccepted in its RPC response, then must also receive the active
     // update that a real caller's phone.confirmCall would normally produce.
     await this._publishTransition(call)
+  }
+
+  private async _finishAcceptAfterResponse(
+    call: StoredCall,
+    excludeAuthKeyId: string | undefined,
+    afterResponse: ((task: () => void | Promise<void>) => void) | undefined,
+  ): Promise<void> {
+    if (!afterResponse) {
+      await this._finishAccept(call, excludeAuthKeyId)
+      return
+    }
+    afterResponse(() => this._serialize(call.session.platformSessionId, async () => {
+      if (this._calls.get(this._key(call.id)) !== call || call.state !== 'accepted') return
+      await this._finishAccept(call, excludeAuthKeyId)
+    }))
   }
 
   private async _publishTransition(call: StoredCall, excludeAuthKeyId?: string): Promise<void> {
@@ -1030,7 +1052,9 @@ export class CallRegistry {
   ): VoiceWorkerMediaStartConfig {
     const enableP2p = call.negotiatedProtocol.udpP2p && config.enableP2p
     const effectiveConfig = { ...config, enableP2p }
-    if (!effectiveConfig.endpoints.length && !enableP2p) throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
+    if (!effectiveConfig.endpoints.length && !(effectiveConfig.rtcServers?.length) && !enableP2p) {
+      throw new VoiceCallError('CALL_MEDIA_UNAVAILABLE')
+    }
     call.connections = this._connectionsFromConfig(effectiveConfig)
     call.p2pAllowed = enableP2p
     call.negotiatedProtocol = { ...call.negotiatedProtocol, udpP2p: enableP2p }
@@ -1038,10 +1062,16 @@ export class CallRegistry {
   }
 
   private _connectionsFromConfig(config: VoiceWorkerMediaStartConfig): tl.TypePhoneConnection[] {
-    return config.endpoints.map((endpoint) => ({
+    const legacy: tl.TypePhoneConnection[] = config.endpoints.map((endpoint) => ({
       _: 'phoneConnection', id: cloneLong(endpoint.id), ip: endpoint.ipv4, ipv6: endpoint.ipv6,
       port: endpoint.port, peerTag: endpoint.peerTag.slice(), tcp: endpoint.kind === 'tcp-relay',
     }))
+    const webRtc: tl.TypePhoneConnection[] = (config.rtcServers ?? []).map((server) => ({
+      _: 'phoneConnectionWebrtc', id: Long.fromInt(server.id), ip: server.host, ipv6: '', port: server.port,
+      username: server.username, password: server.password,
+      turn: server.turn || undefined, stun: !server.turn || undefined,
+    }))
+    return [...legacy, ...webRtc]
   }
 
   private _workerCall(call: StoredCall, mediaStartConfig?: VoiceWorkerMediaStartConfig): VoiceWorkerCall {

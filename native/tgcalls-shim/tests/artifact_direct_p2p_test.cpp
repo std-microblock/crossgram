@@ -22,6 +22,7 @@ struct Observed final {
   std::weak_ptr<const std::array<uint8_t, CROSSGRAM_TGCALLS_SHIM_AUTH_KEY_BYTES>> auth_key;
   std::function<void(const std::vector<uint8_t>&)> emit_signaling;
   std::vector<uint8_t> outbound;
+  std::vector<tgcalls::RtcServer> rtc_servers;
   uint32_t stop_and_waits = 0;
   uint32_t destroyed = 0;
 };
@@ -88,6 +89,7 @@ std::unique_ptr<tgcalls::Instance> CreateNoNetworkInstance(const std::string& ve
                                           ? CROSSGRAM_TGCALLS_PROTOCOL_V1
                                           : CROSSGRAM_TGCALLS_PROTOCOL_V0;
   observed->direct_ice_only = descriptor.endpoints.empty() && descriptor.rtcServers.empty();
+  observed->rtc_servers = descriptor.rtcServers;
   observed->audio_creator_configured = static_cast<bool>(descriptor.createAudioDeviceModule);
   observed->is_outgoing = descriptor.encryptionKey.isOutgoing;
   observed->auth_first_byte = descriptor.encryptionKey.value->front();
@@ -130,7 +132,7 @@ void TestDirectP2pStartUsesNoNetworkCreator() {
   crossgram_tgcalls_shim* session = nullptr;
 
   Check(crossgram_tgcalls_session_create(CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &auth, nullptr, 0,
-                                         &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+                                         nullptr, 0, &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   Check(crossgram_tgcalls_session_start(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   Check(state.created && state.direct_ice_only && state.audio_creator_configured);
   Check(state.version == "5.0.0");
@@ -150,6 +152,45 @@ void TestDirectP2pStartUsesNoNetworkCreator() {
   Check(state.stop_and_waits == 1 && state.destroyed == 1 && state.auth_key.expired());
   Check(crossgram_tgcalls_session_destroy(&session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   Check(session == nullptr);
+  crossgram::tgcalls_shim::ResetArtifactInstanceCreatorForTest();
+}
+
+void TestTurnServerReachesInstanceDescriptor() {
+  Observed state;
+  observed = &state;
+  crossgram::tgcalls_shim::SetArtifactInstanceCreatorForTest(CreateNoNetworkInstance);
+
+  std::array<uint8_t, CROSSGRAM_TGCALLS_SHIM_AUTH_KEY_BYTES> key{};
+  auto config = DirectConfig();
+  config.enable_p2p = 0;
+  const auto auth = Auth(&key);
+  const char host[] = "turn.example.test";
+  const char username[] = "1900000000:call";
+  const char password[] = "credential";
+  const crossgram_tgcalls_rtc_server turn = {
+      .id = 7,
+      .host = {.data = host, .length = sizeof(host) - 1},
+      .port = 3478,
+      .username = {.data = username, .length = sizeof(username) - 1},
+      .password = {.data = password, .length = sizeof(password) - 1},
+      .is_turn = 1,
+      .is_tcp = 0,
+  };
+  const crossgram_tgcalls_session_callbacks callbacks{};
+  crossgram_tgcalls_shim* session = nullptr;
+
+  Check(crossgram_tgcalls_session_create(CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &auth, nullptr, 0,
+                                         &turn, 1, &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  Check(crossgram_tgcalls_session_start(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  Check(state.created && !state.direct_ice_only && state.rtc_servers.size() == 1);
+  Check(state.rtc_servers[0].id == 7 && state.rtc_servers[0].host == host);
+  Check(state.rtc_servers[0].port == 3478 && state.rtc_servers[0].login == username);
+  Check(state.rtc_servers[0].password == password && state.rtc_servers[0].isTurn);
+  Check(!state.rtc_servers[0].isTcp);
+
+  Check(crossgram_tgcalls_session_stop(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  Check(crossgram_tgcalls_session_join(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+  Check(crossgram_tgcalls_session_destroy(&session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   crossgram::tgcalls_shim::ResetArtifactInstanceCreatorForTest();
 }
 
@@ -174,7 +215,7 @@ void TestRelayStartRemainsFailClosed() {
   crossgram_tgcalls_shim* session = nullptr;
 
   Check(crossgram_tgcalls_session_create(CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &auth, &relay, 1,
-                                         &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+                                         nullptr, 0, &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   Check(crossgram_tgcalls_session_start(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_BACKEND_UNAVAILABLE);
   Check(!state.created);
   Check(crossgram_tgcalls_session_stop(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
@@ -187,6 +228,7 @@ void TestRelayStartRemainsFailClosed() {
 
 int main() {
   TestDirectP2pStartUsesNoNetworkCreator();
+  TestTurnServerReachesInstanceDescriptor();
   TestRelayStartRemainsFailClosed();
   return 0;
 }

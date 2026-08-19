@@ -14,6 +14,7 @@ const cases = [
   ['bridge', bridgeConfig, [
     'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
     'blockedContentMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
+    'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
@@ -59,6 +60,10 @@ describe('plugin config schemas', () => {
       voiceWorkerSocketPath: '',
       voiceWorkerTimeoutMs: 5_000,
       voiceDirectIce: true,
+      voiceTurnHost: '',
+      voiceTurnPort: 3478,
+      voiceTurnSharedSecret: '',
+      voiceTurnTtlSeconds: 3_600,
     })
     expect(exporterConfig({ platformId: 'qqnt', platform: 'qq' })).toEqual({
       platformId: 'qqnt',

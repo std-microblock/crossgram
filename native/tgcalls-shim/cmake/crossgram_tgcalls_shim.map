@@ -1,4 +1,4 @@
-CROSSGRAM_TGCALLS_SHIM_3 {
+CROSSGRAM_TGCALLS_SHIM_4 {
   global:
     crossgram_tgcalls_shim_abi_version;
     crossgram_tgcalls_session_create;

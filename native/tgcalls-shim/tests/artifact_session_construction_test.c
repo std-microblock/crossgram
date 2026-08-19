@@ -37,7 +37,7 @@ int main(void) {
   crossgram_tgcalls_shim* session = NULL;
 
   Check(crossgram_tgcalls_session_create(CROSSGRAM_TGCALLS_SHIM_ABI_VERSION, &config, &auth, &endpoint,
-                                         1, &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
+                                         1, NULL, 0, &callbacks, &session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);
   Check(session != NULL);
   Check(crossgram_tgcalls_session_start(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_BACKEND_UNAVAILABLE);
   Check(crossgram_tgcalls_session_stop(session) == CROSSGRAM_TGCALLS_SHIM_STATUS_OK);

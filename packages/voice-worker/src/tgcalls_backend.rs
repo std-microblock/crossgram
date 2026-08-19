@@ -23,6 +23,7 @@ use crate::worker::{
 const PCM_SAMPLES: usize = PCM_FRAME_BYTES / size_of::<i16>();
 pub const AUTH_KEY_BYTES: usize = 256;
 pub const MAX_ENDPOINTS: usize = 16;
+pub const MAX_RTC_SERVERS: usize = 16;
 const OUTBOUND_SIGNAL_QUEUE_CAPACITY: usize = 16;
 const NO_CALLBACK_ERROR: NativeTgcallsStatus = u32::MAX;
 #[cfg(test)]
@@ -46,6 +47,17 @@ pub enum TgcallsEndpointKind {
     TcpRelay,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TgcallsRtcServer {
+    pub id: u8,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub is_turn: bool,
+    pub is_tcp: bool,
+}
+
 pub struct TgcallsTransportOptions {
     pub enable_p2p: bool,
     pub allow_tcp: bool,
@@ -67,14 +79,18 @@ pub struct TgcallsSessionConfig {
     pub auth_key: [u8; AUTH_KEY_BYTES],
     pub is_outgoing: bool,
     pub endpoints: Vec<TgcallsEndpoint>,
+    pub rtc_servers: Vec<TgcallsRtcServer>,
 }
 
 impl TgcallsSessionConfig {
     pub fn validate(&self) -> Result<(), MediaError> {
         if self.initialization_timeout_ms == 0
             || self.receive_timeout_ms == 0
-            || (self.endpoints.is_empty() && !self.transport.enable_p2p)
+            || (self.endpoints.is_empty()
+                && self.rtc_servers.is_empty()
+                && !self.transport.enable_p2p)
             || self.endpoints.len() > MAX_ENDPOINTS
+            || self.rtc_servers.len() > MAX_RTC_SERVERS
             || self.endpoints.iter().any(|endpoint| {
                 endpoint.port == 0
                     || endpoint.ipv4.len() > 255
@@ -82,6 +98,22 @@ impl TgcallsSessionConfig {
                     || endpoint.ipv4.contains('\0')
                     || endpoint.ipv6.contains('\0')
                     || (endpoint.ipv4.is_empty() && endpoint.ipv6.is_empty())
+            })
+            || self.rtc_servers.iter().any(|server| {
+                server.id == 0
+                    || server.port == 0
+                    || server.host.is_empty()
+                    || server.host.len() > 255
+                    || server.username.len() > 255
+                    || server.password.len() > 255
+                    || server.host.contains('\0')
+                    || server.username.contains('\0')
+                    || server.password.contains('\0')
+                    || (server.is_turn
+                        && (server.username.is_empty() || server.password.is_empty()))
+                    || (!server.is_turn
+                        && (!server.username.is_empty() || !server.password.is_empty()))
+                    || (server.is_tcp && !server.is_turn)
             })
         {
             return Err(MediaError);
@@ -108,6 +140,16 @@ impl TgcallsSessionConfig {
             endpoint.peer_tag.zeroize();
         }
         self.endpoints.clear();
+        for server in &mut self.rtc_servers {
+            server.id.zeroize();
+            server.host.zeroize();
+            server.port.zeroize();
+            server.username.zeroize();
+            server.password.zeroize();
+            server.is_turn.zeroize();
+            server.is_tcp.zeroize();
+        }
+        self.rtc_servers.clear();
     }
 }
 
@@ -142,7 +184,7 @@ pub const NATIVE_STATUS_ALLOCATION_FAILED: NativeTgcallsStatus = 6;
 pub const NATIVE_STATUS_INVALID_STATE: NativeTgcallsStatus = 7;
 pub const NATIVE_STATUS_BACKEND_UNAVAILABLE: NativeTgcallsStatus = 8;
 pub const NATIVE_STATUS_INTERNAL_ERROR: NativeTgcallsStatus = 9;
-pub const NATIVE_TGCALLS_ABI_VERSION: u32 = 3;
+pub const NATIVE_TGCALLS_ABI_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -210,6 +252,18 @@ pub struct NativeEndpoint {
     pub port: u16,
     pub kind: u32,
     pub peer_tag: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NativeRtcServer {
+    pub id: u8,
+    pub host: NativeStringView,
+    pub port: u16,
+    pub username: NativeStringView,
+    pub password: NativeStringView,
+    pub is_turn: u8,
+    pub is_tcp: u8,
 }
 
 #[repr(C)]
@@ -345,6 +399,8 @@ pub struct NativeSessionCreateInput {
     is_outgoing: u8,
     hosts: Vec<Vec<u8>>,
     endpoints: Vec<NativeEndpoint>,
+    rtc_strings: Vec<Vec<u8>>,
+    rtc_servers: Vec<NativeRtcServer>,
 }
 
 impl NativeSessionCreateInput {
@@ -379,6 +435,31 @@ impl NativeSessionCreateInput {
                 }
             })
             .collect();
+        let mut rtc_strings = Vec::with_capacity(config.rtc_servers.len() * 3);
+        for server in &config.rtc_servers {
+            rtc_strings.push(server.host.as_bytes().to_vec());
+            rtc_strings.push(server.username.as_bytes().to_vec());
+            rtc_strings.push(server.password.as_bytes().to_vec());
+        }
+        let rtc_servers = config
+            .rtc_servers
+            .iter()
+            .enumerate()
+            .map(|(index, server)| {
+                let host = &rtc_strings[index * 3];
+                let username = &rtc_strings[index * 3 + 1];
+                let password = &rtc_strings[index * 3 + 2];
+                NativeRtcServer {
+                    id: server.id,
+                    host: native_string_view(host),
+                    port: server.port,
+                    username: native_string_view(username),
+                    password: native_string_view(password),
+                    is_turn: u8::from(server.is_turn),
+                    is_tcp: u8::from(server.is_tcp),
+                }
+            })
+            .collect();
         Self {
             config: NativeSessionConfig {
                 initialization_timeout_ms: config.initialization_timeout_ms,
@@ -394,6 +475,8 @@ impl NativeSessionCreateInput {
             is_outgoing: u8::from(config.is_outgoing),
             hosts,
             endpoints,
+            rtc_strings,
+            rtc_servers,
         }
     }
 
@@ -422,6 +505,11 @@ impl NativeSessionCreateInput {
         &self.endpoints
     }
 
+    #[must_use]
+    pub fn rtc_servers(&self) -> &[NativeRtcServer] {
+        &self.rtc_servers
+    }
+
     fn zeroize(&mut self) {
         self.config.initialization_timeout_ms.zeroize();
         self.config.receive_timeout_ms.zeroize();
@@ -448,6 +536,23 @@ impl NativeSessionCreateInput {
             endpoint.peer_tag.zeroize();
         }
         self.endpoints.clear();
+        for value in &mut self.rtc_strings {
+            value.zeroize();
+        }
+        self.rtc_strings.clear();
+        for server in &mut self.rtc_servers {
+            server.id.zeroize();
+            server.host.data = core::ptr::null();
+            server.host.length.zeroize();
+            server.port.zeroize();
+            server.username.data = core::ptr::null();
+            server.username.length.zeroize();
+            server.password.data = core::ptr::null();
+            server.password.length.zeroize();
+            server.is_turn.zeroize();
+            server.is_tcp.zeroize();
+        }
+        self.rtc_servers.clear();
     }
 }
 
@@ -479,6 +584,8 @@ mod ffi {
             auth: *const NativeSessionAuth,
             endpoints: *const NativeEndpoint,
             endpoint_count: u32,
+            rtc_servers: *const NativeRtcServer,
+            rtc_server_count: u32,
             callbacks: *const NativeSessionCallbacks,
             out_session: *mut *mut Session,
         ) -> NativeTgcallsStatus;
@@ -521,6 +628,14 @@ mod ffi {
         } else {
             endpoints.as_ptr()
         };
+        let rtc_servers = input.rtc_servers();
+        let rtc_server_count =
+            u32::try_from(rtc_servers.len()).expect("validated RTC server count fits u32");
+        let rtc_servers = if rtc_servers.is_empty() {
+            core::ptr::null()
+        } else {
+            rtc_servers.as_ptr()
+        };
         // SAFETY: every referenced input lives for this synchronous C call and
         // the shim copies each typed input before it returns. The null pointer
         // is the ABI's required representation of an empty direct-P2P route.
@@ -531,6 +646,8 @@ mod ffi {
                 &raw const auth,
                 endpoints,
                 endpoint_count,
+                rtc_servers,
+                rtc_server_count,
                 callbacks,
                 out_session,
             )
@@ -728,6 +845,13 @@ const fn native_endpoint_kind(kind: TgcallsEndpointKind) -> u32 {
     }
 }
 
+fn native_string_view(value: &[u8]) -> NativeStringView {
+    NativeStringView {
+        data: value.as_ptr().cast(),
+        length: u32::try_from(value.len()).expect("validated native string length fits u32"),
+    }
+}
+
 /// Safe adapter for the native C symbols. `create` must synchronously copy all
 /// fields from `input` and may retain `callbacks` only until Join returns. Its
 /// opaque handle is owned by `NativeTgcallsSession`; `destroy` receives an
@@ -903,7 +1027,21 @@ impl<A: NativeTgcallsApi> TgcallsFfiSession for NativeTgcallsSession<A> {
     }
 
     fn push_capture_20ms(&mut self, samples: &[i16; PCM_SAMPLES]) -> Result<(), MediaError> {
-        self.with_handle(|api, handle| api.push_capture_20ms(handle, samples))
+        let handle = self.handle.as_mut().ok_or(MediaError)?;
+        match NativeStatusCode::try_from(self.api.push_capture_20ms(handle, samples))? {
+            // Capture is a real-time stream. A full four-frame native ring means
+            // this one frame is stale before it can be consumed; dropping it is
+            // bounded backpressure, not a terminal media failure.
+            NativeStatusCode::Ok | NativeStatusCode::InputFull => Ok(()),
+            NativeStatusCode::InvalidArgument
+            | NativeStatusCode::Stopped
+            | NativeStatusCode::OutputEmpty
+            | NativeStatusCode::AbiMismatch
+            | NativeStatusCode::AllocationFailed
+            | NativeStatusCode::InvalidState
+            | NativeStatusCode::BackendUnavailable
+            | NativeStatusCode::InternalError => Err(MediaError),
+        }
     }
 
     fn pop_playout_20ms(&mut self, samples: &mut [i16; PCM_SAMPLES]) -> Result<bool, MediaError> {
@@ -1201,6 +1339,18 @@ fn native_config_from_worker(
             peer_tag: endpoint.peer_tag,
         })
         .collect();
+    let rtc_servers = core::mem::take(&mut config.server.rtc_servers)
+        .into_iter()
+        .map(|server| TgcallsRtcServer {
+            id: server.id,
+            host: server.host,
+            port: server.port,
+            username: server.username,
+            password: server.password,
+            is_turn: server.is_turn,
+            is_tcp: server.is_tcp,
+        })
+        .collect();
     Ok(TgcallsSessionConfig {
         initialization_timeout_ms: config.server.initialization_timeout_ms,
         receive_timeout_ms: config.server.receive_timeout_ms,
@@ -1217,6 +1367,7 @@ fn native_config_from_worker(
         auth_key,
         is_outgoing: config.server.is_outgoing,
         endpoints,
+        rtc_servers,
     })
 }
 
@@ -1328,6 +1479,7 @@ mod tests {
                 kind: TgcallsEndpointKind::UdpRelay,
                 peer_tag: [1; 16],
             }],
+            rtc_servers: vec![],
         }
     }
 
@@ -1352,6 +1504,7 @@ mod tests {
                     kind: crate::ipc::EndpointKind::UdpRelay,
                     peer_tag: [1; 16],
                 }],
+                rtc_servers: vec![],
             },
             auth_key: [7; AUTH_KEY_BYTES],
         }
@@ -1364,6 +1517,38 @@ mod tests {
         let native = native_config_from_worker(config).unwrap();
         assert!(!native.transport.enable_p2p);
         assert_eq!(native.endpoints.len(), 1);
+    }
+
+    #[test]
+    fn worker_turn_credentials_reach_native_transport() {
+        let mut config = worker_config(10);
+        config.server.enable_p2p = false;
+        config.server.endpoints.clear();
+        config.server.rtc_servers.push(crate::ipc::RtcServer {
+            id: 7,
+            host: "turn.example.test".into(),
+            port: 3478,
+            username: "1900000000:call".into(),
+            password: "credential".into(),
+            is_turn: true,
+            is_tcp: false,
+        });
+
+        let native = native_config_from_worker(config).unwrap();
+        assert!(!native.transport.enable_p2p);
+        assert!(native.endpoints.is_empty());
+        assert_eq!(
+            native.rtc_servers,
+            vec![TgcallsRtcServer {
+                id: 7,
+                host: "turn.example.test".into(),
+                port: 3478,
+                username: "1900000000:call".into(),
+                password: "credential".into(),
+                is_turn: true,
+                is_tcp: false,
+            }]
+        );
     }
 
     #[test]
@@ -1460,6 +1645,7 @@ mod tests {
         copied_endpoint_kind: u32,
         callbacks: Option<FakeCallbacks>,
         create_status: NativeTgcallsStatus,
+        capture_status: NativeTgcallsStatus,
         created: usize,
         stopped: usize,
         joined: usize,
@@ -1514,7 +1700,7 @@ mod tests {
             _handle: &mut Self::Handle,
             _samples: &[i16; PCM_SAMPLES],
         ) -> NativeTgcallsStatus {
-            NATIVE_STATUS_OK
+            self.state.lock().unwrap().capture_status
         }
 
         fn pop_playout_20ms(
@@ -1617,6 +1803,32 @@ mod tests {
         assert_eq!(observed.joined, 2);
         assert_eq!(observed.destroyed, 2);
         assert_eq!(observed.copied_auth, vec![9; AUTH_KEY_BYTES]);
+    }
+
+    #[test]
+    fn native_capture_ring_backpressure_drops_a_frame_without_ending_media() {
+        let state = Arc::new(Mutex::new(NativeCallState {
+            capture_status: NATIVE_STATUS_INPUT_FULL,
+            ..NativeCallState::default()
+        }));
+        let mut native_config = config();
+        let mut session = NativeTgcallsSession::create(
+            FakeNativeApi {
+                state: Arc::clone(&state),
+            },
+            &mut native_config,
+        )
+        .unwrap();
+
+        assert_eq!(session.start(), Ok(()));
+        assert_eq!(session.push_capture_20ms(&[0; PCM_SAMPLES]), Ok(()));
+        session.stop();
+        session.join();
+        drop(session);
+        let observed = state.lock().unwrap();
+        assert_eq!(observed.stopped, 1);
+        assert_eq!(observed.joined, 1);
+        assert_eq!(observed.destroyed, 1);
     }
 
     #[test]
@@ -1809,7 +2021,7 @@ mod tests {
 
     #[test]
     fn native_abi_layout_and_values_match_c() {
-        assert_eq!(NATIVE_TGCALLS_ABI_VERSION, 3);
+        assert_eq!(NATIVE_TGCALLS_ABI_VERSION, 4);
         assert_eq!(size_of::<NativeTgcallsStatus>(), 4);
         assert_eq!(core::mem::align_of::<NativeTgcallsStatus>(), 4);
         for (status, value) in [

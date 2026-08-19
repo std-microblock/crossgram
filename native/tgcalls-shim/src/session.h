@@ -23,11 +23,22 @@ struct Endpoint final {
   std::array<uint8_t, 16> peer_tag{};
 };
 
+struct RtcServer final {
+  uint8_t id = 0;
+  std::string host;
+  uint16_t port = 0;
+  std::string username;
+  std::string password;
+  bool is_turn = false;
+  bool is_tcp = false;
+};
+
 struct SessionParameters final {
   crossgram_tgcalls_session_config config{};
   std::array<uint8_t, CROSSGRAM_TGCALLS_SHIM_AUTH_KEY_BYTES> auth_key{};
   bool is_outgoing = false;
   std::vector<Endpoint> endpoints;
+  std::vector<RtcServer> rtc_servers;
 
   ~SessionParameters();
   void Wipe() noexcept;

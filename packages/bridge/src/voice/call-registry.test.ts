@@ -198,6 +198,45 @@ describe('CallRegistry', () => {
     expect(worker.events.at(-1)?.call.mediaStartConfig?.enableP2p).toBe(false)
   })
 
+  it('publishes call-scoped TURN credentials as a WebRTC connection', async () => {
+    const worker = new FakeWorker()
+    const calls = new CallRegistry({
+      worker, publish: () => 1,
+      mediaStartProvider: {
+        async get() {
+          return {
+            initializationTimeoutMs: 1, receiveTimeoutMs: 1,
+            enableP2p: true, allowTcp: false, protocolV1: true,
+            enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
+            rtcServers: [{
+              id: 7, host: 'turn.example.test', port: 3478,
+              username: '1900000000:call', password: 'credential', turn: true, tcp: false,
+            }],
+          }
+        },
+      },
+    })
+    const incoming = await calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'turn-backed-incoming',
+    })
+    if (incoming._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    const accepted = await calls.accept(session, {
+      id: incoming.id, accessHash: incoming.accessHash,
+    }, publicValue(), { ...protocol, udpP2p: false })
+
+    const snapshot = calls.snapshot(session)
+    expect(accepted.phoneCall._).toBe('phoneCallWaiting')
+    expect(snapshot?.phoneCall).toMatchObject({
+      _: 'phoneCall', p2pAllowed: false,
+      connections: [{
+        _: 'phoneConnectionWebrtc', id: Long.fromInt(7), ip: 'turn.example.test', port: 3478,
+        username: '1900000000:call', password: 'credential', turn: true,
+      }],
+    })
+    expect(worker.events.at(-1)?.call.mediaStartConfig?.rtcServers).toHaveLength(1)
+    expect(roundTrip(snapshot!)._).toBe('updatePhoneCall')
+  })
+
   it('rejects Direct ICE before caller or recipient worker completion when the peer disables P2P', async () => {
     const recipientWorker = new FakeWorker()
     const recipientCalls = new CallRegistry({ worker: recipientWorker, mediaStartProvider: directProvider(), publish: () => 1 })
@@ -357,6 +396,35 @@ describe('CallRegistry', () => {
     expect(deliveries.slice(-2)).toEqual([
       { state: 'phoneCallAccepted', excludeAuthKeyId: 'accepting-auth-key' },
       { state: 'phoneCall', excludeAuthKeyId: undefined },
+    ])
+  })
+
+  it('defers the active incoming-call update until after the accept response', async () => {
+    const { calls, updates } = setup()
+    const first = await incoming(calls, 'deferred-active-update')
+    const peer = { id: first.id, accessHash: first.accessHash }
+    const deferred: Array<() => void | Promise<void>> = []
+
+    await calls.received(session, peer)
+    const accepted = await calls.accept(
+      session,
+      peer,
+      publicValue(5),
+      protocol,
+      'accepting-auth-key',
+      (task) => deferred.push(task),
+    )
+
+    expect(accepted.phoneCall).toMatchObject({ _: 'phoneCallWaiting' })
+    expect(updates.map((update) => update.phoneCall._)).toEqual([
+      'phoneCallRequested', 'phoneCallWaiting', 'phoneCallAccepted',
+    ])
+    expect(deferred).toHaveLength(1)
+
+    await deferred[0]!()
+
+    expect(updates.map((update) => update.phoneCall._)).toEqual([
+      'phoneCallRequested', 'phoneCallWaiting', 'phoneCallAccepted', 'phoneCall',
     ])
   })
 

@@ -32,6 +32,44 @@ describe('ServerAuthKey ID normalization', () => {
 })
 
 describe('ServerSession RPC error logging', () => {
+  it('queues the rpc_result before running registered after-response work', async () => {
+    const order: string[] = []
+    const dispatch = vi.fn(async (context: { afterResponse?: (task: () => void) => void }) => {
+      context.afterResponse?.(() => { order.push('after-response') })
+      return { _: 'boolTrue' as const }
+    })
+    const { session } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & {
+      _apiLayer: number
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    internal._apiLayer = 228
+    internal._sendEncryptedMessage = vi.fn(() => { order.push('rpc-result') })
+
+    await internal._handleRpcCall(
+      Long.fromInt(8), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
+    )
+
+    expect(order).toEqual(['rpc-result', 'after-response'])
+  })
+
+  it('does not run registered after-response work when dispatch returns an RPC error', async () => {
+    const afterResponse = vi.fn()
+    const dispatch = vi.fn(async (context: { afterResponse?: (task: () => void) => void }) => {
+      context.afterResponse?.(afterResponse)
+      throw new Error('dispatch failed')
+    })
+    const { session } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & { _apiLayer: number }
+    internal._apiLayer = 228
+
+    await internal._handleRpcCall(
+      Long.fromInt(8), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
+    )
+
+    expect(afterResponse).not.toHaveBeenCalled()
+  })
+
   it('logs implemented RPC failures at error level with method and wire error details', () => {
     const { session, logger } = createSession()
 

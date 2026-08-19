@@ -1,6 +1,6 @@
 import type { tl } from '@mtcute/core'
 import Long from 'long'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { MessageStore } from '../message-store.js'
 import type { IMPlatform, PlatformSession } from '../platform.js'
 import { CallRegistry, type VoiceWorkerClient } from './call-registry.js'
@@ -86,6 +86,20 @@ describe('VoiceRpc incoming calls', () => {
     await expect(incompatible.accept(session, {
       peer: rejectedPeer, gB: publicValue(), protocol: { ...workerProtocol, libraryVersions: ['other'] },
     } as tl.phone.RawAcceptCallRequest)).rejects.toMatchObject({ code: 400, text: 'CALL_PROTOCOL_INVALID' })
+  })
+
+  it('registers the native active transition through the supplied after-response callback', async () => {
+    const voice = createVoiceRpc()
+    const incoming = await voice.receiveIncoming(session, 'remote', 'qq-incoming-after-response')
+    if (incoming._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    const peer = { _: 'inputPhoneCall' as const, id: incoming.id, accessHash: incoming.accessHash }
+    const afterResponse = vi.fn()
+
+    await voice.accept(session, {
+      peer, gB: publicValue(), protocol: workerProtocol,
+    } as tl.phone.RawAcceptCallRequest, undefined, afterResponse)
+
+    expect(afterResponse).toHaveBeenCalledOnce()
   })
 })
 

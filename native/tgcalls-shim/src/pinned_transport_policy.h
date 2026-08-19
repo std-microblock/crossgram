@@ -5,7 +5,7 @@
 
 namespace crossgram::tgcalls_shim {
 
-// The fixed C ABI has no STUN/TURN scheme or TURN credentials.
+// Only WebRTC ICE servers and optional LAN endpoints are accepted by InstanceImpl.
 bool IsControlledLocalP2p(const SessionParameters& parameters) noexcept;
 
 }  // namespace crossgram::tgcalls_shim

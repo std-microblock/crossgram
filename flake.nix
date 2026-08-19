@@ -528,7 +528,7 @@
           | LC_ALL=C sort > actual-exports
         diff -u expected-exports actual-exports
         readelf --version-info "$out/lib/libcrossgram_tgcalls_shim.so" \
-          | grep -F 'CROSSGRAM_TGCALLS_SHIM_3' >/dev/null
+          | grep -F 'CROSSGRAM_TGCALLS_SHIM_4' >/dev/null
         test -s "$out/include/crossgram/tgcalls_shim.h"
         test -s "$out/lib/cmake/CrossgramTgcallsShim/CrossgramTgcallsShimConfig.cmake"
         mkdir consumer
@@ -706,13 +706,13 @@ def receive_exact(client, size):
     return b"".join(chunks)
 
 def request(tag, expected_response_tag):
-    payload = bytes((2, tag)) + struct.pack(">Q", 1)
+    payload = bytes((3, tag)) + struct.pack(">Q", 1)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.connect(path)
         client.sendall(struct.pack(">I", len(payload)) + payload)
         size = struct.unpack(">I", receive_exact(client, 4))[0]
         response = receive_exact(client, size)
-    assert response[:2] == bytes((2, expected_response_tag)), response
+    assert response[:2] == bytes((3, expected_response_tag)), response
 
 request(1, 0x81)   # PrepareCaller
 request(11, 0x8d)  # PollEvent

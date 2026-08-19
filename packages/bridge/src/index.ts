@@ -1,5 +1,6 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
+import { createHmac } from 'node:crypto'
 import { isIP } from 'node:net'
 import { resolve } from 'node:path'
 import Long from 'long'
@@ -47,7 +48,7 @@ import {
 } from './sticker-dashboard.js'
 import { CallRegistry, type VoiceMediaStartProvider, type VoiceWorkerClient } from './voice/call-registry.js'
 import type { VoiceCallMediaProvider } from './voice/media.js'
-import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
+import { VoiceWorkerSocketClient, type VoiceWorkerRtcServer } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 import { RequestInboxSystemPeerProvider } from './request-inbox.js'
@@ -116,6 +117,12 @@ export interface BridgeConfig {
   voiceMediaStartProvider?: VoiceMediaStartProvider
   /** Allow direct ICE only when the configured MTProto host is loopback. */
   voiceDirectIce?: boolean
+  /** Public TURN host advertised to both Telegram and the native worker. */
+  voiceTurnHost?: string
+  voiceTurnPort?: number
+  /** Coturn REST-auth shared secret; only derived call-scoped credentials leave this process. */
+  voiceTurnSharedSecret?: string
+  voiceTurnTtlSeconds?: number
   onTransferProgress?: (session: PlatformSession, progress: import('./platform.js').IMTransferProgress) => void | Promise<void>
 }
 
@@ -142,6 +149,10 @@ export const Config = z.object({
   voiceWorkerSocketPath: z.string().default(''),
   voiceWorkerTimeoutMs: z.natural().min(1).max(60_000).default(5_000),
   voiceDirectIce: z.boolean().default(true),
+  voiceTurnHost: z.string().default(''),
+  voiceTurnPort: z.natural().min(1).max(65_535).default(3478),
+  voiceTurnSharedSecret: z.string().role('secret').default(''),
+  voiceTurnTtlSeconds: z.natural().min(60).max(86_400).default(3_600),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -217,14 +228,32 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       .registerContext(message.conversationId, message.reactionContext),
     conversationViews,
   )
-  const directIceProvider: VoiceMediaStartProvider | undefined = config.voiceDirectIce && isLoopbackHost(config.serverHost)
+  const hasDirectIce = config.voiceDirectIce && isLoopbackHost(config.serverHost)
+  const voiceTurnSharedSecret = config.voiceTurnSharedSecret || process.env.CROSSGRAM_TURN_SHARED_SECRET
+  const hasTurn = Boolean(config.voiceTurnHost && voiceTurnSharedSecret)
+  const builtInMediaProvider: VoiceMediaStartProvider | undefined = hasDirectIce || hasTurn
     ? {
-        async get() {
+        async get(call) {
+          const rtcServers: VoiceWorkerRtcServer[] = []
+          if (hasTurn) {
+            const expires = Math.floor(Date.now() / 1_000) + (config.voiceTurnTtlSeconds ?? 3_600)
+            const username = `${expires}:${call.callId}`
+            rtcServers.push({
+              id: 1,
+              host: config.voiceTurnHost!,
+              port: config.voiceTurnPort ?? 3478,
+              username,
+              password: createHmac('sha1', voiceTurnSharedSecret!).update(username).digest('base64'),
+              turn: true,
+              tcp: false,
+            })
+          }
           return {
             initializationTimeoutMs: config.voiceWorkerTimeoutMs,
             receiveTimeoutMs: config.voiceWorkerTimeoutMs,
-            enableP2p: true, allowTcp: false, protocolV1: true,
+            enableP2p: hasDirectIce || hasTurn, allowTcp: false, protocolV1: true,
             enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
+            rtcServers,
           }
         },
       }
@@ -233,6 +262,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ? new VoiceWorkerSocketClient({
         socketPath: config.voiceWorkerSocketPath,
         timeoutMs: config.voiceWorkerTimeoutMs,
+        onDiagnostic: (phase, code) => bridgeLogger.warn(
+          'voice worker media lifecycle phase=%s code=%s', phase, code,
+        ),
       })
     : undefined
   const voiceWorker = config.voiceWorker ?? socketWorker
@@ -246,7 +278,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const calls = new CallRegistry({
     worker: voiceWorker,
     media: voiceMedia,
-    mediaStartProvider: config.voiceMediaStartProvider ?? directIceProvider,
+    mediaStartProvider: config.voiceMediaStartProvider ?? builtInMediaProvider,
+    onMediaDiagnostic: (phase, code) => bridgeLogger.warn(
+      'voice media attachment terminal phase=%s code=%s', phase, code,
+    ),
     publish: ({ session, update, excludeAuthKeyId }) => updates.publishPhoneCall(session, update, excludeAuthKeyId),
     publishSignaling: (session, update) => updates.publishPhoneSignaling(session, update),
     replay: (session, update, authKeyId) => updates.replayPhoneCall(session, update, authKeyId),
@@ -957,6 +992,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     return voice.accept(
       state.session, req as tl.phone.RawAcceptCallRequest,
       rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+      rpc.afterResponse,
     )
   })
   rpc.register('phone.confirmCall', async (rpc, req) => {
