@@ -17,6 +17,15 @@
     serverHost: 127.0.0.1
 - id: merged-forward
   name: '@mtproto-relay/merged-forward'
+- id: platform-admin-bot
+  name: '@mtproto-relay/platform-admin-bot'
+  disabled: true
+  config:
+    # Empty means every platform identity can manage only itself.
+    allowedPlatformSessionIds: []
+    crossAccountAccess: false
+    showLoginCodes: true
+    webuiUrl: ''
 - id: telegram-bot-api
   name: '@mtproto-relay/telegram-bot-api'
   disabled: true

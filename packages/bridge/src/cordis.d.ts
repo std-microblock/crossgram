@@ -14,6 +14,7 @@ import type { TelegramResourceService } from './resource-provider.js'
 import type { SystemPeerService } from './system-peer.js'
 import type { MtprotoBridgeService } from './bridge-service.js'
 import type { ConversationViewService } from './conversation-view.js'
+import type { BridgeManagementService } from './management-service.js'
 
 declare module 'cordis' {
   interface Context {
@@ -22,6 +23,7 @@ declare module 'cordis' {
     telegramResource: TelegramResourceService
     systemPeer: SystemPeerService
     mtprotoBridge: MtprotoBridgeService
+    bridgeManagement: BridgeManagementService
     conversationView: ConversationViewService
     /** Present on one active platform-session fiber and its descendants. */
     bridgeSession: {
