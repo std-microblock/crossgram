@@ -59,7 +59,7 @@ describe('platform-owned account provisioning', () => {
     }))
 
     expect(first).toBeDefined()
-    expect(first!.auth.virtualPhone).toMatch(/^999\d{12}$/)
+    expect(first!.auth.virtualPhone).toMatch(/^888\d{12}$/)
     expect(first!.auth.totpSecret).toMatch(/^[a-f\d]{40}$/)
     expect(second!.auth).toMatchObject({
       id: first!.auth.id,
@@ -77,6 +77,33 @@ describe('platform-owned account provisioning', () => {
       id: expect.any(Number), platformUserId: 'qq-uid', firstName: 'Alice Renamed', username: '10001',
       avatar: { id: 'avatar:qq-uid', locator: { uin: '10001' } },
       metadata: { nativeId: '10001' },
+    }])
+  })
+
+  it('replaces a legacy virtual-phone prefix without changing auth credentials', async () => {
+    const database = await createDatabase()
+    const legacyPhone = '999123456789012'
+    const totpSecret = 'ab'.repeat(20)
+    await database.create('mtproto_platform_session', {
+      id: 'legacy-session', platformId: 'qqnt', userId: 'qq-uid', credentials: { adapter: 'owned' },
+      metadata: { firstName: 'Alice' }, active: true, createdAt: new Date(),
+    })
+    await database.create('mtproto_auth_session', {
+      id: 'legacy-auth', virtualPhone: legacyPhone, totpSecret,
+      platformId: 'qqnt', platformSessionId: 'legacy-session',
+    })
+
+    const provisioned = await provisionPlatformAccount(database, 'qqnt', platform())
+
+    expect(provisioned!.auth).toMatchObject({
+      id: 'legacy-auth', virtualPhone: expect.stringMatching(/^888\d{12}$/), totpSecret,
+      platformSessionId: 'legacy-session',
+    })
+    expect(provisioned!.auth.virtualPhone).not.toBe(legacyPhone)
+    expect(await database.get('mtproto_auth_session', { virtualPhone: legacyPhone })).toEqual([])
+    expect(await database.get('mtproto_auth_session', { id: 'legacy-auth' })).toMatchObject([{
+      id: 'legacy-auth', virtualPhone: provisioned!.auth.virtualPhone, totpSecret,
+      platformSessionId: 'legacy-session',
     }])
   })
 

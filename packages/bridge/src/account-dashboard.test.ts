@@ -7,7 +7,7 @@ import {
 const provisioned: ProvisionedPlatformAccount = {
   auth: {
     id: 'auth', platformId: 'qq/primary', platformSessionId: 'session',
-    virtualPhone: '999123456789012', totpSecret: Buffer.from('12345678901234567890').toString('hex'),
+    virtualPhone: '888123456789012', totpSecret: Buffer.from('12345678901234567890').toString('hex'),
   },
   session: {
     platformId: 'qq/primary', platformSessionId: 'session', userId: 'uid-1', credentials: {},
@@ -25,7 +25,7 @@ describe('platform account dashboard projection', () => {
     expect(view).toMatchObject({
       platformId: 'qq/primary', platformKind: 'qq', status: 'ready',
       displayName: 'Alice Example', username: '10001', userId: 'uid-1',
-      virtualPhone: '+999123456789012', loginCode: '287082', remainingSeconds: 1,
+      virtualPhone: '+888123456789012', loginCode: '287082', remainingSeconds: 1,
       avatarUrl: '/api/platforms/qq%2Fprimary/avatar?v=avatar%2Fself%201',
     })
     expect(JSON.stringify(view)).not.toContain('totpSecret')

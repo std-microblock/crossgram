@@ -100,11 +100,13 @@ export async function provisionPlatformAccount(
   let auth = existingAuth.find(item => item.platformSessionId === row.id) ?? existingAuth[0]
   if (auth) {
     const totpSecret = auth.totpSecret || generateLoginSecret()
+    const virtualPhone = auth.virtualPhone.startsWith('999') ? await allocateVirtualPhone(database) : auth.virtualPhone
     await database.set('mtproto_auth_session', { id: auth.id }, {
       platformSessionId: row.id,
+      virtualPhone,
       totpSecret,
     })
-    auth = { ...auth, platformSessionId: row.id, totpSecret }
+    auth = { ...auth, platformSessionId: row.id, virtualPhone, totpSecret }
   } else {
     auth = {
       id: randomId(),
@@ -130,8 +132,8 @@ function validateAccount(account: IMPlatformAccount): void {
 
 async function allocateVirtualPhone(database: Database): Promise<string> {
   for (let attempt = 0; attempt < 20; attempt++) {
-    // 15 digits total, inside the reserved 999 prefix used by the route resolver.
-    const virtualPhone = `999${String(randomInt(0, 1e6)).padStart(6, '0')}${String(randomInt(0, 1e6)).padStart(6, '0')}`
+    // 15 digits total, inside the reserved 888 prefix used by the route resolver.
+    const virtualPhone = `888${String(randomInt(0, 1e6)).padStart(6, '0')}${String(randomInt(0, 1e6)).padStart(6, '0')}`
     if (!(await database.get('mtproto_auth_session', { virtualPhone })).length) return virtualPhone
   }
   throw new Error('failed to allocate a unique virtual phone')

@@ -3509,17 +3509,17 @@ describe('bridge login e2e', () => {
         metadata: { firstName: 'Push User' }, active: true, createdAt: new Date(),
       })
       await ctx.database.create('mtproto_auth_session', {
-        id: 'push-auth', virtualPhone: '99900777', totpSecret: '22'.repeat(20),
+        id: 'push-auth', virtualPhone: '88800777', totpSecret: '22'.repeat(20),
         platformId, platformSessionId: 'push-ps',
       })
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
       const sid = new Long(0x56789abc, 0x5abc, false)
       const code = await callRpc(client, key, sid, {
-        _: 'auth.sendCode', phoneNumber: '+99900777', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        _: 'auth.sendCode', phoneNumber: '+88800777', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
       }, 4)
       const authorization = await callRpc(client, key, sid, {
-        _: 'auth.signIn', phoneNumber: '99900777', phoneCodeHash: code.phoneCodeHash,
+        _: 'auth.signIn', phoneNumber: '88800777', phoneCodeHash: code.phoneCodeHash,
         phoneCode: bridge.generateLoginCode('22'.repeat(20)),
       }, 6)
       expect(authorization._).toBe('auth.authorization')
@@ -3687,10 +3687,10 @@ describe('bridge login e2e', () => {
       const observerKey = await doClientHandshake(observer, pubKey)
       const observerSid = new Long(0x6789abcd, 0x6abc, false)
       const observerCode = await callRpc(observer, observerKey, observerSid, {
-        _: 'auth.sendCode', phoneNumber: '+99900777', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        _: 'auth.sendCode', phoneNumber: '+88800777', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
       }, 22)
       await callRpc(observer, observerKey, observerSid, {
-        _: 'auth.signIn', phoneNumber: '99900777', phoneCodeHash: observerCode.phoneCodeHash,
+        _: 'auth.signIn', phoneNumber: '88800777', phoneCodeHash: observerCode.phoneCodeHash,
         phoneCode: bridge.generateLoginCode('22'.repeat(20)),
       }, 24)
 
@@ -3776,17 +3776,17 @@ describe('bridge login e2e', () => {
         metadata: { firstName: 'QQ User' }, active: true, createdAt: new Date(),
       })
       await ctx.database.create('mtproto_auth_session', {
-        id: 'qq-final-sequence-auth', virtualPhone: '99900889', totpSecret: '44'.repeat(20),
+        id: 'qq-final-sequence-auth', virtualPhone: '88800889', totpSecret: '44'.repeat(20),
         platformId, platformSessionId: 'qq-final-sequence-ps',
       })
       client = await TestClient.connect(port)
       const key = await doClientHandshake(client, pubKey)
       const sid = new Long(0x3456cdef, 0x7cde, false)
       const code = await callRpc(client, key, sid, {
-        _: 'auth.sendCode', phoneNumber: '+99900889', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        _: 'auth.sendCode', phoneNumber: '+88800889', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
       }, 2)
       await callRpc(client, key, sid, {
-        _: 'auth.signIn', phoneNumber: '99900889', phoneCodeHash: code.phoneCodeHash,
+        _: 'auth.signIn', phoneNumber: '88800889', phoneCodeHash: code.phoneCodeHash,
         phoneCode: bridge.generateLoginCode('44'.repeat(20)),
       }, 4)
 
@@ -3891,17 +3891,17 @@ describe('bridge login e2e', () => {
         metadata: { firstName: 'Edit User' }, active: true, createdAt: new Date(),
       })
       await ctx.database.create('mtproto_auth_session', {
-        id: 'edit-replacement-auth', virtualPhone: '99900888', totpSecret: '33'.repeat(20),
+        id: 'edit-replacement-auth', virtualPhone: '88800888', totpSecret: '33'.repeat(20),
         platformId, platformSessionId: 'edit-replacement-ps',
       })
       requester = await TestClient.connect(port)
       const requesterKey = await doClientHandshake(requester, pubKey)
       const requesterSid = new Long(0x1234abcd, 0x7abc, false)
       const requesterCode = await callRpc(requester, requesterKey, requesterSid, {
-        _: 'auth.sendCode', phoneNumber: '+99900888', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        _: 'auth.sendCode', phoneNumber: '+88800888', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
       }, 2)
       await callRpc(requester, requesterKey, requesterSid, {
-        _: 'auth.signIn', phoneNumber: '99900888', phoneCodeHash: requesterCode.phoneCodeHash,
+        _: 'auth.signIn', phoneNumber: '88800888', phoneCodeHash: requesterCode.phoneCodeHash,
         phoneCode: bridge.generateLoginCode('33'.repeat(20)),
       }, 4)
 
@@ -3946,10 +3946,10 @@ describe('bridge login e2e', () => {
       const observerKey = await doClientHandshake(observer, pubKey)
       const observerSid = new Long(0x2345bcde, 0x7bcd, false)
       const observerCode = await callRpc(observer, observerKey, observerSid, {
-        _: 'auth.sendCode', phoneNumber: '+99900888', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        _: 'auth.sendCode', phoneNumber: '+88800888', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
       }, 8)
       await callRpc(observer, observerKey, observerSid, {
-        _: 'auth.signIn', phoneNumber: '99900888', phoneCodeHash: observerCode.phoneCodeHash,
+        _: 'auth.signIn', phoneNumber: '88800888', phoneCodeHash: observerCode.phoneCodeHash,
         phoneCode: bridge.generateLoginCode('33'.repeat(20)),
       }, 10)
 
@@ -4046,7 +4046,7 @@ describe('bridge login e2e', () => {
     let observer: TestClient | undefined
     try {
       const platformSessionId = 'read-device-sync-ps'
-      const phone = '99900887'
+      const phone = '88800887'
       const totpSecret = '44'.repeat(20)
       await ctx.database.create('mtproto_platform_session', {
         id: platformSessionId, platformId, userId: 'self', credentials: {},
