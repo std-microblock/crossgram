@@ -2053,6 +2053,17 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/qq-flash-transfer-bot@workspace:packages/qq-flash-transfer-bot":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/qq-flash-transfer-bot@workspace:packages/qq-flash-transfer-bot"
+  dependencies:
+    "@mtproto-relay/bridge": "workspace:*"
+    schemastery: "npm:^3.18.0"
+  peerDependencies:
+    cordis: ^4.0.0-rc.5
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/satori-exporter@workspace:*, @mtproto-relay/satori-exporter@workspace:packages/satori-exporter":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/satori-exporter@workspace:packages/satori-exporter"

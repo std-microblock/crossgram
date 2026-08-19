@@ -232,6 +232,21 @@ export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
   source: IMMediaSource
 }
 
+export interface IMFlashTransferResult {
+  fileSetId: string
+  shareLink: string
+  expiresAt?: number
+}
+
+/** Optional platform-native bulk transfer creator used by bridge-owned tools. */
+export interface IMFlashTransferProvider {
+  create(
+    session: PlatformSession,
+    media: readonly IMMediaInput[],
+    options?: { name?: string, signal?: AbortSignal },
+  ): Promise<IMFlashTransferResult>
+}
+
 export type IMTextEntity =
   | {
       type: 'mention'
@@ -604,6 +619,8 @@ export interface IMPlatform<TMediaLocator = unknown> {
   readonly voiceMedia?: VoiceCallMediaProvider
   /** Optional source-platform call controls; call references remain transient. */
   readonly voiceCalls?: IMVoiceCallController
+  /** Optional platform-native shareable file-set creation. */
+  readonly flashTransfer?: IMFlashTransferProvider
 
   /** Resolve the platform's current user; bridge never invents profile fields. */
   getAccount?(): Promise<IMPlatformAccount<TMediaLocator>>

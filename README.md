@@ -179,6 +179,13 @@ yarn add @satorijs/adapter-discord
 当前 bridge 会话；Token 只在服务端用于代理文件下载，不会提供给客户端。每个会话默认最多导入
 100 个包，并有 3 秒导入冷却时间；可通过 `maxImportsPerSession` 和 `importCooldownMs` 调整。
 
+### QQ 闪传工具 bot
+
+内置插件 `@mtproto-relay/qq-flash-transfer-bot` 会在 QQNT 会话中注册 **QQ 闪传** 工具 bot。
+把一个或多个文件发给它（可附带文字作为文件集名称），bot 会把上传流交给 QQNT 创建闪传，
+然后返回 QQ 原生分享链接和文件集 ID。文件字节保持流式传输，不会先整体读入内存；默认单次最多
+100 个文件、总计 100 GiB，可通过 `maxFiles` 与 `maxTotalBytes` 调整。
+
 ### 导出平台会话到 Satori
 
 Satori exporter 是独立插件 `@mtproto-relay/satori-exporter`，不再由 bridge 配置或管理。

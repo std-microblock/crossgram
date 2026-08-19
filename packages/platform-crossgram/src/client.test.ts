@@ -24,6 +24,23 @@ function highwayBody(frame: Buffer): Buffer {
   return frame.subarray(9 + headLength, 9 + headLength + bodyLength)
 }
 
+function decodeFramedFiles(body: Buffer): Buffer[] {
+  const files: Buffer[] = []
+  let offset = 0
+  while (offset < body.length) {
+    const chunks: Buffer[] = []
+    for (;;) {
+      const length = body.readUInt32BE(offset)
+      offset += 4
+      if (!length) break
+      chunks.push(body.subarray(offset, offset + length))
+      offset += length
+    }
+    files.push(Buffer.concat(chunks))
+  }
+  return files
+}
+
 describe('QQNTClient streaming transport', () => {
   let server: Server | undefined
   afterEach(async () => {
@@ -56,6 +73,47 @@ describe('QQNTClient streaming transport', () => {
       body: { conversationId: '2:group/opaque', messageId: 'msg/opaque:42' },
       authorization: 'Bearer secret',
     }])
+  })
+
+  it('streams multiple inputs through the authenticated QQ Flash Transfer endpoint', async () => {
+    let manifest: Record<string, unknown> | undefined
+    let body: Buffer<ArrayBufferLike> = Buffer.alloc(0)
+    let authorization: string | undefined
+    server = createServer(async (request, response) => {
+      response.setHeader('content-type', 'application/json')
+      if (request.url === '/status') {
+        response.end(JSON.stringify({ protocolVersion: 25, ready: true }))
+        return
+      }
+      const encoded = request.headers['x-qqnt-flash-manifest']
+      if (typeof encoded === 'string') manifest = JSON.parse(Buffer.from(encoded, 'base64url').toString())
+      authorization = request.headers.authorization
+      body = await collect(request)
+      response.end(JSON.stringify({
+        fileSetId: 'fileset-1', shareLink: 'https://qq.example/flash/code', expiresAt: 2_000_000_000_000,
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}`, token: 'secret' })
+
+    await expect(client.createFlashTransfer([{
+      kind: 'file', name: 'alpha.txt', size: 5,
+      source: { size: 5, async *stream() { yield Buffer.from('al'); yield Buffer.from('pha') } },
+    }, {
+      kind: 'file', name: 'beta.bin', size: 3,
+      source: { size: 3, async *stream() { yield Uint8Array.of(1, 2, 3) } },
+    }], { name: 'Telegram files' })).resolves.toEqual({
+      fileSetId: 'fileset-1', shareLink: 'https://qq.example/flash/code', expiresAt: 2_000_000_000_000,
+    })
+    expect(manifest).toEqual({
+      name: 'Telegram files', framing: 'length-prefixed-v1',
+      files: [{ name: 'alpha.txt', size: 5 }, { name: 'beta.bin', size: 3 }],
+    })
+    expect(decodeFramedFiles(body)).toEqual([Buffer.from('alpha'), Buffer.from([1, 2, 3])])
+    expect(authorization).toBe('Bearer secret')
   })
 
   it('lists and resolves requests through encoded authenticated bridge routes', async () => {

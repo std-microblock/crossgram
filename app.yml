@@ -30,6 +30,9 @@
     # apiBase: http://127.0.0.1:8081 # optional Local Bot API Server
     # maxImportsPerSession: 100
     # importCooldownMs: 3000
+- id: qq-flash-transfer-bot
+  name: '@mtproto-relay/qq-flash-transfer-bot'
+  config: {}
 - id: satori-core
   name: '@satorijs/core'
   disabled: true

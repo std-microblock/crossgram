@@ -8,7 +8,7 @@
 3. **本地 Unix socket PCM 媒体通道** —— 语音通话的 48 kHz s16le 音频帧传输。
 
 协议版本由 `qqnt-bridge` 在 `/v1/status` 中返回，当前服务端版本为
-`22`。`platform-crossgram` 适配器当前支持的版本范围为 `19` 到 `21`；
+`25`。`platform-crossgram` 适配器当前支持的版本范围为 `19` 到 `25`；
 高于或低于该范围的版本会被适配器拒绝。两个仓库的协议类型定义分别在
 `packages/platform-crossgram/src/protocol.ts`（适配器侧，`Wire*` 类型）
 与 `qqnt-bridge/src/protocol.ts`（服务端侧，`QQ*` 类型）中。
@@ -461,7 +461,27 @@ interface SendManifest {
 报告文件字节已存在 CDN，无需实际上传。适配器会校验 Highway 返回的
 `fileSize` 和 `fileMd5` 与本地一致。
 
-### 4.5 媒体下载
+### 4.5 QQ 闪传：`POST /v1/flash-transfers`
+
+请求头 `x-qqnt-flash-manifest` 是 base64url 编码的 JSON：
+
+```json
+{
+  "name": "Telegram files",
+  "framing": "length-prefixed-v1",
+  "files": [
+    { "name": "alpha.txt", "size": 5 },
+    { "name": "beta.bin", "size": 3 }
+  ]
+}
+```
+
+body 对每个文件使用与多媒体发送相同的 4 字节大端长度分帧，并用零长度帧结束该文件。
+bridge 边接收边写入账户私有暂存目录，再调用 QQNT `FlashTransferService` 创建文件集。
+成功响应为 `{ fileSetId, shareLink, expiresAt? }`。暂存文件保留到闪传有效期之后的清理窗口，
+避免 QQNT 后台上传仍在读取时源文件被提前删除。
+
+### 4.6 媒体下载
 
 两个媒体端点都支持 HTTP `Range`（`bytes=start-end`），返回 `206`，且都
 设置 `accept-ranges: bytes` 与 `cache-control: no-store`。

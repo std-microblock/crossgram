@@ -36,7 +36,13 @@ export interface SystemPeerProvider {
   /** Return a peer only when it belongs to this platform session. */
   resolve(session: PlatformSession, conversationId: string): Promise<SystemPeer | undefined>
   /** Called only after the user's outgoing message was canonically committed. */
-  receive?(session: PlatformSession, peer: SystemPeer, message: IMMessage, peers: SystemPeerService): Promise<void>
+  receive?(
+    session: PlatformSession,
+    peer: SystemPeer,
+    message: IMMessage,
+    peers: SystemPeerService,
+    input?: IMMessageInput,
+  ): Promise<void>
   /** Resolve a provider-owned callback from its durable source message. */
   callback?(
     session: PlatformSession,
@@ -103,8 +109,13 @@ export class SystemPeerService extends Service {
     }
   }
 
-  async receive(session: PlatformSession, resolution: SystemPeerResolution, message: IMMessage): Promise<void> {
-    await resolution.provider.receive?.(session, resolution.peer, message, this)
+  async receive(
+    session: PlatformSession,
+    resolution: SystemPeerResolution,
+    message: IMMessage,
+    input?: IMMessageInput,
+  ): Promise<void> {
+    await resolution.provider.receive?.(session, resolution.peer, message, this, input)
   }
 
   async callback(
@@ -120,7 +131,11 @@ export class SystemPeerService extends Service {
       id: `bridge:outgoing:${randomUUID()}`,
       conversationId: resolution.peer.id,
       senderId: session.userId,
-      content: { parts: content.parts } as IMMessage['content'],
+      content: {
+        parts: content.parts.map((part) => part.type === 'media'
+          ? { type: 'media' as const, media: { ...part.media, id: `bridge:system-peer-media:${randomUUID()}` } }
+          : part) as IMMessage['content']['parts'],
+      },
       timestamp: Math.floor(Date.now() / 1_000),
       outgoing: true,
       replyToId: content.replyToId,

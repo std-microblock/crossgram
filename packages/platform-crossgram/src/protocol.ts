@@ -55,6 +55,18 @@ export interface WireMedia {
   locator: QQMediaLocator
 }
 
+export interface WireFlashTransferManifest {
+  name?: string
+  files: Array<{ name: string, size: number }>
+  framing: 'length-prefixed-v1'
+}
+
+export interface WireFlashTransferResult {
+  fileSetId: string
+  shareLink: string
+  expiresAt?: number
+}
+
 export type QQStickerReference = (
   | {
       kind: 'sysface'

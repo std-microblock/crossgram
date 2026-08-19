@@ -2340,13 +2340,14 @@ export class DialogRpc {
     if (!systemPeer && !this._platform.capabilities.send.text) {
       throw new RpcError(400, 'MESSAGE_SEND_UNAVAILABLE')
     }
+    const input = { parts: [inputPart], replyToId }
     const sent = systemPeer
-      ? this._systemPeers!.makeOutgoing(this._session, systemPeer, { parts: [inputPart], replyToId })
+      ? this._systemPeers!.makeOutgoing(this._session, systemPeer, input)
       : await this._sendToPlatform(() => this._platform.sendMessage(
           this._session,
           { id: peerId },
           {
-            parts: [inputPart],
+            ...input,
             replyToId,
             ...(replyTarget?.nativeSequence
               ? { replyToNativeSequence: replyTarget.nativeSequence }
@@ -2360,7 +2361,7 @@ export class DialogRpc {
       replyToId: sent.replyToId ?? replyToId,
     }
     const published = await this._publishLocalMessage(peerId, source, excludeConnection)
-    if (systemPeer) await this._systemPeers!.receive(this._session, systemPeer, source)
+    if (systemPeer) await this._systemPeers!.receive(this._session, systemPeer, source, input)
     if (published) {
       const update = published.updates.find((item) =>
         item._ === 'updateNewMessage' || item._ === 'updateNewChannelMessage') as
@@ -2505,23 +2506,7 @@ export class DialogRpc {
     const media = content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
     const stickers = content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
-    if (media.length > this._platform.capabilities.send.maxMedia) throw new RpcError(400, 'MEDIA_TOO_MANY')
-    if (media.some((item) => item.kind === 'image') && !this._platform.capabilities.send.images) {
-      throw new RpcError(400, 'PHOTO_SEND_UNAVAILABLE')
-    }
-    if (media.some((item) => item.kind === 'file') && !this._platform.capabilities.send.files) {
-      throw new RpcError(400, 'FILE_SEND_UNAVAILABLE')
-    }
-    if (text && media.length && !this._platform.capabilities.send.mixed) {
-      throw new RpcError(400, 'MIXED_SEND_UNAVAILABLE')
-    }
     if (stickers.length > 1) throw new RpcError(400, 'STICKERS_TOO_MUCH')
-    if (stickers.some((item) => item.type === 'native') && !this._platform.capabilities.stickers?.native) {
-      throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
-    }
-    if (stickers.some((item) => item.type === 'upload') && !this._platform.capabilities.stickers?.upload) {
-      throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
-    }
     if (Array.from(text).length > this._platform.capabilities.send.maxTextLength) {
       throw new RpcError(400, 'MESSAGE_TOO_LONG')
     }
@@ -2531,19 +2516,50 @@ export class DialogRpc {
     this._assertWritableConversation(peerId)
     const replyTarget = await this._resolveReplyTarget(peerId, replyTo)
     const replyToId = replyTarget?.id
-    const sent = await this._sendToPlatform(() => this._platform.sendMessage(this._session, { id: peerId }, {
+    const systemPeer = await this._systemPeers?.resolve(this._session, peerId)
+    if (!systemPeer) {
+      if (media.length > this._platform.capabilities.send.maxMedia) throw new RpcError(400, 'MEDIA_TOO_MANY')
+      if (media.some((item) => item.kind === 'image') && !this._platform.capabilities.send.images) {
+        throw new RpcError(400, 'PHOTO_SEND_UNAVAILABLE')
+      }
+      if (media.some((item) => item.kind === 'file') && !this._platform.capabilities.send.files) {
+        throw new RpcError(400, 'FILE_SEND_UNAVAILABLE')
+      }
+      if (text && media.length && !this._platform.capabilities.send.mixed) {
+        throw new RpcError(400, 'MIXED_SEND_UNAVAILABLE')
+      }
+      if (stickers.some((item) => item.type === 'native') && !this._platform.capabilities.stickers?.native) {
+        throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
+      }
+      if (stickers.some((item) => item.type === 'upload') && !this._platform.capabilities.stickers?.upload) {
+        throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
+      }
+    }
+    const resolvedContent: IMMessageInput = {
       ...content,
       replyToId,
       ...(replyTarget?.nativeSequence
         ? { replyToNativeSequence: replyTarget.nativeSequence }
         : {}),
-    }, {
-      onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
-    }))
+    }
+    const sent = systemPeer
+      ? this._systemPeers!.makeOutgoing(this._session, systemPeer, resolvedContent)
+      : await this._sendToPlatform(() => this._platform.sendMessage(
+          this._session, { id: peerId }, resolvedContent, {
+            onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
+          }))
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
-    await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
     const published = await this._publishLocalMessage(peerId, source, excludeConnection)
+    if (systemPeer) {
+      try {
+        await this._systemPeers!.receive(this._session, systemPeer, source, resolvedContent)
+      } finally {
+        await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
+      }
+    } else {
+      await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
+    }
     if (published) return this._withMessageIds(published, randomIds)
     const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
       ?? { id: peerId, kind: 'direct' as const, title: peerId }

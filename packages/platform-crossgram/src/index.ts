@@ -30,7 +30,7 @@ import type {
 
 
 const MIN_PROTOCOL_VERSION = 19
-const MAX_PROTOCOL_VERSION = 24
+const MAX_PROTOCOL_VERSION = 25
 
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
@@ -168,6 +168,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   readonly client: QQNTClient
+  readonly flashTransfer = {
+    create: (
+      _session: PlatformSession,
+      media: readonly import('@mtproto-relay/bridge').IMMediaInput[],
+      options?: { name?: string, signal?: AbortSignal },
+    ) => this.client.createFlashTransfer(media, options),
+  }
   readonly voiceMedia?: VoiceCallMediaProvider
   readonly voiceCalls = {
     control: (

@@ -1,0 +1,15 @@
+{
+  "name": "@mtproto-relay/qq-flash-transfer-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {},
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@mtproto-relay/bridge": "workspace:*",
+    "schemastery": "^3.18.0"
+  }
+}

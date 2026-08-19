@@ -6,12 +6,12 @@ import { mkdir, open, rm, type FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Writable } from 'node:stream'
-import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
+import type { IMMediaInput, IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
   WireReactionActorPage, WireReactionContext, WireReactionState, WireRequest, WireRequestPage, WireSticker, WireStickerPack, WireStickerPackSummary,
-  WireTextPart,
+  WireFlashTransferManifest, WireFlashTransferResult, WireTextPart,
 } from './protocol.js'
 import { uploadHighway, type QQMediaUploadPlan } from './highway.js'
 
@@ -139,6 +139,36 @@ export class QQNTClient {
     const status = await this.json<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }>('/status')
     this.bridgeProtocol = status.protocolVersion
     return status
+  }
+
+  async createFlashTransfer(
+    media: readonly IMMediaInput[],
+    options: { name?: string, signal?: AbortSignal } = {},
+  ): Promise<WireFlashTransferResult> {
+    if (this.bridgeProtocol === undefined) await this.status()
+    if (this.bridgeProtocol! < 25) throw new Error('QQNT bridge protocol 25 is required for QQ Flash Transfer')
+    if (!media.length) throw new Error('QQ Flash Transfer requires at least one file')
+    const manifest: WireFlashTransferManifest = {
+      name: options.name,
+      framing: 'length-prefixed-v1',
+      files: media.map((item) => {
+        const size = item.source.size ?? item.size
+        if (!Number.isSafeInteger(size) || size! < 0) {
+          throw new Error(`QQ Flash Transfer requires a known size for ${item.name || 'file'}`)
+        }
+        return { name: item.name || 'file', size: size! }
+      }),
+    }
+    const response = await this.fetchImpl(`${this.endpoint}/flash-transfers`, {
+      method: 'POST',
+      headers: this.headers({
+        'x-qqnt-flash-manifest': Buffer.from(JSON.stringify(manifest)).toString('base64url'),
+      }),
+      body: framedSourcesReadableStream(media.map((item) => item.source), options.signal),
+      signal: options.signal,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' })
+    return responseJson(response)
   }
 
   getRequests(query: { kind?: 'friend' | 'group-join', cursor?: string, limit?: number } = {}): Promise<WireRequestPage> {
@@ -1449,6 +1479,45 @@ function sourceReadableStream(source: IMMediaSource, signal?: AbortSignal): Read
     },
     async cancel() { await iterator.return?.() },
   })
+}
+
+function framedSourcesReadableStream(
+  sources: readonly IMMediaSource[],
+  signal?: AbortSignal,
+): ReadableStream<Uint8Array> {
+  const iterator = framedSources(sources, signal)[Symbol.asyncIterator]()
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const next = await iterator.next()
+        if (next.done) controller.close()
+        else controller.enqueue(next.value)
+      } catch (error) {
+        controller.error(error)
+      }
+    },
+    async cancel() {
+      await iterator.return?.()
+    },
+  })
+}
+
+async function* framedSources(
+  sources: readonly IMMediaSource[],
+  signal?: AbortSignal,
+): AsyncIterable<Uint8Array> {
+  for (const source of sources) {
+    for await (const chunk of source.stream({ signal })) {
+      for (let offset = 0; offset < chunk.length; offset += 1024 * 1024) {
+        const frame = chunk.subarray(offset, offset + 1024 * 1024)
+        const header = Buffer.allocUnsafe(4)
+        header.writeUInt32BE(frame.length)
+        yield header
+        yield frame
+      }
+    }
+    yield new Uint8Array(4)
+  }
 }
 
 function parseMediaLease(value: unknown): QQNTMediaLease {
