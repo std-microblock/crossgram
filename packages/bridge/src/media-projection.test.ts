@@ -783,6 +783,47 @@ describe('rich-media projection', () => {
     expect(await freshRpc.userTlId('alice')).toBe(alice.id)
   })
 
+  it('refreshes a stale persisted user avatar locator before downloading it', async () => {
+    const { store } = await createStore()
+    const staleAvatar = {
+      id: 'avatar:user:alice', kind: 'image' as const, mimeType: 'image/jpeg',
+      locator: { remote: 'stale-avatar' },
+    }
+    const freshAvatar = {
+      ...staleAvatar,
+      locator: { remote: 'fresh-avatar' },
+    }
+    const getUser = vi.fn(async (_session: PlatformSession, id: string) => (
+      id === 'alice' ? { id, firstName: 'Alice', username: '1715311957', avatar: freshAvatar } : null
+    ))
+    const avatarPlatform: IMPlatform = {
+      ...platform,
+      async getContacts() {
+        return { users: [{ id: 'alice', firstName: 'Alice', username: '1715311957', avatar: staleAvatar }] }
+      },
+      getUser,
+    }
+    const firstRpc = new DialogRpc(avatarPlatform, session, store)
+    const contacts = await firstRpc.getContacts()
+    const alice = contacts.users[0] as tl.RawUser
+    if (alice.photo?._ !== 'userProfilePhoto') throw new Error('expected persisted avatar')
+
+    const resumed = new DialogRpc(avatarPlatform, session, store)
+    const file = await resumed.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPeerPhotoFileLocation',
+        peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },
+        photoId: alice.photo.photoId,
+      },
+      offset: 0, limit: 1024,
+    })
+
+    expect(getUser).toHaveBeenCalledWith(session, 'alice')
+    expect(file._).toBe('upload.file')
+    if (file._ === 'upload.file') expect(new TextDecoder().decode(file.bytes)).toBe('fresh-avatar')
+  })
+
   it('restores a persisted group avatar without reloading dialogs after restart', async () => {
     const { store } = await createStore()
     const avatar = {

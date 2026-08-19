@@ -2129,6 +2129,7 @@ function isQQNTDownloadPastEnd(error: unknown): boolean {
   return error instanceof Error && (
     /"retcode"\s*:\s*-5503008/u.test(error.message)
     || /download range out of filesize/iu.test(error.message)
+    || /^QQNT (?:bridge|native media) 416: Range Not Satisfiable$/iu.test(error.message)
   )
 }
 

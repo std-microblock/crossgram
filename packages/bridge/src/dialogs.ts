@@ -1834,8 +1834,11 @@ export class DialogRpc {
       }
     }
     if (req.location._ === 'inputPeerPhotoFileLocation') {
-      const media = this._avatarMedia.get(req.location.photoId.toString())
-        ?? await this._resolveAvatarMedia(req.location.peer, req.location.photoId)
+      // Persisted avatar locators can outlive QQ CDN credentials or predate
+      // newer locator fields (for example avatarUin). Refresh the peer first,
+      // then fall back to the cached projection when upstream is unavailable.
+      const media = await this._resolveAvatarMedia(req.location.peer, req.location.photoId)
+        ?? this._avatarMedia.get(req.location.photoId.toString())
       if (!media || !this._platform.downloadMedia) throw new RpcError(400, 'LOCATION_INVALID')
       return {
         _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: Math.floor(Date.now() / 1000),

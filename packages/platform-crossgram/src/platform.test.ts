@@ -53,6 +53,25 @@ describe('QQNTPlatform mapping', () => {
       .rejects.toThrow('download range out of filesize')
   })
 
+  it('maps QQNT bridge HTTP 416 ranged-read responses to an empty Telegram chunk', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.downloadFile = vi.fn(async function* () {
+      throw new Error('QQNT bridge 416: Range Not Satisfiable')
+    })
+    const media: IMMedia<QQMediaLocator> = {
+      id: 'file', kind: 'file', size: 1024,
+      locator: {
+        messageId: 'message', elementId: 'element', chatType: 2, peerUid: 'group',
+        kind: 'file', fileName: 'file.bin', fileUuid: 'uuid',
+      },
+    }
+
+    await expect(collect(platform.downloadMedia(session, media, { offset: 1024, limit: 512 })))
+      .resolves.toEqual([])
+    await expect(collect(platform.downloadMedia(session, media, { offset: 0, limit: 512 })))
+      .rejects.toThrow('Range Not Satisfiable')
+  })
+
   it('projects QQ bot markdown and native buttons into Telegram-compatible entities and markup', async () => {
     expect(parseQQMarkdown(
       '**粗体** *斜体* ~~删除~~ `代码` [文档](https://example.com/docs)',
