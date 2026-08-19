@@ -19,15 +19,25 @@ const session: PlatformSession = {
   platformSessionId: 'kinds-session', platformId: 'kinds', userId: 'self', credentials: {}, metadata: {},
 }
 
+const ownerPermissions = {
+  manageConversation: true, manageMembers: true, deleteAnyMessage: true,
+  editAnyMessage: true, pinMessages: true, inviteMembers: true, manageAdministrators: true,
+}
+
 const conversations: IMConversation[] = [
   { id: 'direct', kind: 'direct', title: 'Direct' },
-  { id: 'group', kind: 'group', title: 'QQ Group', metadata: { participantsCount: 23 } },
+  {
+    id: 'group', kind: 'group', title: 'QQ Group', selfRole: 'owner', selfPermissions: ownerPermissions,
+    metadata: { participantsCount: 23 },
+  },
   {
     id: 'parent-channel', kind: 'channel', title: 'Discord / general', parentId: 'category', spaceId: 'guild',
+    selfRole: 'owner', selfPermissions: ownerPermissions,
     metadata: { participantsCount: 42 },
   },
   {
     id: 'subchannel', kind: 'channel', title: 'Discord / support', parentId: 'parent-channel', spaceId: 'guild',
+    selfRole: 'owner', selfPermissions: ownerPermissions,
     metadata: { participantsCount: 42 },
   },
 ]
@@ -46,12 +56,13 @@ const sentInputs: Array<import('./platform.js').IMMessageInput> = []
 const actionCalls: string[] = []
 const forwardOptions: import('./platform.js').IMForwardMessagesOptions[] = []
 const subdialogCalls: Array<{ parentId: string, limit?: number, afterId?: string }> = []
+const memberRoleCalls: Array<{ conversationId: string, userId: string, role: 'administrator' | 'member' }> = []
 const platform: IMPlatform = {
   capabilities: {
     history: true,
     send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
     conversations: { groups: true, channels: true, subchannels: true },
-    members: { list: true, administrators: true, permissions: true },
+    members: { list: true, administrators: true, permissions: true, updateRoles: true },
     messageActions: {
       delete: { own: { supported: true, maxAgeSeconds: 120 }, others: { supported: true } },
       edit: { mode: 'native' }, forward: { mode: 'native', preservesAuthor: true },
@@ -78,7 +89,7 @@ const platform: IMPlatform = {
     if (target.id === 'direct') return { members: [], total: 0 }
     const permissions = (admin: boolean) => ({
       manageConversation: admin, manageMembers: admin, deleteAnyMessage: admin,
-      editAnyMessage: admin, pinMessages: admin, inviteMembers: true,
+      editAnyMessage: admin, pinMessages: admin, inviteMembers: true, manageAdministrators: false,
     })
     return {
       total: 3,
@@ -88,6 +99,13 @@ const platform: IMPlatform = {
         { user: { id: 'bob', firstName: 'Bob' }, role: 'member' as const, permissions: permissions(false) },
       ],
     }
+  },
+  async getConversationMember(localSession, target, userId) {
+    const page = await this.getConversationMembers!(localSession, target)
+    return page.members.find((member) => member.user.id === userId) ?? null
+  },
+  async setConversationMemberRole(_session, target, userId, role) {
+    memberRoleCalls.push({ conversationId: target.id, userId, role })
   },
   async sendMessage(_session, target, content) {
     sentTargets.push(target.id)
@@ -128,6 +146,7 @@ afterEach(async () => {
   actionCalls.length = 0
   forwardOptions.length = 0
   subdialogCalls.length = 0
+  memberRoleCalls.length = 0
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
@@ -1059,6 +1078,83 @@ describe('conversation kinds', () => {
     for (const result of [groupSettings, fullGroup, fullChannel, self, participants, admins, sendAs]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
+  })
+
+  it('projects owner, administrator, and member chat permissions without inventing creator rights', async () => {
+    const roles: Array<{ id: string, role: 'owner' | 'administrator' | 'member' }> = [
+      { id: 'owner-group', role: 'owner' },
+      { id: 'admin-group', role: 'administrator' },
+      { id: 'member-group', role: 'member' },
+    ]
+    const selected: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: roles.map(({ id, role }) => ({
+          conversation: {
+            id, kind: 'group' as const, title: id, selfRole: role,
+            selfPermissions: {
+              ...ownerPermissions,
+              manageAdministrators: role === 'owner',
+            },
+          },
+          unreadCount: 0,
+        })) }
+      },
+    }
+    const { rpc } = await createRpc(selected)
+    const result = await rpc.getDialogs(dialogsRequest()) as unknown as tl.messages.RawPeerDialogs
+    const chats = new Map(result.chats.flatMap((chat) =>
+      chat._ === 'channel' || chat._ === 'chat' ? [[chat.title, chat] as const] : []))
+
+    expect(chats.get('owner-group')).toMatchObject({ creator: true, adminRights: { addAdmins: true } })
+    expect(chats.get('admin-group')).toMatchObject({
+      creator: undefined, adminRights: { changeInfo: true, addAdmins: false },
+    })
+    expect(chats.get('member-group')).toMatchObject({ creator: undefined, adminRights: undefined })
+  })
+
+  it('promotes and demotes members only when the current account may manage administrators', async () => {
+    const { rpc } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const channel = {
+      _: 'inputChannel' as const, channelId: stableId('peer:group'), accessHash: Long.ZERO,
+    }
+    const participants = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel, filter: { _: 'channelParticipantsRecent' },
+      offset: 0, limit: 100, hash: Long.ZERO,
+    }) as tl.channels.RawChannelParticipants
+    const bob = participants.users.find((user) => user._ === 'user' && user.firstName === 'Bob') as tl.RawUser
+    const userId = { _: 'inputUser' as const, userId: bob.id, accessHash: Long.ZERO }
+
+    await rpc.editChannelAdmin({
+      _: 'channels.editAdmin', channel, userId,
+      adminRights: { _: 'chatAdminRights', deleteMessages: true }, rank: '',
+    })
+    await rpc.editChannelAdmin({
+      _: 'channels.editAdmin', channel, userId,
+      adminRights: { _: 'chatAdminRights' }, rank: '',
+    })
+
+    expect(memberRoleCalls).toEqual([
+      { conversationId: 'group', userId: 'bob', role: 'administrator' },
+      { conversationId: 'group', userId: 'bob', role: 'member' },
+    ])
+
+    const deniedPlatform: IMPlatform = {
+      ...platform,
+      async getConversationMember(localSession, target, targetUserId) {
+        const member = await platform.getConversationMember!(localSession, target, targetUserId)
+        return targetUserId === localSession.userId && member
+          ? { ...member, role: 'member', permissions: { ...member.permissions, manageAdministrators: false } }
+          : member
+      },
+    }
+    const { rpc: denied } = await createRpc(deniedPlatform)
+    await denied.getDialogs(dialogsRequest())
+    await expect(denied.editChannelAdmin({
+      _: 'channels.editAdmin', channel, userId,
+      adminRights: { _: 'chatAdminRights', deleteMessages: true }, rank: '',
+    })).rejects.toMatchObject({ text: 'CHAT_ADMIN_REQUIRED' })
   })
 
   it('serves channel-scoped message, chat-list, and read RPCs', async () => {

@@ -271,6 +271,26 @@ export class QQNTClient {
     return this.json(`/conversations/${encodeURIComponent(id)}/members${queryString(query)}`)
   }
 
+  async setMemberRole(
+    conversationId: string,
+    userId: string,
+    role: 'administrator' | 'member',
+  ): Promise<void> {
+    if (this.bridgeProtocol === undefined) await this.status()
+    if (this.bridgeProtocol! < 25) {
+      throw new Error('QQNT bridge protocol 25 is required for administrator updates')
+    }
+    await this.json(
+      `/conversations/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}/role`,
+      false,
+      {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ role }),
+      },
+    )
+  }
+
   getUser(id: string): Promise<{
     id: string
     numericId?: string

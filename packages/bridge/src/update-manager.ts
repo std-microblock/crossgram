@@ -4,7 +4,7 @@ import type { ServerConnection } from '@mtproto-relay/mtproto'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  makeTlArticleMedia, makeTlCardPreview, makeTlMessageMedia, projectTlMessage, stableId,
+  makeAdminRights, makeTlArticleMedia, makeTlCardPreview, makeTlMessageMedia, projectTlMessage, stableId,
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
@@ -1125,8 +1125,14 @@ function linkedConversations(message: IMMessage): import('./platform.js').IMConv
 function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {
   const id = stableId(`peer:${conversation.id}`)
   const broadcast = conversation.metadata?.broadcast === true
+  const creator = conversation.selfRole === 'owner'
+  const administrator = conversation.selfRole === 'administrator'
   return {
-    _: 'channel', creator: true, id, accessHash: Long.ONE, title: conversation.title,
+    _: 'channel', creator: creator || undefined,
+    adminRights: creator || administrator
+      ? makeAdminRights(conversation.selfPermissions, creator)
+      : undefined,
+    id, accessHash: Long.ONE, title: conversation.title,
     broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
     forum: forum || undefined,
     photo: conversation.avatar

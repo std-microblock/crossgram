@@ -1775,6 +1775,8 @@ describe('QQNTPlatform mapping', () => {
     expect(dialogs.dialogs[0]).toMatchObject({
       conversation: {
         id: '2:1058754719', kind: 'group',
+        selfRole: 'owner',
+        selfPermissions: { manageAdministrators: true },
         metadata: {
           qqPeerUid: '1058754719', qq: '1058754719', chatType: 2,
           participantsCount: 42, qqSelfRole: 'owner',
@@ -1813,9 +1815,24 @@ describe('QQNTPlatform mapping', () => {
         metadata: { qqName: 'Profile Name' },
       },
       role: 'administrator',
-      permissions: { manageMembers: true, editAnyMessage: true },
+      permissions: { manageMembers: true, editAnyMessage: true, manageAdministrators: false },
       title: 'Group Alias',
     })
+  })
+
+  it('forwards Telegram administrator promotion and demotion to QQNT', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.setMemberRole = vi.fn(async () => {})
+
+    await platform.setConversationMemberRole!(session, { id: '2:group' }, 'opaque/member', 'administrator')
+    await platform.setConversationMemberRole!(session, { id: '2:group' }, 'opaque/member', 'member')
+
+    expect(platform.client.setMemberRole).toHaveBeenNthCalledWith(
+      1, '2:group', 'opaque/member', 'administrator',
+    )
+    expect(platform.client.setMemberRole).toHaveBeenNthCalledWith(
+      2, '2:group', 'opaque/member', 'member',
+    )
   })
 
   it('propagates QQ group message masks into conversation metadata', async () => {

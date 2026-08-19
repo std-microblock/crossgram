@@ -1460,6 +1460,41 @@ export class DialogRpc {
     }
   }
 
+  async editChannelAdmin(req: tl.channels.RawEditAdminRequest): Promise<tl.TypeUpdates> {
+    await this._hydratePeers()
+    const conversation = this._resolveChannel(req.channel)
+    if (!this._platform.setConversationMemberRole
+      || this._platform.capabilities.members?.updateRoles !== true) {
+      throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    }
+    const actor = await this._platform.getConversationMember?.(
+      this._session, { id: conversation.id }, this._session.userId,
+    )
+    if (!actor || (actor.role !== 'owner' && actor.permissions.manageAdministrators !== true)) {
+      throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    }
+    const targetId = req.userId._ === 'inputUserSelf'
+      ? this._session.userId
+      : req.userId._ === 'inputUser' || req.userId._ === 'inputUserFromMessage'
+        ? this._tlToUser.get(req.userId.userId)
+        : undefined
+    if (!targetId || targetId === this._session.userId) throw new RpcError(400, 'USER_ID_INVALID')
+    const target = this._platform.getConversationMember
+      ? await this._platform.getConversationMember(this._session, { id: conversation.id }, targetId)
+      : (await this._allMembers(conversation.id)).find((member) => member.user.id === targetId)
+    if (!target) throw new RpcError(400, 'USER_NOT_PARTICIPANT')
+    if (target.role === 'owner') throw new RpcError(400, 'USER_CREATOR')
+    const role = hasAdminRights(req.adminRights) ? 'administrator' : 'member'
+    await this._platform.setConversationMemberRole(
+      this._session, { id: conversation.id }, targetId, role,
+    )
+    this._memberPages.delete(conversation.id)
+    return {
+      _: 'updates', updates: [], users: [this._makeMemberUser({ ...target, role })],
+      chats: [this._makeChat(conversation)], date: Math.floor(Date.now() / 1_000), seq: 0,
+    }
+  }
+
   async getSendAs(req: tl.channels.RawGetSendAsRequest): Promise<tl.channels.RawSendAsPeers> {
     await this._hydratePeers()
     this._resolvePeer(req.peer)
@@ -4113,7 +4148,7 @@ export class DialogRpc {
     if (member.role === 'owner') {
       return {
         _: 'channelParticipantCreator', userId,
-        adminRights: makeAdminRights(member.permissions), rank: member.title,
+        adminRights: makeAdminRights(member.permissions, true), rank: member.title,
       }
     }
     if (member.role === 'administrator') {
@@ -4388,8 +4423,14 @@ export class DialogRpc {
       if (chat) return chat
     }
     const broadcast = conversation.metadata?.broadcast === true
+    const creator = conversation.selfRole === 'owner'
+    const administrator = conversation.selfRole === 'administrator'
     return {
-      _: 'channel', creator: true, id, accessHash: Long.ONE, title: conversation.title,
+      _: 'channel', creator: creator || undefined,
+      adminRights: creator || administrator
+        ? makeAdminRights(conversation.selfPermissions, creator)
+        : undefined,
+      id, accessHash: Long.ONE, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
       forum: !broadcast && (
         this._subchannels(conversation.id).length > 0
@@ -4829,21 +4870,28 @@ function qqGroupMsgMaskPolicy(
   return typeof mask === 'number' ? QQ_GROUP_MSG_MASK_POLICIES[mask] : undefined
 }
 
-function makeAdminRights(permissions?: IMConversationPermissions): tl.RawChatAdminRights {
+export function makeAdminRights(
+  permissions?: IMConversationPermissions,
+  owner = false,
+): tl.RawChatAdminRights {
   return {
     _: 'chatAdminRights',
-    changeInfo: permissions?.manageConversation ?? true,
-    postMessages: permissions?.manageConversation ?? true,
-    editMessages: permissions?.editAnyMessage ?? true,
-    deleteMessages: permissions?.deleteAnyMessage ?? true,
-    banUsers: permissions?.manageMembers ?? true,
-    inviteUsers: permissions?.inviteMembers ?? true,
-    pinMessages: permissions?.pinMessages ?? true,
-    addAdmins: permissions?.manageMembers ?? true,
-    manageCall: permissions?.manageConversation ?? true,
-    manageTopics: permissions?.manageConversation ?? true,
-    other: permissions?.manageConversation ?? true,
+    changeInfo: permissions?.manageConversation ?? owner,
+    postMessages: permissions?.manageConversation ?? owner,
+    editMessages: permissions?.editAnyMessage ?? owner,
+    deleteMessages: permissions?.deleteAnyMessage ?? owner,
+    banUsers: permissions?.manageMembers ?? owner,
+    inviteUsers: permissions?.inviteMembers ?? owner,
+    pinMessages: permissions?.pinMessages ?? owner,
+    addAdmins: permissions?.manageAdministrators ?? owner,
+    manageCall: permissions?.manageConversation ?? owner,
+    manageTopics: permissions?.manageConversation ?? owner,
+    other: permissions?.manageConversation ?? owner,
   }
+}
+
+function hasAdminRights(rights: tl.RawChatAdminRights): boolean {
+  return Object.entries(rights).some(([key, value]) => key !== '_' && value === true)
 }
 
 function clampLimit(limit: number): number {

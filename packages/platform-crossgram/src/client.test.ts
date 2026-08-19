@@ -1238,6 +1238,29 @@ describe('QQNTClient streaming transport', () => {
     expect(stream).not.toHaveBeenCalled()
   })
 
+  it('posts encoded administrator role updates only to protocol 25 bridges', async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      if (String(input).endsWith('/status')) return Response.json({ protocolVersion: 25, ready: true })
+      expect(String(input)).toBe('http://bridge.invalid/v1/conversations/2%3Agroup/members/member%2Fopaque/role')
+      expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ role: 'administrator' }) })
+      return Response.json({ ok: true })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await client.setMemberRole('2:group', 'member/opaque', 'administrator')
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects administrator updates against protocol 24 before posting', async () => {
+    const fetch = vi.fn(async () => Response.json({ protocolVersion: 24, ready: true }))
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(client.setMemberRole('2:group', 'member', 'administrator'))
+      .rejects.toThrow('protocol 25 is required')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it('revalidates dialogs and history with ETag and reuses only 304 responses', async () => {
     const requests: Array<{ url: string, ifNoneMatch: string | null }> = []
     const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {

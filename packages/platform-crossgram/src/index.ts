@@ -153,7 +153,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       maxMedia: 9,
     },
     conversations: { groups: true, channels: false, subchannels: false },
-    members: { list: true, administrators: true, permissions: false },
+    members: { list: true, administrators: true, permissions: false, updateRoles: true },
     avatars: { users: true, conversations: true },
     messageActions: {
       delete: {
@@ -902,13 +902,22 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
+  async setConversationMemberRole(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+    role: 'administrator' | 'member',
+  ): Promise<void> {
+    await this.client.setMemberRole(conversation.id, userId, role)
+  }
+
   async getConversationMember(
     session: PlatformSession,
     conversation: IMConversationRef,
     userId: string,
   ): Promise<IMConversationMember<QQMediaLocator> | null> {
     const known = this.conversations.get(conversation.id)
-    const selfRole = known?.metadata?.qqSelfRole
+    const selfRole = known?.selfRole ?? known?.metadata?.qqSelfRole
     if (
       userId === session.userId
       && (selfRole === 'owner' || selfRole === 'administrator' || selfRole === 'member')
@@ -1793,11 +1802,14 @@ function formatError(error: unknown): string {
 }
 
 function mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
+  const selfPermissions = input.selfRole ? permissions(input.selfRole) : undefined
   return {
     id: input.id,
     kind: input.kind,
     title: input.title,
     avatar: input.avatar ? mapMedia(input.avatar) : undefined,
+    selfRole: input.selfRole,
+    selfPermissions,
     metadata: {
       qqPeerUid: input.peerUid,
       qq: input.peerUin,
@@ -2146,6 +2158,7 @@ function permissions(role: 'owner' | 'administrator' | 'member') {
     editAnyMessage: administrator,
     pinMessages: administrator,
     inviteMembers: true,
+    manageAdministrators: role === 'owner',
   }
 }
 

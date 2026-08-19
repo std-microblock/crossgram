@@ -99,7 +99,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
       maxMedia: 10,
     },
     conversations: { groups: true, channels: true, subchannels: true },
-    members: { list: true, administrators: true, permissions: true },
+    members: { list: true, administrators: true, permissions: true, updateRoles: true },
     avatars: { users: true, conversations: true },
     messageActions: {
       delete: {
@@ -125,6 +125,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
   private readonly _conversations = new Map<string, IMConversation<StaticMediaLocator>>()
   private readonly _messages = new Map<string, IMMessage<StaticMediaLocator>[]>()
   private readonly _readUpTo = new Map<string, string>()
+  private readonly _memberRoles = new Map<string, Map<string, 'administrator' | 'member'>>()
   private readonly _media = new Map<string, Uint8Array>()
   private readonly _subscribers = new Map<string, Set<(event: IMEvent<StaticMediaLocator>) => void | Promise<void>>>()
   private readonly _timers = new Map<string, ReturnType<typeof setInterval>>()
@@ -327,7 +328,9 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
         : this._users.get(id)
       if (!user) return []
       const owner = id === session.userId
-      const administrator = !owner && id === (session.userId === 'alice' ? 'bob' : 'alice')
+      const configuredRole = this._memberRoles.get(target.id)?.get(id)
+      const administrator = !owner && (configuredRole === 'administrator'
+        || (configuredRole === undefined && id === (session.userId === 'alice' ? 'bob' : 'alice')))
       return [{
         user: clone(user), role: owner ? 'owner' : administrator ? 'administrator' : 'member',
         permissions: {
@@ -337,6 +340,7 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
           editAnyMessage: owner,
           pinMessages: owner || administrator,
           inviteMembers: true,
+          manageAdministrators: owner,
         },
         joinedAt: 1_600_000_000,
         title: administrator ? 'Moderator' : undefined,
@@ -348,6 +352,22 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
       members: clone(members.slice(start, start + limit)), total: members.length,
       nextCursor: start + limit < members.length ? String(start + limit) : undefined,
     }
+  }
+
+  async setConversationMemberRole(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+    role: 'administrator' | 'member',
+  ): Promise<void> {
+    const target = this._requireConversation(conversation.id)
+    if (target.kind === 'direct') throw new Error('member roles require a group conversation')
+    if (userId === session.userId) throw new Error('the conversation owner role cannot be changed')
+    const member = await this.getConversationMember(session, conversation, userId)
+    if (!member) throw new Error('conversation member not found')
+    const roles = this._memberRoles.get(target.id) ?? new Map<string, 'administrator' | 'member'>()
+    roles.set(userId, role)
+    this._memberRoles.set(target.id, roles)
   }
 
   async deleteMessages(
@@ -738,7 +758,16 @@ export class StaticPlatform implements IMPlatform<StaticMediaLocator> {
         parentId: 'discord-general', spaceId: 'discord-guild', metadata: { participantsCount: 4 },
       },
     ]
-    for (const conversation of conversations) this._conversations.set(conversation.id, conversation)
+    for (const conversation of conversations) {
+      if (conversation.kind !== 'direct') {
+        conversation.selfRole = 'owner'
+        conversation.selfPermissions = {
+          manageConversation: true, manageMembers: true, deleteAnyMessage: true,
+          editAnyMessage: true, pinMessages: true, inviteMembers: true, manageAdministrators: true,
+        }
+      }
+      this._conversations.set(conversation.id, conversation)
+    }
     this._append(textMessage('direct:alice:1', 'alice', 'alice', 'Hey there!', 1_700_000_000))
     this._append(textMessage('direct:alice:2', 'alice', 'alice', 'How are you?', 1_700_000_100))
     this._append(textMessage('direct:bob:1', 'bob', 'bob', 'Meeting at 3?', 1_700_000_200))

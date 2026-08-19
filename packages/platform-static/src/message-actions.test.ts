@@ -29,6 +29,20 @@ describe('StaticPlatform administrative domain', () => {
     await expect(platform.getConversationMember(session, { id: 'qq-group' }, 'missing')).resolves.toBeNull()
   })
 
+  it('persists administrator promotion and demotion for subsequent member reads', async () => {
+    const platform = new StaticPlatform({ instanceId: 'member-roles', historySize: 0 })
+
+    await platform.setConversationMemberRole(session, { id: 'qq-group' }, 'bob', 'administrator')
+    await expect(platform.getConversationMember(session, { id: 'qq-group' }, 'bob'))
+      .resolves.toMatchObject({ role: 'administrator' })
+
+    await platform.setConversationMemberRole(session, { id: 'qq-group' }, 'bob', 'member')
+    await expect(platform.getConversationMember(session, { id: 'qq-group' }, 'bob'))
+      .resolves.toMatchObject({ role: 'member' })
+    await expect(platform.setConversationMemberRole(session, { id: 'qq-group' }, 'self', 'member'))
+      .rejects.toThrow('owner role cannot be changed')
+  })
+
   it('exposes user and conversation avatars through typed IMMedia locators', async () => {
     const platform = new StaticPlatform({ instanceId: 'avatars', historySize: 0 })
     const user = await platform.getUser(session, 'alice')

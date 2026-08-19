@@ -38,6 +38,8 @@ export interface PlatformCapabilities {
     list: boolean
     administrators: boolean
     permissions: boolean
+    /** Promote and demote administrators through the platform's native API. */
+    updateRoles?: boolean
   }
   avatars?: {
     users: boolean
@@ -115,6 +117,10 @@ export interface IMConversation<TMediaLocator = unknown> extends IMConversationR
   /** Guild, workspace, or other top-level platform container. */
   spaceId?: string
   avatar?: IMMedia<TMediaLocator>
+  /** Current account's authoritative role in this conversation, when known. */
+  selfRole?: IMConversationRole
+  /** Current account's authoritative permissions, when known. */
+  selfPermissions?: IMConversationPermissions
   metadata?: JsonObject
 }
 
@@ -127,6 +133,8 @@ export interface IMConversationPermissions {
   editAnyMessage: boolean
   pinMessages: boolean
   inviteMembers: boolean
+  /** Whether this member may promote or demote administrators. */
+  manageAdministrators?: boolean
 }
 
 export interface IMConversationMember<TMediaLocator = unknown> {
@@ -703,6 +711,12 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     query?: IMPageQuery,
   ): Promise<IMConversationMemberPage<TMediaLocator>>
+  setConversationMemberRole?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+    role: 'administrator' | 'member',
+  ): Promise<void>
   deleteMessages?(
     session: PlatformSession,
     conversation: IMConversationRef,
