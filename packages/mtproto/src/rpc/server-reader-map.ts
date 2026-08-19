@@ -44,6 +44,7 @@ account.registerDevice#637ea878 token_type:int token:string = Bool;
 export const CROSSGRAM_API_SCHEMA = `
 ---functions---
 crossgram.getFileUrl#7520f6ea location:InputFileLocation = DataJSON;
+crossgram.prepareMediaUpload#f75adc0e peer:InputPeer file_id:long name:string size:long kind:string mime_type:string md5:bytes sha1:bytes file10m_md5:bytes width:int height:int duration:double = Bool;
 `
 
 /**

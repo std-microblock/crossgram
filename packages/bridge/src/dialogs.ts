@@ -51,6 +51,20 @@ type SendMessageRequest = tl.messages.RawSendMessageRequest
 type SendMediaRequest = tl.messages.RawSendMediaRequest
 type SendMultiMediaRequest = tl.messages.RawSendMultiMediaRequest
 type UploadMediaRequest = tl.messages.RawUploadMediaRequest
+export interface PrepareMediaUploadRequest {
+  peer: tl.TypeInputPeer
+  fileId: Long
+  name: string
+  size: Long
+  kind: string
+  mimeType: string
+  md5: Uint8Array
+  sha1: Uint8Array
+  file10mMd5: Uint8Array
+  width: number
+  height: number
+  duration: number
+}
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 type MentionReadPublisher = (
   session: PlatformSession,
@@ -98,6 +112,10 @@ interface ResolvedStickerInput {
 interface QQGroupMsgMaskPolicy {
   muteUntil: 0 | typeof MUTE_FOREVER
   folderId: 0 | 1
+}
+
+function boolObject(value: boolean): tl.TlObject {
+  return { _: value ? 'boolTrue' : 'boolFalse' } as unknown as tl.TlObject
 }
 
 const QQ_GROUP_MSG_MASK = {
@@ -2045,6 +2063,38 @@ export class DialogRpc {
     return directDownloadJSON(resolved)
   }
 
+  async prepareMediaUpload(req: PrepareMediaUploadRequest): Promise<tl.TlObject> {
+    if (!this._uploads || !this._platform.prepareMediaUpload) return boolObject(false)
+    const fileId = req.fileId.toString()
+    const size = req.size.toNumber()
+    if (!fileId || !Number.isSafeInteger(size) || size <= 0 || !req.name) return boolObject(false)
+    const kind = req.kind === 'image' ? 'image' : req.kind === 'file' || req.kind === 'video' ? 'file' : undefined
+    if (!kind || req.md5.length !== 16 || req.sha1.length !== 20 || req.file10mMd5.length !== 16) {
+      return boolObject(false)
+    }
+    await this._hydratePeers()
+    const conversationId = this._resolveMessageTarget(req.peer)
+    this._assertWritableConversation(conversationId)
+    const media = await this._platform.prepareMediaUpload(this._session, { id: conversationId }, {
+      kind,
+      name: req.name,
+      mimeType: req.mimeType || undefined,
+      size,
+      width: req.width > 0 ? req.width : undefined,
+      height: req.height > 0 ? req.height : undefined,
+      duration: req.duration > 0 ? req.duration : undefined,
+      hashes: {
+        size,
+        md5: Buffer.from(req.md5).toString('hex'),
+        sha1: Buffer.from(req.sha1).toString('hex'),
+        file10MMd5: Buffer.from(req.file10mMd5).toString('hex'),
+      },
+    }).catch(() => undefined)
+    if (!media) return boolObject(false)
+    this._uploads.stagePrepared(this._session.platformSessionId, fileId, media)
+    return boolObject(true)
+  }
+
   private async _resolveAvatarMedia(peer: tl.TypeInputPeer, photoId: Long): Promise<IMMedia<any> | undefined> {
     await this._hydratePeers()
     let media: IMMedia<any> | undefined
@@ -2530,13 +2580,6 @@ export class DialogRpc {
     }
     const file = media.file
     if (file._ !== 'inputFile' && file._ !== 'inputFileBig') throw new RpcError(400, 'FILE_ID_INVALID')
-    const upload = await this._uploads.open(
-      this._session.platformSessionId,
-      file.id.toString(),
-      file.parts,
-    ).catch((error) => {
-      throw new RpcError(400, `FILE_PARTS_INVALID: ${String(error)}`)
-    })
     const kind = media._ === 'inputMediaUploadedPhoto' ? 'image' : 'file'
     const attribute = media._ === 'inputMediaUploadedDocument'
       ? media.attributes.find((item) => item._ === 'documentAttributeFilename')
@@ -2547,6 +2590,28 @@ export class DialogRpc {
     const audioAttribute = media._ === 'inputMediaUploadedDocument'
       ? media.attributes.find((item) => item._ === 'documentAttributeAudio')
       : undefined
+    const staged = this._uploads.getStaged(this._session.platformSessionId, file.id.toString())
+    if (staged) {
+      staged.media = {
+        ...staged.media,
+        kind,
+        name: attribute?._ === 'documentAttributeFilename' ? attribute.fileName : file.name,
+        mimeType: media._ === 'inputMediaUploadedDocument' ? media.mimeType : inferImageMime(file.name),
+        width: staged.media.width ?? (videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.w : undefined),
+        height: staged.media.height ?? (videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.h : undefined),
+        duration: staged.media.duration ?? (videoAttribute?._ === 'documentAttributeVideo' ? videoAttribute.duration
+          : audioAttribute?._ === 'documentAttributeAudio' ? audioAttribute.duration : undefined),
+        voice: audioAttribute?._ === 'documentAttributeAudio' ? audioAttribute.voice : staged.media.voice,
+      }
+      return staged
+    }
+    const upload = await this._uploads.open(
+      this._session.platformSessionId,
+      file.id.toString(),
+      file.parts,
+    ).catch((error) => {
+      throw new RpcError(400, `FILE_PARTS_INVALID: ${String(error)}`)
+    })
     const detected = kind === 'image' ? await probeImageDimensions(upload.source) : undefined
     return {
       media: {

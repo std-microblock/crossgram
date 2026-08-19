@@ -81,6 +81,34 @@ describe('historical server reader map', () => {
       },
     })
   })
+
+  it('decodes the stable Crossgram hash-first upload request constructor', () => {
+    const peer = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'inputPeerUser', userId: 42, accessHash: Long.ZERO,
+    } as any)
+    const request = TlBinaryWriter.manual(512)
+    request.uint(0xf75adc0e)
+    request.raw(peer)
+    request.long(Long.fromNumber(9_001))
+    request.string('photo.jpg')
+    request.long(Long.fromNumber(1234))
+    request.string('image')
+    request.string('image/jpeg')
+    request.bytes(Uint8Array.from({ length: 16 }, (_, index) => index))
+    request.bytes(Uint8Array.from({ length: 20 }, (_, index) => index + 16))
+    request.bytes(Uint8Array.from({ length: 16 }, (_, index) => index + 36))
+    request.int(640)
+    request.int(480)
+    request.double(0)
+
+    expect(new TlBinaryReader(getServerReaderMap(), request.result()).object()).toMatchObject({
+      _: 'crossgram.prepareMediaUpload',
+      peer: { _: 'inputPeerUser', userId: 42 },
+      fileId: Long.fromNumber(9_001),
+      name: 'photo.jpg', size: Long.fromNumber(1234), kind: 'image', mimeType: 'image/jpeg',
+      width: 640, height: 480, duration: 0,
+    })
+  })
 })
 
 function tlString(value: string): Uint8Array {

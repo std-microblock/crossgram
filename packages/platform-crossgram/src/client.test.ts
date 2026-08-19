@@ -440,6 +440,57 @@ describe('QQNTClient streaming transport', () => {
     expect(manifest).not.toHaveProperty('mediaFraming')
   })
 
+  it('reuses a hash lookup plan without opening the media source during send', async () => {
+    let prepareCalls = 0
+    let messageManifest: Record<string, any> | undefined
+    server = createServer(async (request, response) => {
+      if (request.url === '/uploads/prepare') {
+        prepareCalls++
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          prepared: {
+            kind: 'file', fileUuid: 'rapid-uuid', fileHash: 'rapid-hash', exists: true, commandId: 95,
+          },
+        }))
+        return
+      }
+      const encoded = request.headers['x-qqnt-manifest']
+      if (typeof encoded === 'string') messageManifest = JSON.parse(Buffer.from(encoded, 'base64url').toString())
+      await collect(request)
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({
+        id: 'sent', conversationId: '1:uid', senderId: 'self', timestamp: 1, outgoing: true, parts: [],
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const hashes = {
+      size: 4,
+      md5: '08d6c05a21512a79a1dfeb9d2a8f262f',
+      sha1: '12dada1fff4d4787ade3333147202c3b443e376f',
+      file10MMd5: '08d6c05a21512a79a1dfeb9d2a8f262f',
+    }
+    const source = await client.prepareFastUpload('1:uid', {
+      kind: 'file', name: 'rapid.bin', mimeType: 'application/octet-stream', size: hashes.size, hashes,
+    })
+    expect(source).toBeDefined()
+    const stream = vi.spyOn(source!, 'stream')
+
+    await client.sendMessage('1:uid', undefined, [{
+      kind: 'file', name: 'rapid.bin', mimeType: 'application/octet-stream', source: source!,
+    }])
+
+    expect(prepareCalls).toBe(1)
+    expect(stream).not.toHaveBeenCalled()
+    expect(messageManifest).toMatchObject({
+      media: [{ name: 'rapid.bin', ...hashes }],
+      uploadedMedia: [{ kind: 'file', fileUuid: 'rapid-uuid', exists: true, commandId: 95 }],
+    })
+  })
+
   it('downloads user and group avatars from platform-constructed qlogo URLs', async () => {
     const requests: Array<{ url: string, range?: string, authorization?: string }> = []
     const client = new QQNTClient({

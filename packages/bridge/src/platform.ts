@@ -236,6 +236,20 @@ export interface IMMediaSource {
   streamRange?(options: { offset: number, limit: number, signal?: AbortSignal }): AsyncIterable<Uint8Array>
 }
 
+/** Hash metadata computed by a client before it starts a relay upload. */
+export interface IMMediaUploadHashes {
+  size: number
+  md5: string
+  sha1: string
+  /** MD5 of the first 10 MiB, used by QQ private-file rapid upload. */
+  file10MMd5: string
+}
+
+/** Metadata-only upload probe. Platforms return a send-ready input only on a native cache hit. */
+export interface IMMediaUploadProbe extends Omit<IMMediaInput, 'source'> {
+  hashes: IMMediaUploadHashes
+}
+
 export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
   source: IMMediaSource
 }
@@ -644,6 +658,16 @@ export interface IMPlatform<TMediaLocator = unknown> {
     content: IMMessageInput,
     options?: IMTransferOptions,
   ): Promise<IMMessage<TMediaLocator>>
+
+  /**
+   * Resolve a local file by hashes without receiving its bytes. Returning
+   * undefined means the caller must continue with the normal part upload.
+   */
+  prepareMediaUpload?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    media: IMMediaUploadProbe,
+  ): Promise<IMMediaInput | undefined>
 
   getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage<TMediaLocator>>
   /** Resolve one opaque platform conversation, used for targeted metadata backfill. */

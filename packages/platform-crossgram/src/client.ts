@@ -6,7 +6,9 @@ import { mkdir, open, rm, type FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Writable } from 'node:stream'
-import type { IMMediaInput, IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
+import type {
+  IMMediaInput, IMMediaSource, IMMediaUploadHashes, IMMediaUploadProbe, IMTransferOptions,
+} from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
@@ -40,6 +42,15 @@ interface HashedVideoThumbnail extends GeneratedVideoThumbnail {
   size: number
   md5: string
   sha1: string
+}
+
+const QQ_FAST_UPLOAD = Symbol('qq-fast-upload')
+
+interface QQFastUploadSource extends IMMediaSource {
+  [QQ_FAST_UPLOAD]: {
+    hashes: IMMediaUploadHashes
+    plan: QQMediaUploadPlan
+  }
 }
 
 export interface QQNTSubscribeOptions {
@@ -395,6 +406,60 @@ export class QQNTClient {
     })
   }
 
+  async prepareFastUpload(
+    conversationId: string,
+    media: IMMediaUploadProbe,
+    signal?: AbortSignal,
+  ): Promise<IMMediaSource | undefined> {
+    const kind = outboundMediaKind({ ...media, name: media.name ?? 'upload' })
+    const plan = await this.prepareMediaUpload(conversationId, {
+      kind,
+      name: media.name ?? 'upload',
+      mimeType: media.mimeType,
+      size: media.hashes.size,
+      md5: media.hashes.md5,
+      sha1: media.hashes.sha1,
+      file10MMd5: media.hashes.file10MMd5,
+      width: media.width,
+      height: media.height,
+      duration: media.duration,
+    }, signal)
+    if (plan.highway || plan.auxiliaryHighways?.length) return
+    const source: QQFastUploadSource = {
+      size: media.hashes.size,
+      async *stream() {
+        throw new Error('QQ fast-upload source must not be read')
+      },
+      [QQ_FAST_UPLOAD]: { hashes: media.hashes, plan },
+    }
+    return source
+  }
+
+  async prepareMediaUpload(
+    conversationId: string,
+    media: {
+      kind: 'image' | 'video' | 'file'
+      name: string
+      mimeType?: string
+      size: number
+      md5: string
+      sha1: string
+      file10MMd5: string
+      width?: number
+      height?: number
+      duration?: number
+      thumbnail?: ReturnType<typeof videoThumbnailMetadata>
+    },
+    signal?: AbortSignal,
+  ): Promise<QQMediaUploadPlan> {
+    return this.json<QQMediaUploadPlan>('/uploads/prepare', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ conversationId, media }),
+      signal,
+    })
+  }
+
   async sendMessage(
     conversationId: string,
     text: string | undefined,
@@ -448,27 +513,27 @@ export class QQNTClient {
     }
     const preparedMedia = media && await Promise.all(media.map(async (item) => {
       const kind = outboundMediaKind(item)
+      const fast = fastUpload(item.source)
+      if (fast) {
+        if (fast.plan.prepared.kind !== kind) throw new Error('QQ fast-upload media kind changed')
+        return { item, kind, hashes: fast.hashes, thumbnail: undefined, plan: fast.plan }
+      }
       const [hashes, thumbnail] = await Promise.all([
         hashMediaSource(item.source, options.signal),
         kind === 'video'
           ? this.videoThumbnail(item.source, options.signal).then(hashVideoThumbnail)
           : undefined,
       ])
-      return { item, kind, hashes, thumbnail }
+      return { item, kind, hashes, thumbnail, plan: undefined }
     }))
-    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({ item, kind, hashes, thumbnail }, mediaIndex) => {
+    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({ item, kind, hashes, thumbnail, plan: fastPlan }, mediaIndex) => {
       const mediaSpec = {
         kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
         md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
         width: item.width, height: item.height, duration: item.duration,
         ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
       }
-      const plan = await this.json<QQMediaUploadPlan>('/uploads/prepare', false, {
-        method: 'POST',
-        headers: this.headers({ 'content-type': 'application/json' }),
-        body: JSON.stringify({ conversationId, media: mediaSpec }),
-        signal: options.signal,
-      })
+      const plan = fastPlan ?? await this.prepareMediaUpload(conversationId, mediaSpec, options.signal)
       if (plan.prepared.kind !== kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
       if (plan.highway) {
         if (plan.highway.fileSize !== hashes.size || plan.highway.fileMd5.toLowerCase() !== hashes.md5) {
@@ -1486,6 +1551,10 @@ async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Pro
     throw new Error(`incomplete media source: expected ${source.size} bytes, streamed ${size}`)
   }
   return { size, md5: md5.digest('hex'), sha1: sha1.digest('hex'), file10MMd5: first10M.digest('hex') }
+}
+
+function fastUpload(source: IMMediaSource): QQFastUploadSource[typeof QQ_FAST_UPLOAD] | undefined {
+  return (source as Partial<QQFastUploadSource>)[QQ_FAST_UPLOAD]
 }
 
 function sourceReadableStream(source: IMMediaSource, signal?: AbortSignal): ReadableStream<Uint8Array> {

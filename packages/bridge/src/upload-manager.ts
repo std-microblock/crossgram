@@ -72,6 +72,18 @@ export class UploadManager {
     this._staged.set(this._stageKey(staged.upload.platformSessionId, staged.upload.fileId), staged)
   }
 
+  stagePrepared(platformSessionId: string, fileId: string, media: IMMediaInput): StagedMedia {
+    const upload: UploadedFile = {
+      platformSessionId,
+      fileId,
+      source: media.source,
+      cleanup: async () => {},
+    }
+    const staged = { media, upload, timestamp: Date.now() }
+    this.stage(staged)
+    return staged
+  }
+
   getStaged(platformSessionId: string, fileId: string): StagedMedia | undefined {
     return this._staged.get(this._stageKey(platformSessionId, fileId))
   }

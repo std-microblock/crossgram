@@ -867,6 +867,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getFileUrl(
       (req as unknown as { location: tl.TypeInputFileLocation }).location,
     ))
+  rpc.register('crossgram.prepareMediaUpload', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.prepareMediaUpload(
+      req as unknown as import('./dialogs.js').PrepareMediaUploadRequest,
+    ))
   rpc.register('upload.getFileHashes', async () => bareVector([]))
 
   rpc.register('messages.getAllStickers', async (rpc, req) =>

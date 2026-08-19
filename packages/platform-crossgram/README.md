@@ -26,6 +26,13 @@ The adapter reads `IMMediaSource.stream()` directly and never constructs a
 complete media `Buffer`. `webSocketEndpoint` can point the event connection at a
 different host or path without changing the HTTP API `endpoint`.
 
+Patched uploaders may call `crossgram.prepareMediaUpload` with a destination
+peer, Telegram file id, metadata, MD5, SHA-1, and first-10-MiB MD5. The bridge
+asks the platform adapter for a native hash hit and stages the opaque result
+under that file id. `BoolTrue` means the client can skip
+`upload.saveFilePart`; `BoolFalse` or any RPC error means it must use the normal
+part upload. No source bytes are opened again after a QQ cache hit.
+
 Bridge protocol v14 sends
 `OidbSvcTrpcTcp.0x9067_202` through
 QQNT, refreshes the private/group RKey in `originImageUrl`, and returns the QQ CDN

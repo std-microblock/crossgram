@@ -182,6 +182,46 @@ describe('media send streaming', () => {
     await expect(uploads.open(session.platformSessionId, '314', 1)).rejects.toThrow('part is missing')
   })
 
+  it('stages a platform-native hash hit and sends without Telegram upload parts', async () => {
+    const { rpc, platform, consumed, inputs, peerId } = await createHarness()
+    const prepare = vi.fn(async (_session, _conversation, media) => ({
+      kind: media.kind,
+      name: media.name,
+      mimeType: media.mimeType,
+      size: media.hashes.size,
+      source: { size: media.hashes.size, async *stream() {} },
+    }))
+    platform.prepareMediaUpload = prepare
+
+    await expect(rpc.prepareMediaUpload({
+      peer: peer(peerId), fileId: Long.fromNumber(9_001), name: 'rapid.jpg',
+      size: Long.fromNumber(4), kind: 'image', mimeType: 'image/jpeg',
+      md5: Uint8Array.from({ length: 16 }, (_, index) => index),
+      sha1: Uint8Array.from({ length: 20 }, (_, index) => index + 16),
+      file10mMd5: Uint8Array.from({ length: 16 }, (_, index) => index),
+      width: 1, height: 1, duration: 0,
+    })).resolves.toMatchObject({ _: 'boolTrue' })
+
+    await expect(rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(9_001), message: '',
+      media: { _: 'inputMediaUploadedPhoto', file: inputFile(9_001, 1, 'rapid.jpg') },
+    })).resolves.toMatchObject({ _: 'updates' })
+
+    expect(prepare).toHaveBeenCalledWith(
+      session, { id: conversation.id },
+      expect.objectContaining({
+        kind: 'image', name: 'rapid.jpg', hashes: {
+          size: 4,
+          md5: '000102030405060708090a0b0c0d0e0f',
+          sha1: '101112131415161718191a1b1c1d1e1f20212223',
+          file10MMd5: '000102030405060708090a0b0c0d0e0f',
+        },
+      }),
+    )
+    expect(consumed).toEqual([[]])
+    expect(inputs[0].parts[0]).toMatchObject({ type: 'media', media: { name: 'rapid.jpg', size: 4 } })
+  })
+
   it('streams file parts into the adapter, reports progressive bytes, persists, and cleans up', async () => {
     const { rpc, uploads, store, consumed, progress, peerId } = await createHarness()
     const priorPush = await store.prepareUpdateDelivery(
