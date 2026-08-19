@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { createReadStream } from 'node:fs'
 import { mkdir, open, rm, type FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Writable } from 'node:stream'
 import type { IMMediaSource, IMTransferOptions } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
@@ -18,6 +21,25 @@ export interface QQNTClientOptions {
   token?: string
   fetch?: typeof globalThis.fetch
   unrangedCachePath?: string
+  videoThumbnail?: VideoThumbnailGenerator
+}
+
+export interface GeneratedVideoThumbnail {
+  bytes: Uint8Array
+  width: number
+  height: number
+}
+
+export type VideoThumbnailGenerator = (
+  source: IMMediaSource,
+  signal?: AbortSignal,
+) => Promise<GeneratedVideoThumbnail | undefined>
+
+interface HashedVideoThumbnail extends GeneratedVideoThumbnail {
+  bytes: Buffer
+  size: number
+  md5: string
+  sha1: string
 }
 
 export interface QQNTSubscribeOptions {
@@ -47,6 +69,10 @@ const MAX_UNRANGED_CACHE_ENTRIES = 8
 const DIRECT_RANGE_BLOCK_BYTES = 1024 * 1024
 const MAX_DIRECT_RANGE_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_REVALIDATED_JSON_RESPONSES = 256
+const VIDEO_THUMBNAIL_WIDTH = 320
+const VIDEO_THUMBNAIL_HEIGHT = 180
+const MAX_VIDEO_THUMBNAIL_BYTES = 2 * 1024 * 1024
+const VIDEO_THUMBNAIL_TIMEOUT_MS = 15_000
 let unrangedCacheSequence = 0
 
 interface CachedUnrangedFile {
@@ -85,6 +111,7 @@ export class QQNTClient {
   private readonly unrangedFiles = new Map<string, CachedUnrangedFile>()
   private readonly unrangedFileLoads = new Map<string, Promise<CachedUnrangedFile>>()
   private readonly unrangedCachePath: string
+  private readonly videoThumbnail: VideoThumbnailGenerator
   private unrangedFileBytes = 0
   private readonly directRangeBlocks = new Map<string, CachedDirectRangeBlock>()
   private readonly directRangeBlockLoads = new Map<string, Promise<CachedDirectRangeBlock>>()
@@ -97,6 +124,13 @@ export class QQNTClient {
     this.webSocketEndpoint = options.webSocketEndpoint ?? `${this.endpoint}/events/ws`
     this.token = options.token
     this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.videoThumbnail = options.videoThumbnail ?? (async (source, signal) => {
+      try {
+        return await extractVideoThumbnail(source, signal)
+      } catch {
+        return undefined
+      }
+    })
     this.unrangedCachePath = options.unrangedCachePath
       ?? join(tmpdir(), `crossgram-qqnt-unranged-${process.pid}-${++unrangedCacheSequence}`)
   }
@@ -355,15 +389,29 @@ export class QQNTClient {
       if (response.status === 403) throw new QQNTMessageSendRejectedError(await responseError(response))
       return responseJson(response)
     }
-    const preparedMedia = media && await Promise.all(media.map(async (item) => ({
-      item,
-      hashes: await hashMediaSource(item.source, options.signal),
-    })))
-    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({ item, hashes }, mediaIndex) => {
+    const hasVideo = media?.some((item) => outboundMediaKind(item) === 'video')
+    if (hasVideo) {
+      if (this.bridgeProtocol === undefined) await this.status()
+      if (this.bridgeProtocol! < 24) {
+        throw new Error('QQNT bridge protocol 24 is required for playable video messages')
+      }
+    }
+    const preparedMedia = media && await Promise.all(media.map(async (item) => {
+      const kind = outboundMediaKind(item)
+      const [hashes, thumbnail] = await Promise.all([
+        hashMediaSource(item.source, options.signal),
+        kind === 'video'
+          ? this.videoThumbnail(item.source, options.signal).then(hashVideoThumbnail)
+          : undefined,
+      ])
+      return { item, kind, hashes, thumbnail }
+    }))
+    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({ item, kind, hashes, thumbnail }, mediaIndex) => {
       const mediaSpec = {
-        kind: item.kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
+        kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
         md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
         width: item.width, height: item.height, duration: item.duration,
+        ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
       }
       const plan = await this.json<QQMediaUploadPlan>('/uploads/prepare', false, {
         method: 'POST',
@@ -371,7 +419,7 @@ export class QQNTClient {
         body: JSON.stringify({ conversationId, media: mediaSpec }),
         signal: options.signal,
       })
-      if (plan.prepared.kind !== item.kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
+      if (plan.prepared.kind !== kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
       if (plan.highway) {
         if (plan.highway.fileSize !== hashes.size || plan.highway.fileMd5.toLowerCase() !== hashes.md5) {
           throw new Error('QQNT bridge returned mismatched Highway file metadata')
@@ -387,7 +435,25 @@ export class QQNTClient {
             }),
           },
         )
-      } else {
+      }
+      for (const auxiliary of plan.auxiliaryHighways ?? []) {
+        const inline = auxiliary.bytes ? Buffer.from(auxiliary.bytes, 'base64url') : undefined
+        const bytes = matchingAuxiliaryBytes(auxiliary.highway, thumbnail?.bytes, inline)
+        if (!bytes) throw new Error(`QQNT bridge returned no usable ${auxiliary.role} bytes`)
+        if (
+          auxiliary.highway.fileSize !== bytes.length
+          || auxiliary.highway.fileMd5.toLowerCase() !== createHash('md5').update(bytes).digest('hex')
+        ) {
+          throw new Error(`QQNT bridge returned mismatched ${auxiliary.role} Highway metadata`)
+        }
+        await uploadHighway(
+          auxiliary.highway,
+          singleChunk(bytes),
+          this.fetchImpl,
+          { signal: options.signal },
+        )
+      }
+      if (!plan.highway) {
         await options.onProgress?.({
           phase: 'upload', mediaIndex, transferredBytes: hashes.size, totalBytes: hashes.size,
         })
@@ -402,10 +468,11 @@ export class QQNTClient {
       replyToSequence,
       originRequestId,
       sticker,
-      media: preparedMedia?.map(({ item, hashes }) => ({
-        kind: item.kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
+      media: preparedMedia?.map(({ item, kind, hashes, thumbnail }) => ({
+        kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
         md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
         width: item.width, height: item.height, duration: item.duration,
+        ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
       })),
       uploadedMedia,
     }
@@ -833,6 +900,15 @@ export class QQNTClient {
       signal,
       redirect: 'follow',
     })
+    if (response.status === 416) {
+      const contentRange = response.headers.get('content-range') ?? ''
+      const match = /^bytes\s+\*\/(\d+)$/i.exec(contentRange)
+      const fileSize = match ? Number(match[1]) : Number.NaN
+      if (Number.isSafeInteger(fileSize) && start >= fileSize) {
+        await discardResponseBody(response)
+        return { start, bytes: new Uint8Array() }
+      }
+    }
     if (!response.ok) throw new Error(await nativeResponseError(response))
     if (response.status !== 206) {
       await discardResponseBody(response)
@@ -1190,6 +1266,147 @@ function rawDataText(data: RawData): string {
   if (Array.isArray(data)) return Buffer.concat(data).toString()
   if (data instanceof ArrayBuffer) return Buffer.from(new Uint8Array(data)).toString()
   return data.toString()
+}
+
+function outboundMediaKind(item: {
+  kind: 'image' | 'file'
+  name: string
+  mimeType?: string
+}): 'image' | 'video' | 'file' {
+  if (item.kind === 'image') return 'image'
+  if (item.mimeType?.toLowerCase().startsWith('video/')) return 'video'
+  return /\.(?:asf|avi|m2ts|mkv|mod|mov|mp4|mts|rm|rmvb|ts|webm|wmv)$/i.test(item.name)
+    ? 'video'
+    : 'file'
+}
+
+function hashVideoThumbnail(
+  value: GeneratedVideoThumbnail | undefined,
+): HashedVideoThumbnail | undefined {
+  if (!value) return
+  const bytes = Buffer.from(value.bytes)
+  if (!bytes.length || bytes.length > MAX_VIDEO_THUMBNAIL_BYTES) {
+    throw new Error('generated video thumbnail has an invalid size')
+  }
+  if (!Number.isSafeInteger(value.width) || value.width <= 0
+    || !Number.isSafeInteger(value.height) || value.height <= 0) {
+    throw new Error('generated video thumbnail has invalid dimensions')
+  }
+  return {
+    bytes,
+    size: bytes.length,
+    md5: createHash('md5').update(bytes).digest('hex'),
+    sha1: createHash('sha1').update(bytes).digest('hex'),
+    width: value.width,
+    height: value.height,
+  }
+}
+
+function videoThumbnailMetadata(thumbnail: HashedVideoThumbnail) {
+  return {
+    size: thumbnail.size,
+    md5: thumbnail.md5,
+    sha1: thumbnail.sha1,
+    width: thumbnail.width,
+    height: thumbnail.height,
+  }
+}
+
+function matchingAuxiliaryBytes(
+  plan: { fileSize: number, fileMd5: string },
+  ...candidates: Array<Uint8Array | undefined>
+): Buffer | undefined {
+  return candidates.flatMap((candidate) => candidate ? [Buffer.from(candidate)] : [])
+    .find((candidate) => candidate.length === plan.fileSize
+      && createHash('md5').update(candidate).digest('hex') === plan.fileMd5.toLowerCase())
+}
+
+async function* singleChunk(bytes: Uint8Array): AsyncIterable<Uint8Array> {
+  yield bytes
+}
+
+export async function extractVideoThumbnail(
+  source: IMMediaSource,
+  signal?: AbortSignal,
+  ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg',
+): Promise<GeneratedVideoThumbnail> {
+  if (signal?.aborted) throw signal.reason ?? new Error('video thumbnail extraction aborted')
+  const child = spawn(ffmpegPath, [
+    '-hide_banner', '-loglevel', 'error',
+    '-i', 'pipe:0',
+    '-frames:v', '1',
+    '-vf', `scale=${VIDEO_THUMBNAIL_WIDTH}:${VIDEO_THUMBNAIL_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_THUMBNAIL_WIDTH}:${VIDEO_THUMBNAIL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black`,
+    '-q:v', '4', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1',
+  ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk: string) => {
+    if (stderr.length < 16_384) stderr += chunk.slice(0, 16_384 - stderr.length)
+  })
+  child.stdin.on('error', () => undefined)
+  let timedOut = false
+  const timeout = setTimeout(() => {
+    timedOut = true
+    child.kill()
+  }, VIDEO_THUMBNAIL_TIMEOUT_MS)
+  timeout.unref()
+  const abort = () => child.kill()
+  signal?.addEventListener('abort', abort, { once: true })
+  const output = collectThumbnailOutput(child.stdout)
+  const feed = feedVideoThumbnailInput(child.stdin, source, signal)
+  const exit = new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code) => resolve(code))
+  })
+  try {
+    const [bytes, code] = await Promise.all([output, exit])
+    await feed.catch((error) => {
+      if (!isClosedPipeError(error)) throw error
+    })
+    if (signal?.aborted) throw signal.reason ?? new Error('video thumbnail extraction aborted')
+    if (timedOut) throw new Error('video thumbnail extraction timed out')
+    if (code !== 0 || !bytes.length) {
+      throw new Error(`ffmpeg video thumbnail extraction failed (${code ?? 'spawn'}): ${stderr.trim()}`)
+    }
+    return { bytes, width: VIDEO_THUMBNAIL_WIDTH, height: VIDEO_THUMBNAIL_HEIGHT }
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', abort)
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+  }
+}
+
+async function collectThumbnailOutput(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of source) {
+    size += chunk.length
+    if (size > MAX_VIDEO_THUMBNAIL_BYTES) throw new Error('generated video thumbnail is too large')
+    chunks.push(Buffer.from(chunk))
+  }
+  return Buffer.concat(chunks, size)
+}
+
+async function feedVideoThumbnailInput(
+  target: Writable,
+  source: IMMediaSource,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    for await (const chunk of source.stream({ signal })) {
+      if (signal?.aborted) throw signal.reason ?? new Error('video thumbnail extraction aborted')
+      if (!target.writable) break
+      if (!target.write(chunk)) await once(target, 'drain')
+    }
+    if (target.writable) target.end()
+  } catch (error) {
+    if (!isClosedPipeError(error)) throw error
+  }
+}
+
+function isClosedPipeError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_PREMATURE_CLOSE'
 }
 
 async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Promise<{

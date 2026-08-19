@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -203,26 +204,51 @@ describe('QQNTClient streaming transport', () => {
   })
 
   it('streams media directly to QQ Highway and posts only CDN metadata to the local bridge', async () => {
+    const thumbnail = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
+    const thumbnailMd5 = createHash('md5').update(thumbnail).digest('hex')
+    const thumbnailSha1 = createHash('sha1').update(thumbnail).digest('hex')
     const highwayFrames: Buffer[] = []
     const localMessageBodies: Buffer[] = []
     let manifest: Record<string, any> | undefined
     server = createServer(async (request, response) => {
+      if (request.url === '/status') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ protocolVersion: 24 }))
+        return
+      }
       if (request.url === '/uploads/prepare') {
         const body = JSON.parse((await collect(request)).toString())
         expect(body).toMatchObject({ conversationId: '1:uid', media: {
-          kind: 'file', name: 'x.mp4', size: 5,
+          kind: 'video', name: 'x.mp4', size: 5,
           md5: '7cfdd07889b3295d6a550914ab35e068',
+          thumbnail: {
+            size: thumbnail.length, md5: thumbnailMd5, sha1: thumbnailSha1,
+            width: 320, height: 180,
+          },
         } })
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({
-          prepared: { kind: 'file', fileUuid: 'file-uuid', fileHash: 'file-hash', exists: false, commandId: 95 },
+          prepared: {
+            kind: 'video', fileUuid: 'video-uuid',
+            msgInfo: Buffer.from('video-msg-info').toString('base64url'),
+          },
           highway: {
             servers: [{ host: '127.0.0.1', port: (server!.address() as { port: number }).port }],
             ticket: Buffer.from('ticket').toString('base64url'),
             extendInfo: Buffer.from('extend').toString('base64url'),
-            selfUin: '1715311957', commandId: 95, sequenceStart: 71,
+            selfUin: '1715311957', commandId: 1001, sequenceStart: 71,
             blockSize: 2, fileSize: 5, fileMd5: '7cfdd07889b3295d6a550914ab35e068',
           },
+          auxiliaryHighways: [{
+            role: 'thumbnail',
+            highway: {
+              servers: [{ host: '127.0.0.1', port: (server!.address() as { port: number }).port }],
+              ticket: Buffer.from('ticket').toString('base64url'),
+              extendInfo: Buffer.from('thumb-extend').toString('base64url'),
+              selfUin: '1715311957', commandId: 1002, sequenceStart: 74,
+              blockSize: 2, fileSize: thumbnail.length, fileMd5: thumbnailMd5,
+            },
+          }],
         }))
         return
       }
@@ -244,7 +270,11 @@ describe('QQNTClient streaming transport', () => {
     await once(server, 'listening')
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const videoThumbnail = vi.fn(async () => ({ bytes: thumbnail, width: 320, height: 180 }))
+    const client = new QQNTClient({
+      endpoint: `http://127.0.0.1:${address.port}`,
+      videoThumbnail,
+    })
     const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4, 5])]
     const progress: number[] = []
     let streamCalls = 0
@@ -254,10 +284,13 @@ describe('QQNTClient streaming transport', () => {
     }], { onProgress: (item) => { progress.push(item.transferredBytes) } },
     'origin-1', undefined, undefined, 'old-account-view-id', '571')
     expect(message.id).toBe('sent')
-    expect(Buffer.concat(highwayFrames.map(highwayBody))).toEqual(Buffer.from([1, 2, 3, 4, 5]))
-    expect(highwayFrames.map((frame) => frame.readUInt32BE(5))).toEqual([2, 2, 1])
+    expect(Buffer.concat(highwayFrames.map(highwayBody))).toEqual(Buffer.concat([
+      Buffer.from([1, 2, 3, 4, 5]), thumbnail,
+    ]))
+    expect(highwayFrames.map((frame) => frame.readUInt32BE(5))).toEqual([2, 2, 1, 2, 2])
     expect(progress).toEqual([2, 4, 5])
     expect(streamCalls).toBe(2)
+    expect(videoThumbnail).toHaveBeenCalledOnce()
     expect(localMessageBodies).toEqual([Buffer.alloc(0)])
     expect(manifest).toMatchObject({
       conversationId: '1:uid', originRequestId: 'origin-1',
@@ -267,9 +300,13 @@ describe('QQNTClient streaming transport', () => {
         md5: '7cfdd07889b3295d6a550914ab35e068',
         sha1: '11966ab9c099f8fabefac54c08d5be2bd8c903af',
         file10MMd5: '7cfdd07889b3295d6a550914ab35e068',
+        thumbnail: {
+          size: thumbnail.length, md5: thumbnailMd5, sha1: thumbnailSha1,
+          width: 320, height: 180,
+        },
       }],
       uploadedMedia: [{
-        kind: 'file', fileUuid: 'file-uuid', fileHash: 'file-hash', exists: false, commandId: 95,
+        kind: 'video', fileUuid: 'video-uuid',
       }],
     })
     expect(manifest).not.toHaveProperty('mediaFraming')
@@ -779,6 +816,68 @@ describe('QQNTClient streaming transport', () => {
     expect(ranges).toEqual(['bytes=0-1048575'])
   })
 
+  it('treats an unsatisfied direct range at or beyond the known file size as EOF', async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      if (String(input) === 'http://bridge.invalid/v1/files/direct-url') {
+        return Response.json({
+          url: 'https://cdn.qq.example/eof', expiresAt: Date.now() + 60_000, supportsRange: true,
+        })
+      }
+      return new Response(null, { status: 416, headers: { 'content-range': 'bytes */1048577' } })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+    const locator = {
+      messageId: 'eof', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'file' as const, fileName: 'partial.bin', fileUuid: 'eof-uuid',
+    }
+
+    await expect(collect(client.downloadFile(locator, {
+      offset: 2 * 1024 * 1024, limit: 128 * 1024,
+    }))).resolves.toEqual(Buffer.alloc(0))
+  })
+
+  it('does not hide a 416 response when the requested direct range is still satisfiable', async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      if (String(input) === 'http://bridge.invalid/v1/files/direct-url') {
+        return Response.json({
+          url: 'https://cdn.qq.example/premature-416', expiresAt: Date.now() + 60_000, supportsRange: true,
+        })
+      }
+      return new Response('premature', {
+        status: 416, headers: { 'content-range': 'bytes */2097152' },
+      })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(collect(client.downloadFile({
+      messageId: 'premature', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'file', fileName: 'partial.bin', fileUuid: 'premature-uuid',
+    }, { offset: 1024 * 1024, limit: 128 * 1024 }))).rejects.toThrow(
+      'QQNT native media 416: premature',
+    )
+  })
+
+  it('does not accept a malformed 416 Content-Range as direct media EOF', async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo) => {
+      if (String(input) === 'http://bridge.invalid/v1/files/direct-url') {
+        return Response.json({
+          url: 'https://cdn.qq.example/malformed-416', expiresAt: Date.now() + 60_000, supportsRange: true,
+        })
+      }
+      return new Response('malformed', {
+        status: 416, headers: { 'content-range': 'bytes 0-1/*' },
+      })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(collect(client.downloadFile({
+      messageId: 'malformed', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'file', fileName: 'partial.bin', fileUuid: 'malformed-uuid',
+    }, { offset: 2 * 1024 * 1024, limit: 128 * 1024 }))).rejects.toThrow(
+      'QQNT native media 416: malformed',
+    )
+  })
+
   it('downloads an image from its packet-refreshed direct URL without leaking bridge authorization', async () => {
     const requests: Array<{ url: string, range?: string, authorization?: string }> = []
     server = createServer(async (request, response) => {
@@ -1068,6 +1167,17 @@ describe('QQNTClient streaming transport', () => {
       kind: 'file', voice: true, name: 'voice.ogg', source: { async *stream() { yield Uint8Array.of(1) } },
     }])).rejects.toThrow('protocol 21 is required')
     expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('rejects playable-video sends against a v23 bridge before hashing or posting bytes', async () => {
+    const fetch = vi.fn(async () => Response.json({ protocolVersion: 23, ready: true }))
+    const stream = vi.fn(async function* () { yield Uint8Array.of(1) })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+    await expect(client.sendMessage('c', undefined, [{
+      kind: 'file', name: 'video.mp4', mimeType: 'video/mp4', source: { stream },
+    }])).rejects.toThrow('protocol 24 is required')
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(stream).not.toHaveBeenCalled()
   })
 
   it('revalidates dialogs and history with ETag and reuses only 304 responses', async () => {

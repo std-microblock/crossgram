@@ -8,6 +8,7 @@ const HIGHWAY_APP_ID = 1_600_001_604
 
 export type QQPreparedMedia =
   | { kind: 'image', fileUuid: string, msgInfo: string, compatQMsg?: string }
+  | { kind: 'video', fileUuid: string, msgInfo: string }
   | { kind: 'file', fileUuid: string, fileHash?: string, exists: boolean, commandId: 71 | 95 }
 
 export interface QQHighwayUploadPlan {
@@ -25,6 +26,11 @@ export interface QQHighwayUploadPlan {
 export interface QQMediaUploadPlan {
   prepared: QQPreparedMedia
   highway?: QQHighwayUploadPlan
+  auxiliaryHighways?: Array<{
+    role: 'thumbnail'
+    bytes?: string
+    highway: QQHighwayUploadPlan
+  }>
 }
 
 export async function uploadHighway(
