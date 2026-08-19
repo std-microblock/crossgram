@@ -8,7 +8,7 @@ import WebSocket from 'ws'
 import { Readable } from 'node:stream'
 import { SatoriExporter, type SatoriExportConfig } from './exporter.js'
 import type {
-  IMConversation, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession, Unsubscribe,
+  IMConversation, IMConversationMember, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 
 const session: PlatformSession = {
@@ -25,6 +25,17 @@ const capabilities: PlatformCapabilities = {
   conversations: { groups: true, channels: false, subchannels: false },
 }
 
+const guildMember: IMConversationMember = {
+  user: { id: 'alice', firstName: 'Alice', lastName: 'Member' },
+  role: 'member',
+  permissions: {
+    manageConversation: false, manageMembers: false, deleteAnyMessage: false,
+    editAnyMessage: false, pinMessages: false, inviteMembers: true,
+  },
+  title: 'Moderator',
+  joinedAt: 1_700_000_000,
+}
+
 const disposals: Array<{ dispose(): unknown }> = []
 
 afterEach(async () => {
@@ -38,6 +49,7 @@ class TestPlatform implements IMPlatform {
   readonly getConversation = vi.fn(async (_session: PlatformSession, id: string) => ({
     id, kind: id.startsWith('direct:') ? 'direct' as const : 'group' as const, title: id,
   }))
+  readonly getConversationMember = vi.fn(async (): Promise<IMConversationMember | null> => null)
   readonly resolveMediaUrl = vi.fn(async () => ({
     url: 'https://media.test/file', expiresAt: Date.now() + 60_000, supportsRange: true,
   }))
@@ -51,7 +63,7 @@ class TestPlatform implements IMPlatform {
   }))
 }
 
-async function createExporter(satori: Partial<SatoriExportConfig> = {}) {
+async function createExporter(satori: Partial<SatoriExportConfig> = {}, activeSession = session) {
   const ctx = new Context()
   const ingestLocalMessage = vi.fn(async () => ({}))
   const disposePlatform = ctx.provide('imPlatform', { ingestLocalMessage } as never)
@@ -60,9 +72,9 @@ async function createExporter(satori: Partial<SatoriExportConfig> = {}) {
   disposals.push(...fibers)
   await Promise.all(fibers)
   const warnings = vi.fn()
-  const exporter = new SatoriExporter(ctx, { platformId: 'qqnt', platform: 'qq', ...satori }, { warn: warnings })
+  const exporter = new SatoriExporter(ctx, { platformId: activeSession.platformId, platform: 'qq', ...satori }, { warn: warnings })
   const platform = new TestPlatform()
-  exporter.start(platform, session)
+  exporter.start(platform, activeSession)
   return { ctx, exporter, platform, warnings, ingestLocalMessage }
 }
 
@@ -114,8 +126,9 @@ async function createSatoriServer(token?: string, limits: { maxRequestBodyBytes?
   disposals.push(server)
   await server
   const exporter = new SatoriExporter(ctx, { platformId: 'qqnt', platform: 'qq' }, { warn: vi.fn() })
-  exporter.start(new TestPlatform(), session)
-  return { ctx, events: new URL('/satori/v1/events', ctx.server.baseUrl) }
+  const platform = new TestPlatform()
+  exporter.start(platform, session)
+  return { ctx, platform, events: new URL('/satori/v1/events', ctx.server.baseUrl) }
 }
 
 function message(id: string, conversationId: string, outgoing = false): IMMessage {
@@ -156,6 +169,127 @@ describe('SatoriExporter', () => {
     ])
     expect(events[1]?.event.guild).toBeUndefined()
     expect(platform.subscribe).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a truly empty fragment', []],
+    ['normalized empty text and containers', [h.text(''), h('p')]],
+    ['quote-only content', [h.quote('reply:1')]],
+  ])('silently ignores %s', async (_name, content) => {
+    const { ctx, platform, warnings } = await createExporter()
+
+    await expect(ctx.bots[0]!.createMessage('group:42', content)).resolves.toEqual([])
+
+    expect(platform.sendMessage).not.toHaveBeenCalled()
+    expect(warnings).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an empty fragment', []],
+    ['a normalized empty container', [h('p')]],
+    ['quote-only content', [h.quote('reply:1')]],
+  ])('ignores %s before resolving an unknown channel', async (_name, content) => {
+    const { ctx, platform, warnings } = await createExporter()
+    const getConversation = platform.getConversation
+    Object.assign(platform, { getConversation: undefined })
+
+    await expect(ctx.bots[0]!.createMessage('unknown:42', content)).resolves.toEqual([])
+
+    expect(getConversation).not.toHaveBeenCalled()
+    expect(platform.sendMessage).not.toHaveBeenCalled()
+    expect(warnings).not.toHaveBeenCalled()
+  })
+
+  it('maps guild members through their cached non-direct conversation', async () => {
+    const { ctx, exporter, platform } = await createExporter()
+    const conversation: IMConversation = { id: 'group:42', kind: 'group', spaceId: 'guild:7', title: 'Guild 7' }
+    exporter.handleMessage(session, conversation, message('cached', conversation.id), { created: true })
+    platform.getConversationMember.mockResolvedValueOnce(guildMember)
+
+    await expect(ctx.bots[0]!.getGuildMember('guild:7', 'alice')).resolves.toEqual({
+      user: { id: 'alice', name: 'Alice Member' }, title: 'Moderator', joinedAt: 1_700_000_000_000,
+    })
+    expect(platform.getConversationMember).toHaveBeenCalledWith(session, { id: 'group:42' }, 'alice')
+  })
+
+  it('uses the QQNT guild ID directly when no cached conversation exists', async () => {
+    const { ctx, platform } = await createExporter()
+    platform.getConversationMember.mockResolvedValueOnce(guildMember)
+
+    await expect(ctx.bots[0]!.getGuildMember('guild:7', 'alice')).resolves.toMatchObject({
+      user: { id: 'alice', name: 'Alice Member' },
+    })
+    expect(platform.getConversationMember).toHaveBeenCalledWith(session, { id: 'guild:7' }, 'alice')
+  })
+
+  it('fails guild member lookups when the guild cannot be resolved', async () => {
+    const discordSession: PlatformSession = { ...session, platformId: 'discord', platformSessionId: 'discord-session' }
+    const { ctx, platform } = await createExporter({}, discordSession)
+
+    await expect(ctx.bots[0]!.getGuildMember('guild:7', 'alice'))
+      .rejects.toThrow('Satori exporter cannot resolve guild: guild:7')
+    expect(platform.getConversationMember).not.toHaveBeenCalled()
+  })
+
+  it('fails guild member lookups when the member is unavailable', async () => {
+    const { ctx, platform } = await createExporter()
+
+    await expect(ctx.bots[0]!.getGuildMember('guild:7', 'missing'))
+      .rejects.toThrow('Satori exporter cannot find guild member: guild:7/missing')
+    expect(platform.getConversationMember).toHaveBeenCalledWith(session, { id: 'guild:7' }, 'missing')
+  })
+
+  it('fails guild member lookups when the platform does not support them', async () => {
+    const { ctx, platform } = await createExporter()
+    const getConversationMember = platform.getConversationMember
+    Object.assign(platform, { getConversationMember: undefined })
+
+    await expect(ctx.bots[0]!.getGuildMember('guild:7', 'alice'))
+      .rejects.toThrow('Satori exporter platform does not support guild member lookup')
+    expect(getConversationMember).not.toHaveBeenCalled()
+  })
+
+  it('rejects a guild member lookup after its bot session is replaced', async () => {
+    const { ctx, exporter, platform } = await createExporter()
+    let resolveMember!: (member: IMConversationMember | null) => void
+    const pendingMember = new Promise<IMConversationMember | null>((resolve) => { resolveMember = resolve })
+    platform.getConversationMember.mockReturnValueOnce(pendingMember)
+
+    const lookup = ctx.bots[0]!.getGuildMember('guild:7', 'alice')
+    await vi.waitFor(() => expect(platform.getConversationMember).toHaveBeenCalledOnce())
+    exporter.stop('qqnt')
+    exporter.start(platform, replacementSession)
+    resolveMember(guildMember)
+
+    await expect(lookup).rejects.toThrow('Satori exporter bot is no longer active')
+  })
+
+  it('sends media and native stickers without accompanying text', async () => {
+    const { ctx, platform } = await createExporter()
+    const sticker = {
+      providerId: 'qq-native', stickerId: 's1', packId: 'pack:1', format: 'static' as const, mimeType: 'image/png',
+    }
+    const plan = { type: 'native' as const, providerId: sticker.providerId, stickerId: sticker.stickerId, packId: sticker.packId, reference: { asset: 'a' } }
+    Object.assign(ctx, { imSticker: {
+      get: () => ({ capabilities: { ownerPlatformId: 'qqnt' }, getSticker: async () => sticker, prepareSend: async () => plan }),
+    } })
+
+    await ctx.bots[0]!.createMessage('group:42', [
+      h.img('data:image/png;base64,iVBORw0KGgo='),
+      h('img', {
+        src: 'internal:qq/self/sticker.png',
+        'data-crossgram-sticker-provider': sticker.providerId, 'data-crossgram-sticker-id': sticker.stickerId,
+        'data-crossgram-sticker-pack': sticker.packId, 'data-crossgram-sticker-name': 'Smile',
+        'data-crossgram-sticker-reference': 'eyJhc3NldCI6ImEifQ',
+      }),
+    ])
+
+    expect(platform.sendMessage).toHaveBeenCalledWith(session, { id: 'group:42' }, {
+      parts: [
+        { type: 'media', media: expect.objectContaining({ kind: 'image' }) },
+        { type: 'sticker', sticker: plan },
+      ],
+    })
   })
 
   it('sends pure text through the canonical session and ingests the forced outgoing result', async () => {
@@ -905,6 +1039,28 @@ describe('SatoriExporter', () => {
     expect(missing.status).toBe(403)
     expect(invalid.status).toBe(403)
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('serves guild.member.get through the authenticated Satori HTTP route', async () => {
+    const { ctx, platform } = await createSatoriServer('test-token')
+    platform.getConversationMember.mockResolvedValueOnce(guildMember)
+
+    const response = await fetch(new URL('/satori/v1/guild.member.get', ctx.server.baseUrl), {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-token',
+        'content-type': 'application/json',
+        'satori-platform': 'qq',
+        'satori-user-id': 'self',
+      },
+      body: JSON.stringify({ guild_id: 'guild:7', user_id: 'alice' }),
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({
+      user: { id: 'alice', name: 'Alice Member' }, title: 'Moderator', joined_at: 1_700_000_000_000,
+    })
+    expect(platform.getConversationMember).toHaveBeenCalledWith(session, { id: 'guild:7' }, 'alice')
   })
 
   it('serves Satori meta and message.create through the patched server plugin', async () => {

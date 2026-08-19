@@ -2,7 +2,7 @@ import { Bot, h, type Universal } from '@satorijs/core'
 import type { Context } from 'cordis'
 import {
   probeImageDimensions, providerBelongsToAccount,
-  type IMConversation, type IMMediaInput, type IMMessage, type IMMessageInput, type IMMessagePart,
+  type IMConversation, type IMConversationMember, type IMMediaInput, type IMMessage, type IMMessageInput, type IMMessagePart,
   type IMPlatform, type IMSticker, type IMStickerProvider, type IMStickerSendPlan, type IMTextEntity,
   type IngestResult, type JsonValue, type PlatformSession, type StickerProviderContext,
 } from '@mtproto-relay/bridge'
@@ -125,6 +125,28 @@ export class SatoriExporter {
     })
   }
 
+  async getGuildMember(
+    bot: SatoriExportBot,
+    generation: number,
+    guildId: string,
+    userId: string,
+  ): Promise<Universal.GuildMember> {
+    const platform = this._platform
+    const session = this._session
+    if (!platform || !session || !this.isActive(bot, generation)) throw new Error('Satori exporter bot is no longer active')
+    if (!platform.getConversationMember) throw new Error('Satori exporter platform does not support guild member lookup')
+    const conversation = [...this._conversations.values()]
+      .find((item) => item.kind !== 'direct' && (item.spaceId ?? item.id) === guildId)
+    const conversationId = conversation?.id ?? (session.platformId === 'qqnt' ? guildId : undefined)
+    if (!conversationId) throw new Error(`Satori exporter cannot resolve guild: ${guildId}`)
+    const member = await platform.getConversationMember(session, { id: conversationId }, userId)
+    if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) {
+      throw new Error('Satori exporter bot is no longer active')
+    }
+    if (!member) throw new Error(`Satori exporter cannot find guild member: ${guildId}/${userId}`)
+    return satoriGuildMember(member)
+  }
+
   async sendMessage(
     bot: SatoriExportBot,
     generation: number,
@@ -134,6 +156,14 @@ export class SatoriExporter {
     const platform = this._platform
     const session = this._session
     if (!platform || !session || !this.isActive(bot, generation)) throw new Error('Satori exporter bot is no longer active')
+    const stickerContext = {
+      session,
+      conversation: { id: channelId },
+      platformKind: platform.platformKind ?? session.platformId,
+    }
+    let input = await satoriInput(this._ctx, content, this._config, stickerContext)
+    if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) throw new Error('Satori exporter bot is no longer active')
+    if (!hasSendableContent(input)) return []
     let conversation = this._conversations.get(channelId)
     if (!conversation && platform.getConversation) {
       conversation = await platform.getConversation(session, channelId) ?? undefined
@@ -141,12 +171,10 @@ export class SatoriExporter {
       if (conversation) this._conversations.set(conversation.id, conversation)
     }
     if (!conversation) throw new Error(`Satori exporter cannot resolve channel: ${channelId}`)
-    const input = await satoriInput(this._ctx, content, this._config, {
-      session,
-      conversation: { id: conversation.id },
-      platformKind: platform.platformKind ?? session.platformId,
-    })
-    if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) throw new Error('Satori exporter bot is no longer active')
+    if (conversation.id !== channelId && input.parts.some((part) => part.type === 'sticker')) {
+      input = await satoriInput(this._ctx, content, this._config, { ...stickerContext, conversation: { id: conversation.id } })
+      if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) throw new Error('Satori exporter bot is no longer active')
+    }
     const message = await platform.sendMessage(session, { id: channelId }, input)
     if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) throw new Error('Satori exporter bot is no longer active')
     const outgoing = { ...message, conversationId: conversation.id, outgoing: true }
@@ -218,6 +246,11 @@ class SatoriExportBot extends Bot {
   override createMessage(channelId: string, content: h.Fragment): Promise<Universal.Message[]> {
     if (!this._exporter.isActive(this, this.generation)) return Promise.reject(new Error('Satori exporter bot is not ready'))
     return this._exporter.sendMessage(this, this.generation, channelId, content)
+  }
+
+  override getGuildMember(guildId: string, userId: string): Promise<Universal.GuildMember> {
+    if (!this._exporter.isActive(this, this.generation)) return Promise.reject(new Error('Satori exporter bot is not ready'))
+    return this._exporter.getGuildMember(this, this.generation, guildId, userId)
   }
 }
 
@@ -308,6 +341,16 @@ async function satoriInput(
   text = text.replace(/\n$/u, '')
   flush()
   return { parts: parts.length ? parts : [{ type: 'text', text: '' }], replyToId }
+}
+
+function hasSendableContent(input: IMMessageInput): boolean {
+  return input.parts.some((part) => {
+    switch (part.type) {
+      case 'text': return !!part.text
+      case 'media':
+      case 'sticker': return true
+    }
+  })
 }
 
 function mediaSource(ctx: Context, src: string, size: number | undefined, maxBytes: number) {
@@ -517,6 +560,14 @@ function satoriGuild(conversation: IMConversation): Universal.Guild {
 
 function satoriUser(id: string, user: IMMessage['sender']): Universal.User {
   return { id, name: user ? [user.firstName, user.lastName].filter(Boolean).join(' ') || id : id }
+}
+
+function satoriGuildMember(member: IMConversationMember): Universal.GuildMember {
+  return {
+    user: satoriUser(member.user.id, member.user),
+    title: member.title,
+    joinedAt: member.joinedAt === undefined ? undefined : member.joinedAt * 1_000,
+  }
 }
 
 function stringAttr(value: unknown): string | undefined {
