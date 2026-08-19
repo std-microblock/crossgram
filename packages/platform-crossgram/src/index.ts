@@ -7,7 +7,7 @@ import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import {
   IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
-  messagePartText, resolvePlatformPluginId,
+  messagePartText, resolvePlatformPluginId, stableId,
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
   type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMTransferOptions,
@@ -65,6 +65,7 @@ const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CONVERSATION_PREFIX = 'qqnt-multi-forward:'
+const INVALID_ZERO_PEER_CONVERSATION_ID = '0'
 const GLOBAL_SUBSCRIPTION_LEASES_KEY = '__crossgramQQNTSubscriptionLeasesV1' as const
 const EMPTY_GROUP_REACTION_CATALOG: IMReactionContext = {
   available: [], reactions: [], maxSelected: 20,
@@ -186,8 +187,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly originSessions = new Map<string, string>()
   private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
   private readonly multiForwardPreviewJobs = new Map<string, Promise<string | undefined>>()
-  private readonly multiForwardCleanupJobs = new Map<string, Promise<void>>()
-  private readonly multiForwardCleanupSessions = new Set<string>()
+  private readonly legacyDialogCleanupJobs = new Map<string, Promise<void>>()
+  private readonly legacyDialogCleanupSessions = new Set<string>()
   private readonly eventHandlers = new Map<
     string,
     (event: IMEvent<QQMediaLocator>) => void | Promise<void>
@@ -270,7 +271,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     session: PlatformSession,
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
-    await this.cleanupLegacyMultiForwardDialogs(session)
+    await this.cleanupLegacyDialogs(session)
     void this.ensureReactionCatalog()
     const controller = new AbortController()
     const knownLastMessageIds = new Map<string, string | undefined>()
@@ -366,13 +367,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
             }
             if (event.type === 'call-signal' && !isWireCallSignalEvent(event)) return
             if (event.type !== 'call-signal' && event.type !== 'request'
-              && isMultiForwardConversationId(event.conversation.id)) {
+              && isFilteredConversationId(event.conversation.id)) {
               if (event.type === 'message') {
                 knownLastMessageIds.set(event.conversation.id, event.message.id)
               }
+              const reason = isInvalidZeroPeerConversationId(event.conversation.id)
+                ? 'invalid-zero-peer'
+                : 'temporary-multi-forward'
               this.logger?.warn(
-                'WebSocket event filtered session=%s reason=temporary-multi-forward streamEventId=%s conversation=%s',
-                platformSessionId, eventId ?? '<none>', event.conversation.id,
+                'WebSocket event filtered session=%s reason=%s streamEventId=%s conversation=%s',
+                platformSessionId, reason, eventId ?? '<none>', event.conversation.id,
               )
               return
             }
@@ -622,7 +626,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async getDialogs(session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
-    await this.cleanupLegacyMultiForwardDialogs(session)
+    await this.cleanupLegacyDialogs(session)
     await waitAtMost(this.ensureReactionCatalog().catch(() => undefined), REACTION_CATALOG_GRACE_MS)
     return this.prepareDialogPage(session, await this.fetchDialogsPage(query))
   }
@@ -631,6 +635,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     _session: PlatformSession,
     conversationId: string,
   ): Promise<IMConversation<QQMediaLocator> | null> {
+    if (isInvalidZeroPeerConversationId(conversationId)) return null
     if (isMultiForwardConversationId(conversationId)) {
       return this.conversations.get(conversationId) ?? null
     }
@@ -645,7 +650,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       cursor: query.cursor, afterId: query.afterId, limit: query.limit,
     }, signal)
     const conversations = response.conversations.filter((conversation) =>
-      !isMultiForwardConversationId(conversation.id))
+      !isFilteredConversationId(conversation.id))
     for (const conversation of conversations) {
       if (conversation.firstUnread?.msgSeq) this.firstUnreadSeq.set(conversation.id, conversation.firstUnread.msgSeq)
       else this.firstUnreadSeq.delete(conversation.id)
@@ -753,7 +758,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           })),
       }
     }
-    if (isMultiForwardConversationId(conversation.id)) return { messages: [] }
+    if (isFilteredConversationId(conversation.id)) return { messages: [] }
     const response = await this.client.getHistory(conversation.id, {
       cursor: query.cursor,
       limit: query.limit,
@@ -776,6 +781,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     query: IMMessageSearchQuery,
   ): Promise<IMMessageSearchPage<QQMediaLocator>> {
+    if (isFilteredConversationId(conversation.id)) return { messages: [] }
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
     const response = await this.client.searchMessages(conversation.id, {
       q: query.query,
@@ -812,6 +818,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     messageId: string,
   ): Promise<IMMessage<QQMediaLocator> | null> {
+    if (isFilteredConversationId(conversation.id)) return null
     const message = await this.client.getMessage(conversation.id, messageId)
     return message && !this.isFilteredGrayTip(message)
       ? this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message))
@@ -840,7 +847,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
-    if (isMultiForwardConversationId(target.conversationId)) return
+    if (isFilteredConversationId(target.conversationId)) return
     await this.client.markRead(target.conversationId, target.messageId)
     this.firstUnreadSeq.delete(target.conversationId)
   }
@@ -865,6 +872,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     query: IMPageQuery = {},
   ): Promise<IMConversationMemberPage<QQMediaLocator>> {
+    if (isFilteredConversationId(conversation.id)) return { members: [], total: 0 }
     const page = await this.client.getMembers(conversation.id, { cursor: query.cursor, limit: query.limit })
     return {
       members: page.members.map((member): IMConversationMember<QQMediaLocator> => ({
@@ -1315,6 +1323,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private isGroupConversation(conversationId: string): boolean {
+    if (isInvalidZeroPeerConversationId(conversationId)) return false
     const known = this.conversations.get(conversationId)
     if (known) return known.kind === 'group'
     return conversationId.startsWith('2:') || /^\d+$/.test(conversationId)
@@ -1409,15 +1418,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return changed ? { ...message, content: { ...message.content, parts } } : message
   }
 
-  private cleanupLegacyMultiForwardDialogs(session: PlatformSession): Promise<void> {
+  private cleanupLegacyDialogs(session: PlatformSession): Promise<void> {
     if (!this.database) return Promise.resolve()
-    if (this.multiForwardCleanupSessions.has(session.platformSessionId)) return Promise.resolve()
-    const existing = this.multiForwardCleanupJobs.get(session.platformSessionId)
+    if (this.legacyDialogCleanupSessions.has(session.platformSessionId)) return Promise.resolve()
+    const existing = this.legacyDialogCleanupJobs.get(session.platformSessionId)
     if (existing) return existing
     const pending = this.database.withTransaction(async (database) => {
       const conversations = (await database.get('mtproto_im_conversation', {
         platformSessionId: session.platformSessionId,
-      })).filter((row) => isMultiForwardConversationId(row.platformConversationId))
+      })).filter((row) => isFilteredConversationId(row.platformConversationId))
       const platformConversationIds = conversations.map((row) => row.platformConversationId)
       if (!platformConversationIds.length) return
 
@@ -1429,6 +1438,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       if (messageIds.length) {
         await database.remove('mtproto_im_message_reaction', { messageId: { $in: messageIds } })
         await database.remove('mtproto_im_media', { messageId: { $in: messageIds } })
+        await database.remove('mtproto_message_mention', { messageId: { $in: messageIds } })
       }
       await database.remove('mtproto_tl_message_part', { conversationId: { $in: conversationIds } })
       await database.remove('mtproto_im_message_alias', { conversationId: { $in: conversationIds } })
@@ -1447,6 +1457,21 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         platformUserId: { $in: platformConversationIds },
       })
 
+      const channelIds = platformConversationIds.map((id) => String(stableId(`peer:${id}`)))
+      await database.remove('mtproto_channel_update_state', {
+        platformSessionId: session.platformSessionId,
+        channelId: { $in: channelIds },
+      })
+      const notificationSettings = await database.get('mtproto_notification_settings', {
+        platformSessionId: session.platformSessionId,
+      })
+      const notificationSettingIds = notificationSettings.filter((row) =>
+        platformConversationIds.some((id) => row.scope === `peer:${id}` || row.scope.startsWith(`topic:${id}:`)))
+        .map((row) => row.id)
+      if (notificationSettingIds.length) {
+        await database.remove('mtproto_notification_settings', { id: { $in: notificationSettingIds } })
+      }
+
       const fakeUsers = (await database.get('mtproto_im_user', {
         platformId: session.platformId,
       })).filter((row) => isMultiForwardConversationId(row.platformUserId))
@@ -1458,24 +1483,29 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         const unused = fakeUserIds.filter((id) => !referenced.has(id))
         if (unused.length) await database.remove('mtproto_im_user', { id: { $in: unused } })
       }
-      for (const id of platformConversationIds) this.conversations.delete(id)
+      for (const id of platformConversationIds) {
+        this.conversations.delete(id)
+        this.firstUnreadSeq.delete(id)
+      }
       this.logger?.warn(
-        'Removed persisted temporary merged-forward dialogs session=%s conversations=%d messages=%d',
+        'Removed persisted filtered QQ dialogs session=%s conversations=%d messages=%d zeroPeers=%d mergedForwards=%d',
         session.platformSessionId, conversations.length, messages.length,
+        platformConversationIds.filter(isInvalidZeroPeerConversationId).length,
+        platformConversationIds.filter(isMultiForwardConversationId).length,
       )
     }).then(() => {
-      this.multiForwardCleanupSessions.add(session.platformSessionId)
+      this.legacyDialogCleanupSessions.add(session.platformSessionId)
     }).catch((error) => {
       this.logger?.warn(
-        'Failed to remove persisted temporary merged-forward dialogs session=%s error=%s',
+        'Failed to remove persisted filtered QQ dialogs session=%s error=%s',
         session.platformSessionId, formatError(error),
       )
     }).finally(() => {
-      if (this.multiForwardCleanupJobs.get(session.platformSessionId) === pending) {
-        this.multiForwardCleanupJobs.delete(session.platformSessionId)
+      if (this.legacyDialogCleanupJobs.get(session.platformSessionId) === pending) {
+        this.legacyDialogCleanupJobs.delete(session.platformSessionId)
       }
     })
-    this.multiForwardCleanupJobs.set(session.platformSessionId, pending)
+    this.legacyDialogCleanupJobs.set(session.platformSessionId, pending)
     return pending
   }
 
@@ -2065,6 +2095,14 @@ function multiForwardConversationId(locator: WireMultiForwardLocator): string {
 
 function isMultiForwardConversationId(value: string): boolean {
   return value.startsWith(MULTI_FORWARD_CONVERSATION_PREFIX)
+}
+
+function isInvalidZeroPeerConversationId(value: string): boolean {
+  return value === INVALID_ZERO_PEER_CONVERSATION_ID
+}
+
+function isFilteredConversationId(value: string): boolean {
+  return isMultiForwardConversationId(value) || isInvalidZeroPeerConversationId(value)
 }
 
 function normalizeTextPart(

@@ -6,7 +6,7 @@ import sharp from 'sharp'
 import type { Logger } from 'cordis'
 import {
   expandTelegramStrippedThumbnail, IMMediaUnavailableError, IMMessageSendRejectedError,
-  IMMessageTargetUnavailableError, PlatformMessageActions,
+  IMMessageTargetUnavailableError, PlatformMessageActions, stableId,
   type IMMedia, type PlatformSession,
 } from '@mtproto-relay/bridge'
 import { parseQQMarkdown, QQNTPlatform } from './index.js'
@@ -652,18 +652,26 @@ describe('QQNTPlatform mapping', () => {
     }))
   })
 
-  it('filters and cleans temporary merged-forward peers without calling QQNT peer APIs', async () => {
+  it('filters and cleans temporary and zero-peer dialogs without hiding real QQ service messages', async () => {
     const temporaryId = 'qqnt-multi-forward:["633125440","7668634613890478612",""]'
     const remove = vi.fn(async () => {})
     const database = {
       withTransaction: vi.fn(async (callback: (database: any) => Promise<void>) => callback({
         get: vi.fn(async (table: string, query: any) => {
           if (table === 'mtproto_im_conversation') return [{
-            id: 41, platformSessionId: session.platformSessionId,
-            platformConversationId: temporaryId,
+            id: 41, platformSessionId: session.platformSessionId, platformConversationId: temporaryId,
+          }, {
+            id: 42, platformSessionId: session.platformSessionId, platformConversationId: '0',
           }]
-          if (table === 'mtproto_im_message' && query.conversationId) return [{ id: 51, conversationId: 41 }]
+          if (table === 'mtproto_im_message' && query.conversationId) return [
+            { id: 51, conversationId: 41 }, { id: 52, conversationId: 42 },
+          ]
           if (table === 'mtproto_im_message') return []
+          if (table === 'mtproto_notification_settings') return [
+            { id: 'peer-zero', scope: 'peer:0' },
+            { id: 'topic-temporary', scope: `topic:${temporaryId}:7` },
+            { id: 'real-peer', scope: 'peer:real-group' },
+          ]
           if (table === 'mtproto_im_user') return [{
             id: 61, platformId: session.platformId, platformUserId: temporaryId,
           }]
@@ -678,27 +686,52 @@ describe('QQNTPlatform mapping', () => {
       id: temporaryId, kind: 'direct' as const, title: temporaryId,
       peerUid: temporaryId, peerUin: '', chatType: 1 as const,
     }, {
+      id: '0', kind: 'group' as const, title: '0',
+      peerUid: '0', peerUin: '0', chatType: 2 as const,
+    }, {
       id: 'real-group', kind: 'group' as const, title: 'Real group',
       peerUid: 'real-group', peerUin: '10001', chatType: 2 as const,
+      lastMessage: {
+        id: 'real-service', conversationId: 'real-group', senderId: '0', timestamp: 10, outgoing: false,
+        serviceAction: { type: 'custom' as const, text: '群公告已更新' }, parts: [],
+      },
     }] }))
     platform.client.getConversation = vi.fn()
     platform.client.getHistory = vi.fn()
     platform.client.markRead = vi.fn()
 
     await expect(platform.getDialogs(session)).resolves.toMatchObject({
-      dialogs: [{ conversation: { id: 'real-group', title: 'Real group' } }],
+      dialogs: [{
+        conversation: { id: 'real-group', title: 'Real group' },
+        lastMessage: { content: { serviceAction: { type: 'custom', text: '群公告已更新' }, parts: [] } },
+      }],
     })
     await expect(platform.getConversation(session, temporaryId)).resolves.toBeNull()
+    await expect(platform.getConversation(session, '0')).resolves.toBeNull()
     await expect(platform.getHistory(session, { id: temporaryId })).resolves.toEqual({ messages: [] })
+    await expect(platform.getHistory(session, { id: '0' })).resolves.toEqual({ messages: [] })
+    await expect(platform.searchMessages(session, { id: '0' }, { query: 'ignored' })).resolves.toEqual({ messages: [] })
+    await expect(platform.getMessage(session, { id: '0' }, 'ghost')).resolves.toBeNull()
     await expect(platform.markRead(session, {
       conversationId: temporaryId, messageId: 'inside-forward',
+    })).resolves.toBeUndefined()
+    await expect(platform.markRead(session, {
+      conversationId: '0', messageId: 'ghost',
     })).resolves.toBeUndefined()
 
     expect(platform.client.getConversation).not.toHaveBeenCalled()
     expect(platform.client.getHistory).not.toHaveBeenCalled()
     expect(platform.client.markRead).not.toHaveBeenCalled()
-    expect(remove).toHaveBeenCalledWith('mtproto_im_message_reaction', { messageId: { $in: [51] } })
-    expect(remove).toHaveBeenCalledWith('mtproto_im_conversation', { id: { $in: [41] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_im_message_reaction', { messageId: { $in: [51, 52] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_message_mention', { messageId: { $in: [51, 52] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_im_conversation', { id: { $in: [41, 42] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_channel_update_state', {
+      platformSessionId: session.platformSessionId,
+      channelId: { $in: [stableId(`peer:${temporaryId}`), stableId('peer:0')].map(String) },
+    })
+    expect(remove).toHaveBeenCalledWith('mtproto_notification_settings', {
+      id: { $in: ['peer-zero', 'topic-temporary'] },
+    })
     expect(remove).toHaveBeenCalledWith('mtproto_im_user', { id: { $in: [61] } })
   })
 

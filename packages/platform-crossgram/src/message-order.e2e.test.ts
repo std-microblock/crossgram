@@ -237,6 +237,133 @@ describe('QQNT same-second message ordering E2E', () => {
   })
 })
 
+describe('QQNT zero-peer quarantine E2E', () => {
+  it('removes the persisted ghost dialog, checkpoints its sidecar, and keeps the real service message', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQNTEventCheckpointModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const quarantineSession = { ...session, platformSessionId: 'qqnt-zero-peer-e2e' }
+    const store = new MessageStore(ctx.database)
+    await store.ingest(quarantineSession, {
+      id: '0', kind: 'group', title: '0',
+      metadata: { qqPeerUid: '0', qq: '0', chatType: 2 },
+    }, {
+      id: 'persisted-zero-peer', conversationId: '0', senderId: '810303476',
+      timestamp: 1_800_000_000, outgoing: false, content: { parts: [] },
+    })
+    await expect(ctx.database.get('mtproto_im_conversation', {
+      platformSessionId: quarantineSession.platformSessionId,
+    })).resolves.toMatchObject([{ platformConversationId: '0' }])
+
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    const server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    webSocketServer.on('connection', (webSocket) => {
+      webSocket.send(JSON.stringify({
+        id: '1',
+        event: {
+          type: 'message',
+          conversation: { id: '0', kind: 'group', title: '0', peerUid: '0', peerUin: '0', chatType: 2 },
+          message: {
+            id: 'live-zero-peer-sidecar', conversationId: '0', senderId: '810303476',
+            timestamp: 1_800_000_001, outgoing: false, msgSeq: '3890313', parts: [],
+          },
+        },
+      }))
+      webSocket.send(JSON.stringify({
+        id: '2',
+        event: {
+          type: 'message',
+          conversation: {
+            id: '810303476', kind: 'group', title: 'BeatSaber',
+            peerUid: '810303476', peerUin: '810303476', chatType: 2,
+          },
+          message: {
+            id: 'real-group-service', conversationId: '810303476', senderId: '0',
+            timestamp: 1_800_000_001, outgoing: false, msgSeq: '3890313',
+            serviceAction: { type: 'custom', text: '群公告已更新' }, parts: [],
+          },
+        },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing zero-peer test address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const warnings: unknown[][] = []
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    }, 'qqnt:stickers', undefined, {
+      debug: () => {}, info: () => {}, warn: (...args: unknown[]) => warnings.push(args), error: () => {},
+    } as never, ctx.database)
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [], reactions: [], maxSelected: 20,
+    }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: '0', kind: 'group' as const, title: '0', peerUid: '0', peerUin: '0', chatType: 2 as const,
+    }, {
+      id: '810303476', kind: 'group' as const, title: 'BeatSaber',
+      peerUid: '810303476', peerUin: '810303476', chatType: 2 as const,
+    }] }))
+    const delivered = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(quarantineSession, async (event) => {
+      if (event.type !== 'message') return
+      await store.ingest(quarantineSession, event.conversation, event.message)
+      delivered.resolve()
+    })
+    try {
+      await Promise.race([
+        delivered.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('zero-peer E2E timed out')), 5_000)),
+      ])
+      await vi.waitFor(async () => expect(await ctx.database.get(
+        'mtproto_qqnt_event_checkpoint', { platformSessionId: quarantineSession.platformSessionId },
+      )).toMatchObject([{ lastEventId: '2' }]))
+      expect(warnings.some(([message]) => String(message).startsWith('Failed to remove'))).toBe(false)
+      await expect(ctx.database.get('mtproto_im_conversation', {
+        platformSessionId: quarantineSession.platformSessionId,
+      })).resolves.toMatchObject([{
+        platformConversationId: '810303476', title: 'BeatSaber',
+      }])
+      await expect(ctx.database.get('mtproto_im_message', {
+        platformSessionId: quarantineSession.platformSessionId,
+      })).resolves.toMatchObject([{
+        primaryPlatformMessageId: 'real-group-service',
+        content: { serviceAction: { type: 'custom', text: '群公告已更新' }, parts: [] },
+      }])
+    } finally {
+      await unsubscribe()
+    }
+  })
+})
+
 describe('QQNT durable event checkpoint E2E', () => {
   it('advances past an unknown reaction target and delivers the following message', async () => {
     const ctx = new Context()
