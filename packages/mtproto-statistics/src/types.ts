@@ -37,6 +37,22 @@ export interface RpcFailureSnapshot {
   lastSeenAt: number
 }
 
+export interface RpcFailureReasonSnapshot extends RpcFailureSnapshot {
+  method: string
+  errorMessage: string
+  methodErrorRate: number
+}
+
+export interface RpcFailureSample {
+  at: number
+  method: string
+  errorCode: number
+  errorMessage: string
+  requestSummary?: string
+  connectionId: string
+  remoteAddress: string
+}
+
 export interface MissingRpcSnapshot {
   method: string
   count: number
@@ -136,6 +152,8 @@ export interface StatisticsSnapshot {
   methods: RpcMethodSnapshot[]
   methodDistribution: RpcMethodCountSnapshot[]
   failures: RpcFailureSnapshot[]
+  failureReasons: RpcFailureReasonSnapshot[]
+  recentFailures: RpcFailureSample[]
   missingRpcs: {
     count: number
     uniqueMethods: number

@@ -5,7 +5,8 @@ import type { Context } from 'cordis'
 import { computed, defineComponent, ref, resolveComponent } from 'vue'
 import { useRpc } from '@cordisjs/client'
 import type {
-  MissingRpcSnapshot, MtprotoStatisticsData, RpcFailureSnapshot, RpcMethodSnapshot, StatisticsPoint,
+  MissingRpcSnapshot, MtprotoStatisticsData, RpcFailureReasonSnapshot, RpcFailureSnapshot,
+  RpcMethodSnapshot, StatisticsPoint,
 } from '../src/types.js'
 import './style.css'
 
@@ -191,12 +192,18 @@ export const StatisticsPage = defineComponent({
                 <PieChart title="RPC 成功 / 失败" slices={resultSlices} totalLabel="调用" />
               </section>
               <Panel title="RPC 方法耗时排行"><MethodTable rows={snapshot.methods} /></Panel>
+              <Panel title="RPC 错误明细（按方法与具体原因聚合）">
+                <FailureReasonTable rows={snapshot.failureReasons} />
+              </Panel>
               <section class="statistics-two-column">
                 <Panel title="RPC 失败类型"><FailureTable rows={snapshot.failures} /></Panel>
                 <Panel title={`不存在的 RPC Hit（${snapshot.missingRpcs.count}）`}>
                   <MissingRpcTable rows={snapshot.missingRpcs.methods} />
                 </Panel>
               </section>
+              <Panel title="最近 RPC 错误样本">
+                <RecentFailureTable rows={snapshot.recentFailures} />
+              </Panel>
               <Panel title="慢请求与突发长尾"><SlowTable rows={snapshot.slowest} /></Panel>
             </>}
             {tab.value === 'network' && <>
@@ -256,6 +263,36 @@ const FailureTable = defineComponent({
       failureCategoryLabel(row.category), row.errorCode, formatInteger(row.count),
       formatPercent(row.rate), formatTime(row.lastSeenAt),
     ])} />
+  },
+})
+
+const FailureReasonTable = defineComponent({
+  props: { rows: { type: Array as () => RpcFailureReasonSnapshot[], required: true } },
+  setup(props) {
+    return () => <Table
+      headers={['方法', '类型', '错误码', '具体原因', '次数', '方法错误占比', '总调用占比', '最后出现']}
+      rows={props.rows.map(row => [
+        <code title={row.method}>{row.method}</code>, failureCategoryLabel(row.category), row.errorCode,
+        <code class="statistics-error-reason" title={row.errorMessage}>{row.errorMessage}</code>,
+        formatInteger(row.count), formatPercent(row.methodErrorRate), formatPercent(row.rate),
+        formatTime(row.lastSeenAt),
+      ])}
+    />
+  },
+})
+
+const RecentFailureTable = defineComponent({
+  props: { rows: { type: Array as () => MtprotoStatisticsData['snapshot']['recentFailures'], required: true } },
+  setup(props) {
+    return () => <Table
+      headers={['时间', '方法', '请求摘要', '错误码', '具体原因', '连接 / IP']}
+      rows={props.rows.map(row => [
+        formatTime(row.at), <code>{row.method}</code>,
+        <code title={row.requestSummary}>{row.requestSummary ?? '—'}</code>, row.errorCode,
+        <code class="statistics-error-reason" title={row.errorMessage}>{row.errorMessage}</code>,
+        <><code>{row.connectionId}</code><br /><code>{row.remoteAddress}</code></>,
+      ])}
+    />
   },
 })
 

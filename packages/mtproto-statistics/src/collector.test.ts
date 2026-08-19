@@ -89,7 +89,8 @@ describe('StatisticsCollector', () => {
     })
     collector.recordRpc({
       method: 'messages.getHistory', durationMs: 3, connectionId: 'conn', error: true,
-      errorCode: 400, errorMessage: 'FILE_ID_INVALID', at: 2_000,
+      errorCode: 400, errorMessage: '  FILE_ID_INVALID\n',
+      requestSummary: 'location=inputDocumentFileLocation, id=42', at: 2_000,
     })
     collector.recordRpc({
       method: 'messages.getHistory', durationMs: 4, connectionId: 'conn', error: false, at: 3_000,
@@ -100,6 +101,24 @@ describe('StatisticsCollector', () => {
       expect.objectContaining({ category: 'not-implemented', errorCode: 500, count: 1, rate: 0.33 }),
       expect.objectContaining({ category: 'bad-request', errorCode: 400, count: 1, rate: 0.33 }),
     ]))
+    expect(snapshot.failureReasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        method: 'unknown.method', category: 'not-implemented', errorCode: 500,
+        errorMessage: 'METHOD_NOT_IMPLEMENTED: unknown.method', count: 1,
+        methodErrorRate: 1, rate: 0.33,
+      }),
+      expect.objectContaining({
+        method: 'messages.getHistory', category: 'bad-request', errorCode: 400,
+        errorMessage: 'FILE_ID_INVALID', count: 1, methodErrorRate: 1, rate: 0.33,
+      }),
+    ]))
+    expect(snapshot.recentFailures).toEqual([
+      expect.objectContaining({
+        at: 2_000, method: 'messages.getHistory', errorMessage: 'FILE_ID_INVALID',
+        requestSummary: 'location=inputDocumentFileLocation, id=42',
+      }),
+      expect.objectContaining({ at: 1_000, method: 'unknown.method' }),
+    ])
     expect(snapshot.missingRpcs).toEqual({
       count: 1,
       uniqueMethods: 1,
@@ -109,6 +128,8 @@ describe('StatisticsCollector', () => {
     collector.reset(5_000)
     expect(collector.snapshot(runtime())).toMatchObject({
       failures: [],
+      failureReasons: [],
+      recentFailures: [],
       missingRpcs: { count: 0, uniqueMethods: 0, methods: [] },
     })
   })

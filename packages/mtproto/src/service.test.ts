@@ -194,6 +194,39 @@ describe('Mtproto stalled-connection handling', () => {
 })
 
 describe('Mtproto Cordis-native RPC pipeline', () => {
+  it('dispatches upload.getFile method listeners with Cordis serial semantics', async () => {
+    const { ctx, service, stop } = await makeService()
+    const order: string[] = []
+    const disposeFallback = ctx.on('mtproto/rpc/method', async (method) => {
+      if (method !== 'upload.getFile') return
+      order.push('fallback')
+      return { _: 'boolTrue' } as never
+    })
+    const disposeProbe = ctx.on('mtproto/rpc/method', async (method) => {
+      if (method !== 'upload.getFile') return
+      order.push('probe:before')
+      await Promise.resolve()
+      order.push('probe:after')
+      return undefined
+    }, { prepend: true })
+    const disposeSkipped = ctx.on('mtproto/rpc/method', async (method) => {
+      if (method !== 'upload.getFile') return
+      order.push('skipped')
+      return { _: 'boolFalse' } as never
+    })
+    const request = { _: 'upload.getFile' } as never
+
+    try {
+      await expect(service.dispatch(makeRpcContext(ctx, request), request)).resolves.toEqual({ _: 'boolTrue' })
+      expect(order).toEqual(['probe:before', 'probe:after', 'fallback'])
+    } finally {
+      disposeProbe()
+      disposeFallback()
+      disposeSkipped()
+      await stop()
+    }
+  })
+
   it('runs middleware and a method route in a short-lived derived-context fiber', async () => {
     const { ctx, service, stop } = await makeService()
     const order: string[] = []

@@ -32,6 +32,13 @@ describe('MTProto statistics dashboard e2e', () => {
     expect(wrapper.text()).toContain('RPC 方法占比')
     expect(wrapper.text()).toContain('不存在的 RPC Hit')
     expect(wrapper.text()).toContain('unknown.method')
+    expect(wrapper.text()).toContain('RPC 错误明细（按方法与具体原因聚合）')
+    expect(wrapper.text()).toContain('upload.getFile')
+    expect(wrapper.text()).toContain('FILE_ID_INVALID')
+    expect(wrapper.text()).toContain('messages.faveSticker')
+    expect(wrapper.text()).toContain('addFavEmoji: already exists (1)')
+    expect(wrapper.text()).toContain('最近 RPC 错误样本')
+    expect(wrapper.text()).toContain('location=inputDocumentFileLocation')
     expect(wrapper.findAll('.statistics-pie')).toHaveLength(2)
 
     await wrapper.findAll('.statistics-tabs button')[2]!.trigger('click')
@@ -113,6 +120,21 @@ function statisticsData(): MtprotoStatisticsData {
       failures: [{
         category: 'not-implemented', errorCode: 500, count: 1,
         rate: 0.0125, lastSeenAt: Date.now(),
+      }],
+      failureReasons: [{
+        method: 'upload.getFile', category: 'bad-request', errorCode: 400,
+        errorMessage: 'FILE_ID_INVALID', count: 1, methodErrorRate: 0.5,
+        rate: 0.0125, lastSeenAt: Date.now(),
+      }, {
+        method: 'messages.faveSticker', category: 'internal', errorCode: 500,
+        errorMessage: 'INTERNAL_SERVER_ERROR: addFavEmoji: already exists (1)',
+        count: 1, methodErrorRate: 1, rate: 0.0125, lastSeenAt: Date.now(),
+      }],
+      recentFailures: [{
+        at: Date.now(), method: 'upload.getFile', errorCode: 400,
+        errorMessage: 'FILE_ID_INVALID',
+        requestSummary: 'location=inputDocumentFileLocation, id=42, thumb=m, offset=0, limit=131072',
+        connectionId: 'conn-2', remoteAddress: '203.0.113.9',
       }],
       missingRpcs: {
         count: 1, uniqueMethods: 1,

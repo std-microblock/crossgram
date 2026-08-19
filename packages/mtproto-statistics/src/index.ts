@@ -100,6 +100,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         error: failed,
         errorCode,
         errorMessage,
+        requestSummary: summarizeRpcRequest(request as unknown as Record<string, unknown>),
       })
     }
   }, { prepend: true })
@@ -146,4 +147,40 @@ function syncPoints(target: StatisticsPoint[], source: StatisticsPoint[]): void 
   if (!additions.length) return
   target.push(...additions)
   if (target.length > source.length) target.splice(0, target.length - source.length)
+}
+
+function summarizeRpcRequest(request: Record<string, unknown>): string | undefined {
+  if (request._ === 'upload.getFile') {
+    const location = objectValue(request.location)
+    return [
+      `location=${stringValue(location?._) ?? 'unknown'}`,
+      valuePart('id', location?.id),
+      valuePart('thumb', location?.thumbSize),
+      valuePart('offset', request.offset),
+      valuePart('limit', request.limit),
+    ].filter(Boolean).join(', ')
+  }
+  if (request._ === 'messages.faveSticker') {
+    const document = objectValue(request.id)
+    return [
+      `document=${stringValue(document?._) ?? 'unknown'}`,
+      valuePart('id', document?.id),
+      `unfave=${Boolean(request.unfave)}`,
+    ].filter(Boolean).join(', ')
+  }
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined
+}
+
+function valuePart(label: string, value: unknown): string | undefined {
+  const text = stringValue(value)
+  return text === undefined || text === '' ? undefined : `${label}=${text}`
+}
+
+function stringValue(value: unknown): string | undefined {
+  if (value === undefined || value === null) return
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (typeof (value as { toString?: unknown }).toString === 'function') return String(value)
 }

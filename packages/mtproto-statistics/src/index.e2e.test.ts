@@ -65,6 +65,28 @@ describe('MTProto statistics Muon entry e2e', () => {
     )
     await listeners.get('mtproto/rpc')!.listener.call(
       { mtprotoConnection: connection },
+      {
+        _: 'upload.getFile', offset: 0, limit: 131_072,
+        location: { _: 'inputDocumentFileLocation', id: '42', thumbSize: 'm' },
+      },
+      async () => ({
+        _: 'mt_rpc_error', errorCode: 400,
+        errorMessage: 'FILE_ID_INVALID',
+      }),
+    )
+    await listeners.get('mtproto/rpc')!.listener.call(
+      { mtprotoConnection: connection },
+      {
+        _: 'messages.faveSticker', unfave: false,
+        id: { _: 'inputDocument', id: '77' },
+      },
+      async () => ({
+        _: 'mt_rpc_error', errorCode: 500,
+        errorMessage: 'INTERNAL_SERVER_ERROR: addFavEmoji: already exists (1)',
+      }),
+    )
+    await listeners.get('mtproto/rpc')!.listener.call(
+      { mtprotoConnection: connection },
       { _: 'unknown.method' },
       async () => ({
         _: 'mt_rpc_error', errorCode: 500,
@@ -77,7 +99,7 @@ describe('MTProto statistics Muon entry e2e', () => {
     expect(mutations).toBe(1)
     expect(data.snapshot).toMatchObject({
       activeConnections: 1,
-      rpc: { count: 2, errors: 1 },
+      rpc: { count: 4, errors: 3 },
       packets: { count: 1, bytes: 128 },
       traffic: { receivedBytes: 4_096, sentBytes: 2_048 },
     })
@@ -87,8 +109,29 @@ describe('MTProto statistics Muon entry e2e', () => {
       { method: 'unknown.method', count: 1 },
     ]))
     expect(data.snapshot.failures).toEqual([
-      expect.objectContaining({ category: 'not-implemented', count: 1 }),
+      expect.objectContaining({ count: 1 }),
+      expect.objectContaining({ count: 1 }),
+      expect.objectContaining({ count: 1 }),
     ])
+    expect(data.snapshot.failureReasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        method: 'upload.getFile', errorCode: 400, errorMessage: 'FILE_ID_INVALID',
+      }),
+      expect.objectContaining({
+        method: 'messages.faveSticker', errorCode: 500,
+        errorMessage: 'INTERNAL_SERVER_ERROR: addFavEmoji: already exists (1)',
+      }),
+    ]))
+    expect(data.snapshot.recentFailures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        method: 'upload.getFile',
+        requestSummary: 'location=inputDocumentFileLocation, id=42, thumb=m, offset=0, limit=131072',
+      }),
+      expect.objectContaining({
+        method: 'messages.faveSticker',
+        requestSummary: 'document=inputDocument, id=77, unfave=false',
+      }),
+    ]))
     expect(data.snapshot.missingRpcs).toMatchObject({
       count: 1, uniqueMethods: 1,
       methods: [expect.objectContaining({ method: 'unknown.method', count: 1 })],
@@ -100,6 +143,8 @@ describe('MTProto statistics Muon entry e2e', () => {
     expect(data.snapshot.rpc.count).toBe(0)
     expect(data.snapshot.activeConnections).toBe(1)
     expect(data.snapshot.failures).toEqual([])
+    expect(data.snapshot.failureReasons).toEqual([])
+    expect(data.snapshot.recentFailures).toEqual([])
     expect(data.snapshot.missingRpcs).toEqual({ count: 0, uniqueMethods: 0, methods: [] })
     expect(data.series.seconds).toEqual([])
     cleanups.forEach(cleanup => cleanup())

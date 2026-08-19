@@ -38,6 +38,7 @@
 .statistics-table th { position:sticky; top:0; padding:8px 11px; background:var(--bg1); color:var(--fg2); text-align:left; white-space:nowrap; }
 .statistics-table td { max-width:340px; padding:9px 11px; border-top:1px solid color-mix(in srgb,var(--border) 72%,transparent); white-space:nowrap; }
 .statistics-table code { display:block; overflow:hidden; color:var(--fg1); text-overflow:ellipsis; }
+.statistics-table code.statistics-error-reason { min-width:260px; max-width:680px; overflow:visible; overflow-wrap:anywhere; text-overflow:clip; white-space:normal; }
 .statistics-table tbody tr:hover { background:color-mix(in srgb,var(--statistics-accent) 5%,transparent); }
 .statistics-empty { padding:28px !important; color:var(--fg3); text-align:center; }
 .status-error { color:#e05d6f; font-weight:650; }

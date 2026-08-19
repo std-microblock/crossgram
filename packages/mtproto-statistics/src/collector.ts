@@ -2,7 +2,7 @@ import type { MtprotoConnectionScope, MtprotoTrafficSample } from '@mtproto-rela
 import { LatencyHistogram } from './histogram.js'
 import type {
   IpSnapshot, MissingRpcSnapshot, RpcFailureCategory, RpcFailureSnapshot, RpcMethodCountSnapshot, RpcMethodSnapshot,
-  RuntimeSnapshot, SlowRpcSample,
+  RpcFailureReasonSnapshot, RpcFailureSample, RuntimeSnapshot, SlowRpcSample,
   StatisticsPoint, StatisticsSeries, StatisticsSnapshot,
 } from './types.js'
 
@@ -30,6 +30,11 @@ interface RpcFailureState {
   lastSeenAt: number
 }
 
+interface RpcFailureReasonState extends RpcFailureState {
+  method: string
+  errorMessage: string
+}
+
 export interface CollectorOptions {
   slowThresholdMs: number
   topMethods: number
@@ -49,6 +54,10 @@ const EMPTY_RUNTIME: RuntimeSnapshot = {
   uptimeSeconds: 0,
 }
 
+const MAX_FAILURE_REASONS = 2_048
+const MAX_RECENT_FAILURES = 100
+const MAX_ERROR_MESSAGE_LENGTH = 500
+
 export class StatisticsCollector {
   readonly series: StatisticsSeries = { seconds: [], minutes: [], hours: [] }
   private startedAt = Date.now()
@@ -58,10 +67,12 @@ export class StatisticsCollector {
   private readonly intervalPacket = new LatencyHistogram()
   private readonly methods = new Map<string, MethodState>()
   private readonly failures = new Map<string, RpcFailureState>()
+  private readonly failureReasons = new Map<string, RpcFailureReasonState>()
   private readonly missingRpcs = new Map<string, { count: number, lastSeenAt: number }>()
   private readonly ips = new Map<string, IpState>()
   private readonly connections = new Map<string, string>()
   private readonly slowest: SlowRpcSample[] = []
+  private readonly recentFailures: RpcFailureSample[] = []
   private rpcErrors = 0
   private missingRpcCount = 0
   private intervalRpcErrors = 0
@@ -129,6 +140,7 @@ export class StatisticsCollector {
     error: boolean
     errorCode?: number
     errorMessage?: string
+    requestSummary?: string
     at?: number
   }): void {
     const at = input.at ?? Date.now()
@@ -138,7 +150,8 @@ export class StatisticsCollector {
       this.rpcErrors++
       this.intervalRpcErrors++
       const errorCode = input.errorCode ?? 500
-      const category = classifyRpcFailure(errorCode, input.errorMessage)
+      const errorMessage = normalizeErrorMessage(input.errorMessage)
+      const category = classifyRpcFailure(errorCode, errorMessage)
       const key = `${category}:${errorCode}`
       const failure = this.failures.get(key) ?? {
         category, errorCode, count: 0, lastSeenAt: at,
@@ -146,6 +159,19 @@ export class StatisticsCollector {
       failure.count++
       failure.lastSeenAt = at
       this.failures.set(key, failure)
+      this.recordFailureReason({
+        method: input.method, category, errorCode, errorMessage, at,
+      })
+      this.recentFailures.unshift({
+        at,
+        method: input.method,
+        errorCode,
+        errorMessage,
+        requestSummary: normalizeRequestSummary(input.requestSummary),
+        connectionId: input.connectionId,
+        remoteAddress: normalizeAddress(input.remoteAddress),
+      })
+      this.recentFailures.length = Math.min(this.recentFailures.length, MAX_RECENT_FAILURES)
       if (category === 'not-implemented') {
         const missing = this.missingRpcs.get(input.method) ?? { count: 0, lastSeenAt: at }
         missing.count++
@@ -258,6 +284,8 @@ export class StatisticsCollector {
       methods: this.methodSnapshots(),
       methodDistribution: this.methodCountSnapshots(),
       failures: this.failureSnapshots(rpc.count),
+      failureReasons: this.failureReasonSnapshots(rpc.count),
+      recentFailures: [...this.recentFailures],
       missingRpcs: {
         count: this.missingRpcCount,
         uniqueMethods: this.missingRpcs.size,
@@ -276,8 +304,10 @@ export class StatisticsCollector {
     this.intervalPacket.reset()
     this.methods.clear()
     this.failures.clear()
+    this.failureReasons.clear()
     this.missingRpcs.clear()
     this.slowest.length = 0
+    this.recentFailures.length = 0
     this.rpcErrors = 0
     this.missingRpcCount = 0
     this.intervalRpcErrors = 0
@@ -320,6 +350,15 @@ export class StatisticsCollector {
       ...failure,
       rate: ratio(failure.count, total),
     })).sort((left, right) => right.count - left.count || right.lastSeenAt - left.lastSeenAt)
+  }
+
+  private failureReasonSnapshots(total: number): RpcFailureReasonSnapshot[] {
+    return [...this.failureReasons.values()].map((failure) => ({
+      ...failure,
+      rate: ratio(failure.count, total),
+      methodErrorRate: ratio(failure.count, this.methods.get(failure.method)?.errors ?? 0),
+    })).sort((left, right) => right.count - left.count || right.lastSeenAt - left.lastSeenAt)
+      .slice(0, this.options.topMethods * 2)
   }
 
   private methodCountSnapshots(): RpcMethodCountSnapshot[] {
@@ -367,6 +406,37 @@ export class StatisticsCollector {
       this.ips.set(address, state)
     }
     return state
+  }
+
+  private recordFailureReason(input: {
+    method: string
+    category: RpcFailureCategory
+    errorCode: number
+    errorMessage: string
+    at: number
+  }): void {
+    let key = `${input.method}\u0000${input.errorCode}\u0000${input.errorMessage}`
+    let state = this.failureReasons.get(key)
+    if (!state && this.failureReasons.size >= MAX_FAILURE_REASONS) {
+      key = `*\u0000${input.errorCode}\u0000[其他错误原因：统计维度已达上限]`
+      state = this.failureReasons.get(key)
+      input = {
+        ...input,
+        method: '*',
+        errorMessage: '[其他错误原因：统计维度已达上限]',
+      }
+    }
+    state ??= {
+      method: input.method,
+      category: input.category,
+      errorCode: input.errorCode,
+      errorMessage: input.errorMessage,
+      count: 0,
+      lastSeenAt: input.at,
+    }
+    state.count++
+    state.lastSeenAt = input.at
+    this.failureReasons.set(key, state)
   }
 }
 
@@ -425,4 +495,18 @@ function classifyRpcFailure(errorCode: number, errorMessage?: string): RpcFailur
   if (errorCode === 400) return 'bad-request'
   if (errorCode >= 500) return 'internal'
   return 'other'
+}
+
+function normalizeErrorMessage(message?: string): string {
+  const normalized = message?.replace(/\s+/g, ' ').trim() || '[无错误信息]'
+  if (normalized.length <= MAX_ERROR_MESSAGE_LENGTH) return normalized
+  return `${normalized.slice(0, MAX_ERROR_MESSAGE_LENGTH - 1)}…`
+}
+
+function normalizeRequestSummary(summary?: string): string | undefined {
+  if (!summary) return
+  const normalized = summary.replace(/\s+/g, ' ').trim()
+  if (!normalized) return
+  if (normalized.length <= MAX_ERROR_MESSAGE_LENGTH) return normalized
+  return `${normalized.slice(0, MAX_ERROR_MESSAGE_LENGTH - 1)}…`
 }
