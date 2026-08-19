@@ -61,7 +61,7 @@ function dialogsRequest(): tl.messages.RawGetDialogsRequest {
 }
 
 describe('Discord stall regression E2E', () => {
-  it('projects a corrupt Discord cache through uncached concurrent dialog RPCs', async () => {
+  it('projects a corrupt Discord cache through per-connection coalesced dialog RPCs', async () => {
     const self = user('100', 'Self')
     const alice = user('200', 'Alice')
     const channel: any = {
@@ -128,7 +128,7 @@ describe('Discord stall regression E2E', () => {
       ])
     }
     expect(channel.messages.fetch).toHaveBeenCalledOnce()
-    expect(ingestDialogs).toHaveBeenCalledTimes(24)
+    expect(ingestDialogs).toHaveBeenCalledTimes(connections.length)
     platform.stop()
   })
 
@@ -177,7 +177,7 @@ describe('Discord stall regression E2E', () => {
 
     expect(results).toHaveLength(24)
     expect(results.every((result) => (result as tl.messages.RawDialogs).dialogs.length === 1)).toBe(true)
-    expect(getDialogs).toHaveBeenCalledTimes(24)
+    expect(getDialogs).toHaveBeenCalledTimes(connections.length)
     expect(await database.get('mtproto_im_conversation', {})).toHaveLength(1)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(0)
     expect(channels.every((channel) => !channel.messages.fetch.mock.calls.length)).toBe(true)

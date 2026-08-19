@@ -699,6 +699,86 @@ describe('QQNTClient streaming transport', () => {
     expect(ranges).toEqual(['bytes=0-1'])
   })
 
+  it('reuses direct range capability across signed URLs on the same CDN endpoint', async () => {
+    let resolutions = 0
+    const probes: string[] = []
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input)
+      if (url === 'http://bridge.invalid/v1/files/direct-url') {
+        resolutions++
+        return Response.json({
+          url: `https://multimedia.qq.example/download?token=${resolutions}`,
+          expiresAt: Date.now() + 60_000,
+        })
+      }
+      probes.push(url)
+      const range = new Headers(init?.headers).get('range')
+      return new Response('ab', {
+        status: 206,
+        headers: { 'content-range': `bytes 0-1/10`, 'content-length': '2', 'x-range': range ?? '' },
+      })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+    const first = {
+      messageId: 'first', elementId: 'element-1', chatType: 2 as const, peerUid: 'group',
+      kind: 'file' as const, fileName: 'first.bin', fileUuid: 'first-uuid',
+    }
+    const second = {
+      messageId: 'second', elementId: 'element-2', chatType: 2 as const, peerUid: 'group',
+      kind: 'file' as const, fileName: 'second.bin', fileUuid: 'second-uuid',
+    }
+
+    await expect(client.resolveFileUrlForDirectDownload(first)).resolves.toMatchObject({ supportsRange: true })
+    await expect(client.resolveFileUrlForDirectDownload(second)).resolves.toMatchObject({ supportsRange: true })
+
+    expect(resolutions).toBe(2)
+    expect(probes).toEqual(['https://multimedia.qq.example/download?token=1'])
+  })
+
+  it('coalesces Telegram chunks into cached one-megabyte direct ranges', async () => {
+    const bytes = Buffer.alloc(2 * 1024 * 1024, 0).map((_, index) => index % 251)
+    const ranges: string[] = []
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input)
+      if (url === 'http://bridge.invalid/v1/files/direct-url') {
+        return Response.json({
+          url: 'https://cdn.qq.example/ranged-file',
+          expiresAt: Date.now() + 60_000,
+          supportsRange: true,
+        })
+      }
+      const range = new Headers(init?.headers).get('range')!
+      ranges.push(range)
+      const match = /^bytes=(\d+)-(\d+)$/.exec(range)!
+      const start = Number(match[1])
+      const end = Math.min(Number(match[2]), bytes.length - 1)
+      return new Response(bytes.subarray(start, end + 1), {
+        status: 206,
+        headers: {
+          'content-range': `bytes ${start}-${end}/${bytes.length}`,
+          'content-length': String(end - start + 1),
+        },
+      })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+    const locator = {
+      messageId: 'ranged-file', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'file' as const, fileName: 'large.bin', fileUuid: 'ranged-file-uuid',
+    }
+    const chunkSize = 128 * 1024
+
+    const [first, second] = await Promise.all([
+      collect(client.downloadFile(locator, { offset: 0, limit: chunkSize })),
+      collect(client.downloadFile(locator, { offset: chunkSize, limit: chunkSize })),
+    ])
+    const third = await collect(client.downloadFile(locator, { offset: chunkSize * 2, limit: chunkSize }))
+
+    expect(first).toEqual(bytes.subarray(0, chunkSize))
+    expect(second).toEqual(bytes.subarray(chunkSize, chunkSize * 2))
+    expect(third).toEqual(bytes.subarray(chunkSize * 2, chunkSize * 3))
+    expect(ranges).toEqual(['bytes=0-1048575'])
+  })
+
   it('downloads an image from its packet-refreshed direct URL without leaking bridge authorization', async () => {
     const requests: Array<{ url: string, range?: string, authorization?: string }> = []
     server = createServer(async (request, response) => {

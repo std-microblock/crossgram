@@ -553,19 +553,21 @@ export class StickerRpc {
   private async _resolveRowsWithRows<T extends { providerId: string, providerStickerId: string }>(
     rows: T[],
   ): Promise<Array<{ row: T, resolved: ResolvedSticker }>> {
-    const result: Array<{ row: T, resolved: ResolvedSticker }> = []
-    for (const row of rows) {
+    const resolved = await mapConcurrent(rows, 8, async (row) => {
       const provider = this._registry.get(row.providerId)
-      if (!provider) continue
-      const sticker = await provider.getSticker(this._context(), row.providerStickerId).catch(() => null)
-      if (sticker) result.push({
+      if (!provider) return
+      const sticker = await this._cached(
+        `sticker:${packKey(row.providerId, row.providerStickerId)}`,
+        () => provider.getSticker(this._context(), row.providerStickerId),
+      ).catch(() => null)
+      if (sticker) return {
         row,
         resolved: {
           providerId: row.providerId, provider, sticker: { ...sticker, providerId: row.providerId },
         },
-      })
-    }
-    return result
+      }
+    })
+    return resolved.filter((item): item is { row: T, resolved: ResolvedSticker } => item !== undefined)
   }
 
   private async _resolveInputDocument(input: tl.TypeInputDocument): Promise<ResolvedSticker> {
@@ -883,6 +885,22 @@ function hashMatches(input: number | Long, hash: number | Long): boolean {
 
 function packKey(providerId: string, packId: string): string {
   return `${providerId}\u0000${packId}`
+}
+
+async function mapConcurrent<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const output = new Array<R>(values.length)
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (next < values.length) {
+      const index = next++
+      output[index] = await mapper(values[index]!)
+    }
+  }))
+  return output
 }
 
 function uniqueResolved(items: ResolvedSticker[]): ResolvedSticker[] {

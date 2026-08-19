@@ -44,6 +44,8 @@ const MEDIA_LEASE_ID_HEX_LENGTH = 32
 const MEDIA_LEASE_TOKEN_BYTES = 32
 const MAX_UNRANGED_CACHE_BYTES = 4 * 1024 * 1024 * 1024
 const MAX_UNRANGED_CACHE_ENTRIES = 8
+const DIRECT_RANGE_BLOCK_BYTES = 1024 * 1024
+const MAX_DIRECT_RANGE_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_REVALIDATED_JSON_RESPONSES = 256
 let unrangedCacheSequence = 0
 
@@ -54,6 +56,11 @@ interface CachedUnrangedFile {
   accounted: boolean
   error?: unknown
   waiters: Set<() => void>
+}
+
+interface CachedDirectRangeBlock {
+  start: number
+  bytes: Uint8Array
 }
 
 /** One short-lived, local-only capability for the QQ Bridge PCM gateway. */
@@ -74,10 +81,14 @@ export class QQNTClient {
   private readonly directUrls = new Map<string, DirectUrl>()
   private readonly directUrlRefreshes = new Map<string, Promise<DirectUrl>>()
   private readonly directRangeChecks = new Map<string, Promise<boolean>>()
+  private readonly directRangeCapabilities = new Map<string, boolean>()
   private readonly unrangedFiles = new Map<string, CachedUnrangedFile>()
   private readonly unrangedFileLoads = new Map<string, Promise<CachedUnrangedFile>>()
   private readonly unrangedCachePath: string
   private unrangedFileBytes = 0
+  private readonly directRangeBlocks = new Map<string, CachedDirectRangeBlock>()
+  private readonly directRangeBlockLoads = new Map<string, Promise<CachedDirectRangeBlock>>()
+  private directRangeBlockBytes = 0
   private bridgeProtocol?: number
   private readonly revalidatedJsonResponses = new Map<string, { etag: string, value: unknown }>()
 
@@ -564,6 +575,12 @@ export class QQNTClient {
           yield* this.readCachedUnrangedFile(cached, offset, limit, options)
           return
         }
+        if (limit !== undefined && direct.supportsRange === true) {
+          const bytes = await this.cachedDirectRange(directKey, direct.url, offset, limit, options.signal)
+          await options.onChunk?.(bytes.length)
+          if (bytes.length) yield bytes
+          return
+        }
         response = await this.fetchImpl(direct.url, {
           headers: direct.supportsRange === false ? {} : rangeHeaders,
           signal: options.signal,
@@ -584,6 +601,12 @@ export class QQNTClient {
         : undefined
       if (cached) {
         yield* this.readCachedUnrangedFile(cached, offset, limit, options)
+        return
+      }
+      if (directKey && limit !== undefined && direct?.supportsRange === true) {
+        const bytes = await this.cachedDirectRange(directKey, directUrl, offset, limit, options.signal)
+        await options.onChunk?.(bytes.length)
+        if (bytes.length) yield bytes
         return
       }
       response = await this.fetchImpl(directUrl, {
@@ -728,11 +751,21 @@ export class QQNTClient {
     expiresAt: number,
     signal?: AbortSignal,
   ): Promise<DirectUrl & { supportsRange: boolean }> {
-    const active = this.directRangeChecks.get(url)
+    const capabilityKey = directRangeCapabilityKey(url)
+    const cached = this.directRangeCapabilities.get(capabilityKey)
+    if (cached !== undefined) return { url, expiresAt, supportsRange: cached }
+    const active = this.directRangeChecks.get(capabilityKey)
     const pending = active ?? this.probeDirectRange(url, signal)
-      .finally(() => this.directRangeChecks.delete(url))
-    if (!active) this.directRangeChecks.set(url, pending)
-    return { url, expiresAt, supportsRange: await pending }
+      .finally(() => this.directRangeChecks.delete(capabilityKey))
+    if (!active) this.directRangeChecks.set(capabilityKey, pending)
+    const supportsRange = await pending
+    if (!this.directRangeCapabilities.has(capabilityKey)) {
+      this.directRangeCapabilities.set(capabilityKey, supportsRange)
+      while (this.directRangeCapabilities.size > 128) {
+        this.directRangeCapabilities.delete(this.directRangeCapabilities.keys().next().value!)
+      }
+    }
+    return { url, expiresAt, supportsRange }
   }
 
   private fetchDirectUrl(locator: QQMediaLocator): Promise<DirectUrl> {
@@ -750,6 +783,67 @@ export class QQNTClient {
       this.directUrls.set(key, value)
     }
     while (this.directUrls.size > 1_024) this.directUrls.delete(this.directUrls.keys().next().value!)
+  }
+
+  private async cachedDirectRange(
+    identity: string,
+    url: string,
+    offset: number,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    const blockStart = Math.floor(offset / DIRECT_RANGE_BLOCK_BYTES) * DIRECT_RANGE_BLOCK_BYTES
+    const requiredSize = offset - blockStart + limit
+    const blockSize = Math.ceil(requiredSize / DIRECT_RANGE_BLOCK_BYTES) * DIRECT_RANGE_BLOCK_BYTES
+    const cacheKey = `${identity}\0${blockStart}\0${blockSize}`
+    let block = this.directRangeBlocks.get(cacheKey)
+    if (block) {
+      this.directRangeBlocks.delete(cacheKey)
+      this.directRangeBlocks.set(cacheKey, block)
+    } else {
+      const active = this.directRangeBlockLoads.get(cacheKey)
+      const pending = active ?? this.fetchDirectRangeBlock(url, blockStart, blockSize, signal)
+        .finally(() => this.directRangeBlockLoads.delete(cacheKey))
+      if (!active) this.directRangeBlockLoads.set(cacheKey, pending)
+      block = await pending
+      if (!this.directRangeBlocks.has(cacheKey)) {
+        this.directRangeBlocks.set(cacheKey, block)
+        this.directRangeBlockBytes += block.bytes.length
+        while (this.directRangeBlockBytes > MAX_DIRECT_RANGE_CACHE_BYTES && this.directRangeBlocks.size > 1) {
+          const oldestKey = this.directRangeBlocks.keys().next().value!
+          const oldest = this.directRangeBlocks.get(oldestKey)!
+          this.directRangeBlocks.delete(oldestKey)
+          this.directRangeBlockBytes -= oldest.bytes.length
+        }
+      }
+    }
+    const relative = offset - block.start
+    if (relative < 0 || relative >= block.bytes.length) return new Uint8Array()
+    return block.bytes.subarray(relative, Math.min(block.bytes.length, relative + limit))
+  }
+
+  private async fetchDirectRangeBlock(
+    url: string,
+    start: number,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<CachedDirectRangeBlock> {
+    const response = await this.fetchImpl(url, {
+      headers: { 'accept-encoding': 'identity', range: `bytes=${start}-${start + size - 1}` },
+      signal,
+      redirect: 'follow',
+    })
+    if (!response.ok) throw new Error(await nativeResponseError(response))
+    if (response.status !== 206) {
+      await discardResponseBody(response)
+      throw new Error('QQNT direct media origin stopped honoring byte ranges')
+    }
+    const contentRange = response.headers.get('content-range') ?? ''
+    if (!new RegExp(`^bytes\\s+${start}-`, 'i').test(contentRange)) {
+      await discardResponseBody(response)
+      throw new Error('QQNT direct media origin returned a mismatched byte range')
+    }
+    return { start, bytes: new Uint8Array(await response.arrayBuffer()) }
   }
 
   private async probeDirectRange(url: string, signal?: AbortSignal): Promise<boolean> {
@@ -1239,4 +1333,13 @@ function directUrlIdentity(locator: QQMediaLocator): string {
     locator.videoCodecFormat ?? null, locator.originImageUrl ?? '', locator.imageSpec ?? null,
     locator.avatarUin ?? '',
   ])
+}
+
+function directRangeCapabilityKey(value: string): string {
+  try {
+    const url = new URL(value)
+    return `${url.origin}${url.pathname}`
+  } catch {
+    return value
+  }
 }

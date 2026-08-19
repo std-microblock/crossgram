@@ -244,6 +244,44 @@ describe('DialogRpc', () => {
     expect(getUser).not.toHaveBeenCalled()
   })
 
+  it('uses and remembers a native Telegram message ID before background persistence finishes', async () => {
+    const conversation = { id: 'native-id-user', kind: 'direct' as const, title: 'Native ID' }
+    const message: IMMessage = {
+      id: 'native-message', conversationId: conversation.id, senderId: conversation.id,
+      timestamp: 1_700_000_000, content: { parts: [{ type: 'text', text: 'stable' }] },
+      metadata: { telegramMessageId: 5_850_634 },
+    }
+    const markRead = vi.fn(async () => undefined)
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        readState: { markRead: true, events: false },
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 1, lastMessage: message }] } },
+      async getHistory() { return { messages: [message] } },
+      async getUser() { return { id: conversation.id, firstName: conversation.title } },
+      markRead,
+    }
+    const rpc = new DialogRpc(platform, session)
+    const result = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
+    const dialog = result.dialogs[0] as tl.RawDialog
+
+    expect(dialog.topMessage).toBe(5_850_634)
+    expect(result.messages[0]).toMatchObject({ _: 'message', id: 5_850_634 })
+    await rpc.readHistory({
+      _: 'messages.readHistory',
+      peer: { _: 'inputPeerUser', userId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO },
+      maxId: 5_850_634,
+    })
+    expect(markRead).toHaveBeenCalledWith(session, {
+      conversationId: conversation.id, messageId: message.id,
+    })
+  })
+
   it('projects group content.serviceAction in dialogs and history', async () => {
     const conversation = { id: 'group', kind: 'group' as const, title: 'Group' }
     const service: IMMessage = {

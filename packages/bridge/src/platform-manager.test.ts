@@ -637,7 +637,7 @@ describe('PlatformDataService', () => {
     const dialogs = await data.getDialogsPage({ limit: 100 })
     const history = await data.getHistory(conversation.id, { limit: 10 })
 
-    expect(recovered).toEqual(['2', '3'])
+    await vi.waitFor(() => expect(recovered).toEqual(['2', '3']))
     expect(dialogs.dialogs[0]?.lastMessage?.id).toBe('3')
     expect(history.messages[0]?.id).toBe('3')
     expect((await store.readDialogs(session.platformSessionId, [conversation.id]))[0]?.lastMessage?.id).toBe('3')
@@ -745,9 +745,10 @@ describe('PlatformDataService', () => {
     expect(dialogCalls).toBe(1)
     expect(dialogPage).toMatchObject({ total: 347, nextCursor: 'dialogs-2' })
     expect(dialogs).toMatchObject([{ conversation: { id: 'history-room' }, unreadCount: 4 }])
-    const [persistedDialog] = await database.get('mtproto_im_conversation', {
+    await vi.waitFor(async () => expect(await database.get('mtproto_im_conversation', {
       platformConversationId: conversation.id,
-    })
+    })).toHaveLength(1))
+    const [persistedDialog] = await database.get('mtproto_im_conversation', { platformConversationId: conversation.id })
     await new Promise((resolve) => setTimeout(resolve, 5))
     await data.getDialogsPage()
     const [unchangedDialog] = await database.get('mtproto_im_conversation', {
@@ -885,7 +886,7 @@ describe('PlatformDataService', () => {
     expect(calls).toBe(1)
   })
 
-  it('revalidates concurrent dialog reads without an in-memory request cache', async () => {
+  it('coalesces concurrent dialog reads within one session while keeping services independent', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
@@ -906,12 +907,55 @@ describe('PlatformDataService', () => {
       second.getDialogsPage({ limit: 50 }),
       first.getDialogsPage({ limit: 50 }),
     ])
-    await vi.waitFor(() => expect(getDialogs).toHaveBeenCalledTimes(3))
+    await vi.waitFor(() => expect(getDialogs).toHaveBeenCalledTimes(2))
     release.resolve()
 
     await expect(pages).resolves.toHaveLength(3)
-    expect(ingestDialogs).toHaveBeenCalledTimes(3)
-    expect(await database.get('mtproto_im_message', {})).toHaveLength(1)
+    expect(ingestDialogs.mock.calls.length).toBeGreaterThanOrEqual(1)
+    expect(ingestDialogs.mock.calls.length).toBeLessThanOrEqual(2)
+    await vi.waitFor(async () => expect(await database.get('mtproto_im_message', {})).toHaveLength(1))
+  })
+
+  it('returns a fresh dialog page before slow missed-message recovery finishes', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'background-recovery-room', kind: 'group', title: 'Background' }
+    const store = new MessageStore(database)
+    await store.ingest(session, conversation, incoming('1', conversation.id))
+    platform.getDialogs = vi.fn(async () => ({
+      dialogs: [{ conversation, unreadCount: 2, lastMessage: incoming('3', conversation.id) }],
+    }))
+    const recoveryStarted = Promise.withResolvers<void>()
+    const releaseRecovery = Promise.withResolvers<void>()
+    platform.getHistory = vi.fn(async () => {
+      recoveryStarted.resolve()
+      await releaseRecovery.promise
+      return { messages: [incoming('3', conversation.id), incoming('2', conversation.id)] }
+    })
+    const recovered: string[] = []
+    const data = new PlatformDataService(
+      platform, session, store, undefined, undefined,
+      async (event) => {
+        recovered.push(event.message.id)
+        await store.ingest(session, event.conversation, event.message)
+      },
+    )
+
+    const [first, second] = await Promise.all([
+      data.getDialogsPage({ limit: 100 }),
+      data.getDialogsPage({ limit: 100 }),
+    ])
+    expect(first.dialogs[0]?.lastMessage?.id).toBe('3')
+    expect(second).toBe(first)
+    expect(platform.getDialogs).toHaveBeenCalledOnce()
+    await recoveryStarted.promise
+    expect(recovered).toEqual([])
+
+    releaseRecovery.resolve()
+    await vi.waitFor(() => expect(recovered).toEqual(['2', '3']))
+    await expect(store.readHistory(session.platformSessionId, conversation.id, { limit: 10 }))
+      .resolves.toMatchObject([{ id: '3' }, { id: '2' }, { id: '1' }])
   })
 
   it('does not return stale stored dialogs that are absent from an authoritative upstream page', async () => {

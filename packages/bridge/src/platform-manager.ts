@@ -587,6 +587,10 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
+  private readonly _dialogPageLoads = new Map<string, Promise<IMDialogPage>>()
+  private readonly _dialogReconciliationRevisions = new Map<string, string>()
+  private readonly _dialogReconciliationJobs = new Map<string, Promise<void>>()
+  private _dialogReconciliationTail: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly _platform: IMPlatform,
@@ -596,6 +600,7 @@ export class PlatformDataService {
     now: () => number = () => performance.now(),
     private readonly _publishRecovered?: (
       event: Extract<IMEvent, { type: 'message' }>,
+      options?: PlatformEventDeliveryOptions,
     ) => Promise<unknown>,
   ) {
     void now
@@ -606,7 +611,14 @@ export class PlatformDataService {
   }
 
   getDialogsPage(query: { limit?: number, afterId?: string } = {}): Promise<IMDialogPage> {
-    return this._loadDialogsPage(query)
+    const key = `${query.limit ?? ''}\0${query.afterId ?? ''}`
+    const active = this._dialogPageLoads.get(key)
+    if (active) return active
+    const pending = this._loadDialogsPage(query).finally(() => {
+      if (this._dialogPageLoads.get(key) === pending) this._dialogPageLoads.delete(key)
+    })
+    this._dialogPageLoads.set(key, pending)
+    return pending
   }
 
   async getSubdialogsPage(
@@ -619,7 +631,8 @@ export class PlatformDataService {
       this._session.platformSessionId,
       page.dialogs.map((dialog) => dialog.conversation.id),
     )
-    await this._reconcileDialogs(page.dialogs, stored)
+    await this._persistDialogs(page.dialogs, stored)
+    this._scheduleDialogReconciliation(page.dialogs, stored)
     return page
   }
 
@@ -667,7 +680,8 @@ export class PlatformDataService {
       this._session.platformSessionId,
       upstreamDialogs.map((dialog) => dialog.conversation.id),
     )
-    await this._reconcileDialogs(upstreamDialogs, persistedDialogs)
+    await this._persistDialogs(upstreamDialogs, persistedDialogs)
+    this._scheduleDialogReconciliation(upstreamDialogs, persistedDialogs)
     const persisted = new Map(persistedDialogs.map((dialog) => [dialog.conversation.id, dialog]))
     const dialogs = upstreamDialogs.map((dialog) => {
       const previous = persisted.get(dialog.conversation.id)
@@ -714,21 +728,45 @@ export class PlatformDataService {
     }
   }
 
-  private async _reconcileDialogs(upstream: readonly IMDialog[], stored: readonly IMDialog[]): Promise<void> {
+  private _scheduleDialogReconciliation(upstream: readonly IMDialog[], stored: readonly IMDialog[]): void {
     const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
     for (const dialog of upstream) {
       const previous = persisted.get(dialog.conversation.id)
-      if (previous) await this._recoverDialogMessages(dialog, previous)
+      if (!previous || !dialog.lastMessage || dialog.lastMessage.id === previous.lastMessage?.id) continue
+      const revision = dialogRevision(dialog)
+      if (this._dialogReconciliationRevisions.get(dialog.conversation.id) === revision) continue
+      this._dialogReconciliationRevisions.set(dialog.conversation.id, revision)
+      const scheduled = this._dialogReconciliationTail.catch(() => undefined).then(async () => {
+        await this._recoverDialogMessages(dialog, previous)
+      }).catch((error) => {
+        if (this._dialogReconciliationRevisions.get(dialog.conversation.id) === revision) {
+          this._dialogReconciliationRevisions.delete(dialog.conversation.id)
+        }
+        this._onTrace?.(
+          'dialog background reconciliation failed conversation=%s error=%s',
+          dialog.conversation.id, formatError(error),
+        )
+      }).finally(() => {
+        if (this._dialogReconciliationJobs.get(dialog.conversation.id) === scheduled) {
+          this._dialogReconciliationJobs.delete(dialog.conversation.id)
+        }
+      })
+      this._dialogReconciliationJobs.set(dialog.conversation.id, scheduled)
+      this._dialogReconciliationTail = scheduled
     }
+  }
+
+  private async _persistDialogs(upstream: readonly IMDialog[], stored: readonly IMDialog[]): Promise<void> {
+    const persisted = new Map(stored.map((dialog) => [dialog.conversation.id, dialog]))
     const changed = upstream.filter((dialog) => dialogNeedsPersistence(
       dialog, persisted.get(dialog.conversation.id),
     ))
     if (changed.length) await this._store.ingestDialogs(this._session, changed)
   }
 
-  private async _recoverDialogMessages(dialog: IMDialog, stored: IMDialog): Promise<void> {
+  private async _recoverDialogMessages(dialog: IMDialog, stored: IMDialog | undefined): Promise<void> {
     const latest = dialog.lastMessage
-    if (!this._publishRecovered || !latest || latest.id === stored.lastMessage?.id) return
+    if (!stored || !this._publishRecovered || !latest || latest.id === stored.lastMessage?.id) return
     let recovered = [latest]
     if (stored.lastMessage && this._platform.getHistory) {
       try {
@@ -747,13 +785,9 @@ export class PlatformDataService {
     const unique = [...new Map(recovered.map((message) => [message.id, message])).values()]
       .sort((left, right) => left.timestamp - right.timestamp || left.id.localeCompare(right.id))
     for (const message of unique) {
-      const existing = await this._store.findProjectedByPlatformId(
-        this._session.platformSessionId, dialog.conversation.id, message.id,
-      )
-      if (existing) continue
       await this._publishRecovered({
         type: 'message', delivery: 'recovery', conversation: dialog.conversation, message,
-      })
+      }, { forceDelivery: true })
     }
   }
 
@@ -798,7 +832,8 @@ export class PlatformDataService {
       const remaining: IMMessage[] = []
       const baseline = storedDialog?.lastMessage
       const canPublish = Boolean(
-        this._publishRecovered && baseline && !query.cursor && !query.before && !query.after,
+        this._publishRecovered && baseline && !query.cursor && !query.before && !query.after
+        && !this._dialogReconciliationJobs.has(conversationId),
       )
       for (const message of page.messages.slice().sort((left, right) =>
         left.timestamp - right.timestamp || left.id.localeCompare(right.id))) {
@@ -897,6 +932,22 @@ function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined
     || upstreamMessage.senderId !== storedMessage.senderId
     || JSON.stringify(upstreamMessage.content) !== JSON.stringify(storedMessage.content)
     || JSON.stringify(upstreamMessage.metadata ?? {}) !== JSON.stringify(storedMessage.metadata ?? {})
+}
+
+function dialogRevision(dialog: IMDialog): string {
+  return JSON.stringify([
+    dialog.conversation.kind,
+    dialog.conversation.title,
+    dialog.conversation.parentId,
+    dialog.conversation.spaceId,
+    dialog.conversation.metadata ?? null,
+    dialog.unreadCount,
+    dialog.lastMessage?.id ?? null,
+    dialog.lastMessage?.timestamp ?? null,
+    dialog.lastMessage?.senderId ?? null,
+    dialog.lastMessage?.content ?? null,
+    dialog.lastMessage?.metadata ?? null,
+  ])
 }
 
 export function sessionFromRow(row: PlatformSessionRow): PlatformSession {

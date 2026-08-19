@@ -229,7 +229,7 @@ export class DialogRpc {
       this._store = store
       this._data = new PlatformDataService(
         _platform, _session, store, _onTrace, undefined,
-        _onLocalEvent ? (event) => _onLocalEvent(_session, event) : undefined,
+        _onLocalEvent ? (event, options) => _onLocalEvent(_session, event, options) : undefined,
       )
     }
   }
@@ -2725,7 +2725,7 @@ export class DialogRpc {
         : []
     const chat = source.conversation.kind === 'direct' ? undefined : this._makeChat(source.conversation)
     const unpersistedReadInboxMaxId = source.unreadCount > 0 && source.readInboxMaxMessage && !this._store
-      ? this._messageId(platformPeerId, source.readInboxMaxMessage.id)
+      ? this._sourceMessageId(platformPeerId, source.readInboxMaxMessage)
       : undefined
     let projected = source.lastMessage
       ? requestProjections.filter((item) =>
@@ -2746,7 +2746,7 @@ export class DialogRpc {
       for (const item of projected ?? []) this._rememberMessage(item)
     }
     const top = projected?.[0]
-    const topMessage = top?.tlId ?? (source.lastMessage ? this._messageId(platformPeerId, source.lastMessage.id) : 0)
+    const topMessage = top?.tlId ?? (source.lastMessage ? this._sourceMessageId(platformPeerId, source.lastMessage) : 0)
     let readInboxMaxId = source.unreadCount > 0 ? 0 : topMessage
     if (source.unreadCount > 0 && source.readInboxMaxMessage) {
       let readProjection = requestProjections.filter((item) =>
@@ -2767,7 +2767,7 @@ export class DialogRpc {
       }
       readInboxMaxId = readProjection.reduce((maximum, item) => Math.max(maximum, item.tlId), 0)
         || unpersistedReadInboxMaxId
-        || this._messageId(platformPeerId, source.readInboxMaxMessage.id)
+        || this._sourceMessageId(platformPeerId, source.readInboxMaxMessage)
     }
     const topItem = top ?? (source.lastMessage
       ? { source: source.lastMessage, tlId: topMessage, ordinal: 0 }
@@ -4601,6 +4601,13 @@ export class DialogRpc {
     this._messageToTl.set(key, id)
     this._tlToMessage.set(id, { peerId, platformMessageId: messageId, ordinal: 0 })
     return id
+  }
+
+  private _sourceMessageId(peerId: string, message: IMMessage): number {
+    const native = telegramMessageId(message)
+    if (native === undefined) return this._messageId(peerId, message.id)
+    this._rememberMessage({ source: message, tlId: native, ordinal: 0 })
+    return native
   }
 
   private _allocate(seed: string, occupied: Map<number, unknown>): number {

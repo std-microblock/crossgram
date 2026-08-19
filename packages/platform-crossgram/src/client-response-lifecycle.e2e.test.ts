@@ -126,4 +126,65 @@ describe('QQNTClient response lifecycle', () => {
     expect(receivedRange).toBe('bytes=4-7')
     expect(sockets.size).toBeLessThanOrEqual(1)
   })
+
+  it('serves concurrent Telegram chunks from one real CDN range response', async () => {
+    const content = Buffer.alloc(2 * 1024 * 1024).map((_, index) => index % 251)
+    const ranges: string[] = []
+    server = createServer(async (request, response) => {
+      if (request.url === '/v1/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/cdn/large.bin`,
+          expiresAt: Date.now() + 60_000,
+          supportsRange: true,
+        }))
+        return
+      }
+      if (request.url === '/cdn/large.bin') {
+        const range = request.headers.range ?? ''
+        ranges.push(range)
+        const match = /^bytes=(\d+)-(\d+)$/.exec(range)
+        if (!match) {
+          response.writeHead(400).end('range required')
+          return
+        }
+        const start = Number(match[1])
+        const end = Math.min(Number(match[2]), content.length - 1)
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        response.writeHead(206, {
+          'content-range': `bytes ${start}-${end}/${content.length}`,
+          'content-length': end - start + 1,
+        })
+        response.end(content.subarray(start, end + 1))
+        return
+      }
+      response.writeHead(500).end('unexpected request')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}/v1` })
+    const locator = {
+      messageId: 'large', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'file' as const, fileName: 'large.bin', fileUuid: 'large-uuid',
+    }
+    const chunkSize = 128 * 1024
+
+    const [first, second] = await Promise.all([
+      collect(client.downloadFile(locator, { offset: 0, limit: chunkSize })),
+      collect(client.downloadFile(locator, { offset: chunkSize, limit: chunkSize })),
+    ])
+    const third = await collect(client.downloadFile(locator, {
+      offset: chunkSize * 2, limit: chunkSize,
+    }))
+
+    expect(first).toEqual(content.subarray(0, chunkSize))
+    expect(second).toEqual(content.subarray(chunkSize, chunkSize * 2))
+    expect(third).toEqual(content.subarray(chunkSize * 2, chunkSize * 3))
+    expect(ranges).toEqual(['bytes=0-1048575'])
+  })
 })

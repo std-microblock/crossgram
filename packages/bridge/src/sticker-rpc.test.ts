@@ -351,6 +351,36 @@ describe('StickerRpc', () => {
     expect(recent.packs[0]?.documents[0]?.equals(recent.stickers[0].id)).toBe(true)
   })
 
+  it('resolves recent sticker rows with bounded concurrency and reuses provider results', async () => {
+    const { rpc, provider, sticker, query } = stickerHarness()
+    const rows = Array.from({ length: 24 }, (_, index) => ({
+      id: index + 1,
+      platformSessionId: 'session',
+      providerId: 'qq:stickers',
+      providerStickerId: `recent:${index}`,
+      attached: false,
+      useCount: 1,
+      lastUsedAt: new Date(1_700_000_000_000 - index * 1_000),
+    }))
+    vi.mocked(query.execute).mockResolvedValue(rows)
+    let active = 0
+    let maximum = 0
+    vi.mocked(provider.getSticker).mockImplementation(async (_context, stickerId) => {
+      active++
+      maximum = Math.max(maximum, active)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      active--
+      return { ...sticker, stickerId }
+    })
+
+    await rpc.getRecentStickers({ _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO })
+    expect(provider.getSticker).toHaveBeenCalledTimes(rows.length)
+    expect(maximum).toBe(8)
+
+    await rpc.getRecentStickers({ _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO })
+    expect(provider.getSticker).toHaveBeenCalledTimes(rows.length)
+  })
+
   it('uses wide document IDs in non-QQ favorite sticker packs', async () => {
     const sticker: IMSticker = {
       providerId: 'importer', stickerId: 'favorite:wide', title: 'Wide favorite',
