@@ -868,7 +868,7 @@ export class DialogRpc {
   }
 
   async getMessages(req: GetMessagesRequest): Promise<tl.messages.TypeMessages> {
-    await this._hydrateAllMessages()
+    await this._hydrateUsers()
     return this._getMessages(req.id)
   }
 
@@ -924,6 +924,7 @@ export class DialogRpc {
         messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
         continue
       }
+      await this._hydrateMessageConversation(ref.peerId)
       const projected = this._store
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, requestedId, ref.peerId)
         : undefined
@@ -2920,13 +2921,6 @@ export class DialogRpc {
     return materialized
   }
 
-  private async _hydrateAllMessages(): Promise<void> {
-    await this._hydrateUsers()
-    const dialogs = await this._loadDialogs()
-    await this._persistDirectDialogUsers(dialogs)
-    await Promise.all(dialogs.map((dialog) => this._loadHistory(dialog.conversation.id)))
-  }
-
   private async _hydrateUsers(): Promise<void> {
     if (this._selfId) return
     if (this._userHydration) return this._userHydration
@@ -2992,6 +2986,24 @@ export class DialogRpc {
         firstName: dialog.conversation.title,
         avatar: dialog.conversation.avatar,
       })))
+  }
+
+  private async _hydrateMessageConversation(peerId: string): Promise<void> {
+    if (!this._store || this._conversations.has(peerId)) return
+    const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
+    if (!conversation) {
+      await this._syncStoredUsers([peerId])
+      return
+    }
+    this._conversations.set(peerId, conversation)
+    this._peerId(peerId)
+    if (conversation.kind === 'direct') {
+      await this._persistUsers([{
+        id: conversation.id,
+        firstName: conversation.title,
+        avatar: conversation.avatar,
+      }])
+    }
   }
 
   private _registerUser(row: IMUserRow): void {

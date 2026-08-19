@@ -890,8 +890,10 @@ describe('rich-media projection', () => {
     const self = await store.upsertUser(session, { id: session.userId, firstName: 'Current' })
     const ingested = await store.ingest(session, conversation, album)
     const sender = await store.getUser(session.platformId, album.senderId)
+    const getDialogs = vi.fn(platform.getDialogs)
+    const getHistory = vi.fn(platform.getHistory)
 
-    const result = await new DialogRpc(platform, session, store).getMessages({
+    const result = await new DialogRpc({ ...platform, getDialogs, getHistory }, session, store).getMessages({
       _: 'messages.getMessages',
       id: [{ _: 'inputMessageID', id: ingested.projection[0].tlMessageId }],
     }) as tl.messages.RawMessages
@@ -908,6 +910,8 @@ describe('rich-media projection', () => {
       expect.objectContaining({ _: 'user', id: self.id, self: true }),
       expect.objectContaining({ _: 'user', id: sender!.id, firstName: 'Alice' }),
     ]))
+    expect(getDialogs).not.toHaveBeenCalled()
+    expect(getHistory).not.toHaveBeenCalled()
   })
 
   it('projects converted animated images as WebM documents with a preview', async () => {

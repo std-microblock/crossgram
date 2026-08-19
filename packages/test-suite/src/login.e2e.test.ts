@@ -1693,6 +1693,9 @@ describe('bridge login e2e', () => {
       expect(storedAliceMessages).toHaveLength(2)
       expect(storedAliceMessages.every(row => row.senderUserId === aliceRow!.id)).toBe(true)
 
+      const getMessagesAdapter = ctx.imPlatform.require('static') as staticPlatformPlugin.StaticPlatform
+      const getDialogsForMessage = vi.spyOn(getMessagesAdapter, 'getDialogs')
+      const getHistoryForMessage = vi.spyOn(getMessagesAdapter, 'getHistory')
       const message = await callRpc(resumed, key, resumedSid, {
         _: 'messages.getMessages',
         id: [{ _: 'inputMessageID', id: history.messages[0].id }],
@@ -1702,6 +1705,10 @@ describe('bridge login e2e', () => {
       expect(message.messages[0]).toMatchObject({
         _: 'message', id: history.messages[0].id, message: 'How are you?',
       })
+      expect(getDialogsForMessage).not.toHaveBeenCalled()
+      expect(getHistoryForMessage).not.toHaveBeenCalled()
+      getDialogsForMessage.mockRestore()
+      getHistoryForMessage.mockRestore()
       expect(await callRpc(resumed, key, resumedSid, {
         _: 'messages.readHistory',
         peer: { _: 'inputPeerUser', userId: alice.id, accessHash: Long.ZERO },

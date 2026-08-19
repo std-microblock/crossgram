@@ -403,6 +403,7 @@ export function defineModels(ctx: Context): void {
     unique: [['scope', 'tlMessageId'], ['messageId', 'ordinal']],
     indexes: [
       'messageId',
+      ['platformSessionId', 'tlMessageId'],
       ['platformSessionId', 'conversationId', 'tlMessageId'],
       ['platformSessionId', 'conversationId', 'nativeSequence'],
       ['scope', 'nativeOrderKey'],
