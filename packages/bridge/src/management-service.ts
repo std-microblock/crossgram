@@ -106,8 +106,16 @@ export interface BridgeManagementSource {
  * TOTP seeds and raw auth keys never leave this service.
  */
 export class BridgeManagementService extends Service {
-  constructor(ctx: Context, private readonly _source: BridgeManagementSource) {
+  private _source?: BridgeManagementSource
+
+  constructor(ctx: Context, source?: BridgeManagementSource) {
     super(ctx, 'bridgeManagement')
+    this._source = source
+  }
+
+  /** Attach bridge-owned state after every declared service has been provided. */
+  attach(source: BridgeManagementSource): void {
+    this._source = source
   }
 
   async status(): Promise<BridgeManagementRuntimeStatus> {
@@ -135,8 +143,8 @@ export class BridgeManagementService extends Service {
         authorizedConnections: this.ctx.mtproto.authorizedConnectionCount,
       },
       platforms: {
-        registered: this._source.registeredPlatformIds().sort(),
-        activeSessions: this._source.activeSessions().length,
+        registered: this._requireSource().registeredPlatformIds().sort(),
+        activeSessions: this._requireSource().activeSessions().length,
       },
       storage: {
         platformSessions: platformSessions.length,
@@ -149,14 +157,15 @@ export class BridgeManagementService extends Service {
   }
 
   serverConfig(): CrossGramServerConfig {
-    const config = this._source.serverConfig()
+    const config = this._requireSource().serverConfig()
     return { ...config, dcs: config.dcs.map(dc => ({ ...dc })) }
   }
 
   accounts(platformSessionId?: string): PlatformAccountView[] {
-    const accounts = this._source.accounts().map(account => ({ ...account }))
+    const source = this._requireSource()
+    const accounts = source.accounts().map(account => ({ ...account }))
     if (!platformSessionId) return accounts
-    const session = this._source.activeSessions().find(item => item.platformSessionId === platformSessionId)
+    const session = source.activeSessions().find(item => item.platformSessionId === platformSessionId)
     return session ? accounts.filter(account => account.platformId === session.platformId) : []
   }
 
@@ -171,8 +180,9 @@ export class BridgeManagementService extends Service {
       this.ctx.database.get('mtproto_client_authorization', relatedQuery),
     ])
     const identityBySession = new Map(identities.map(identity => [identity.platformSessionId, identity]))
-    const accountBySession = new Map(this._source.accounts().flatMap((account) => {
-      const session = this._source.activeSessions().find(item => item.platformId === account.platformId)
+    const source = this._requireSource()
+    const accountBySession = new Map(source.accounts().flatMap((account) => {
+      const session = source.activeSessions().find(item => item.platformId === account.platformId)
       return session ? [[session.platformSessionId, account] as const] : []
     }))
     return sessions
@@ -207,15 +217,15 @@ export class BridgeManagementService extends Service {
   }
 
   async refresh(): Promise<void> {
-    await this._source.refresh()
+    await this._requireSource().refresh()
   }
 
   approveLoginToken(platformId: string, token: string): void {
-    this._source.approveLoginToken(platformId, token)
+    this._requireSource().approveLoginToken(platformId, token)
   }
 
   stickers(platformSessionId?: string): BridgeManagementStickerSnapshot {
-    const snapshot = this._source.stickers()
+    const snapshot = this._requireSource().stickers()
     const accounts = snapshot.accounts
       .filter(account => !platformSessionId || account.platformSessionId === platformSessionId)
       .map(account => ({ ...account }))
@@ -233,7 +243,7 @@ export class BridgeManagementService extends Service {
   }
 
   async refreshStickers(): Promise<void> {
-    await this._source.refreshStickers()
+    await this._requireSource().refreshStickers()
   }
 
   async setStickerPackAssigned(
@@ -242,6 +252,11 @@ export class BridgeManagementService extends Service {
     packId: string,
     assigned: boolean,
   ): Promise<void> {
-    await this._source.setStickerPackAssigned(platformSessionId, providerId, packId, assigned)
+    await this._requireSource().setStickerPackAssigned(platformSessionId, providerId, packId, assigned)
+  }
+
+  private _requireSource(): BridgeManagementSource {
+    if (!this._source) throw new Error('bridge management source is not attached')
+    return this._source
   }
 }

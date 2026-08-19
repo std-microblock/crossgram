@@ -172,6 +172,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const resources = new TelegramResourceService(ctx)
   const systemPeers = new SystemPeerService(ctx)
   const conversationViews = new ConversationViewService(ctx)
+  const management = new BridgeManagementService(ctx)
   const registry = platforms.registry
   const rpc = ctx.mtproto
   const dcId = config.dcId ?? 1
@@ -569,7 +570,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     })) throw new BridgeManagementError('AUTH_TOKEN_INVALID')
   }
 
-  new BridgeManagementService(ctx, {
+  management.attach({
     serverConfig: () => dashboard.serverConfig,
     accounts: currentAccounts,
     registeredPlatformIds: () => registry.ids,

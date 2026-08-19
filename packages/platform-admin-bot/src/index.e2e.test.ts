@@ -82,33 +82,44 @@ describe('platform admin bot Cordis e2e', () => {
       await serviceFiber.dispose()
     })
 
-    await vi.waitFor(() => expect(events.some(event =>
-      event.type === 'message' && event.message.id === 'bridge:platform-admin:welcome')).toBe(true))
+    await vi.waitFor(() => {
+      if (!events.some(event =>
+        event.type === 'message' && event.message.id === 'bridge:platform-admin:welcome')) {
+        throw new Error('welcome message was not emitted')
+      }
+    })
     const resolution = await peers.resolve(session, PLATFORM_ADMIN_CONVERSATION_ID)
-    expect(resolution?.peer.conversation.metadata).toMatchObject({ bot: true, systemPeer: 'platform-admin' })
+    if (!resolution) throw new Error('admin peer was not resolved')
+    if (resolution.peer.conversation.metadata?.bot !== true) throw new Error('admin peer is not a bot')
+    if (resolution.peer.conversation.metadata?.systemPeer !== 'platform-admin') throw new Error('wrong system peer')
     const outgoing = peers.makeOutgoing(session, resolution!, {
       parts: [{ type: 'text', text: '/identities' }],
     })
     await peers.receive(session, resolution!, outgoing)
     const identityReply = events.filter(event => event.type === 'message').at(-1)
-    expect(identityReply).toMatchObject({
-      type: 'message', message: { content: { parts: [{ text: expect.stringContaining('session-a') }] } },
-    })
+    const identityText = identityReply?.type === 'message' && identityReply.message.content.parts[0]?.type === 'text'
+      ? identityReply.message.content.parts[0].text
+      : ''
+    if (!identityText.includes('session-a')) throw new Error('identity command did not return the scoped identity')
 
     const welcome = events.find(event =>
       event.type === 'message' && event.message.id === 'bridge:platform-admin:welcome')
     if (!welcome || welcome.type !== 'message') throw new Error('welcome missing')
     const statusButton = welcome.message.content.inlineKeyboard!.rows[0]!.buttons[0]!
     if (statusButton.type !== 'callback') throw new Error('status callback missing')
-    await expect(peers.callback(session, resolution!, {
+    const answer = await peers.callback(session, resolution!, {
       message: welcome.message, data: statusButton.data,
-    })).resolves.toMatchObject({ message: '已打开' })
-    const statusReply = events.filter(event => event.type === 'message').at(-1)
-    expect(statusReply).toMatchObject({
-      type: 'message', message: { content: { parts: [{ text: expect.stringContaining('服务器状态') }] } },
     })
+    if (answer?.message !== '已打开') throw new Error('status callback did not return its toast')
+    const statusReply = events.filter(event => event.type === 'message').at(-1)
+    const statusText = statusReply?.type === 'message' && statusReply.message.content.parts[0]?.type === 'text'
+      ? statusReply.message.content.parts[0].text
+      : ''
+    if (!statusText.includes('服务器状态')) throw new Error('status callback did not emit status')
 
     await botFiber.dispose()
-    await expect(peers.resolve(session, PLATFORM_ADMIN_CONVERSATION_ID)).resolves.toBeUndefined()
+    if (await peers.resolve(session, PLATFORM_ADMIN_CONVERSATION_ID)) {
+      throw new Error('admin peer remained registered after plugin disposal')
+    }
   })
 })
