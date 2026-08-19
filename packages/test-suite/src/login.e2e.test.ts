@@ -25,6 +25,7 @@ import {
   Mtproto, AbridgedPacketCodec, CURRENT_API_LAYER, generateRsaKeyPair, type MtprotoDebugEvent,
 } from '@mtproto-relay/mtproto'
 import * as bridge from '@mtproto-relay/bridge'
+import * as mergedForwardPlugin from '@mtproto-relay/merged-forward'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
 import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
@@ -390,6 +391,7 @@ async function startApp(options: {
       authKeyStorePath: options.authKeyStorePath,
     }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
+    ctx.plugin(mergedForwardPlugin),
     ...(options.botApi
       ? [ctx.plugin(telegramBotApi, { verifierSecret: 'mtproto-e2e-botfather-verifier' })]
       : []),
@@ -3131,20 +3133,20 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
-  it('uses native merged-forward previews with virtual history deep-link targets', async () => {
+  it('opens native merged-forward previews through the Cordis view plugin', async () => {
     const parent: bridge.IMConversation = {
       id: 'parent-room', kind: 'group', title: 'Parent room',
     }
     const virtual: bridge.IMConversation = {
       id: 'virtual-forward', kind: 'group', title: 'Alice 和 Bob 的聊天记录',
       metadata: {
-        virtual: true,
+        conversationView: 'merged-forward',
         qqMultiForwardPreview: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
       },
     }
     const innerVirtual: bridge.IMConversation = {
       id: 'inner-virtual-forward', kind: 'group', title: 'Bob 和 Carol 的聊天记录',
-      metadata: { virtual: true, qqMultiForwardPreview: 'Carol: inner first message' },
+      metadata: { conversationView: 'merged-forward', qqMultiForwardPreview: 'Carol: inner first message' },
     }
     const merged: bridge.IMMessage = {
       id: 'merged-root', conversationId: parent.id, senderId: 'alice', timestamp: 1_700_001_000,
@@ -3346,8 +3348,11 @@ describe('bridge login e2e', () => {
         _: 'messages.getFullChat', chatId: virtualChat.id,
       }, 17)).toMatchObject({
         _: 'messages.chatFull',
-        fullChat: { _: 'chatFull', id: virtualChat.id, participants: { _: 'chatParticipants' } },
-        chats: [{ _: 'chat', id: virtualChat.id }],
+        fullChat: {
+          _: 'chatFull', id: virtualChat.id,
+          participants: { _: 'chatParticipantsForbidden', chatId: virtualChat.id },
+        },
+        chats: [{ _: 'chat', left: true, id: virtualChat.id }], users: [],
       })
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,
@@ -3361,6 +3366,13 @@ describe('bridge login e2e', () => {
       ] })
       expect(virtualMemberCalls).toBe(0)
       expect(virtualReactionCalls).toBe(0)
+      const refreshedDialogs = await callRpc(fresh, key, freshSid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 23)
+      expect(refreshedDialogs.dialogs).not.toContainEqual(expect.objectContaining({
+        peer: { _: 'peerChat', chatId: virtualChat.id },
+      }))
       fresh.close()
     } finally {
       await stop()

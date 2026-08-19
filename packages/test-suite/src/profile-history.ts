@@ -79,7 +79,7 @@ function loadTarget(options: HistoryProfileOptions): {
     if (!conversation) throw new Error('conversation was not found for the selected auth session')
     const id = stableSyntheticId(`peer:${conversation.platformConversationId}`)
     const metadata = parseStoredMetadata(conversation.metadata)
-    const peer = metadata.virtual === true
+    const peer = metadata.conversationView === 'merged-forward'
       ? inputPeer(`chat:${id}`)
       : conversation.kind === 'direct'
         ? inputPeer(`user:${id}`)

@@ -1645,7 +1645,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       kind: 'group',
       title: title || '聊天记录',
       metadata: {
-        virtual: true,
+        conversationView: 'merged-forward',
         qqTemporaryMultiForward: true,
         ...(preview ? { qqMultiForwardPreview: preview } : {}),
       },

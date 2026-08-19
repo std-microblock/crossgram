@@ -1,0 +1,28 @@
+{
+  "name": "@mtproto-relay/merged-forward",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {
+    "service": {
+      "required": [
+        "conversationView",
+        "mtproto",
+        "mtprotoBridge"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@mtcute/core": "^0.30.3",
+    "@mtproto-relay/bridge": "workspace:*",
+    "@mtproto-relay/mtproto": "workspace:*",
+    "long": "^5.3.2"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  }
+}

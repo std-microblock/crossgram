@@ -13,6 +13,7 @@ import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { IMMessageTargetUnavailableError } from './platform.js'
 import type { IMConversation, IMEvent, IMMessage, IMMessageTarget, IMPlatform, IMReactionActorPageRequest, PlatformSession } from './platform.js'
+import { createTestConversationViews } from './conversation-view.test-utils.js'
 
 const session: PlatformSession = {
   platformSessionId: 'kinds-session', platformId: 'kinds', userId: 'self', credentials: {}, metadata: {},
@@ -193,6 +194,8 @@ async function createRpc(
       selectedPlatform, session, store,
       undefined, undefined, 1, undefined, reactions,
       undefined, onLocalEvent, '0011223344556677',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      createTestConversationViews(),
     ),
   }
 }
@@ -809,7 +812,7 @@ describe('conversation kinds', () => {
       async forwardMessages(_session, _from, _ids, to) {
         const virtual: IMConversation = {
           id: 'virtual-merged', kind: 'group', title: '聊天记录',
-          metadata: { virtual: true, qqMultiForwardPreview: 'Alice: one\nBob: two' },
+          metadata: { conversationView: 'merged-forward', qqMultiForwardPreview: 'Alice: one\nBob: two' },
         }
         return [{
           id: 'merged-output', conversationId: to.id, senderId: 'self', outgoing: true, timestamp: 20,

@@ -52,6 +52,8 @@ import { VoiceRpc } from './voice/voice-rpc.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 import { RequestInboxSystemPeerProvider } from './request-inbox.js'
 import { ActiveSessionStore, registerActiveSessionRpc } from './active-sessions.js'
+import { ConversationViewService } from './conversation-view.js'
+import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
@@ -79,6 +81,8 @@ export * from './voice/media.js'
 export * from './voice/voice-worker-client.js'
 export * from './voice/voice-rpc.js'
 export * from './system-peer.js'
+export * from './conversation-view.js'
+export * from './bridge-service.js'
 export * from './stripped-thumbnail.js'
 export * from './image-dimensions.js'
 export * from './sticker-outline.js'
@@ -87,6 +91,9 @@ export * from './active-sessions.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui']
+export const provide = [
+  'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'conversationView', 'mtprotoBridge',
+]
 
 export interface BridgeConfig {
   dcId?: number
@@ -141,14 +148,6 @@ export const Config = z.object({
   'zh-CN': zhCN,
 })
 
-interface BridgeSessionState {
-  generation: object
-  platform: IMPlatform
-  session: PlatformSession
-  dialogs: DialogRpc
-  stickers: StickerRpc
-}
-
 /**
  * Bridge backend — a native cordis plugin. Translates MTProto RPC to an IM
  * platform. Each adapter supplies its own current-user profile; bridge assigns
@@ -160,6 +159,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const stickerProviders = new IMStickerService(ctx)
   const resources = new TelegramResourceService(ctx)
   const systemPeers = new SystemPeerService(ctx)
+  const conversationViews = new ConversationViewService(ctx)
   const registry = platforms.registry
   const rpc = ctx.mtproto
   const dcId = config.dcId ?? 1
@@ -216,6 +216,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     blockedPeers,
     (session, message) => reactionRpcFor(registry.require(session.platformId), session)
       .registerContext(message.conversationId, message.reactionContext),
+    conversationViews,
   )
   const directIceProvider: VoiceMediaStartProvider | undefined = config.voiceDirectIce && isLoopbackHost(config.serverHost)
     ? {
@@ -336,9 +337,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       await activeSessions.touch(rpcContext, session)
       await calls.replay(session, authKeyId)
     },
+    conversationViews,
   )
   registerActiveSessionRpc(rpc, activeSessions, async rpcContext =>
     (await requireBridgeSession(rpcContext)).session)
+  new MtprotoBridgeService(ctx, requireBridgeSession)
 
   const authorizationLocks = new Map<string, Promise<void>>()
   const withAuthorizationLock = async <T>(authKeyId: string, callback: () => Promise<T>): Promise<T> => {
@@ -883,16 +886,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getBlocked(req as tl.contacts.RawGetBlockedRequest))
   rpc.register('contacts.getContacts', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getContacts())
-  rpc.register('contacts.resolveUsername', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.resolveUsername(req as tl.contacts.RawResolveUsernameRequest))
   rpc.register('users.getUsers', async (rpc, req) =>
     bareVector(await (await requireBridgeSession(rpc)).dialogs.getUsers(req as tl.users.RawGetUsersRequest)))
   rpc.register('users.getFullUser', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullUser(req as tl.users.RawGetFullUserRequest))
   rpc.register('messages.getPeerSettings', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getPeerSettings(req as tl.messages.RawGetPeerSettingsRequest))
-  rpc.register('messages.getFullChat', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.getFullChat(req as tl.messages.RawGetFullChatRequest))
   rpc.register('channels.getFullChannel', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getFullChannel(req as tl.channels.RawGetFullChannelRequest))
   rpc.register('channels.getChannels', async (rpc, req) =>
@@ -1178,6 +1177,7 @@ function createSessionResolver(
     authKeyId: string,
     rpc: ServerRpcContext,
   ) => void | Promise<void>,
+  conversationViews?: ConversationViewService,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
 
@@ -1232,6 +1232,7 @@ function createSessionResolver(
         blockedPeers,
         dialogFolders,
         systemPeers,
+        conversationViews,
       )
       return state
     }

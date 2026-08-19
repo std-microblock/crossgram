@@ -4,12 +4,13 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
-import { DialogRpc, makeTlConversationPreview, stableId } from './dialogs.js'
+import { DialogRpc, stableId } from './dialogs.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
 import type {
   IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMMessageSearchQuery, IMPlatform, IMUser, PlatformSession,
 } from './platform.js'
+import { createTestConversationViews } from './conversation-view.test-utils.js'
 
 const session: PlatformSession = {
   platformSessionId: 'session-1',
@@ -17,6 +18,18 @@ const session: PlatformSession = {
   userId: 'me',
   credentials: { token: 'test' },
   metadata: { firstName: 'Current', lastName: 'User' },
+}
+
+function makeViewRpc(
+  platform: IMPlatform,
+  views = createTestConversationViews(),
+): DialogRpc {
+  return new DialogRpc(
+    platform, session,
+    undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    views,
+  )
 }
 
 class DialogTestPlatform implements IMPlatform {
@@ -208,16 +221,6 @@ describe('DialogRpc', () => {
     })
     expect(dialogs.get(rpc.peerTlId(otherGroup.id))).toMatchObject({ unreadMentionsCount: 0 })
     expect(messages.get(rpc.peerTlId(otherGroup.id))?.mentioned).toBe(false)
-  })
-
-  it('does not expose a generic merged-forward counter as the card description', () => {
-    const media = makeTlConversationPreview({
-      id: 'generic-forward', kind: 'group', title: '聊天记录',
-      metadata: { virtual: true, qqMultiForwardPreview: '3条消息的合并转发' },
-    }, 'https://t.me/bridgechat_123')
-    expect(media.webpage).toMatchObject({
-      _: 'webPage', description: '点击查看合并转发消息',
-    })
   })
 
   it('builds serializable dialogs, users, and top messages in newest-first order', async () => {
@@ -1123,10 +1126,12 @@ describe('DialogRpc', () => {
   it('prepares virtual deep links through peer-dialog and search projections', async () => {
     const platform = new DialogTestPlatform()
     const peerArchive = {
-      id: 'peer-dialog-archive', kind: 'group' as const, title: 'Peer dialog archive', metadata: { virtual: true },
+      id: 'peer-dialog-archive', kind: 'group' as const, title: 'Peer dialog archive',
+      metadata: { conversationView: 'merged-forward' },
     }
     const searchArchive = {
-      id: 'search-archive', kind: 'group' as const, title: 'Search archive', metadata: { virtual: true },
+      id: 'search-archive', kind: 'group' as const, title: 'Search archive',
+      metadata: { conversationView: 'merged-forward' },
     }
     platform.addMessage('alice', {
       id: 'peer-link', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
@@ -1148,7 +1153,7 @@ describe('DialogRpc', () => {
         content: { parts: [{ type: 'text', text: `${conversation.id} first` }] },
       })
     }
-    const rpc = new DialogRpc(platform, session)
+    const rpc = makeViewRpc(platform)
     const peerDialogs = await rpc.getPeerDialogs({
       _: 'messages.getPeerDialogs', peers: [{
         _: 'inputDialogPeer',
@@ -1179,7 +1184,10 @@ describe('DialogRpc', () => {
     const getHistory = vi.spyOn(platform, 'getHistory')
     const temporary = {
       id: 'temporary-forward', kind: 'group' as const, title: '聊天记录',
-      metadata: { virtual: true, qqMultiForwardPreview: 'Bob: native preview\nAlice: work' },
+      metadata: {
+        conversationView: 'merged-forward',
+        qqMultiForwardPreview: 'Bob: native preview\nAlice: work',
+      },
     }
     platform.addMessage('alice', {
       id: 'merged', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
@@ -1198,7 +1206,8 @@ describe('DialogRpc', () => {
       sender: { id: 'alice', firstName: 'Alice' },
       content: { parts: [{ type: 'text', text: 'work' }] },
     })
-    const rpc = new DialogRpc(platform, session)
+    const views = createTestConversationViews()
+    const rpc = makeViewRpc(platform, views)
     await rpc.getDialogs(getDialogsRequest())
     expect(platform.historyCalls).toContain(temporary.id)
     expect(getHistory).toHaveBeenCalledWith(
@@ -1241,7 +1250,7 @@ describe('DialogRpc', () => {
     // Telegram Desktop opens chats through multiple MTProto connections.
     // A fresh DialogRpc must resolve the linked virtual peer and serve the
     // bootstrap requests without calling nonexistent upstream member APIs.
-    const freshRpc = new DialogRpc(platform, session)
+    const freshRpc = makeViewRpc(platform, views)
     const peer = { _: 'inputPeerChat' as const, chatId: temporaryId }
     expect(freshRpc.resolveUsername({
       _: 'contacts.resolveUsername', username: `bridgechat_${temporaryId}`,
@@ -1271,9 +1280,9 @@ describe('DialogRpc', () => {
         _: 'messages.chatFull',
         fullChat: {
           _: 'chatFull', id: temporaryId,
-          participants: { _: 'chatParticipants', participants: [{ _: 'chatParticipantCreator' }] },
+          participants: { _: 'chatParticipantsForbidden', chatId: temporaryId },
         },
-        chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
+        chats: [{ _: 'chat', left: true, id: temporaryId, title: '聊天记录' }], users: [],
       })
     await expect(freshRpc.getFullChannel({
       _: 'channels.getFullChannel',

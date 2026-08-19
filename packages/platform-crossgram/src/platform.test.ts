@@ -674,7 +674,7 @@ describe('QQNTPlatform mapping', () => {
       throw new Error('merged forward link was not mapped')
     }
     expect(link.entities[0].conversation.metadata).toMatchObject({
-      virtual: true,
+      conversationView: 'merged-forward',
       qqMultiForwardPreview: 'Alice: hello\nBob: [图片]',
     })
 

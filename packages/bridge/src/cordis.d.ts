@@ -12,6 +12,8 @@ import type { IMEvent, IMPlatform, PlatformSession } from './platform.js'
 import type { IMStickerService } from './sticker-provider.js'
 import type { TelegramResourceService } from './resource-provider.js'
 import type { SystemPeerService } from './system-peer.js'
+import type { MtprotoBridgeService } from './bridge-service.js'
+import type { ConversationViewService } from './conversation-view.js'
 
 declare module 'cordis' {
   interface Context {
@@ -19,6 +21,8 @@ declare module 'cordis' {
     imSticker: IMStickerService
     telegramResource: TelegramResourceService
     systemPeer: SystemPeerService
+    mtprotoBridge: MtprotoBridgeService
+    conversationView: ConversationViewService
     /** Present on one active platform-session fiber and its descendants. */
     bridgeSession: {
       platform: IMPlatform

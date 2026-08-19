@@ -16,6 +16,7 @@ import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { requestInboxConversation, requestInboxMessage } from './request-inbox.js'
+import { createTestConversationViews } from './conversation-view.test-utils.js'
 
 const session: PlatformSession = {
   platformSessionId: 'updates-session', platformId: 'updates-platform', userId: 'self',
@@ -71,18 +72,19 @@ async function createHarness(
   }> = []
   const store = new MessageStore(ctx.database, updateDeliveryRetention)
   const blockedPeers = blockedMode ? new BlockedPeerStore(ctx.database, blockedMode) : undefined
+  const conversationViews = createTestConversationViews()
   const manager = new UpdateManager(
     ctx.database, new PlatformRegistry([[session.platformId, targetPlatform]]), store,
     (authKeyId, update, excludeConnection) => {
       sent.push({ authKeyId, update, excludeConnection })
       return deliveredConnections
     },
-    1, undefined, projectSticker, blockedPeers, registerReactions,
+    1, undefined, projectSticker, blockedPeers, registerReactions, conversationViews,
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { ctx, store, manager, sent, blockedPeers }
+  return { ctx, store, manager, sent, blockedPeers, conversationViews }
 }
 
 function roundTrip<T>(object: T): T {
@@ -654,7 +656,8 @@ describe('UpdateManager', () => {
     const sourceConversation: IMConversation = { id: 'forward-source', kind: 'group', title: 'Source' }
     const targetConversation: IMConversation = { id: 'forward-target', kind: 'group', title: 'Target' }
     const archive: IMConversation = {
-      id: 'forward-archive', kind: 'group', title: 'Forward archive', metadata: { virtual: true },
+      id: 'forward-archive', kind: 'group', title: 'Forward archive',
+      metadata: { conversationView: 'merged-forward' },
     }
     const source: IMMessage = {
       id: 'forward-source-message', conversationId: sourceConversation.id, senderId: 'alice', timestamp: 1_800_000_010,
@@ -692,10 +695,15 @@ describe('UpdateManager', () => {
         return [{ ...source, id: 'forwarded-message', conversationId: to.id, timestamp: 1_800_000_011 }]
       },
     }
-    const { store } = await createHarness(undefined, targetPlatform)
+    const { store, conversationViews } = await createHarness(undefined, targetPlatform)
     const sourceProjection = await store.ingest(session, sourceConversation, source)
     await store.upsertConversation(session, targetConversation)
-    const rpc = new DialogRpc(targetPlatform, session, store)
+    const rpc = new DialogRpc(
+      targetPlatform, session, store,
+      undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      conversationViews,
+    )
     const forwarded = await rpc.forwardMessages({
       _: 'messages.forwardMessages',
       fromPeer: { _: 'inputPeerChannel', channelId: stableId(`peer:${sourceConversation.id}`), accessHash: Long.ONE },
@@ -714,7 +722,7 @@ describe('UpdateManager', () => {
     const virtual: IMConversation = {
       id: 'merged-virtual', kind: 'group', title: 'QQ用户的聊天记录',
       metadata: {
-        virtual: true,
+        conversationView: 'merged-forward',
         qqMultiForwardPreview: 'Alice: 第一条\nBob: 第二条',
       },
     }
@@ -731,7 +739,7 @@ describe('UpdateManager', () => {
         return { messages: forwarded.slice(0, query.limit ?? forwarded.length) }
       },
     }
-    const { store, manager, sent } = await createHarness(undefined, targetPlatform)
+    const { store, manager, sent, conversationViews } = await createHarness(undefined, targetPlatform)
     const text = '查看聊天记录'
     const message: IMMessage = {
       id: 'merged-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_003,
@@ -763,7 +771,12 @@ describe('UpdateManager', () => {
     )
     if (!firstEntity) throw new Error('merged forward update is missing its deep link')
     const firstId = Number(new URL(firstEntity.url).pathname.split('/').at(-1))
-    const freshRpc = new DialogRpc(targetPlatform, session, store)
+    const freshRpc = new DialogRpc(
+      targetPlatform, session, store,
+      undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      conversationViews,
+    )
     expect(freshRpc.resolveUsername({
       _: 'contacts.resolveUsername', username: `bridgechat_${virtualId}`,
     })).toMatchObject({ _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualId } })

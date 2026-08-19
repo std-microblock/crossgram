@@ -1884,6 +1884,20 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/merged-forward@workspace:*, @mtproto-relay/merged-forward@workspace:packages/merged-forward":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/merged-forward@workspace:packages/merged-forward"
+  dependencies:
+    "@mtcute/core": "npm:^0.30.3"
+    "@mtproto-relay/bridge": "workspace:*"
+    "@mtproto-relay/mtproto": "workspace:*"
+    long: "npm:^5.3.2"
+    vitest: "npm:^4.1.10"
+  peerDependencies:
+    cordis: ^4.0.0-rc.5
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/mtproto-debug@workspace:packages/mtproto-debug":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/mtproto-debug@workspace:packages/mtproto-debug"
@@ -2094,6 +2108,7 @@ __metadata:
     "@mtcute/node": "npm:^0.30.3"
     "@mtcute/tl-runtime": "npm:^0.30.3"
     "@mtproto-relay/bridge": "workspace:*"
+    "@mtproto-relay/merged-forward": "workspace:*"
     "@mtproto-relay/mtproto": "workspace:*"
     "@mtproto-relay/platform-discord": "workspace:*"
     "@mtproto-relay/platform-matrix": "workspace:*"

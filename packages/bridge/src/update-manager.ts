@@ -6,7 +6,7 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  makeTlArticleMedia, makeTlCardPreview, makeTlConversationPreview, makeTlMessageMedia, projectTlMessage, stableId,
+  makeTlArticleMedia, makeTlCardPreview, makeTlMessageMedia, projectTlMessage, stableId,
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
@@ -19,10 +19,7 @@ import type {
   CommittedPlatformEvent, PlatformEventDeliveryOptions, PlatformEventPublishResult, PlatformRegistry,
 } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
-import {
-  registerVirtualConversation, registerVirtualConversationMessageTarget,
-  virtualConversationMessageTarget,
-} from './virtual-conversations.js'
+import type { ConversationViewService } from './conversation-view.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 
@@ -50,6 +47,7 @@ export class UpdateManager {
     ) => tl.TypeMessageMedia | undefined,
     private readonly _blockedPeers?: BlockedPeerStore,
     private readonly _registerReactions?: (session: PlatformSession, message: IMMessage) => void,
+    private readonly _conversationViews?: ConversationViewService,
   ) {}
 
   private async _hydrateReactionUsers(
@@ -183,7 +181,7 @@ export class UpdateManager {
       }
       const payload: tl.RawUpdates = {
         _: 'updates', updates, users: [],
-        chats: channelId === undefined ? [] : [makeUpdateChat(group.conversation, false, this._dcId)],
+        chats: channelId === undefined ? [] : [this._makeChat(session, group.conversation)],
         date: delivery.date, seq: delivery.seq,
       }
       await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
@@ -441,7 +439,7 @@ export class UpdateManager {
     void pts
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users: reactionUsers.users,
-      chats: displayConversation.kind === 'direct' ? [] : [makeUpdateChat(displayConversation, false, this._dcId)],
+      chats: displayConversation.kind === 'direct' ? [] : [this._makeChat(session, displayConversation)],
       date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
@@ -490,7 +488,7 @@ export class UpdateManager {
     }
     const payload: tl.RawUpdates = {
       _: 'updates', updates: [update], users: [],
-      chats: channelId === undefined ? [] : [makeUpdateChat(displayConversation, false, this._dcId)],
+      chats: channelId === undefined ? [] : [this._makeChat(session, displayConversation)],
       date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
@@ -555,7 +553,7 @@ export class UpdateManager {
       ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
       : undefined
     const platform = this._registry.require(session.platformId)
-    await this._prepareVirtualMessageTargets(session, platform, visibleMessage)
+    await this._prepareConversationViewTargets(session, platform, visibleMessage)
     const selfProfile = await platform.getUser?.(session, session.userId)
       ?? {
         id: session.userId,
@@ -667,8 +665,12 @@ export class UpdateManager {
             ? this._projectSticker?.(session, sticker.sticker)
             : card?.type === 'card'
               ? makeTlCardPreview(card.card, this._dcId)
-              : makeConversationPreviewMedia(projected.source, session.platformSessionId)),
-        entities: makeMessageEntities(projected.source, session.platformSessionId, userIds),
+               : makeConversationPreviewMedia(
+                   projected.source, session.platformSessionId, this._conversationViews,
+                 )),
+        entities: makeMessageEntities(
+          projected.source, session.platformSessionId, userIds, this._conversationViews,
+        ),
         reactions: visibleMessage.reactionContext?.reactions.length
           ? makeMessageReactions(
               this._blockedPeers?.filterMessageReactions(session.platformSessionId, projected.source)
@@ -729,9 +731,9 @@ export class UpdateManager {
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []
-        : [makeUpdateChat(displayConversation, topicId !== undefined, this._dcId)]),
+        : [this._makeChat(session, displayConversation, topicId !== undefined)]),
       ...linkedConversations(event.message).map((conversation) =>
-        makeUpdateChat(conversation, false, this._dcId)),
+        this._makeChat(session, conversation)),
     ]
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
@@ -795,7 +797,7 @@ export class UpdateManager {
       users: [],
       chats: displayConversation.kind === 'direct'
         ? []
-        : [makeUpdateChat(displayConversation, !!event.conversation.parentId, this._dcId)],
+        : [this._makeChat(session, displayConversation, !!event.conversation.parentId)],
       date: delivery.date,
       seq: delivery.seq,
     }
@@ -808,17 +810,17 @@ export class UpdateManager {
     return payload
   }
 
-  private async _prepareVirtualMessageTargets(
+  private async _prepareConversationViewTargets(
     session: PlatformSession,
     platform: IMPlatform,
     message: IMMessage,
   ): Promise<void> {
     await Promise.all(linkedConversations(message)
-      .filter((conversation) => conversation.metadata?.virtual === true)
+      .filter((conversation) => this._conversationViews?.supports(conversation) === true)
       .map(async (conversation) => {
         const chatId = stableId(`peer:${conversation.id}`)
-        registerVirtualConversation(session.platformSessionId, chatId, conversation)
-        if (virtualConversationMessageTarget(session.platformSessionId, chatId)) return
+        this._conversationViews?.remember(session.platformSessionId, chatId, conversation)
+        if (this._conversationViews?.target(session.platformSessionId, chatId)) return
         try {
           let tlMessageId = await this._store.getOldestTlMessageId(
             session.platformSessionId, conversation.id,
@@ -842,17 +844,27 @@ export class UpdateManager {
             session.platformSessionId, tlMessageId, conversation.id,
           )
           if (!projected) return
-          registerVirtualConversationMessageTarget(session.platformSessionId, chatId, {
+          this._conversationViews?.setTarget(session.platformSessionId, chatId, {
             conversationId: conversation.id,
             platformMessageId: projected.source.id,
             tlMessageId,
           })
         } catch (error) {
           this._onTrace?.(
-            'virtual history target failed conversation=%s error=%s', conversation.id, String(error),
+            'conversation view target failed conversation=%s error=%s', conversation.id, String(error),
           )
         }
       }))
+  }
+
+  private _makeChat(session: PlatformSession, conversation: IMConversation, forum = false): tl.TypeChat {
+    const chatId = stableId(`peer:${conversation.id}`)
+    if (this._conversationViews?.supports(conversation)) {
+      this._conversationViews.remember(session.platformSessionId, chatId, conversation)
+      const projected = this._conversationViews.makeChat(session.platformSessionId, chatId, this._dcId)
+      if (projected) return projected
+    }
+    return makeUpdateChat(conversation, forum, this._dcId)
   }
 
   private async _send(
@@ -1038,6 +1050,7 @@ function makeMessageEntities(
   message: IMMessage,
   platformSessionId: string,
   userIds: ReadonlyMap<string, number>,
+  conversationViews?: ConversationViewService,
 ): tl.TypeMessageEntity[] | undefined {
   const entities: tl.TypeMessageEntity[] = []
   const rendered = message.content.parts.flatMap((part) => {
@@ -1054,9 +1067,9 @@ function makeMessageEntities(
           userId: requiredUserId(userIds, entity.userId),
         })
       } else if (entity.type === 'conversation-link') {
-        entities.push({
-          _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
-          url: conversationLinkUrl(platformSessionId, entity.conversation),
+        const url = conversationLinkUrl(platformSessionId, entity.conversation, conversationViews)
+        if (url) entities.push({
+          _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length, url,
         })
       } else if (entity.type === 'text-link') {
         entities.push({
@@ -1120,15 +1133,6 @@ function linkedConversations(message: IMMessage): import('./platform.js').IMConv
 
 function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {
   const id = stableId(`peer:${conversation.id}`)
-  if (conversation.metadata?.virtual === true) {
-    return {
-      _: 'chat', creator: true, id, title: conversation.title,
-      photo: conversation.avatar
-        ? makeUpdateAvatar(conversation.avatar.id, dcId, 'chat')
-        : { _: 'chatPhotoEmpty' },
-      participantsCount: 1, date: 0, version: 1,
-    }
-  }
   const broadcast = conversation.metadata?.broadcast === true
   return {
     _: 'channel', creator: true, id, accessHash: Long.ONE, title: conversation.title,
@@ -1141,21 +1145,26 @@ function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): 
   }
 }
 
-function conversationLinkUrl(platformSessionId: string, conversation: IMConversation): string {
-  return registerVirtualConversation(
-    platformSessionId,
-    stableId(`peer:${conversation.id}`),
-    conversation,
+function conversationLinkUrl(
+  platformSessionId: string,
+  conversation: IMConversation,
+  conversationViews?: ConversationViewService,
+): string | undefined {
+  return conversationViews?.remember(
+    platformSessionId, stableId(`peer:${conversation.id}`), conversation,
   )
 }
 
 function makeConversationPreviewMedia(
   message: IMMessage,
   platformSessionId: string,
+  conversationViews?: ConversationViewService,
 ): tl.RawMessageMediaWebPage | undefined {
   const linked = linkedConversations(message)[0]
   if (!linked) return
-  return makeTlConversationPreview(linked, conversationLinkUrl(platformSessionId, linked))
+  const chatId = stableId(`peer:${linked.id}`)
+  conversationViews?.remember(platformSessionId, chatId, linked)
+  return conversationViews?.makePreview(platformSessionId, chatId)
 }
 
 function makeUpdateAvatar(mediaId: string, dcId: number, kind: 'user'): tl.RawUserProfilePhoto

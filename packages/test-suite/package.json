@@ -16,6 +16,7 @@
     "@mtcute/node": "^0.30.3",
     "@mtcute/tl-runtime": "^0.30.3",
     "@mtproto-relay/bridge": "workspace:*",
+    "@mtproto-relay/merged-forward": "workspace:*",
     "@mtproto-relay/mtproto": "workspace:*",
     "@mtproto-relay/platform-discord": "workspace:*",
     "@mtproto-relay/platform-matrix": "workspace:*",
