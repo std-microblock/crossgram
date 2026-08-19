@@ -46,7 +46,7 @@ afterEach(async () => {
 class TestPlatform implements IMPlatform {
   readonly capabilities = capabilities
   readonly subscribe = vi.fn(async (): Promise<Unsubscribe> => () => {})
-  readonly getConversation = vi.fn(async (_session: PlatformSession, id: string) => ({
+  readonly getConversation = vi.fn(async (_session: PlatformSession, id: string): Promise<IMConversation | null> => ({
     id, kind: id.startsWith('direct:') ? 'direct' as const : 'group' as const, title: id,
   }))
   readonly getConversationMember = vi.fn(async (): Promise<IMConversationMember | null> => null)
@@ -169,6 +169,70 @@ describe('SatoriExporter', () => {
     ])
     expect(events[1]?.event.guild).toBeUndefined()
     expect(platform.subscribe).not.toHaveBeenCalled()
+  })
+
+  it('returns a cached guild with its conversation title', async () => {
+    const { ctx, exporter, platform } = await createExporter()
+    const conversation: IMConversation = { id: 'group:42', kind: 'group', title: 'QQ Group' }
+    exporter.handleMessage(session, conversation, message('cached', conversation.id), { created: true })
+
+    await expect(ctx.bots[0]!.getGuild('group:42')).resolves.toEqual({
+      id: 'group:42', name: 'QQ Group',
+    })
+    expect(platform.getConversation).not.toHaveBeenCalled()
+  })
+
+  it('does not use a cached channel title as its guild name', async () => {
+    const { ctx, exporter, platform } = await createExporter()
+    const channel: IMConversation = { id: 'channel:42', kind: 'channel', spaceId: 'guild:7', title: 'General' }
+    exporter.handleMessage(session, channel, message('cached', channel.id), { created: true })
+    platform.getConversation.mockResolvedValueOnce({ id: 'guild:7', kind: 'group', title: 'Guild 7' })
+
+    await expect(ctx.bots[0]!.getGuild('guild:7')).resolves.toEqual({
+      id: 'guild:7', name: 'Guild 7',
+    })
+    expect(platform.getConversation).toHaveBeenCalledWith(session, 'guild:7')
+  })
+
+  it('resolves and caches a guild before its first message', async () => {
+    const { ctx, platform } = await createExporter()
+    platform.getConversation.mockResolvedValueOnce({ id: 'group:42', kind: 'group', title: 'QQ Group' })
+
+    await expect(ctx.bots[0]!.getGuild('group:42')).resolves.toEqual({
+      id: 'group:42', name: 'QQ Group',
+    })
+    await expect(ctx.bots[0]!.getGuild('group:42')).resolves.toEqual({
+      id: 'group:42', name: 'QQ Group',
+    })
+    expect(platform.getConversation).toHaveBeenCalledOnce()
+    expect(platform.getConversation).toHaveBeenCalledWith(session, 'group:42')
+  })
+
+  it.each([
+    ['an unavailable conversation', null],
+    ['a direct conversation', { id: 'group:42', kind: 'direct' as const, title: 'Alice' }],
+    ['a different guild', { id: 'channel:42', kind: 'group' as const, spaceId: 'guild:8', title: 'Channel' }],
+  ])('fails guild lookup for %s', async (_name, resolved) => {
+    const { ctx, platform } = await createExporter()
+    platform.getConversation.mockResolvedValueOnce(resolved)
+
+    await expect(ctx.bots[0]!.getGuild('group:42'))
+      .rejects.toThrow('Satori exporter cannot resolve guild: group:42')
+  })
+
+  it('rejects a guild lookup after its bot session is replaced', async () => {
+    const { ctx, exporter, platform } = await createExporter()
+    let resolveConversation!: (conversation: IMConversation | null) => void
+    const pendingConversation = new Promise<IMConversation | null>((resolve) => { resolveConversation = resolve })
+    platform.getConversation.mockReturnValueOnce(pendingConversation)
+
+    const lookup = ctx.bots[0]!.getGuild('group:42')
+    await vi.waitFor(() => expect(platform.getConversation).toHaveBeenCalledOnce())
+    exporter.stop('qqnt')
+    exporter.start(platform, replacementSession)
+    resolveConversation({ id: 'group:42', kind: 'group', title: 'QQ Group' })
+
+    await expect(lookup).rejects.toThrow('Satori exporter bot is no longer active')
   })
 
   it.each([
@@ -1039,6 +1103,26 @@ describe('SatoriExporter', () => {
     expect(missing.status).toBe(403)
     expect(invalid.status).toBe(403)
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('serves guild.get with the group name through the authenticated Satori HTTP route', async () => {
+    const { ctx, platform } = await createSatoriServer('test-token')
+    platform.getConversation.mockResolvedValueOnce({ id: 'group:42', kind: 'group', title: 'QQ Group' })
+
+    const response = await fetch(new URL('/satori/v1/guild.get', ctx.server.baseUrl), {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-token',
+        'content-type': 'application/json',
+        'satori-platform': 'qq',
+        'satori-user-id': 'self',
+      },
+      body: JSON.stringify({ guild_id: 'group:42' }),
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ id: 'group:42', name: 'QQ Group' })
+    expect(platform.getConversation).toHaveBeenCalledWith(session, 'group:42')
   })
 
   it('serves guild.member.get through the authenticated Satori HTTP route', async () => {

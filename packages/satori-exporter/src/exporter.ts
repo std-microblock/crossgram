@@ -125,6 +125,30 @@ export class SatoriExporter {
     })
   }
 
+  async getGuild(
+    bot: SatoriExportBot,
+    generation: number,
+    guildId: string,
+  ): Promise<Universal.Guild> {
+    const platform = this._platform
+    const session = this._session
+    if (!platform || !session || !this.isActive(bot, generation)) throw new Error('Satori exporter bot is no longer active')
+    let conversation = this._conversations.get(guildId)
+    if (conversation?.kind === 'direct') conversation = undefined
+    if (!conversation && platform.getConversation) {
+      const resolved = await platform.getConversation(session, guildId)
+      if (!this.isActive(bot, generation) || this._platform !== platform || this._session !== session) {
+        throw new Error('Satori exporter bot is no longer active')
+      }
+      if (resolved && resolved.kind !== 'direct' && resolved.id === guildId) {
+        conversation = resolved
+        this._conversations.set(resolved.id, resolved)
+      }
+    }
+    if (!conversation) throw new Error(`Satori exporter cannot resolve guild: ${guildId}`)
+    return { id: guildId, name: conversation.title }
+  }
+
   async getGuildMember(
     bot: SatoriExportBot,
     generation: number,
@@ -246,6 +270,11 @@ class SatoriExportBot extends Bot {
   override createMessage(channelId: string, content: h.Fragment): Promise<Universal.Message[]> {
     if (!this._exporter.isActive(this, this.generation)) return Promise.reject(new Error('Satori exporter bot is not ready'))
     return this._exporter.sendMessage(this, this.generation, channelId, content)
+  }
+
+  override getGuild(guildId: string): Promise<Universal.Guild> {
+    if (!this._exporter.isActive(this, this.generation)) return Promise.reject(new Error('Satori exporter bot is not ready'))
+    return this._exporter.getGuild(this, this.generation, guildId)
   }
 
   override getGuildMember(guildId: string, userId: string): Promise<Universal.GuildMember> {
