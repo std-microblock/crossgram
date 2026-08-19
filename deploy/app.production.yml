@@ -15,6 +15,8 @@
     serverHost: __CROSSGRAM_PUBLIC_HOST__
     serverPort: __CROSSGRAM_PORT__
     uploadPath: /var/lib/crossgram/data/bridge-uploads
+- id: merged-forward
+  name: '@mtproto-relay/merged-forward'
 - id: telegram-resources
   name: '@mtproto-relay/telegram-resources'
   config: {}
