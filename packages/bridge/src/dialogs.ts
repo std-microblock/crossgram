@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import {
-  cardUrl, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
+  cardUrl, IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
   isArticleMessage, messageMentionsUser, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput,
@@ -2019,12 +2019,17 @@ export class DialogRpc {
       offset, limit,
       onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
     })
-    for await (const chunk of stream) {
-      const remaining = limit - size
-      if (remaining <= 0) break
-      const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk
-      chunks.push(accepted)
-      size += accepted.length
+    try {
+      for await (const chunk of stream) {
+        const remaining = limit - size
+        if (remaining <= 0) break
+        const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk
+        chunks.push(accepted)
+        size += accepted.length
+      }
+    } catch (error) {
+      if (error instanceof IMMediaUnavailableError) throw new RpcError(400, 'FILE_REFERENCE_EXPIRED')
+      throw error
     }
     const bytes = new Uint8Array(size)
     let position = 0

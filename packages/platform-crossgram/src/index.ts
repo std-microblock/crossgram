@@ -6,7 +6,8 @@ import z from 'schemastery'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import {
-  IMMessageSendRejectedError, IMMessageTargetUnavailableError, messagePartText, resolvePlatformPluginId,
+  IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
+  messagePartText, resolvePlatformPluginId,
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
   type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMTransferOptions,
@@ -1095,9 +1096,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): AsyncIterable<Uint8Array> {
     if (!media.locator) throw new Error(`QQ media ${media.id} has no locator`)
     if (media.locator.deferred) return
+    let locator = media.locator
+    if (needsUserAvatarRefresh(media, locator)) {
+      const refreshed = await this.client.getUser(locator.peerUid).catch(() => null)
+      locator = refreshed?.avatar?.locator ?? locator
+    }
     let transferred = 0
     try {
-      for await (const chunk of this.client.downloadFile(media.locator, {
+      for await (const chunk of this.client.downloadFile(locator, {
         signal: options.signal, offset: options.offset, limit: options.limit,
       })) {
         transferred += chunk.length
@@ -1111,6 +1117,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       // Telegram probes the next chunk to learn EOF. QQNT reports this normal
       // ranged-read terminator as HTTP 400 instead of an empty response.
       if ((options.offset ?? 0) > 0 && isQQNTDownloadPastEnd(error)) return
+      if (isQQNTMediaUnavailable(error)) {
+        throw new IMMediaUnavailableError(error instanceof Error ? error.message : String(error), {
+          cause: error,
+        })
+      }
       throw error
     }
   }
@@ -2131,6 +2142,24 @@ function isQQNTDownloadPastEnd(error: unknown): boolean {
     || /download range out of filesize/iu.test(error.message)
     || /^QQNT (?:bridge|native media) 416: Range Not Satisfiable$/iu.test(error.message)
   )
+}
+
+function isQQNTMediaUnavailable(error: unknown): boolean {
+  return error instanceof Error && (
+    /"retcode"\s*:\s*-(?:5503001|5503042)\b/u.test(error.message)
+    || /\b(?:illegal request|file has expired)\b/iu.test(error.message)
+    || /QQNT media locator has no remote direct-link identity/iu.test(error.message)
+    || /^QQNT native media 404: Not Found$/iu.test(error.message)
+  )
+}
+
+function needsUserAvatarRefresh(media: IMMedia<QQMediaLocator>, locator: QQMediaLocator): boolean {
+  return media.id.startsWith('avatar:')
+    && locator.chatType === 1
+    && !locator.filePath
+    && !locator.fileUuid
+    && !locator.originImageUrl
+    && !locator.avatarUin
 }
 
 function isNativeForwardRejection(error: unknown): boolean {

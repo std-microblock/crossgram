@@ -431,6 +431,14 @@ export interface IMMessageTarget {
 /** The platform permanently cannot resolve the requested stored message target. */
 export class IMMessageTargetUnavailableError extends Error {}
 
+/** The stored media reference can no longer produce bytes and must be refreshed. */
+export class IMMediaUnavailableError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'IMMediaUnavailableError'
+  }
+}
+
 export interface IMReadTarget {
   conversationId: string
   /** Opaque logical platform message ID through which incoming messages were read. */

@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import type { Logger } from 'cordis'
 import {
-  expandTelegramStrippedThumbnail, IMMessageSendRejectedError, IMMessageTargetUnavailableError, PlatformMessageActions,
+  expandTelegramStrippedThumbnail, IMMediaUnavailableError, IMMessageSendRejectedError,
+  IMMessageTargetUnavailableError, PlatformMessageActions,
   type IMMedia, type PlatformSession,
 } from '@mtproto-relay/bridge'
 import { parseQQMarkdown, QQNTPlatform } from './index.js'
@@ -70,6 +71,54 @@ describe('QQNTPlatform mapping', () => {
       .resolves.toEqual([])
     await expect(collect(platform.downloadMedia(session, media, { offset: 0, limit: 512 })))
       .rejects.toThrow('Range Not Satisfiable')
+  })
+
+  it('refreshes a legacy user-avatar locator before downloading it', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'opaque-user', numericId: '1715311957', name: 'Alice',
+      avatar: {
+        id: 'avatar:user:opaque-user', kind: 'image' as const, mimeType: 'image/jpeg',
+        locator: {
+          messageId: 'avatar:user:opaque-user', elementId: 'avatar:user:opaque-user',
+          chatType: 1 as const, peerUid: 'opaque-user', kind: 'image' as const,
+          fileName: '1715311957.jpg', avatarUin: '1715311957',
+        },
+      },
+    }))
+    platform.client.downloadFile = vi.fn(async function* (locator) {
+      expect(locator).toMatchObject({ avatarUin: '1715311957' })
+      yield new TextEncoder().encode('avatar-bytes')
+    })
+    const media: IMMedia<QQMediaLocator> = {
+      id: 'avatar:user:opaque-user:original-v1', kind: 'image', mimeType: 'image/jpeg',
+      locator: {
+        messageId: 'profile', elementId: 'legacy-avatar', chatType: 1,
+        peerUid: 'opaque-user', kind: 'image', fileName: 'avatar.jpg',
+      },
+    }
+
+    await expect(collect(platform.downloadMedia(session, media))).resolves.toEqual([
+      new TextEncoder().encode('avatar-bytes'),
+    ])
+    expect(platform.client.getUser).toHaveBeenCalledWith('opaque-user')
+  })
+
+  it('marks expired QQ media locators for Telegram file-reference refresh', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.downloadFile = vi.fn(async function* () {
+      throw new Error('QQNT native media 404: {"retcode":-5503042,"retmsg":"file has expired"}')
+    })
+    const media: IMMedia<QQMediaLocator> = {
+      id: 'expired', kind: 'image',
+      locator: {
+        messageId: 'message', elementId: 'element', chatType: 1, peerUid: 'user',
+        kind: 'image', fileName: 'expired.jpg', fileUuid: 'expired',
+      },
+    }
+
+    await expect(collect(platform.downloadMedia(session, media)))
+      .rejects.toBeInstanceOf(IMMediaUnavailableError)
   })
 
   it('projects QQ bot markdown and native buttons into Telegram-compatible entities and markup', async () => {

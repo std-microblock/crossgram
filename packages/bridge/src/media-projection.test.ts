@@ -14,6 +14,7 @@ import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { UploadManager } from './upload-manager.js'
+import { IMMediaUnavailableError } from './platform.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
@@ -822,6 +823,31 @@ describe('rich-media projection', () => {
     expect(getUser).toHaveBeenCalledWith(session, 'alice')
     expect(file._).toBe('upload.file')
     if (file._ === 'upload.file') expect(new TextDecoder().decode(file.bytes)).toBe('fresh-avatar')
+  })
+
+  it('maps unavailable platform media to Telegram file-reference expiry', async () => {
+    const { store, peerId } = await createStore()
+    const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-expired-media-'))
+    disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
+    const unavailablePlatform: IMPlatform = {
+      ...platform,
+      async *downloadMedia() {
+        throw new IMMediaUnavailableError('upstream media expired')
+      },
+    }
+    const rpc = new DialogRpc(unavailablePlatform, session, store, new UploadManager(uploadPath))
+    const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const media = (history.messages.at(-1) as tl.RawMessage).media as tl.RawMessageMediaPhoto
+    if (media.photo?._ !== 'photo') throw new Error('expected photo')
+
+    await expect(rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPhotoFileLocation', id: media.photo.id, accessHash: media.photo.accessHash,
+        fileReference: media.photo.fileReference, thumbSize: 'x',
+      },
+      offset: 0, limit: 1024,
+    })).rejects.toMatchObject({ code: 400, text: 'FILE_REFERENCE_EXPIRED' })
   })
 
   it('restores a persisted group avatar without reloading dialogs after restart', async () => {
