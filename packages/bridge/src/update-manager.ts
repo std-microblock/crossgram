@@ -1,8 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
 import type { ServerConnection } from '@mtproto-relay/mtproto'
-import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
-import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
@@ -22,6 +20,7 @@ import { makeUser } from './synthetic.js'
 import type { ConversationViewService } from './conversation-view.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
+import { updateFromJson, updateToJson } from './update-json.js'
 
 export interface MentionReadPublishResult {
   pts: number
@@ -184,7 +183,7 @@ export class UpdateManager {
         chats: channelId === undefined ? [] : [this._makeChat(session, group.conversation)],
         date: delivery.date, seq: delivery.seq,
       }
-      await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+      await this._store.setUpdatePayload(eventKey, updateToJson(payload))
       if (await this._send(session.platformSessionId, payload)) {
         await this._store.markUpdatePublished(eventKey)
       }
@@ -282,7 +281,7 @@ export class UpdateManager {
       date: delivery.date,
       seq: delivery.seq,
     }
-    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    await this._store.setUpdatePayload(eventKey, updateToJson(payload))
     await this._send(session.platformSessionId, payload, undefined, excludeConnection)
     // The initiating connection acknowledged the same mutation through its RPC
     // result, while offline devices can still recover the retained payload via
@@ -442,7 +441,7 @@ export class UpdateManager {
       chats: displayConversation.kind === 'direct' ? [] : [this._makeChat(session, displayConversation)],
       date: delivery.date, seq: delivery.seq,
     }
-    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    await this._store.setUpdatePayload(eventKey, updateToJson(payload))
     if (await this._send(session.platformSessionId, payload)) await this._store.markUpdatePublished(eventKey)
   }
 
@@ -491,7 +490,7 @@ export class UpdateManager {
       chats: channelId === undefined ? [] : [this._makeChat(session, displayConversation)],
       date: delivery.date, seq: delivery.seq,
     }
-    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    await this._store.setUpdatePayload(eventKey, updateToJson(payload))
     if (await this._send(
       session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
     ) || options.deliveredViaRpc) {
@@ -542,7 +541,7 @@ export class UpdateManager {
     )
     if (delivery.published) {
       this._onTrace?.('update publish skipped eventKey=%s reason=already-published', eventKey)
-      return delivery.payload ? decodeUpdate(delivery.payload) : undefined
+      return delivery.payload ? updateFromJson(delivery.payload) : undefined
     }
     this._onTrace?.(
       'update delivery prepared eventKey=%s pts=%d ptsCount=%d seq=%d projection=%d created=%s changed=%s',
@@ -738,7 +737,7 @@ export class UpdateManager {
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
-    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    await this._store.setUpdatePayload(eventKey, updateToJson(payload))
     this._onTrace?.(
       'update payload stored eventKey=%s updates=%d types=%s pts=%d seq=%d',
       eventKey, updates.length, updates.map((update) => update._).join(','), delivery.pts, delivery.seq,
@@ -777,7 +776,7 @@ export class UpdateManager {
     delivery ??= await this._store.prepareUpdateDelivery(
       eventKey, session.platformSessionId, result.tlMessageIds.length, event.timestamp, channelId,
     )
-    if (delivery.published) return delivery.payload ? decodeUpdate(delivery.payload) : undefined
+    if (delivery.published) return delivery.payload ? updateFromJson(delivery.payload) : undefined
     const update = event.conversation.kind !== 'direct'
       ? {
           _: 'updateDeleteChannelMessages',
@@ -801,7 +800,7 @@ export class UpdateManager {
       date: delivery.date,
       seq: delivery.seq,
     }
-    await this._store.setUpdatePayload(eventKey, encodeUpdate(payload))
+    await this._store.setUpdatePayload(eventKey, updateToJson(payload))
     if (await this._send(
       session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
     ) || options.deliveredViaRpc) {
@@ -900,7 +899,7 @@ export class UpdateManager {
     let published = 0
     for (const delivery of await this._store.getPendingUpdateDeliveries(platformSessionId)) {
       if (!delivery.payload) continue
-      if (!await this._send(platformSessionId, decodeUpdate(delivery.payload))) break
+      if (!await this._send(platformSessionId, updateFromJson(delivery.payload))) break
       await this._store.markUpdatePublished(delivery.eventKey)
       published++
     }
@@ -934,7 +933,7 @@ export class UpdateManager {
     const chats = new Map<string, tl.TypeChat>()
     const users = new Map<string, tl.TypeUser>()
     for (const delivery of page.filter((delivery) => delivery.payload)) {
-      const payload = decodeUpdate(delivery.payload)
+      const payload = updateFromJson(delivery.payload)
       for (const update of payload.updates) {
         if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
           newMessages.push(update.message)
@@ -957,7 +956,7 @@ export class UpdateManager {
       const channelId = Number(delivery.scope.slice('channel:'.length))
       if (!Number.isSafeInteger(channelId)) continue
       changedChannels.set(channelId, Math.max(changedChannels.get(channelId) ?? 0, delivery.pts))
-      const payload = decodeUpdate(delivery.payload)
+      const payload = updateFromJson(delivery.payload)
       for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
       for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
     }
@@ -999,7 +998,7 @@ export class UpdateManager {
     const chats = new Map<string, tl.TypeChat>()
     const users = new Map<string, tl.TypeUser>()
     for (const delivery of page.filter((delivery) => delivery.payload)) {
-      const payload = decodeUpdate(delivery.payload)
+      const payload = updateFromJson(delivery.payload)
       for (const update of payload.updates) {
         if (update._ === 'updateNewChannelMessage') newMessages.push(update.message)
         else otherUpdates.push(update)
@@ -1036,14 +1035,6 @@ function committedEventSummary(committed: CommittedPlatformEvent): string {
   }
   const reactions = result as import('./message-store.js').ReactionResult
   return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} changed=${reactions.changed} tlMessages=${reactions.tlMessageIds.length}`
-}
-
-function encodeUpdate(update: tl.RawUpdates): string {
-  return Buffer.from(TlBinaryWriter.serializeObject(__tlWriterMap, update)).toString('base64')
-}
-
-function decodeUpdate(payload: string): tl.RawUpdates {
-  return new TlBinaryReader(__tlReaderMap, Buffer.from(payload, 'base64')).object() as tl.RawUpdates
 }
 
 function makeMessageEntities(

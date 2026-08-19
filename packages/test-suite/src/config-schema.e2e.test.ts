@@ -10,9 +10,12 @@ import * as staticPlatform from '../../platform-static/src/index.js'
 import * as satoriPlatform from '../../platform-satori/src/index.js'
 import * as satoriExporter from '../../satori-exporter/src/index.js'
 import * as resources from '../../telegram-resources/src/index.js'
+import * as updateStoreMemory from '../../update-store-memory/src/index.js'
+import * as updateStoreDatabase from '../../update-store-database/src/index.js'
 
 const modules = {
   bridge, debug, mtproto, qqnt, discord, matrix, staticPlatform, satoriPlatform, satoriExporter, resources,
+  updateStoreMemory, updateStoreDatabase,
 }
 
 describe('loader WebUI config discovery', () => {

@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@mtproto-relay/bridge": "workspace:*",
+    "@mtproto-relay/update-store-memory": "workspace:*",
     "schemastery": "^3.18.0"
   },
   "devDependencies": {

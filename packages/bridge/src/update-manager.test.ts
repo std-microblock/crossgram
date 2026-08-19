@@ -1608,7 +1608,7 @@ describe('UpdateManager', () => {
 
     expect(sent).toHaveLength(0)
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toMatchObject([{
-      published: false, pts: 2, payload: expect.any(String),
+      published: false, pts: 2, payload: expect.objectContaining({ _: 'updates' }),
     }])
     online = true
     await expect(manager.retryPending(session.platformSessionId)).resolves.toBe(1)

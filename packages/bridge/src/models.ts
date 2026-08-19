@@ -191,19 +191,6 @@ export interface ChannelUpdateStateRow {
   date: number
 }
 
-export interface UpdateDeliveryRow {
-  messageId: number
-  eventKey: string
-  platformSessionId: string
-  scope: string
-  pts: number
-  ptsCount: number
-  seq: number
-  date: number
-  published: boolean
-  payload: string
-}
-
 export interface StickerRecentRow {
   id: number
   platformSessionId: string
@@ -314,7 +301,6 @@ declare module '@cordisjs/plugin-database' {
     mtproto_message_id_epoch: MessageIdEpochRow
     mtproto_update_state: UpdateStateRow
     mtproto_channel_update_state: ChannelUpdateStateRow
-    mtproto_update_delivery: UpdateDeliveryRow
     mtproto_sticker_recent: StickerRecentRow
     mtproto_sticker_favorite: StickerFavoriteRow
     mtproto_reaction_recent: ReactionRecentRow
@@ -464,18 +450,6 @@ export function defineModels(ctx: Context): void {
   }, {
     primary: 'id',
     unique: [['platformSessionId', 'channelId']],
-  })
-
-  ctx.model.extend('mtproto_update_delivery', {
-    messageId: 'unsigned', eventKey: 'text', platformSessionId: 'string', scope: 'string', pts: 'unsigned', ptsCount: 'unsigned',
-    seq: 'unsigned', date: 'unsigned', published: 'boolean', payload: 'text',
-  }, {
-    primary: 'messageId', autoInc: true,
-    unique: ['eventKey'],
-    indexes: [
-      ['platformSessionId', 'published', 'seq'],
-      ['platformSessionId', 'scope', 'pts'],
-    ],
   })
 
   ctx.model.extend('mtproto_sticker_recent', {

@@ -1,0 +1,34 @@
+{
+  "name": "@mtproto-relay/update-store-database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "cordis": {
+    "service": {
+      "required": [
+        "database",
+        "model"
+      ],
+      "implements": [
+        "updateStore"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "@mtproto-relay/update-store": "workspace:*",
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "@cordisjs/plugin-database-sqlite": "^5.1.1",
+    "vitest": "^4.1.10"
+  }
+}

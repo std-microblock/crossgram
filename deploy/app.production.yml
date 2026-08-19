@@ -43,6 +43,10 @@
         path: /var/lib/crossgram/data/cordis.db
         journalMode: wal
         busyTimeout: 5000
+- id: update-store
+  name: '@mtproto-relay/update-store-database'
+  config:
+    retention: 10000
 - id: webui
   name: '@cordisjs/plugin-webui'
 - id: mtproto-statistics

@@ -1,0 +1,24 @@
+{
+  "name": "@mtproto-relay/update-store-memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "cordis": {
+    "service": {
+      "implements": [
+        "updateStore"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@mtproto-relay/update-store": "workspace:*",
+    "schemastery": "^3.18.0"
+  }
+}

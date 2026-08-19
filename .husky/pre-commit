@@ -1,1 +1,6 @@
+#!/usr/bin/env sh
+
+root=$(git rev-parse --show-toplevel)
+[ -f "$root/package.json" ] || exit 0
+cd "$root"
 yarn typecheck

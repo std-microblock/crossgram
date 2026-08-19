@@ -1,4 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
+import type { UpdateJson, UpdateStoreBackend } from '@mtproto-relay/update-store'
+import { MemoryUpdateStoreBackend } from '@mtproto-relay/update-store-memory'
 import type {
   IMConversationRow, IMMediaRow, IMMessageAliasRow, IMMessageReactionRow, IMMessageRow, IMRequestRow, IMUserRow,
   TlMessagePartRow,
@@ -14,7 +16,6 @@ import {
   qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata,
   TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS,
 } from './message-id.js'
-import { MemoryUpdateDeliveryJournal, type UpdateDeliveryJournal } from './update-journal.js'
 import { REQUEST_INBOX_CONVERSATION_ID, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 
 export interface IngestResult {
@@ -113,7 +114,9 @@ export class MessageStore {
   constructor(
     private readonly _database: Database,
     updateDeliveryRetention = UPDATE_DELIVERY_RETENTION,
-    private readonly _updateJournal: UpdateDeliveryJournal = new MemoryUpdateDeliveryJournal(updateDeliveryRetention),
+    private readonly _updateStore: UpdateStoreBackend = new MemoryUpdateStoreBackend({
+      retention: updateDeliveryRetention,
+    }),
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
   ) {}
 
@@ -1271,7 +1274,7 @@ export class MessageStore {
     channelId?: number,
   ) {
     return this._write(async () => {
-      const existing = await this._updateJournal.get(eventKey)
+      const existing = await this._updateStore.get(eventKey)
       if (existing) return existing
 
       const allocated = await this._database.withTransaction(async (database) => {
@@ -1301,32 +1304,32 @@ export class MessageStore {
         await database.upsert('mtproto_channel_update_state', [channel])
         return { state: channel, scope: channelUpdateScope(channelId), seq: account.seq, date: deliveryDate }
       })
-      return this._updateJournal.create({
+      return this._updateStore.create({
         eventKey, platformSessionId, scope: allocated.scope, pts: allocated.state.pts, ptsCount,
         seq: allocated.seq, date: allocated.date, published: false,
-        payload: '',
+        payload: null,
       })
     })
   }
 
   async getUpdateDelivery(eventKey: string) {
-    return this._updateJournal.get(eventKey)
+    return this._updateStore.get(eventKey)
   }
 
   async markUpdatePublished(eventKey: string): Promise<void> {
-    await this._write(() => this._updateJournal.markPublished(eventKey))
+    await this._write(() => this._updateStore.markPublished(eventKey))
   }
 
-  async setUpdatePayload(eventKey: string, payload: string): Promise<void> {
-    await this._write(() => this._updateJournal.setPayload(eventKey, payload))
+  async setUpdatePayload(eventKey: string, payload: UpdateJson): Promise<void> {
+    await this._write(() => this._updateStore.setPayload(eventKey, payload))
   }
 
   async getPendingUpdateDeliveries(platformSessionId: string) {
-    return this._updateJournal.getPending(platformSessionId)
+    return this._updateStore.getPending(platformSessionId)
   }
 
   async getUpdateDeliveriesAfter(platformSessionId: string, pts: number, limit = 101, channelId?: number) {
-    return this._updateJournal.getAfter(
+    return this._updateStore.getAfter(
       platformSessionId,
       channelId === undefined ? ACCOUNT_UPDATE_SCOPE : channelUpdateScope(channelId),
       pts,
@@ -1335,7 +1338,7 @@ export class MessageStore {
   }
 
   async getChannelUpdateDeliveriesSince(platformSessionId: string, date: number) {
-    return (await this._updateJournal.getSince(platformSessionId, date))
+    return (await this._updateStore.getSince(platformSessionId, date))
       .filter((delivery) => delivery.scope.startsWith('channel:'))
   }
 
@@ -1970,7 +1973,7 @@ export class MessageStore {
   }
 
   async pruneUpdateDeliveries(platformSessionId: string): Promise<void> {
-    await this._write(() => this._updateJournal.prune(platformSessionId, ACCOUNT_UPDATE_SCOPE))
+    await this._write(() => this._updateStore.prune(platformSessionId, ACCOUNT_UPDATE_SCOPE))
   }
 
   private async _write<T>(

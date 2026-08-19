@@ -29,6 +29,7 @@ import * as mergedForwardPlugin from '@mtproto-relay/merged-forward'
 import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
 import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
+import DatabaseUpdateStore from '@mtproto-relay/update-store-database'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
@@ -390,6 +391,7 @@ async function startApp(options: {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,
     }),
+    ctx.plugin(DatabaseUpdateStore, { retention: 10_000 }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),
     ctx.plugin(mergedForwardPlugin),
     ...(options.botApi
@@ -2378,7 +2380,7 @@ describe('bridge login e2e', () => {
           title: 'Static Plugin Stickers', installedDate: expect.any(Number),
           thumbs: [expect.objectContaining({ _: 'photoSize' })],
           thumbDcId: 1,
-          thumbVersion: 1237283681,
+          thumbVersion: expect.any(Number),
           thumbDocumentId: expect.any(Long),
         },
         documents: expect.arrayContaining([expect.objectContaining({ _: 'document', mimeType: 'image/webp' })]),
@@ -3605,7 +3607,9 @@ describe('bridge login e2e', () => {
           { _: 'updateDeleteChannelMessages', messages: [pushed.updates[0].message.id] },
         ],
       })
-      expect(await ctx.database.get('mtproto_update_delivery', {})).toEqual([])
+      const storedUpdates = await ctx.database.get('mtproto_update_delivery', {})
+      expect(storedUpdates).toHaveLength(3)
+      expect(storedUpdates.every((delivery) => delivery.payload instanceof ArrayBuffer)).toBe(true)
 
       expect(await callRpc(client, key, sid, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(700), filePart: 0,

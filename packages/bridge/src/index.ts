@@ -63,7 +63,6 @@ export * from './message-actions.js'
 export * from './platform-manager.js'
 export * from './upload-manager.js'
 export * from './update-manager.js'
-export * from './update-journal.js'
 export * from './sticker-provider.js'
 export * from './sticker-rpc.js'
 export * from './reaction-rpc.js'
@@ -90,7 +89,7 @@ export * from './sticker-dashboard.js'
 export * from './active-sessions.js'
 
 export const name = 'mtproto-bridge'
-export const inject = ['mtproto', 'database', 'model', 'server', 'webui']
+export const inject = ['mtproto', 'database', 'model', 'server', 'webui', 'updateStore']
 export const provide = [
   'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'conversationView', 'mtprotoBridge',
 ]
@@ -177,7 +176,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     ctx.database,
     authKeyId => ctx.mtproto.revokeAuthKey(authKeyId),
   )
-  const store = new MessageStore(ctx.database, undefined, undefined, historyTrace)
+  const store = new MessageStore(ctx.database, undefined, ctx.updateStore, historyTrace)
   const drafts = new DraftStore(ctx.database)
   const notificationSettings = new NotificationSettingsStore(
     ctx.database, config.autoMuteGroupChats ?? true,

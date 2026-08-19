@@ -6,6 +6,7 @@ import Server from '@cordisjs/plugin-server'
 import Http from '@cordisjs/plugin-http'
 import Satori, { h } from '@satorijs/core'
 import * as bridge from '@mtproto-relay/bridge'
+import MemoryUpdateStore from '@mtproto-relay/update-store-memory'
 import type {
   IMEvent, IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
@@ -66,6 +67,7 @@ describe('standalone Satori exporter lifecycle', () => {
       ctx.plugin(Database),
       ctx.plugin(SQLiteDriver, { path: ':memory:' }),
       ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
+      ctx.plugin(MemoryUpdateStore),
       ...satoriFibers,
     ]
     disposals.push(() => Promise.resolve(provideWebui()), () => Promise.resolve(provideMtproto()), ...infrastructure.map(fiber => () => fiber.dispose()))

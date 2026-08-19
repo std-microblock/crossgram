@@ -994,7 +994,7 @@ describe('MessageStore', () => {
   })
 
   it('allocates independent outbox rows while deduplicating by event key', async () => {
-    const { ctx, store } = await createStore()
+    const { store } = await createStore()
     const first = await store.prepareUpdateDelivery('event:first', session.platformSessionId, 1, 100)
     const second = await store.prepareUpdateDelivery('event:second', session.platformSessionId, 2, 101)
     const repeated = await store.prepareUpdateDelivery('event:first', session.platformSessionId, 1, 100)
@@ -1003,7 +1003,6 @@ describe('MessageStore', () => {
     expect(second).toMatchObject({ messageId: 2, eventKey: 'event:second', pts: 4, seq: 2 })
     expect(repeated).toEqual(first)
     expect(await store.getUpdateDeliveriesAfter(session.platformSessionId, 1)).toEqual([first, second])
-    expect(await ctx.database.get('mtproto_update_delivery', {})).toEqual([])
   })
 
   it('persists and hydrates content.serviceAction', async () => {

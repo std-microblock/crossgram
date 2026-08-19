@@ -118,6 +118,10 @@
     - id: 5c1993ac
       name: '@cordisjs/plugin-database-mongo'
       disabled: true
+- id: update-store-database
+  name: '@mtproto-relay/update-store-database'
+  config:
+    retention: 10000
 - id: 7bf6f701
   name: '@cordisjs/plugin-group'
   label: SSO

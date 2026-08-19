@@ -1,0 +1,14 @@
+{
+  "name": "@mtproto-relay/update-store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "cordis": {},
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  }
+}

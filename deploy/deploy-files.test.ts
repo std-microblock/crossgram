@@ -36,6 +36,8 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain('serverHost: __CROSSGRAM_PUBLIC_HOST__')
     expect(config).toContain('/var/lib/crossgram/data/rsa-key.json')
     expect(config).toContain("name: '@mtproto-relay/mtproto-statistics'")
+    expect(config).toContain("name: '@mtproto-relay/update-store-database'")
+    expect(config).toContain('retention: 10000')
     expect(config).toContain('historySeconds: 900')
     expect(config).not.toMatch(/^\s*token:/m)
     const installer = readFileSync(join(root, 'deploy', 'install.sh'), 'utf8')
