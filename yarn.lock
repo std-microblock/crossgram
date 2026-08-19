@@ -651,7 +651,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@cordisjs/plugin-webui@npm:^0.8.2":
+"@cordisjs/plugin-webui@npm:0.8.2":
   version: 0.8.2
   resolution: "@cordisjs/plugin-webui@npm:0.8.2"
   dependencies:
@@ -669,6 +669,27 @@ __metadata:
     "@cordisjs/client":
       optional: true
   checksum: 10c0/44ab9ba8164a38258b12b4e1301b01f6786bc4d106c7c2dc087289bdb16c968436fa09926dc78155ba10ad9199b346f1ee71ce7e2963d5a9f42d66660e919863
+  languageName: node
+  linkType: hard
+
+"@cordisjs/plugin-webui@patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch":
+  version: 0.8.2
+  resolution: "@cordisjs/plugin-webui@patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch::version=0.8.2&hash=37286d"
+  dependencies:
+    "@cordisjs/fetch-file": "npm:^1.0.3"
+    "@cordisjs/muon": "npm:^0.2.2"
+    cosmokit: "npm:^1.8.1"
+    es-module-lexer: "npm:^2.0.0"
+    open: "npm:^11.0.0"
+    path-to-regexp: "npm:^8.3.0"
+    schemastery: "npm:^3.18.0"
+  peerDependencies:
+    "@cordisjs/client": 0.8.2
+    cordis: ^4.0.0-rc.6
+  peerDependenciesMeta:
+    "@cordisjs/client":
+      optional: true
+  checksum: 10c0/1fb1168459501383d61f92e62a3ddf14bcb4975e0b7a9e4aea311df16b7f0c06305aa75a220f7ed9248bbf3cda45998ea26d2a07a7e247a0cbdde14005a8a25d
   languageName: node
   linkType: hard
 
@@ -2111,7 +2132,7 @@ __metadata:
     "@cordisjs/plugin-http": "npm:^1.5.1"
     "@cordisjs/plugin-loader": "npm:^1.0.0-rc.5"
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch"
-    "@cordisjs/plugin-webui": "npm:^0.8.2"
+    "@cordisjs/plugin-webui": "patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch"
     "@fuman/io": "npm:^0.0.20"
     "@fuman/utils": "npm:^0.0.20"
     "@mtcute/core": "npm:^0.30.3"
@@ -5846,7 +5867,7 @@ __metadata:
     "@cordisjs/plugin-sso-password": "npm:^0.2.2"
     "@cordisjs/plugin-sso-server": "npm:^0.2.2"
     "@cordisjs/plugin-timer": "npm:^1.1.2"
-    "@cordisjs/plugin-webui": "npm:^0.8.2"
+    "@cordisjs/plugin-webui": "patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch"
     "@cordisjs/plugin-webui-sso": "npm:^0.2.6"
     "@cordisjs/unyaml": "npm:^2.0.3"
     "@satorijs/core": "patch:@satorijs/core@npm%3A4.6.0#~/.yarn/patches/@satorijs-core-npm-4.6.0-ab9d8023e0.patch"

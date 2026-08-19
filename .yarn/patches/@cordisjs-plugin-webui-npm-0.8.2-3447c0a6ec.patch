@@ -1,0 +1,63 @@
+diff --git a/lib/base/index.js b/lib/base/index.js
+index 5d13e920ce114bcccc5ddd5134cab5edb9d2675d..184b61443b6831ddaffe8e927693fd130e593a06 100644
+--- a/lib/base/index.js
++++ b/lib/base/index.js
+@@ -7,6 +7,24 @@ import { pathToRegexp } from "path-to-regexp";
+ 
+ // src/base/client.ts
+ import { mapValues } from "cosmokit";
++var MAX_SOCKET_BUFFERED_BYTES = 8 * 1024 * 1024;
++var overloadedSockets = /* @__PURE__ */ new WeakSet();
++function sendWithBackpressure(socket, payload) {
++  if (overloadedSockets.has(socket)) return false;
++  const bufferedBytes = Number(socket.bufferedAmount ?? 0);
++  const payloadBytes = Buffer.byteLength(payload);
++  if (Number.isFinite(bufferedBytes) && bufferedBytes + payloadBytes <= MAX_SOCKET_BUFFERED_BYTES) {
++    socket.send(payload);
++    return true;
++  }
++  overloadedSockets.add(socket);
++  if (typeof socket.terminate === "function") {
++    socket.terminate();
++  } else {
++    socket.close(1013, "WebUI client is too slow");
++  }
++  return false;
++}
+ var Client = class {
+   constructor(ctx, socket) {
+     this.ctx = ctx;
+@@ -25,7 +43,7 @@ var Client = class {
+   }
+   id = Math.random().toString(36).slice(2);
+   send(payload) {
+-    this.socket.send(JSON.stringify(payload));
++    sendWithBackpressure(this.socket, JSON.stringify(payload));
+   }
+   receive = /* @__PURE__ */ __name(async (data) => {
+     const { type, body } = JSON.parse(data.data.toString());
+@@ -253,7 +271,7 @@ var WebUI = class extends Service {
+   broadcast(type, body) {
+     const payload = JSON.stringify({ type, body });
+     for (const client of Object.values(this.clients)) {
+-      client.socket.send(payload);
++      sendWithBackpressure(client.socket, payload);
+     }
+   }
+ };
+diff --git a/lib/base/types.d.ts b/lib/base/types.d.ts
+index 8d9f149e72b562aacb4a9416031f3b2cbca1d6d5..de23c8c8aa901fc225e226b5c8949b5ffb7eb7d5 100644
+--- a/lib/base/types.d.ts
++++ b/lib/base/types.d.ts
+@@ -36,7 +36,11 @@ export interface WebSocket {
+     readonly url?: string;
+     readonly protocol?: string;
+     readonly readyState?: number;
++    /** Bytes queued in user space because the peer is not consuming messages. */
++    readonly bufferedAmount?: number;
+     close(code?: number, reason?: string): void;
++    /** Immediately discard queued data when implemented by the server socket. */
++    terminate?(): void;
+     send(data: string): void;
+     dispatchEvent?(event: any): boolean;
+     addEventListener<K extends keyof WebSocket.EventMap>(type: K, listener: (event: WebSocket.EventMap[K]) => void): void;
