@@ -401,20 +401,32 @@ describeUnix('QQ Bridge PCM transport', () => {
     expect(ownedToken).toEqual(new Uint8Array(32))
   })
 
-  it('fails closed instead of retaining more than four downlink frames', async () => {
+  it('parses a pipe-sized downlink burst without retaining stale audio', async () => {
+    let remote: Socket | undefined
     const server = await unixServer((socket) => {
-      readFrames(socket, () => socket.write(frame(0x80, Uint8Array.of(1)), () => {
-        setTimeout(() => socket.write(Buffer.concat(
-          Array.from({ length: 5 }, (_, index) => frame(0x81, pcm(index))),
-        )), 10).unref()
-      }))
+      remote = socket
+      readFrames(socket, () => socket.write(Buffer.concat([
+        frame(0x80, Uint8Array.of(1)),
+        ...Array.from({ length: 34 }, (_, index) => frame(0x81, pcm(index))),
+      ])))
     })
     servers.push(server)
     const connection = await new QQBridgePcmTransport(server.socketPath).connect(options())
+    const iterator = connection.receive({ signal: new AbortController().signal })[Symbol.asyncIterator]()
 
-    await expect(connection.receive({ signal: new AbortController().signal })[Symbol.asyncIterator]().next())
-      .rejects.toBeInstanceOf(QQBridgePcmTransportError)
-    await expect(connection.close()).resolves.toBeUndefined()
+    let previous = -1
+    for (let received = 0; received < 34 && previous !== 33; received += 1) {
+      const next = await iterator.next()
+      expect(next.done).toBe(false)
+      expect(next.value.data.byteLength).toBe(QQ_VOICE_PCM_FORMAT.bytesPerFrame)
+      expect(next.value.data[0]).toBeGreaterThan(previous)
+      previous = next.value.data[0]!
+    }
+    expect(previous).toBe(33)
+    const next = iterator.next()
+    remote!.write(frame(0x81, pcm(99)))
+    await expect(next).resolves.toMatchObject({ value: { data: pcm(99) } })
+    await connection.close()
   })
 
   it.each([

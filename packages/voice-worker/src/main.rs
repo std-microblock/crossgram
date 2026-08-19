@@ -203,11 +203,22 @@ fn configure_connection_timeout(stream: &UnixStream, timeout: Duration) -> io::R
     stream.set_write_timeout(Some(timeout))
 }
 
-fn verify_peer_uid(stream: &UnixStream) -> io::Result<()> {
-    let credentials = getsockopt(stream, sockopt::PeerCredentials).map_err(|error| {
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    getsockopt(stream, sockopt::PeerCredentials).map(|credentials| credentials.uid()).map_err(|error| {
         io::Error::other(format!("could not get Unix peer credentials: {error}"))
-    })?;
-    if credentials.uid() != Uid::current().as_raw() {
+    })
+}
+
+#[cfg(target_vendor = "apple")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    getsockopt(stream, sockopt::LocalPeerCred).map(|credentials| credentials.uid()).map_err(|error| {
+        io::Error::other(format!("could not get Unix peer credentials: {error}"))
+    })
+}
+
+fn verify_peer_uid(stream: &UnixStream) -> io::Result<()> {
+    if peer_uid(stream)? != Uid::current().as_raw() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Unix socket peer has a different UID",
@@ -294,6 +305,7 @@ mod tests {
                 kind: EndpointKind::UdpRelay,
                 peer_tag: [1; 16],
             }],
+            rtc_servers: vec![],
         }
     }
 

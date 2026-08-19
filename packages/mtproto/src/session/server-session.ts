@@ -1122,6 +1122,7 @@ export class ServerSession {
       return
     }
 
+    const afterResponse: Array<() => void | Promise<void>> = []
     const ctx: ServerRpcContext = {
       connection: this._connection,
       apiLayer: this._apiLayer,
@@ -1129,6 +1130,7 @@ export class ServerSession {
       sessionId: clientSessionId,
       isAuthorized: this._authorized,
       sendUpdate: (update) => this.sendUpdate(update, clientSessionId),
+      afterResponse: (task) => afterResponse.push(task),
       getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
       setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),
     }
@@ -1136,6 +1138,17 @@ export class ServerSession {
     try {
       const result = await this._dispatcher.dispatch(ctx, unwrapped.request)
       this._sendRpcResult(msgId, result, unwrapped.request._, clientSessionId)
+      for (const task of afterResponse) {
+        try {
+          await task()
+        } catch (error) {
+          this._log.error(
+            'after-response task failed for %s: %s',
+            unwrapped.request._,
+            error instanceof Error ? error.stack ?? error.message : error,
+          )
+        }
+      }
     } catch (err) {
       this._log.error('RPC dispatch error for %s: %s', unwrapped.request._, err instanceof Error ? err.stack : err)
       this._sendRpcResult(msgId, {

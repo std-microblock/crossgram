@@ -48,13 +48,18 @@ export class VoiceMediaAttachment {
   private readonly completed = Promise.withResolvers<void>()
   private readonly loops: Promise<void>[]
   private closing?: Promise<void>
+  private terminalReported = false
 
   constructor(
     private readonly media: VoiceMediaSession,
     private readonly worker: VoiceWorkerMediaEndpoint,
+    private readonly onTerminal?: (phase: VoiceMediaTerminalPhase, code: string) => void,
   ) {
     this.loops = [this.copyWorkerToMedia(), this.copyMediaToWorker()]
-    void media.finished.then(() => this.close(), () => this.close())
+    void media.finished.then(
+      () => { this.reportTerminal('platform-finished', 'CLOSED'); return this.close() },
+      (error) => { this.reportTerminal('platform-finished', terminalCode(error)); return this.close() },
+    )
   }
 
   /** Resolves after both media resources and both copy loops are terminal. */
@@ -72,8 +77,9 @@ export class VoiceMediaAttachment {
         if (this.controller.signal.aborted) return
         this.media.send(copyFrame(frame), { signal: this.controller.signal })
       }
-    } catch {
+    } catch (error) {
       // The terminal path below deliberately exposes no platform or worker data.
+      if (!this.controller.signal.aborted) this.reportTerminal('worker-receive', terminalCode(error))
     } finally {
       void this.close()
     }
@@ -85,8 +91,9 @@ export class VoiceMediaAttachment {
         const frame = await this.media.receive({ signal: this.controller.signal })
         await abortable(this.worker.send(copyFrame(frame), { signal: this.controller.signal }), this.controller.signal)
       }
-    } catch {
+    } catch (error) {
       // The terminal path below deliberately exposes no platform or worker data.
+      if (!this.controller.signal.aborted) this.reportTerminal('worker-send', terminalCode(error))
     } finally {
       void this.close()
     }
@@ -98,6 +105,22 @@ export class VoiceMediaAttachment {
     await Promise.allSettled(this.loops)
     this.completed.resolve()
   }
+
+  private reportTerminal(phase: VoiceMediaTerminalPhase, code: string): void {
+    if (this.terminalReported) return
+    this.terminalReported = true
+    try {
+      this.onTerminal?.(phase, code)
+    } catch {
+      // Diagnostics must never change media lifecycle behavior.
+    }
+  }
+}
+
+export type VoiceMediaTerminalPhase = 'platform-finished' | 'worker-receive' | 'worker-send'
+
+function terminalCode(error: unknown): string {
+  return error instanceof Error && error.name ? error.name : 'UNKNOWN'
 }
 
 function copyFrame(frame: VoicePcmFrame): VoicePcmFrame {

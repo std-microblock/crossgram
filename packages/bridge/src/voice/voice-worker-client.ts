@@ -12,7 +12,7 @@ import {
   type VoiceWorkerRecipientPreparation,
 } from './call-registry.js'
 
-export const VOICE_WORKER_PROTOCOL_VERSION = 2
+export const VOICE_WORKER_PROTOCOL_VERSION = 3
 export const VOICE_WORKER_MAX_FRAME_BYTES = 65_536
 export const VOICE_WORKER_MAX_SIGNAL_BYTES = 32_768
 export const VOICE_WORKER_PCM_FRAME_BYTES = 1_920
@@ -33,6 +33,17 @@ export interface VoiceWorkerEndpoint {
   readonly peerTag: Uint8Array
 }
 
+/** One WebRTC ICE server shared with both native tgcalls peers. */
+export interface VoiceWorkerRtcServer {
+  readonly id: number
+  readonly host: string
+  readonly port: number
+  readonly username: string
+  readonly password: string
+  readonly turn: boolean
+  readonly tcp: boolean
+}
+
 /** Public relay settings copied into the worker only with its private auth key. */
 export interface VoiceWorkerMediaStartConfig {
   readonly initializationTimeoutMs: number
@@ -44,6 +55,7 @@ export interface VoiceWorkerMediaStartConfig {
   readonly enableNs: boolean
   readonly enableAgc: boolean
   readonly endpoints: readonly VoiceWorkerEndpoint[]
+  readonly rtcServers?: readonly VoiceWorkerRtcServer[]
 }
 
 export type VoiceWorkerEvent =
@@ -54,7 +66,11 @@ export interface VoiceWorkerSocketClientOptions {
   readonly socketPath: string
   readonly timeoutMs?: number
   readonly onEvent?: (call: VoiceWorkerCall, event: VoiceWorkerEvent) => Promise<void> | void
+  /** Redacted lifecycle diagnostics; never includes call IDs, capabilities, or media. */
+  readonly onDiagnostic?: (phase: VoiceWorkerDiagnosticPhase, code: string) => void
 }
+
+export type VoiceWorkerDiagnosticPhase = 'pcm-send' | 'pcm-receive' | 'pcm-close' | 'native-error'
 
 export type VoiceWorkerIpcRequest =
   | { readonly tag: 0x01, readonly callId: bigint }
@@ -93,7 +109,7 @@ class VoiceWorkerTransportError extends Error {
   }
 }
 
-/** Encodes one complete IPC v2 request frame for a local voice worker. */
+/** Encodes one complete IPC v3 request frame for a local voice worker. */
 export function encodeVoiceWorkerRequest(request: VoiceWorkerIpcRequest): Buffer {
   const payload: Buffer[] = [Buffer.from([VOICE_WORKER_PROTOCOL_VERSION, request.tag])]
   payload.push(u64(request.callId))
@@ -128,7 +144,7 @@ export function encodeVoiceWorkerRequest(request: VoiceWorkerIpcRequest): Buffer
   return frame(Buffer.concat(payload))
 }
 
-/** Decodes exactly one IPC v2 response payload after its length prefix. */
+/** Decodes exactly one IPC v3 response payload after its length prefix. */
 export function decodeVoiceWorkerResponse(payload: Uint8Array): VoiceWorkerIpcResponse {
   if (payload.length < 2 || payload.length > VOICE_WORKER_MAX_FRAME_BYTES
     || payload[0] !== VOICE_WORKER_PROTOCOL_VERSION) throw unavailable()
@@ -177,7 +193,7 @@ export function decodeVoiceWorkerResponse(payload: Uint8Array): VoiceWorkerIpcRe
 }
 
 /**
- * Minimal production adapter for the Rust worker's local IPC v2 protocol.
+ * Minimal production adapter for the Rust worker's local IPC v3 protocol.
  * It owns no worker process or media backend; every operation uses a fresh
  * Unix connection so a restarted worker can be reached by the same instance.
  */
@@ -348,7 +364,10 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
           delivered.delete(response.eventId)
           if (!delivered.size) this._deliveredEvents.delete(callId)
           failures = 0
-          if (response.event.kind === 'native-error') return
+          if (response.event.kind === 'native-error') {
+            this._diagnose('native-error', 'NATIVE_ERROR')
+            return
+          }
         } catch {
           if (signal.aborted || this._closed) return
           failures++
@@ -377,6 +396,21 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
   private _invalidateCallEndpoints(callId: bigint): void {
     for (const endpoint of this._endpoints) {
       if (endpoint.belongsTo(callId)) endpoint.invalidate()
+    }
+  }
+
+  _diagnose(phase: VoiceWorkerDiagnosticPhase, error: unknown): void {
+    const code = typeof error === 'string'
+      ? error
+      : error instanceof VoiceCallError
+        ? error.code
+        : error instanceof VoiceWorkerTransportError
+          ? error.retryable ? 'TRANSPORT_RETRYABLE' : 'TRANSPORT_TERMINAL'
+          : error instanceof Error && error.name ? error.name : 'UNKNOWN'
+    try {
+      this._options.onDiagnostic?.(phase, code)
+    } catch {
+      // Diagnostics must never change media lifecycle behavior.
     }
   }
 
@@ -527,7 +561,8 @@ class VoiceWorkerPcmEndpoint implements VoiceWorkerMediaEndpoint {
         tag: 0x08, callId: this._callId, capability: this._capability, frame: data,
       }), options.signal)
       if (response.tag !== 0x88) throw unavailable()
-    } catch {
+    } catch (error) {
+      this._client._diagnose('pcm-send', error)
       this.invalidate()
       throw unavailable()
     } finally {
@@ -548,7 +583,8 @@ class VoiceWorkerPcmEndpoint implements VoiceWorkerMediaEndpoint {
         if (response.tag !== 0x8a) throw unavailable()
         await delay(PCM_POLL_INTERVAL_MS, options.signal)
       }
-    } catch {
+    } catch (error) {
+      this._client._diagnose('pcm-receive', error)
       this.invalidate()
       throw unavailable()
     }
@@ -561,7 +597,8 @@ class VoiceWorkerPcmEndpoint implements VoiceWorkerMediaEndpoint {
         tag: 0x0a, callId: this._callId, capability: this._capability,
       })
       if (response.tag !== 0x8b) throw unavailable()
-    } catch {
+    } catch (error) {
+      this._client._diagnose('pcm-close', error)
       throw unavailable()
     } finally {
       this.invalidate()
@@ -642,12 +679,13 @@ function mediaStartConfig(config: VoiceWorkerMediaStartConfig, isOutgoing: boole
     | (Number(normalized.enableAec) << 3)
     | (Number(normalized.enableNs) << 4)
     | (Number(normalized.enableAgc) << 5)
-  const header = Buffer.allocUnsafe(11)
+  const header = Buffer.allocUnsafe(12)
   header[0] = Number(isOutgoing)
   header.writeUInt32BE(normalized.initializationTimeoutMs, 1)
   header.writeUInt32BE(normalized.receiveTimeoutMs, 5)
   header[9] = flags
   header[10] = normalized.endpoints.length
+  header[11] = normalized.rtcServers?.length ?? 0
   const endpoints = normalized.endpoints.map((endpoint) => {
     const kind = { inet: 0, lan: 1, 'udp-relay': 2, 'tcp-relay': 3 }[endpoint.kind]
     const prefix = Buffer.allocUnsafe(27)
@@ -655,9 +693,21 @@ function mediaStartConfig(config: VoiceWorkerMediaStartConfig, isOutgoing: boole
     prefix.writeUInt16BE(endpoint.port, 8)
     prefix[10] = kind
     fixedBytes(endpoint.peerTag, 16).copy(prefix, 11)
-    return Buffer.concat([prefix, boundedHost(endpoint.ipv4), boundedHost(endpoint.ipv6)])
+    return Buffer.concat([prefix, boundedString(endpoint.ipv4), boundedString(endpoint.ipv6)])
   })
-  return Buffer.concat([header, ...endpoints])
+  const rtcServers = (normalized.rtcServers ?? []).map((server) => {
+    const prefix = Buffer.allocUnsafe(4)
+    prefix[0] = server.id
+    prefix.writeUInt16BE(server.port, 1)
+    prefix[3] = Number(server.turn) | (Number(server.tcp) << 1)
+    return Buffer.concat([
+      prefix,
+      boundedString(server.host),
+      boundedString(server.username),
+      boundedString(server.password),
+    ])
+  })
+  return Buffer.concat([header, ...endpoints, ...rtcServers])
 }
 
 function cloneMediaStartConfig(config: VoiceWorkerMediaStartConfig): VoiceWorkerMediaStartConfig {
@@ -665,7 +715,9 @@ function cloneMediaStartConfig(config: VoiceWorkerMediaStartConfig): VoiceWorker
     || !Number.isSafeInteger(config.receiveTimeoutMs) || config.receiveTimeoutMs < 1 || config.receiveTimeoutMs > 0xffff_ffff
     || typeof config.enableP2p !== 'boolean' || typeof config.allowTcp !== 'boolean' || typeof config.protocolV1 !== 'boolean'
     || typeof config.enableAec !== 'boolean' || typeof config.enableNs !== 'boolean' || typeof config.enableAgc !== 'boolean'
-    || !Array.isArray(config.endpoints) || (!config.endpoints.length && !config.enableP2p) || config.endpoints.length > 16) throw unavailable()
+    || !Array.isArray(config.endpoints) || config.endpoints.length > 16
+    || config.rtcServers !== undefined && (!Array.isArray(config.rtcServers) || config.rtcServers.length > 16)
+    || !config.endpoints.length && !(config.rtcServers?.length) && !config.enableP2p) throw unavailable()
   return {
     initializationTimeoutMs: config.initializationTimeoutMs,
     receiveTimeoutMs: config.receiveTimeoutMs,
@@ -681,10 +733,24 @@ function cloneMediaStartConfig(config: VoiceWorkerMediaStartConfig): VoiceWorker
         || endpoint.peerTag.length !== 16) throw unavailable()
       return { ...endpoint, id: Long.fromBits(endpoint.id.low, endpoint.id.high, false), peerTag: endpoint.peerTag.slice() }
     }),
+    rtcServers: (config.rtcServers ?? []).map((server) => {
+      if (!server || !Number.isSafeInteger(server.id) || server.id < 1 || server.id > 255
+        || typeof server.host !== 'string' || !server.host.length || server.host.includes('\0')
+        || !Number.isSafeInteger(server.port) || server.port < 1 || server.port > 65_535
+        || typeof server.username !== 'string' || server.username.includes('\0')
+        || typeof server.password !== 'string' || server.password.includes('\0')
+        || typeof server.turn !== 'boolean' || typeof server.tcp !== 'boolean'
+        || Buffer.byteLength(server.host, 'utf8') > 255
+        || Buffer.byteLength(server.username, 'utf8') > 255
+        || Buffer.byteLength(server.password, 'utf8') > 255
+        || server.turn && (!server.username.length || !server.password.length)
+        || !server.turn && (server.username.length > 0 || server.password.length > 0)) throw unavailable()
+      return { ...server }
+    }),
   }
 }
 
-function boundedHost(value: string): Buffer {
+function boundedString(value: string): Buffer {
   const bytes = Buffer.from(value, 'utf8')
   if (bytes.length > 255) throw unavailable()
   const length = Buffer.allocUnsafe(2)

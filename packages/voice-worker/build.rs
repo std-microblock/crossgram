@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-const SHIM_ABI_VERSION: u32 = 3;
+const SHIM_ABI_VERSION: u32 = 4;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CROSSGRAM_TGCALLS_SHIM_INCLUDE_DIR");

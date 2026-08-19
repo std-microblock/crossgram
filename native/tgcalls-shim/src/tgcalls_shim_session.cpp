@@ -16,6 +16,7 @@ struct crossgram_tgcalls_shim {
 namespace {
 
 using crossgram::tgcalls_shim::Endpoint;
+using crossgram::tgcalls_shim::RtcServer;
 using crossgram::tgcalls_shim::SessionParameters;
 
 bool IsBoolean(uint8_t value) noexcept {
@@ -41,6 +42,8 @@ bool CopyParameters(const crossgram_tgcalls_session_config* config,
                     const crossgram_tgcalls_session_auth* auth,
                     const crossgram_tgcalls_endpoint* endpoints,
                     uint32_t endpoint_count,
+                    const crossgram_tgcalls_rtc_server* rtc_servers,
+                    uint32_t rtc_server_count,
                     SessionParameters* output) {
   if (output == nullptr) return false;
   const auto reject = [output] {
@@ -50,7 +53,10 @@ bool CopyParameters(const crossgram_tgcalls_session_config* config,
   if (config == nullptr || auth == nullptr || auth->key == nullptr ||
       auth->key_length != CROSSGRAM_TGCALLS_SHIM_AUTH_KEY_BYTES ||
       endpoint_count > CROSSGRAM_TGCALLS_SHIM_MAX_ENDPOINTS ||
-      (endpoint_count == 0 ? (!config->enable_p2p || endpoints != nullptr) : endpoints == nullptr) ||
+      rtc_server_count > CROSSGRAM_TGCALLS_SHIM_MAX_RTC_SERVERS ||
+      (endpoint_count == 0 ? endpoints != nullptr : endpoints == nullptr) ||
+      (rtc_server_count == 0 ? rtc_servers != nullptr : rtc_servers == nullptr) ||
+      (endpoint_count == 0 && rtc_server_count == 0 && !config->enable_p2p) ||
       !IsBoolean(config->enable_p2p) || !IsBoolean(config->allow_tcp) || !IsBoolean(config->enable_aec) ||
       !IsBoolean(config->enable_ns) || !IsBoolean(config->enable_agc) || !IsBoolean(auth->is_outgoing) ||
       !IsProtocolVersion(config->protocol_version)) {
@@ -77,6 +83,28 @@ bool CopyParameters(const crossgram_tgcalls_session_config* config,
     }
     output->endpoints.push_back(std::move(destination));
   }
+  output->rtc_servers.reserve(rtc_server_count);
+  for (uint32_t index = 0; index < rtc_server_count; ++index) {
+    const auto& source = rtc_servers[index];
+    if (source.id == 0 || source.port == 0 || source.host.length == 0 ||
+        !IsBoolean(source.is_turn) || !IsBoolean(source.is_tcp) ||
+        (source.is_turn != 0 && (source.username.length == 0 || source.password.length == 0)) ||
+        (source.is_turn == 0 && (source.username.length != 0 || source.password.length != 0)) ||
+        (source.is_tcp != 0 && source.is_turn == 0)) {
+      return reject();
+    }
+    RtcServer destination;
+    destination.id = source.id;
+    destination.port = source.port;
+    destination.is_turn = source.is_turn != 0;
+    destination.is_tcp = source.is_tcp != 0;
+    if (!CopyHost(source.host, &destination.host) ||
+        !CopyHost(source.username, &destination.username) ||
+        !CopyHost(source.password, &destination.password)) {
+      return reject();
+    }
+    output->rtc_servers.push_back(std::move(destination));
+  }
   return true;
 }
 
@@ -101,6 +129,8 @@ crossgram_tgcalls_shim_status crossgram_tgcalls_session_create(
     const crossgram_tgcalls_session_auth* auth,
     const crossgram_tgcalls_endpoint* endpoints,
     uint32_t endpoint_count,
+    const crossgram_tgcalls_rtc_server* rtc_servers,
+    uint32_t rtc_server_count,
     const crossgram_tgcalls_session_callbacks* callbacks,
     crossgram_tgcalls_shim** out_session) {
   return CatchStatus([&] {
@@ -109,7 +139,8 @@ crossgram_tgcalls_shim_status crossgram_tgcalls_session_create(
     if (abi_version != CROSSGRAM_TGCALLS_SHIM_ABI_VERSION) return CROSSGRAM_TGCALLS_SHIM_STATUS_ABI_MISMATCH;
 
     SessionParameters parameters;
-    if (!CopyParameters(config, auth, endpoints, endpoint_count, &parameters)) {
+    if (!CopyParameters(
+            config, auth, endpoints, endpoint_count, rtc_servers, rtc_server_count, &parameters)) {
       return CROSSGRAM_TGCALLS_SHIM_STATUS_INVALID_ARGUMENT;
     }
     auto adapter = crossgram::tgcalls_shim::CreateProductionSessionAdapter(parameters);

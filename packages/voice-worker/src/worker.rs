@@ -35,6 +35,12 @@ impl Drop for MediaStartConfig {
             endpoint.peer_tag.zeroize();
         }
         self.server.endpoints.clear();
+        for server in &mut self.server.rtc_servers {
+            server.host.zeroize();
+            server.username.zeroize();
+            server.password.zeroize();
+        }
+        self.server.rtc_servers.clear();
     }
 }
 
@@ -224,6 +230,10 @@ impl<B: MediaBackend> VoiceWorker<B> {
 
     /// Handles one local IPC request. All returned variants are public-only.
     pub fn handle(&mut self, request: Request) -> Response {
+        // Active calls use the same TTL as an inactivity guard, not as an
+        // absolute call-duration limit. PCM and signaling requests arrive
+        // continuously while a call is healthy and refresh this timestamp.
+        self.refresh_active(request.call_id());
         self.expire();
         self.collect_native_events();
         if let Some(replay) = &self.recent {
@@ -820,6 +830,19 @@ impl<B: MediaBackend> VoiceWorker<B> {
         }
     }
 
+    fn refresh_active(&mut self, request_call_id: u64) {
+        let CallState::Active {
+            call_id, created, ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        let now = Instant::now();
+        if *call_id == request_call_id && now.saturating_duration_since(*created) < self.ttl {
+            *created = now;
+        }
+    }
+
     fn state_created(&self) -> Option<Instant> {
         match &self.state {
             CallState::Idle => None,
@@ -1104,6 +1127,7 @@ mod tests {
                 kind: crate::ipc::EndpointKind::UdpRelay,
                 peer_tag: [1; 16],
             }],
+            rtc_servers: vec![],
         }
     }
 
@@ -1586,6 +1610,27 @@ mod tests {
         assert_eq!(caller.handle(request), invalid_state());
         assert_eq!(caller.backend().forwarded_signals(), 1);
         assert_eq!(caller.backend().stopped(), &[44]);
+    }
+
+    #[test]
+    fn active_call_ttl_is_refreshed_by_call_scoped_ipc_activity() {
+        let (mut caller, _, _, _, _) = prepared_pair();
+        caller.ttl = Duration::from_secs(1);
+        let CallState::Active { created, .. } = &mut caller.state else {
+            panic!("caller must be active");
+        };
+        *created = Instant::now()
+            .checked_sub(Duration::from_millis(900))
+            .expect("test instant must support subtraction");
+
+        assert_eq!(
+            caller.handle(Request::PollEvent { call_id: 44 }),
+            Response::EventPending
+        );
+        let CallState::Active { created, .. } = &caller.state else {
+            panic!("active IPC traffic must keep the call alive");
+        };
+        assert!(created.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

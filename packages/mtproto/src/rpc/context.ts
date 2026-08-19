@@ -20,6 +20,12 @@ export interface ServerRpcContext {
   isAuthorized: boolean
   /** Push a server-initiated update to this client. */
   sendUpdate: (update: tl.TypeUpdates) => void
+  /**
+   * Register work that must start only after this RPC's `rpc_result` has been
+   * queued on the connection. This is used by state machines whose update is
+   * meaningful only after the client has consumed the matching RPC result.
+   */
+  afterResponse?: (task: () => void | Promise<void>) => void
   /** Read backend-specific data shared by all connections using this auth key. */
   getPlatformData: <T>() => T
   /** Store backend-specific data for this permanent auth key. */

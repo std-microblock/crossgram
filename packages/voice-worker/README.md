@@ -14,7 +14,7 @@ The worker accepts framed binary requests on standard input and writes framed bi
 
 ## Wire format
 
-Every message is a `u32` big-endian payload length followed by a payload beginning with the one-byte protocol version (`2`) and one-byte message tag. Lengths are checked before allocation; integer fields are big-endian unless marked little-endian.
+Every message is a `u32` big-endian payload length followed by a payload beginning with the one-byte protocol version (`3`) and one-byte message tag. Lengths are checked before allocation; integer fields are big-endian unless marked little-endian.
 
 ### Requests
 

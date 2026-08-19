@@ -10,7 +10,7 @@
 
 namespace {
 
-static_assert(CROSSGRAM_TGCALLS_SHIM_ABI_VERSION == 3);
+static_assert(CROSSGRAM_TGCALLS_SHIM_ABI_VERSION == 4);
 static_assert(sizeof(crossgram_tgcalls_shim_status) == 4);
 static_assert(alignof(crossgram_tgcalls_shim_status) == 4);
 static_assert(sizeof(crossgram_tgcalls_endpoint_type) == 4);
@@ -45,6 +45,15 @@ static_assert(offsetof(crossgram_tgcalls_endpoint, ipv6) == 24);
 static_assert(offsetof(crossgram_tgcalls_endpoint, port) == 40);
 static_assert(offsetof(crossgram_tgcalls_endpoint, type) == 44);
 static_assert(offsetof(crossgram_tgcalls_endpoint, peer_tag) == 48);
+static_assert(sizeof(crossgram_tgcalls_rtc_server) == 72);
+static_assert(alignof(crossgram_tgcalls_rtc_server) == 8);
+static_assert(offsetof(crossgram_tgcalls_rtc_server, id) == 0);
+static_assert(offsetof(crossgram_tgcalls_rtc_server, host) == 8);
+static_assert(offsetof(crossgram_tgcalls_rtc_server, port) == 24);
+static_assert(offsetof(crossgram_tgcalls_rtc_server, username) == 32);
+static_assert(offsetof(crossgram_tgcalls_rtc_server, password) == 48);
+static_assert(offsetof(crossgram_tgcalls_rtc_server, is_turn) == 64);
+static_assert(offsetof(crossgram_tgcalls_rtc_server, is_tcp) == 65);
 static_assert(sizeof(crossgram_tgcalls_session_config) == 20);
 static_assert(alignof(crossgram_tgcalls_session_config) == 4);
 static_assert(offsetof(crossgram_tgcalls_session_config, initialization_timeout_ms) == 0);
@@ -87,6 +96,8 @@ class FakeSessionAdapter final : public SessionAdapter {
     first_endpoint_port = parameters.endpoints.empty() ? 0 : parameters.endpoints.front().port;
     first_endpoint_type = parameters.endpoints.empty() ? CROSSGRAM_TGCALLS_ENDPOINT_INET
                                                         : parameters.endpoints.front().type;
+    rtc_server_count = parameters.rtc_servers.size();
+    first_rtc_host = parameters.rtc_servers.empty() ? "" : parameters.rtc_servers.front().host;
     auth_first_byte = parameters.auth_key.front();
   }
 
@@ -119,6 +130,8 @@ class FakeSessionAdapter final : public SessionAdapter {
   int64_t first_endpoint_id = 0;
   uint16_t first_endpoint_port = 0;
   crossgram_tgcalls_endpoint_type first_endpoint_type = CROSSGRAM_TGCALLS_ENDPOINT_INET;
+  std::size_t rtc_server_count = 0;
+  std::string first_rtc_host;
   uint8_t auth_first_byte = 0;
   std::vector<uint8_t> inbound;
 };
@@ -150,6 +163,7 @@ SessionParameters Parameters() {
   result.auth_key.fill(9);
   result.is_outgoing = true;
   result.endpoints.push_back({42, "149.154.167.51", "", 443, CROSSGRAM_TGCALLS_ENDPOINT_UDP_RELAY, {}});
+  result.rtc_servers.push_back({7, "turn.example.test", 3478, "user", "password", true, false});
   return result;
 }
 
@@ -170,6 +184,7 @@ void TestFakeSessionSignalsAndPcm() {
   CHECK(fake->is_outgoing && fake->auth_first_byte == 9);
   CHECK(fake->endpoint_count == 1 && fake->first_endpoint_id == 42 && fake->first_endpoint_port == 443);
   CHECK(fake->first_endpoint_type == CROSSGRAM_TGCALLS_ENDPOINT_UDP_RELAY);
+  CHECK(fake->rtc_server_count == 1 && fake->first_rtc_host == "turn.example.test");
   CHECK(observed.outbound == std::vector<uint8_t>({1, 2, 3}));
 
   const std::array<uint8_t, 4> inbound = {4, 5, 6, 7};

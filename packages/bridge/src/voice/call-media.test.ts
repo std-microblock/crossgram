@@ -209,8 +209,10 @@ describe('CallRegistry QQ media composition', () => {
     const accepted = await calls.accept(session, peer, new Uint8Array(256).fill(5), protocol)
     const repeated = await calls.accept(session, peer, new Uint8Array(256).fill(5), protocol)
 
-    expect(accepted.phoneCall._).toBe('phoneCallAccepted')
-    expect(repeated.phoneCall._).toBe('phoneCall')
+    // The accepting Telegram recipient receives the active phoneCall as an
+    // update; phone.acceptCall itself remains phoneCallWaiting on retries.
+    expect(accepted.phoneCall._).toBe('phoneCallWaiting')
+    expect(repeated.phoneCall._).toBe('phoneCallWaiting')
     expect(starts).toHaveBeenCalledOnce()
     expect(worker.attachMedia).toHaveBeenCalledOnce()
     expect(worker.attachMedia.mock.calls[0]?.[0]).toMatchObject({ telegramRole: 'recipient' })
