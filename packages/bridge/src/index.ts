@@ -307,7 +307,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   ))
   ctx.effect(() => unregisterRequestInbox, 'mtproto-bridge.request-inbox')
   platforms.onSessionChange((event, binding) => {
-    if (event === 'activate') void systemPeers.bootstrap(binding.session).catch((error) => {
+    if (event === 'deactivate') {
+      const key = `${binding.session.platformId} ${binding.session.platformSessionId}`
+      stickerRpcs.delete(key)
+      reactionRpcs.delete(key)
+      stickerProviders.releaseSession(binding.session.platformSessionId)
+      return
+    }
+    void systemPeers.bootstrap(binding.session).catch((error) => {
       bridgeLogger.warn('system peer bootstrap failed: %s', String(error))
     })
   })

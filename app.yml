@@ -20,6 +20,14 @@
   disabled: true
   config:
     verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}
+- id: telegram-sticker-importer
+  name: '@mtproto-relay/telegram-sticker-importer'
+  disabled: true
+  config:
+    botToken: ${TELEGRAM_STICKER_IMPORTER_BOT_TOKEN}
+    # apiBase: http://127.0.0.1:8081 # optional Local Bot API Server
+    # maxImportsPerSession: 100
+    # importCooldownMs: 3000
 - id: satori-core
   name: '@satorijs/core'
   disabled: true

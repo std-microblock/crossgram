@@ -1545,6 +1545,7 @@ describe('QQNT animated system-face E2E', () => {
       openAsset: vi.fn(async () => { throw new Error('not needed for document projection') }),
     }
     const stickerRpc = new StickerRpc(ctx.database, {
+      revisionFor: () => '0:0',
       entries: [['qqnt:stickers', provider]],
       get: (id: string) => id === 'qqnt:stickers' ? provider : undefined,
       require: (id: string) => {

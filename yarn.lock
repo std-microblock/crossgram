@@ -2066,6 +2066,18 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/telegram-sticker-importer@workspace:packages/telegram-sticker-importer":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/telegram-sticker-importer@workspace:packages/telegram-sticker-importer"
+  dependencies:
+    "@mtproto-relay/bridge": "workspace:*"
+    schemastery: "npm:^3.18.0"
+  peerDependencies:
+    "@cordisjs/plugin-database": ^4.0.0
+    cordis: ^4.0.0-rc.5
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/test-suite@workspace:packages/test-suite":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/test-suite@workspace:packages/test-suite"

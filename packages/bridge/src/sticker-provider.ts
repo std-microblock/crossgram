@@ -111,6 +111,8 @@ export interface StickerProviderCapabilities {
   sessionScoped?: boolean
   conversationScoped?: boolean
   search?: boolean
+  /** Require sticker documents to be resolved through getSticker() before opening assets. */
+  canonicalLookup?: boolean
 }
 
 export interface IMStickerProvider {
@@ -152,13 +154,37 @@ export interface IMStickerProvider {
 
 export class StickerProviderRegistry {
   private readonly _providers = new Map<string, IMStickerProvider>()
+  private readonly _sessionRevisions = new Map<string, number>()
+  private _revision = 0
 
   register(id: string, provider: IMStickerProvider): Unsubscribe {
     if (this._providers.has(id)) throw new Error(`duplicate sticker provider ID: ${id}`)
     this._providers.set(id, provider)
+    this._revision++
     return () => {
-      if (this._providers.get(id) === provider) this._providers.delete(id)
+      if (this._providers.get(id) === provider) {
+        this._providers.delete(id)
+        this._revision++
+      }
     }
+  }
+
+  /** Mark provider-owned catalog data as changed, optionally for one platform session. */
+  touch(id: string, platformSessionId?: string): void {
+    if (!this._providers.has(id)) throw new Error(`sticker provider is not registered: ${id}`)
+    if (!platformSessionId) {
+      this._revision++
+      return
+    }
+    this._sessionRevisions.set(platformSessionId, (this._sessionRevisions.get(platformSessionId) ?? 0) + 1)
+  }
+
+  revisionFor(platformSessionId: string): string {
+    return `${this._revision}:${this._sessionRevisions.get(platformSessionId) ?? 0}`
+  }
+
+  releaseSession(platformSessionId: string): void {
+    this._sessionRevisions.delete(platformSessionId)
   }
 
   get(id: string): IMStickerProvider | undefined {
@@ -192,6 +218,14 @@ export class IMStickerService extends Service {
       () => this.registry.register(id, provider),
       `imSticker.register(${id})`,
     )
+  }
+
+  touch(id: string, platformSessionId?: string): void {
+    this.registry.touch(id, platformSessionId)
+  }
+
+  releaseSession(platformSessionId: string): void {
+    this.registry.releaseSession(platformSessionId)
   }
 
   get(id: string): IMStickerProvider | undefined {

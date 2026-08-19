@@ -170,6 +170,15 @@ yarn add @satorijs/adapter-discord
 具体能力仍取决于 adaptor 在 Satori `login.features` 中声明的 API。Satori 4.6 的 npm 包仍携带 Cordis 3
 依赖元数据，本仓库通过 Yarn patch 将它适配到 Cordis 4，并为旧 adaptor 保留 HTTP 兼容 API。
 
+### 导入 Telegram 贴纸包
+
+可选插件 `@mtproto-relay/telegram-sticker-importer` 使用一个 Telegram Bot Token 从 Hosted Bot API
+读取公开贴纸包。启用 `app.yml` 中的示例并设置 `TELEGRAM_STICKER_IMPORTER_BOT_TOKEN`；只有测试
+或 Local Bot API Server 才需要设置可选的 `apiBase`。在 Telegram 客户端打开 **Sticker Importer**
+工具 bot，粘贴 `https://t.me/addstickers/<short_name>`，或发送 `/import <url>`。导入的包会立即安装到
+当前 bridge 会话；Token 只在服务端用于代理文件下载，不会提供给客户端。每个会话默认最多导入
+100 个包，并有 3 秒导入冷却时间；可通过 `maxImportsPerSession` 和 `importCooldownMs` 调整。
+
 ### 导出平台会话到 Satori
 
 Satori exporter 是独立插件 `@mtproto-relay/satori-exporter`，不再由 bridge 配置或管理。

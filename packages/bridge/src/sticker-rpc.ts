@@ -1,5 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
+import { createHash } from 'node:crypto'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
@@ -17,9 +18,8 @@ interface ResolvedSticker {
   sticker: IMSticker
 }
 
-// v7 invalidates Android's cached empty QQ sets from the period when the
-// native favorite snapshot and individual pack assets were unavailable.
-const STICKER_PROJECTION_VERSION = 7
+// v8 replaces the old 31-bit projection IDs with wide deterministic IDs.
+const STICKER_PROJECTION_VERSION = 8
 const STICKER_PROVIDER_CACHE_TTL_MS = 5 * 60_000
 // Telegram Desktop ignores every document field when date is zero, leaving a
 // zero-byte generic file. Keep synthetic sticker documents on a stable,
@@ -29,8 +29,10 @@ const STICKER_DOCUMENT_DATE = 1_700_000_000
 export class StickerRpc {
   private readonly _documents = new Map<number, ResolvedSticker>()
   private readonly _sets = new Map<number, { providerId: string, packId: string }>()
+  private _projectionRevision?: string
   private readonly _providerCache = new Map<string, {
     expiresAt: number
+    revision: string
     value: Promise<unknown>
   }>()
 
@@ -44,6 +46,7 @@ export class StickerRpc {
   ) {}
 
   async getAllStickers(req: tl.messages.RawGetAllStickersRequest): Promise<tl.messages.TypeAllStickers> {
+    this._refreshProjectionCache()
     const packs = await this._listPackSummaries()
     for (const { providerId, pack } of packs) {
       this._sets.set(this._setId(providerId, pack.packId), { providerId, packId: pack.packId })
@@ -84,6 +87,7 @@ export class StickerRpc {
   }
 
   async getStickerSet(req: tl.messages.RawGetStickerSetRequest): Promise<tl.messages.TypeStickerSet> {
+    this._refreshProjectionCache()
     if (req.stickerset._ === 'inputStickerSetAnimatedEmoji'
       || req.stickerset._ === 'inputStickerSetDice'
       || req.stickerset._ === 'inputStickerSetEmojiDefaultStatuses'
@@ -406,8 +410,9 @@ export class StickerRpc {
   }
 
   makeMessageMedia(sticker: IMSticker, providerId = sticker.providerId): tl.RawMessageMediaDocument {
+    this._refreshProjectionCache()
     const provider = this._registry.get(providerId)
-    if (provider) this._documents.set(this._documentId(providerId, sticker.stickerId), {
+    if (provider && !provider.capabilities?.canonicalLookup) this._documents.set(this._documentId(providerId, sticker.stickerId), {
       providerId, provider, sticker: { ...sticker, providerId },
     })
     return { _: 'messageMediaDocument', document: this._makeDocument({
@@ -503,6 +508,7 @@ export class StickerRpc {
 
   private _rememberPack(providerId: string, provider: IMStickerProvider, pack: IMStickerPack): void {
     this._sets.set(this._setId(providerId, pack.packId), { providerId, packId: pack.packId })
+    if (provider.capabilities?.canonicalLookup) return
     for (const sticker of pack.stickers) {
       this._documents.set(this._documentId(providerId, sticker.stickerId), {
         providerId, provider, sticker,
@@ -511,10 +517,11 @@ export class StickerRpc {
   }
 
   private async _cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const revision = this._registry.revisionFor(this._session.platformSessionId)
     const cached = this._providerCache.get(key)
-    if (cached && cached.expiresAt > Date.now()) return cached.value as Promise<T>
+    if (cached && cached.revision === revision && cached.expiresAt > Date.now()) return cached.value as Promise<T>
     const value = load()
-    const entry = { expiresAt: Date.now() + this._providerCacheTtlMs, value }
+    const entry = { expiresAt: Date.now() + this._providerCacheTtlMs, revision, value }
     this._providerCache.set(key, entry)
     try {
       return await value
@@ -572,6 +579,7 @@ export class StickerRpc {
     id: number,
     fileReference?: Uint8Array,
   ): Promise<ResolvedSticker | undefined> {
+    this._refreshProjectionCache()
     let resolved = this._documents.get(id)
     if (resolved) return resolved
     resolved = await this._resolveDocumentReference(id, fileReference)
@@ -660,7 +668,7 @@ export class StickerRpc {
   private _makeDocument(item: ResolvedSticker): tl.RawDocument {
     const { sticker } = item
     const id = this._documentId(item.providerId, sticker.stickerId)
-    this._documents.set(id, item)
+    if (!item.provider.capabilities?.canonicalLookup) this._documents.set(id, item)
     if (sticker.packId) {
       this._sets.set(this._setId(item.providerId, sticker.packId), {
         providerId: item.providerId,
@@ -723,11 +731,19 @@ export class StickerRpc {
   }
 
   private _setId(providerId: string, packId: string): number {
-    return stableId(`sticker-set:v${STICKER_PROJECTION_VERSION}:${providerId}:${packId}`)
+    return stickerProjectionId(`sticker-set:v${STICKER_PROJECTION_VERSION}:${providerId}:${packId}`)
   }
 
   private _documentId(providerId: string, stickerId: string): number {
-    return stableId(`sticker-document:v${STICKER_PROJECTION_VERSION}:${providerId}:${stickerId}`)
+    return stickerProjectionId(`sticker-document:v${STICKER_PROJECTION_VERSION}:${providerId}:${stickerId}`)
+  }
+
+  private _refreshProjectionCache(): void {
+    const revision = this._registry.revisionFor(this._session.platformSessionId)
+    if (revision === this._projectionRevision) return
+    this._projectionRevision = revision
+    this._documents.clear()
+    this._sets.clear()
   }
 
   private _shortName(pack: IMStickerPackSummary): string {
@@ -774,6 +790,11 @@ export class StickerRpc {
   }
 }
 
+function stickerProjectionId(value: string): number {
+  const hash = createHash('sha256').update(value).digest()
+  return 1 + hash.readUInt32BE(0) * 0x10_0000 + (hash.readUInt32BE(4) & 0x0f_ffff)
+}
+
 function normalizePack(providerId: string, pack: IMStickerPack): IMStickerPack {
   return {
     ...pack,
@@ -807,7 +828,7 @@ function documentVectorHash(items: ResolvedSticker[]): Long {
     hash = hash.xor(hash.shiftRightUnsigned(21))
     hash = hash.xor(hash.shiftLeft(35))
     hash = hash.xor(hash.shiftRightUnsigned(4))
-    hash = hash.add(Long.fromNumber(stableId(
+    hash = hash.add(Long.fromNumber(stickerProjectionId(
       `sticker-document:v${STICKER_PROJECTION_VERSION}:${item.providerId}:${item.sticker.stickerId}`,
     )))
   }
@@ -841,7 +862,7 @@ function stickerPacks(items: ResolvedSticker[]): tl.RawStickerPack[] {
   for (const item of items) {
     for (const emoji of item.sticker.emoji ?? ['']) {
       const documents = result.get(emoji) ?? []
-      documents.push(Long.fromNumber(stableId(
+      documents.push(Long.fromNumber(stickerProjectionId(
         `sticker-document:v${STICKER_PROJECTION_VERSION}:${item.providerId}:${item.sticker.stickerId}`,
       )))
       result.set(emoji, documents)

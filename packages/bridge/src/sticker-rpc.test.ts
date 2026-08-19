@@ -4,10 +4,25 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { StickerRpc } from './sticker-rpc.js'
-import type { IMSticker, IMStickerProvider, StickerProviderRegistry } from './sticker-provider.js'
+import { StickerProviderRegistry, type IMSticker, type IMStickerProvider } from './sticker-provider.js'
 import type { IMPlatform, PlatformSession } from './platform.js'
 
 describe('StickerRpc', () => {
+  it('releases only the deactivated session revision', () => {
+    const registry = new StickerProviderRegistry()
+    registry.register('provider', { } as IMStickerProvider)
+    registry.touch('provider', 'first')
+    registry.touch('provider', 'second')
+    const second = registry.revisionFor('second')
+
+    registry.releaseSession('first')
+
+    expect(registry.revisionFor('first')).toBe('1:0')
+    expect(registry.revisionFor('second')).toBe(second)
+    registry.touch('provider', 'first')
+    expect(registry.revisionFor('first')).toBe('1:1')
+  })
+
   it.each([
     ['GIF', 'image/gif', 'market:11690:gif-wave'],
     ['APNG', 'image/apng', 'market:11690:apng-wave'],
@@ -148,6 +163,7 @@ describe('StickerRpc', () => {
       openAsset: vi.fn(async () => { throw new Error('not used') }),
     }
     const registry = {
+      revisionFor: () => '0:0',
       entries: [['qq:stickers', provider]],
       get: (id: string) => id === 'qq:stickers' ? provider : undefined,
       require: (id: string) => {
@@ -204,6 +220,7 @@ describe('StickerRpc', () => {
       openAsset: vi.fn(async () => { throw new Error('not used') }),
     }
     const registry = {
+      revisionFor: () => '0:0',
       entries: [['qq:stickers', provider]],
       get: (id: string) => id === 'qq:stickers' ? provider : undefined,
       require: (id: string) => {
@@ -328,6 +345,46 @@ describe('StickerRpc', () => {
       _: 'messages.recentStickers', stickers: [{ _: 'document' }],
       dates: [Math.floor(validAt.getTime() / 1000)],
     })
+    if (recent._ !== 'messages.recentStickers' || recent.stickers[0]?._ !== 'document') {
+      throw new Error('expected full recent stickers')
+    }
+    expect(recent.packs[0]?.documents[0]?.equals(recent.stickers[0].id)).toBe(true)
+  })
+
+  it('uses wide document IDs in non-QQ favorite sticker packs', async () => {
+    const sticker: IMSticker = {
+      providerId: 'importer', stickerId: 'favorite:wide', title: 'Wide favorite',
+      emoji: ['🙂'], format: 'static', mimeType: 'image/webp',
+    }
+    const provider: IMStickerProvider = {
+      listPacks: vi.fn(async () => ({ packs: [] })),
+      getPack: vi.fn(async () => null),
+      getSticker: vi.fn(async (_context, stickerId) => stickerId === sticker.stickerId ? sticker : null),
+      openAsset: vi.fn(async () => ({ mimeType: sticker.mimeType, source: { async *stream() {} } })),
+    }
+    const registry = new StickerProviderRegistry()
+    registry.register('importer', provider)
+    const query = {
+      orderBy: vi.fn(() => query),
+      limit: vi.fn(() => query),
+      execute: vi.fn(async () => [{
+        id: 1, platformSessionId: 'session', providerId: 'importer',
+        providerStickerId: sticker.stickerId, createdAt: new Date(),
+      }]),
+    }
+    const rpc = new StickerRpc(
+      { select: vi.fn(() => query), get: vi.fn(async () => []) } as never,
+      registry,
+      { platformKind: 'static' } as IMPlatform,
+      { platformId: 'static', platformSessionId: 'session' } as PlatformSession,
+    )
+
+    const favorite = await rpc.getFavedStickers({ _: 'messages.getFavedStickers', hash: Long.ZERO })
+    if (favorite._ !== 'messages.favedStickers' || favorite.stickers[0]?._ !== 'document') {
+      throw new Error('expected full favorite stickers')
+    }
+    expect(favorite.stickers[0].id.greaterThan(Long.fromNumber(0x7fff_ffff))).toBe(true)
+    expect(favorite.packs[0]?.documents[0]?.equals(favorite.stickers[0].id)).toBe(true)
   })
 
   it('deduplicates recent aliases by canonical sticker ID and honors Telegram document hashes', async () => {
@@ -396,6 +453,7 @@ describe('StickerRpc', () => {
       }),
     }
     const registry = {
+      revisionFor: () => '0:0',
       entries: [['qq:stickers', provider]],
       get: (id: string) => id === 'qq:stickers' ? provider : undefined,
       require: (id: string) => {
@@ -461,6 +519,21 @@ describe('StickerRpc', () => {
     await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
     expect(provider.listPacks).toHaveBeenCalledTimes(2)
     expect(provider.getPack).not.toHaveBeenCalled()
+  })
+
+  it('refreshes a cached catalog immediately after its provider is touched', async () => {
+    const { rpc, provider, touch } = stickerHarness()
+    const initial = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    if (initial._ !== 'messages.allStickers') throw new Error('expected full sticker catalog')
+    vi.mocked(provider.listPacks).mockResolvedValue({
+      packs: [{ providerId: 'ignored', packId: '11690', title: 'Imported revision', count: 1, version: 8 }],
+    })
+
+    touch()
+    const refreshed = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: initial.hash })
+
+    expect(provider.listPacks).toHaveBeenCalledTimes(2)
+    expect(refreshed).toMatchObject({ _: 'messages.allStickers', sets: [{ title: 'Imported revision' }] })
   })
 
   it('maps QQ favorite mutations to QQNT and refreshes the account-owned pack without filling Telegram favorites', async () => {
@@ -647,6 +720,57 @@ describe('StickerRpc', () => {
     expect(resumed.provider.listSavedStickers).not.toHaveBeenCalled()
   })
 
+  it('does not use a cached document after its provider unregisters', async () => {
+    const sticker: IMSticker = {
+      providerId: 'temporary', stickerId: 'sticker', title: 'Temporary', format: 'static', mimeType: 'image/webp',
+    }
+    const provider: IMStickerProvider = {
+      listPacks: vi.fn(async () => ({ packs: [] })), getPack: vi.fn(async () => null),
+      getSticker: vi.fn(async () => sticker),
+      openAsset: vi.fn(async () => ({ mimeType: sticker.mimeType, source: { async *stream() { yield Uint8Array.of(1) } } })),
+    }
+    const registry = new StickerProviderRegistry()
+    const unregister = registry.register('temporary', provider)
+    const rpc = new StickerRpc({ get: vi.fn(async () => []) } as never, registry, { platformKind: 'static' } as never,
+      { platformId: 'static', platformSessionId: 'session' } as PlatformSession)
+    const media = rpc.makeMessageMedia(sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+
+    unregister()
+
+    await expect(rpc.getFile(media.document.id.toNumber(), 0, 1, media.document.fileReference)).resolves.toBeUndefined()
+    expect(provider.openAsset).not.toHaveBeenCalled()
+  })
+
+  it('uses distinct wide document IDs for legacy stableId collision inputs and resolves each file reference', async () => {
+    const first: IMSticker = {
+      providerId: 'importer', stickerId: '_G6Nrw_pWDbJj7gS', title: 'First', format: 'static', mimeType: 'image/webp',
+    }
+    const second: IMSticker = {
+      providerId: 'importer', stickerId: 'PNvAxey3RRfHHagZ', title: 'Second', format: 'static', mimeType: 'image/webp',
+    }
+    const provider: IMStickerProvider = {
+      listPacks: vi.fn(async () => ({ packs: [] })), getPack: vi.fn(async () => null),
+      getSticker: vi.fn(async (_context, stickerId) => stickerId === first.stickerId ? first : stickerId === second.stickerId ? second : null),
+      openAsset: vi.fn(async (_context, sticker) => ({
+        mimeType: sticker.mimeType,
+        source: { async *stream() { yield Uint8Array.of(sticker.stickerId === first.stickerId ? 1 : 2) } },
+      })),
+    }
+    const registry = new StickerProviderRegistry()
+    registry.register('importer', provider)
+    const session = { platformId: 'static', platformSessionId: 'session' } as PlatformSession
+    const rpc = new StickerRpc({ get: vi.fn(async () => []) } as never, registry, { platformKind: 'static' } as never, session)
+    const firstMedia = rpc.makeMessageMedia(first)
+    const secondMedia = rpc.makeMessageMedia(second)
+    if (!firstMedia.document || firstMedia.document._ !== 'document'
+      || !secondMedia.document || secondMedia.document._ !== 'document') throw new Error('expected documents')
+
+    expect(firstMedia.document.id.equals(secondMedia.document.id)).toBe(false)
+    await expect(rpc.getFile(firstMedia.document.id.toNumber(), 0, 1, firstMedia.document.fileReference)).resolves.toEqual(Uint8Array.of(1))
+    await expect(rpc.getFile(secondMedia.document.id.toNumber(), 0, 1, secondMedia.document.fileReference)).resolves.toEqual(Uint8Array.of(2))
+  })
+
   it('rejects a sticker file reference whose document id does not match', async () => {
     const historical: IMSticker = {
       providerId: 'qq:stickers', stickerId: 'favorite:historical:ebcb350f',
@@ -686,7 +810,9 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     openAsset: vi.fn(async () => { throw new Error('not used') }),
     openThumbnail: vi.fn(async () => null),
   }
+  let revision = 0
   const registry = {
+    revisionFor: () => `0:${revision}`,
     entries: [['qq:stickers', provider]],
     get: (id: string) => id === 'qq:stickers' ? provider : undefined,
     require: (id: string) => {
@@ -719,7 +845,7 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     1,
     cacheTtlMs,
   )
-  return { rpc, provider, sticker, query, database }
+  return { rpc, provider, sticker, query, database, touch: () => { revision++ } }
 }
 
 function telegramDocumentHash(ids: Long[]): Long {
