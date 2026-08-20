@@ -14,8 +14,10 @@ export interface Config {
 }
 
 export const Config = z.object({
-  maxFiles: z.natural().min(1).max(100).default(100),
-  maxTotalBytes: z.natural().min(1).max(100 * 1024 ** 3).default(100 * 1024 ** 3),
+  maxFiles: z.natural().min(1).max(100).default(100)
+    .description('Maximum number of files accepted by one QQ flash-transfer request.'),
+  maxTotalBytes: z.natural().min(1).max(100 * 1024 ** 3).default(100 * 1024 ** 3)
+    .description('Maximum combined byte size accepted by one QQ flash-transfer request.'),
 })
 
 export const name = 'qq-flash-transfer-bot'

@@ -36,7 +36,8 @@ export interface Config {
 }
 
 export const Config = z.object({
-  retention: z.natural().max(1_000_000).default(10_000),
+  retention: z.natural().max(1_000_000).default(10_000)
+    .description('Maximum retained update deliveries for each Telegram account and update scope.'),
 })
 
 /** Context-free durable backend using compact MessagePack payloads and indexed account partitions. */

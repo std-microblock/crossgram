@@ -3,19 +3,24 @@ import { describe, expect, it } from 'vitest'
 import * as bridge from '../../bridge/src/index.js'
 import * as debug from '../../mtproto-debug/src/index.js'
 import * as mtproto from '../../mtproto/src/index.js'
+import * as statistics from '../../mtproto-statistics/src/index.js'
+import * as adminBot from '../../platform-admin-bot/src/index.js'
 import * as qqnt from '../../platform-crossgram/src/index.js'
 import * as discord from '../../platform-discord/src/index.js'
 import * as matrix from '../../platform-matrix/src/index.js'
 import * as staticPlatform from '../../platform-static/src/index.js'
 import * as satoriPlatform from '../../platform-satori/src/index.js'
 import * as satoriExporter from '../../satori-exporter/src/index.js'
+import * as flashTransfer from '../../qq-flash-transfer-bot/src/index.js'
+import * as botApi from '../../telegram-bot-api/src/index.js'
 import * as resources from '../../telegram-resources/src/index.js'
+import * as stickerImporter from '../../telegram-sticker-importer/src/index.js'
 import * as updateStoreMemory from '../../update-store-memory/src/index.js'
 import * as updateStoreDatabase from '../../update-store-database/src/index.js'
 
 const modules = {
-  bridge, debug, mtproto, qqnt, discord, matrix, staticPlatform, satoriPlatform, satoriExporter, resources,
-  updateStoreMemory, updateStoreDatabase,
+  bridge, debug, mtproto, statistics, adminBot, qqnt, discord, matrix, staticPlatform, satoriPlatform,
+  satoriExporter, flashTransfer, botApi, resources, stickerImporter, updateStoreMemory, updateStoreDatabase,
 }
 
 describe('loader WebUI config discovery', () => {

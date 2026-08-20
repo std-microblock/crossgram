@@ -2,13 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { Config as bridgeConfig } from '../../bridge/src/index.js'
 import { Config as debugConfig } from '../../mtproto-debug/src/index.js'
 import { Config as mtprotoConfig } from '../../mtproto/src/index.js'
+import { Config as statisticsConfig } from '../../mtproto-statistics/src/index.js'
+import { Config as adminBotConfig } from '../../platform-admin-bot/src/index.js'
 import { Config as qqntConfig } from '../../platform-crossgram/src/index.js'
 import { Config as discordConfig } from '../../platform-discord/src/index.js'
 import { Config as matrixConfig } from '../../platform-matrix/src/index.js'
 import { Config as staticConfig } from '../../platform-static/src/index.js'
 import { Config as satoriConfig } from '../../platform-satori/src/index.js'
 import { Config as exporterConfig } from '../../satori-exporter/src/index.js'
+import { Config as flashTransferConfig } from '../../qq-flash-transfer-bot/src/index.js'
+import { Config as botApiConfig } from '../../telegram-bot-api/src/index.js'
 import { Config as resourcesConfig } from '../../telegram-resources/src/index.js'
+import { Config as stickerImporterConfig } from '../../telegram-sticker-importer/src/index.js'
+import { Config as databaseUpdateStoreConfig } from '../../update-store-database/src/index.js'
+import { Config as memoryUpdateStoreConfig } from '../../update-store-memory/src/index.js'
 
 const cases = [
   ['bridge', bridgeConfig, [
@@ -18,6 +25,12 @@ const cases = [
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
   ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
+  ['mtproto-statistics', statisticsConfig, [
+    'sampleIntervalMs', 'slowThresholdMs', 'historySeconds', 'topMethods', 'topIps',
+  ]],
+  ['platform-admin-bot', adminBotConfig, [
+    'allowedPlatformSessionIds', 'crossAccountAccess', 'showLoginCodes', 'webuiUrl', 'pageSize',
+  ]],
   ['qqnt', qqntConfig, [
     'endpoint', 'webSocketEndpoint', 'token', 'grayTipFilters',
     'generatePreviews', 'previewConcurrency',
@@ -27,7 +40,14 @@ const cases = [
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['satori', satoriConfig, ['bot']],
   ['satori-exporter', exporterConfig, ['platformId', 'platform', 'maxMediaBytes']],
+  ['qq-flash-transfer-bot', flashTransferConfig, ['maxFiles', 'maxTotalBytes']],
+  ['telegram-bot-api', botApiConfig, ['verifierSecret']],
   ['resources', resourcesConfig, ['assetsPath', 'providerId']],
+  ['telegram-sticker-importer', stickerImporterConfig, [
+    'botToken', 'apiBase', 'maxImportsPerSession', 'importCooldownMs',
+  ]],
+  ['update-store-database', databaseUpdateStoreConfig, ['retention']],
+  ['update-store-memory', memoryUpdateStoreConfig, ['retention']],
 ] as const
 
 describe('plugin config schemas', () => {
@@ -83,6 +103,15 @@ describe('plugin config schemas', () => {
     expect(discordConfig({ token: 'user-token' })).toMatchObject({
       token: 'user-token', includeBots: true, downloadChunkSize: 256 * 1024,
     })
+    expect(statisticsConfig({})).toEqual({
+      sampleIntervalMs: 1_000,
+      slowThresholdMs: 1_000,
+      historySeconds: 900,
+      topMethods: 40,
+      topIps: 100,
+    })
+    expect(databaseUpdateStoreConfig({})).toEqual({ retention: 10_000 })
+    expect(memoryUpdateStoreConfig({})).toEqual({ retention: 1_000 })
   })
 
   it('validates and normalizes alternate bridge endpoints', () => {
@@ -116,6 +145,10 @@ describe('plugin config schemas', () => {
     expect(() => staticConfig({ transferChunkSize: 0 })).toThrow(/transferChunkSize/)
     expect(() => exporterConfig({ platformId: undefined as unknown as string })).toThrow(/platformId/)
     expect(() => exporterConfig({ platformId: 'qqnt', maxMediaBytes: 0 })).toThrow(/maxMediaBytes/)
+    expect(() => statisticsConfig({ sampleIntervalMs: 499 })).toThrow(/sampleIntervalMs/)
+    expect(() => flashTransferConfig({ maxFiles: 101 })).toThrow(/maxFiles/)
+    expect(() => stickerImporterConfig({ botToken: 'token', importCooldownMs: 60_001 })).toThrow(/importCooldownMs/)
+    expect(() => databaseUpdateStoreConfig({ retention: 1_000_001 })).toThrow(/retention/)
   })
 
   it('requires Matrix connection credentials and hides its access token', () => {
@@ -138,5 +171,20 @@ describe('plugin config schemas', () => {
     const token = json.refs[root.dict!.token as unknown as number]
     expect(token.meta.required).toBe(true)
     expect(token.meta.role).toBe('secret')
+  })
+
+  it('requires and masks bot credentials', () => {
+    expect(() => botApiConfig({} as never)).toThrow(/verifierSecret/)
+    expect(() => stickerImporterConfig({} as never)).toThrow(/botToken/)
+    for (const [schema, field] of [
+      [botApiConfig, 'verifierSecret'],
+      [stickerImporterConfig, 'botToken'],
+    ] as const) {
+      const json = schema.toJSON()
+      const root = json.refs[json.uid]
+      const credential = json.refs[root.dict![field] as unknown as number]
+      expect(credential.meta.required).toBe(true)
+      expect(credential.meta.role).toBe('secret')
+    }
   })
 })

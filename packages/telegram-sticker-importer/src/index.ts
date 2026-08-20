@@ -19,10 +19,14 @@ export interface Config {
 }
 
 export const Config = z.object({
-  botToken: z.string().role('secret').required(),
-  apiBase: z.string().default('https://api.telegram.org'),
-  maxImportsPerSession: z.natural().min(1).max(10_000).default(100),
-  importCooldownMs: z.natural().min(0).max(60_000).default(3_000),
+  botToken: z.string().role('secret').required()
+    .description('Telegram Bot token used to read public sticker packs from the Bot API.'),
+  apiBase: z.string().default('https://api.telegram.org')
+    .description('Base URL of the hosted or local Telegram Bot API server.'),
+  maxImportsPerSession: z.natural().min(1).max(10_000).default(100)
+    .description('Maximum number of sticker packs imported by each platform session.'),
+  importCooldownMs: z.natural().min(0).max(60_000).default(3_000)
+    .description('Minimum delay in milliseconds between imports from the same platform session.'),
 })
 
 class ImportCancelledError extends Error {}

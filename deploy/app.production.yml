@@ -50,7 +50,17 @@
   config:
     retention: 10000
 - id: webui
-  name: '@cordisjs/plugin-webui'
+  name: '@cordisjs/plugin-group'
+  label: WebUI
+  config:
+    - id: webui-core
+      name: '@cordisjs/plugin-webui'
+    - id: database-webui
+      name: '@cordisjs/plugin-database-webui'
+    - id: http-webui
+      name: '@cordisjs/plugin-http-webui'
+    - id: loader-webui
+      name: '@cordisjs/plugin-loader-webui'
 - id: mtproto-statistics
   name: '@mtproto-relay/mtproto-statistics'
   config:

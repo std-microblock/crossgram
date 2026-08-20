@@ -17,7 +17,8 @@ export interface Config {
 }
 
 export const Config = z.object({
-  verifierSecret: z.string().role('secret').required(),
+  verifierSecret: z.string().role('secret').required()
+    .description('Secret used to verify tokens issued by the built-in BotFather service.'),
 })
 
 export const name = 'telegram-bot-api'

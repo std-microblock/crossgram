@@ -41,11 +41,16 @@ export interface Config {
 }
 
 export const Config = z.object({
-  allowedPlatformSessionIds: z.array(z.string()).default([]),
-  crossAccountAccess: z.boolean().default(false),
-  showLoginCodes: z.boolean().default(true),
-  webuiUrl: z.string().default(''),
-  pageSize: z.natural().min(1).max(PAGE_SIZE_MAX).default(6),
+  allowedPlatformSessionIds: z.array(z.string()).default([])
+    .description('Platform session IDs allowed to use the administration bot; empty allows self-service access.'),
+  crossAccountAccess: z.boolean().default(false)
+    .description('Allow approved operators to inspect and manage every platform account.'),
+  showLoginCodes: z.boolean().default(true)
+    .description('Show rotating Telegram login codes in account and identity views.'),
+  webuiUrl: z.string().default('').role('link')
+    .description('Public WebUI URL displayed as a button in the administration bot.'),
+  pageSize: z.natural().min(1).max(PAGE_SIZE_MAX).default(6)
+    .description('Number of accounts or identities displayed on each administration page.'),
 })
 
 export const name = 'platform-admin-bot'

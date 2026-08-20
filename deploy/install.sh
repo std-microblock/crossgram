@@ -13,6 +13,7 @@ branch=${CROSSGRAM_BRANCH:-main}
 install_dir=${CROSSGRAM_INSTALL_DIR:-/opt/crossgram}
 state_dir=${CROSSGRAM_STATE_DIR:-/var/lib/crossgram}
 service_user=${CROSSGRAM_USER:-crossgram}
+runtime_config=$install_dir/.runtime/app.yml
 deploy_base_url=${CROSSGRAM_DEPLOY_BASE_URL:-https://raw.githubusercontent.com/std-microblock/crossgram/main/deploy}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
 
@@ -88,13 +89,19 @@ fetch_deploy_file() {
 }
 
 install -d -m 0755 /etc/crossgram
-install -d -m 0750 -o root -g "$service_user" "$install_dir/.runtime"
+install -d -m 0700 -o "$service_user" -g "$service_user" "$install_dir/.runtime"
+ln -sfn ../package.json "$install_dir/.runtime/package.json"
 template=$(mktemp)
-trap 'rm -f "$template"' EXIT HUP INT TERM
+generated_config=
+trap 'rm -f "$template" ${generated_config:+"$generated_config"}' EXIT HUP INT TERM
 fetch_deploy_file app.production.yml "$template" 0600
-sed -e "s/__CROSSGRAM_PUBLIC_HOST__/$public_host/g" -e "s/__CROSSGRAM_PORT__/$port/g" "$template" > "$install_dir/.runtime/app.yml"
-chown root:"$service_user" "$install_dir/.runtime/app.yml"
-chmod 0640 "$install_dir/.runtime/app.yml"
+if [ ! -e "$runtime_config" ]; then
+  generated_config=$(mktemp)
+  sed -e "s/__CROSSGRAM_PUBLIC_HOST__/$public_host/g" -e "s/__CROSSGRAM_PORT__/$port/g" "$template" > "$generated_config"
+  install -m 0600 -o "$service_user" -g "$service_user" "$generated_config" "$runtime_config"
+fi
+chown "$service_user:$service_user" "$runtime_config"
+chmod 0600 "$runtime_config"
 fetch_deploy_file crossgram.service /etc/systemd/system/crossgram.service 0644
 fetch_deploy_file update.sh /usr/local/sbin/crossgram-update 0755
 fetch_deploy_file generate-client-config.mjs /usr/local/sbin/crossgram-client-config 0755
@@ -111,4 +118,4 @@ systemctl enable --now crossgram.service
 echo "Crossgram is running on $public_host:$port"
 echo "Update later with: sudo crossgram-update"
 echo "Generate client JSON with: sudo crossgram-client-config --host $public_host --port $port"
-echo "Configuration: $install_dir/.runtime/app.yml"
+echo "Configuration: $runtime_config"

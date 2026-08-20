@@ -23,7 +23,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/var/lib/crossgram
+ReadWritePaths=/var/lib/crossgram /opt/crossgram/.runtime
 
 [Install]
 WantedBy=multi-user.target
