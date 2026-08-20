@@ -10,7 +10,9 @@ import { getServerReaderMap } from './rpc/server-reader-map.js'
 import { ServerConnection } from './transport/server-connection.js'
 import { RpcDependencyRegistry, ServerSession } from './session/server-session.js'
 import { PqChallengeStore } from './session/server-authorization.js'
-import { MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore } from './session/auth-key-store.js'
+import {
+  AuthKeyStorePublishedError, MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore,
+} from './session/auth-key-store.js'
 import { AuthKeyDataStore } from './session/auth-key-data-store.js'
 import type { RpcHandler, RpcResult } from './rpc/protocol.js'
 import { invokeRpc, registerRpcRoute } from './rpc/router.js'
@@ -179,19 +181,54 @@ export class Mtproto extends Service {
     return targets.length
   }
 
+  /** Whether a permanent auth key is still registered for resumed connections. */
+  async hasAuthKey(authKeyId: Uint8Array): Promise<boolean> {
+    return Boolean(await this._authKeyStore.get(authKeyId))
+  }
+
+  /** Write the durable fail-closed marker and close other connections using this permanent key. */
+  async beginAuthKeyRevocation(authKeyId: Uint8Array, originConnection?: ServerConnection): Promise<void> {
+    try {
+      await this._authKeyStore.beginRevocation(authKeyId)
+    } catch (error) {
+      if (error instanceof AuthKeyStorePublishedError) this._closeAuthKeyConnections(authKeyId)
+      throw error
+    }
+    this._closeAuthKeyConnections(authKeyId, originConnection)
+  }
+
+  /** Purge one revoked key and close all connections using it. */
+  async finishAuthKeyRevocation(authKeyId: Uint8Array): Promise<boolean> {
+    try {
+      return await this._authKeyStore.finishRevocation(authKeyId)
+    } finally {
+      this._authKeyData.delete(authKeyId)
+      this._authApiLayers.delete(bytesHex(authKeyId))
+      this._closeAuthKeyConnections(authKeyId)
+    }
+  }
+
+  private _closeAuthKeyConnections(authKeyId: Uint8Array, exceptConnection?: ServerConnection): void {
+    for (const session of [...this._sessions]) {
+      if (session.connection !== exceptConnection && equalBytes(session.authKeyId, authKeyId)) {
+        session.connection.close()
+      }
+    }
+  }
+
   /** Revoke one permanent authorization and disconnect every connection using it. */
   async revokeAuthKey(authKeyId: Uint8Array): Promise<boolean> {
-    const deleted = await this._authKeyStore.delete(authKeyId)
-    this._authKeyData.delete(authKeyId)
-    this._authApiLayers.delete(bytesHex(authKeyId))
-    for (const session of [...this._sessions]) {
-      if (equalBytes(session.authKeyId, authKeyId)) session.connection.close()
-    }
-    return deleted
+    await this.beginAuthKeyRevocation(authKeyId)
+    return this.finishAuthKeyRevocation(authKeyId)
   }
 
   async* [Service.init]() {
     await this._crypto.initialize?.()
+    try {
+      await this._authKeyStore.recoverPendingRevocations()
+    } catch (error) {
+      this._log.warn('failed to recover pending auth key revocations: %s', error instanceof Error ? error.message : error)
+    }
 
     const server = new Server((socket) => this._handleConnection(socket))
     this._server = server

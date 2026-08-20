@@ -10,6 +10,7 @@ import { Mtproto } from './service.js'
 import type { ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair } from './crypto/rsa-keygen.js'
 import type { ServerSession } from './session/server-session.js'
+import { AuthKeyStorePublishedError, MemoryAuthKeyStore } from './session/auth-key-store.js'
 import type { ServerConnection } from './transport/server-connection.js'
 
 const crypto = new NodeCryptoProvider()
@@ -107,6 +108,146 @@ function makeRpcContext(ctx: Context, request: { _: string }): ServerRpcContext 
 function sessionsOf(service: Mtproto): Set<FakeSession> {
   return (service as unknown as { _sessions: Set<FakeSession> })._sessions
 }
+
+describe('Mtproto durable revocation recovery', () => {
+  it('recovers pending revocations before opening its listening socket', async () => {
+    const store = new MemoryAuthKeyStore()
+    let releaseRecovery!: () => void
+    const recoveryGate = new Promise<void>(resolve => { releaseRecovery = resolve })
+    let markRecoveryStarted!: () => void
+    const recoveryStarted = new Promise<void>(resolve => { markRecoveryStarted = resolve })
+    vi.spyOn(store, 'recoverPendingRevocations').mockImplementation(async () => {
+      markRecoveryStarted()
+      await recoveryGate
+    })
+    const ctx = new Context()
+    const service = new Mtproto(ctx, {
+      port: 0, host: '127.0.0.1', rsaKey: generateRsaKeyPair(), log, authKeyStore: store,
+    })
+    const generator = service[Service.init]()
+    const initializing = generator.next()
+
+    await recoveryStarted
+    expect((service as unknown as { _server: unknown })._server).toBeNull()
+    releaseRecovery()
+    const initialized = await initializing
+    try {
+      expect(service.port).toBeGreaterThan(0)
+    } finally {
+      if (typeof initialized.value === 'function') await initialized.value()
+      await generator.return(undefined)
+    }
+  })
+
+  it('warns but starts fail-closed when pending revocation recovery fails', async () => {
+    const store = new MemoryAuthKeyStore()
+    store.save(authKeyA, { key: new Uint8Array(256).fill(1) })
+    store.beginRevocation(authKeyA)
+    vi.spyOn(store, 'recoverPendingRevocations').mockImplementation(() => {
+      throw new Error('recovery failed')
+    })
+    const logger = {
+      warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn(), verbose: vi.fn(),
+    }
+    const ctx = new Context()
+    const service = new Mtproto(ctx, {
+      port: 0, host: '127.0.0.1', rsaKey: generateRsaKeyPair(), authKeyStore: store,
+      log: logger as never,
+    })
+    const generator = service[Service.init]()
+    const initialized = await generator.next()
+    try {
+      expect(service.port).toBeGreaterThan(0)
+      expect(logger.warn).toHaveBeenCalledWith(
+        'failed to recover pending auth key revocations: %s',
+        'recovery failed',
+      )
+      await expect(service.hasAuthKey(authKeyA)).resolves.toBe(false)
+    } finally {
+      if (typeof initialized.value === 'function') await initialized.value()
+      await generator.return(undefined)
+    }
+  })
+
+  it('closes a sibling before the gated logout response settles, then closes its origin on finish', async () => {
+    const store = new MemoryAuthKeyStore()
+    store.save(authKeyA, { key: new Uint8Array(256).fill(1) })
+    const { service, stop } = await makeService()
+    try {
+      const origin = fakeSession(authKeyA, fakeConnection(0), true)
+      const sibling = fakeSession(authKeyA, fakeConnection(0), true)
+      const unrelated = fakeSession(authKeyB, fakeConnection(0), true)
+      sessionsOf(service).add(origin)
+      sessionsOf(service).add(sibling)
+      sessionsOf(service).add(unrelated)
+      ;(service as unknown as { _authKeyStore: MemoryAuthKeyStore })._authKeyStore = store
+      let releaseResponseWrite!: () => void
+      const responseWrite = new Promise<void>(resolve => { releaseResponseWrite = resolve })
+
+      await service.beginAuthKeyRevocation(authKeyA, origin.connection as unknown as ServerConnection)
+
+      expect(origin.connection.close).not.toHaveBeenCalled()
+      expect(sibling.connection.close).toHaveBeenCalledOnce()
+      expect(unrelated.connection.close).not.toHaveBeenCalled()
+      await expect(service.hasAuthKey(authKeyA)).resolves.toBe(false)
+
+      releaseResponseWrite()
+      await responseWrite
+      await service.finishAuthKeyRevocation(authKeyA)
+      expect(origin.connection.close).toHaveBeenCalledOnce()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('closes even the origin when directory sync fails after publishing a tombstone', async () => {
+    const store = new MemoryAuthKeyStore()
+    store.save(authKeyA, { key: new Uint8Array(256).fill(1) })
+    const originalBegin = store.beginRevocation.bind(store)
+    vi.spyOn(store, 'beginRevocation').mockImplementation((id) => {
+      originalBegin(id)
+      throw new AuthKeyStorePublishedError(new Error('directory fsync failed'), 'post-rename')
+    })
+    const { service, stop } = await makeService()
+    try {
+      const origin = fakeSession(authKeyA, fakeConnection(0), true)
+      const sibling = fakeSession(authKeyA, fakeConnection(0), true)
+      sessionsOf(service).add(origin)
+      sessionsOf(service).add(sibling)
+      ;(service as unknown as { _authKeyStore: MemoryAuthKeyStore })._authKeyStore = store
+
+      await expect(service.beginAuthKeyRevocation(authKeyA, origin.connection as unknown as ServerConnection))
+        .rejects.toBeInstanceOf(AuthKeyStorePublishedError)
+
+      expect(origin.connection.close).toHaveBeenCalledOnce()
+      expect(sibling.connection.close).toHaveBeenCalledOnce()
+      await expect(service.hasAuthKey(authKeyA)).resolves.toBe(false)
+    } finally {
+      await stop()
+    }
+  })
+
+  it('keeps connections open when begin fails before publication', async () => {
+    const store = new MemoryAuthKeyStore()
+    vi.spyOn(store, 'beginRevocation').mockImplementation(() => { throw new Error('file fsync failed') })
+    const { service, stop } = await makeService()
+    try {
+      const origin = fakeSession(authKeyA, fakeConnection(0), true)
+      const sibling = fakeSession(authKeyA, fakeConnection(0), true)
+      sessionsOf(service).add(origin)
+      sessionsOf(service).add(sibling)
+      ;(service as unknown as { _authKeyStore: MemoryAuthKeyStore })._authKeyStore = store
+
+      await expect(service.beginAuthKeyRevocation(authKeyA, origin.connection as unknown as ServerConnection))
+        .rejects.toThrow('file fsync failed')
+
+      expect(origin.connection.close).not.toHaveBeenCalled()
+      expect(sibling.connection.close).not.toHaveBeenCalled()
+    } finally {
+      await stop()
+    }
+  })
+})
 
 describe('Mtproto stalled-connection handling', () => {
   it('reports open and authorized connection counts for management consumers', async () => {
