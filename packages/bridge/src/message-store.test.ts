@@ -437,6 +437,49 @@ describe('MessageStore', () => {
     }])
   })
 
+  it('rehydrates media stripped thumbnails before a stored message is ingested again', async () => {
+    const { ctx, store } = await createStore()
+    const conversation: IMConversation = { id: 'thumbnail-room', kind: 'group', title: 'Thumbnail room' }
+    const strippedThumbnail = new Uint8Array([1, 23, 40, 172, 11, 240, 55])
+    const message: IMMessage = {
+      id: 'thumbnail-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { parts: [
+        { type: 'media', media: { id: 'photo', kind: 'image', strippedThumbnail } },
+        { type: 'text', text: 'caption' },
+      ] },
+    }
+
+    const ingested = await store.ingest(session, conversation, message)
+    const [stored] = await ctx.database.get('mtproto_im_message', { id: ingested.message.id })
+    const storedPart = (stored.content as unknown as IMMessage['content']).parts[0]
+    if (storedPart?.type !== 'media') throw new Error('stored media missing')
+    expect(storedPart.media.strippedThumbnail).toEqual([...strippedThumbnail])
+
+    const [hydrated] = await store.readHistory(session.platformSessionId, conversation.id)
+    const hydratedPart = hydrated.content.parts[0]
+    if (hydratedPart?.type !== 'media') throw new Error('hydrated media missing')
+    expect(hydratedPart.media.strippedThumbnail).toBeInstanceOf(Uint8Array)
+    expect(hydratedPart.media.strippedThumbnail).toEqual(strippedThumbnail)
+    await expect(store.ingest(session, conversation, hydrated)).resolves.toMatchObject({ changed: false })
+
+    await ctx.database.set('mtproto_im_message', { id: ingested.message.id }, {
+      content: {
+        parts: [{
+          ...storedPart,
+          media: {
+            ...storedPart.media,
+            strippedThumbnail: Object.fromEntries(strippedThumbnail.entries()),
+          },
+        }, { type: 'text', text: 'caption' }],
+      } as never,
+    })
+    const [legacyHydrated] = await store.readHistory(session.platformSessionId, conversation.id)
+    const legacyPart = legacyHydrated.content.parts[0]
+    if (legacyPart?.type !== 'media') throw new Error('legacy hydrated media missing')
+    expect(legacyPart.media.strippedThumbnail).toEqual(strippedThumbnail)
+    await expect(store.ingest(session, conversation, legacyHydrated)).resolves.toBeDefined()
+  })
+
   it('uses one auto-increment Telegram user ID across sessions of the same platform entry', async () => {
     const { ctx, store } = await createStore()
     const first = await store.upsertUser(session, { id: 'opaque-alice', firstName: 'opaque-alice' })

@@ -231,7 +231,10 @@ describe('PlatformSubscriptionManager', () => {
       id: 'qq-recalled', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
       content: { parts: [
         { type: 'text', text: 'first' },
-        { type: 'media', media: { id: 'photo', kind: 'image' } },
+        {
+          type: 'media',
+          media: { id: 'photo', kind: 'image', strippedThumbnail: new Uint8Array([1, 23, 40, 172]) },
+        },
         { type: 'text', text: 'second' },
       ] },
     }

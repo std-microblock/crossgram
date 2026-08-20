@@ -2217,9 +2217,15 @@ function mergePlatformUser(existing: IMUser | undefined, incoming: IMUser): IMUs
 function persistMessageContent(content: IMMessageContent): JsonValue {
   return {
     ...content,
-    parts: content.parts.map((part) => part.type === 'sticker' && part.sticker.outline
-      ? { ...part, sticker: { ...part.sticker, outline: [...part.sticker.outline] } }
-      : part),
+    parts: content.parts.map((part) => {
+      if (part.type === 'sticker' && part.sticker.outline) {
+        return { ...part, sticker: { ...part.sticker, outline: [...part.sticker.outline] } }
+      }
+      if (part.type === 'media' && part.media.strippedThumbnail) {
+        return { ...part, media: { ...part.media, strippedThumbnail: [...part.media.strippedThumbnail] } }
+      }
+      return part
+    }),
   } as unknown as JsonValue
 }
 
@@ -2228,14 +2234,25 @@ function hydrateMessageContent(value: JsonValue): IMMessageContent {
   return {
     ...content,
     parts: content.parts.map((part) => {
-      if (part.type !== 'sticker' || part.sticker.outline === undefined) return part
-      return {
-        ...part,
-        sticker: {
-          ...part.sticker,
-          outline: hydrateByteArray(part.sticker.outline as unknown),
-        },
+      if (part.type === 'sticker' && part.sticker.outline !== undefined) {
+        return {
+          ...part,
+          sticker: {
+            ...part.sticker,
+            outline: hydrateByteArray(part.sticker.outline as unknown),
+          },
+        }
       }
+      if (part.type === 'media' && part.media.strippedThumbnail !== undefined) {
+        return {
+          ...part,
+          media: {
+            ...part.media,
+            strippedThumbnail: hydrateByteArray(part.media.strippedThumbnail as unknown),
+          },
+        }
+      }
+      return part
     }),
   }
 }

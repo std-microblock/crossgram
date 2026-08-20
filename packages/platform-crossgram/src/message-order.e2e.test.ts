@@ -10,7 +10,8 @@ import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
 import {
-  MessageStore, StickerRpc, type IngestResult, type PlatformSession, type Unsubscribe,
+  MessageStore, StickerRpc, type IMConversation, type IMMessage, type IngestResult,
+  type PlatformSession, type Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { DialogRpc, makeTlMessageMedia } from '../../bridge/src/dialogs.js'
 import { defineModels } from '../../bridge/src/models.js'
@@ -590,6 +591,159 @@ describe('QQNT durable event checkpoint E2E', () => {
       await expect(ctx.database.get('mtproto_im_message', {})).resolves.toMatchObject([{
         primaryPlatformMessageId: 'message-after-reaction-gap',
       }])
+    } finally {
+      await unsubscribe()
+    }
+  })
+
+  it('rehydrates a recalled media thumbnail and advances to the following message', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQNTEventCheckpointModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const checkpointSession = { ...session, platformSessionId: 'qqnt-recall-media-checkpoint-e2e' }
+    const conversation: IMConversation = {
+      id: 'production-recall-group', kind: 'group', title: 'Production recall group',
+    }
+    const recalled: IMMessage = {
+      id: 'recalled-media', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { parts: [{
+        type: 'media', media: {
+          id: 'recalled-photo', kind: 'image', width: 1602, height: 932,
+          strippedThumbnail: new Uint8Array([1, 23, 40, 172, 11, 240, 55]),
+        },
+      }, { type: 'text', text: '50389251' }] },
+    }
+    const store = new MessageStore(ctx.database)
+    await store.ingest(checkpointSession, conversation, recalled)
+
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    const server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    let connections = 0
+    webSocketServer.on('connection', (webSocket) => {
+      connections++
+      webSocket.send(JSON.stringify({
+        id: '8658',
+        event: {
+          type: 'message-delete', eventId: 'delete:production-recall',
+          conversation: {
+            id: conversation.id, kind: 'group', title: conversation.title,
+            peerUid: conversation.id, peerUin: '1002974327', chatType: 2,
+          },
+          messageIds: [recalled.id], timestamp: 2,
+        },
+      }))
+      webSocket.send(JSON.stringify({
+        id: '8659',
+        event: {
+          type: 'message',
+          conversation: {
+            id: conversation.id, kind: 'group', title: conversation.title,
+            peerUid: conversation.id, peerUin: '1002974327', chatType: 2,
+          },
+          message: {
+            id: 'message-after-recall', conversationId: conversation.id, senderId: 'bob',
+            timestamp: 3, outgoing: false, msgSeq: '1597712', telegramMessageId: 1597712,
+            parts: [{ type: 'text', text: 'after recall' }],
+          },
+        },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing recall checkpoint test address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const errors: unknown[][] = []
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    }, 'qqnt:stickers', undefined, {
+      info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: (...args: unknown[]) => errors.push(args),
+    } as never, ctx.database)
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [], reactions: [], maxSelected: 20,
+    }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const unsubscribe = await platform.subscribe(checkpointSession, async (event) => {
+      if (event.type === 'message-delete') {
+        const messages = await store.readProjectedByPlatformIds(
+          checkpointSession.platformSessionId,
+          event.messageIds.map((platformMessageId) => ({
+            conversationId: event.conversation.id, platformMessageId,
+          })),
+        )
+        for (const { source } of messages) {
+          const parts = source.content.parts.map((part) => {
+            if (part.type !== 'text' || !part.text || part.entities?.some((entity) =>
+              entity.type === 'strikethrough' && entity.offset === 0 && entity.length === part.text.length)) {
+              return part
+            }
+            return {
+              ...part,
+              entities: [...part.entities ?? [], {
+                type: 'strikethrough' as const, offset: 0, length: part.text.length,
+              }],
+            }
+          })
+          await store.ingest(checkpointSession, event.conversation, {
+            ...source, content: { ...source.content, parts },
+          })
+        }
+      } else if (event.type === 'message') {
+        await store.ingest(checkpointSession, event.conversation, event.message)
+      }
+    })
+    try {
+      await vi.waitFor(() => expect(connections).toBeGreaterThan(0), { timeout: 5_000 })
+      expect(errors).toEqual([])
+      await vi.waitFor(async () => expect(await ctx.database.get(
+        'mtproto_qqnt_event_checkpoint', { platformSessionId: checkpointSession.platformSessionId },
+      )).toMatchObject([{ lastEventId: '8659' }]), { timeout: 5_000 })
+      expect(connections).toBe(1)
+      await expect(store.readHistory(checkpointSession.platformSessionId, conversation.id)).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: recalled.id,
+            content: { parts: [
+              expect.objectContaining({
+                type: 'media', media: expect.objectContaining({
+                  strippedThumbnail: new Uint8Array([1, 23, 40, 172, 11, 240, 55]),
+                }),
+              }),
+              expect.objectContaining({
+                type: 'text', entities: [{ type: 'strikethrough', offset: 0, length: 8 }],
+              }),
+            ] },
+          }),
+          expect.objectContaining({ id: 'message-after-recall' }),
+        ]),
+      )
     } finally {
       await unsubscribe()
     }
