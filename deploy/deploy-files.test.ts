@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -121,9 +121,13 @@ describe('Crossgram Linux deployment', () => {
     const config = join(temp, 'app.yml')
     try {
       writeFileSync(config, oldConfig)
+      const owner = statSync(config)
       expect(migrateRuntimeConfigFile(config)).toBe(true)
       expect(migrateRuntimeConfigFile(config)).toBe(false)
       expect(readFileSync(config, 'utf8')).toBe(migrated)
+      const migratedStat = statSync(config)
+      expect(migratedStat.uid).toBe(owner.uid)
+      expect(migratedStat.gid).toBe(owner.gid)
     } finally {
       rmSync(temp, { recursive: true, force: true })
     }

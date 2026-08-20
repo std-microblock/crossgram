@@ -1,4 +1,4 @@
-import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, chownSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 const requiredPlugins = [
@@ -36,6 +36,7 @@ function escapeRegExp(value) {
 }
 
 export function migrateRuntimeConfigFile(path) {
+  const previous = statSync(path)
   const source = readFileSync(path, 'utf8')
   const migrated = migrateRuntimeConfig(source)
   if (migrated === source) return false
@@ -43,6 +44,9 @@ export function migrateRuntimeConfigFile(path) {
   const temporary = `${path}.tmp-${process.pid}`
   try {
     writeFileSync(temporary, migrated, { encoding: 'utf8', mode: 0o600 })
+    // Updates run as root, but the Cordis process runs as `crossgram` and must
+    // retain read access to its root-managed runtime config after an atomic rename.
+    chownSync(temporary, previous.uid, previous.gid)
     renameSync(temporary, path)
     chmodSync(path, 0o600)
   } finally {
