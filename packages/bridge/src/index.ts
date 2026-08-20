@@ -54,7 +54,9 @@ import { VoiceRpc } from './voice/voice-rpc.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 import type { BotDashboardData } from './bot-dashboard.js'
 import { RequestInboxSystemPeerProvider } from './request-inbox.js'
-import { ActiveSessionStore, registerActiveSessionRpc } from './active-sessions.js'
+import {
+  ActiveSessionStore, createAuthorizationReservationQueue, registerActiveSessionRpc,
+} from './active-sessions.js'
 import { ConversationViewService } from './conversation-view.js'
 import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.js'
 import { BridgeManagementError, BridgeManagementService } from './management-service.js'
@@ -214,6 +216,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const activeSessions = new ActiveSessionStore(
     ctx.database,
     authKeyId => ctx.mtproto.revokeAuthKey(authKeyId),
+    undefined,
+    authKeyId => ctx.mtproto.hasAuthKey(authKeyId),
+    (authKeyId, originConnection) => ctx.mtproto.beginAuthKeyRevocation(authKeyId, originConnection),
+    authKeyId => ctx.mtproto.finishAuthKeyRevocation(authKeyId),
   )
   const store = new MessageStore(ctx.database, undefined, ctx.updateStore, historyTrace)
   const drafts = new DraftStore(ctx.database)
@@ -391,31 +397,34 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     },
     conversationViews,
   )
-  registerActiveSessionRpc(rpc, activeSessions, async rpcContext =>
-    (await requireBridgeSession(rpcContext)).session)
   new MtprotoBridgeService(ctx, requireBridgeSession)
   registerGroupFilesMiniApp(ctx, platforms, requireBridgeSession, config.groupFilesMiniApp)
 
-  const authorizationLocks = new Map<string, Promise<void>>()
+  const reserveAuthorization = createAuthorizationReservationQueue()
   const withAuthorizationLock = async <T>(authKeyId: string, callback: () => Promise<T>): Promise<T> => {
-    const previous = authorizationLocks.get(authKeyId) ?? Promise.resolve()
-    let release!: () => void
-    const current = new Promise<void>((resolve) => { release = resolve })
-    authorizationLocks.set(authKeyId, current)
-    await previous
+    const reservation = reserveAuthorization(authKeyId)
+    await reservation.wait()
     try {
       return await callback()
     } finally {
-      release()
-      if (authorizationLocks.get(authKeyId) === current) authorizationLocks.delete(authKeyId)
+      reservation.release()
     }
   }
+
+  registerActiveSessionRpc(
+    rpc,
+    activeSessions,
+    async rpcContext => (await requireBridgeSession(rpcContext)).session,
+    reserveAuthorization,
+  )
 
   const authorizePlatformSession = async (
     rpc: ServerRpcContext,
     identity: { platformId: string, platformSessionId: string },
   ): Promise<tl.TlObject> => {
-    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    if (rpc.connection.closed || !rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    const authKey = new Uint8Array(rpc.authKeyId)
+    const authKeyId = authKeyHex(authKey)
     const [platformSession] = await ctx.database.get('mtproto_platform_session', {
       id: identity.platformSessionId,
       platformId: identity.platformId,
@@ -426,8 +435,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     if (!authSession) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
     if (!registry.get(identity.platformId)) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
 
-    const authKeyId = authKeyHex(rpc.authKeyId)
     return withAuthorizationLock(authKeyId, async () => {
+      if (rpc.connection.closed || !await ctx.mtproto.hasAuthKey(authKey)) {
+        throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+      }
       const [binding] = await ctx.database.get('mtproto_auth_binding', { authKeyId })
       if (
         binding

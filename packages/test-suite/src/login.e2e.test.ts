@@ -112,6 +112,11 @@ class TestClient {
     this._frames.unshift(...frames)
   }
 
+  async waitForClose(): Promise<void> {
+    if (this._sock.destroyed) return
+    await new Promise<void>(resolve => this._sock.once('close', resolve))
+  }
+
   close(): void { this._sock.destroy() }
 }
 
@@ -335,6 +340,20 @@ async function readRpcFrame(client: TestClient, method: string): Promise<Uint8Ar
       client.read(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`RPC timed out: ${method}`)), 5_000)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+async function waitForSocketClose(client: TestClient, label: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      client.waitForClose(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`socket did not close after ${label}`)), 5_000)
       }),
     ])
   } finally {
@@ -649,6 +668,120 @@ describe('BotFather physical MTProto e2e', () => {
 })
 
 describe('bridge login e2e', () => {
+  it('returns auth.loggedOut before revoking only the current authenticated device', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    let currentClient: TestClient | undefined
+    let sameKeyClient: TestClient | undefined
+    let otherClient: TestClient | undefined
+    let revokedClient: TestClient | undefined
+    let finishAuthKeyRevocation: ReturnType<typeof vi.spyOn> | undefined
+    let disposeDebug: (() => void) | undefined
+    try {
+      const account = await waitForPlatformLogin(ctx, 'static')
+      currentClient = await TestClient.connect(port)
+      const currentKey = await doClientHandshake(currentClient, pubKey)
+      const currentSession = Long.fromInt(0x77331126)
+      const otherSession = Long.fromInt(0x77331127)
+      const authenticate = async (client: TestClient, key: ClientKey, session: Long, sub: number) => {
+        const sent = await callRpc(client, key, session, {
+          _: 'auth.sendCode', phoneNumber: `+${account.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+          settings: { _: 'codeSettings' },
+        }, sub)
+        return callRpc(client, key, session, {
+          _: 'auth.signIn', phoneNumber: account.auth.virtualPhone, phoneCodeHash: sent.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode(account.auth.totpSecret),
+        }, sub + 2)
+      }
+      await expect(authenticate(currentClient, currentKey, currentSession, 2))
+        .resolves.toMatchObject({ _: 'auth.authorization' })
+      sameKeyClient = await TestClient.connect(port)
+      await expect(callRpc(sameKeyClient, currentKey, Long.fromInt(0x77331129), {
+        _: 'account.getAuthorizations',
+      }, 2)).resolves.toMatchObject({ _: 'account.authorizations', authorizations: [{ current: true }] })
+      otherClient = await TestClient.connect(port)
+      const otherKey = await doClientHandshake(otherClient, pubKey)
+      await expect(authenticate(otherClient, otherKey, otherSession, 2))
+        .resolves.toMatchObject({ _: 'auth.authorization' })
+
+      const currentAuthKeyId = Buffer.from(currentKey.authKeyId).toString('hex')
+      const otherAuthKeyId = Buffer.from(otherKey.authKeyId).toString('hex')
+      await expect(ctx.database.get('mtproto_auth_binding', { authKeyId: currentAuthKeyId }))
+        .resolves.toHaveLength(1)
+      await expect(ctx.database.get('mtproto_client_authorization', { authKeyId: currentAuthKeyId }))
+        .resolves.toHaveLength(1)
+      const order: string[] = []
+      disposeDebug = ctx.on('mtproto/debug', (event) => {
+        const payload = event.payload as { _?: string, result?: { _?: string } }
+        if (event.direction === 'server->client' && payload._ === 'rpc_result'
+          && payload.result?._ === 'auth.loggedOut') order.push('rpc-result')
+      })
+      const originalFinishAuthKeyRevocation = ctx.mtproto.finishAuthKeyRevocation.bind(ctx.mtproto)
+      finishAuthKeyRevocation = vi.spyOn(ctx.mtproto, 'finishAuthKeyRevocation').mockImplementation(async (authKeyId) => {
+        order.push('finish-auth-key-revocation')
+        return originalFinishAuthKeyRevocation(authKeyId)
+      })
+
+      await expect(callRpc(currentClient, currentKey, currentSession, { _: 'auth.logOut' }, 6))
+        .resolves.toEqual({ _: 'auth.loggedOut' })
+      await vi.waitFor(() => expect(finishAuthKeyRevocation).toHaveBeenCalledOnce())
+      expect(typed.equal(finishAuthKeyRevocation.mock.calls[0]![0], currentKey.authKeyId)).toBe(true)
+      await waitForSocketClose(currentClient, 'auth.logOut')
+      await waitForSocketClose(sameKeyClient, 'auth.logOut from another connection sharing the key')
+
+      expect(order).toEqual(['rpc-result', 'finish-auth-key-revocation'])
+      await expect(ctx.database.get('mtproto_auth_binding', { authKeyId: currentAuthKeyId })).resolves.toEqual([])
+      await expect(ctx.database.get('mtproto_client_authorization', { authKeyId: currentAuthKeyId })).resolves.toEqual([])
+      const hasAuthKey = vi.spyOn(ctx.mtproto, 'hasAuthKey')
+      await expect(ctx.mtproto.dispatch({
+        connection: { closed: false } as never,
+        apiLayer: 228,
+        authKeyId: currentKey.authKeyId,
+        sessionId: currentSession,
+        isAuthorized: true,
+        sendUpdate: () => {},
+        getPlatformData: <T>() => undefined as T,
+        setPlatformData: () => {},
+      }, {
+        _: 'auth.signIn',
+        phoneNumber: account.auth.virtualPhone,
+        phoneCode: bridge.generateLoginCode(account.auth.totpSecret),
+      } as never)).resolves.toMatchObject({
+        _: 'mt_rpc_error', errorCode: 401, errorMessage: 'AUTH_KEY_UNREGISTERED',
+      })
+      expect(hasAuthKey).toHaveBeenCalledOnce()
+      expect(typed.equal(hasAuthKey.mock.calls[0]![0], currentKey.authKeyId)).toBe(true)
+      hasAuthKey.mockRestore()
+      await expect(ctx.database.get('mtproto_auth_binding', { authKeyId: currentAuthKeyId })).resolves.toEqual([])
+      await expect(ctx.database.get('mtproto_platform_session', { id: account.session.id })).resolves.toHaveLength(1)
+      await expect(ctx.database.get('mtproto_auth_session', { id: account.auth.id })).resolves.toHaveLength(1)
+      await expect(ctx.database.get('mtproto_auth_binding', { authKeyId: otherAuthKeyId })).resolves.toHaveLength(1)
+      await expect(callRpc(otherClient, otherKey, otherSession, {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 1, hash: Long.ZERO,
+      }, 6)).resolves.toMatchObject({ _: expect.stringMatching(/^messages\.dialogs/) })
+
+      revokedClient = await TestClient.connect(port)
+      await revokedClient.send(clientEncrypt(
+        currentKey,
+        TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getConfig' }),
+        currentKey.salt,
+        Long.fromInt(0x77331128),
+        8,
+      ))
+      const rejected = await readRpcFrame(revokedClient, 'revoked auth key')
+      expect(rejected).toHaveLength(4)
+      expect(new DataView(rejected.buffer, rejected.byteOffset, rejected.byteLength).getInt32(0, true)).toBe(-404)
+    } finally {
+      disposeDebug?.()
+      finishAuthKeyRevocation?.mockRestore()
+      revokedClient?.close()
+      otherClient?.close()
+      sameKeyClient?.close()
+      currentClient?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('lets any account-list viewer approve QR tokens and keeps permanent keys bound', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let issuer: TestClient | undefined

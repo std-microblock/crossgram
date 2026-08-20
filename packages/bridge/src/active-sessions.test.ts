@@ -4,7 +4,7 @@ import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Long from 'long'
 import type { MtprotoClientInfo, ServerRpcContext } from '@mtproto-relay/mtproto'
-import { ActiveSessionStore, authorizationHash } from './active-sessions.js'
+import { ActiveSessionStore, authorizationHash, createAuthorizationReservationQueue } from './active-sessions.js'
 import { defineModels } from './models.js'
 
 const disposals: Array<() => Promise<void>> = []
@@ -134,6 +134,240 @@ describe('ActiveSessionStore', () => {
     expect(await database.get('mtproto_auth_binding', {
       authKeyId: Buffer.from(outsider).toString('hex'),
     })).toHaveLength(1)
+  })
+
+  it('removes only the current device authorization while preserving its account and other device', async () => {
+    const database = await createDatabase()
+    const revoke = vi.fn(async (_authKeyId: Uint8Array) => true)
+    const store = new ActiveSessionStore(database, revoke)
+    const current = authKey(1)
+    const other = authKey(2)
+    const currentAuthKeyId = Buffer.from(current).toString('hex')
+    const otherAuthKeyId = Buffer.from(other).toString('hex')
+    await database.create('mtproto_platform_session', {
+      id: 'account', platformId: 'test', userId: 'user', credentials: {}, metadata: {}, active: true,
+      createdAt: new Date('2024-01-01T00:00:00.000Z'),
+    })
+    await database.create('mtproto_auth_session', {
+      id: 'auth-session', virtualPhone: '15550000000', totpSecret: 'secret',
+      platformId: 'test', platformSessionId: 'account',
+    })
+    await database.upsert('mtproto_auth_binding', [current, other].map(key => ({
+      authKeyId: Buffer.from(key).toString('hex'), platformId: 'test', platformSessionId: 'account',
+    })))
+    const currentRpc = rpcContext(current, desktop)
+    const setPlatformData = vi.fn()
+    currentRpc.setPlatformData = setPlatformData
+    await store.touch(currentRpc, { platformSessionId: 'account' })
+    await store.touch(rpcContext(other, android), { platformSessionId: 'account' })
+
+    await store.logout(currentRpc)
+    await store.finishLogout(currentRpc)
+
+    expect(setPlatformData).toHaveBeenCalledExactlyOnceWith(null)
+    expect(revoke).toHaveBeenCalledExactlyOnceWith(current)
+    await expect(database.get('mtproto_auth_binding', { authKeyId: currentAuthKeyId })).resolves.toEqual([])
+    await expect(database.get('mtproto_client_authorization', { authKeyId: currentAuthKeyId })).resolves.toEqual([])
+    await store.touch(currentRpc, { platformSessionId: 'account' })
+    await expect(database.get('mtproto_client_authorization', { authKeyId: currentAuthKeyId })).resolves.toEqual([])
+    await expect(database.get('mtproto_platform_session', { id: 'account' })).resolves.toHaveLength(1)
+    await expect(database.get('mtproto_auth_session', { id: 'auth-session' })).resolves.toHaveLength(1)
+    await expect(database.get('mtproto_client_authorization', { authKeyId: otherAuthKeyId })).resolves.toMatchObject([
+      { authKeyId: otherAuthKeyId, deviceModel: 'Pixel 10', platform: 'Android' },
+    ])
+    await expect(store.list(rpcContext(other, android), { platformSessionId: 'account' }))
+      .resolves.toMatchObject({ authorizations: [{ hash: Long.ZERO, deviceModel: 'Pixel 10' }] })
+    await expect(database.get('mtproto_auth_binding', { authKeyId: otherAuthKeyId })).resolves.toHaveLength(1)
+  })
+
+  it('does not restore the current authorization when touch held before its upsert races logout', async () => {
+    const database = await createDatabase()
+    const current = authKey(1)
+    const authKeyId = Buffer.from(current).toString('hex')
+    let registered = true
+    const revoke = vi.fn(async () => { registered = false })
+    const store = new ActiveSessionStore(database, revoke, undefined, async () => registered)
+    await database.upsert('mtproto_auth_binding', [{
+      authKeyId, platformId: 'test', platformSessionId: 'account',
+    }])
+    let allowUpsert!: () => void
+    const upsertGate = new Promise<void>(resolve => { allowUpsert = resolve })
+    let markUpsertStarted!: () => void
+    const upsertStarted = new Promise<void>(resolve => { markUpsertStarted = resolve })
+    const originalUpsert = database.upsert.bind(database) as (...args: any[]) => Promise<unknown>
+    const upsert = vi.spyOn(database, 'upsert').mockImplementation(async (table, rows) => {
+      if (table === 'mtproto_client_authorization') {
+        markUpsertStarted()
+        await upsertGate
+      }
+      return originalUpsert(table, rows) as never
+    })
+
+    const touching = store.touch(rpcContext(current, desktop), { platformSessionId: 'account' })
+    await upsertStarted
+    const logoutRpc = rpcContext(current, desktop)
+    await store.beginLogout(logoutRpc)
+    const loggingOut = store.logout(logoutRpc)
+    expect(revoke).not.toHaveBeenCalled()
+    allowUpsert()
+    await Promise.all([touching, loggingOut])
+    await store.finishLogout(logoutRpc)
+
+    expect(revoke).toHaveBeenCalledExactlyOnceWith(current)
+    await expect(database.get('mtproto_client_authorization', { authKeyId })).resolves.toEqual([])
+    upsert.mockRestore()
+  })
+
+  it('does not restore the current authorization when logout holds the key before touch starts', async () => {
+    const database = await createDatabase()
+    const current = authKey(1)
+    const authKeyId = Buffer.from(current).toString('hex')
+    let registered = true
+    let releaseRevoke!: () => void
+    const revokeGate = new Promise<void>(resolve => { releaseRevoke = resolve })
+    let markRevokeStarted!: () => void
+    const revokeStarted = new Promise<void>(resolve => { markRevokeStarted = resolve })
+    const revoke = vi.fn(async () => {
+      markRevokeStarted()
+      await revokeGate
+      registered = false
+    })
+    const store = new ActiveSessionStore(database, revoke, undefined, async () => registered)
+    await database.upsert('mtproto_auth_binding', [{
+      authKeyId, platformId: 'test', platformSessionId: 'account',
+    }])
+    const upsert = vi.spyOn(database, 'upsert')
+
+    const logoutRpc = rpcContext(current, desktop)
+    await store.beginLogout(logoutRpc)
+    await store.logout(logoutRpc)
+    const finishing = store.finishLogout(logoutRpc)
+    await revokeStarted
+    const touching = store.touch(rpcContext(current, desktop), { platformSessionId: 'account' })
+    expect(upsert).not.toHaveBeenCalled()
+    releaseRevoke()
+    await Promise.all([finishing, touching])
+
+    expect(upsert).not.toHaveBeenCalled()
+    await expect(database.get('mtproto_client_authorization', { authKeyId })).resolves.toEqual([])
+    upsert.mockRestore()
+  })
+
+  it('revokes the current key and clears cached platform state when a logout delete fails', async () => {
+    const database = await createDatabase()
+    const current = authKey(1)
+    const authKeyId = Buffer.from(current).toString('hex')
+    let registered = true
+    const revoke = vi.fn(async (_authKeyId: Uint8Array) => {
+      registered = false
+      return true
+    })
+    const store = new ActiveSessionStore(database, revoke, undefined, async () => registered)
+    await database.upsert('mtproto_auth_binding', [{
+      authKeyId, platformId: 'test', platformSessionId: 'account',
+    }])
+    const rpc = rpcContext(current, desktop)
+    rpc.setPlatformData = vi.fn()
+    const remove = vi.spyOn(database, 'remove').mockImplementation(async (table, query) => {
+      if (table === 'mtproto_auth_binding' && (query as { authKeyId?: string }).authKeyId === authKeyId) {
+        throw new Error('delete failed')
+      }
+      return [] as never
+    })
+
+    const databaseErrors = await store.logout(rpc)
+    await store.finishLogout(rpc)
+
+    expect(databaseErrors).toHaveLength(1)
+    expect(databaseErrors[0]).toMatchObject({ message: 'delete failed' })
+    expect(rpc.setPlatformData).toHaveBeenCalledExactlyOnceWith(null)
+    expect(revoke).toHaveBeenCalledExactlyOnceWith(current)
+    await store.touch(rpc, { platformSessionId: 'account' })
+    await expect(database.get('mtproto_client_authorization', { authKeyId })).resolves.toEqual([])
+    remove.mockRestore()
+  })
+
+  it('hides a revoked ghost device when both logout deletes and opportunistic cleanup fail', async () => {
+    const database = await createDatabase()
+    const current = authKey(1)
+    const other = authKey(2)
+    const currentAuthKeyId = Buffer.from(current).toString('hex')
+    const otherAuthKeyId = Buffer.from(other).toString('hex')
+    const registered = new Set([currentAuthKeyId, otherAuthKeyId])
+    const revoke = vi.fn(async (authKeyId: Uint8Array) => { registered.delete(Buffer.from(authKeyId).toString('hex')) })
+    const store = new ActiveSessionStore(
+      database,
+      revoke,
+      undefined,
+      async authKeyId => registered.has(Buffer.from(authKeyId).toString('hex')),
+    )
+    await database.upsert('mtproto_auth_binding', [current, other].map(key => ({
+      authKeyId: Buffer.from(key).toString('hex'), platformId: 'test', platformSessionId: 'account',
+    })))
+    const currentRpc = rpcContext(current, desktop)
+    await store.touch(currentRpc, { platformSessionId: 'account' })
+    await store.touch(rpcContext(other, android), { platformSessionId: 'account' })
+    const remove = vi.spyOn(database, 'remove').mockImplementation(async (table, query) => {
+      if ((query as { authKeyId?: string }).authKeyId === currentAuthKeyId) {
+        throw new Error(`cannot remove ${table}`)
+      }
+      return [] as never
+    })
+
+    await expect(store.logout(currentRpc)).resolves.toHaveLength(2)
+    await store.finishLogout(currentRpc)
+    await expect(store.list(rpcContext(other, android), { platformSessionId: 'account' }))
+      .resolves.toMatchObject({ authorizations: [{ current: true, deviceModel: 'Pixel 10' }] })
+    await expect(store.list(rpcContext(other, android), { platformSessionId: 'account' }))
+      .resolves.toMatchObject({ authorizations: [{ deviceModel: 'Pixel 10' }] })
+    await expect(database.get('mtproto_auth_binding', { authKeyId: currentAuthKeyId })).resolves.toHaveLength(1)
+    await expect(database.get('mtproto_client_authorization', { authKeyId: currentAuthKeyId })).resolves.toHaveLength(1)
+    remove.mockRestore()
+  })
+
+  it('unblocks a later authorization reservation when a non-terminal reservation is cancelled', async () => {
+    const reserve = createAuthorizationReservationQueue()
+    const first = reserve('auth-key')
+    const second = reserve('auth-key')
+    let secondFinished = false
+    const waitForSecond = second.wait().then(() => { secondFinished = true })
+
+    await Promise.resolve()
+    expect(secondFinished).toBe(false)
+    first.release()
+    await waitForSecond
+
+    expect(secondFinished).toBe(true)
+    second.release()
+    await expect(reserve('auth-key').wait()).resolves.toBeUndefined()
+  })
+
+  it('rejects an authorization queued after a terminal logout reservation until cleanup releases it', async () => {
+    const reserve = createAuthorizationReservationQueue()
+    const predecessor = reserve('auth-key')
+    const logout = reserve('auth-key', true)
+    let logoutStarted = false
+    const waitForLogout = logout.wait().then(() => { logoutStarted = true })
+
+    await Promise.resolve()
+    expect(logoutStarted).toBe(false)
+    let bindingRecreated = false
+    const signIn = async () => {
+      const reservation = reserve('auth-key')
+      await reservation.wait()
+      bindingRecreated = true
+      reservation.release()
+    }
+    await expect(signIn()).rejects.toMatchObject({ code: 401, text: 'AUTH_KEY_UNREGISTERED' })
+    expect(bindingRecreated).toBe(false)
+
+    predecessor.release()
+    await waitForLogout
+    expect(logoutStarted).toBe(true)
+    logout.release()
+    const afterCleanup = reserve('auth-key')
+    await expect(afterCleanup.wait()).resolves.toBeUndefined()
+    afterCleanup.release()
   })
 
   it('stores TTL and per-authorization call/encryption settings', async () => {

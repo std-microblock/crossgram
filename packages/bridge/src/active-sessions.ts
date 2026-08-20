@@ -12,6 +12,12 @@ export interface ActiveSessionIdentity {
 }
 
 export type RevokeAuthKey = (authKeyId: Uint8Array) => Promise<unknown>
+export type BeginAuthKeyRevocation = (
+  authKeyId: Uint8Array,
+  originConnection?: ServerRpcContext['connection'],
+) => Promise<void>
+export type FinishAuthKeyRevocation = (authKeyId: Uint8Array) => Promise<unknown>
+export type IsAuthKeyRegistered = (authKeyId: Uint8Array) => Promise<boolean>
 
 export interface ActiveSessionRpcRegistrar {
   register(method: string, handler: RpcHandler): unknown
@@ -19,13 +25,72 @@ export interface ActiveSessionRpcRegistrar {
 
 export type ResolveActiveSessionIdentity = (rpc: ServerRpcContext) => Promise<ActiveSessionIdentity>
 
+export interface AuthorizationReservation {
+  wait(): Promise<void>
+  release(): void
+}
+
+export type ReserveAuthorization = (authKeyId: string, terminal?: boolean) => AuthorizationReservation
+
+/** Serialize authorization transitions and fence a logged-out key until revocation completes. */
+export function createAuthorizationReservationQueue(): ReserveAuthorization {
+  const authorizationLocks = new Map<string, { tail: Promise<void>, terminal: boolean }>()
+  return (authKeyId, terminal = false) => {
+    const previous = authorizationLocks.get(authKeyId)
+    if (previous?.terminal) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    let resolve!: () => void
+    const tail = new Promise<void>((release) => { resolve = release })
+    authorizationLocks.set(authKeyId, { tail, terminal })
+    let released = false
+    return {
+      wait: () => previous?.tail ?? Promise.resolve(),
+      release: () => {
+        if (released) return
+        released = true
+        resolve()
+        if (authorizationLocks.get(authKeyId)?.tail === tail) authorizationLocks.delete(authKeyId)
+      },
+    }
+  }
+}
+
 export function registerActiveSessionRpc(
   rpc: ActiveSessionRpcRegistrar,
   sessions: ActiveSessionStore,
   resolveIdentity: ResolveActiveSessionIdentity,
+  reserveAuthorization: ReserveAuthorization,
 ): void {
   rpc.register('account.getAuthorizations', async (context) =>
     sessions.list(context, await resolveIdentity(context)))
+  rpc.register('auth.logOut', async (context) => {
+    if (!context.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    if (!context.afterResponseSettled) throw new RpcError(500, 'INTERNAL')
+    const reservation = reserveAuthorization(authKeyHex(context.authKeyId), true)
+    try {
+      await reservation.wait()
+      await sessions.beginLogout(context)
+    } catch (error) {
+      reservation.release()
+      throw error
+    }
+    context.afterResponseSettled(async () => {
+      try {
+        const databaseErrors = await sessions.logout(context)
+        let revokeError: unknown
+        try {
+          await sessions.finishLogout(context)
+        } catch (error) {
+          revokeError = error
+        }
+        if (databaseErrors.length || revokeError) {
+          throw new AggregateError([...databaseErrors, ...(revokeError ? [revokeError] : [])], 'logout cleanup failed')
+        }
+      } finally {
+        reservation.release()
+      }
+    })
+    return { _: context.apiLayer !== null && context.apiLayer < 135 ? 'boolTrue' : 'auth.loggedOut' }
+  })
   rpc.register('account.resetAuthorization', async (context, request) => ({
     _: await sessions.reset(
       context,
@@ -55,39 +120,69 @@ export function registerActiveSessionRpc(
 
 /** Durable implementation of Telegram's Settings > Active Sessions RPCs. */
 export class ActiveSessionStore {
+  private readonly _touchLocks = new Map<string, Promise<void>>()
+  private readonly _finishAuthKeyRevocation: FinishAuthKeyRevocation
+
   constructor(
     private readonly _database: Database,
     private readonly _revokeAuthKey: RevokeAuthKey,
     private readonly _now: () => number = () => Date.now(),
-  ) {}
+    private readonly _isAuthKeyRegistered: IsAuthKeyRegistered = async () => true,
+    private readonly _beginAuthKeyRevocation: BeginAuthKeyRevocation = async () => {},
+    finishAuthKeyRevocation?: FinishAuthKeyRevocation,
+  ) {
+    this._finishAuthKeyRevocation = finishAuthKeyRevocation ?? (authKeyId => this._revokeAuthKey(authKeyId))
+  }
+
+  private async _withTouchLock<T>(authKeyId: string, callback: () => Promise<T>): Promise<T> {
+    const previous = this._touchLocks.get(authKeyId) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>((resolve) => { release = resolve })
+    this._touchLocks.set(authKeyId, current)
+    await previous
+    try {
+      return await callback()
+    } finally {
+      release()
+      if (this._touchLocks.get(authKeyId) === current) this._touchLocks.delete(authKeyId)
+    }
+  }
 
   async touch(rpc: ServerRpcContext, identity: ActiveSessionIdentity): Promise<void> {
     if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-    const authKeyId = authKeyHex(rpc.authKeyId)
-    const [stored] = await this._database.get('mtproto_client_authorization', { authKeyId })
-    const now = Math.floor((rpc.lastActiveAt ?? this._now()) / 1000)
-    const created = Math.floor((rpc.connectedAt ?? rpc.lastActiveAt ?? this._now()) / 1000)
-    const client = rpc.clientInfo
-    const ip = normalizeAddress(rpc.connection.remoteAddress)
-    const row: ClientAuthorizationRow = {
-      authKeyId,
-      platformSessionId: identity.platformSessionId,
-      apiId: client?.apiId ?? stored?.apiId ?? 0,
-      deviceModel: client?.deviceModel || stored?.deviceModel || 'Unknown device',
-      platform: client ? platformName(client.langPack, client.systemVersion) : stored?.platform || 'Unknown',
-      systemVersion: client?.systemVersion || stored?.systemVersion || 'Unknown',
-      appName: client ? applicationName(client.langPack) : stored?.appName || 'Telegram',
-      appVersion: client?.appVersion || stored?.appVersion || '',
-      dateCreated: stored?.dateCreated ?? created,
-      dateActive: Math.max(stored?.dateActive ?? 0, now),
-      ip: ip || stored?.ip || '0.0.0.0',
-      country: locationName(ip || stored?.ip),
-      region: stored?.region ?? '',
-      encryptedRequestsDisabled: stored?.encryptedRequestsDisabled ?? false,
-      callRequestsDisabled: stored?.callRequestsDisabled ?? false,
-      unconfirmed: stored?.unconfirmed ?? false,
-    }
-    await this._database.upsert('mtproto_client_authorization', [row])
+    const authKey = new Uint8Array(rpc.authKeyId)
+    const authKeyId = authKeyHex(authKey)
+    await this._withTouchLock(authKeyId, async () => {
+      if (!await this._isAuthKeyRegistered(authKey)) return
+      const [binding] = await this._database.get('mtproto_auth_binding', {
+        authKeyId, platformSessionId: identity.platformSessionId,
+      })
+      if (!binding) return
+      const [stored] = await this._database.get('mtproto_client_authorization', { authKeyId })
+      const now = Math.floor((rpc.lastActiveAt ?? this._now()) / 1000)
+      const created = Math.floor((rpc.connectedAt ?? rpc.lastActiveAt ?? this._now()) / 1000)
+      const client = rpc.clientInfo
+      const ip = normalizeAddress(rpc.connection.remoteAddress)
+      const row: ClientAuthorizationRow = {
+        authKeyId,
+        platformSessionId: identity.platformSessionId,
+        apiId: client?.apiId ?? stored?.apiId ?? 0,
+        deviceModel: client?.deviceModel || stored?.deviceModel || 'Unknown device',
+        platform: client ? platformName(client.langPack, client.systemVersion) : stored?.platform || 'Unknown',
+        systemVersion: client?.systemVersion || stored?.systemVersion || 'Unknown',
+        appName: client ? applicationName(client.langPack) : stored?.appName || 'Telegram',
+        appVersion: client?.appVersion || stored?.appVersion || '',
+        dateCreated: stored?.dateCreated ?? created,
+        dateActive: Math.max(stored?.dateActive ?? 0, now),
+        ip: ip || stored?.ip || '0.0.0.0',
+        country: locationName(ip || stored?.ip),
+        region: stored?.region ?? '',
+        encryptedRequestsDisabled: stored?.encryptedRequestsDisabled ?? false,
+        callRequestsDisabled: stored?.callRequestsDisabled ?? false,
+        unconfirmed: stored?.unconfirmed ?? false,
+      }
+      await this._database.upsert('mtproto_client_authorization', [row])
+    })
   }
 
   async list(rpc: ServerRpcContext, identity: ActiveSessionIdentity): Promise<tl.account.RawAuthorizations> {
@@ -100,8 +195,32 @@ export class ActiveSessionStore {
     const rows = await this._database.get('mtproto_client_authorization', {
       platformSessionId: identity.platformSessionId,
     })
-    const rowByAuthKey = new Map(rows.map(row => [row.authKeyId, row]))
+    const revoked = new Set<string>()
+    const authKeyIds = [...new Set([...bindings.map(binding => binding.authKeyId), ...rows.map(row => row.authKeyId)])]
+    for (let offset = 0; offset < authKeyIds.length; offset += 16) {
+      const batch = authKeyIds.slice(offset, offset + 16)
+      const active = await Promise.all(batch.map(async (authKeyId) => {
+        try {
+          return await this._isAuthKeyRegistered(authKeyBytes(authKeyId))
+        } catch {
+          return false
+        }
+      }))
+      for (let index = 0; index < batch.length; index++) {
+        if (active[index]) continue
+        const authKeyId = batch[index]!
+        revoked.add(authKeyId)
+        void Promise.allSettled([
+          this._database.remove('mtproto_auth_binding', { authKeyId }),
+          this._database.remove('mtproto_client_authorization', { authKeyId }),
+        ])
+      }
+    }
+    const rowByAuthKey = new Map(rows
+      .filter(row => !revoked.has(row.authKeyId))
+      .map(row => [row.authKeyId, row]))
     const authorizations = bindings
+      .filter(binding => !revoked.has(binding.authKeyId))
       .map(binding => rowByAuthKey.get(binding.authKeyId))
       .filter((row): row is ClientAuthorizationRow => Boolean(row))
       .sort((left, right) => {
@@ -152,6 +271,29 @@ export class ActiveSessionStore {
       await this._database.remove('mtproto_client_authorization', { authKeyId: binding.authKeyId })
       await this._revokeAuthKey(authKeyBytes(binding.authKeyId))
     }
+  }
+
+  async beginLogout(rpc: ServerRpcContext): Promise<void> {
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    await this._beginAuthKeyRevocation(new Uint8Array(rpc.authKeyId), rpc.connection)
+  }
+
+  async logout(rpc: ServerRpcContext): Promise<unknown[]> {
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    const authKeyId = authKeyHex(rpc.authKeyId)
+    return this._withTouchLock(authKeyId, async () => {
+      rpc.setPlatformData(null)
+      const results = await Promise.allSettled([
+        this._database.remove('mtproto_auth_binding', { authKeyId }),
+        this._database.remove('mtproto_client_authorization', { authKeyId }),
+      ])
+      return results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+    })
+  }
+
+  async finishLogout(rpc: ServerRpcContext): Promise<void> {
+    if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+    await this._finishAuthKeyRevocation(new Uint8Array(rpc.authKeyId))
   }
 
   async setTtl(identity: ActiveSessionIdentity, ttlDays: number): Promise<void> {
