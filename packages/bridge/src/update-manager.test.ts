@@ -20,7 +20,8 @@ import { createTestConversationViews } from './conversation-view.test-utils.js'
 
 const session: PlatformSession = {
   platformSessionId: 'updates-session', platformId: 'updates-platform', userId: 'self',
-  credentials: {}, metadata: { firstName: 'Current' },
+  credentials: {}, metadata: { firstName: 'Current', phone: 'qq-uin-must-not-project' },
+  virtualPhone: '888123456789012',
 }
 
 const platform: IMPlatform = {
@@ -483,7 +484,7 @@ describe('UpdateManager', () => {
     const payload = roundTrip(sent[0].update) as tl.RawUpdates
     expect(payload.users).toHaveLength(1)
     expect(payload.users[0]).toMatchObject({
-      _: 'user', self: true, premium: true, firstName: 'User self',
+      _: 'user', self: true, premium: true, firstName: 'User self', phone: '888123456789012',
     })
     expect((payload.updates[0] as tl.RawUpdateNewChannelMessage).message).toMatchObject({
       fromId: { _: 'peerUser', userId: (payload.users[0] as tl.RawUser).id },
@@ -1085,7 +1086,9 @@ describe('UpdateManager', () => {
     })
     expect(payload.users).toHaveLength(3)
     expect(payload.users).toEqual(expect.arrayContaining([
-      expect.objectContaining({ _: 'user', self: true, firstName: 'User self', photo: expect.any(Object) }),
+      expect.objectContaining({
+        _: 'user', self: true, firstName: 'User self', phone: '888123456789012', photo: expect.any(Object),
+      }),
       expect.objectContaining({ _: 'user', firstName: 'User bob', photo: expect.any(Object) }),
       expect.objectContaining({ _: 'user', firstName: 'User carol', photo: expect.any(Object) }),
     ]))

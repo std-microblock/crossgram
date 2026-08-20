@@ -87,6 +87,8 @@ export interface PlatformSession {
   userId: string
   credentials: JsonValue
   metadata: JsonObject
+  /** MTProto login phone from this session's auth binding. */
+  virtualPhone?: string
 }
 
 /** The adapter-owned identity represented by one Cordis platform entry. */

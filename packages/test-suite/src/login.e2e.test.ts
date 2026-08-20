@@ -997,7 +997,9 @@ describe('bridge login e2e', () => {
         phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
       }, 4)
       expect(authorization).toMatchObject({
-        _: 'auth.authorization', user: { self: true, premium: true },
+        _: 'auth.authorization', user: {
+          self: true, premium: true, phone: platformLogin.auth.virtualPhone,
+        },
       })
 
       const selfUsers = await callRpc(client, key, sid, {
@@ -1008,10 +1010,14 @@ describe('bridge login e2e', () => {
       }, 8)
       expect(selfUsers).toMatchObject([{
         _: 'user', id: authorization.user.id, self: true, premium: true,
+        phone: platformLogin.auth.virtualPhone,
       }])
       expect(selfFull).toMatchObject({
         _: 'users.userFull', fullUser: { _: 'userFull', id: authorization.user.id },
-        users: [{ _: 'user', id: authorization.user.id, self: true, premium: true }],
+        users: [{
+          _: 'user', id: authorization.user.id, self: true, premium: true,
+          phone: platformLogin.auth.virtualPhone,
+        }],
       })
 
       const exported = await callRpc(client, key, sid, { _: 'auth.exportAuthorization', dcId: 2 }, 10)
@@ -1026,10 +1032,14 @@ describe('bridge login e2e', () => {
       }, 14)
       expect(imported).toMatchObject({ _: 'auth.authorization', user: {
         id: authorization.user.id, self: true, premium: true,
+        phone: platformLogin.auth.virtualPhone,
       } })
       expect(importedFull).toMatchObject({
         _: 'users.userFull', fullUser: { _: 'userFull', id: authorization.user.id },
-        users: [{ _: 'user', id: authorization.user.id, self: true, premium: true }],
+        users: [{
+          _: 'user', id: authorization.user.id, self: true, premium: true,
+          phone: platformLogin.auth.virtualPhone,
+        }],
       })
     } finally {
       media?.close()
@@ -3024,6 +3034,11 @@ describe('bridge login e2e', () => {
 
       resumed = await TestClient.connect(port)
       const resumedSid = new Long(0x456789ab, 0x4abc, false)
+      expect(await callRpc(resumed, key, resumedSid, {
+        _: 'users.getUsers', id: [{ _: 'inputUserSelf' }],
+      }, 10)).toMatchObject([{
+        _: 'user', self: true, phone: platformLogin.auth.virtualPhone,
+      }])
       const difference = await callRpc(resumed, key, resumedSid, {
         _: 'updates.getDifference', pts: before.pts, date: before.date, qts: before.qts,
       }, 12)
@@ -3579,7 +3594,9 @@ describe('bridge login e2e', () => {
         _: 'auth.signIn', phoneNumber: '88800777', phoneCodeHash: code.phoneCodeHash,
         phoneCode: bridge.generateLoginCode('22'.repeat(20)),
       }, 6)
-      expect(authorization._).toBe('auth.authorization')
+      expect(authorization).toMatchObject({
+        _: 'auth.authorization', user: { self: true, premium: true, phone: '88800777' },
+      })
       expect(handler).toBeTypeOf('function')
       expect(await callRpc(client, key, sid, {
         _: 'users.getUsers',
@@ -3607,7 +3624,7 @@ describe('bridge login e2e', () => {
           message: { id: 0x40000007, peerId: { _: 'peerChannel' }, message: 'arrived by subscribe' },
         }],
         chats: [{ _: 'channel', megagroup: true, title: 'Push Group' }],
-        users: [{ _: 'user', self: true, premium: true }],
+        users: [{ _: 'user', self: true, premium: true, phone: '88800777' }],
       })
       expect(pushed.users).toHaveLength(1)
       const [stored] = await ctx.database.get('mtproto_im_message', {})

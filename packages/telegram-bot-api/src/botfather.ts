@@ -1,7 +1,9 @@
 import { randomBytes } from 'node:crypto'
 import type { Context } from 'cordis'
+import type { Database } from '@cordisjs/plugin-database'
 import {
-  type IMConversation, type IMMessage, type PlatformSession, type SystemPeer, type SystemPeerProvider, SystemPeerService,
+  sessionFromRow, type IMConversation, type IMMessage, type PlatformSession, type SystemPeer, type SystemPeerProvider,
+  SystemPeerService,
 } from '@mtproto-relay/bridge'
 import { BotRegistry, BotUsernameTakenError, botConversationId, type BotIdentity, type BotOwner, validUsername } from './registry.js'
 
@@ -11,16 +13,12 @@ export { botConversationId, validUsername }
 
 export function registerBotFather(ctx: Context, registry: BotRegistry): () => void {
   const activeSessionIds = new Set(ctx.imPlatform.sessions.map(({ session }) => session.platformSessionId))
-  const unregister = ctx.systemPeer.register(new BotFatherProvider(registry))
+  const unregister = ctx.systemPeer.register(new BotFatherProvider(ctx.database, registry))
   void ctx.database.prepared().then(async () => {
     const rows = await ctx.database.get('mtproto_platform_session', { active: true })
-    await Promise.all(rows.filter((row) => !activeSessionIds.has(row.id)).map((row) => ctx.systemPeer.bootstrap({
-      platformId: row.platformId,
-      platformSessionId: row.id,
-      userId: row.userId,
-      credentials: row.credentials,
-      metadata: row.metadata,
-    })))
+    await Promise.all(rows.filter((row) => !activeSessionIds.has(row.id)).map((row) =>
+      ctx.systemPeer.bootstrap(sessionFromRow(row)),
+    ))
   }).catch((error) => ctx.logger('telegram-bot-api').warn('BotFather bootstrap recovery failed: %s', String(error)))
   return unregister
 }
@@ -28,18 +26,25 @@ export function registerBotFather(ctx: Context, registry: BotRegistry): () => vo
 class BotFatherProvider implements SystemPeerProvider {
   private readonly _flows = new Map<string, { stage: 'name' | 'username', name?: string }>()
 
-  constructor(private readonly _registry: BotRegistry) {}
+  constructor(
+    private readonly _database: Database,
+    private readonly _registry: BotRegistry,
+  ) {}
 
   async bootstrap(session: PlatformSession, peers: SystemPeerService): Promise<void> {
+    const [auth] = await this._database.get('mtproto_auth_session', {
+      platformId: session.platformId, platformSessionId: session.platformSessionId,
+    })
+    const hydrated = { ...session, virtualPhone: auth?.virtualPhone }
     const father = botFatherPeer()
-    await peers.emit(session, { type: 'conversation', conversation: father.conversation })
-    await peers.emit(session, {
+    await peers.emit(hydrated, { type: 'conversation', conversation: father.conversation })
+    await peers.emit(hydrated, {
       type: 'message',
       conversation: father.conversation,
       message: systemMessage(father.conversation, 'bridge:botfather:welcome', 'Welcome to BotFather. Send /newbot to create a bot.'),
     })
-    for (const bot of await this._registry.list(ownerFrom(session))) {
-      if (bot.enabled) await bootstrapBot(session, bot, peers)
+    for (const bot of await this._registry.list(ownerFrom(hydrated))) {
+      if (bot.enabled) await bootstrapBot(hydrated, bot, peers)
     }
   }
 

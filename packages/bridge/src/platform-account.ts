@@ -140,7 +140,7 @@ export async function provisionPlatformAccount(
     await database.create('mtproto_auth_session', auth)
   }
 
-  return { auth, profile: resolved.user, session: sessionFromRow(row) }
+  return { auth, profile: resolved.user, session: sessionFromRow(row, auth.virtualPhone) }
 }
 
 function validateAccount(account: IMPlatformAccount): void {

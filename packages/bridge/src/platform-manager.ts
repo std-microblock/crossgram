@@ -233,7 +233,10 @@ export class PlatformSubscriptionManager {
       ...(platformId ? { platformId } : {}),
     })
     await Promise.all(rows.map(async (row) => {
-      const session = sessionFromRow(row)
+      const [auth] = await this._database.get('mtproto_auth_session', {
+        platformId: row.platformId, platformSessionId: row.id,
+      })
+      const session = sessionFromRow(row, auth?.virtualPhone)
       try {
         await this._store.pruneUpdateDeliveries(session.platformSessionId)
         await this.ensure(session)
@@ -996,13 +999,14 @@ function historyLoadKey(
   ])
 }
 
-export function sessionFromRow(row: PlatformSessionRow): PlatformSession {
+export function sessionFromRow(row: PlatformSessionRow, virtualPhone?: string): PlatformSession {
   return {
     platformSessionId: row.id,
     platformId: row.platformId,
     userId: row.userId,
     credentials: row.credentials,
     metadata: row.metadata,
+    virtualPhone,
   }
 }
 

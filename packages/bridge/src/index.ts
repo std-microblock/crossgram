@@ -1312,7 +1312,11 @@ function createSessionResolver(
         active: true,
       })
       if (!row) throw new RpcError(401, 'PLATFORM_SESSION_REVOKED')
-      const session = sessionFromRow(row)
+      const [auth] = await ctx.database.get('mtproto_auth_session', {
+        platformId: identity.platformId, platformSessionId: identity.platformSessionId,
+      })
+      if (!auth) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
+      const session = sessionFromRow(row, auth.virtualPhone)
       const selfRow = await store.getUser(session.platformId, session.userId)
         ?? await store.upsertUser(session, {
           id: session.userId,

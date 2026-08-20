@@ -17,7 +17,8 @@ const session: PlatformSession = {
   platformId: 'dialog-test',
   userId: 'me',
   credentials: { token: 'test' },
-  metadata: { firstName: 'Current', lastName: 'User' },
+  metadata: { firstName: 'Current', lastName: 'User', phone: 'qq-uin-must-not-project' },
+  virtualPhone: '888123456789012',
 }
 
 function makeViewRpc(
@@ -861,7 +862,10 @@ describe('DialogRpc', () => {
         { _: 'inputUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO },
       ],
     })
-    expect(users.map((user) => user._ === 'user' ? user.firstName : '')).toEqual(['Current', 'Alice'])
+    expect(users).toMatchObject([
+      { _: 'user', self: true, firstName: 'Current', phone: '888123456789012' },
+      { _: 'user', firstName: 'Alice' },
+    ])
 
     const full = await rpc.getFullUser({
       _: 'users.getFullUser',
@@ -879,7 +883,7 @@ describe('DialogRpc', () => {
     })
     expect(self).toMatchObject({
       fullUser: { _: 'userFull', about: 'Self signature' },
-      users: [{ _: 'user', self: true, firstName: 'Current' }],
+      users: [{ _: 'user', self: true, firstName: 'Current', phone: '888123456789012' }],
     })
 
     const emptyAbout = await rpc.getFullUser({

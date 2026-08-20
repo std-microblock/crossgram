@@ -57,10 +57,12 @@ class PushPlatform implements IMPlatform {
   getDialogs?: IMPlatform['getDialogs']
   getRequests?: IMPlatform['getRequests']
   getHistory?: IMPlatform['getHistory']
+  subscribedSession?: PlatformSession
   private _handler?: (event: IMEvent) => void | Promise<void>
 
-  async subscribe(_session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe> {
+  async subscribe(session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>): Promise<Unsubscribe> {
     this.subscribeCalls++
+    this.subscribedSession = session
     this._handler = handler
     return async () => {
       this.unsubscribeCalls++
@@ -527,11 +529,19 @@ describe('PlatformSubscriptionManager', () => {
       id: 'inactive', platformId: session.platformId, userId: 'self', credentials: {}, metadata: {},
       active: false, createdAt: new Date(),
     })
+    await database.create('mtproto_auth_session', {
+      id: 'active-auth', virtualPhone: '888123456789012', totpSecret: '11'.repeat(20),
+      platformId: session.platformId, platformSessionId: session.platformSessionId,
+    })
     const manager = new PlatformSubscriptionManager(
       database, new PlatformRegistry([['push', platform]]), new MessageStore(database),
     )
     await manager.startActiveSessions()
     expect(platform.subscribeCalls).toBe(1)
+    expect(platform.subscribedSession).toMatchObject({
+      platformSessionId: session.platformSessionId,
+      virtualPhone: '888123456789012',
+    })
     await manager.stop()
   })
   it('recovers messages missed before subscription startup through the committed update pipeline', async () => {

@@ -83,6 +83,7 @@ export class UpdateManager {
           firstName: user.firstName,
           lastName: user.lastName,
           username: user.username,
+          phone: row.platformUserId === session.userId ? session.virtualPhone : undefined,
           photo: user.avatar ? makeUpdateAvatar(user.avatar.id, this._dcId, 'user') : undefined,
         })
       }),
@@ -716,6 +717,7 @@ export class UpdateManager {
     const selfUser = makeUser({
       id: selfRow.id, self: true, premium: true,
       firstName: self.firstName, lastName: self.lastName, username: self.username,
+      phone: session.virtualPhone,
       photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
     })
     const users = uniqueUpdateUsers(senderRow.id === selfRow.id

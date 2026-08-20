@@ -4396,6 +4396,7 @@ export class DialogRpc {
       firstName: profile?.firstName ?? String(this._session.metadata.firstName ?? 'Bridge'),
       lastName: profile?.lastName ?? this._session.metadata.lastName as string | undefined,
       username: profile?.username ?? this._session.metadata.username as string | undefined,
+      phone: this._session.virtualPhone,
       photo: photo ? this._makeAvatarPhoto(photo, 'user') : undefined,
     })
   }

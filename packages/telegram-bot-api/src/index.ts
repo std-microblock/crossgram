@@ -145,9 +145,12 @@ class BotRuntime {
     if (!text) throw new TelegramApiError(400, 'Bad Request: message text is empty')
     const chat = await this._chatById(bot, chatId)
     if (!chat || chat.conversationId !== bot.conversationId) throw new TelegramApiError(400, 'Bad Request: chat not found')
+    const [auth] = await this._database.get('mtproto_auth_session', {
+      platformId: bot.ownerPlatformId, platformSessionId: bot.ownerPlatformSessionId,
+    })
     const session: PlatformSession = {
       platformId: bot.ownerPlatformId, platformSessionId: bot.ownerPlatformSessionId,
-      userId: bot.ownerUserId, credentials: {}, metadata: {},
+      userId: bot.ownerUserId, credentials: {}, metadata: {}, virtualPhone: auth?.virtualPhone,
     }
     const peer = await this._peers.resolve(session, chat.conversationId)
     if (!peer) throw new TelegramApiError(400, 'Bad Request: chat not found')

@@ -14,7 +14,14 @@ import * as telegramBotApi from './index.js'
 const session: PlatformSession = { platformId: 'static', platformSessionId: 'bot-owner', userId: 'owner', credentials: {}, metadata: { firstName: 'Owner' } }
 const platform = { capabilities: { history: false, send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 }, conversations: { groups: false, channels: false, subchannels: false } }, async subscribe() { return () => {} }, async sendMessage() { throw new Error('unused') } }
 
-interface Fixture { ctx: Context, token: string, conversationId: string, events: IMEvent[], stop(): Promise<void> }
+interface Fixture {
+  ctx: Context
+  token: string
+  conversationId: string
+  events: IMEvent[]
+  emittedSessions: PlatformSession[]
+  stop(): Promise<void>
+}
 const fixtures: Fixture[] = []
 const temporaryDirectories: string[] = []
 
@@ -37,18 +44,24 @@ async function createFixture(path = ':memory:'): Promise<Fixture> {
     id: session.platformSessionId, platformId: session.platformId, userId: session.userId,
     credentials: {}, metadata: {}, active: true, createdAt: new Date(),
   })
+  await ctx.database.create('mtproto_auth_session', {
+    id: 'bot-owner-auth', virtualPhone: '888123456789012', totpSecret: '11'.repeat(20),
+    platformId: session.platformId, platformSessionId: session.platformSessionId,
+  })
   const imPlatform = new IMPlatformService(ctx)
   const peers = new SystemPeerService(ctx)
   imPlatform.activateSession('static', platform, session)
   const events: IMEvent[] = []
+  const emittedSessions: PlatformSession[] = []
   peers.attach(async (eventSession, event) => {
+    emittedSessions.push(eventSession)
     events.push(event)
     if (event.type === 'message') imPlatform.emitCommittedEvent(eventSession, { event, result: {} as never })
   })
   const api = ctx.plugin(telegramBotApi, { verifierSecret: 'test-verifier-secret' })
   await api
   const issued = await ctx.botRegistry.create({ platformId: session.platformId, platformSessionId: session.platformSessionId, userId: session.userId }, 'Echo Bot', 'echo_bot')
-  const fixture = { ctx, token: issued.token, conversationId: issued.bot.conversationId, events, async stop() {
+  const fixture = { ctx, token: issued.token, conversationId: issued.bot.conversationId, events, emittedSessions, async stop() {
     await api.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose()
   } }
   fixtures.push(fixture)
@@ -89,6 +102,11 @@ describe('dynamic Telegram Bot API', () => {
     const sent = await (await fetch(endpoint(fixture, 'sendMessage'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: updates.result[0].message.chat.id, text: 'reply' }) })).json()
     expect(sent).toMatchObject({ ok: true, result: { text: 'reply', from: { username: 'echo_bot' } } })
     expect(fixture.events.filter((event) => event.type === 'message').at(-1)).toMatchObject({ message: { conversationId: fixture.conversationId, outgoing: false, content: { parts: [{ text: 'reply' }] } } })
+    expect(fixture.emittedSessions.at(-1)).toMatchObject({
+      platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+      virtualPhone: '888123456789012',
+    })
     const unavailable = await fetch(endpoint(fixture, 'sendMessage'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: 999_999, text: 'nope' }) })
     expect(unavailable.status).toBe(400)
 

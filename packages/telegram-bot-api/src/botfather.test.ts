@@ -1,9 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
-import { defineModels, IMPlatformService, SystemPeerService, type IMEvent, type PlatformSession } from '@mtproto-relay/bridge'
+import {
+  defineModels, IMPlatformService, MessageStore, PlatformRegistry, SystemPeerService, UpdateManager,
+  type IMEvent, type PlatformSession,
+} from '@mtproto-relay/bridge'
 import * as telegramBotApi from './index.js'
 
 const owner: PlatformSession = { platformId: 'static', platformSessionId: 'owner-session', userId: 'owner', credentials: {}, metadata: {} }
@@ -37,6 +40,62 @@ async function createFixture() {
   await peers.bootstrap(owner)
   fixtures.push(async () => { await api.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose() })
   return { ctx, events, peers }
+}
+
+async function startBootstrapUpdate(active: boolean, virtualPhone?: string) {
+  const ctx = new Context()
+  const database = ctx.plugin(Database)
+  const sqlite = ctx.plugin(SQLiteDriver, { path: ':memory:' })
+  const server = ctx.plugin(Server, { host: '127.0.0.1', port: 0 })
+  await Promise.all([database, sqlite, server])
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  defineModels(ctx)
+  await ctx.database.prepared()
+  await ctx.database.create('mtproto_platform_session', {
+    id: owner.platformSessionId, platformId: owner.platformId, userId: owner.userId,
+    credentials: {}, metadata: { firstName: 'Owner' }, active: true, createdAt: new Date(),
+  })
+  if (virtualPhone) {
+    await ctx.database.create('mtproto_auth_session', {
+      id: 'bootstrap-owner-auth', virtualPhone, totpSecret: '11'.repeat(20),
+      platformId: owner.platformId, platformSessionId: owner.platformSessionId,
+    })
+  }
+  const imPlatform = new IMPlatformService(ctx)
+  const peers = new SystemPeerService(ctx)
+  const store = new MessageStore(ctx.database)
+  const updates = new UpdateManager(
+    ctx.database, new PlatformRegistry([[owner.platformId, platform]]), store, () => 0,
+  )
+  peers.attach(async (eventSession, event) => {
+    if (event.type === 'conversation') {
+      await store.upsertConversation(eventSession, event.conversation)
+      return
+    }
+    if (event.type === 'message') {
+      const result = await store.ingest(eventSession, event.conversation, event.message)
+      return updates.publish(eventSession, { event, result })
+    }
+  })
+  if (active) imPlatform.activateSession('static', platform, owner)
+  const api = ctx.plugin(telegramBotApi, { verifierSecret: 'recovery-test-secret' })
+  await api
+  return {
+    store,
+    async stop() { await api.dispose(); await server.dispose(); await sqlite.dispose(); await database.dispose() },
+  }
+}
+
+async function bootstrapPayload(active: boolean, virtualPhone?: string) {
+  const fixture = await startBootstrapUpdate(active, virtualPhone)
+  try {
+    await vi.waitFor(async () => {
+      expect(await fixture.store.getUpdateDeliveriesAfter(owner.platformSessionId, 0)).toHaveLength(1)
+    })
+    return (await fixture.store.getUpdateDeliveriesAfter(owner.platformSessionId, 0))[0]?.payload
+  } finally {
+    await fixture.stop()
+  }
 }
 
 function userMessage(text: string) {
@@ -105,5 +164,22 @@ describe('BotRegistry and BotFather system peer', () => {
     expect(persistedText).toContain('Cancelled')
     expect(persistedText).toContain('already taken')
     expect(persistedText).toMatch(/\d+:[A-Za-z0-9_-]{43}/u)
+  })
+
+  it('uses the recovered auth session phone in the persisted BotFather update', async () => {
+    await expect(bootstrapPayload(false, '888123456789012')).resolves.toMatchObject({
+      users: expect.arrayContaining([expect.objectContaining({ self: true, phone: '888123456789012' })]),
+    })
+  })
+
+  it('hydrates an active in-memory session from its exact auth row before the welcome update', async () => {
+    await expect(bootstrapPayload(true, '888123456789012')).resolves.toMatchObject({
+      users: expect.arrayContaining([expect.objectContaining({ self: true, phone: '888123456789012' })]),
+    })
+  })
+
+  it('omits the self phone when the active session has no auth row', async () => {
+    const payload = await bootstrapPayload(true) as { users: Array<{ self?: boolean, phone?: string }> }
+    expect(payload.users.find((user) => user.self)).not.toHaveProperty('phone')
   })
 })
