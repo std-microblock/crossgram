@@ -70,7 +70,7 @@ export interface VoiceWorkerSocketClientOptions {
   readonly onDiagnostic?: (phase: VoiceWorkerDiagnosticPhase, code: string) => void
 }
 
-export type VoiceWorkerDiagnosticPhase = 'pcm-send' | 'pcm-receive' | 'pcm-close' | 'native-error'
+export type VoiceWorkerDiagnosticPhase = 'prepare-caller' | 'pcm-send' | 'pcm-receive' | 'pcm-close' | 'native-error'
 
 export type VoiceWorkerIpcRequest =
   | { readonly tag: 0x01, readonly callId: bigint }
@@ -231,9 +231,14 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
   }
 
   async prepareTelegramCaller(call: VoiceWorkerCall): Promise<VoiceWorkerCallerPreparation> {
-    const response = await this._request({ tag: 0x01, callId: this._callId(call) })
-    if (response.tag !== 0x81) throw unavailable()
-    return { state: 'ready', gAHash: response.gAHash }
+    const response = await this._request({ tag: 0x01, callId: this._callId(call) }, true, undefined, 'prepare-caller')
+    try {
+      if (response.tag !== 0x81) throw unavailable()
+      return { state: 'ready', gAHash: response.gAHash }
+    } catch (error) {
+      this._diagnose('prepare-caller', error)
+      throw error
+    }
   }
 
   async prepareTelegramRecipient(
@@ -434,12 +439,14 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
     request: VoiceWorkerIpcRequest,
     retryTransport = false,
     signal?: AbortSignal,
+    diagnosticPhase?: VoiceWorkerDiagnosticPhase,
   ): Promise<VoiceWorkerIpcResponse> {
     if (this._closed || signal?.aborted) throw unavailable()
     const encoded = encodeVoiceWorkerRequest(request)
     try {
       return await this._requestEncoded(encoded, retryTransport, signal)
     } catch (error) {
+      if (diagnosticPhase) this._diagnose(diagnosticPhase, error)
       if (error instanceof VoiceCallError) throw error
       throw unavailable()
     } finally {

@@ -479,6 +479,23 @@ describeUnix('VoiceWorkerSocketClient', () => {
     expect(openSocketCount(client)).toBe(0)
   })
 
+  it('retries one empty prepare-caller timeout with the same Unix frame', async () => {
+    const gaHash = new Uint8Array(32).fill(6)
+    let requestCount = 0
+    const server = await fakeServer((_request, socket) => {
+      requestCount++
+      if (requestCount === 1) return
+      socket.end(response(Buffer.concat([Buffer.from([3, 0x81]), Buffer.from(gaHash)])))
+    })
+    const client = new VoiceWorkerSocketClient({ socketPath: server.path, timeoutMs: 20 })
+
+    await expect(client.prepareTelegramCaller(call)).resolves.toEqual({ state: 'ready', gAHash: gaHash })
+
+    expect(server.requests).toHaveLength(2)
+    expect(server.requests[1]).toEqual(server.requests[0])
+    expect(openSocketCount(client)).toBe(0)
+  })
+
   it('retries one empty timeout after connecting and cleans up each socket', async () => {
     let requestCount = 0
     const server = await fakeServer((request, socket) => {
@@ -503,6 +520,28 @@ describeUnix('VoiceWorkerSocketClient', () => {
     await expect(client.sendSignalingData(call, Uint8Array.of(4, 5)))
       .rejects.toMatchObject({ code: 'CALL_MEDIA_UNAVAILABLE' })
     expect(openSocketCount(client)).toBe(0)
+  })
+
+  it('reports redacted final prepare-caller failures', async () => {
+    const cases: Array<{ reply: (socket: Socket) => void, diagnosticCode: string, errorCode: string, requests: number }> = [
+      { reply: (socket) => socket.end(), diagnosticCode: 'TRANSPORT_RETRYABLE', errorCode: 'CALL_MEDIA_UNAVAILABLE', requests: 2 },
+      { reply: (socket) => socket.end(Buffer.from([0, 0, 0, 2, 2])), diagnosticCode: 'TRANSPORT_TERMINAL', errorCode: 'CALL_MEDIA_UNAVAILABLE', requests: 1 },
+      { reply: (socket) => socket.end(response(Uint8Array.of(3, 0xff, 2))), diagnosticCode: 'CALL_OCCUPY_FAILED', errorCode: 'CALL_OCCUPY_FAILED', requests: 1 },
+    ]
+    for (const testCase of cases) {
+      const diagnostics: Array<[string, string]> = []
+      const server = await fakeServer((_request, socket) => testCase.reply(socket))
+      const client = new VoiceWorkerSocketClient({
+        socketPath: server.path,
+        timeoutMs: 20,
+        onDiagnostic: (phase, code) => diagnostics.push([phase, code]),
+      })
+
+      await expect(client.prepareTelegramCaller(call)).rejects.toMatchObject({ code: testCase.errorCode })
+
+      expect(diagnostics).toEqual([['prepare-caller', testCase.diagnosticCode]])
+      expect(server.requests).toHaveLength(testCase.requests)
+    }
   })
 
   it('fails closed for worker errors, bad frames, short reads, timeouts, and aborts', async () => {
