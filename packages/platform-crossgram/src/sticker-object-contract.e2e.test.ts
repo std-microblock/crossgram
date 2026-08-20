@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -66,6 +67,8 @@ describe('QQ store animated sticker object contract E2E', () => {
     if (all._ !== 'messages.allStickers') throw new Error('expected complete sticker catalog')
     expect(all.sets).toHaveLength(1)
     const set = all.sets[0]!
+    expect(set.id.toNumber()).toBe(testStickerProjectionId('sticker-set:v9:qqnt:stickers:11690'))
+    expect(set.id.toNumber()).not.toBe(testStickerProjectionId('sticker-set:v8:qqnt:stickers:11690'))
     const pack = await rpc.getStickerSet({
       _: 'messages.getStickerSet',
       stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },
@@ -80,6 +83,9 @@ describe('QQ store animated sticker object contract E2E', () => {
       const expectedMime = index === 0 ? 'image/gif' : 'image/apng'
       const packDocument = pack.documents[index]
       if (!packDocument || packDocument._ !== 'document') throw new Error('expected pack document')
+      expect(packDocument.id.toNumber()).toBe(testStickerProjectionId(
+        `sticker-document:v9:qqnt:stickers:${sticker.stickerId}`,
+      ))
       assertStickerDocument(wireRoundTrip(packDocument), expectedMime, set.id)
 
       const media = wireRoundTrip(rpc.makeMessageMedia(sticker))
@@ -212,4 +218,9 @@ function marketSticker(
 function wireRoundTrip<T>(object: T): T {
   const bytes = TlBinaryWriter.serializeObject(__tlWriterMap, object as tl.TlObject)
   return new TlBinaryReader(__tlReaderMap, bytes).object() as T
+}
+
+function testStickerProjectionId(value: string): number {
+  const hash = createHash('sha256').update(value).digest()
+  return 1 + hash.readUInt32BE(0) * 0x10_0000 + (hash.readUInt32BE(4) & 0x0f_ffff)
 }

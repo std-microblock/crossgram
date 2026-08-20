@@ -18,8 +18,10 @@ interface ResolvedSticker {
   sticker: IMSticker
 }
 
-// v8 replaces the old 31-bit projection IDs with wide deterministic IDs.
-const STICKER_PROJECTION_VERSION = 8
+// v8 replaced the old 31-bit projection IDs with wide deterministic IDs.
+// v9 invalidates documents whose dimensions were cached before QQ favorites
+// started exposing their intrinsic aspect ratio.
+const STICKER_PROJECTION_VERSION = 9
 const STICKER_PROVIDER_CACHE_TTL_MS = 5 * 60_000
 // Telegram Desktop ignores every document field when date is zero, leaving a
 // zero-byte generic file. Keep synthetic sticker documents on a stable,

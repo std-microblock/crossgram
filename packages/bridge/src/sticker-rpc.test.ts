@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
@@ -62,6 +63,32 @@ describe('StickerRpc', () => {
     }
     expect(stickerAttribute.stickerset.id.equals(stickerAttribute.stickerset.accessHash)).toBe(true)
     expect(stickerAttribute.stickerset.id.isZero()).toBe(false)
+  })
+
+  it('rotates synthetic sticker IDs so clients discard cached square dimensions', () => {
+    const { rpc, sticker } = stickerHarness()
+    sticker.width = 512
+    sticker.height = 286
+
+    const media = rpc.makeMessageMedia(sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+    const stickerAttribute = media.document.attributes.find((attribute) =>
+      attribute._ === 'documentAttributeSticker')
+    if (!stickerAttribute || stickerAttribute._ !== 'documentAttributeSticker'
+      || stickerAttribute.stickerset._ !== 'inputStickerSetID') throw new Error('expected sticker set ID')
+
+    expect(media.document.id.toNumber()).toBe(testStickerProjectionId(
+      `sticker-document:v9:${sticker.providerId}:${sticker.stickerId}`,
+    ))
+    expect(media.document.id.toNumber()).not.toBe(testStickerProjectionId(
+      `sticker-document:v8:${sticker.providerId}:${sticker.stickerId}`,
+    ))
+    expect(stickerAttribute.stickerset.id.toNumber()).toBe(testStickerProjectionId(
+      `sticker-set:v9:${sticker.providerId}:${sticker.packId}`,
+    ))
+    expect(media.document.attributes).toContainEqual({
+      _: 'documentAttributeImageSize', w: 512, h: 286,
+    })
   })
 
   it('rejects unsupported built-in sets instead of claiming an initial request was not modified', async () => {
@@ -876,6 +903,11 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     cacheTtlMs,
   )
   return { rpc, provider, sticker, query, database, touch: () => { revision++ } }
+}
+
+function testStickerProjectionId(value: string): number {
+  const hash = createHash('sha256').update(value).digest()
+  return 1 + hash.readUInt32BE(0) * 0x10_0000 + (hash.readUInt32BE(4) & 0x0f_ffff)
 }
 
 function telegramDocumentHash(ids: Long[]): Long {
