@@ -17,6 +17,7 @@ vi.mock('@cordisjs/client', async () => {
 })
 vi.mock('jsqr', () => ({ default: vi.fn(() => qrState.result) }))
 
+import jsQR from 'jsqr'
 import { PlatformAccountsPage, StickerPacksPage } from './page.js'
 
 afterEach(() => {
@@ -151,7 +152,20 @@ describe('Bridge platform account page', () => {
     delete (document as { execCommand?: unknown }).execCommand
   })
 
-  it('approves a pasted Telegram login QR for the only ready account', async () => {
+  it('does not intercept a plain-text-only paste event', () => {
+    const wrapper = mountPlatformAccountsPage()
+    const event = new Event('paste', { cancelable: true }) as ClipboardEvent
+    Object.defineProperty(event, 'clipboardData', { value: { items: [{ type: 'text/plain' }] } })
+
+    window.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
+    expect(jsQR).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('approves a pasted Telegram login QR without keyboard modifiers', async () => {
     rpcState.data.accounts = [{ platformId: 'static', platformKind: 'static', status: 'ready' }]
     qrState.result = { data: telegramQr() }
     const wrapper = mountPlatformAccountsPage()
@@ -254,8 +268,8 @@ function pasteImage(modifiers: { ctrlKey?: boolean, metaKey?: boolean } = {}): v
   const file = new File(['image'], 'login.png', { type: 'image/png' })
   const event = new Event('paste') as ClipboardEvent
   Object.defineProperties(event, {
-    ctrlKey: { value: modifiers.ctrlKey ?? !modifiers.metaKey },
-    metaKey: { value: modifiers.metaKey ?? false },
+    ...(modifiers.ctrlKey === undefined ? {} : { ctrlKey: { value: modifiers.ctrlKey } }),
+    ...(modifiers.metaKey === undefined ? {} : { metaKey: { value: modifiers.metaKey } }),
     clipboardData: {
       value: { items: [{ type: 'image/png', getAsFile: () => file }] },
     },

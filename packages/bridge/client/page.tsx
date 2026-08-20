@@ -136,8 +136,6 @@ export const PlatformAccountsPage = defineComponent({
       }
     }
     const handlePaste = (event: ClipboardEvent) => {
-      const modifiers = event as ClipboardEvent & Pick<KeyboardEvent, 'ctrlKey' | 'metaKey'>
-      if (!modifiers.ctrlKey && !modifiers.metaKey) return
       const item = Array.from(event.clipboardData?.items ?? []).find(item => item.type.startsWith('image/'))
       const image = item?.getAsFile()
       if (!image) return
