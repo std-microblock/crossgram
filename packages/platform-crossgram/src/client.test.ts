@@ -112,14 +112,14 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
-  it('streams multiple inputs through the authenticated QQ Flash Transfer endpoint', async () => {
+  it('reuses QQ-origin media and streams only new inputs through the flash-transfer endpoint', async () => {
     let manifest: Record<string, unknown> | undefined
     let body: Buffer<ArrayBufferLike> = Buffer.alloc(0)
     let authorization: string | undefined
     server = createServer(async (request, response) => {
       response.setHeader('content-type', 'application/json')
       if (request.url === '/status') {
-        response.end(JSON.stringify({ protocolVersion: 26, ready: true }))
+        response.end(JSON.stringify({ protocolVersion: 28, ready: true }))
         return
       }
       const encoded = request.headers['x-qqnt-flash-manifest']
@@ -138,7 +138,14 @@ describe('QQNTClient streaming transport', () => {
 
     await expect(client.createFlashTransfer([{
       kind: 'file', name: 'alpha.txt', size: 5,
-      source: { size: 5, async *stream() { yield Buffer.from('al'); yield Buffer.from('pha') } },
+      source: { size: 5, async *stream() { throw new Error('QQ-origin bytes must not be read') } },
+      origin: {
+        id: 'qq-alpha', kind: 'file', name: 'alpha.txt', size: 5,
+        locator: {
+          messageId: 'm1', elementId: 'e1', chatType: 1, peerUid: 'friend',
+          kind: 'file', fileName: 'alpha.txt', filePath: '/qq-cache/alpha.txt', cachedPath: '/relay-cache',
+        },
+      },
     }, {
       kind: 'file', name: 'beta.bin', size: 3,
       source: { size: 3, async *stream() { yield Uint8Array.of(1, 2, 3) } },
@@ -147,9 +154,15 @@ describe('QQNTClient streaming transport', () => {
     })
     expect(manifest).toEqual({
       name: 'Telegram files', framing: 'length-prefixed-v1',
-      files: [{ name: 'alpha.txt', size: 5 }, { name: 'beta.bin', size: 3 }],
+      files: [{
+        source: 'qq-media', name: 'alpha.txt', size: 5,
+        locator: {
+          messageId: 'm1', elementId: 'e1', chatType: 1, peerUid: 'friend',
+          kind: 'file', fileName: 'alpha.txt', filePath: '/qq-cache/alpha.txt',
+        },
+      }, { source: 'upload', name: 'beta.bin', size: 3 }],
     })
-    expect(decodeFramedFiles(body)).toEqual([Buffer.from('alpha'), Buffer.from([1, 2, 3])])
+    expect(decodeFramedFiles(body)).toEqual([Buffer.from([1, 2, 3])])
     expect(authorization).toBe('Bearer secret')
   })
 

@@ -21,7 +21,7 @@ import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
 import { PlatformDataService } from './platform-manager.js'
 import type { PlatformEventDeliveryOptions, PlatformEventPublishResult } from './platform-manager.js'
-import type { IMMediaRow, IMUserRow } from './models.js'
+import type { IMMediaRow, IMUserRow, TlMessagePartRow } from './models.js'
 import type { StagedMedia, UploadedFile, UploadManager } from './upload-manager.js'
 import type { StickerRpc } from './sticker-rpc.js'
 import type { ReactionRpc } from './reaction-rpc.js'
@@ -33,7 +33,7 @@ import { getCardThumbnailFile, makeCardThumbnailPhoto, storageFileType } from '.
 import type { DraftStore, StoredDraft } from './draft-store.js'
 import { MUTE_FOREVER, type NotificationSettingsStore, type NotificationTarget } from './notification-settings.js'
 import type { BlockedPeerChange, BlockedPeerStore } from './blocked-peers.js'
-import { SystemPeerCallbackError, type SystemPeerService } from './system-peer.js'
+import { SystemPeerCallbackError, type SystemPeerResolution, type SystemPeerService } from './system-peer.js'
 import {
   decodeDialogFilterTitle, encodeDialogFilterTitle,
   type DialogFolderStore, type StoredDialogFilter,
@@ -1981,6 +1981,7 @@ export class DialogRpc {
       : this._resolvePeer(req.fromPeer)
     const sourceIds: string[] = []
     const sourceMessages: IMMessage<any>[] = []
+    const selected: Array<{ projected: ProjectedMessage, part: TlMessagePartRow }> = []
     for (const tlId of req.id) {
       const projected = await this._store.findProjectedByTlId(
         this._session.platformSessionId,
@@ -1995,10 +1996,17 @@ export class DialogRpc {
         throw new RpcError(400, 'MSG_ID_INVALID')
       }
       const ordinal = projected.parts.find((part) => part.tlMessageId === tlId)?.ordinal ?? 0
+      const part = projected.parts.find((candidate) => candidate.ordinal === ordinal)
+      if (!part) throw new RpcError(400, 'MSG_ID_INVALID')
       sourceIds.push(projected.source.sourceIds?.[ordinal] ?? projected.source.id)
       sourceMessages.push(projected.source)
+      selected.push({ projected, part })
     }
     if (!fromId) throw new RpcError(400, 'MSG_ID_INVALID')
+    const systemPeer = await this._systemPeers?.resolve(this._session, toId)
+    if (systemPeer) {
+      return this._forwardToSystemPeer(systemPeer, selected, req.randomId, excludeConnection)
+    }
     let forwarded: IMMessage<any>[]
     try {
       forwarded = await this._actions.forward(
@@ -2051,6 +2059,71 @@ export class DialogRpc {
     // Confirm every unpaired random ID as cancelled so patched Telegram clients
     // remove their local placeholders instead of converting them to send errors.
     for (const randomId of req.randomId.slice(projectedCount)) {
+      confirmed.updates.push({ _: 'updateMessageID', id: CANCELLED_MESSAGE_ID, randomId })
+    }
+    return confirmed
+  }
+
+  private async _forwardToSystemPeer(
+    resolution: SystemPeerResolution,
+    selected: readonly { projected: ProjectedMessage, part: TlMessagePartRow }[],
+    randomIds: Long[],
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.TypeUpdates> {
+    const input = this._systemPeerForwardInput(selected)
+    const sent = this._systemPeers!.makeOutgoing(this._session, resolution, input)
+    const source: IMMessage = {
+      ...sent,
+      conversationId: resolution.peer.id,
+      outgoing: true,
+    }
+    const published = await this._publishLocalMessage(resolution.peer.id, source, excludeConnection)
+    await this._systemPeers!.receive(this._session, resolution, source, input)
+    if (published) return this._confirmForwardRandomIds(published, randomIds)
+
+    const conversation = await this._store!.getConversation(
+      this._session.platformSessionId, resolution.peer.id,
+    ) ?? resolution.peer.conversation
+    const persisted = await this._store!.ingest(this._session, conversation, source)
+    let pts = await this._reservePts(persisted.projection.length, source.timestamp, conversation)
+      - persisted.projection.length
+    const updates: tl.TypeUpdate[] = []
+    for (const part of persisted.projection) {
+      const item = await this._projectedItem(part.tlMessageId, resolution.peer.id)
+      updates.push({
+        _: 'updateNewMessage', message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
+      })
+    }
+    return this._confirmForwardRandomIds(
+      this._updates(conversation, updates, source.timestamp) as tl.RawUpdates,
+      randomIds,
+    )
+  }
+
+  private _systemPeerForwardInput(
+    selected: readonly { projected: ProjectedMessage, part: TlMessagePartRow }[],
+  ): IMMessageInput {
+    const parts: IMMessageInput['parts'] = []
+    const textSources = new Set<string>()
+    for (const { projected, part } of selected) {
+      if (!textSources.has(projected.source.id)) {
+        textSources.add(projected.source.id)
+        parts.push(...projected.source.content.parts.flatMap((item) => item.type === 'text' ? [item] : []))
+      }
+      if (part.mediaId === null) continue
+      const stored = projected.media.find((media) => media.id === part.mediaId)
+      const sourcePart = stored && projected.source.content.parts[stored.partIndex]
+      if (!stored || sourcePart?.type !== 'media') throw new RpcError(400, 'MEDIA_INVALID')
+      parts.push({ type: 'media', media: this._mediaInputFromOrigin(sourcePart.media) })
+    }
+    return { parts }
+  }
+
+  private _confirmForwardRandomIds(payload: tl.RawUpdates, randomIds: Long[]): tl.RawUpdates {
+    const projectedCount = payload.updates.filter((update) =>
+      update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage').length
+    const confirmed = this._withMessageIds(payload, randomIds.slice(0, projectedCount))
+    for (const randomId of randomIds.slice(projectedCount)) {
       confirmed.updates.push({ _: 'updateMessageID', id: CANCELLED_MESSAGE_ID, randomId })
     }
     return confirmed
@@ -2890,9 +2963,46 @@ export class DialogRpc {
         }
       }
     }
+    const nativeId = media.id.id.toNumber()
+    if (Number.isSafeInteger(nativeId) && nativeId > 0
+      && media.id.accessHash.equals(media.id.id)
+      && decodeBridgeMediaReference(media.id.fileReference) === nativeId
+      && this._store) {
+      const stored = await this._store.getMedia(this._session.platformSessionId, nativeId)
+      if (stored) {
+        const resolved = this._mediaInputFromOrigin(stored.media)
+        return {
+          media: resolved,
+          upload: {
+            platformSessionId: this._session.platformSessionId,
+            fileId: String(nativeId),
+            source: resolved.source,
+            native: true,
+            cleanup: async () => {},
+          },
+        }
+      }
+    }
     const staged = this._uploads.getStaged(this._session.platformSessionId, media.id.id.toString())
     if (!staged) throw new RpcError(400, 'MEDIA_INVALID')
     return staged
+  }
+
+  private _mediaInputFromOrigin(media: IMMedia<any>): IMMediaInput {
+    const { id: _id, locator: _locator, ...metadata } = media
+    const platform = this._platform
+    const session = this._session
+    return {
+      ...metadata,
+      origin: media,
+      source: {
+        size: media.size,
+        async *stream(options = {}) {
+          if (!platform.downloadMedia) throw new Error('source platform media download is unavailable')
+          yield* platform.downloadMedia(session, media, { signal: options.signal })
+        },
+      },
+    }
   }
 
   private async _sendRichContent(

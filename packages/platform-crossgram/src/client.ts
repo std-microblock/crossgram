@@ -159,8 +159,9 @@ export class QQNTClient {
     options: { name?: string, signal?: AbortSignal } = {},
   ): Promise<WireFlashTransferResult> {
     if (this.bridgeProtocol === undefined) await this.status()
-    if (this.bridgeProtocol! < 26) throw new Error('QQNT bridge protocol 26 is required for QQ Flash Transfer')
+    if (this.bridgeProtocol! < 28) throw new Error('QQNT bridge protocol 28 is required for QQ Flash Transfer reuse')
     if (!media.length) throw new Error('QQ Flash Transfer requires at least one file')
+    const uploads: IMMediaSource[] = []
     const manifest: WireFlashTransferManifest = {
       name: options.name,
       framing: 'length-prefixed-v1',
@@ -169,7 +170,10 @@ export class QQNTClient {
         if (!Number.isSafeInteger(size) || size! < 0) {
           throw new Error(`QQ Flash Transfer requires a known size for ${item.name || 'file'}`)
         }
-        return { name: item.name || 'file', size: size! }
+        const locator = qqMediaOriginLocator(item.origin)
+        if (locator) return { source: 'qq-media', name: item.name || 'file', size: size!, locator }
+        uploads.push(item.source)
+        return { source: 'upload', name: item.name || 'file', size: size! }
       }),
     }
     const response = await this.fetchImpl(`${this.endpoint}/flash-transfers`, {
@@ -177,7 +181,7 @@ export class QQNTClient {
       headers: this.headers({
         'x-qqnt-flash-manifest': Buffer.from(JSON.stringify(manifest)).toString('base64url'),
       }),
-      body: framedSourcesReadableStream(media.map((item) => item.source), options.signal),
+      body: framedSourcesReadableStream(uploads, options.signal),
       signal: options.signal,
       duplex: 'half',
     } as RequestInit & { duplex: 'half' })
@@ -1364,6 +1368,19 @@ export class QQNTClient {
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return { ...(this.token ? { authorization: `Bearer ${this.token}` } : {}), ...extra }
   }
+}
+
+function qqMediaOriginLocator(origin: IMMediaInput['origin']): QQMediaLocator | undefined {
+  const locator = origin?.locator
+  if (!locator || typeof locator !== 'object' || Array.isArray(locator)) return
+  const value = locator as Partial<QQMediaLocator>
+  if (typeof value.messageId !== 'string' || typeof value.elementId !== 'string'
+    || (value.chatType !== 1 && value.chatType !== 2 && value.chatType !== 8 && value.chatType !== 134)
+    || typeof value.peerUid !== 'string'
+    || (value.kind !== 'image' && value.kind !== 'file' && value.kind !== 'voice')
+    || typeof value.fileName !== 'string') return
+  const { cachedPath: _cachedPath, previewKey: _previewKey, deferred: _deferred, ...raw } = value
+  return raw as QQMediaLocator
 }
 
 class WebSocketMessageQueue {

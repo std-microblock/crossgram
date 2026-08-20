@@ -55,14 +55,14 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
   }
 
   async bootstrap(session: PlatformSession, peers: SystemPeerService): Promise<void> {
-    if (!this.active || !this.binding(session)?.platform.flashTransfer) return
+    if (!this.active || !this.qqBinding(session)?.platform.flashTransfer) return
     const peer = flashTransferPeer()
     await peers.emit(session, { type: 'conversation', conversation: peer.conversation })
     if (!this.active) return
     await reply(
       session,
       peer.conversation,
-      '把一个或多个文件发给我，我会创建 QQ 闪传并返回分享链接。文件说明会用作闪传名称。',
+      '仅支持 QQ。转发已有 QQ 文件会复用 QQNT 本地缓存；直接上传的新文件会交给 QQ 闪传上传一次。文件说明会用作闪传名称。',
       peers,
       'bridge:qq-flash-transfer:welcome',
     )
@@ -70,7 +70,7 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
 
   async resolve(session: PlatformSession, conversationId: string): Promise<SystemPeer | undefined> {
     if (!this.active || conversationId !== QQ_FLASH_TRANSFER_CONVERSATION_ID) return
-    return this.binding(session)?.platform.flashTransfer ? flashTransferPeer() : undefined
+    return this.qqBinding(session)?.platform.flashTransfer ? flashTransferPeer() : undefined
   }
 
   listBots() {
@@ -98,7 +98,7 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
         session,
         peer.conversation,
         text === '/start' || text === '/help'
-          ? '发送一个或多个文件即可创建 QQ 闪传；可附带一段文字作为闪传名称。'
+          ? '转发一个或多个已有 QQ 文件即可复用创建闪传；也可直接上传新文件。可附带文字作为闪传名称。'
           : '请发送文件；纯文字消息不会创建 QQ 闪传。',
         peers,
       )
@@ -114,7 +114,7 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
     text: string | undefined,
     peers: SystemPeerService,
   ): Promise<void> {
-    const binding = this.binding(session)
+    const binding = this.qqBinding(session)
     const flashTransfer = binding?.platform.flashTransfer
     if (!this.active || !flashTransfer) return
     if (media.length > this.maxFiles) {
@@ -131,10 +131,16 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
       await reply(session, conversation, `文件总大小超过 ${formatBytes(this.maxTotalBytes)} 限制。`, peers)
       return
     }
+    const reused = media.filter((item) => item.origin?.locator).length
+    const uploaded = media.length - reused
+    const mode = [
+      reused ? `复用 ${reused} 个 QQ 文件` : '',
+      uploaded ? `上传 ${uploaded} 个新文件` : '',
+    ].filter(Boolean).join('，')
     await reply(
       session,
       conversation,
-      `正在创建 QQ 闪传：${media.length} 个文件，共 ${formatBytes(totalBytes)}……`,
+      `正在创建 QQ 闪传：${media.length} 个文件，共 ${formatBytes(totalBytes)}（${mode}）……`,
       peers,
     )
     try {
@@ -149,7 +155,7 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
     } catch (error) {
       if (!this.active || this.controller.signal.aborted) return
       this.ctx.logger('qq-flash-transfer-bot').warn('QQ flash transfer failed: %s', errorText(error))
-      await reply(session, conversation, 'QQ 闪传创建失败，请稍后重试。', peers)
+      await reply(session, conversation, flashTransferFailureMessage(error), peers)
     }
   }
 
@@ -157,6 +163,11 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
     return this.ctx.imPlatform.sessions.find((item) =>
       item.session.platformId === session.platformId
       && item.session.platformSessionId === session.platformSessionId)
+  }
+
+  private qqBinding(session: PlatformSession): ActivePlatformSession | undefined {
+    const binding = this.binding(session)
+    return binding?.platform.platformKind === 'qq' ? binding : undefined
   }
 
   private enqueue(platformSessionId: string, operation: () => Promise<void>): Promise<void> {
@@ -251,4 +262,12 @@ function formatBytes(bytes: number): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error)
+}
+
+function flashTransferFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/QQ media (?:is not available in the local cache|cache path is not trusted|cache size mismatch)/iu.test(message)) {
+    return '有 QQ 文件尚未保存在 QQNT 本机缓存中，请先在 QQ 中下载该文件后再转发。'
+  }
+  return 'QQ 闪传创建失败，请稍后重试。'
 }

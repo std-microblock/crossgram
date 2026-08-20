@@ -183,6 +183,89 @@ describe('media send streaming', () => {
     await expect(uploads.open(session.platformSessionId, '314', 1)).rejects.toThrow('part is missing')
   })
 
+  it('forwards existing platform media to a system peer with its reusable native origin', async () => {
+    const received: IMMessageInput[] = []
+    const provider: SystemPeerProvider = {
+      bootstrap: async () => {},
+      resolve: async (_session, conversationId) => conversationId === conversation.id
+        ? { id: conversation.id, conversation }
+        : undefined,
+      receive: async (_session, _peer, _message, _peers, input) => {
+        if (input) received.push(input)
+      },
+    }
+    const { rpc, store, peerId } = await createHarness(0, provider)
+    const origin: IMMedia = {
+      id: 'remote-qq-file', kind: 'file', name: 'existing.bin', size: 4,
+      locator: {
+        messageId: 'qq-message', elementId: 'qq-element', chatType: 1,
+        peerUid: 'friend', kind: 'file', fileName: 'existing.bin', filePath: '/qq/cache/existing.bin',
+      },
+    }
+    const seeded = await store.ingest(session, conversation, {
+      id: 'qq-message', conversationId: conversation.id, senderId: 'friend', timestamp: 100,
+      content: { parts: [{ type: 'media', media: origin }] },
+    })
+
+    const result = await rpc.forwardMessages({
+      _: 'messages.forwardMessages', fromPeer: peer(peerId), toPeer: peer(peerId),
+      id: [seeded.projection[0]!.tlMessageId], randomId: [Long.fromNumber(4_001)],
+    })
+
+    const forwarded = received[0]?.parts.find((part) => part.type === 'media')
+    expect(forwarded).toMatchObject({
+      type: 'media',
+      media: { name: 'existing.bin', size: 4, origin: { id: 'remote-qq-file', locator: origin.locator } },
+    })
+    expect(result._).toBe('updates')
+    expect((result as tl.RawUpdates).updates).toContainEqual(expect.objectContaining({
+      _: 'updateMessageID', randomId: Long.fromNumber(4_001),
+    }))
+  })
+
+  it('resolves a persisted bridge document reference as reusable platform media', async () => {
+    const received: IMMessageInput[] = []
+    const provider: SystemPeerProvider = {
+      bootstrap: async () => {},
+      resolve: async (_session, conversationId) => conversationId === conversation.id
+        ? { id: conversation.id, conversation }
+        : undefined,
+      receive: async (_session, _peer, _message, _peers, input) => {
+        if (input) received.push(input)
+      },
+    }
+    const { rpc, store, peerId } = await createHarness(0, provider)
+    const origin: IMMedia = {
+      id: 'remote-qq-document', kind: 'file', name: 'persisted.bin', size: 3,
+      locator: {
+        messageId: 'persisted-message', elementId: 'persisted-element', chatType: 2,
+        peerUid: 'group', kind: 'file', fileName: 'persisted.bin', filePath: '/qq/cache/persisted.bin',
+      },
+    }
+    const seeded = await store.ingest(session, conversation, {
+      id: 'persisted-message', conversationId: conversation.id, senderId: 'friend', timestamp: 101,
+      content: { parts: [{ type: 'media', media: origin }] },
+    })
+    const mediaId = seeded.projection[0]?.mediaId
+    if (!mediaId) throw new Error('missing persisted media id')
+    const documentId = Long.fromNumber(mediaId)
+
+    await rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(4_002), message: '',
+      media: {
+        _: 'inputMediaDocument',
+        id: {
+          _: 'inputDocument', id: documentId, accessHash: documentId,
+          fileReference: new TextEncoder().encode(`bridge-media:${mediaId}`),
+        },
+      },
+    })
+
+    expect(received[0]?.parts).toMatchObject([{
+      type: 'media', media: { origin: { id: 'remote-qq-document', locator: origin.locator } },
+    }])
+  })
+
   it('stages a platform-native hash hit and sends without Telegram upload parts', async () => {
     const { rpc, platform, consumed, inputs, peerId } = await createHarness()
     const prepare = vi.fn(async (_session, _conversation, media) => ({

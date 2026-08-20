@@ -27,6 +27,7 @@ async function fixture(config: bot.Config = {}) {
     fileSetId: 'fileset-1', shareLink: 'https://qq.example/flash/code', expiresAt: 2_000_000_000_000,
   }))
   const platform: IMPlatform = {
+    platformKind: 'qq',
     capabilities: {
       history: true,
       send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 9 },
@@ -64,11 +65,38 @@ describe('QQ Flash Transfer bot', () => {
     }))
     const messages = events.filter((event): event is Extract<IMEvent, { type: 'message' }> => event.type === 'message')
     expect(messages).toHaveLength(2)
-    expect(messages[0]!.message.content.parts[0]).toMatchObject({ text: expect.stringContaining('正在创建') })
+    expect(messages[0]!.message.content.parts[0]).toMatchObject({
+      text: expect.stringContaining('上传 1 个新文件'),
+    })
     expect(messages[1]!.message.content.parts[0]).toMatchObject({
       text: expect.stringContaining('https://qq.example/flash/code'),
       entities: [{ type: 'text-link', url: 'https://qq.example/flash/code' }],
     })
+    await plugin.dispose()
+  })
+
+  it('is unavailable for non-QQ platform sessions even when they expose a similarly named provider', async () => {
+    const ctx = new Context()
+    const platforms = new IMPlatformService(ctx)
+    const peers = new SystemPeerService(ctx)
+    const platform: IMPlatform = {
+      platformKind: 'discord',
+      capabilities: {
+        history: true,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 9 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      flashTransfer: { async create() { throw new Error('must not be called') } },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('not used') },
+    }
+    platforms.activateSession('discord', platform, { ...session, platformId: 'discord' })
+    const plugin = ctx.plugin(bot)
+    await plugin
+
+    await expect(peers.resolve(
+      { ...session, platformId: 'discord' }, bot.QQ_FLASH_TRANSFER_CONVERSATION_ID,
+    )).resolves.toBeUndefined()
     await plugin.dispose()
   })
 
@@ -83,6 +111,31 @@ describe('QQ Flash Transfer bot', () => {
 
     expect(create).not.toHaveBeenCalled()
     expect(events).toMatchObject([{ type: 'message', message: { content: { parts: [{ text: expect.stringContaining('最多') }] } } }])
+    await plugin.dispose()
+  })
+
+  it('explains that an uncached forwarded QQ file must be downloaded in QQ first', async () => {
+    const { plugin, peers, events, create, resolution } = await fixture()
+    events.length = 0
+    create.mockRejectedValueOnce(new Error(
+      'QQNT bridge 502: QQ media is not available in the local cache: archived.zip',
+    ))
+    await peers.receive(session, resolution, outgoing(), { parts: [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'archived.zip', size: 10,
+        source: { size: 10, async *stream() { throw new Error('must not stream') } },
+        origin: {
+          id: 'qq-file', kind: 'file', name: 'archived.zip', size: 10,
+          locator: { messageId: 'm1', elementId: 'e1', chatType: 1, peerUid: 'friend' },
+        },
+      },
+    }] })
+
+    const messages = events.filter((event): event is Extract<IMEvent, { type: 'message' }> => event.type === 'message')
+    expect(messages.at(-1)?.message.content.parts[0]).toMatchObject({
+      text: expect.stringContaining('请先在 QQ 中下载'),
+    })
     await plugin.dispose()
   })
 })

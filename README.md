@@ -182,7 +182,8 @@ yarn add @satorijs/adapter-discord
 ### QQ 闪传工具 bot
 
 内置插件 `@mtproto-relay/qq-flash-transfer-bot` 会在 QQNT 会话中注册 **QQ 闪传** 工具 bot。
-把一个或多个文件发给它（可附带文字作为文件集名称），bot 会把上传流交给 QQNT 创建闪传，
+它只在 QQ 会话中出现。转发已有 QQ 文件时会复用 QQNT 本地缓存，不重新经过 Crossgram 上传；
+直接上传到 bot 的新文件则只交给 QQNT 闪传上传一次（可附带文字作为文件集名称），
 然后返回 QQ 原生分享链接和文件集 ID。文件字节保持流式传输，不会先整体读入内存；默认单次最多
 100 个文件、总计 100 GiB，可通过 `maxFiles` 与 `maxTotalBytes` 调整。
 

@@ -55,9 +55,22 @@ export interface WireMedia {
   locator: QQMediaLocator
 }
 
+export interface WireFlashTransferUploadFile {
+  source: 'upload'
+  name: string
+  size: number
+}
+
+export interface WireFlashTransferQQMediaFile {
+  source: 'qq-media'
+  name: string
+  size: number
+  locator: QQMediaLocator
+}
+
 export interface WireFlashTransferManifest {
   name?: string
-  files: Array<{ name: string, size: number }>
+  files: Array<WireFlashTransferUploadFile | WireFlashTransferQQMediaFile>
   framing: 'length-prefixed-v1'
 }
 

@@ -461,7 +461,7 @@ interface SendManifest {
 报告文件字节已存在 CDN，无需实际上传。适配器会校验 Highway 返回的
 `fileSize` 和 `fileMd5` 与本地一致。
 
-### 4.5 QQ 闪传：`POST /v1/flash-transfers`
+### 4.5 QQ 闪传复用/上传：`POST /v1/flash-transfers`
 
 请求头 `x-qqnt-flash-manifest` 是 base64url 编码的 JSON：
 
@@ -470,15 +470,23 @@ interface SendManifest {
   "name": "Telegram files",
   "framing": "length-prefixed-v1",
   "files": [
-    { "name": "alpha.txt", "size": 5 },
-    { "name": "beta.bin", "size": 3 }
+    {
+      "source": "qq-media",
+      "name": "alpha.txt",
+      "size": 5,
+      "locator": { "messageId": "...", "elementId": "...", "chatType": 1, "peerUid": "...", "kind": "file", "fileName": "alpha.txt" }
+    },
+    { "source": "upload", "name": "beta.bin", "size": 3 }
   ]
 }
 ```
 
-body 对每个文件使用与多媒体发送相同的 4 字节大端长度分帧，并用零长度帧结束该文件。
-bridge 边接收边写入账户私有暂存目录，再调用 QQNT `FlashTransferService` 创建文件集。
-成功响应为 `{ fileSetId, shareLink, expiresAt? }`。暂存文件保留到闪传有效期之后的清理窗口，
+body 只对 `source: "upload"` 的文件使用与多媒体发送相同的 4 字节大端长度分帧，
+并用零长度帧结束该文件；`source: "qq-media"` 不占用 body 中的文件序号。
+已有 QQ 媒体通过 locator 复用 QQNT 受信任的本地缓存路径，不再从 QQ 下载并跨 HTTP 重传；
+只有直接上传到工具 bot 的新文件才使用长度分帧 body 写入账户私有暂存目录。两类路径最终都只交给
+QQNT `FlashTransferService`，本接口不申请 Crossgram Highway plan。成功响应为
+`{ fileSetId, shareLink, expiresAt? }`。暂存文件保留到闪传有效期之后的清理窗口，
 避免 QQNT 后台上传仍在读取时源文件被提前删除。
 
 ### 4.6 媒体下载

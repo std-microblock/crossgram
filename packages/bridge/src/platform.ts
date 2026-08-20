@@ -275,6 +275,8 @@ export interface IMMediaUploadPreparation {
 
 export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
   source: IMMediaSource
+  /** Existing source-platform media that can be reused without relaying its bytes again. */
+  origin?: IMMedia
 }
 
 export interface IMFlashTransferResult {

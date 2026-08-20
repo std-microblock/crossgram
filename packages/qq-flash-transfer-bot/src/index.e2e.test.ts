@@ -44,13 +44,13 @@ function decodeFiles(body: Buffer): Buffer[] {
 }
 
 describe('QQ Flash Transfer bot E2E', () => {
-  it('streams Telegram-uploaded file sources through QQNT protocol v25 and replies with the native link', async () => {
+  it('streams a direct Telegram upload through QQNT protocol v28 and replies with the native link', async () => {
     let manifest: Record<string, unknown> | undefined
     let uploaded: Buffer<ArrayBufferLike> = Buffer.alloc(0)
     server = createServer(async (request, response) => {
       response.setHeader('content-type', 'application/json')
       if (request.url === '/status') {
-        response.end(JSON.stringify({ protocolVersion: 26, ready: true }))
+        response.end(JSON.stringify({ protocolVersion: 28, ready: true }))
         return
       }
       const encoded = request.headers['x-qqnt-flash-manifest']
@@ -88,7 +88,8 @@ describe('QQ Flash Transfer bot E2E', () => {
     await peers.receive(session, resolution, outgoing, input)
 
     expect(manifest).toEqual({
-      name: 'telegram.bin', framing: 'length-prefixed-v1', files: [{ name: 'telegram.bin', size: 5 }],
+      name: 'telegram.bin', framing: 'length-prefixed-v1',
+      files: [{ source: 'upload', name: 'telegram.bin', size: 5 }],
     })
     expect(decodeFiles(uploaded)).toEqual([Buffer.from('teleg')])
     const replies = events.filter((event): event is Extract<IMEvent, { type: 'message' }> => event.type === 'message')
