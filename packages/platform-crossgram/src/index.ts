@@ -263,15 +263,21 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
     const user = await this.client.getUser(userId)
     if (!user) throw new Error(`QQNT current user is unavailable: ${userId}`)
+    const qq = typeof status.selfUin === 'string' && /^\d+$/.test(status.selfUin)
+      ? status.selfUin
+      : typeof user.numericId === 'string' && /^\d+$/.test(user.numericId)
+        ? user.numericId
+        : undefined
+    if (!qq) throw new Error('QQNT current account must provide a numeric selfUin or user.numericId')
     return {
       credentials: {},
       user: {
         id: user.id,
         firstName: user.name,
-        username: user.numericId ?? status.selfUin,
+        username: qq,
         about: typeof user.signature === 'string' ? user.signature : undefined,
         avatar: user.avatar ? mapMedia(user.avatar) : undefined,
-        metadata: user.numericId ? { qq: user.numericId } : undefined,
+        metadata: { qq },
       },
     }
   }

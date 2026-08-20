@@ -460,7 +460,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
   const legacyPhoneMigration = ctx.database.prepared().then(async () => {
     const migrated = await migrateLegacyVirtualPhones(ctx.database)
-    if (migrated) bridgeLogger.info('migrated %d legacy +999 virtual phones to +1', migrated)
+    if (migrated) bridgeLogger.info('migrated %d non-888 virtual phones to +888', migrated)
   })
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()

@@ -600,13 +600,13 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
-  it('supplies the current QQ account identity and avatar to bridge', async () => {
+  it('prefers a numeric status.selfUin for the current QQ account identity', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
-      protocolVersion: 21, ready: true, selfUin: '10001', selfUid: 'u_self',
+      protocolVersion: 21, ready: true, selfUin: '1234567890', selfUid: 'u_self',
     }))
     platform.client.getUser = vi.fn(async () => ({
-      id: 'u_self', numericId: '10001', name: 'Platform Alice',
+      id: 'u_self', numericId: '9876543210', name: 'Platform Alice',
       signature: 'Self signature',
       avatar: {
         id: 'avatar-self', kind: 'image' as const, mimeType: 'image/jpeg',
@@ -620,11 +620,37 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).resolves.toMatchObject({
       credentials: {},
       user: {
-        id: 'u_self', firstName: 'Platform Alice', username: '10001', about: 'Self signature',
-        avatar: { id: 'avatar-self:original-v1', kind: 'image' }, metadata: { qq: '10001' },
+        id: 'u_self', firstName: 'Platform Alice', username: '1234567890', about: 'Self signature',
+        avatar: { id: 'avatar-self:original-v1', kind: 'image' }, metadata: { qq: '1234567890' },
       },
     })
     expect(platform.client.getUser).toHaveBeenCalledWith('u_self')
+  })
+
+  it('falls back to a numeric user.numericId when status.selfUin is invalid', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 21, ready: true, selfUin: 'not-a-number', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'u_self', numericId: '1234567890', name: 'Platform Alice',
+    }))
+
+    await expect(platform.getAccount()).resolves.toMatchObject({
+      user: { id: 'u_self', username: '1234567890', metadata: { qq: '1234567890' } },
+    })
+  })
+
+  it('rejects the current account when neither QQ identity is numeric', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 21, ready: true, selfUin: 'not-a-number', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn(async () => ({
+      id: 'u_self', numericId: 'also-not-a-number', name: 'Platform Alice',
+    }))
+
+    await expect(platform.getAccount()).rejects.toThrow('numeric selfUin or user.numericId')
   })
 
   it('accepts bridge protocol 19 during the call-signal rollout', async () => {

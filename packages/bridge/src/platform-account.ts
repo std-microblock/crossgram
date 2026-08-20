@@ -12,14 +12,6 @@ export interface ProvisionedPlatformAccount {
   session: PlatformSession
 }
 
-// Keep generated identities inside NANP's reserved fictional 555-0100 through
-// 555-0199 blocks. Multiple valid area codes provide enough space without
-// assigning numbers that could belong to real subscribers.
-const VIRTUAL_PHONE_AREA_CODES = [
-  '201', '202', '203', '205', '206', '207', '208', '209', '210', '212',
-  '213', '214', '215', '216', '217', '218', '219', '220', '223', '224',
-] as const
-
 /** Coalesce startup scans and registry events for the same platform entry. */
 export class PlatformAccountProvisioner {
   private readonly _pending = new Map<string, Promise<ProvisionedPlatformAccount | undefined>>()
@@ -38,10 +30,10 @@ export class PlatformAccountProvisioner {
   }
 }
 
-/** Replace every legacy Telegram test-range identity, including inactive adapters. */
+/** Replace every non-888 virtual phone, including inactive adapters. */
 export async function migrateLegacyVirtualPhones(database: Database): Promise<number> {
   const legacy = (await database.get('mtproto_auth_session', {}))
-    .filter(auth => isLegacyVirtualPhone(auth.virtualPhone))
+    .filter(auth => !is888VirtualPhone(auth.virtualPhone))
   for (const auth of legacy) {
     await database.set('mtproto_auth_session', { id: auth.id }, {
       virtualPhone: await allocateVirtualPhone(database),
@@ -63,6 +55,9 @@ export async function provisionPlatformAccount(
   if (!platform.getAccount && !account) return
   const resolved = account ?? await platform.getAccount!()
   validateAccount(resolved)
+  const deterministicVirtualPhone = platform.platformKind === 'qq'
+    ? qqVirtualPhone(resolved.user)
+    : undefined
 
   const existingSessions = await database.get('mtproto_platform_session', { platformId })
   let row = existingSessions[0]
@@ -120,9 +115,9 @@ export async function provisionPlatformAccount(
   let auth = existingAuth.find(item => item.platformSessionId === row.id) ?? existingAuth[0]
   if (auth) {
     const totpSecret = auth.totpSecret || generateLoginSecret()
-    const virtualPhone = isLegacyVirtualPhone(auth.virtualPhone)
-      ? await allocateVirtualPhone(database)
-      : auth.virtualPhone
+    const virtualPhone = deterministicVirtualPhone
+      ?? (is888VirtualPhone(auth.virtualPhone) ? auth.virtualPhone : await allocateVirtualPhone(database))
+    if (deterministicVirtualPhone) await ensureVirtualPhoneAvailable(database, virtualPhone, auth.id)
     await database.set('mtproto_auth_session', { id: auth.id }, {
       platformSessionId: row.id,
       totpSecret,
@@ -130,9 +125,11 @@ export async function provisionPlatformAccount(
     })
     auth = { ...auth, platformSessionId: row.id, totpSecret, virtualPhone }
   } else {
+    const virtualPhone = deterministicVirtualPhone ?? await allocateVirtualPhone(database)
+    if (deterministicVirtualPhone) await ensureVirtualPhoneAvailable(database, virtualPhone)
     auth = {
       id: randomId(),
-      virtualPhone: await allocateVirtualPhone(database),
+      virtualPhone,
       totpSecret: generateLoginSecret(),
       platformId,
       platformSessionId: row.id,
@@ -154,15 +151,27 @@ function validateAccount(account: IMPlatformAccount): void {
 
 async function allocateVirtualPhone(database: Database): Promise<string> {
   for (let attempt = 0; attempt < 20; attempt++) {
-    const areaCode = VIRTUAL_PHONE_AREA_CODES[randomInt(0, VIRTUAL_PHONE_AREA_CODES.length)]
-    const virtualPhone = `1${areaCode}55501${String(randomInt(0, 100)).padStart(2, '0')}`
+    const virtualPhone = `888${String(randomInt(0, 1_000_000)).padStart(6, '0')}${String(randomInt(0, 1_000_000)).padStart(6, '0')}`
     if (!(await database.get('mtproto_auth_session', { virtualPhone })).length) return virtualPhone
   }
   throw new Error('failed to allocate a unique virtual phone')
 }
 
-function isLegacyVirtualPhone(phone: string): boolean {
-  return phone.startsWith('999') || phone.startsWith('888')
+async function ensureVirtualPhoneAvailable(database: Database, virtualPhone: string, authId?: string): Promise<void> {
+  const owner = (await database.get('mtproto_auth_session', { virtualPhone })).find(auth => auth.id !== authId)
+  if (owner) throw new Error(`QQ virtual phone ${virtualPhone} is already assigned to another auth session`)
+}
+
+function qqVirtualPhone(user: IMUser): string {
+  const qq = user.metadata?.qq
+  if (typeof qq !== 'string' || !/^[0-9]+$/.test(qq)) {
+    throw new Error('QQ platform account must provide metadata.qq as a non-empty ASCII digit string')
+  }
+  return `888${qq}`
+}
+
+function is888VirtualPhone(phone: string): boolean {
+  return phone.startsWith('888')
 }
 
 function randomId(): string {

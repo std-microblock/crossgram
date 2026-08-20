@@ -84,6 +84,24 @@ describe('Bridge platform account page', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    ['+8881234567890', '+888 123 456 7890'],
+    ['+88812345678901', '+888 1 234 567 8901'],
+  ])('formats %s by QQ groups while copying the dashboard value', async (virtualPhone, formattedPhone) => {
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    rpcState.data.accounts = [{
+      platformId: 'qq/primary', platformKind: 'qq', status: 'ready', displayName: 'QQ Alice',
+      virtualPhone, loginCode: '123456', validUntil: Date.now() + 30_000,
+    }]
+    const wrapper = mountPlatformAccountsPage()
+
+    expect(wrapper.get('.phone-number').text()).toBe(formattedPhone)
+    await wrapper.get('[aria-label="复制虚拟手机号"]').trigger('click')
+    expect(writeText).toHaveBeenCalledWith(virtualPhone)
+    wrapper.unmount()
+  })
+
   it('shows the server configuration panel with no platform accounts', () => {
     const wrapper = mountPlatformAccountsPage()
 

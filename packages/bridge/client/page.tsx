@@ -486,6 +486,11 @@ export default function apply(ctx: Context): void {
 function formatPhone(phone?: string): string {
   if (!phone) return '—'
   const digits = phone.replace(/\D/g, '')
+  if (digits.startsWith('888')) {
+    const qq = digits.slice(3)
+    const prefix = qq.slice(0, -4).match(/\d{1,3}(?=(?:\d{3})*$)/g)?.join(' ')
+    return `+888${prefix ? ` ${prefix}` : ''} ${qq.slice(-4)}`
+  }
   return `+${digits.slice(0, 3)} ${digits.slice(3, 7)} ${digits.slice(7, 11)} ${digits.slice(11)}`.trim()
 }
 

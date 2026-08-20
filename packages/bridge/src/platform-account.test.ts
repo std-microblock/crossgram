@@ -32,16 +32,24 @@ async function createDatabase() {
   return ctx.database
 }
 
-function platform(profile = { id: 'qq-uid', firstName: 'Alice', username: '10001' }): IMPlatform {
+function platform(
+  profile = { id: 'qq-uid', firstName: 'Alice', username: '1234567890' },
+  platformKind = 'qq',
+  metadata?: Record<string, string | number>,
+): IMPlatform {
   return {
+    platformKind,
     capabilities,
     async getAccount() {
       return {
         credentials: { adapter: 'owned' },
         user: {
           ...profile,
-          avatar: { id: 'avatar:qq-uid', kind: 'image', locator: { uin: '10001' } },
-          metadata: { nativeId: '10001' },
+          avatar: { id: 'avatar:qq-uid', kind: 'image', locator: { uin: '1234567890' } },
+          metadata: metadata ?? {
+            nativeId: profile.username,
+            ...(platformKind === 'qq' ? { qq: profile.username } : {}),
+          },
         },
       }
     },
@@ -53,39 +61,40 @@ function platform(profile = { id: 'qq-uid', firstName: 'Alice', username: '10001
 }
 
 describe('platform-owned account provisioning', () => {
-  it('persists one stable phone while refreshing platform-owned identity fields', async () => {
+  it('maps QQ identity to a stable deterministic +888 phone while refreshing profile fields', async () => {
     const database = await createDatabase()
     const first = await provisionPlatformAccount(database, 'qqnt', platform())
     const second = await provisionPlatformAccount(database, 'qqnt', platform({
-      id: 'qq-uid', firstName: 'Alice Renamed', username: '10001',
+      id: 'qq-uid', firstName: 'Alice Renamed', username: '1234567890',
     }))
 
     expect(first).toBeDefined()
-    expect(first!.auth.virtualPhone).toMatch(/^1\d{3}55501\d{2}$/)
+    expect(first!.auth.virtualPhone).toBe('8881234567890')
     expect(first!.auth.totpSecret).toMatch(/^[a-f\d]{40}$/)
     expect(second!.auth).toMatchObject({
       id: first!.auth.id,
-      virtualPhone: first!.auth.virtualPhone,
+      virtualPhone: '8881234567890',
       totpSecret: first!.auth.totpSecret,
       platformSessionId: first!.session.platformSessionId,
     })
     expect(second!.session).toMatchObject({
       platformId: 'qqnt', userId: 'qq-uid', credentials: { adapter: 'owned' },
-      metadata: { firstName: 'Alice Renamed', username: '10001', nativeId: '10001' },
+      metadata: { firstName: 'Alice Renamed', username: '1234567890', nativeId: '1234567890', qq: '1234567890' },
     })
     expect(await database.get('mtproto_platform_session', { platformId: 'qqnt' })).toHaveLength(1)
     expect(await database.get('mtproto_auth_session', { platformId: 'qqnt' })).toHaveLength(1)
     expect(await database.get('mtproto_im_user', { platformId: 'qqnt' })).toMatchObject([{
-      id: expect.any(Number), platformUserId: 'qq-uid', firstName: 'Alice Renamed', username: '10001',
-      avatar: { id: 'avatar:qq-uid', locator: { uin: '10001' } },
-      metadata: { nativeId: '10001' },
+      id: expect.any(Number), platformUserId: 'qq-uid', firstName: 'Alice Renamed', username: '1234567890',
+      avatar: { id: 'avatar:qq-uid', locator: { uin: '1234567890' } },
+      metadata: { nativeId: '1234567890', qq: '1234567890' },
     }])
   })
 
   it.each([
+    '17778889999',
     '999123456789012',
-    '888123456789012',
-  ])('replaces legacy virtual phone %s with a stable +1 fictional number', async (legacyPhone) => {
+    '888000000000002',
+  ])('updates QQ legacy or random phone %s in place', async (legacyPhone) => {
     const database = await createDatabase()
     const totpSecret = 'ab'.repeat(20)
     await database.create('mtproto_platform_session', {
@@ -96,37 +105,77 @@ describe('platform-owned account provisioning', () => {
       id: 'legacy-auth', virtualPhone: legacyPhone, totpSecret,
       platformId: 'qqnt', platformSessionId: 'legacy-session',
     })
+    await database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: 'qqnt', platformSessionId: 'legacy-session',
+    })
 
     const provisioned = await provisionPlatformAccount(database, 'qqnt', platform())
 
     expect(provisioned!.auth).toMatchObject({
-      id: 'legacy-auth', virtualPhone: expect.stringMatching(/^1\d{3}55501\d{2}$/), totpSecret,
+      id: 'legacy-auth', virtualPhone: '8881234567890', totpSecret,
       platformSessionId: 'legacy-session',
     })
-    expect(provisioned!.auth.virtualPhone).not.toBe(legacyPhone)
     expect(await database.get('mtproto_auth_session', { virtualPhone: legacyPhone })).toEqual([])
     expect(await database.get('mtproto_auth_session', { id: 'legacy-auth' })).toMatchObject([{
-      id: 'legacy-auth', virtualPhone: provisioned!.auth.virtualPhone, totpSecret,
+      id: 'legacy-auth', virtualPhone: '8881234567890', totpSecret,
       platformSessionId: 'legacy-session',
+    }])
+    expect(await database.get('mtproto_auth_binding', { authKeyId: '0011223344556677' })).toEqual([{
+      authKeyId: '0011223344556677', platformId: 'qqnt', platformSessionId: 'legacy-session',
     }])
   })
 
-  it('migrates legacy numbers even when their platform adapter is inactive', async () => {
+  it('keeps non-QQ 888 phones stable and assigns random 15-digit +888 fallbacks', async () => {
+    const database = await createDatabase()
+    const adapter = platform({ id: 'static-uid', firstName: 'Static', username: '10002' }, 'static')
+    const first = await provisionPlatformAccount(database, 'static', adapter)
+    const second = await provisionPlatformAccount(database, 'static', adapter)
+
+    expect(first!.auth.virtualPhone).toMatch(/^888\d{12}$/)
+    expect(second!.auth).toMatchObject({ id: first!.auth.id, virtualPhone: first!.auth.virtualPhone })
+  })
+
+  it.each([
+    undefined,
+    '',
+    '123abc',
+    1234567890,
+  ])('rejects QQ accounts without a numeric metadata.qq value', async (qq) => {
+    const database = await createDatabase()
+    const metadata = qq === undefined ? {} : { qq }
+
+    await expect(provisionPlatformAccount(database, 'qqnt', platform(undefined, 'qq', metadata)))
+      .rejects.toThrow('metadata.qq as a non-empty ASCII digit string')
+    expect(await database.get('mtproto_auth_session', {})).toEqual([])
+  })
+
+  it('allows only one concurrent QQ provision to claim the same virtual phone', async () => {
+    const database = await createDatabase()
+    const results = await Promise.allSettled([
+      provisionPlatformAccount(database, 'qq-one', platform()),
+      provisionPlatformAccount(database, 'qq-two', platform({
+        id: 'other-uid', firstName: 'Other', username: '1234567890',
+      })),
+    ])
+
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter(result => result.status === 'rejected')).toHaveLength(1)
+    expect(await database.get('mtproto_auth_session', { virtualPhone: '8881234567890' })).toHaveLength(1)
+  })
+
+  it('migrates only non-888 numbers when their platform adapters are inactive', async () => {
     const database = await createDatabase()
     const first = await provisionPlatformAccount(database, 'qqnt', platform())
     const second = await provisionPlatformAccount(database, 'static', platform({
       id: 'static-uid', firstName: 'Static', username: '10002',
-    }))
-    await database.set('mtproto_auth_session', { id: first!.auth.id }, { virtualPhone: '999000000000001' })
+    }, 'static'))
+    await database.set('mtproto_auth_session', { id: first!.auth.id }, { virtualPhone: '17778889999' })
     await database.set('mtproto_auth_session', { id: second!.auth.id }, { virtualPhone: '888000000000002' })
 
-    await expect(migrateLegacyVirtualPhones(database)).resolves.toBe(2)
+    await expect(migrateLegacyVirtualPhones(database)).resolves.toBe(1)
     const rows = await database.get('mtproto_auth_session', {})
-    expect(rows.map(row => row.virtualPhone)).toEqual([
-      expect.stringMatching(/^1\d{3}55501\d{2}$/),
-      expect.stringMatching(/^1\d{3}55501\d{2}$/),
-    ])
-    expect(new Set(rows.map(row => row.virtualPhone)).size).toBe(2)
+    expect(rows.find(row => row.id === first!.auth.id)!.virtualPhone).toMatch(/^888\d{12}$/)
+    expect(rows.find(row => row.id === second!.auth.id)!.virtualPhone).toBe('888000000000002')
     await expect(migrateLegacyVirtualPhones(database)).resolves.toBe(0)
   })
 
