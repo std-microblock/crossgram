@@ -1017,7 +1017,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         )
       } catch (error) {
         if (error instanceof QQNTMessageSendRejectedError) {
-          throw new IMMessageSendRejectedError('permission-denied', error.message, { cause: error })
+          throw new IMMessageSendRejectedError(
+            /^QQNT bridge 403:/u.test(error.message) ? 'permission-denied' : 'platform-rejected',
+            error.message,
+            { cause: error },
+          )
         }
         throw error
       }

@@ -4017,6 +4017,7 @@ describe('bridge login e2e', () => {
     }
     const unread = new Set([direct.id, group.id])
     const readTargets: Array<{ conversationId: string, messageId: string }> = []
+    const readReleases: Array<ReturnType<typeof Promise.withResolvers<void>>> = []
     const platform: bridge.IMPlatform = {
       capabilities: {
         history: true,
@@ -4041,6 +4042,9 @@ describe('bridge login e2e', () => {
       async getUser(_session, id) { return { id, firstName: id === direct.id ? direct.title : id } },
       async markRead(_session, target) {
         readTargets.push(target)
+        const release = Promise.withResolvers<void>()
+        readReleases.push(release)
+        await release.promise
         unread.delete(target.conversationId)
       },
       async sendMessage() { throw new Error('send is disabled') },
@@ -4122,9 +4126,18 @@ describe('bridge login e2e', () => {
         dialogs: [{ unreadCount: 1, unreadMentionsCount: 0 }],
       })
 
-      await expect(callRpc(requester, requesterKey, requesterSid, {
+      const directRead = callRpc(requester, requesterKey, requesterSid, {
         _: 'messages.readHistory', peer: directPeer, maxId: directHistory.messages[0].id,
-      }, 20)).resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 0 })
+      }, 20)
+      await vi.waitFor(() => expect(readReleases).toHaveLength(1))
+      const directAck = await Promise.race([
+        directRead.then((value) => ({ type: 'ack' as const, value })),
+        new Promise<{ type: 'timeout' }>((resolve) => setTimeout(() => resolve({ type: 'timeout' }), 1_000)),
+      ])
+      readReleases[0]?.resolve()
+      expect(directAck).toMatchObject({
+        type: 'ack', value: { _: 'messages.affectedMessages', ptsCount: 0 },
+      })
       await expect(readPush(observer, observerKey)).resolves.toMatchObject({
         _: 'updates',
         updates: [{
@@ -4133,11 +4146,18 @@ describe('bridge login e2e', () => {
         }],
       })
 
-      await expect(callRpc(requester, requesterKey, requesterSid, {
+      const channelRead = callRpc(requester, requesterKey, requesterSid, {
         _: 'channels.readHistory',
         channel: { _: 'inputChannel', channelId: groupChat.id, accessHash: Long.ZERO },
         maxId: groupHistory.messages[0].id,
-      }, 22)).resolves.toEqual({ _: 'boolTrue' })
+      }, 22)
+      await vi.waitFor(() => expect(readReleases).toHaveLength(2))
+      const channelAck = await Promise.race([
+        channelRead.then((value) => ({ type: 'ack' as const, value })),
+        new Promise<{ type: 'timeout' }>((resolve) => setTimeout(() => resolve({ type: 'timeout' }), 1_000)),
+      ])
+      readReleases[1]?.resolve()
+      expect(channelAck).toEqual({ type: 'ack', value: { _: 'boolTrue' } })
       await expect(readPush(observer, observerKey)).resolves.toMatchObject({
         _: 'updates',
         updates: [{

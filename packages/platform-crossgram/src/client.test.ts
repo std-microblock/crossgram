@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocketServer } from 'ws'
-import { QQNTClient } from './client.js'
+import { QQNTClient, QQNTMessageSendRejectedError } from './client.js'
 
 async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
   const chunks: Uint8Array[] = []
@@ -48,6 +48,43 @@ describe('QQNTClient streaming transport', () => {
     if (!server) return
     server.close()
     await once(server, 'close')
+  })
+
+  it('classifies upload preparation rejection as a permanent message send error', async () => {
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async () => Response.json({
+        error: 'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
+      }, { status: 422 })),
+    })
+
+    const error = await client.prepareMediaUpload('group', {
+      kind: 'file', name: 'full.bin', size: 3,
+      md5: '5289df737df57326fcdd22597afb1fac',
+      sha1: '7037807198c22a7d2b0807371d763779a84fdfcf',
+      file10MMd5: '5289df737df57326fcdd22597afb1fac',
+    }).catch((value: unknown) => value)
+
+    expect(error).toBeInstanceOf(QQNTMessageSendRejectedError)
+    expect(error).toMatchObject({
+      message: 'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
+    })
+  })
+
+  it('treats a bridge sticker range past EOF as an empty Telegram chunk', async () => {
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async () => new Response(null, {
+        status: 416, headers: { 'content-range': 'bytes */128' },
+      })),
+    })
+    const source = client.stickerSource({
+      kind: 'market', packageId: '42', stickerId: 'wave', name: 'wave', key: 'key',
+      width: 240, height: 240, animated: true,
+    })
+
+    await expect(collect(source.streamRange!({ offset: 128, limit: 32 })))
+      .resolves.toEqual(Buffer.alloc(0))
   })
 
   it('posts opaque read boundaries to the QQNT bridge', async () => {

@@ -366,6 +366,10 @@ export class QQNTClient {
       body: JSON.stringify(reference),
       signal: options.signal,
     })
+    if (response.status === 416 && offset > 0) {
+      await discardResponseBody(response)
+      return
+    }
     if (!response.ok) throw new Error(await responseError(response))
     if (!response.body) throw new Error('QQNT sticker response has no body')
     const reader = response.body.getReader()
@@ -452,12 +456,16 @@ export class QQNTClient {
     },
     signal?: AbortSignal,
   ): Promise<QQMediaUploadPlan> {
-    return this.json<QQMediaUploadPlan>('/uploads/prepare', false, {
+    const response = await this.fetchImpl(`${this.endpoint}/uploads/prepare`, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ conversationId, media }),
       signal,
     })
+    if (response.status === 422) {
+      throw new QQNTMessageSendRejectedError(await responseErrorDetail(response))
+    }
+    return responseJson(response)
   }
 
   async sendMessage(
@@ -501,7 +509,11 @@ export class QQNTClient {
         // Node's fetch requires this for a streaming request body.
         duplex: 'half',
       } as RequestInit & { duplex: 'half' })
-      if (response.status === 403) throw new QQNTMessageSendRejectedError(await responseError(response))
+      if (response.status === 403 || response.status === 422) {
+        throw new QQNTMessageSendRejectedError(
+          response.status === 403 ? await responseError(response) : await responseErrorDetail(response),
+        )
+      }
       return responseJson(response)
     }
     const hasVideo = media?.some((item) => outboundMediaKind(item) === 'video')
@@ -597,8 +609,10 @@ export class QQNTClient {
     const response = await this.fetchImpl(`${this.endpoint}/messages`, {
       method: 'POST', headers, body: new Uint8Array(), signal: options.signal,
     })
-    if (response.status === 403) {
-      throw new QQNTMessageSendRejectedError(await responseError(response))
+    if (response.status === 403 || response.status === 422) {
+      throw new QQNTMessageSendRejectedError(
+        response.status === 403 ? await responseError(response) : await responseErrorDetail(response),
+      )
     }
     return responseJson(response)
   }
@@ -1677,6 +1691,16 @@ async function responseError(response: Response): Promise<string> {
     return `QQNT bridge ${response.status}: ${typeof body.error === 'string' ? body.error : text}`
   } catch {
     return `QQNT bridge ${response.status}: ${text || response.statusText}`
+  }
+}
+
+async function responseErrorDetail(response: Response): Promise<string> {
+  const text = await response.text()
+  try {
+    const body = JSON.parse(text) as { error?: unknown }
+    return typeof body.error === 'string' ? body.error : text || response.statusText
+  } catch {
+    return text || response.statusText
   }
 }
 

@@ -200,11 +200,14 @@ describe('QQNTPlatform mapping', () => {
     expect(authorizations).toEqual(['Bearer service-token', 'Bearer configured-token'])
   })
 
-  it('maps only the QQNT message endpoint permanent rejection to a platform send rejection', async () => {
+  it('maps QQ permission and upload preparation rejections to typed platform send errors', async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(Response.json({
         error: 'QQ message send rejected: 发送失败，请先添加对方为好友 (16)', result: 16,
       }, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({
+        error: 'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
+      }, { status: 422 }))
       .mockResolvedValueOnce(Response.json({
         error: 'QQ transport temporarily unavailable',
       }, { status: 500 })) as typeof globalThis.fetch
@@ -221,6 +224,16 @@ describe('QQNTPlatform mapping', () => {
       expect(error).toMatchObject({
         reason: 'permission-denied',
         message: 'QQNT bridge 403: QQ message send rejected: 发送失败，请先添加对方为好友 (16)',
+      })
+    }
+    try {
+      await send()
+      throw new Error('expected permanent QQ upload rejection')
+    } catch (error) {
+      expect(error).toBeInstanceOf(IMMessageSendRejectedError)
+      expect(error).toMatchObject({
+        reason: 'platform-rejected',
+        message: 'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
       })
     }
     try {

@@ -954,7 +954,7 @@ export class DialogRpc {
   ): Promise<tl.messages.RawAffectedMessages> {
     await this._hydratePeers()
     const conversationId = this._resolvePeer(req.peer)
-    await this._markRead(conversationId, req.maxId, excludeConnection)
+    this._markReadInBackground(conversationId, req.maxId, excludeConnection)
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
   }
@@ -1306,7 +1306,7 @@ export class DialogRpc {
   ): Promise<tl.TlObject> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
-    await this._markRead(conversation.id, req.maxId, excludeConnection)
+    this._markReadInBackground(conversation.id, req.maxId, excludeConnection)
     return { _: 'boolTrue' } as unknown as tl.TlObject
   }
 
@@ -2559,7 +2559,10 @@ export class DialogRpc {
       return await send()
     } catch (error) {
       if (error instanceof IMMessageSendRejectedError) {
-        throw new RpcError(403, 'CHAT_WRITE_FORBIDDEN')
+        if (error.reason === 'permission-denied') {
+          throw new RpcError(403, 'CHAT_WRITE_FORBIDDEN')
+        }
+        throw new RpcError(400, error.message)
       }
       throw error
     }
@@ -4841,6 +4844,21 @@ export class DialogRpc {
       conversationId: target.id,
       upToMessageId: ref.id,
     }, this._localDelivery(excludeConnection))
+  }
+
+  private _markReadInBackground(
+    conversationId: string,
+    tlMessageId: number,
+    excludeConnection?: ServerConnection,
+  ): void {
+    void this._markRead(conversationId, tlMessageId, excludeConnection).catch((error) => {
+      this._onTrace?.(
+        'background mark-read failed conversation=%s message=%d error=%s',
+        conversationId,
+        tlMessageId,
+        error instanceof Error ? error.message : String(error),
+      )
+    })
   }
 
   private async _markMentionContentsRead(

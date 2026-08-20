@@ -428,6 +428,10 @@ describe('media send streaming', () => {
         'permission-denied',
         'QQNT bridge 403: QQ message send rejected',
       ))
+      .mockRejectedValueOnce(new IMMessageSendRejectedError(
+        'platform-rejected',
+        'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
+      ))
       .mockRejectedValueOnce(new Error('QQNT bridge 500: temporary media send failure'))
     await uploads.savePart(session.platformSessionId, '188', 0, new TextEncoder().encode('keep-me'))
     const request = (randomId: number): tl.messages.RawSendMediaRequest => ({
@@ -441,11 +445,16 @@ describe('media send streaming', () => {
     await expect(rpc.sendMedia(request(18_801)))
       .rejects.toMatchObject({ code: 403, text: 'CHAT_WRITE_FORBIDDEN' })
     await expect(rpc.sendMedia(request(18_802)))
+      .rejects.toMatchObject({
+        code: 400,
+        text: 'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
+      })
+    await expect(rpc.sendMedia(request(18_803)))
       .rejects.toThrow('QQNT bridge 500: temporary media send failure')
     expect(new TextDecoder().decode(await collectSource(
       (await uploads.open(session.platformSessionId, '188', 1)).source,
     ))).toBe('keep-me')
-    expect(send).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenCalledTimes(3)
   })
 
   it('stages photos with the configured media DC and sends them by reference', async () => {

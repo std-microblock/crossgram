@@ -707,6 +707,36 @@ describe('DialogRpc', () => {
     expect(localEvents).toHaveLength(1)
   })
 
+  it('acknowledges readHistory without waiting for the upstream mark-read request', async () => {
+    const platform = new DialogTestPlatform()
+    let release!: () => void
+    let started!: () => void
+    const markStarted = new Promise<void>((resolve) => { started = resolve })
+    vi.spyOn(platform, 'markRead').mockImplementation(async () => {
+      started()
+      await new Promise<void>((resolve) => { release = resolve })
+    })
+    const rpc = new DialogRpc(platform, session)
+    const peer = { _: 'inputPeerUser' as const, userId: stableId('peer:alice'), accessHash: Long.ZERO }
+    const history = await rpc.getHistory(getHistoryRequest(peer.userId)) as tl.messages.RawMessages
+    const newest = history.messages[0] as tl.RawMessage
+    let completed = false
+    const response = rpc.readHistory({ _: 'messages.readHistory', peer, maxId: newest.id })
+      .then((value) => {
+        completed = true
+        return value
+      })
+
+    await markStarted
+    await Promise.resolve()
+    await Promise.resolve()
+    const completedBeforeUpstream = completed
+    release()
+
+    await expect(response).resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
+    expect(completedBeforeUpstream).toBe(true)
+  })
+
   it('uses platform search filters and carries its opaque cursor across Telegram pages', async () => {
     class NativeSearchPlatform extends DialogTestPlatform {
       readonly queries: IMMessageSearchQuery[] = []
@@ -942,7 +972,17 @@ describe('DialogRpc', () => {
     await expect(rpc.sendMessage(sendMessageRequest(aliceId, {
       randomId: Long.fromNumber(12_002),
     }))).rejects.toThrow('QQNT bridge 500: temporary send failure')
-    expect(send).toHaveBeenCalledTimes(2)
+    send.mockRejectedValueOnce(new IMMessageSendRejectedError(
+      'platform-rejected',
+      'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
+    ))
+    await expect(rpc.sendMessage(sendMessageRequest(aliceId, {
+      randomId: Long.fromNumber(12_003),
+    }))).rejects.toMatchObject({
+      code: 400,
+      text: 'QQ group file upload preparation failed: 永久空间不足, 请清理文件列表后重试 (-403)',
+    })
+    expect(send).toHaveBeenCalledTimes(3)
   })
 
   it('resolves a reply from the message target loaded into the active dialog', async () => {
