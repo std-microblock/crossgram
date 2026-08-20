@@ -130,4 +130,23 @@ describe('createServerObfuscation', () => {
     const decoded = await serverDecodeAll(clientObf, serverBytes) // client.decode
     expect(decoded[0]).toEqual(frame)
   })
+
+  it('server → Android-style padded-intermediate client preserves consecutive frames', async () => {
+    const clientInner = new PaddedIntermediatePacketCodec()
+    const clientObf = new ObfuscatedPacketCodec(clientInner)
+    clientObf.setup?.(crypto, log)
+    const header = await (clientObf.tag() as Promise<Uint8Array>)
+    const { codec: serverObf } = createServerObfuscation(new Uint8Array(header), crypto, log)
+
+    const first = crypto.randomBytes(84)
+    const second = crypto.randomBytes(84)
+    const raw = new Uint8Array([
+      ...await clientEncode(serverObf, first),
+      ...await clientEncode(serverObf, second),
+    ])
+    const decoded = await serverDecodeAll(clientObf, raw)
+    expect(decoded).toHaveLength(2)
+    expect(decoded[0]!.slice(0, first.length)).toEqual(first)
+    expect(decoded[1]!.slice(0, second.length)).toEqual(second)
+  })
 })

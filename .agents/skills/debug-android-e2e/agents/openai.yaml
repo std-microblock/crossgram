@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug Android E2E"
+  short_description: "Debug Android with AVD, programmatic probes, logs, and Frida"
+  default_prompt: "Use $debug-android-e2e to reproduce and diagnose this Android client issue without coordinate-based UI automation."

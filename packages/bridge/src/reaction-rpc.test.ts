@@ -150,6 +150,27 @@ describe('ReactionRpc', () => {
     ])
   })
 
+  it('bounds message reaction previews to Telegram Androids three visible actors', () => {
+    const platform = { capabilities: { reactions: { actorList: true } } } as IMPlatform
+    const rpc = new ReactionRpc(platform, session)
+    const context: IMReactionContext = {
+      available: [{ key: 'like', presentation: { type: 'emoji', emoticon: '👍' } }],
+      reactions: [{
+        key: 'like', count: 4,
+        recentActors: [
+          { userId: 'alice' }, { userId: 'bob' }, { userId: 'carol' }, { userId: 'dave' },
+        ],
+      }],
+      maxSelected: 20,
+    }
+
+    expect(rpc.messageReactions('group', {
+      id: 'message', conversationId: 'group', senderId: 'sender', timestamp: 1,
+      content: { parts: [{ type: 'text', text: 'preview' }] }, reactionContext: context,
+    }, (id) => ({ alice: 1, bob: 2, carol: 3, dave: 4 })[id]!).recentReactions)
+      .toHaveLength(3)
+  })
+
   it.each(['static', 'video'] as const)('describes and serves %s custom reaction resources', async (format) => {
     const { rpc, documentId, resource, bytes } = fixture(format)
     const [document] = rpc.getCustomEmojiDocuments([documentId])

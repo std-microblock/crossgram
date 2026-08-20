@@ -25,6 +25,28 @@ describe('TelegramResources', () => {
     expect([...file!.bytes.subarray(0, 4)]).toEqual([0x52, 0x49, 0x46, 0x46])
   })
 
+  it('advertises the exact served size for every reaction asset', () => {
+    const resources = new TelegramResources()
+    const documents = resources.availableReactions().reactions.flatMap((reaction) => [
+      reaction.staticIcon,
+      reaction.appearAnimation,
+      reaction.selectAnimation,
+      reaction.activateAnimation,
+      reaction.effectAnimation,
+      reaction.aroundAnimation,
+      reaction.centerIcon,
+    ]).filter((document) => document?._ === 'document')
+
+    expect(documents.length).toBeGreaterThan(0)
+    for (const document of documents) {
+      if (!document || document._ !== 'document') continue
+      const file = resources.getFile(document.id)
+      expect(file, `missing bytes for ${document.id.toString()}`).toBeDefined()
+      expect(document.size, `stale size for ${document.id.toString()}`)
+        .toBe(file!.bytes.byteLength)
+    }
+  })
+
   it('builds effects with optional document IDs omitted', () => {
     const resources = new TelegramResources()
     const effects = resources.availableEffects()

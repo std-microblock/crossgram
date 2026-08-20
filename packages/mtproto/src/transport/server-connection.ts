@@ -33,6 +33,11 @@ export class ServerConnection {
   private _closed = false
   private _readPaused = false
   private _recvBuffer = Bytes.alloc(65536)
+  private _pendingSocketData: Uint8Array[] = []
+  private _decoding = false
+  private _pendingSends: Array<{ data: Uint8Array, closeAfterWrite: boolean }> = []
+  private _encoding = false
+  private _closing = false
   private _messageHandler: ((data: Uint8Array) => void) | null = null
   /** Codec is `null` until the transport is detected from the first bytes. */
   private _codec: IPacketCodec | null = null
@@ -54,6 +59,8 @@ export class ServerConnection {
   private readonly _onClose = (): void => {
     this._closed = true
     this._readPaused = false
+    this._closing = true
+    this._pendingSends.length = 0
     this._backpressuredSince = null
   }
 
@@ -78,11 +85,6 @@ export class ServerConnection {
     }
   }
 
-  /** Temporarily replace the frame consumer while a handshake owns the socket. */
-  replaceMessageHandler(handler: ((data: Uint8Array) => void) | null): void {
-    this._messageHandler = handler
-  }
-
   /**
    * Send a raw framed packet to the client.
    * The packet is encoded by the (detected) codec before writing to the socket.
@@ -97,20 +99,35 @@ export class ServerConnection {
   }
 
   private _send(data: Uint8Array, closeAfterWrite: boolean): void {
-    if (this._closed) return
+    if (this._closed || this._closing) return
     if (!this._codec) {
       this._log.warn('send() called before transport was detected; dropping %d bytes', data.length)
       if (closeAfterWrite) this.close()
       return
     }
 
-    const writable = Bytes.alloc(data.length + 16)
-    const result = this._codec.encode(data, writable)
+    if (closeAfterWrite) this._closing = true
+    // Obfuscated transports use a stateful AES-CTR encoder. Keep both codec
+    // mutation and socket writes strictly ordered when callers send multiple
+    // replies before an asynchronous encode has completed.
+    this._pendingSends.push({ data: new Uint8Array(data), closeAfterWrite })
+    this._drainSendQueue()
+  }
+
+  private _drainSendQueue(): void {
+    if (this._encoding || this._closed) return
+    const pending = this._pendingSends.shift()
+    if (!pending) return
+
+    this._encoding = true
+    const writable = Bytes.alloc(pending.data.length + 16)
     const write = () => {
+      if (this._closed) return
       const encoded = writable.result()
       this._onTraffic?.({ direction: 'sent', bytes: encoded.length, timestamp: Date.now() })
-      if (closeAfterWrite) {
+      if (pending.closeAfterWrite) {
         this._closed = true
+        this._pendingSends.length = 0
         this._socket.end(encoded)
       } else {
         const flushed = this._socket.write(encoded)
@@ -119,10 +136,26 @@ export class ServerConnection {
         }
       }
     }
-    if (result instanceof Promise) {
-      result.then(write)
-    } else {
-      write()
+    const complete = () => {
+      this._encoding = false
+      this._drainSendQueue()
+    }
+    const fail = (error: unknown) => {
+      this._log.error('transport encode failed: %s', error instanceof Error ? error.stack : error)
+      this.close()
+    }
+
+    try {
+      const result = this._codec!.encode(pending.data, writable)
+      if (result instanceof Promise) {
+        result.then(write, fail).finally(complete)
+      } else {
+        write()
+        complete()
+      }
+    } catch (error) {
+      fail(error)
+      complete()
     }
   }
 
@@ -174,6 +207,8 @@ export class ServerConnection {
     if (this._closed) return
     this._closed = true
     this._readPaused = false
+    this._closing = true
+    this._pendingSends.length = 0
     this._backpressuredSince = null
     this._socket.off('drain', this._onDrain)
     this._socket.destroy()
@@ -194,40 +229,54 @@ export class ServerConnection {
     this._onTraffic?.({ direction: 'received', bytes: data.length, timestamp: Date.now() })
     this._log.debug('received %d bytes from socket', data.length)
 
-    // Append data to receive buffer using the sync write API
-    const writeView = this._recvBuffer.writeSync(data.length)
-    writeView.set(new Uint8Array(data))
-    this._recvBuffer.disposeWriteSync(data.length)
+    // Node owns the socket Buffer and packet codecs may decode asynchronously.
+    // Queue owned chunks so the receive cursor and obfuscation state are only
+    // touched by one drain at a time.
+    this._pendingSocketData.push(new Uint8Array(data))
+    this._scheduleDecode()
+  }
 
-    // Detect the transport from the first bytes (once). Returns false while
-    // more bytes are needed to disambiguate.
-    if (!this._codec) {
-      if (!this._detectTransport()) return
-    }
+  private _scheduleDecode(): void {
+    if (this._decoding || this._closed) return
+    this._decoding = true
+    this._drainSocketData().catch((error) => {
+      this._log.error('transport decode failed: %s', error instanceof Error ? error.stack : error)
+      this.close()
+    }).finally(() => {
+      this._decoding = false
+      if (this._pendingSocketData.length > 0) this._scheduleDecode()
+    })
+  }
 
-    this._log.debug('recv buffer available for decode: %d bytes', this._recvBuffer.available)
-
-    for (;;) {
-      const frame = this._codec!.decode(this._recvBuffer, false)
-      if (frame instanceof Promise) {
-        frame.then((f) => {
-          if (f !== null) {
-            this._log.verbose('decoded frame: %d bytes', f.length)
-            this._messageHandler?.(f)
-          }
-        })
-        break
-      }
-      if (frame === null) {
-        this._log.debug('decode returned null (incomplete data), available: %d', this._recvBuffer.available)
-        break
+  private async _drainSocketData(): Promise<void> {
+    while (!this._closed && this._pendingSocketData.length > 0) {
+      for (const chunk of this._pendingSocketData.splice(0)) {
+        const writeView = this._recvBuffer.writeSync(chunk.length)
+        writeView.set(chunk)
+        this._recvBuffer.disposeWriteSync(chunk.length)
       }
 
-      this._log.debug('decoded frame: %d bytes', frame.length)
-      this._messageHandler?.(frame)
-    }
+      // Detect the transport from the first bytes (once). Returns false while
+      // more bytes are needed to disambiguate.
+      if (!this._codec && !this._detectTransport()) continue
 
-    this._recvBuffer.reclaim()
+      this._log.debug('recv buffer available for decode: %d bytes', this._recvBuffer.available)
+
+      for (;;) {
+        const frame = await this._codec!.decode(this._recvBuffer, false)
+        if (frame === null) {
+          this._log.debug('decode returned null (incomplete data), available: %d', this._recvBuffer.available)
+          break
+        }
+
+        this._log.debug('decoded frame: %d bytes', frame.length)
+        // The Cordis packet pipeline is asynchronous. Give it an owned frame,
+        // never a view into `_recvBuffer` that reclaim() will overwrite.
+        this._messageHandler?.(new Uint8Array(frame))
+      }
+
+      this._recvBuffer.reclaim()
+    }
   }
 
   /**

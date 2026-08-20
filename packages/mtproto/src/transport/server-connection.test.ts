@@ -119,4 +119,109 @@ describe('ServerConnection stall tracking', () => {
     expect((socket as unknown as { off: ReturnType<typeof vi.fn> }).off).toHaveBeenCalledWith('drain', expect.any(Function))
     expect(connection.stalledForMs).toBe(0)
   })
+
+  it('delivers owned frames that survive receive-buffer reuse', async () => {
+    const socket = mockSocket()
+    const connection = makeConnection(socket)
+    const frames: Uint8Array[] = []
+    connection.listen(frame => frames.push(frame))
+
+    socket.emit('data', Buffer.from([1, 1, 2, 3, 4]))
+    await vi.waitFor(() => expect(frames).toHaveLength(1))
+    socket.emit('data', Buffer.from([1, 9, 8, 7, 6]))
+    await vi.waitFor(() => expect(frames).toHaveLength(2))
+
+    expect(frames[0]).toEqual(Uint8Array.of(1, 2, 3, 4))
+    expect(frames[1]).toEqual(Uint8Array.of(9, 8, 7, 6))
+  })
+
+  it('serializes asynchronous codec drains across socket data events', async () => {
+    const socket = mockSocket()
+    const connection = makeConnection(socket)
+    const frames: Uint8Array[] = []
+    const releases: Array<() => void> = []
+    let active = 0
+    let maxActive = 0
+    const codec = {
+      tag: () => new Uint8Array(),
+      reset: () => {},
+      encode: () => {},
+      decode(reader: import('@fuman/io').Bytes) {
+        if (reader.available === 0) return null
+        const value = reader.readSync(1)[0]
+        active++
+        maxActive = Math.max(maxActive, active)
+        return new Promise<Uint8Array>((resolve) => {
+          releases.push(() => {
+            active--
+            resolve(Uint8Array.of(value))
+          })
+        })
+      },
+    }
+    ;(connection as unknown as { _codec: typeof codec })._codec = codec
+    connection.listen(frame => frames.push(frame))
+
+    socket.emit('data', Buffer.from([11]))
+    await vi.waitFor(() => expect(releases).toHaveLength(1))
+    socket.emit('data', Buffer.from([22]))
+    expect(releases).toHaveLength(1)
+    expect(maxActive).toBe(1)
+
+    releases.shift()!()
+    await vi.waitFor(() => expect(frames).toEqual([Uint8Array.of(11)]))
+    await vi.waitFor(() => expect(releases).toHaveLength(1))
+    releases.shift()!()
+    await vi.waitFor(() => expect(frames).toEqual([Uint8Array.of(11), Uint8Array.of(22)]))
+    expect(maxActive).toBe(1)
+  })
+
+  it('serializes asynchronous stateful encoding and preserves socket write order', async () => {
+    const writes: Uint8Array[] = []
+    const write = vi.fn((data: Uint8Array) => {
+      writes.push(new Uint8Array(data))
+      return true
+    })
+    const socket = mockSocket({ write })
+    const connection = makeConnection(socket)
+    const releases: Array<() => void> = []
+    let active = 0
+    let maxActive = 0
+    const codec = {
+      tag: () => new Uint8Array(),
+      reset: () => {},
+      decode: () => null,
+      encode(data: Uint8Array, writable: import('@fuman/io').Bytes) {
+        const value = data[0]
+        active++
+        maxActive = Math.max(maxActive, active)
+        return new Promise<void>((resolve) => {
+          releases.push(() => {
+            const target = writable.writeSync(1)
+            target[0] = value
+            writable.disposeWriteSync(1)
+            active--
+            resolve()
+          })
+        })
+      },
+    }
+    ;(connection as unknown as { _codec: typeof codec })._codec = codec
+
+    connection.send(Uint8Array.of(11))
+    connection.send(Uint8Array.of(22))
+    await vi.waitFor(() => expect(releases).toHaveLength(1))
+    expect(maxActive).toBe(1)
+    expect(write).not.toHaveBeenCalled()
+
+    releases.shift()!()
+    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(1))
+    expect(writes[0]).toEqual(Uint8Array.of(11))
+    await vi.waitFor(() => expect(releases).toHaveLength(1))
+    expect(maxActive).toBe(1)
+
+    releases.shift()!()
+    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(2))
+    expect(writes[1]).toEqual(Uint8Array.of(22))
+  })
 })

@@ -1005,6 +1005,68 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('answers a fast RPC from the same Android-style container while a sibling is blocked', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, register, stop } = await startServer()
+    let releaseSlow!: () => void
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
+    let markSlowStarted!: () => void
+    const slowStarted = new Promise<void>((resolve) => { markSlowStarted = resolve })
+    register('help.getAppConfig', async () => {
+      markSlowStarted()
+      await slowGate
+      return { _: 'help.appConfig', hash: 11, config: { _: 'jsonObject', value: [] } }
+    })
+    register('help.getNearestDc', async () => ({
+      _: 'nearestDc', country: 'test', thisDc: 1, nearestDc: 1,
+    } as unknown as tl.TlObject))
+
+    let client: TestClient | undefined
+    try {
+      client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x72727272, 0x72727272)
+      const slowMessageId = makeMsgId(54)
+      const fastMessageId = slowMessageId.add(4)
+      const containerMessageId = fastMessageId.add(4)
+      const slow = serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 })
+      const fast = serializeInitializedRpc({ _: 'help.getNearestDc' })
+      const container = TlBinaryWriter.manual(8 + 16 + slow.length + 16 + fast.length)
+      container.uint(0x73f1f8dc)
+      container.uint(2)
+      container.long(slowMessageId)
+      container.uint(1)
+      container.uint(slow.length)
+      container.raw(slow)
+      container.long(fastMessageId)
+      container.uint(3)
+      container.uint(fast.length)
+      container.raw(fast)
+
+      await client.send(clientEncryptWithMessageId(
+        perm, container.result(), perm.salt, sessionId, containerMessageId,
+      ))
+      await slowStarted
+
+      const fastResult = await within(
+        readRpcResultEnvelope(client, perm),
+        3_000,
+        'same-container independent RPC response',
+      )
+      expect(fastResult.requestMessageId.toString()).toBe(fastMessageId.toString())
+      expect(fastResult.result).toMatchObject({ _: 'nearestDc', thisDc: 1 })
+
+      releaseSlow()
+      const slowResult = await readRpcResultEnvelope(client, perm)
+      expect(slowResult.requestMessageId.toString()).toBe(slowMessageId.toString())
+      expect(slowResult.result).toMatchObject({ _: 'help.appConfig', hash: 11 })
+    } finally {
+      releaseSlow()
+      client?.close()
+      await stop()
+    }
+  })
+
   it('echoes every ping message id and keeps accepting RPCs on the same socket', async () => {
     await crypto.initialize?.()
     const { port, pubKey, register, stop } = await startServer()

@@ -177,6 +177,7 @@ export interface BlockedPeerRpcChange extends BlockedPeerChange {
  */
 export class DialogRpc {
   private static readonly PEER_HYDRATION_TTL_MS = 5_000
+  private static readonly REACTION_REFRESH_FAILURE_COOLDOWN_MS = 30_000
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
   private readonly _userToTl = new Map<string, number>()
@@ -215,6 +216,7 @@ export class DialogRpc {
   private readonly _memberPages = new Map<string, MemberPageState>()
   private readonly _pendingMemberPages = new Map<string, Promise<void>>()
   private readonly _searchCursors = new Map<string, SearchCursorState>()
+  private readonly _reactionRefreshFailures = new Map<string, number>()
   // ponytail: session-wide queue; use per-peer queues only if folder edit throughput matters.
   private _folderEditQueue = Promise.resolve()
   private readonly _actions: PlatformMessageActions
@@ -2344,23 +2346,65 @@ export class DialogRpc {
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
-    const updates: tl.TypeUpdate[] = []
-    for (const id of req.id) {
+    const refreshed = await mapConcurrent(req.id, 4, async (id) => {
       const projected = await this._store?.findProjectedByTlId(this._session.platformSessionId, id, peerId)
-      if (!projected || await this._messageHidden(projected.source)) continue
-      updates.push({
+      if (!projected || await this._messageHidden(projected.source)) return
+      let message = projected.source
+      const hasReactionCounts = message.reactionContext?.reactions.some((summary) =>
+        summary.count > 0 || summary.selected) ?? false
+      if (hasReactionCounts && this._platform.getMessageReactions && this._store) {
+        const target = {
+          conversationId: peerId,
+          messageId: message.id,
+          targetId: message.sourceIds?.[0] ?? message.id,
+          nativeSequence: projected.parts[0]?.nativeSequence === null
+            || projected.parts[0]?.nativeSequence === undefined
+            ? undefined
+            : String(projected.parts[0].nativeSequence),
+        }
+        const refreshKey = this._reactionRefreshKey(target)
+        if (!this._reactionRefreshCoolingDown(refreshKey)) {
+          try {
+            const context = await this._platform.getMessageReactions(this._session, target)
+            message = (await this._store.setReactions(this._session, conversation, target, context)).message
+            this._reactionRefreshFailures.delete(refreshKey)
+          } catch (error) {
+            this._reactionRefreshFailures.set(refreshKey, Date.now())
+            this._onTrace?.(
+              'reaction preview refresh failed peer=%s message=%s error=%s',
+              peerId,
+              message.id,
+              error instanceof Error ? error.message : String(error),
+            )
+          }
+        }
+      }
+      const visible = this._blockedPeers?.filterMessageReactions(this._session.platformSessionId, message)
+        ?? message
+      await Promise.all([...new Set((visible.reactionContext?.reactions ?? []).flatMap((summary) =>
+        (summary.recentActors ?? []).slice(0, 3).map((actor) => actor.userId)))]
+        .map((id) => this._getPeerUser(id)))
+      return {
+        message: visible,
+        update: {
         _: 'updateMessageReactions', peer: this._conversationPeer(conversation),
         msgId: id,
         reactions: this._reactions!.messageReactions(
           peerId,
-          this._blockedPeers?.filterMessageReactions(this._session.platformSessionId, projected.source)
-            ?? projected.source,
+          visible,
           (userId) => this._userId(userId),
         ),
-      } as tl.RawUpdateMessageReactions)
-    }
+        } as tl.RawUpdateMessageReactions,
+      }
+    })
+    const entries = refreshed.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+    const actorIds = [...new Set(entries.flatMap(({ message }) =>
+      (message.reactionContext?.reactions ?? []).flatMap((summary) =>
+        (summary.recentActors ?? []).slice(0, 3).map((actor) => actor.userId))))]
+    const actorUsers = await Promise.all(actorIds.map((id) => this._getPeerUser(id)))
     return {
-      _: 'updates', updates, users: [this._makeSelfUser()],
+      _: 'updates', updates: entries.map(({ update }) => update),
+      users: uniqueUsers([...actorUsers, this._makeSelfUser()]),
       chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
       date: Math.floor(Date.now() / 1000), seq: 0,
     }
@@ -2390,37 +2434,28 @@ export class DialogRpc {
     const blocked = await this._blockedPeers?.ensureLoaded(this._session.platformSessionId)
     const canPageUpstream = Boolean(this._platform.getMessageReactionActors
       && (this._blockedPeers?.mode === 'show' || !blocked?.size))
+    const refreshKey = this._reactionRefreshKey(target)
+    const refreshCoolingDown = this._reactionRefreshCoolingDown(refreshKey)
 
     let context: IMReactionContext | undefined
-    let actors: Array<{ summary: IMReactionSummary, actor: IMReactionActor }>
+    let actors: Array<{ summary: IMReactionSummary, actor: IMReactionActor }> = []
     let nextOffset: string | undefined
-    if (canPageUpstream) {
-      const page = await this._platform.getMessageReactionActors!(this._session, target, {
-        reactionKey: filter,
-        offset: req.offset || undefined,
-        limit: Math.max(0, req.limit),
-      })
-      const preservedActors = new Map((projected.source.reactionContext?.reactions ?? [])
-        .map((summary) => [summary.key, summary.recentActors]))
-      const persistedContext = {
-        ...page.context,
-        reactions: page.context.reactions.map((summary) => ({
-          ...summary,
-          recentActors: preservedActors.get(summary.key),
-        })),
+    const useStoredActors = async (refresh: boolean) => {
+      let refreshed: IMReactionContext | undefined
+      if (refresh) {
+        try {
+          refreshed = await this._platform.getMessageReactions?.(this._session, target)
+          this._reactionRefreshFailures.delete(refreshKey)
+        } catch (error) {
+          this._reactionRefreshFailures.set(refreshKey, Date.now())
+          this._onTrace?.(
+            'reaction actor fallback refresh failed peer=%s message=%s error=%s',
+            peerId,
+            projected.source.id,
+            error instanceof Error ? error.message : String(error),
+          )
+        }
       }
-      await this._store!.setReactions(
-        this._session, this._conversation(peerId), target, persistedContext,
-      )
-      context = page.context
-      const summaries = new Map(context.reactions.map((summary) => [summary.key, summary]))
-      actors = page.actors.flatMap(({ reactionKey, actor }) => {
-        const summary = summaries.get(reactionKey)
-        return summary ? [{ summary, actor }] : []
-      })
-      nextOffset = page.nextOffset
-    } else {
-      const refreshed = await this._platform.getMessageReactions?.(this._session, target)
       const unfilteredContext = refreshed
         ? (await this._store!.setReactions(
             this._session, this._conversation(peerId), target, refreshed,
@@ -2438,6 +2473,60 @@ export class DialogRpc {
       actors = allActors.slice(offset, offset + Math.max(0, req.limit))
       const next = offset + actors.length
       nextOffset = next < allActors.length ? String(next) : undefined
+    }
+    if (canPageUpstream && !refreshCoolingDown) {
+      try {
+        const page = await this._platform.getMessageReactionActors!(this._session, target, {
+          reactionKey: filter,
+          offset: req.offset || undefined,
+          limit: Math.max(0, req.limit),
+        })
+        this._reactionRefreshFailures.delete(refreshKey)
+        const preservedActors = new Map((projected.source.reactionContext?.reactions ?? [])
+          .map((summary) => [summary.key, summary.recentActors]))
+        const pageActors = new Map<string, IMReactionActor[]>()
+        for (const item of page.actors) {
+          const actors = pageActors.get(item.reactionKey) ?? []
+          if (actors.length < 3) actors.push(item.actor)
+          pageActors.set(item.reactionKey, actors)
+        }
+        const firstPage = !req.offset
+        const completeFirstPage = firstPage && !page.nextOffset
+        const persistedContext = {
+          ...page.context,
+          reactions: page.context.reactions.map((summary) => ({
+            ...summary,
+            recentActors: firstPage && (
+              filter !== undefined
+                ? summary.key === filter
+                : completeFirstPage || pageActors.has(summary.key)
+            )
+              ? pageActors.get(summary.key) ?? []
+              : preservedActors.get(summary.key),
+          })),
+        }
+        await this._store!.setReactions(
+          this._session, this._conversation(peerId), target, persistedContext,
+        )
+        context = page.context
+        const summaries = new Map(context.reactions.map((summary) => [summary.key, summary]))
+        actors = page.actors.flatMap(({ reactionKey, actor }) => {
+          const summary = summaries.get(reactionKey)
+          return summary ? [{ summary, actor }] : []
+        })
+        nextOffset = page.nextOffset
+      } catch (error) {
+        this._reactionRefreshFailures.set(refreshKey, Date.now())
+        this._onTrace?.(
+          'reaction actor page refresh failed peer=%s message=%s error=%s',
+          peerId,
+          projected.source.id,
+          error instanceof Error ? error.message : String(error),
+        )
+        await useStoredActors(false)
+      }
+    } else {
+      await useStoredActors(!canPageUpstream && !refreshCoolingDown)
     }
 
     const definitions = new Map((context?.available ?? []).map((item) => [item.key, item]))
@@ -2468,6 +2557,23 @@ export class DialogRpc {
     if (conversation?.kind === 'direct') return this._userId(peerId)
     if (!conversation && this._userToTl.has(peerId)) return this._userId(peerId)
     return this._peerId(peerId)
+  }
+
+  private _reactionRefreshKey(target: {
+    conversationId: string
+    messageId: string
+    targetId: string
+    nativeSequence?: string
+  }): string {
+    return `${target.conversationId}\0${target.targetId}\0${target.nativeSequence ?? ''}`
+  }
+
+  private _reactionRefreshCoolingDown(key: string): boolean {
+    const failedAt = this._reactionRefreshFailures.get(key)
+    if (failedAt === undefined) return false
+    if (Date.now() - failedAt < DialogRpc.REACTION_REFRESH_FAILURE_COOLDOWN_MS) return true
+    this._reactionRefreshFailures.delete(key)
+    return false
   }
 
   async userTlId(platformUserId: string): Promise<number> {
@@ -5720,6 +5826,24 @@ function cappedPhotoDimensions(
 
 function qqSequenceKey(conversationId: string, sequence: number): string {
   return `${conversationId}\u0000qq-sequence:${sequence}`
+}
+
+async function mapConcurrent<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    for (;;) {
+      const index = next++
+      if (index >= items.length) return
+      results[index] = await mapper(items[index]!, index)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 function safeOffset(value: unknown): number {

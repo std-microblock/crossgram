@@ -307,6 +307,18 @@ export class ServerSession {
   private _scheduledAckFlushes = new Set<string>()
   private _futureSalts: { validSince: number, validUntil: number, salt: Long }[] = []
   private _msgHandler: ((data: Uint8Array) => void) | null = null
+  /**
+   * Handshake frames normally bypass the Cordis packet pipeline after the
+   * first plaintext packet replaces the connection handler. Keep an ingress
+   * reservation before entering that async pipeline as well: a fast client can
+   * otherwise deliver another plaintext frame while the first packet is still
+   * crossing middleware, causing two authorization state machines to own the
+   * same socket and emit stale nonces indefinitely.
+   */
+  private _handshakeIngress: {
+    pending: Uint8Array[]
+    handler: ((data: Uint8Array) => void) | null
+  } | null = null
   private _packetSequence = 0
   private _frameQueue: Uint8Array[] = []
   private _queuedFrameBytes = 0
@@ -432,6 +444,19 @@ export class ServerSession {
 
   private _enqueueRawFrame(data: Uint8Array): void {
     if (this._disposed || this._connection.closed) return
+    // A handshake owns the socket until DH authorization finishes. The normal
+    // frame drain is deliberately single-file and is currently awaiting that
+    // handshake, so queueing the next plaintext frame behind it deadlocks the
+    // handshake's recvPlain() waiter. Route follow-up frames straight to the
+    // handshake ingress instead; frames that arrive before its temporary
+    // handler is installed remain buffered on the ingress reservation.
+    const activeHandshake = this._handshakeIngress
+    if (activeHandshake) {
+      const owned = new Uint8Array(data)
+      if (activeHandshake.handler) activeHandshake.handler(owned)
+      else activeHandshake.pending.push(owned)
+      return
+    }
     if (
       this._frameQueue.length >= MAX_QUEUED_FRAMES
       || this._queuedFrameBytes + data.byteLength > MAX_QUEUED_FRAME_BYTES
@@ -496,18 +521,43 @@ export class ServerSession {
   }
 
   private async _onRawData(data: Uint8Array): Promise<void> {
+    const activeHandshake = this._handshakeIngress
+    if (activeHandshake) {
+      if (activeHandshake.handler) activeHandshake.handler(data)
+      else activeHandshake.pending.push(data)
+      return
+    }
+
+    const keyId = data.subarray(0, 8)
+    const mayEnterHandshake = !this._authorized || keyId.every(byte => byte === 0)
+    const handshakeIngress = mayEnterHandshake
+      ? { pending: [] as Uint8Array[], handler: null as ((data: Uint8Array) => void) | null }
+      : null
+    if (handshakeIngress) this._handshakeIngress = handshakeIngress
+
     const packet: MtprotoPacketScope = {
       connection: this._context.mtprotoConnection,
       sequence: ++this._packetSequence,
       data,
     }
     const packetCtx = this._context.extend({ mtprotoPacket: packet })
-    await packetCtx.waterfall(
-      packetCtx,
-      'mtproto/packet',
-      packet,
-      () => this._processRawData(data, packetCtx),
-    )
+    try {
+      await packetCtx.waterfall(
+        packetCtx,
+        'mtproto/packet',
+        packet,
+        () => this._processRawData(data, packetCtx),
+      )
+    } finally {
+      if (handshakeIngress && this._handshakeIngress === handshakeIngress) {
+        this._handshakeIngress = null
+        for (const pending of handshakeIngress.pending.splice(0)) {
+          this._onRawData(pending).catch((err) => {
+            this._log.error('unhandled error in deferred message processing: %s', err)
+          })
+        }
+      }
+    }
   }
 
   private async _processRawData(data: Uint8Array, packetCtx: Context): Promise<void> {
@@ -603,7 +653,11 @@ export class ServerSession {
   private async _runHandshake(data: Uint8Array, isTemp: boolean): Promise<void> {
     this._log.verbose('%s handshake starting (%d bytes)', isTemp ? 'temp-key' : 'perm-key', data.length)
 
-    const normalHandler = this._msgHandler
+    const ingress = this._handshakeIngress ?? {
+      pending: [] as Uint8Array[],
+      handler: null as ((data: Uint8Array) => void) | null,
+    }
+    if (!this._handshakeIngress) this._handshakeIngress = ingress
     const unencryptedQueue: Uint8Array[] = [data]
     const encryptedFrames: Uint8Array[] = []
     let handshakeError: Error | null = null
@@ -681,8 +735,10 @@ export class ServerSession {
 
     let resumed: ResumeStoredAuthKey | null = null
     try {
-      // Replace handler to capture subsequent unencrypted messages during handshake
-      this._connection.replaceMessageHandler(tempHandler)
+      // Capture frames that reached the normal handler before this handshake
+      // crossed the async packet middleware, then route all later frames here.
+      ingress.handler = tempHandler
+      for (const pending of ingress.pending.splice(0)) tempHandler(pending)
 
       const recvPlain = async (): Promise<Uint8Array> => {
         if (handshakeError) throw handshakeError
@@ -773,7 +829,7 @@ export class ServerSession {
         this._connection.close()
       }
     } finally {
-      this._connection.replaceMessageHandler(normalHandler)
+      ingress.handler = null
     }
 
     if (resumed) {
@@ -877,18 +933,25 @@ export class ServerSession {
           messageId: msgId,
           seqNo,
         })
+        const processing: Promise<void>[] = []
         for (let i = 0; i < count; i++) {
           const innerMsgId = reader.long(true)
           const innerSeqNo = reader.uint()
           const innerLength = reader.uint()
           const innerBody = reader.raw(innerLength)
           const innerReader = new TlBinaryReader(this._readerMap, innerBody)
-          try {
-            await this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader, clientSessionId, packetCtx)
-          } catch (error) {
-            this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error, clientSessionId)
-          }
+          processing.push(
+            this._handleDecryptedMessage(innerMsgId, innerSeqNo, innerReader, clientSessionId, packetCtx)
+              .catch((error) => {
+                this._handleContainerMessageError(innerMsgId, innerSeqNo, innerBody, error, clientSessionId)
+              }),
+          )
         }
+        // A container is a transport batch, not an execution queue. Android
+        // groups independent upload.getFile calls in one container; awaiting
+        // each handler in wire order lets one slow or wedged asset prevent all
+        // following media and reaction resources from receiving a response.
+        await Promise.all(processing)
         return
       }
 

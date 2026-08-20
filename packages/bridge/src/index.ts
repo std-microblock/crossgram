@@ -28,7 +28,9 @@ import { IMStickerService } from './sticker-provider.js'
 import { StickerRpc } from './sticker-rpc.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { TelegramResourceService } from './resource-provider.js'
-import { PlatformAccountProvisioner, type ProvisionedPlatformAccount } from './platform-account.js'
+import {
+  migrateLegacyVirtualPhones, PlatformAccountProvisioner, type ProvisionedPlatformAccount,
+} from './platform-account.js'
 import { verifyLoginCode } from './login-code.js'
 import { DraftStore } from './draft-store.js'
 import { NotificationSettingsStore } from './notification-settings.js'
@@ -475,6 +477,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   }
 
   const accountProvisioner = new PlatformAccountProvisioner(ctx.database)
+  const legacyPhoneMigration = ctx.database.prepared().then(async () => {
+    const migrated = await migrateLegacyVirtualPhones(ctx.database)
+    if (migrated) bridgeLogger.info('migrated %d legacy +999 virtual phones to +1', migrated)
+  })
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()
   let publishedStickerPacks: StickerDashboardPack[] = []
@@ -563,6 +569,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   }
 
   const provision = async (platformId: string) => {
+    await legacyPhoneMigration
     const platform = registry.get(platformId)
     if (!platform?.getAccount) return
     try {
@@ -732,6 +739,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 
   ctx.effect(async () => {
     await ctx.database.prepared()
+    await legacyPhoneMigration
     // Delivery rows from pre-memory-journal versions are no longer used.
     await ctx.database.remove('mtproto_update_delivery', {})
     await Promise.all(registry.ids.map(platformId => provision(platformId)))

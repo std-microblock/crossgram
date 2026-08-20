@@ -140,7 +140,7 @@ export class ReactionRpc {
       }),
       recentReactions: (context?.reactions ?? []).flatMap((summary) => {
         const definition = definitions.get(summary.key)
-        return definition ? (summary.recentActors ?? []).map((actor): tl.RawMessagePeerReaction => ({
+        return definition ? (summary.recentActors ?? []).slice(0, 3).map((actor): tl.RawMessagePeerReaction => ({
           _: 'messagePeerReaction',
           my: actor.userId === this._session.userId || undefined,
           peerId: {

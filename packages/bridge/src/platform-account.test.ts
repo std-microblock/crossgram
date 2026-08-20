@@ -3,7 +3,9 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import { defineModels } from './models.js'
-import { PlatformAccountProvisioner, provisionPlatformAccount } from './platform-account.js'
+import {
+  migrateLegacyVirtualPhones, PlatformAccountProvisioner, provisionPlatformAccount,
+} from './platform-account.js'
 import type { IMMessage, IMMessageInput, IMPlatform, PlatformCapabilities, PlatformSession } from './platform.js'
 
 const disposals: Array<() => Promise<void>> = []
@@ -59,7 +61,7 @@ describe('platform-owned account provisioning', () => {
     }))
 
     expect(first).toBeDefined()
-    expect(first!.auth.virtualPhone).toMatch(/^888\d{12}$/)
+    expect(first!.auth.virtualPhone).toMatch(/^1\d{3}55501\d{2}$/)
     expect(first!.auth.totpSecret).toMatch(/^[a-f\d]{40}$/)
     expect(second!.auth).toMatchObject({
       id: first!.auth.id,
@@ -80,9 +82,11 @@ describe('platform-owned account provisioning', () => {
     }])
   })
 
-  it('replaces a legacy virtual-phone prefix without changing auth credentials', async () => {
+  it.each([
+    '999123456789012',
+    '888123456789012',
+  ])('replaces legacy virtual phone %s with a stable +1 fictional number', async (legacyPhone) => {
     const database = await createDatabase()
-    const legacyPhone = '999123456789012'
     const totpSecret = 'ab'.repeat(20)
     await database.create('mtproto_platform_session', {
       id: 'legacy-session', platformId: 'qqnt', userId: 'qq-uid', credentials: { adapter: 'owned' },
@@ -96,7 +100,7 @@ describe('platform-owned account provisioning', () => {
     const provisioned = await provisionPlatformAccount(database, 'qqnt', platform())
 
     expect(provisioned!.auth).toMatchObject({
-      id: 'legacy-auth', virtualPhone: expect.stringMatching(/^888\d{12}$/), totpSecret,
+      id: 'legacy-auth', virtualPhone: expect.stringMatching(/^1\d{3}55501\d{2}$/), totpSecret,
       platformSessionId: 'legacy-session',
     })
     expect(provisioned!.auth.virtualPhone).not.toBe(legacyPhone)
@@ -105,6 +109,25 @@ describe('platform-owned account provisioning', () => {
       id: 'legacy-auth', virtualPhone: provisioned!.auth.virtualPhone, totpSecret,
       platformSessionId: 'legacy-session',
     }])
+  })
+
+  it('migrates legacy numbers even when their platform adapter is inactive', async () => {
+    const database = await createDatabase()
+    const first = await provisionPlatformAccount(database, 'qqnt', platform())
+    const second = await provisionPlatformAccount(database, 'static', platform({
+      id: 'static-uid', firstName: 'Static', username: '10002',
+    }))
+    await database.set('mtproto_auth_session', { id: first!.auth.id }, { virtualPhone: '999000000000001' })
+    await database.set('mtproto_auth_session', { id: second!.auth.id }, { virtualPhone: '888000000000002' })
+
+    await expect(migrateLegacyVirtualPhones(database)).resolves.toBe(2)
+    const rows = await database.get('mtproto_auth_session', {})
+    expect(rows.map(row => row.virtualPhone)).toEqual([
+      expect.stringMatching(/^1\d{3}55501\d{2}$/),
+      expect.stringMatching(/^1\d{3}55501\d{2}$/),
+    ])
+    expect(new Set(rows.map(row => row.virtualPhone)).size).toBe(2)
+    await expect(migrateLegacyVirtualPhones(database)).resolves.toBe(0)
   })
 
   it('does nothing for legacy adapters without a current-account provider', async () => {

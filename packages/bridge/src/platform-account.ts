@@ -12,6 +12,14 @@ export interface ProvisionedPlatformAccount {
   session: PlatformSession
 }
 
+// Keep generated identities inside NANP's reserved fictional 555-0100 through
+// 555-0199 blocks. Multiple valid area codes provide enough space without
+// assigning numbers that could belong to real subscribers.
+const VIRTUAL_PHONE_AREA_CODES = [
+  '201', '202', '203', '205', '206', '207', '208', '209', '210', '212',
+  '213', '214', '215', '216', '217', '218', '219', '220', '223', '224',
+] as const
+
 /** Coalesce startup scans and registry events for the same platform entry. */
 export class PlatformAccountProvisioner {
   private readonly _pending = new Map<string, Promise<ProvisionedPlatformAccount | undefined>>()
@@ -28,6 +36,18 @@ export class PlatformAccountProvisioner {
     }).catch(() => {})
     return pending
   }
+}
+
+/** Replace every legacy Telegram test-range identity, including inactive adapters. */
+export async function migrateLegacyVirtualPhones(database: Database): Promise<number> {
+  const legacy = (await database.get('mtproto_auth_session', {}))
+    .filter(auth => isLegacyVirtualPhone(auth.virtualPhone))
+  for (const auth of legacy) {
+    await database.set('mtproto_auth_session', { id: auth.id }, {
+      virtualPhone: await allocateVirtualPhone(database),
+    })
+  }
+  return legacy.length
 }
 
 /**
@@ -100,13 +120,15 @@ export async function provisionPlatformAccount(
   let auth = existingAuth.find(item => item.platformSessionId === row.id) ?? existingAuth[0]
   if (auth) {
     const totpSecret = auth.totpSecret || generateLoginSecret()
-    const virtualPhone = auth.virtualPhone.startsWith('999') ? await allocateVirtualPhone(database) : auth.virtualPhone
+    const virtualPhone = isLegacyVirtualPhone(auth.virtualPhone)
+      ? await allocateVirtualPhone(database)
+      : auth.virtualPhone
     await database.set('mtproto_auth_session', { id: auth.id }, {
       platformSessionId: row.id,
-      virtualPhone,
       totpSecret,
+      virtualPhone,
     })
-    auth = { ...auth, platformSessionId: row.id, virtualPhone, totpSecret }
+    auth = { ...auth, platformSessionId: row.id, totpSecret, virtualPhone }
   } else {
     auth = {
       id: randomId(),
@@ -132,11 +154,15 @@ function validateAccount(account: IMPlatformAccount): void {
 
 async function allocateVirtualPhone(database: Database): Promise<string> {
   for (let attempt = 0; attempt < 20; attempt++) {
-    // 15 digits total, inside the reserved 888 prefix used by the route resolver.
-    const virtualPhone = `888${String(randomInt(0, 1e6)).padStart(6, '0')}${String(randomInt(0, 1e6)).padStart(6, '0')}`
+    const areaCode = VIRTUAL_PHONE_AREA_CODES[randomInt(0, VIRTUAL_PHONE_AREA_CODES.length)]
+    const virtualPhone = `1${areaCode}55501${String(randomInt(0, 100)).padStart(2, '0')}`
     if (!(await database.get('mtproto_auth_session', { virtualPhone })).length) return virtualPhone
   }
   throw new Error('failed to allocate a unique virtual phone')
+}
+
+function isLegacyVirtualPhone(phone: string): boolean {
+  return phone.startsWith('999') || phone.startsWith('888')
 }
 
 function randomId(): string {

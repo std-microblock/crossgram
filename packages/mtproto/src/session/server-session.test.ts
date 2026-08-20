@@ -149,6 +149,38 @@ describe('ServerSession Cordis packet pipeline', () => {
     expect(connection.resumeReading).toHaveBeenCalledOnce()
   })
 
+  it('routes follow-up handshake frames around the serialized frame backlog', () => {
+    const { session, connection } = createSession()
+    const handler = vi.fn()
+    const ingress = {
+      pending: [] as Uint8Array[],
+      handler: handler as ((data: Uint8Array) => void) | null,
+    }
+    const internal = session as unknown as {
+      _handshakeIngress: typeof ingress | null
+      _frameQueue: Uint8Array[]
+      _enqueueRawFrame(data: Uint8Array): void
+    }
+    internal._handshakeIngress = ingress
+
+    const handled = Uint8Array.of(1, 2, 3)
+    internal._enqueueRawFrame(handled)
+
+    expect(handler).toHaveBeenCalledOnce()
+    expect(handler.mock.calls[0][0]).toEqual(handled)
+    expect(handler.mock.calls[0][0]).not.toBe(handled)
+    expect(internal._frameQueue).toEqual([])
+
+    ingress.handler = null
+    const pending = Uint8Array.of(4, 5, 6)
+    internal._enqueueRawFrame(pending)
+
+    expect(ingress.pending).toHaveLength(1)
+    expect(ingress.pending[0]).toEqual(pending)
+    expect(ingress.pending[0]).not.toBe(pending)
+    expect(connection.pauseReading).not.toHaveBeenCalled()
+  })
+
   it('closes a connection whose decoded-frame backlog exceeds the hard cap', async () => {
     const { session, connection } = createSession()
     const internal = session as unknown as {
@@ -202,6 +234,53 @@ describe('ServerSession Cordis packet pipeline', () => {
 
     await expect(Promise.all([first, second])).resolves.toEqual([true, true])
     expect(internal._adoptStoredAuthKey).toHaveBeenCalledOnce()
+  })
+
+  it('admits only one pre-auth frame into async packet middleware at a time', async () => {
+    const { session, context } = createSession()
+    const internal = session as unknown as {
+      _onRawData(data: Uint8Array): Promise<void>
+      _processRawData(data: Uint8Array, context: Context): Promise<void>
+    }
+    const first = new Uint8Array(20)
+    const second = new Uint8Array(20)
+    second[19] = 2
+    const processed: Uint8Array[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+    let markFirstEntered!: () => void
+    const firstEntered = new Promise<void>(resolve => { markFirstEntered = resolve })
+    let activeMiddleware = 0
+    let maxActiveMiddleware = 0
+
+    internal._processRawData = vi.fn(async (data) => {
+      processed.push(data)
+    })
+    context.on('mtproto/packet', async function (packet, next) {
+      activeMiddleware++
+      maxActiveMiddleware = Math.max(maxActiveMiddleware, activeMiddleware)
+      try {
+        if (packet.data === first) {
+          markFirstEntered()
+          await firstGate
+        }
+        await next()
+      } finally {
+        activeMiddleware--
+      }
+    })
+
+    const firstProcessing = internal._onRawData(first)
+    await firstEntered
+    await internal._onRawData(second)
+
+    expect(processed).toEqual([])
+    expect(maxActiveMiddleware).toBe(1)
+
+    releaseFirst()
+    await firstProcessing
+    await vi.waitFor(() => expect(processed).toEqual([first, second]))
+    expect(maxActiveMiddleware).toBe(1)
   })
 })
 

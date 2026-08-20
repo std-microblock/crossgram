@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import type { TelegramResourceProvider } from '@mtproto-relay/bridge'
 import Long from 'long'
 import { Buffer } from 'node:buffer'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { URL } from 'node:url'
 
 /**
@@ -89,6 +89,7 @@ export class TelegramResources implements TelegramResourceProvider {
   private readonly _assetsBase: URL
   private readonly _idToFile = new Map<string, string>()
   private readonly _idToMeta = new Map<string, DocMeta>()
+  private readonly _idToSize = new Map<string, number>()
 
   constructor(assetsBase: URL = new URL('../assets/', import.meta.url)) {
     this._assetsBase = assetsBase
@@ -99,6 +100,7 @@ export class TelegramResources implements TelegramResourceProvider {
         for (const a of assetsOf(item)) {
           this._idToFile.set(a.doc.id, a.file)
           this._idToMeta.set(a.doc.id, a.doc)
+          this._idToSize.set(a.doc.id, statSync(new URL(a.file, assetsBase)).size)
         }
       }
     }
@@ -115,7 +117,13 @@ export class TelegramResources implements TelegramResourceProvider {
       fileReference: Buffer.from(meta.fileReference, 'hex'),
       date: meta.date,
       mimeType: meta.mimeType,
-      size: meta.size,
+      // Telegram clients use Document.size to decide whether another
+      // upload.getFile part is required. Some captured metadata differs from
+      // the bundled file by one or two bytes; advertising that stale size
+      // leaves FileLoadOperation waiting forever at EOF and blocks the rest of
+      // Android's small-media queue. Always describe the exact bytes served by
+      // getFile(), including when the same document id appears in several feeds.
+      size: this._idToSize.get(meta.id) ?? meta.size,
       dcId: meta.dcId,
       attributes: meta.attributes.map(reviveTlValue) as tl.TypeDocumentAttribute[],
       thumbs: meta.thumbs.length
