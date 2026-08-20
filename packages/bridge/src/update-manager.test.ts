@@ -444,6 +444,7 @@ describe('UpdateManager', () => {
       }],
       chats: [{
         _: 'channel', title: 'Group', megagroup: true, accessHash: Long.ONE,
+        defaultBannedRights: { _: 'chatBannedRights', untilDate: 0 },
         photo: { _: 'chatPhoto', dcId: 1 },
       }],
       users: [
@@ -455,7 +456,12 @@ describe('UpdateManager', () => {
       ],
     })
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
-    expect(() => roundTrip(sent[0].update)).not.toThrow()
+    const payload = roundTrip(sent[0].update) as tl.RawUpdates
+    const chat = payload.chats[0] as tl.RawChannel
+    expect(chat.defaultBannedRights).toMatchObject({
+      _: 'chatBannedRights', untilDate: 0,
+      viewMessages: false, sendMessages: false, sendMedia: false,
+    })
 
     await manager.publish(session, { event: { type: 'message', conversation, message }, result })
     expect(sent).toHaveLength(1)

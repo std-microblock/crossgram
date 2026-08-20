@@ -2202,6 +2202,10 @@ describe('bridge login e2e', () => {
       }, 65)
       expect(fullChannel).toMatchObject({
         _: 'messages.chatFull', fullChat: { _: 'channelFull', id: generalChannel.id },
+        chats: [{
+          _: 'channel', id: generalChannel.id,
+          defaultBannedRights: { _: 'chatBannedRights', untilDate: 0, sendMessages: false },
+        }],
       })
       const channelMessages = await callRpc(resumed, key, resumedSid, {
         _: 'channels.getMessages',

@@ -321,6 +321,47 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(history)).not.toThrow()
   })
 
+  it('projects empty default banned rights through channel discovery and full-info RPCs', async () => {
+    const conversation = { id: 'permissions-group', kind: 'group' as const, title: 'Permissions' }
+    const message: IMMessage = {
+      id: 'permissions-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1_700_000_000,
+      content: { parts: [{ type: 'text', text: 'members can send' }] },
+    }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: message }] } },
+      async getHistory() { return { messages: [message] } },
+      async getUser(_session, id) { return { id, firstName: id } },
+    }
+    const rpc = new DialogRpc(platform, session)
+    const channelId = rpc.peerTlId(conversation.id)
+    const channel = { _: 'inputChannel' as const, channelId, accessHash: Long.ONE }
+
+    const dialogs = wireRoundTrip(await rpc.getDialogs(getDialogsRequest())) as tl.messages.RawDialogs
+    const channels = wireRoundTrip(await rpc.getChannels({ _: 'channels.getChannels', id: [channel] })) as tl.messages.RawChats
+    const full = wireRoundTrip(await rpc.getFullChannel({
+      _: 'channels.getFullChannel', channel,
+    })) as tl.messages.RawChatFull
+
+    const projected = [
+      dialogs.chats[0] as tl.RawChannel,
+      channels.chats[0] as tl.RawChannel,
+      full.chats[0] as tl.RawChannel,
+    ]
+    for (const chat of projected) {
+      expect(chat.defaultBannedRights).toMatchObject({
+        _: 'chatBannedRights', untilDate: 0,
+        viewMessages: false, sendMessages: false, sendMedia: false,
+      })
+    }
+  })
+
   it('projects direct content.serviceAction in dialogs and history', async () => {
     const conversation = { id: 'alice', kind: 'direct' as const, title: 'Alice' }
     const service: IMMessage = {
