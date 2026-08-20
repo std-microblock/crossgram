@@ -292,9 +292,17 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     onMediaDiagnostic: (phase, code) => bridgeLogger.warn(
       'voice media attachment terminal phase=%s code=%s', phase, code,
     ),
-    publish: ({ session, update, excludeAuthKeyId }) => updates.publishPhoneCall(session, update, excludeAuthKeyId),
+    publish: async ({ session, update, excludeAuthKeyId }) => {
+      const delivered = await updates.publishPhoneCall(session, update, excludeAuthKeyId)
+      bridgeLogger.info('voice phone call update state=%s delivered=%d', update.phoneCall._, delivered)
+      return delivered
+    },
     publishSignaling: (session, update) => updates.publishPhoneSignaling(session, update),
-    replay: (session, update, authKeyId) => updates.replayPhoneCall(session, update, authKeyId),
+    replay: async (session, update, authKeyId) => {
+      const delivered = await updates.replayPhoneCall(session, update, authKeyId)
+      bridgeLogger.info('voice phone call update state=%s delivered=%d replay=true', update.phoneCall._, delivered)
+      return delivered
+    },
   })
   const voice = new VoiceRpc(calls, store)
   socketWorker?.setEventHandler((call, event) => calls.handleWorkerEvent(call, event))
@@ -440,8 +448,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
           metadata,
         })
       if (created) {
-        await ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }])
-        rpc.setPlatformData(state)
+        await finalizeAuthorizedSession(
+          rpc,
+          state,
+          () => ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }]),
+          requireBridgeSession,
+        )
         void updates.retryPending(state.session.platformSessionId).catch((error) => bridgeLogger.warn(
           'pending update retry failed session=%s error=%s', state.session.platformSessionId, String(error),
         ))
@@ -1060,6 +1072,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     )
   })
   rpc.register('phone.receivedCall', async (rpc, req) => {
+    bridgeLogger.info('phone.receivedCall reached')
     const state = await requireBridgeSession(rpc)
     return voice.received(
       state.session, req as tl.phone.RawReceivedCallRequest,
@@ -1067,6 +1080,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     )
   })
   rpc.register('phone.acceptCall', async (rpc, req) => {
+    bridgeLogger.info('phone.acceptCall reached')
     const state = await requireBridgeSession(rpc)
     return voice.accept(
       state.session, req as tl.phone.RawAcceptCallRequest,
@@ -1257,7 +1271,19 @@ function normPhone(p: string): string {
   return p.replace(/\D/g, '')
 }
 
-function createSessionResolver(
+/** Completes a new authorization only after its binding can receive transient replays. */
+export async function finalizeAuthorizedSession(
+  rpc: ServerRpcContext,
+  state: BridgeSessionState,
+  persistBinding: () => Promise<unknown>,
+  resolveSession: (rpc: ServerRpcContext) => Promise<BridgeSessionState>,
+): Promise<void> {
+  await persistBinding()
+  rpc.setPlatformData(state)
+  await resolveSession(rpc)
+}
+
+export function createSessionResolver(
   ctx: Context,
   registry: PlatformRegistry,
   stickerRpcFor: (platform: IMPlatform, session: PlatformSession) => StickerRpc,
@@ -1288,6 +1314,23 @@ function createSessionResolver(
   conversationViews?: ConversationViewService,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
+  const authorizedConnections = new WeakSet<object>()
+  const authorizingConnections = new WeakMap<object, Promise<void>>()
+  const notifyAuthorizedSession = async (session: PlatformSession, rpc: ServerRpcContext): Promise<void> => {
+    if (!onAuthorizedSession || !rpc.authKeyId || authorizedConnections.has(rpc.connection)) return
+    const pending = authorizingConnections.get(rpc.connection)
+    if (pending) return pending
+    const authorizing = (async () => {
+      await onAuthorizedSession(session, authKeyHex(rpc.authKeyId), rpc)
+      authorizedConnections.add(rpc.connection)
+    })()
+    authorizingConnections.set(rpc.connection, authorizing)
+    try {
+      await authorizing
+    } finally {
+      if (authorizingConnections.get(rpc.connection) === authorizing) authorizingConnections.delete(rpc.connection)
+    }
+  }
 
   return async (
     rpc: ServerRpcContext,
@@ -1298,11 +1341,17 @@ function createSessionResolver(
     if (
       cached?.generation === generation
       && registry.get(cached.session.platformId) === cached.platform
-    ) return cached
+    ) {
+      await notifyAuthorizedSession(cached.session, rpc)
+      return cached
+    }
     if (!rpc.authKeyId) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
 
     const authKeyId = authKeyHex(rpc.authKeyId)
-    const makeState = async (identity: { platformId: string, platformSessionId: string }) => {
+    const makeState = async (
+      identity: { platformId: string, platformSessionId: string },
+      notify = true,
+    ) => {
       const platform = registry.get(identity.platformId)
       if (!platform) throw new RpcError(500, 'PLATFORM_NOT_AVAILABLE')
       const [row] = await ctx.database.get('mtproto_platform_session', {
@@ -1324,7 +1373,7 @@ function createSessionResolver(
           metadata: row.metadata,
         })
       await subscriptions.ensure(session)
-      await onAuthorizedSession?.(session, authKeyId, rpc)
+      if (notify) await notifyAuthorizedSession(session, rpc)
       const state: BridgeSessionState = {
         generation, platform, session,
         stickers: stickerRpcFor(platform, session),
@@ -1351,7 +1400,7 @@ function createSessionResolver(
 
     if (!cache) {
       if (!provisionalIdentity) throw new RpcError(401, 'AUTH_KEY_UNREGISTERED')
-      return makeState(provisionalIdentity)
+      return makeState(provisionalIdentity, false)
     }
 
     while (true) {
@@ -1374,6 +1423,7 @@ function createSessionResolver(
         continue
       }
       rpc.setPlatformData(state)
+      await notifyAuthorizedSession(state.session, rpc)
       return state
     }
   }

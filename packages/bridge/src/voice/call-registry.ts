@@ -158,6 +158,7 @@ interface StoredCall {
   readonly randomId?: number
   readonly incomingCorrelationDigest?: string
   pendingDelivery?: tl.TypePhoneCall
+  pendingDeliveryExcludeAuthKeyId?: string
   state: VoiceCallState
   deadline: number
   gAHash?: Uint8Array
@@ -256,7 +257,7 @@ export class CallRegistry {
       const existing = this._sessionCalls.get(input.session.platformSessionId)
       if (existing && existing.state !== 'discarded') {
         if (this._isMatchingRequest(existing, input)) {
-          await this._deliverPending(existing, input.excludeAuthKeyId)
+          await this._deliverPending(existing)
           return this._wrap(existing)
         }
         throw new VoiceCallError('CALL_OCCUPY_FAILED')
@@ -370,7 +371,7 @@ export class CallRegistry {
       const call = this._find(session, peer)
       this._requireTelegramRole(call, 'recipient')
       if (call.state === 'received') {
-        await this._deliverPending(call, excludeAuthKeyId)
+        await this._deliverPending(call)
         return
       }
       this._requireState(call, 'requested')
@@ -394,11 +395,11 @@ export class CallRegistry {
       const call = this._find(session, peer)
       this._requireTelegramRole(call, 'recipient')
       if (call.state === 'active') {
-        await this._deliverPending(call, excludeAuthKeyId)
+        await this._deliverPending(call)
         return this._wrapPhoneCall(this._waiting(call))
       }
       if (call.state === 'accepted') {
-        await this._finishAcceptAfterResponse(call, excludeAuthKeyId, afterResponse)
+        await this._finishAcceptAfterResponse(call, afterResponse)
         return this._wrapPhoneCall(this._waiting(call))
       }
       // phone.receivedCall is only a delivery/ringing acknowledgement. Some
@@ -434,7 +435,7 @@ export class CallRegistry {
       call.keyFingerprint = cloneLong(status.keyFingerprint).toSigned()
       call.state = 'accepted'
       await this._publishTransition(call, excludeAuthKeyId)
-      await this._finishAcceptAfterResponse(call, excludeAuthKeyId, afterResponse)
+      await this._finishAcceptAfterResponse(call, afterResponse)
       // Telegram Desktop requires phone.acceptCall to return phoneCallWaiting;
       // phoneCallAccepted is the caller-side update, while the recipient moves
       // forward on the subsequent active phoneCall update.
@@ -456,7 +457,7 @@ export class CallRegistry {
       const call = this._find(session, peer)
       this._requireTelegramRole(call, 'caller')
       if (call.state === 'active') {
-        await this._deliverPending(call, excludeAuthKeyId)
+        await this._deliverPending(call)
         return this._wrap(call)
       }
       this._requireState(call, 'requested')
@@ -622,6 +623,11 @@ export class CallRegistry {
     this._pruneTombstones()
     const now = this._now()
     for (const call of this._calls.values()) {
+      if (call.state !== 'discarded' && call.pendingDelivery && (call.state === 'active' || now < call.deadline)) {
+        await this._serialize(call.session.platformSessionId, async () => {
+          if (this._calls.get(this._key(call.id)) === call) await this._deliverPending(call)
+        })
+      }
       if (call.state === 'discarded' || call.state === 'active' || now < call.deadline) continue
       await this.discard(call.session, { id: call.id, accessHash: call.accessHash }, { _: 'phoneCallDiscardReasonMissed' }, 0)
     }
@@ -642,7 +648,10 @@ export class CallRegistry {
     await this._serialize(session.platformSessionId, async () => {
       const call = this._sessionCalls.get(session.platformSessionId)
       if (call && call.state !== 'initializing') {
-        await this._replayCall(session, this._phoneCall(call), authKeyId)
+        if (await this._replayCall(session, this._phoneCall(call), authKeyId) > 0) {
+          call.pendingDelivery = undefined
+          call.pendingDeliveryExcludeAuthKeyId = undefined
+        }
         return
       }
       const tombstone = [...this._tombstones.values()].find((value) => value.sessionId === session.platformSessionId
@@ -716,6 +725,7 @@ export class CallRegistry {
     call.p2pAllowed = undefined
     call.recipientProtocol = undefined
     call.pendingDelivery = undefined
+    call.pendingDeliveryExcludeAuthKeyId = undefined
     call.platformCallRef = undefined
     call.platformControl = undefined
     this._tombstones.set(this._key(call.id), tombstone)
@@ -880,8 +890,8 @@ export class CallRegistry {
     }).catch(() => {})
   }
 
-  private async _finishAccept(call: StoredCall, excludeAuthKeyId?: string): Promise<void> {
-    await this._deliverPending(call, excludeAuthKeyId)
+  private async _finishAccept(call: StoredCall): Promise<void> {
+    await this._deliverPending(call)
     call.state = 'active'
     call.startDate = Math.floor(this._now() / 1_000)
     // The worker is the synthetic Telegram caller, so no second Telegram auth
@@ -893,28 +903,29 @@ export class CallRegistry {
 
   private async _finishAcceptAfterResponse(
     call: StoredCall,
-    excludeAuthKeyId: string | undefined,
     afterResponse: ((task: () => void | Promise<void>) => void) | undefined,
   ): Promise<void> {
     if (!afterResponse) {
-      await this._finishAccept(call, excludeAuthKeyId)
+      await this._finishAccept(call)
       return
     }
     afterResponse(() => this._serialize(call.session.platformSessionId, async () => {
       if (this._calls.get(this._key(call.id)) !== call || call.state !== 'accepted') return
-      await this._finishAccept(call, excludeAuthKeyId)
+      await this._finishAccept(call)
     }))
   }
 
   private async _publishTransition(call: StoredCall, excludeAuthKeyId?: string): Promise<void> {
     call.pendingDelivery = this._phoneCall(call)
-    await this._deliverPending(call, excludeAuthKeyId)
+    call.pendingDeliveryExcludeAuthKeyId = excludeAuthKeyId
+    await this._deliverPending(call)
   }
 
-  private async _deliverPending(call: StoredCall, excludeAuthKeyId?: string): Promise<void> {
+  private async _deliverPending(call: StoredCall): Promise<void> {
     if (!call.pendingDelivery) return
-    if (await this._publishCall(call.session, call.pendingDelivery, excludeAuthKeyId) > 0) {
+    if (await this._publishCall(call.session, call.pendingDelivery, call.pendingDeliveryExcludeAuthKeyId) > 0) {
       call.pendingDelivery = undefined
+      call.pendingDeliveryExcludeAuthKeyId = undefined
     }
   }
 

@@ -973,20 +973,51 @@ describe('CallRegistry', () => {
     expect(worker.events.filter((event) => event.operation === 'prepare-recipient')).toHaveLength(2)
   })
 
-  it('keeps nonterminal zero-recipient deliveries pending for the existing retry path', async () => {
+  it('retries a pending current call from expire once a live connection is available', async () => {
     const worker = new FakeWorker()
+    const updates: tl.RawUpdatePhoneCall[] = []
+    const exclusions: Array<string | undefined> = []
     let liveConnections = 0
-    const calls = new CallRegistry({ worker, publish: () => liveConnections })
-    const input = { session, selfId: 1, participantId: 2, randomId: 71, gAHash: gAHash(), protocol }
+    const calls = new CallRegistry({
+      worker,
+      publish: ({ update, excludeAuthKeyId }) => {
+        exclusions.push(excludeAuthKeyId)
+        if (liveConnections) updates.push(update)
+        return liveConnections
+      },
+    })
+    const input = {
+      session, selfId: 1, participantId: 2, randomId: 71, gAHash: gAHash(), protocol, excludeAuthKeyId: 'initiator',
+    }
 
     await calls.request(input)
     const internals = calls as unknown as { _calls: Map<string, { pendingDelivery?: tl.TypePhoneCall }> }
     expect([...internals._calls.values()][0]?.pendingDelivery).toMatchObject({ _: 'phoneCallRequested' })
     liveConnections = 1
-    await calls.request(input)
+    await calls.expire()
 
     expect([...internals._calls.values()][0]?.pendingDelivery).toBeUndefined()
+    expect(exclusions).toEqual(['initiator', 'initiator'])
+    expect(updates.map((update) => update.phoneCall._)).toEqual(['phoneCallRequested'])
     expect(worker.events.filter((event) => event.operation === 'prepare-recipient')).toHaveLength(1)
+  })
+
+  it('clears a current pending delivery after a successful targeted replay', async () => {
+    const worker = new FakeWorker()
+    let publishes = 0
+    let replays = 0
+    const calls = new CallRegistry({
+      worker,
+      publish: () => { publishes++; return 0 },
+      replay: () => { replays++; return 1 },
+    })
+
+    await calls.request({ session, selfId: 1, participantId: 2, randomId: 72, gAHash: gAHash(), protocol })
+    await calls.replay(session, 'authorized-auth-key')
+    await calls.expire()
+
+    expect(replays).toBe(1)
+    expect(publishes).toBe(1)
   })
 
   it('keeps a zero-delivery incoming terminal tombstone pending through reconnect without repeating teardown', async () => {
