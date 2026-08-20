@@ -31,7 +31,7 @@ import type {
 
 
 const MIN_PROTOCOL_VERSION = 19
-const MAX_PROTOCOL_VERSION = 26
+const MAX_PROTOCOL_VERSION = 27
 
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
@@ -187,6 +187,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly database?: Database
   private readonly qqVoiceMedia?: QQVoiceMedia
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
+  private readonly savedMessagesConversationIds = new Map<string, string>()
   private readonly firstUnreadSeq = new Map<string, string>()
   private reactionCatalog?: IMReactionContext
   private reactionCatalogPromise?: Promise<IMReactionContext>
@@ -411,7 +412,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               )
               return
             }
-            const mapped = this.mapEvent(event)
+            const mapped = this.mapEvent(event, session)
             this.logger?.debug(
               'WebSocket event mapped session=%s streamEventId=%s %s',
               platformSessionId, eventId ?? '<none>', event.type === 'call-signal' ? eventSummary : imEventSummary(mapped),
@@ -536,7 +537,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           do {
             const query = { cursor, limit: 100 }
             const page = await this.prepareDialogPage(
-              session, await this.fetchDialogsPage(query, signal),
+              session, await this.fetchDialogsPage(session, query, signal),
             )
             for (const dialog of page.dialogs) {
               knownLastMessageIds.set(dialog.conversation.id, dialog.lastMessage?.id)
@@ -551,7 +552,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           // needs that page rather than scanning hundreds of dialogs each time.
           const query = { limit: 100 }
           const page = await this.prepareDialogPage(
-            session, await this.fetchDialogsPage(query, signal),
+            session, await this.fetchDialogsPage(session, query, signal),
           )
           for (const dialog of page.dialogs) {
             const conversationId = dialog.conversation.id
@@ -594,14 +595,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMMessage<QQMediaLocator>[]> {
     if (!previousId) return [latest]
     try {
-      const response = await this.client.getHistory(conversation.id, {
+      const response = await this.client.getHistory(
+        await this.wireConversationId(session, conversation.id), {
         afterId: previousId,
         limit: 100,
       })
       const messages = await Promise.all(response.messages
         .filter((message) => message.id !== previousId && !this.isFilteredGrayTip(message))
         .map((message) => this.prepareRequestedMessage(
-          session, conversation, this.mapMessage(message),
+          session, conversation, this.mapMessage(message, conversation.id),
         )))
       if (!messages.some((message) => message.id === latest.id)) messages.push(latest)
       return messages.sort(compareMessagesChronologically)
@@ -636,7 +638,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   async getDialogs(session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
     await this.cleanupLegacyDialogs(session)
     await waitAtMost(this.ensureReactionCatalog().catch(() => undefined), REACTION_CATALOG_GRACE_MS)
-    return this.prepareDialogPage(session, await this.fetchDialogsPage(query))
+    return this.prepareDialogPage(session, await this.fetchDialogsPage(session, query))
   }
 
   async getConversation(
@@ -647,34 +649,42 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (isMultiForwardConversationId(conversationId)) {
       return this.conversations.get(conversationId) ?? null
     }
-    return this.mapConversation(await this.client.getConversation(conversationId))
+    const wireId = await this.wireConversationId(_session, conversationId)
+    return this.mapConversation(await this.client.getConversation(wireId), _session)
   }
 
   private async fetchDialogsPage(
+    session: PlatformSession,
     query: IMPageQuery = {},
     signal?: AbortSignal,
   ): Promise<IMDialogPage<QQMediaLocator>> {
     const response = await this.client.getDialogs({
       cursor: query.cursor, afterId: query.afterId, limit: query.limit,
     }, signal)
+    const selectedSaved = this.selectSavedMessagesConversation(session, response.conversations)
     const conversations = response.conversations.filter((conversation) =>
-      !isFilteredConversationId(conversation.id))
-    for (const conversation of conversations) {
-      if (conversation.firstUnread?.msgSeq) this.firstUnreadSeq.set(conversation.id, conversation.firstUnread.msgSeq)
-      else this.firstUnreadSeq.delete(conversation.id)
-    }
+      !isFilteredConversationId(conversation.id)
+      && (!isDeviceConversation(conversation) || conversation.id === selectedSaved))
     return {
-      dialogs: conversations.map((conversation) => ({
-        conversation: this.mapConversation(conversation),
-        unreadCount: conversation.unreadCount ?? 0,
-        lastMessage: conversation.lastMessage
-          && !this.isFilteredGrayTip(conversation.lastMessage)
-          ? this.mapMessage(conversation.lastMessage)
-          : undefined,
-        readInboxMaxMessage: conversation.readInboxMaxMessage
-          ? this.mapMessage(conversation.readInboxMaxMessage)
-          : undefined,
-      })),
+      dialogs: conversations.map((conversation) => {
+        const mappedConversation = this.mapConversation(conversation, session)
+        if (conversation.firstUnread?.msgSeq) {
+          this.firstUnreadSeq.set(mappedConversation.id, conversation.firstUnread.msgSeq)
+        } else {
+          this.firstUnreadSeq.delete(mappedConversation.id)
+        }
+        return {
+          conversation: mappedConversation,
+          unreadCount: conversation.unreadCount ?? 0,
+          lastMessage: conversation.lastMessage
+            && !this.isFilteredGrayTip(conversation.lastMessage)
+            ? this.mapMessage(conversation.lastMessage, mappedConversation.id)
+            : undefined,
+          readInboxMaxMessage: conversation.readInboxMaxMessage
+            ? this.mapMessage(conversation.readInboxMaxMessage, mappedConversation.id)
+            : undefined,
+        }
+      }),
       nextCursor: response.nextCursor,
       total: response.total,
     }
@@ -767,7 +777,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
     }
     if (isFilteredConversationId(conversation.id)) return { messages: [] }
-    const response = await this.client.getHistory(conversation.id, {
+    const response = await this.client.getHistory(
+      await this.wireConversationId(session, conversation.id), {
       cursor: query.cursor,
       limit: query.limit,
       beforeId: query.before?.id,
@@ -779,7 +790,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
       messages: await Promise.all(response.messages.filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
-        this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message)))),
+        this.prepareRequestedMessage(
+          session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
+        ))),
       nextCursor: response.nextCursor,
     }
   }
@@ -829,7 +842,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
     }
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
-    const response = await this.client.searchMessages(conversation.id, {
+    const response = await this.client.searchMessages(
+      await this.wireConversationId(session, conversation.id), {
       q: query.query,
       cursor: query.cursor,
       limit: query.limit,
@@ -841,7 +855,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
       messages: await Promise.all(response.messages.filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
-        this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message)))),
+        this.prepareRequestedMessage(
+          session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
+        ))),
       nextCursor: response.nextCursor,
     }
   }
@@ -892,9 +908,13 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     messageId: string,
   ): Promise<IMMessage<QQMediaLocator> | null> {
     if (isFilteredConversationId(conversation.id)) return null
-    const message = await this.client.getMessage(conversation.id, messageId)
+    const message = await this.client.getMessage(
+      await this.wireConversationId(session, conversation.id), messageId,
+    )
     return message && !this.isFilteredGrayTip(message)
-      ? this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message))
+      ? this.prepareRequestedMessage(
+          session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
+        )
       : null
   }
 
@@ -919,9 +939,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return { message: result.promptText || undefined, alert: result.promptType === 1 }
   }
 
-  async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
+  async markRead(session: PlatformSession, target: IMReadTarget): Promise<void> {
     if (isFilteredConversationId(target.conversationId)) return
-    await this.client.markRead(target.conversationId, target.messageId)
+    await this.client.markRead(
+      await this.wireConversationId(session, target.conversationId), target.messageId,
+    )
     this.firstUnreadSeq.delete(target.conversationId)
   }
 
@@ -1076,7 +1098,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       let sent: WireMessage
       try {
         sent = await this.client.sendMessage(
-          conversation.id, text, media.length ? media : undefined,
+          await this.wireConversationId(session, conversation.id), text, media.length ? media : undefined,
           options, originRequestId, sticker, textParts,
           content.replyToId, content.replyToNativeSequence,
         )
@@ -1090,7 +1112,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         }
         throw error
       }
-      const message = await this.prepareInitialMessage(this.mapMessage(sent))
+      const message = await this.prepareInitialMessage(this.mapMessage(sent, conversation.id))
       this.scheduleInlinePreview(
         session, this.conversationFor(conversation.id), message,
         this.eventHandlers.get(session.platformSessionId),
@@ -1107,6 +1129,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     media: IMMediaUploadProbe,
   ): Promise<IMMediaInput | undefined> {
+    if (conversation.id === _session.userId
+      && await this.wireConversationId(_session, conversation.id) !== conversation.id) return
     const source = await this.client.prepareFastUpload(conversation.id, media)
     if (!source) return
     const { hashes: _hashes, ...metadata } = media
@@ -1114,12 +1138,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async deleteMessages(
-    _session: PlatformSession,
+    session: PlatformSession,
     conversation: IMConversationRef,
     messageIds: readonly string[],
     options: import('@mtproto-relay/bridge').IMDeleteMessagesOptions,
   ): Promise<void> {
-    await this.client.deleteMessages(conversation.id, messageIds, options.forEveryone)
+    await this.client.deleteMessages(
+      await this.wireConversationId(session, conversation.id), messageIds, options.forEveryone,
+    )
   }
 
   async forwardMessages(
@@ -1135,8 +1161,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
     const merged = messageIds.length > 1
     try {
-      const messages = await this.client.forwardMessages(from.id, messageIds, to.id, merged)
-      return Promise.all(messages.map((message) => this.prepareInitialMessage(this.mapMessage(message))))
+      const messages = await this.client.forwardMessages(
+        await this.wireConversationId(session, from.id), messageIds,
+        await this.wireConversationId(session, to.id), merged,
+      )
+      return Promise.all(messages.map((message) =>
+        this.prepareInitialMessage(this.mapMessage(message, to.id))))
     } catch (error) {
       if (!isNativeForwardRejection(error)
         || options.sourceMessages?.length !== messageIds.length) throw error
@@ -1154,7 +1184,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const outputs: IMMessage<QQMediaLocator>[] = []
     for (const [index, messageId] of messageIds.entries()) {
       const stored = options.sourceMessages?.[index] as IMMessage<QQMediaLocator> | undefined
-      const source = stored ?? await this.client.getMessage(from.id, messageId)
+      const source = stored ?? await this.client.getMessage(
+        await this.wireConversationId(session, from.id), messageId,
+      )
         .then((wire) => {
           if (!wire) throw new Error(`QQ source message not found: ${messageId}`)
           return this.mapMessage(wire)
@@ -1606,9 +1638,46 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return pending
   }
 
-  private mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
-    const current = this.conversations.get(input.id)
-    const mapped = mapConversation(input)
+  private selectSavedMessagesConversation(
+    session: PlatformSession,
+    conversations: readonly WireConversation[],
+  ): string | undefined {
+    const current = this.savedMessagesConversationIds.get(session.platformSessionId)
+    if (current) return current
+    const selected = conversations.find(isDeviceConversation)
+    if (!selected) return
+    this.savedMessagesConversationIds.set(session.platformSessionId, selected.id)
+    return selected.id
+  }
+
+  private async wireConversationId(session: PlatformSession, conversationId: string): Promise<string> {
+    const known = this.conversations.get(conversationId)?.metadata?.qqConversationId
+    if (typeof known === 'string' && known) return known
+    if (conversationId !== session.userId) return conversationId
+    return this.savedMessagesConversationIds.get(session.platformSessionId)
+      ?? await this.discoverSavedMessagesConversation(session)
+      ?? conversationId
+  }
+
+  private async discoverSavedMessagesConversation(session: PlatformSession): Promise<string | undefined> {
+    let cursor: string | undefined
+    const seen = new Set<string>()
+    do {
+      const page = await this.client.getDialogs({ cursor, limit: 100 })
+      const selected = this.selectSavedMessagesConversation(session, page.conversations)
+      if (selected) return selected
+      cursor = page.nextCursor
+      if (cursor && seen.has(cursor)) break
+      if (cursor) seen.add(cursor)
+    } while (cursor)
+  }
+
+  private mapConversation(input: WireConversation, session?: PlatformSession): IMConversation<QQMediaLocator> {
+    const id = session && this.savedMessagesConversationIds.get(session.platformSessionId) === input.id
+      ? session.userId
+      : input.id
+    const current = this.conversations.get(id)
+    const mapped = mapConversation({ ...input, id })
     const fallbackTitles = new Set([input.id, input.peerUid, input.peerUin].filter(Boolean))
     const title = current?.title && fallbackTitles.has(mapped.title) ? current.title : mapped.title
     const conversation: IMConversation<QQMediaLocator> = {
@@ -1616,13 +1685,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       ...mapped,
       title,
       avatar: mapped.avatar ?? current?.avatar,
-      metadata: { ...current?.metadata, ...mapped.metadata },
+      metadata: { ...current?.metadata, ...mapped.metadata, qqConversationId: input.id },
     }
     this.conversations.set(conversation.id, conversation)
     return conversation
   }
 
-  private mapEvent(input: Exclude<WireEvent, WireNativeAvsdkEvent>): IMEvent<QQMediaLocator> {
+  private mapEvent(
+    input: Exclude<WireEvent, WireNativeAvsdkEvent>,
+    session: PlatformSession,
+  ): IMEvent<QQMediaLocator> {
     if (input.type === 'request') return { type: 'request', request: mapRequest(input.request) }
     const wireConversation = input.type === 'call-signal'
       ? {
@@ -1634,12 +1706,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           chatType: 1 as const,
         }
       : input.conversation
-    const conversation = this.mapConversation(wireConversation)
+    if (isDeviceConversation(wireConversation)) {
+      this.savedMessagesConversationIds.set(session.platformSessionId, wireConversation.id)
+    }
+    const conversation = this.mapConversation(wireConversation, session)
     if (input.type === 'message') {
       return {
         type: 'message',
         conversation,
-        message: this.mapMessage(input.message),
+        message: this.mapMessage(input.message, conversation.id),
       }
     }
     if (input.type === 'call-signal') {
@@ -1678,9 +1753,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return Boolean(text && this.grayTipFilters.some((filter) => filter && text.includes(filter)))
   }
 
-  private mapMessage(input: WireMessage): IMMessage<QQMediaLocator> {
+  private mapMessage(input: WireMessage, conversationId?: string): IMMessage<QQMediaLocator> {
     const message = mapMessage(
-      input, this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
+      conversationId ? { ...input, conversationId } : input,
+      this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
       (media) => this.mediaPreviews.project(media),
     )
     return message
@@ -2199,6 +2275,10 @@ function isMultiForwardConversationId(value: string): boolean {
 
 function isInvalidZeroPeerConversationId(value: string): boolean {
   return value === INVALID_ZERO_PEER_CONVERSATION_ID
+}
+
+function isDeviceConversation(conversation: WireConversation): boolean {
+  return conversation.chatType === 8 || conversation.chatType === 134
 }
 
 function isFilteredConversationId(value: string): boolean {

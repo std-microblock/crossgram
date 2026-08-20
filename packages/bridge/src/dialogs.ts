@@ -4402,6 +4402,7 @@ export class DialogRpc {
   }
 
   private _resolvePeer(peer: tl.TypeInputPeer): string {
+    if (peer._ === 'inputPeerSelf') return this._session.userId
     if (peer._ !== 'inputPeerUser' && peer._ !== 'inputPeerChat' && peer._ !== 'inputPeerChannel') {
       throw new RpcError(400, 'PEER_ID_INVALID')
     }

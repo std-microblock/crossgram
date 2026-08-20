@@ -153,6 +153,61 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('DialogRpc', () => {
+  it('routes Telegram inputPeerSelf through a platform Saved Messages conversation', async () => {
+    const calls: string[] = []
+    const saved: IMMessage = {
+      id: 'saved-1', conversationId: session.userId, senderId: session.userId,
+      timestamp: 1_800_000_000, outgoing: true, content: { parts: [{ type: 'text', text: 'saved' }] },
+    }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        readState: { markRead: true, events: false },
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: false, channels: false, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation: { id: session.userId, kind: 'direct', title: '我的手机' },
+          unreadCount: 0, lastMessage: saved,
+        }] }
+      },
+      async getHistory(_session, conversation) {
+        calls.push(`history:${conversation.id}`)
+        return { messages: [saved] }
+      },
+      async sendMessage(_session, conversation, content) {
+        calls.push(`send:${conversation.id}`)
+        return {
+          ...saved,
+          id: 'saved-2',
+          content: { parts: content.parts.flatMap((part) =>
+            part.type === 'text' ? [{ type: 'text' as const, text: part.text }] : []) },
+        }
+      },
+      async getUser(_session, id) {
+        return { id, firstName: id === session.userId ? 'Current' : id }
+      },
+      async getContacts() { return { users: [] } },
+      async markRead() {},
+    }
+    const rpc = new DialogRpc(platform, session)
+
+    const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
+    expect(dialogs.dialogs).toMatchObject([{ peer: { _: 'peerUser', userId: rpc.peerTlId(session.userId) } }])
+    const history = await rpc.getHistory({
+      ...getHistoryRequest(rpc.peerTlId(session.userId)), peer: { _: 'inputPeerSelf' },
+    }) as tl.messages.RawMessages
+    expect(history.messages).toMatchObject([{ _: 'message', message: 'saved' }])
+    await expect(rpc.sendMessage({
+      ...sendMessageRequest(rpc.peerTlId(session.userId)),
+      peer: { _: 'inputPeerSelf' }, message: 'new saved item', randomId: Long.fromNumber(999),
+    })).resolves.toMatchObject({ _: expect.stringMatching(/^updates/) })
+    expect(calls.filter((call) => call === 'history:me')).toHaveLength(2)
+    expect(calls.at(-1)).toBe('send:me')
+  })
+
   it('marks unread group mentions and replies to the current user for Telegram notification badges', async () => {
     const mentionGroup = { id: 'mention-group', kind: 'group' as const, title: 'Mentions' }
     const replyGroup = { id: 'reply-group', kind: 'group' as const, title: 'Replies' }

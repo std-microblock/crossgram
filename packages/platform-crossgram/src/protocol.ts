@@ -3,7 +3,7 @@ import type { JsonValue } from '@mtproto-relay/bridge'
 export interface QQMediaLocator {
   messageId: string
   elementId: string
-  chatType: 1 | 2
+  chatType: 1 | 2 | 8 | 134
   peerUid: string
   kind: 'image' | 'file' | 'voice'
   fileName: string
@@ -273,7 +273,7 @@ export interface WireConversation {
   title: string
   peerUid: string
   peerUin: string
-  chatType: 1 | 2
+  chatType: 1 | 2 | 8 | 134
   /** QQ group message policy: 0 unspecified; 1 notify; 2 group assistant; 3 shield; 4 receive silently. */
   groupMsgMask?: 0 | 1 | 2 | 3 | 4
   avatarUrl?: string

@@ -653,8 +653,8 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).rejects.toThrow('not ready')
   })
 
-  it('rejects bridge protocols outside the supported 19-26 range', async () => {
-    for (const protocolVersion of [18, 27, 19.5, Number.NaN, '19', undefined]) {
+  it('rejects bridge protocols outside the supported 19-27 range', async () => {
+    for (const protocolVersion of [18, 28, 19.5, Number.NaN, '19', undefined]) {
       const platform = new QQNTPlatform()
       const status = {
         protocolVersion, ready: true, selfUin: '10001', selfUid: 'u_self',
@@ -662,7 +662,7 @@ describe('QQNTPlatform mapping', () => {
       platform.client.status = vi.fn(async () => status)
       platform.client.getUser = vi.fn()
 
-      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-26')
+      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-27')
       expect(platform.client.getUser).not.toHaveBeenCalled()
     }
   })
@@ -2829,6 +2829,64 @@ describe('QQNTPlatform mapping', () => {
     const media = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![2]
     expect(media).toMatchObject([{ name: 'one.png' }, { name: 'two.png' }])
     expect(platform.capabilities.send?.maxMedia).toBe(9)
+  })
+
+  it('maps QQ device sessions to Saved Messages and keeps wire calls physical', async () => {
+    const platform = new QQNTPlatform()
+    const physicalId = 'device:8:phone'
+    const wireMessage = {
+      id: 'saved-message', conversationId: physicalId, senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{ type: 'text' as const, text: 'saved' }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getDialogs = vi.fn()
+      .mockResolvedValueOnce({ conversations: [{
+        id: physicalId,
+        kind: 'direct' as const,
+        title: '我的手机',
+        peerUid: 'phone',
+        peerUin: '',
+        chatType: 8 as const,
+        lastMessage: wireMessage,
+      }], nextCursor: 'next' })
+      .mockResolvedValueOnce({ conversations: [{
+        id: 'device:134:desktop',
+        kind: 'direct' as const,
+        title: '我的电脑',
+        peerUid: 'desktop',
+        peerUin: '',
+        chatType: 134 as const,
+      }] })
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.sendMessage = vi.fn(async () => ({ ...wireMessage, id: 'sent-saved' }))
+    platform.client.prepareFastUpload = vi.fn()
+
+    await expect(platform.getDialogs(session)).resolves.toMatchObject({
+      dialogs: [{
+        conversation: {
+          id: 'self', kind: 'direct', title: '我的手机',
+          metadata: { chatType: 8, qqConversationId: physicalId },
+        },
+        lastMessage: { id: 'saved-message', conversationId: 'self' },
+      }],
+    })
+    await expect(platform.getDialogs(session, { cursor: 'next' })).resolves.toMatchObject({ dialogs: [] })
+    await expect(platform.getHistory(session, { id: 'self' })).resolves.toMatchObject({
+      messages: [{ id: 'saved-message', conversationId: 'self' }],
+    })
+    expect(platform.client.getHistory).toHaveBeenCalledWith(physicalId, expect.any(Object))
+    await expect(platform.sendMessage(session, { id: 'self' }, {
+      parts: [{ type: 'text', text: 'saved' }],
+    })).resolves.toMatchObject({ id: 'sent-saved', conversationId: 'self' })
+    expect(platform.client.sendMessage).toHaveBeenCalledWith(
+      physicalId, 'saved', undefined, expect.any(Object), expect.any(String), undefined,
+      [{ type: 'text', text: 'saved', entities: undefined }], undefined, undefined,
+    )
+    await expect(platform.prepareMediaUpload!(session, { id: 'self' }, {
+      kind: 'image', name: 'saved.png', mimeType: 'image/png',
+      hashes: { size: 1, md5: 'md5', sha1: 'sha1', file10MMd5: 'prefix' },
+    })).resolves.toBeUndefined()
+    expect(platform.client.prepareFastUpload).not.toHaveBeenCalled()
   })
 })
 
