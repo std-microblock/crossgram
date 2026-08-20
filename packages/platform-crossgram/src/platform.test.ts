@@ -1602,6 +1602,46 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
+  it('maps and checkpoints QQNT message-edit WebSocket events', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const conversation = {
+      id: 'production-group', kind: 'group' as const, title: 'Production group',
+      peerUid: 'production-group', peerUin: '42', chatType: 2 as const,
+    }
+    const acknowledged: string[] = []
+    platform.client.subscribe = vi.fn(async (handler, signal, options) => {
+      await handler({
+        type: 'message-edit', eventId: 'message-info:target:1:1', conversation,
+        message: {
+          id: 'target', conversationId: conversation.id, senderId: 'self', timestamp: 1,
+          outgoing: true, msgSeq: '463806', telegramMessageId: 463806,
+          parts: [{ type: 'text', text: 'edited' }],
+        },
+      }, '5580')
+      await options.onEventId?.('5580')
+      acknowledged.push('5580')
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(acknowledged).toEqual(['5580']))
+
+    expect(received).toEqual([expect.objectContaining({
+      type: 'message-edit', eventId: 'message-info:target:1:1',
+      conversation: expect.objectContaining({ id: conversation.id }),
+      message: expect.objectContaining({
+        id: 'target', conversationId: conversation.id, outgoing: true,
+        metadata: expect.objectContaining({ qqMsgSeq: '463806', telegramMessageId: 463806 }),
+        content: { parts: [{ type: 'text', text: 'edited' }] },
+      }),
+    })])
+    expect(platform.client.subscribe).toHaveBeenCalledTimes(1)
+    await unsubscribe()
+  })
+
   it('maps request WebSocket events without invoking message or gray-tip paths', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))

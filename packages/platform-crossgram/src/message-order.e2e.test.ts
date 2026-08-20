@@ -365,6 +365,136 @@ describe('QQNT zero-peer quarantine E2E', () => {
 })
 
 describe('QQNT durable event checkpoint E2E', () => {
+  it('consumes a replayed message edit and immediately delivers the following reaction update', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQNTEventCheckpointModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const checkpointSession = { ...session, platformSessionId: 'qqnt-message-edit-replay-e2e' }
+    const conversation = {
+      id: 'production-group', kind: 'group' as const, title: 'Production group',
+      peerUid: 'production-group', peerUin: '42', chatType: 2 as const,
+    }
+    const store = new MessageStore(ctx.database)
+    const targetId = 'production-message'
+    const makeSeed = (id: string, text: string) => ({
+      id, conversationId: conversation.id, senderId: checkpointSession.userId,
+      timestamp: 1_787_215_084, outgoing: true,
+      metadata: { qqMsgSeq: '463805', telegramMessageId: 463805 },
+      content: { parts: [{ type: 'text' as const, text }] },
+    })
+    const target = await store.ingest(checkpointSession, conversation, makeSeed(targetId, 'before edit'))
+    await store.ingest(checkpointSession, conversation, makeSeed('duplicate-sequence', 'same native sequence'))
+
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    const server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    let connections = 0
+    webSocketServer.on('connection', (webSocket) => {
+      connections++
+      webSocket.send(JSON.stringify({
+        id: '5580',
+        event: {
+          type: 'message-edit', eventId: 'message-info:target:1:1', conversation,
+          message: {
+            id: targetId, conversationId: conversation.id, senderId: checkpointSession.userId,
+            timestamp: 1_787_215_084, outgoing: true,
+            msgSeq: '463806', telegramMessageId: 463806,
+            parts: [{ type: 'text', text: 'after edit' }],
+          },
+        },
+      }))
+      webSocket.send(JSON.stringify({
+        id: '5581',
+        event: {
+          type: 'message-reactions', eventId: 'reaction:target:1:1', conversation,
+          target: { conversationId: conversation.id, messageId: targetId, targetId },
+          context: {
+            reactions: [{
+              key: 'like', count: 2,
+              recentActors: [{ userId: 'alice', timestamp: 1 }, { userId: 'bob', timestamp: 2 }],
+            }],
+            maxSelected: 20,
+          },
+          timestamp: 1_787_215_085,
+        },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing message-edit replay test address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    }, 'qqnt:stickers', undefined, undefined, ctx.database)
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [{ key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }],
+      reactions: [], maxSelected: 20,
+    }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const reactionDelivered = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(checkpointSession, async (event) => {
+      if (event.type === 'message-edit') {
+        await store.ingest(checkpointSession, event.conversation, event.message)
+      } else if (event.type === 'message-reactions') {
+        await store.setReactions(checkpointSession, event.conversation, event.target, event.context)
+        reactionDelivered.resolve()
+      }
+    })
+    try {
+      await Promise.race([
+        reactionDelivered.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('message-edit replay E2E timed out')), 5_000)),
+      ])
+      await vi.waitFor(async () => expect(await ctx.database.get(
+        'mtproto_qqnt_event_checkpoint', { platformSessionId: checkpointSession.platformSessionId },
+      )).toMatchObject([{ lastEventId: '5581' }]))
+      expect(connections).toBe(1)
+      await expect(store.findProjectedByNativeSequence(
+        checkpointSession.platformSessionId, conversation.id, 463806,
+      )).resolves.toMatchObject({
+        source: {
+          id: targetId, metadata: expect.objectContaining({ qqMsgSeq: '463806', telegramMessageId: 463806 }),
+          content: { parts: [{ type: 'text', text: 'after edit' }] },
+        },
+        parts: [{ tlMessageId: target.projection[0].tlMessageId, nativeSequence: 463806 }],
+      })
+      const [reaction] = await ctx.database.get('mtproto_im_message_reaction', { messageId: target.message.id })
+      expect(reaction).toMatchObject({
+        nativeReactionKey: 'like', count: 2,
+        recentActors: [{ userId: 'alice', timestamp: 1 }, { userId: 'bob', timestamp: 2 }],
+      })
+    } finally {
+      await unsubscribe()
+    }
+  })
+
   it('advances past an unknown reaction target and delivers the following message', async () => {
     const ctx = new Context()
     const fibers = [

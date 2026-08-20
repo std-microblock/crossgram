@@ -326,6 +326,7 @@ export interface WireRequestPage {
 
 export type WireEvent =
   | { type: 'message', conversation: WireConversation, message: WireMessage }
+  | { type: 'message-edit', eventId: string, conversation: WireConversation, message: WireMessage }
   | { type: 'request', request: WireRequest }
   | WireCallSignalEvent
   | WireNativeAvsdkEvent

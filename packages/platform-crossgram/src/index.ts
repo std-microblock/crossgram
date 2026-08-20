@@ -1728,6 +1728,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         message: this.mapMessage(input.message, conversation.id),
       }
     }
+    if (input.type === 'message-edit') {
+      return {
+        type: 'message-edit',
+        eventId: input.eventId,
+        conversation,
+        message: this.mapMessage(input.message, conversation.id),
+      }
+    }
     if (input.type === 'call-signal') {
       return {
         type: 'voice-call',
@@ -1926,8 +1934,8 @@ function wireEventSummary(event: WireEvent): string {
   if (event.type === 'call-signal') {
     return `type=call-signal version=${event.version} signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`
   }
-  if (event.type === 'message') {
-    return `type=message conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.parts.length}`
+  if (event.type === 'message' || event.type === 'message-edit') {
+    return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.parts.length}`
   }
   if (event.type === 'request') return `type=request request=${event.request.id} kind=${event.request.kind}`
   if (event.type === 'message-delete') {
