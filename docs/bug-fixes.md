@@ -40,7 +40,7 @@
 - [x] 删除历史媒体的空 File + `message-edit` 首屏机制；首次投影即提供可下载 locator。
 - [x] preview 仅作为缓存优化，不再是消息可用性的前置条件。
 - [x] 缺失尺寸时从可靠 preview 补齐宽高，已有比例信息时不再退化为 1×1 正方形。
-- [x] 图片上传改为单次流式读取并直接进入有界 Highway 请求，避免重复完整读取和额外文件落盘；对应 upload protocol 单元测试通过。
+- [x] 预检客户端 cache miss 时按 Telegram `file_id` 保留 QQ Highway plan；分片只进入有界乱序窗口，凑满 1 MiB 即转发，并在同一字节流增量校验 MD5/SHA-1/前 10 MiB MD5。`sendMedia` 只消费完成结果，不再全量落盘、重读、hash 或申请第二次 plan；无预检客户端继续使用磁盘 fallback。
 - [x] Android AVD 验证 1240×1754 竖图的 direct/relay 下载、非正方形布局和完整大图打开。
 - [x] QQNT bridge 暴露原生视频 `thumbPath`，Crossgram 对 bridge 本机资源走认证 asset API。
 - [x] QQNT bridge v1.0.11 在 Linux QQ 缺少 `userPath` 时，以服务账号 `$HOME/.config` 作为受限可信媒体根。

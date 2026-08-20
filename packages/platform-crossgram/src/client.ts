@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Writable } from 'node:stream'
 import type {
-  IMMediaInput, IMMediaSource, IMMediaUploadHashes, IMMediaUploadProbe, IMTransferOptions,
+  IMMediaInput, IMMediaSource, IMMediaUploadHashes, IMMediaUploadPreparation, IMMediaUploadProbe,
+  IMTransferOptions,
 } from '@mtproto-relay/bridge'
 import WebSocket, { type RawData } from 'ws'
 import type {
@@ -15,7 +16,7 @@ import type {
   WireReactionActorPage, WireReactionContext, WireReactionState, WireRequest, WireRequestPage, WireSticker, WireStickerPack, WireStickerPackSummary,
   WireFlashTransferManifest, WireFlashTransferResult, WireTextPart,
 } from './protocol.js'
-import { uploadHighway, type QQMediaUploadPlan } from './highway.js'
+import { QQHighwayUploadWriter, uploadHighway, type QQMediaUploadPlan } from './highway.js'
 
 export interface QQNTClientOptions {
   endpoint?: string
@@ -50,6 +51,7 @@ interface QQFastUploadSource extends IMMediaSource {
   [QQ_FAST_UPLOAD]: {
     hashes: IMMediaUploadHashes
     plan: QQMediaUploadPlan
+    uploaded: boolean
   }
 }
 
@@ -422,7 +424,7 @@ export class QQNTClient {
     conversationId: string,
     media: IMMediaUploadProbe,
     signal?: AbortSignal,
-  ): Promise<IMMediaSource | undefined> {
+  ): Promise<IMMediaUploadPreparation | undefined> {
     const kind = outboundMediaKind({ ...media, name: media.name ?? 'upload' })
     const plan = await this.prepareMediaUpload(conversationId, {
       kind,
@@ -436,15 +438,50 @@ export class QQNTClient {
       height: media.height,
       duration: media.duration,
     }, signal)
-    if (plan.highway || plan.auxiliaryHighways?.length) return
+    if (plan.prepared.kind !== kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
+    if (plan.highway
+      && (plan.highway.fileSize !== media.hashes.size
+        || plan.highway.fileMd5.toLowerCase() !== media.hashes.md5.toLowerCase())) {
+      throw new Error('QQNT bridge returned mismatched Highway file metadata')
+    }
+    const uploadAuxiliaryHighways = async () => {
+      for (const auxiliary of plan.auxiliaryHighways ?? []) {
+        const bytes = auxiliary.bytes ? Buffer.from(auxiliary.bytes, 'base64url') : undefined
+        if (!bytes) throw new Error(`QQNT bridge returned no usable ${auxiliary.role} bytes`)
+        if (
+          auxiliary.highway.fileSize !== bytes.length
+          || auxiliary.highway.fileMd5.toLowerCase() !== createHash('md5').update(bytes).digest('hex')
+        ) {
+          throw new Error(`QQNT bridge returned mismatched ${auxiliary.role} Highway metadata`)
+        }
+        await uploadHighway(auxiliary.highway, singleChunk(bytes), this.fetchImpl, { signal })
+      }
+    }
     const source: QQFastUploadSource = {
       size: media.hashes.size,
       async *stream() {
         throw new Error('QQ fast-upload source must not be read')
       },
-      [QQ_FAST_UPLOAD]: { hashes: media.hashes, plan },
+      [QQ_FAST_UPLOAD]: { hashes: media.hashes, plan, uploaded: true },
     }
-    return source
+    const { hashes: _hashes, ...metadata } = media
+    const input: IMMediaInput = { ...metadata, source }
+    if (!plan.highway) {
+      await uploadAuxiliaryHighways()
+      return { media: input }
+    }
+    const writer = new QQHighwayUploadWriter(plan.highway, this.fetchImpl, { signal })
+    return {
+      media: input,
+      sink: {
+        write: (bytes) => writer.write(bytes),
+        complete: async () => {
+          await writer.complete()
+          await uploadAuxiliaryHighways()
+        },
+        abort: () => writer.abort(),
+      },
+    }
   }
 
   async prepareMediaUpload(
@@ -536,7 +573,10 @@ export class QQNTClient {
       const fast = fastUpload(item.source)
       if (fast) {
         if (fast.plan.prepared.kind !== kind) throw new Error('QQ fast-upload media kind changed')
-        return { item, kind, hashes: fast.hashes, thumbnail: undefined, plan: fast.plan }
+        return {
+          item, kind, hashes: fast.hashes, thumbnail: undefined, plan: fast.plan,
+          uploaded: fast.uploaded,
+        }
       }
       const [hashes, thumbnail] = await Promise.all([
         hashMediaSource(item.source, options.signal),
@@ -544,9 +584,11 @@ export class QQNTClient {
           ? this.videoThumbnail(item.source, options.signal).then(hashVideoThumbnail)
           : undefined,
       ])
-      return { item, kind, hashes, thumbnail, plan: undefined }
+      return { item, kind, hashes, thumbnail, plan: undefined, uploaded: false }
     }))
-    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({ item, kind, hashes, thumbnail, plan: fastPlan }, mediaIndex) => {
+    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({
+      item, kind, hashes, thumbnail, plan: fastPlan, uploaded,
+    }, mediaIndex) => {
       const mediaSpec = {
         kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
         md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
@@ -555,7 +597,7 @@ export class QQNTClient {
       }
       const plan = fastPlan ?? await this.prepareMediaUpload(conversationId, mediaSpec, options.signal)
       if (plan.prepared.kind !== kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
-      if (plan.highway) {
+      if (plan.highway && !uploaded) {
         if (plan.highway.fileSize !== hashes.size || plan.highway.fileMd5.toLowerCase() !== hashes.md5) {
           throw new Error('QQNT bridge returned mismatched Highway file metadata')
         }
@@ -571,7 +613,7 @@ export class QQNTClient {
           },
         )
       }
-      for (const auxiliary of plan.auxiliaryHighways ?? []) {
+      for (const auxiliary of uploaded ? [] : plan.auxiliaryHighways ?? []) {
         const inline = auxiliary.bytes ? Buffer.from(auxiliary.bytes, 'base64url') : undefined
         const bytes = matchingAuxiliaryBytes(auxiliary.highway, thumbnail?.bytes, inline)
         if (!bytes) throw new Error(`QQNT bridge returned no usable ${auxiliary.role} bytes`)
@@ -588,7 +630,7 @@ export class QQNTClient {
           { signal: options.signal },
         )
       }
-      if (!plan.highway) {
+      if (!plan.highway || uploaded) {
         await options.onProgress?.({
           phase: 'upload', mediaIndex, transferredBytes: hashes.size, totalBytes: hashes.size,
         })

@@ -267,7 +267,15 @@ adapter 可以提供 at-least-once 事件；不要求自己实现 exactly-once�
 
 ## 7. 流式媒体与进度
 
-Telegram `upload.saveFilePart` 到达后，bridge 将每个 part 独立写入临时文件。调用 adapter 时不会构造完整文件 Buffer：
+支持 `crossgram.prepareMediaUpload` 的客户端会在分片上传前提交目标会话、文件名、大小、媒体类型、MD5、SHA-1 和前 10 MiB MD5。adapter 的 `prepareMediaUpload()` 返回：
+
+- 不带 `sink` 的 `IMMediaUploadPreparation`：平台已秒传命中，bridge 按 `file_id` 暂存可发送的 `media`，RPC 返回 `BoolTrue`；
+- 带 `sink` 的 preparation：平台已申请上传 plan 但仍缺文件字节，bridge 保留 plan，RPC 仍返回 `BoolFalse`，让原 uploader 继续发送 `upload.saveFilePart`；
+- `undefined`：无法预检，使用旧的磁盘 fallback。
+
+有 `sink` 时，bridge 只保留最多 32 个 / 16 MiB 的乱序 part 窗口。连续 part 会立即按顺序喂给 sink；QQ adapter 在内部凑满 Highway plan 的 1 MiB block 后立刻发出。MD5、SHA-1 和前 10 MiB MD5 在同一字节流上增量计算，全部字节到齐后先校验 hash，再完成最后一个 Highway block。`messages.sendMedia` 只消费已完成的 opaque 平台结果，不再打开分片文件、重新 hash 或申请第二个 plan。
+
+没有预检能力的客户端在 `upload.saveFilePart` 到达后，bridge 才将每个 part 独立写入临时文件。调用 adapter 时仍不会构造完整文件 Buffer：
 
 ```ts
 for await (const chunk of media.source.stream({ signal: options.signal })) {
@@ -280,7 +288,7 @@ for await (const chunk of media.source.stream({ signal: options.signal })) {
 }
 ```
 
-adapter 必须边读取 `source.stream()` 边向平台上传。不要先将所有 chunk 收集到内存或另一个完整临时文件后再开始平台上传。成功返回后 bridge 清理 Telegram upload parts；失败时保留 parts，允许客户端以同一个 random ID 重试。
+磁盘 fallback 中 adapter 必须边读取 `source.stream()` 边向平台上传。不要先将所有 chunk 收集到内存或另一个完整临时文件后再开始平台上传。成功返回后 bridge 清理 Telegram upload parts；失败时保留 parts，允许客户端以同一个 random ID 重试。预检直传路径不会创建这些 part 文件；hash 或 Highway 失败会终止该 plan，也不会退回到“先完整落盘再重读”的同一次上传。
 
 Telegram Desktop 通常不会把 `inputMediaUploadedPhoto` / `inputMediaUploadedDocument` 直接交给 `messages.sendMedia`，而是使用两阶段流程：
 

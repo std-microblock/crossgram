@@ -529,14 +529,14 @@ describe('QQNTClient streaming transport', () => {
       sha1: '12dada1fff4d4787ade3333147202c3b443e376f',
       file10MMd5: '08d6c05a21512a79a1dfeb9d2a8f262f',
     }
-    const source = await client.prepareFastUpload('1:uid', {
+    const preparation = await client.prepareFastUpload('1:uid', {
       kind: 'file', name: 'rapid.bin', mimeType: 'application/octet-stream', size: hashes.size, hashes,
     })
-    expect(source).toBeDefined()
-    const stream = vi.spyOn(source!, 'stream')
+    expect(preparation).toBeDefined()
+    const stream = vi.spyOn(preparation!.media.source, 'stream')
 
     await client.sendMessage('1:uid', undefined, [{
-      kind: 'file', name: 'rapid.bin', mimeType: 'application/octet-stream', source: source!,
+      kind: 'file', name: 'rapid.bin', mimeType: 'application/octet-stream', source: preparation!.media.source,
     }])
 
     expect(prepareCalls).toBe(1)

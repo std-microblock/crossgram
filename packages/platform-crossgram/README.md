@@ -28,10 +28,14 @@ different host or path without changing the HTTP API `endpoint`.
 
 Patched uploaders may call `crossgram.prepareMediaUpload` with a destination
 peer, Telegram file id, metadata, MD5, SHA-1, and first-10-MiB MD5. The bridge
-asks the platform adapter for a native hash hit and stages the opaque result
-under that file id. `BoolTrue` means the client can skip
-`upload.saveFilePart`; `BoolFalse` or any RPC error means it must use the normal
-part upload. No source bytes are opened again after a QQ cache hit.
+asks the platform adapter for a native upload plan and retains it under that
+file id. `BoolTrue` means QQ already has the bytes and the client can skip
+`upload.saveFilePart`. A planned cache miss still returns `BoolFalse`, but the
+normal Telegram parts are reordered in a small bounded memory window and fed
+directly into 1 MiB QQ Highway blocks. The bridge verifies MD5, SHA-1, and the
+first-10-MiB MD5 incrementally; `messages.sendMedia` then posts only the
+completed opaque QQ result, without reopening a part file or requesting a
+second plan. Clients without the probe keep the disk-backed fallback.
 
 Bridge protocol v14 sends
 `OidbSvcTrpcTcp.0x9067_202` through

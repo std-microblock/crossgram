@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -185,11 +186,13 @@ describe('media send streaming', () => {
   it('stages a platform-native hash hit and sends without Telegram upload parts', async () => {
     const { rpc, platform, consumed, inputs, peerId } = await createHarness()
     const prepare = vi.fn(async (_session, _conversation, media) => ({
-      kind: media.kind,
-      name: media.name,
-      mimeType: media.mimeType,
-      size: media.hashes.size,
-      source: { size: media.hashes.size, async *stream() {} },
+      media: {
+        kind: media.kind,
+        name: media.name,
+        mimeType: media.mimeType,
+        size: media.hashes.size,
+        source: { size: media.hashes.size, async *stream() {} },
+      },
     }))
     platform.prepareMediaUpload = prepare
 
@@ -220,6 +223,69 @@ describe('media send streaming', () => {
     )
     expect(consumed).toEqual([[]])
     expect(inputs[0].parts[0]).toMatchObject({ type: 'media', media: { name: 'rapid.jpg', size: 4 } })
+  })
+
+  it('keeps a cache-miss native plan, streams ordered parts into its sink, and sends without rereading bytes', async () => {
+    const { rpc, platform, uploads, peerId } = await createHarness()
+    const bytes = Buffer.from('first-second')
+    const parts = [bytes.subarray(0, 6), bytes.subarray(6)]
+    const written: Buffer[] = []
+    let completed = false
+    const stream = vi.fn(async function* (): AsyncIterable<Uint8Array> {
+      throw new Error('completed native upload must not be read')
+    })
+    platform.prepareMediaUpload = vi.fn(async (_session, _conversation, media) => ({
+      media: {
+        kind: media.kind, name: media.name, mimeType: media.mimeType, size: media.hashes.size,
+        source: { size: media.hashes.size, stream },
+      },
+      sink: {
+        async write(chunk) { written.push(Buffer.from(chunk)) },
+        async complete() { completed = true },
+        abort() {},
+      },
+    }))
+    vi.spyOn(platform, 'sendMessage').mockImplementation(async (_session, target, content) => {
+      const output: IMMessage['content']['parts'] = []
+      for (const part of content.parts) {
+        if (part.type === 'text') output.push(part)
+        if (part.type === 'media') output.push({
+          type: 'media',
+          media: {
+            id: 'native-media', kind: part.media.kind, name: part.media.name,
+            mimeType: part.media.mimeType, size: part.media.size,
+          },
+        })
+      }
+      return {
+        id: 'native-sent', conversationId: target.id, senderId: 'self', outgoing: true,
+        timestamp: 1_800_000_001, content: { parts: output },
+      }
+    })
+    const md5 = createHash('md5').update(bytes).digest()
+    const sha1 = createHash('sha1').update(bytes).digest()
+
+    await expect(rpc.prepareMediaUpload({
+      peer: peer(peerId), fileId: Long.fromNumber(9_002), name: 'streamed.bin',
+      size: Long.fromNumber(bytes.length), kind: 'file', mimeType: 'application/octet-stream',
+      md5, sha1, file10mMd5: md5, width: 0, height: 0, duration: 0,
+    })).resolves.toMatchObject({ _: 'boolFalse' })
+    await uploads.savePart(session.platformSessionId, '9002', 1, parts[1]!)
+    expect(written).toEqual([])
+    await uploads.savePart(session.platformSessionId, '9002', 0, parts[0]!)
+    expect(Buffer.concat(written)).toEqual(bytes)
+    expect(completed).toBe(true)
+
+    await expect(rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(9_002), message: '',
+      media: {
+        _: 'inputMediaUploadedDocument', file: inputFile(9_002, 2, 'streamed.bin'),
+        mimeType: 'application/octet-stream', attributes: [],
+      },
+    })).resolves.toMatchObject({ _: 'updates' })
+
+    expect(stream).not.toHaveBeenCalled()
+    await expect(uploads.open(session.platformSessionId, '9002', 2)).rejects.toThrow('part is missing: 0')
   })
 
   it('streams file parts into the adapter, reports progressive bytes, persists, and cleans up', async () => {

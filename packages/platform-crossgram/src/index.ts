@@ -10,7 +10,7 @@ import {
   messagePartText, resolvePlatformPluginId, stableId,
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage, type IMGroupFilePage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
-  type IMMediaInput, type IMMediaUploadProbe,
+  type IMMediaInput, type IMMediaUploadPreparation, type IMMediaUploadProbe,
   type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMTransferOptions,
   type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
   type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
@@ -1139,13 +1139,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     _session: PlatformSession,
     conversation: IMConversationRef,
     media: IMMediaUploadProbe,
-  ): Promise<IMMediaInput | undefined> {
+  ): Promise<IMMediaUploadPreparation | undefined> {
     if (conversation.id === _session.userId
       && await this.wireConversationId(_session, conversation.id) !== conversation.id) return
-    const source = await this.client.prepareFastUpload(conversation.id, media)
-    if (!source) return
-    const { hashes: _hashes, ...metadata } = media
-    return { ...metadata, source }
+    return this.client.prepareFastUpload(conversation.id, media)
   }
 
   async deleteMessages(

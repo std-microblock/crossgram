@@ -2134,7 +2134,13 @@ export class DialogRpc {
     await this._hydratePeers()
     const conversationId = this._resolveMessageTarget(req.peer)
     this._assertWritableConversation(conversationId)
-    const media = await this._platform.prepareMediaUpload(this._session, { id: conversationId }, {
+    const hashes = {
+      size,
+      md5: Buffer.from(req.md5).toString('hex'),
+      sha1: Buffer.from(req.sha1).toString('hex'),
+      file10MMd5: Buffer.from(req.file10mMd5).toString('hex'),
+    }
+    const preparation = await this._platform.prepareMediaUpload(this._session, { id: conversationId }, {
       kind,
       name: req.name,
       mimeType: req.mimeType || undefined,
@@ -2142,16 +2148,13 @@ export class DialogRpc {
       width: req.width > 0 ? req.width : undefined,
       height: req.height > 0 ? req.height : undefined,
       duration: req.duration > 0 ? req.duration : undefined,
-      hashes: {
-        size,
-        md5: Buffer.from(req.md5).toString('hex'),
-        sha1: Buffer.from(req.sha1).toString('hex'),
-        file10MMd5: Buffer.from(req.file10mMd5).toString('hex'),
-      },
+      hashes,
     }).catch(() => undefined)
-    if (!media) return boolObject(false)
-    this._uploads.stagePrepared(this._session.platformSessionId, fileId, media)
-    return boolObject(true)
+    if (!preparation) return boolObject(false)
+    const status = await this._uploads.prepare(
+      this._session.platformSessionId, fileId, hashes, preparation,
+    ).catch(() => undefined)
+    return boolObject(status === 'ready')
   }
 
   private async _resolveAvatarMedia(peer: tl.TypeInputPeer, photoId: Long): Promise<IMMedia<any> | undefined> {

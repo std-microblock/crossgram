@@ -33,24 +33,86 @@ export interface QQMediaUploadPlan {
   }>
 }
 
+/** Incremental QQ Highway writer used while Telegram file parts are still arriving. */
+export class QQHighwayUploadWriter {
+  private _buffer: Buffer
+  private _bufferedLength = 0
+  private _received = 0
+  private _uploaded = 0
+  private _blockIndex = 0
+  private _closed = false
+
+  constructor(
+    private readonly _plan: QQHighwayUploadPlan,
+    private readonly _fetchImpl: typeof globalThis.fetch,
+    private readonly _options: {
+      signal?: AbortSignal
+      onProgress?(transferredBytes: number): void | Promise<void>
+    } = {},
+  ) {
+    validateHighwayPlan(_plan)
+    this._buffer = Buffer.allocUnsafe(_plan.blockSize)
+  }
+
+  async write(value: Uint8Array): Promise<void> {
+    if (this._closed) throw new Error('QQ Highway upload is already closed')
+    if (this._options.signal?.aborted) {
+      throw this._options.signal.reason ?? new Error('upload aborted')
+    }
+    const chunk = Buffer.from(value)
+    if (!chunk.length) return
+    this._received += chunk.length
+    if (this._received > this._plan.fileSize) {
+      throw new Error(`upload exceeded declared size ${this._plan.fileSize}`)
+    }
+    let offset = 0
+    while (offset < chunk.length) {
+      const length = Math.min(this._plan.blockSize - this._bufferedLength, chunk.length - offset)
+      chunk.copy(this._buffer, this._bufferedLength, offset, offset + length)
+      this._bufferedLength += length
+      offset += length
+      if (this._bufferedLength === this._plan.blockSize) await this._flush(this._buffer)
+    }
+  }
+
+  async complete(): Promise<void> {
+    if (this._closed) throw new Error('QQ Highway upload is already closed')
+    if (this._received !== this._plan.fileSize) {
+      throw new Error(`incomplete upload: expected ${this._plan.fileSize} bytes, received ${this._received}`)
+    }
+    if (this._bufferedLength) await this._flush(this._buffer.subarray(0, this._bufferedLength))
+    this._closed = true
+  }
+
+  abort(): void {
+    this._closed = true
+    this._bufferedLength = 0
+  }
+
+  private async _flush(block: Buffer): Promise<void> {
+    const frame = encodeHighwayFrame(
+      this._plan,
+      this._plan.sequenceStart + this._blockIndex++,
+      this._uploaded,
+      block,
+    )
+    await postHighwayBlock(this._plan, frame, this._fetchImpl, this._options.signal)
+    this._uploaded += block.length
+    this._buffer = Buffer.allocUnsafe(this._plan.blockSize)
+    this._bufferedLength = 0
+    await this._options.onProgress?.(this._uploaded)
+  }
+}
+
 export async function uploadHighway(
   plan: QQHighwayUploadPlan,
   source: AsyncIterable<Uint8Array>,
   fetchImpl: typeof globalThis.fetch,
   options: { signal?: AbortSignal, onProgress?(transferredBytes: number): void | Promise<void> } = {},
 ): Promise<void> {
-  if (!plan.servers.length) throw new Error('QQ Highway plan has no upload server')
-  if (!Number.isSafeInteger(plan.blockSize) || plan.blockSize <= 0) {
-    throw new Error('QQ Highway plan has an invalid block size')
-  }
-  let offset = 0
-  let blockIndex = 0
-  for await (const block of exactBlocks(source, plan.fileSize, plan.blockSize, options.signal)) {
-    const frame = encodeHighwayFrame(plan, plan.sequenceStart + blockIndex++, offset, block)
-    await postHighwayBlock(plan, frame, fetchImpl, options.signal)
-    offset += block.length
-    await options.onProgress?.(offset)
-  }
+  const writer = new QQHighwayUploadWriter(plan, fetchImpl, options)
+  for await (const chunk of source) await writer.write(chunk)
+  await writer.complete()
 }
 
 export function encodeHighwayFrame(
@@ -130,38 +192,14 @@ async function postHighwayBlock(
   throw new Error(`all QQ Highway upload servers failed: ${errorMessage(lastError)}`)
 }
 
-async function* exactBlocks(
-  source: AsyncIterable<Uint8Array>,
-  expectedSize: number,
-  blockSize: number,
-  signal?: AbortSignal,
-): AsyncIterable<Buffer> {
-  let buffered = Buffer.allocUnsafe(blockSize)
-  let bufferedLength = 0
-  let received = 0
-  for await (const value of source) {
-    if (signal?.aborted) throw signal.reason ?? new Error('upload aborted')
-    const chunk = Buffer.from(value)
-    if (!chunk.length) continue
-    received += chunk.length
-    if (received > expectedSize) throw new Error(`upload exceeded declared size ${expectedSize}`)
-    let offset = 0
-    while (offset < chunk.length) {
-      const length = Math.min(blockSize - bufferedLength, chunk.length - offset)
-      chunk.copy(buffered, bufferedLength, offset, offset + length)
-      bufferedLength += length
-      offset += length
-      if (bufferedLength === blockSize) {
-        yield buffered
-        buffered = Buffer.allocUnsafe(blockSize)
-        bufferedLength = 0
-      }
-    }
+function validateHighwayPlan(plan: QQHighwayUploadPlan): void {
+  if (!plan.servers.length) throw new Error('QQ Highway plan has no upload server')
+  if (!Number.isSafeInteger(plan.blockSize) || plan.blockSize <= 0) {
+    throw new Error('QQ Highway plan has an invalid block size')
   }
-  if (received !== expectedSize) {
-    throw new Error(`incomplete upload: expected ${expectedSize} bytes, received ${received}`)
+  if (!Number.isSafeInteger(plan.fileSize) || plan.fileSize <= 0) {
+    throw new Error('QQ Highway plan has an invalid file size')
   }
-  if (bufferedLength) yield buffered.subarray(0, bufferedLength)
 }
 
 function hex(value: string, name: string, length: number): Buffer {

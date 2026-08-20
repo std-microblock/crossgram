@@ -247,9 +247,30 @@ export interface IMMediaUploadHashes {
   file10MMd5: string
 }
 
-/** Metadata-only upload probe. Platforms return a send-ready input only on a native cache hit. */
+/** Metadata-only upload probe computed before Telegram starts sending file parts. */
 export interface IMMediaUploadProbe extends Omit<IMMediaInput, 'source'> {
   hashes: IMMediaUploadHashes
+}
+
+/** Native upload sink fed in file order by the bridge after a metadata-only probe. */
+export interface IMMediaUploadSink {
+  write(bytes: Uint8Array): Promise<void>
+  complete(): Promise<void>
+  abort(reason?: unknown): void | Promise<void>
+}
+
+/**
+ * Platform-native upload preparation result.
+ *
+ * A missing sink means the bytes already exist remotely and the returned media
+ * can be sent immediately. A sink means Telegram must still upload its normal
+ * file parts; the bridge will reorder a small window, verify the supplied
+ * hashes, and feed the bytes directly into this sink without staging them on
+ * disk.
+ */
+export interface IMMediaUploadPreparation {
+  media: IMMediaInput
+  sink?: IMMediaUploadSink
 }
 
 export interface IMMediaInput extends Omit<IMMedia, 'id' | 'locator'> {
@@ -695,14 +716,16 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMMessage<TMediaLocator>>
 
   /**
-   * Resolve a local file by hashes without receiving its bytes. Returning
-   * undefined means the caller must continue with the normal part upload.
+   * Prepare a native upload from metadata available before Telegram sends any
+   * bytes. Returning undefined keeps the ordinary disk-backed part-upload
+   * fallback. A preparation with a sink keeps the native plan while Telegram
+   * continues upload.saveFilePart; a preparation without one is a cache hit.
    */
   prepareMediaUpload?(
     session: PlatformSession,
     conversation: IMConversationRef,
     media: IMMediaUploadProbe,
-  ): Promise<IMMediaInput | undefined>
+  ): Promise<IMMediaUploadPreparation | undefined>
 
   getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage<TMediaLocator>>
   /** Resolve one opaque platform conversation, used for targeted metadata backfill. */

@@ -3,7 +3,8 @@ import { create, fromBinary, toBinary } from '@bufbuild/protobuf'
 import { describe, expect, it, vi } from 'vitest'
 import { HighwayRequestHeadSchema, HighwayResponseHeadSchema } from './generated/qqnt/highway_pb.js'
 import {
-  decodeHighwayResponse, encodeHighwayFrame, uploadHighway, type QQHighwayUploadPlan,
+  decodeHighwayResponse, encodeHighwayFrame, QQHighwayUploadWriter, uploadHighway,
+  type QQHighwayUploadPlan,
 } from './highway.js'
 
 const body = Buffer.from('payload')
@@ -62,6 +63,26 @@ describe('QQ Highway protobuf transport', () => {
       vi.fn() as typeof globalThis.fetch,
     )).rejects.toThrow('expected 8 bytes, received 7')
   })
+
+  it('flushes complete blocks immediately and retains only the final partial block', async () => {
+    const frames: Buffer[] = []
+    const fetch = vi.fn(async (_input, init) => {
+      frames.push(Buffer.from(init?.body as Uint8Array))
+      return new Response(Uint8Array.from(responseFrame()))
+    }) as typeof globalThis.fetch
+    const writer = new QQHighwayUploadWriter({ ...plan, fileSize: 6, blockSize: 4 }, fetch)
+
+    await writer.write(Buffer.from([1, 2, 3]))
+    expect(frames).toHaveLength(0)
+    await writer.write(Buffer.from([4, 5]))
+    expect(frames).toHaveLength(1)
+    expect(highwayBody(frames[0]!)).toEqual(Buffer.from([1, 2, 3, 4]))
+    await writer.write(Buffer.from([6]))
+    expect(frames).toHaveLength(1)
+    await writer.complete()
+    expect(frames).toHaveLength(2)
+    expect(highwayBody(frames[1]!)).toEqual(Buffer.from([5, 6]))
+  })
 })
 
 function responseFrame(options: { errorCode?: number, returnCode?: number } = {}): Buffer {
@@ -76,4 +97,10 @@ function responseFrame(options: { errorCode?: number, returnCode?: number } = {}
   head.copy(frame, 9)
   frame[frame.length - 1] = 0x29
   return frame
+}
+
+function highwayBody(frame: Buffer): Buffer {
+  const headLength = frame.readUInt32BE(1)
+  const bodyLength = frame.readUInt32BE(5)
+  return frame.subarray(9 + headLength, 9 + headLength + bodyLength)
 }
