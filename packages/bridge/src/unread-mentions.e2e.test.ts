@@ -273,4 +273,77 @@ describe('unread mention navigation RPC e2e', () => {
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
     })).resolves.toMatchObject({ dialogs: [{ unreadMentionsCount: 0 }] })
   })
+
+  it('clears legacy private-chat reply mentions and keeps them out of TL history', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const conversation: IMConversation = { id: 'private', kind: 'direct', title: 'Private' }
+    const own: IMMessage = {
+      id: 'own-private', conversationId: conversation.id, senderId: session.userId,
+      outgoing: true, timestamp: 10, content: { parts: [{ type: 'text', text: 'question' }] },
+    }
+    const reply: IMMessage = {
+      id: 'private-reply', conversationId: conversation.id, senderId: 'alice',
+      replyToId: own.id, timestamp: 11, content: { parts: [{ type: 'text', text: 'answer' }] },
+    }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation, unreadCount: 1, lastMessage: reply, readInboxMaxMessage: own,
+        }] }
+      },
+      async getHistory() { return { messages: [own, reply] } },
+      async getUser(_session, id) { return { id, firstName: id } },
+    }
+    const store = new MessageStore(ctx.database)
+    await store.ingest(session, conversation, own)
+    const replyResult = await store.ingest(session, conversation, reply)
+    const replyTlId = replyResult.projection[0].tlMessageId
+    // Simulate mention state persisted by an older server version, where every
+    // private reply to an outgoing message was classified as an unread mention.
+    await store.setMessageMentioned(
+      session.platformSessionId, conversation.id, replyTlId, true, true,
+    )
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(1)
+
+    const dialogs = new DialogRpc(platform, session, store)
+    const rpcHarness = rpcHarnessFor(dialogs)
+    await expect(roundTripRpc(rpcHarness, {
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })).resolves.toMatchObject({ dialogs: [{ unreadCount: 1, unreadMentionsCount: 0 }] })
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(0)
+
+    const peer = {
+      _: 'inputPeerUser' as const,
+      userId: dialogs.peerTlId(conversation.id), accessHash: Long.ZERO,
+    }
+    await expect(roundTripRpc(rpcHarness, {
+      _: 'messages.getUnreadMentions', peer,
+      offsetId: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0,
+    })).resolves.toMatchObject({ messages: [] })
+    const history = await roundTripRpc(rpcHarness, {
+      _: 'messages.getHistory', peer, offsetId: 0, offsetDate: 0,
+      addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    expect(history.messages.find((message): message is tl.RawMessage =>
+      message._ === 'message' && message.id === replyTlId)).toMatchObject({
+      message: 'answer', mentioned: false, mediaUnread: false,
+    })
+  })
 })

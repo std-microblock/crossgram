@@ -633,7 +633,8 @@ export class UpdateManager {
       }
       const sticker = projected.source.content.parts.find((item) => item.type === 'sticker')
       const card = projected.source.content.parts.find((item) => item.type === 'card')
-      const mentioned = part.ordinal === 0 && projected.source.outgoing !== true && (
+      const mentioned = event.conversation.kind !== 'direct'
+        && part.ordinal === 0 && projected.source.outgoing !== true && (
         messageMentionsUser(projected.source, session.userId)
         || replied?.source.outgoing === true
       )

@@ -3788,7 +3788,8 @@ export class DialogRpc {
   }
 
   private _messageMentioned(source: IMMessage, replyToTlId?: number): boolean {
-    return source.outgoing !== true && (
+    return this._conversation(source.conversationId).kind !== 'direct'
+      && source.outgoing !== true && (
       messageMentionsUser(source, this._session.userId)
       || (replyToTlId !== undefined && this._messageOutgoingByTl.get(replyToTlId) === true)
     )
@@ -3827,6 +3828,25 @@ export class DialogRpc {
     history: readonly MaterializedMessage[],
     unreadCount: number,
   ): Promise<number> {
+    if (this._conversation(conversationId).kind === 'direct') {
+      if (this._store) {
+        const cachedCount = this._unreadMentionCounts.get(conversationId)
+        const unreadMentions = cachedCount ?? await this._store.countUnreadMentions(
+          this._session.platformSessionId, conversationId,
+        )
+        for (const item of history) item.unreadMention = false
+        if (!unreadMentions) return 0
+        const changedIds = await this._store.markMentionsRead(
+          this._session.platformSessionId, conversationId,
+        )
+        return -changedIds.length
+      }
+      const states = this._memoryMentionStates.get(conversationId)
+      const unreadMentions = [...(states?.values() ?? [])].filter((unread) => unread).length
+      states?.clear()
+      for (const item of history) item.unreadMention = false
+      return -unreadMentions
+    }
     const logical = [...new Map(history
       .filter((item) => item.ordinal === 0)
       .map((item) => [item.tlId, item])).values()]

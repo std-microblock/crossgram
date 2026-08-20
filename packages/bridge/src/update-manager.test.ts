@@ -1409,6 +1409,35 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('does not expose private-chat replies as Telegram unread mentions', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'private-reply', kind: 'direct', title: 'Private Reply' }
+    const outgoing: IMMessage = {
+      id: 'private-outgoing', conversationId: conversation.id, senderId: session.userId,
+      outgoing: true, timestamp: 36,
+      content: { parts: [{ type: 'text', text: 'private question' }] },
+    }
+    const reply: IMMessage = {
+      id: 'private-reply', conversationId: conversation.id, senderId: 'alice',
+      replyToId: outgoing.id, timestamp: 37,
+      content: { parts: [{ type: 'text', text: 'private answer' }] },
+    }
+    await store.ingest(session, conversation, outgoing)
+    const result = await store.ingest(session, conversation, reply)
+
+    await manager.publish(session, {
+      event: { type: 'message', conversation, message: reply }, result,
+    })
+
+    const update = (sent[0].update as tl.RawUpdates).updates[0] as tl.RawUpdateNewMessage
+    const message = roundTrip(update.message) as tl.RawMessage
+    expect(message).toMatchObject({
+      _: 'message', message: 'private answer',
+      mentioned: false, mediaUnread: false,
+    })
+    await expect(store.countUnreadMentions(session.platformSessionId, conversation.id)).resolves.toBe(0)
+  })
+
   it('lists, paginates, acknowledges, and durably clears unread mentions after live delivery', async () => {
     const conversation: IMConversation = { id: 'mention-navigation', kind: 'group', title: 'Mention Navigation' }
     const own: IMMessage = {
