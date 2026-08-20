@@ -11,6 +11,19 @@ export interface TransportTrafficSample {
   timestamp: number
 }
 
+export type TransportSendCompletion = 'written' | 'closed' | 'encode-failed' | 'write-failed' | 'abandoned' | 'timeout'
+
+export const TRANSPORT_SETTLE_TIMEOUT_MS = 30_000
+
+interface PendingSend {
+  data: Uint8Array
+  closeAfterWrite: boolean
+  abandoned: boolean
+  started: boolean
+  submitted: boolean
+  settle?: (outcome: TransportSendCompletion) => void
+}
+
 /**
  * A single client TCP connection, with MTProto transport framing handled by an
  * mtcute-compatible `IPacketCodec`.
@@ -35,9 +48,11 @@ export class ServerConnection {
   private _recvBuffer = Bytes.alloc(65536)
   private _pendingSocketData: Uint8Array[] = []
   private _decoding = false
-  private _pendingSends: Array<{ data: Uint8Array, closeAfterWrite: boolean }> = []
+  private _pendingSends: PendingSend[] = []
+  private _completionSends = new Set<PendingSend>()
   private _encoding = false
   private _closing = false
+  private _pendingCloseFrame: Uint8Array | null = null
   private _messageHandler: ((data: Uint8Array) => void) | null = null
   /** Codec is `null` until the transport is detected from the first bytes. */
   private _codec: IPacketCodec | null = null
@@ -60,7 +75,7 @@ export class ServerConnection {
     this._closed = true
     this._readPaused = false
     this._closing = true
-    this._pendingSends.length = 0
+    this._settlePendingSends('closed')
     this._backpressuredSince = null
   }
 
@@ -93,24 +108,52 @@ export class ServerConnection {
     this._send(data, false)
   }
 
+  /** Queue a packet and resolve when its socket write callback settles. */
+  sendAndWait(data: Uint8Array): Promise<TransportSendCompletion> {
+    return new Promise((resolve) => this._send(data, false, resolve))
+  }
+
   /** Send one final framed packet and close after the socket flushes it. */
   sendAndClose(data: Uint8Array): void {
     this._send(data, true)
   }
 
-  private _send(data: Uint8Array, closeAfterWrite: boolean): void {
-    if (this._closed || this._closing) return
+  private _send(
+    data: Uint8Array,
+    closeAfterWrite: boolean,
+    completion?: (outcome: TransportSendCompletion) => void,
+  ): void {
+    if (this._closed || this._closing) {
+      completion?.('closed')
+      return
+    }
     if (!this._codec) {
       this._log.warn('send() called before transport was detected; dropping %d bytes', data.length)
+      completion?.('abandoned')
       if (closeAfterWrite) this.close()
       return
     }
 
     if (closeAfterWrite) this._closing = true
+    const pending: PendingSend = {
+      data: new Uint8Array(data), closeAfterWrite, abandoned: false, started: false, submitted: false,
+    }
+    if (completion) {
+      this._completionSends.add(pending)
+      const timeout = setTimeout(() => {
+        pending.abandoned = true
+        this._settlePendingSend(pending, 'timeout')
+        if (pending.started || this._encoding) this.close()
+      }, TRANSPORT_SETTLE_TIMEOUT_MS)
+      pending.settle = (outcome) => {
+        clearTimeout(timeout)
+        completion(outcome)
+      }
+    }
     // Obfuscated transports use a stateful AES-CTR encoder. Keep both codec
     // mutation and socket writes strictly ordered when callers send multiple
     // replies before an asynchronous encode has completed.
-    this._pendingSends.push({ data: new Uint8Array(data), closeAfterWrite })
+    this._pendingSends.push(pending)
     this._drainSendQueue()
   }
 
@@ -118,21 +161,38 @@ export class ServerConnection {
     if (this._encoding || this._closed) return
     const pending = this._pendingSends.shift()
     if (!pending) return
+    if (pending.abandoned) {
+      this._drainSendQueue()
+      return
+    }
 
     this._encoding = true
+    pending.started = true
     const writable = Bytes.alloc(pending.data.length + 16)
     const write = () => {
-      if (this._closed) return
+      if (this._closed) {
+        this._settlePendingSend(pending, 'closed')
+        return
+      }
+      if (pending.abandoned) return
       const encoded = writable.result()
       this._onTraffic?.({ direction: 'sent', bytes: encoded.length, timestamp: Date.now() })
       if (pending.closeAfterWrite) {
-        this._closed = true
-        this._pendingSends.length = 0
-        this._socket.end(encoded)
+        this._pendingCloseFrame = encoded
+        this._finishPendingClose()
       } else {
-        const flushed = this._socket.write(encoded)
-        if (!flushed && this._backpressuredSince === null) {
-          this._backpressuredSince = Date.now()
+        try {
+          pending.submitted = true
+          const flushed = this._socket.write(encoded, (error) => {
+            this._settlePendingSend(pending, error ? 'write-failed' : 'written')
+          })
+          if (!flushed && this._backpressuredSince === null) {
+            this._backpressuredSince = Date.now()
+          }
+        } catch (error) {
+          this._log.error('socket write failed: %s', error instanceof Error ? error.stack : error)
+          this._settlePendingSend(pending, 'write-failed')
+          this.close()
         }
       }
     }
@@ -142,6 +202,7 @@ export class ServerConnection {
     }
     const fail = (error: unknown) => {
       this._log.error('transport encode failed: %s', error instanceof Error ? error.stack : error)
+      this._settlePendingSend(pending, 'encode-failed')
       this.close()
     }
 
@@ -156,6 +217,28 @@ export class ServerConnection {
     } catch (error) {
       fail(error)
       complete()
+    }
+  }
+
+  private _settlePendingSend(pending: PendingSend, outcome: TransportSendCompletion): void {
+    if (!this._completionSends.delete(pending)) return
+    pending.settle?.(outcome)
+    this._finishPendingClose()
+  }
+
+  private _finishPendingClose(): void {
+    if (!this._pendingCloseFrame || this._closed || this._completionSends.size > 0) return
+    const frame = this._pendingCloseFrame
+    this._pendingCloseFrame = null
+    this._closed = true
+    this._settlePendingSends('closed')
+    this._socket.end(frame)
+  }
+
+  private _settlePendingSends(outcome: TransportSendCompletion): void {
+    this._pendingSends.length = 0
+    for (const pending of this._completionSends) {
+      if (!pending.submitted) this._settlePendingSend(pending, outcome)
     }
   }
 
@@ -208,7 +291,7 @@ export class ServerConnection {
     this._closed = true
     this._readPaused = false
     this._closing = true
-    this._pendingSends.length = 0
+    this._settlePendingSends('closed')
     this._backpressuredSince = null
     this._socket.off('drain', this._onDrain)
     this._socket.destroy()

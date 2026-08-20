@@ -4,7 +4,9 @@ import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import { LogManager } from '@mtcute/core/utils.js'
 import { NodePlatform } from '@mtcute/node'
 import type { Socket } from 'node:net'
-import { ServerConnection, type TransportTrafficSample } from './server-connection.js'
+import {
+  ServerConnection, TRANSPORT_SETTLE_TIMEOUT_MS, type TransportTrafficSample,
+} from './server-connection.js'
 
 const crypto = new NodeCryptoProvider()
 const log = new LogManager('test', new NodePlatform()).create('test')
@@ -44,6 +46,21 @@ function makeConnection(socket: Socket, onTraffic?: (sample: TransportTrafficSam
   const connection = new ServerConnection(socket, crypto, log, onTraffic)
   socket.emit('data', Buffer.from([0xef])) // abridged tag byte
   return connection
+}
+
+function setCodec(connection: ServerConnection, codec: {
+  tag: () => Uint8Array
+  reset: () => void
+  decode: () => null
+  encode: (data: Uint8Array, writable: import('@fuman/io').Bytes) => void | Promise<void>
+}): void {
+  ;(connection as unknown as { _codec: typeof codec })._codec = codec
+}
+
+function writeByte(data: Uint8Array, writable: import('@fuman/io').Bytes): void {
+  const target = writable.writeSync(1)
+  target[0] = data[0]!
+  writable.disposeWriteSync(1)
 }
 
 describe('ServerConnection stall tracking', () => {
@@ -223,5 +240,221 @@ describe('ServerConnection stall tracking', () => {
     releases.shift()!()
     await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(2))
     expect(writes[1]).toEqual(Uint8Array.of(22))
+  })
+})
+
+describe('ServerConnection sendAndWait', () => {
+  it('stays pending through asynchronous encoding and until the socket write callback', async () => {
+    let releaseEncode!: () => void
+    const encodeGate = new Promise<void>(resolve => { releaseEncode = resolve })
+    let finishWrite!: (error?: Error | null) => void
+    const write = vi.fn((_data: Uint8Array, callback: (error?: Error | null) => void) => {
+      finishWrite = callback
+      return true
+    })
+    const connection = makeConnection(mockSocket({ write }))
+    setCodec(connection, {
+      tag: () => new Uint8Array(), reset: () => {}, decode: () => null,
+      encode(data, writable) {
+        return encodeGate.then(() => writeByte(data, writable))
+      },
+    })
+    const settled = vi.fn()
+    const completion = connection.sendAndWait(Uint8Array.of(7))
+    completion.then(settled)
+
+    await Promise.resolve()
+    expect(settled).not.toHaveBeenCalled()
+    releaseEncode()
+    await vi.waitFor(() => expect(write).toHaveBeenCalledOnce())
+    expect(settled).not.toHaveBeenCalled()
+
+    finishWrite()
+    await expect(completion).resolves.toBe('written')
+    expect(settled).toHaveBeenCalledExactlyOnceWith('written')
+  })
+
+  it('settles exactly once as closed when the connection closes during encoding', async () => {
+    let releaseEncode!: () => void
+    const encodeGate = new Promise<void>(resolve => { releaseEncode = resolve })
+    const write = vi.fn(() => true)
+    const connection = makeConnection(mockSocket({ write }))
+    setCodec(connection, {
+      tag: () => new Uint8Array(), reset: () => {}, decode: () => null,
+      encode(data, writable) { return encodeGate.then(() => writeByte(data, writable)) },
+    })
+    const settled = vi.fn()
+    const completion = connection.sendAndWait(Uint8Array.of(8))
+    completion.then(settled)
+
+    connection.close()
+    await expect(completion).resolves.toBe('closed')
+    releaseEncode()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(write).not.toHaveBeenCalled()
+    expect(settled).toHaveBeenCalledExactlyOnceWith('closed')
+  })
+
+  it('settles a submitted write from its callback after the connection closes', async () => {
+    let finishWrite!: (error?: Error | null) => void
+    const write = vi.fn((_data: Uint8Array, callback: (error?: Error | null) => void) => {
+      finishWrite = callback
+      return true
+    })
+    const connection = makeConnection(mockSocket({ write }))
+    const settled = vi.fn()
+    const completion = connection.sendAndWait(Uint8Array.of(9))
+    completion.then(settled)
+
+    expect(write).toHaveBeenCalledOnce()
+    connection.close()
+    expect(settled).not.toHaveBeenCalled()
+    finishWrite(new Error('socket closed'))
+    await expect(completion).resolves.toBe('write-failed')
+
+    expect(settled).toHaveBeenCalledExactlyOnceWith('write-failed')
+  })
+
+  it('reports an encode rejection without leaving its completion pending', async () => {
+    const connection = makeConnection(mockSocket())
+    setCodec(connection, {
+      tag: () => new Uint8Array(), reset: () => {}, decode: () => null,
+      encode: () => Promise.reject(new Error('codec failed')),
+    })
+
+    await expect(connection.sendAndWait(Uint8Array.of(10))).resolves.toBe('encode-failed')
+    expect(connection.closed).toBe(true)
+  })
+
+  it('reports a thrown socket write as write-failed', async () => {
+    const connection = makeConnection(mockSocket({
+      write: () => { throw new Error('write failed') },
+    }))
+
+    await expect(connection.sendAndWait(Uint8Array.of(11))).resolves.toBe('write-failed')
+    expect(connection.closed).toBe(true)
+  })
+
+  it('reports a socket write callback error as write-failed', async () => {
+    const connection = makeConnection(mockSocket({
+      write: (_data: Uint8Array, callback: (error?: Error | null) => void) => {
+        callback(new Error('flush failed'))
+        return true
+      },
+    }))
+
+    await expect(connection.sendAndWait(Uint8Array.of(12))).resolves.toBe('write-failed')
+  })
+
+  it('reports an undetected transport as abandoned', async () => {
+    const connection = new ServerConnection(mockSocket(), crypto, log)
+
+    await expect(connection.sendAndWait(Uint8Array.of(13))).resolves.toBe('abandoned')
+  })
+
+  it('closes after a stateful encode timeout without advancing the next packet', async () => {
+    vi.useFakeTimers()
+    let releaseEncode!: () => void
+    const encodeGate = new Promise<void>(resolve => { releaseEncode = resolve })
+    const write = vi.fn(() => true)
+    const encoded: number[] = []
+    const connection = makeConnection(mockSocket({ write }))
+    setCodec(connection, {
+      tag: () => new Uint8Array(), reset: () => {}, decode: () => null,
+      encode(data, writable) {
+        encoded.push(data[0]!)
+        return encodeGate.then(() => writeByte(data, writable))
+      },
+    })
+    const first = connection.sendAndWait(Uint8Array.of(14))
+    const second = connection.sendAndWait(Uint8Array.of(15))
+
+    await vi.advanceTimersByTimeAsync(TRANSPORT_SETTLE_TIMEOUT_MS)
+    await expect(first).resolves.toBe('timeout')
+    await expect(second).resolves.toBe('closed')
+    expect(connection.closed).toBe(true)
+    expect(encoded).toEqual([14])
+
+    releaseEncode()
+    await vi.runAllTimersAsync()
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('lets a submitted sendAndWait settle from its callback after sendAndClose', async () => {
+    let finishFirst!: (error?: Error | null) => void
+    const end = vi.fn()
+    const write = vi.fn((_data: Uint8Array, callback: (error?: Error | null) => void) => {
+      finishFirst = callback
+      return true
+    })
+    const connection = makeConnection(mockSocket({ write, end }))
+    setCodec(connection, {
+      tag: () => new Uint8Array(), reset: () => {}, decode: () => null,
+      encode: writeByte,
+    })
+
+    const first = connection.sendAndWait(Uint8Array.of(15))
+    connection.sendAndClose(Uint8Array.of(16))
+    expect(end).not.toHaveBeenCalled()
+    let settled = false
+    void first.then(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    finishFirst()
+    await expect(first).resolves.toBe('written')
+    expect(end).toHaveBeenCalledOnce()
+  })
+
+  it('waits for a submitted response write failure before a later sendAndClose closes the socket', async () => {
+    let finishWrite!: (error?: Error | null) => void
+    const write = vi.fn((_data: Uint8Array, callback: (error?: Error | null) => void) => {
+      finishWrite = callback
+      return true
+    })
+    const end = vi.fn()
+    const connection = makeConnection(mockSocket({ write, end }))
+    setCodec(connection, {
+      tag: () => new Uint8Array(), reset: () => {}, decode: () => null,
+      encode: writeByte,
+    })
+    const settled = vi.fn()
+    const first = connection.sendAndWait(Uint8Array.of(17))
+    first.then(settled)
+
+    connection.sendAndClose(Uint8Array.of(18))
+    expect(settled).not.toHaveBeenCalled()
+    expect(end).not.toHaveBeenCalled()
+
+    finishWrite(new Error('flush failed'))
+    await expect(first).resolves.toBe('write-failed')
+    expect(settled).toHaveBeenCalledExactlyOnceWith('write-failed')
+    expect(end).toHaveBeenCalledOnce()
+  })
+
+  it('preserves FIFO socket writes when a pending sendAndWait callback has not settled', async () => {
+    const writes: number[] = []
+    let finishFirst!: (error?: Error | null) => void
+    const write = vi.fn((data: Uint8Array, callback?: (error?: Error | null) => void) => {
+      writes.push(data[0]!)
+      if (writes.length === 1) finishFirst = callback!
+      else callback?.()
+      return true
+    })
+    const connection = makeConnection(mockSocket({ write }))
+    setCodec(connection, {
+      tag: () => new Uint8Array(), reset: () => {}, decode: () => null,
+      encode: writeByte,
+    })
+
+    const first = connection.sendAndWait(Uint8Array.of(15))
+    const second = connection.sendAndWait(Uint8Array.of(16))
+    expect(writes).toEqual([15, 16])
+    await expect(second).resolves.toBe('written')
+    finishFirst()
+    await expect(first).resolves.toBe('written')
+    expect(writes).toEqual([15, 16])
   })
 })

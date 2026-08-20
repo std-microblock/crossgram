@@ -89,6 +89,8 @@ export interface ServerRpcContext {
    * meaningful only after the client has consumed the matching RPC result.
    */
   afterResponse?: (task: () => void | Promise<void>) => void
+  /** Register work that runs after the successful response transport settles. */
+  afterResponseSettled?: (task: () => void | Promise<void>) => void
   /** Read backend-specific data shared by all connections using this auth key. */
   getPlatformData: <T>() => T
   /** Store backend-specific data for this permanent auth key. */
