@@ -7,7 +7,7 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import type { ServerConnection } from '@mtproto-relay/mtproto'
-import { DialogRpc, stableId } from './dialogs.js'
+import { CANCELLED_MESSAGE_ID, DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
@@ -819,12 +819,12 @@ describe('conversation kinds', () => {
     }])
   })
 
-  it('returns one confirmation when a platform merges multiple Android forwards into one message', async () => {
+  it('cancels six surplus Android placeholders when seven forwards merge into one message', async () => {
     const mergedPlatform: IMPlatform = {
       ...platform,
       async getHistory(_session, target) {
         const conversation = conversations.find((item) => item.id === target.id)!
-        return { messages: [0, 1].map((index) => ({
+        return { messages: Array.from({ length: 7 }, (_, index) => ({
           ...source(conversation), id: `merge-source-${index}`, timestamp: 10 + index,
         })) }
       },
@@ -848,18 +848,26 @@ describe('conversation kinds', () => {
     const directId = await rpc.userTlId('direct')
     const directPeer = { _: 'inputPeerUser' as const, userId: directId, accessHash: Long.ZERO }
     const history = await rpc.getHistory(historyRequest(directPeer)) as tl.messages.RawMessages
-    const ids = history.messages.slice(0, 2).map((message) => (message as tl.RawMessage).id)
-    expect(ids).toHaveLength(2)
+    const ids = history.messages.slice(0, 7).map((message) => (message as tl.RawMessage).id)
+    const randomIds = Array.from({ length: 7 }, (_, index) => Long.fromNumber(201 + index))
+    expect(ids).toHaveLength(7)
 
     const forwarded = await rpc.forwardMessages({
       _: 'messages.forwardMessages', fromPeer: { _: 'inputPeerEmpty' }, id: ids,
-      randomId: [Long.fromNumber(201), Long.fromNumber(202)], toPeer: directPeer,
+      randomId: randomIds, toPeer: directPeer,
     }) as tl.RawUpdates
 
-    expect(forwarded.updates.filter((update) => update._ === 'updateMessageID')).toEqual([{
-      _: 'updateMessageID', id: expect.any(Number), randomId: Long.fromNumber(201),
-    }])
+    const confirmations = forwarded.updates.filter((update) => update._ === 'updateMessageID')
+    expect(confirmations).toHaveLength(7)
+    expect(confirmations[0]).toEqual({
+      _: 'updateMessageID', id: expect.any(Number), randomId: randomIds[0],
+    })
+    expect((confirmations[0] as tl.RawUpdateMessageID).id).toBeGreaterThan(0)
+    expect(confirmations.slice(1)).toEqual(randomIds.slice(1).map((randomId) => ({
+      _: 'updateMessageID', id: CANCELLED_MESSAGE_ID, randomId,
+    })))
     expect(forwarded.updates.filter((update) => update._ === 'updateNewMessage')).toHaveLength(1)
+    expect(() => roundTrip(forwarded)).not.toThrow()
   })
 
   it('projects delete-and-resend editing as delete plus new-message updates', async () => {

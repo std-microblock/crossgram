@@ -74,6 +74,12 @@ type MentionReadPublisher = (
   excludeConnection?: ServerConnection,
 ) => Promise<{ pts: number, ptsCount: number }>
 
+// Crossgram clients consume updateMessageID(id=0) as an explicit acknowledgement
+// that the local message for this random ID was intentionally cancelled. Telegram
+// message IDs are strictly positive, so zero is a wire-compatible sentinel that
+// does not require a private TL constructor.
+export const CANCELLED_MESSAGE_ID = 0
+
 
 interface MessageRef {
   peerId: string
@@ -1928,6 +1934,12 @@ export class DialogRpc {
         _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
         message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
       } as tl.TypeUpdate)
+    }
+    // Native platforms may coalesce several forwarded inputs into fewer outputs.
+    // Confirm every unpaired random ID as cancelled so patched Telegram clients
+    // remove their local placeholders instead of converting them to send errors.
+    for (const randomId of req.randomId.slice(projections.length)) {
+      updates.push({ _: 'updateMessageID', id: CANCELLED_MESSAGE_ID, randomId })
     }
     return this._updates(conversation, updates, Math.floor(Date.now() / 1000))
   }
