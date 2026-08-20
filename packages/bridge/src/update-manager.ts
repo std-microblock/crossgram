@@ -930,7 +930,11 @@ export class UpdateManager {
       return { _: 'updates.differenceEmpty', date: state.date, seq: state.seq }
     }
     const requestedLimit = request.ptsLimit ?? request.ptsTotalLimit ?? 100
-    const page = deliveries.slice(0, Math.max(1, Math.min(requestedLimit, 100)))
+    // prepareUpdateDelivery reserves pts before the publisher finishes the payload.
+    // A concurrent difference must stop there or the client permanently skips it.
+    const firstIncomplete = deliveries.findIndex((delivery) => !delivery.payload)
+    const readyDeliveries = firstIncomplete < 0 ? deliveries : deliveries.slice(0, firstIncomplete)
+    const page = readyDeliveries.slice(0, Math.max(1, Math.min(requestedLimit, 100)))
     const newMessages: tl.TypeMessage[] = []
     const otherUpdates: tl.TypeUpdate[] = []
     const chats = new Map<string, tl.TypeChat>()
@@ -967,12 +971,22 @@ export class UpdateManager {
       _: 'updateChannelTooLong', channelId, pts,
     })))
     for (const delivery of page) await this._store.markUpdatePublished(delivery.eventKey)
-    const last = page.at(-1)!
     const difference = {
       newMessages, newEncryptedMessages: [], otherUpdates,
       chats: [...chats.values()], users: [...users.values()],
     }
+    if (!page.length && deliveries.length) {
+      const pending = deliveries[0]
+      return {
+        _: 'updates.differenceSlice', ...difference,
+        intermediateState: {
+          _: 'updates.state', pts: request.pts, qts: request.qts,
+          date: request.date, seq: Math.max(0, pending.seq - 1), unreadCount: 0,
+        },
+      }
+    }
     if (page.length < deliveries.length) {
+      const last = page.at(-1)!
       return {
         _: 'updates.differenceSlice', ...difference,
         intermediateState: {
@@ -995,7 +1009,14 @@ export class UpdateManager {
     if (!deliveries.length) {
       return { _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts }
     }
-    const page = deliveries.slice(0, Math.max(1, Math.min(request.limit, 100)))
+    // Channel short-polls race live publication frequently, so never acknowledge
+    // the reserved pts until the corresponding update payload is durable.
+    const firstIncomplete = deliveries.findIndex((delivery) => !delivery.payload)
+    const readyDeliveries = firstIncomplete < 0 ? deliveries : deliveries.slice(0, firstIncomplete)
+    const page = readyDeliveries.slice(0, Math.max(1, Math.min(request.limit, 100)))
+    if (!page.length) {
+      return { _: 'updates.channelDifferenceEmpty', final: false, pts: request.pts }
+    }
     const newMessages: tl.TypeMessage[] = []
     const otherUpdates: tl.TypeUpdate[] = []
     const chats = new Map<string, tl.TypeChat>()

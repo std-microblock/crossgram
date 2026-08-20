@@ -1746,6 +1746,79 @@ describe('UpdateManager', () => {
     expect(() => roundTrip(difference)).not.toThrow()
   })
 
+  it('does not advance account difference past a delivery whose payload is still being prepared', async () => {
+    const { ctx, store } = await createHarness()
+    const manager = new UpdateManager(
+      ctx.database,
+      new PlatformRegistry([[session.platformId, platform]]),
+      store,
+      () => 0,
+    )
+    const conversation: IMConversation = { id: 'pending-direct', kind: 'direct', title: 'Pending Direct' }
+    const message: IMMessage = {
+      id: 'pending-direct-message', conversationId: conversation.id, senderId: 'alice', timestamp: 55,
+      content: { parts: [{ type: 'text', text: 'payload commits later' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    const eventKey = `${session.platformSessionId}:message:${result.message.id}`
+    await store.prepareUpdateDelivery(eventKey, session.platformSessionId, 1, message.timestamp)
+
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toMatchObject({
+      _: 'updates.differenceSlice', newMessages: [], otherUpdates: [],
+      intermediateState: { pts: 1, qts: 0, date: 0, seq: 0 },
+    })
+    await expect(store.getUpdateDelivery(eventKey)).resolves.toMatchObject({
+      pts: 2, published: false, payload: null,
+    })
+
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toMatchObject({
+      _: 'updates.difference', newMessages: [{ message: 'payload commits later' }],
+      state: { pts: 2, seq: 1 },
+    })
+  })
+
+  it('does not advance channel difference past a delivery whose payload is still being prepared', async () => {
+    const { ctx, store } = await createHarness()
+    const manager = new UpdateManager(
+      ctx.database,
+      new PlatformRegistry([[session.platformId, platform]]),
+      store,
+      () => 0,
+    )
+    const conversation: IMConversation = { id: 'pending-channel', kind: 'group', title: 'Pending Channel' }
+    const channelId = stableId(`peer:${conversation.id}`)
+    const request = {
+      _: 'updates.getChannelDifference' as const, force: true,
+      channel: { _: 'inputChannel' as const, channelId, accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' as const }, pts: 1, limit: 100,
+    }
+    const message: IMMessage = {
+      id: 'pending-channel-message', conversationId: conversation.id, senderId: 'alice', timestamp: 56,
+      content: { parts: [{ type: 'text', text: 'channel payload commits later' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    const eventKey = `${session.platformSessionId}:message:${result.message.id}`
+    await store.prepareUpdateDelivery(eventKey, session.platformSessionId, 1, message.timestamp, channelId)
+
+    await expect(manager.getChannelDifference(session.platformSessionId, request)).resolves.toMatchObject({
+      _: 'updates.channelDifferenceEmpty', final: false, pts: 1,
+    })
+    await expect(store.getUpdateDelivery(eventKey)).resolves.toMatchObject({
+      pts: 2, published: false, payload: null,
+    })
+
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    await expect(manager.getChannelDifference(session.platformSessionId, request)).resolves.toMatchObject({
+      _: 'updates.channelDifference', final: true, pts: 2,
+      newMessages: [{ message: 'channel payload commits later' }],
+    })
+  })
+
   it('replays and deletes the same Telegram ID after QQ finalizes a live msgSeq', async () => {
     const { ctx, store } = await createHarness()
     const manager = new UpdateManager(

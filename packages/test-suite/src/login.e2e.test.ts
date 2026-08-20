@@ -30,6 +30,7 @@ import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
 import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
 import DatabaseUpdateStore from '@mtproto-relay/update-store-database'
+import { updateToJson } from '../../bridge/src/update-json.js'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
@@ -3712,6 +3713,50 @@ describe('bridge login e2e', () => {
       expect(storedUpdates).toHaveLength(3)
       expect(storedUpdates.every((delivery) => delivery.payload instanceof ArrayBuffer)).toBe(true)
 
+      const raceStore = new bridge.MessageStore(ctx.database, undefined, ctx.updateStore)
+      const raceEventKey = 'push-ps:e2e:pending-channel-payload'
+      const pending = await raceStore.prepareUpdateDelivery(
+        raceEventKey, 'push-ps', 1, 1_800_000_103, chatId,
+      )
+      expect(await callRpc(client, key, sid, {
+        _: 'updates.getChannelDifference', force: true,
+        channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
+        filter: { _: 'channelMessagesFilterEmpty' }, pts: 4, limit: 100,
+      }, 13)).toMatchObject({
+        _: 'updates.channelDifferenceEmpty', final: false, pts: 4,
+      })
+      expect(await raceStore.getUpdateDelivery(raceEventKey)).toMatchObject({
+        pts: 5, payload: null, published: false,
+      })
+
+      const replayMessageId = pushed.updates[0].message.id + 16
+      await raceStore.setUpdatePayload(raceEventKey, updateToJson({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewChannelMessage',
+          message: {
+            ...pushed.updates[0].message,
+            id: replayMessageId,
+            date: pending.date,
+            message: 'payload completed after difference',
+          },
+          pts: pending.pts,
+          ptsCount: pending.ptsCount,
+        }],
+        users: pushed.users,
+        chats: pushed.chats,
+        date: pending.date,
+        seq: pending.seq,
+      }))
+      expect(await callRpc(client, key, sid, {
+        _: 'updates.getChannelDifference', force: true,
+        channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
+        filter: { _: 'channelMessagesFilterEmpty' }, pts: 4, limit: 100,
+      }, 15)).toMatchObject({
+        _: 'updates.channelDifference', final: true, pts: 5,
+        newMessages: [{ id: replayMessageId, message: 'payload completed after difference' }],
+      })
+
       expect(await callRpc(client, key, sid, {
         _: 'upload.saveFilePart', fileId: Long.fromNumber(700), filePart: 0,
         bytes: new TextEncoder().encode('stream-'),
@@ -3774,7 +3819,7 @@ describe('bridge login e2e', () => {
         id: sentMedia.updates[1].message.id, message: 'replacement after recall',
       }, 26)
       expect(editResult).toMatchObject({
-        _: 'updatesCombined', seqStart: 5, seq: 6,
+        _: 'updatesCombined', seqStart: 6, seq: 7,
         updates: [
           {
             _: 'updateDeleteChannelMessages', messages: [sentMedia.updates[1].message.id], ptsCount: 1,
