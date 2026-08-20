@@ -1208,6 +1208,30 @@ export class MessageStore {
     return part?.tlMessageId
   }
 
+  async getNewestTlMessageId(
+    platformSessionId: string,
+    platformConversationId: string,
+  ): Promise<number | undefined> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return
+    const [newest] = await this._database.select('mtproto_im_message', {
+      conversationId: conversation.id, deleted: false,
+    }).orderBy('timestamp', 'desc').limit(1).execute()
+    if (!newest) return
+    const messages = await this._database.get('mtproto_im_message', {
+      conversationId: conversation.id, deleted: false, timestamp: newest.timestamp,
+    })
+    const [part] = await this._database.select('mtproto_tl_message_part', {
+      platformSessionId,
+      conversationId: conversation.id,
+      messageId: { $in: messages.map((message) => message.id) },
+      ordinal: 0,
+    }).orderBy('tlMessageId', 'desc').limit(1).execute()
+    return part?.tlMessageId
+  }
+
   async getMedia(platformSessionId: string, mediaId: number): Promise<StoredMedia | undefined> {
     const [row] = await this._database.get('mtproto_im_media', { id: mediaId })
     if (!row) return

@@ -1399,8 +1399,8 @@ describe('DialogRpc', () => {
       throw new Error('merged forward preview was not projected as a full webpage')
     }
     const url = merged.media.webpage.url
-    const insideFirstId = Number(new URL(url).pathname.split('/').at(-1))
-    expect(insideFirstId).toBeGreaterThan(0)
+    const insideLatestId = Number(new URL(url).pathname.split('/').at(-1))
+    expect(insideLatestId).toBeGreaterThan(0)
     expect(merged.message).toBe('查看聊天记录')
     expect(merged.entities).toMatchObject([{
       _: 'messageEntityTextUrl', offset: 0, length: 6, url,
@@ -1409,7 +1409,7 @@ describe('DialogRpc', () => {
       _: 'messageMediaWebPage', manual: true, safe: true,
       webpage: {
         _: 'webPage',
-        url: `https://t.me/bridgechat_${temporaryId}/${insideFirstId}`,
+        url: `https://t.me/bridgechat_${temporaryId}/${insideLatestId}`,
         displayUrl: '聊天记录', type: 'telegram_message',
         title: '聊天记录', description: 'Bob: native preview\nAlice: work',
       },
@@ -1437,9 +1437,9 @@ describe('DialogRpc', () => {
       chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
     })
     await expect(freshRpc.getMessages({
-      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: insideFirstId }],
+      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: insideLatestId }],
     })).resolves.toMatchObject({
-      messages: [{ _: 'message', id: insideFirstId, message: 'forwarded content' }],
+      messages: [{ _: 'message', id: insideLatestId, message: 'work' }],
     })
     await expect(freshRpc.getPeerDialogs({
       _: 'messages.getPeerDialogs', peers: [{

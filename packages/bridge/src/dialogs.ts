@@ -3973,17 +3973,19 @@ export class DialogRpc {
       }
       this._conversationLinkUrl(conversation)
       try {
-        // Keep the target in the same upstream window that a fresh RPC can
-        // load for messages.getMessages; do not link to an unresolvable page.
+        // Telegram Android opens a linked message and then grows history
+        // upward. Target the newest archived message so the whole transcript
+        // remains reachable instead of stranding everything after its first
+        // message below the initial viewport.
         const history = await this._loadHistory(conversation.id, { limit: 200 })
-        const first = history
+        const latest = history
           .filter((item) => item.ordinal === 0)
-          .sort((left, right) => left.source.timestamp - right.source.timestamp || left.tlId - right.tlId)[0]
-        if (!first) return
+          .sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId)[0]
+        if (!latest) return
         const target = {
           conversationId: conversation.id,
-          platformMessageId: first.source.id,
-          tlMessageId: first.tlId,
+          platformMessageId: latest.source.id,
+          tlMessageId: latest.tlId,
         }
         this._conversationViews?.setTarget(this._session.platformSessionId, chatId, target)
         this._rememberConversationViewTarget(target)

@@ -66,6 +66,7 @@ const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CONVERSATION_PREFIX = 'qqnt-multi-forward:'
+const MULTI_FORWARD_CACHE_LIMIT = 256
 const INVALID_ZERO_PEER_CONVERSATION_ID = '0'
 const GLOBAL_SUBSCRIPTION_LEASES_KEY = '__crossgramQQNTSubscriptionLeasesV1' as const
 const EMPTY_GROUP_REACTION_CATALOG: IMReactionContext = {
@@ -195,6 +196,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
   private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
+  private readonly multiForwardMessages = new Map<string, Promise<WireMessage[]>>()
   private readonly multiForwardPreviewJobs = new Map<string, Promise<string | undefined>>()
   private readonly legacyDialogCleanupJobs = new Map<string, Promise<void>>()
   private readonly legacyDialogCleanupSessions = new Set<string>()
@@ -760,26 +762,29 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
     const multiForward = this.multiForwardLocators.get(conversation.id)
     if (multiForward) {
-      const messages = await this.client.getMultiForwardMessages(multiForward)
+      const messages = selectMultiForwardHistory(
+        (await this.loadMultiForwardMessages(multiForward))
+          .filter((message) => !this.isFilteredGrayTip(message)),
+        query,
+      )
       const senders = new Map<string, Promise<IMUser<QQMediaLocator> | null>>()
       await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
       return {
-        messages: await Promise.all(messages.filter((message) => !this.isFilteredGrayTip(message))
-          .slice(0, query.limit ?? messages.length).map(async (message) => {
-            const mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), multiForward)
-            let sender = mapped.sender
-            if (!sender) {
-              let pending = senders.get(message.senderId)
-              if (!pending) {
-                pending = this.getUser(session, message.senderId).catch(() => null)
-                senders.set(message.senderId, pending)
-              }
-              sender = (await pending) ?? undefined
+        messages: await Promise.all(messages.map(async (message) => {
+          const mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), multiForward)
+          let sender = mapped.sender
+          if (!sender) {
+            let pending = senders.get(message.senderId)
+            if (!pending) {
+              pending = this.getUser(session, message.senderId).catch(() => null)
+              senders.set(message.senderId, pending)
             }
-            return this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
-              ...mapped, sender, conversationId: conversation.id,
-            })
-          })),
+            sender = (await pending) ?? undefined
+          }
+          return this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
+            ...mapped, sender, conversationId: conversation.id,
+          })
+        })),
       }
     }
     if (isFilteredConversationId(conversation.id)) return { messages: [] }
@@ -1836,7 +1841,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (!locator) return Promise.resolve(undefined)
     const existing = this.multiForwardPreviewJobs.get(conversation.id)
     if (existing) return existing
-    const pending = this.client.getMultiForwardMessages(locator)
+    const pending = this.loadMultiForwardMessages(locator)
       .then((messages) => wireMultiForwardPreview(messages))
       .catch((error) => {
         this.logger?.warn(
@@ -1851,6 +1856,21 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         }
       })
     this.multiForwardPreviewJobs.set(conversation.id, pending)
+    return pending
+  }
+
+  private loadMultiForwardMessages(locator: WireMultiForwardLocator): Promise<WireMessage[]> {
+    const key = multiForwardConversationId(locator)
+    const existing = this.multiForwardMessages.get(key)
+    if (existing) return existing
+    const pending = this.client.getMultiForwardMessages(locator).catch((error) => {
+      if (this.multiForwardMessages.get(key) === pending) this.multiForwardMessages.delete(key)
+      throw error
+    })
+    this.multiForwardMessages.set(key, pending)
+    while (this.multiForwardMessages.size > MULTI_FORWARD_CACHE_LIMIT) {
+      this.multiForwardMessages.delete(this.multiForwardMessages.keys().next().value!)
+    }
     return pending
   }
 
@@ -2273,6 +2293,38 @@ function multiForwardConversationId(locator: WireMultiForwardLocator): string {
   return `qqnt-multi-forward:${JSON.stringify([
     locator.conversationId, locator.rootMessageId, locator.parentMessageId ?? '',
   ])}`
+}
+
+function selectMultiForwardHistory(
+  messages: readonly WireMessage[],
+  query: IMHistoryQuery,
+): WireMessage[] {
+  if (query.limit === undefined && !query.before && !query.after) return [...messages]
+  const limit = Math.max(0, query.limit ?? messages.length)
+  if (!limit) return []
+  // QQ returns an archived transcript in display order. Preserve that order
+  // for equal timestamps while normalizing older/newer anchors for Telegram's
+  // history contract.
+  const ordered = messages.map((message, index) => ({ message, index }))
+    .sort((left, right) => left.message.timestamp - right.message.timestamp || left.index - right.index)
+    .map(({ message }) => message)
+  if (query.after) {
+    const anchor = ordered.findIndex((message) => message.id === query.after!.id)
+    const newer = anchor >= 0
+      ? ordered.slice(anchor + 1)
+      : ordered.filter((message) => message.timestamp > query.after!.timestamp)
+    return newer.slice(0, limit)
+  }
+  if (query.before) {
+    const anchor = ordered.findIndex((message) => message.id === query.before!.id)
+    const older = anchor >= 0
+      ? ordered.slice(0, anchor)
+      : ordered.filter((message) => message.timestamp < query.before!.timestamp)
+    return older.slice(-limit)
+  }
+  // Opening a Telegram chat starts at the newest edge and loads upward. A
+  // merged-forward view must therefore expose its tail as the initial page.
+  return ordered.slice(-limit)
 }
 
 function isMultiForwardConversationId(value: string): boolean {

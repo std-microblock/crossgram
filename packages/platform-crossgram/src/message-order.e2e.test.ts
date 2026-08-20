@@ -792,6 +792,7 @@ describe('QQNT remote media routing E2E', () => {
   it('rebases an archived merged-forward file before resolving and streaming it over HTTP', async () => {
     const file = Buffer.from('merged-forward-file')
     const resolverLocators: Array<Record<string, unknown>> = []
+    let multiForwardRequests = 0
     let server: Server | undefined
     server = createServer(async (request, response) => {
       if (request.method === 'GET' && request.url === '/v1/reactions/catalog') {
@@ -815,22 +816,31 @@ describe('QQNT remote media routing E2E', () => {
         return
       }
       if (request.method === 'POST' && request.url === '/v1/messages/multi-forward') {
+        multiForwardRequests++
         response.setHeader('content-type', 'application/json')
-        response.end(JSON.stringify({ messages: [{
-          id: 'archived-file-message', conversationId: 'archived-source-group',
-          senderId: 'bob', timestamp: 9, outgoing: false,
-          parts: [{
-            type: 'media',
-            media: {
-              id: 'file-element', kind: 'file', name: 'guide.xlsx', size: file.length,
-              locator: {
-                messageId: 'archived-file-message', elementId: 'file-element', chatType: 2,
-                peerUid: 'archived-source-group', kind: 'file', fileName: 'guide.xlsx',
-                fileUuid: '/file-uuid', fileBizId: 104,
+        response.end(JSON.stringify({ messages: [
+          ...Array.from({ length: 4 }, (_, index) => ({
+            id: `archived-text-${index}`, conversationId: 'archived-source-group',
+            senderId: 'bob', sender: { id: 'bob', name: 'Bob' },
+            timestamp: 5 + index, outgoing: false,
+            parts: [{ type: 'text', text: `archived ${index}` }],
+          })),
+          {
+            id: 'archived-file-message', conversationId: 'archived-source-group',
+            senderId: 'bob', sender: { id: 'bob', name: 'Bob' }, timestamp: 9, outgoing: false,
+            parts: [{
+              type: 'media',
+              media: {
+                id: 'file-element', kind: 'file', name: 'guide.xlsx', size: file.length,
+                locator: {
+                  messageId: 'archived-file-message', elementId: 'file-element', chatType: 2,
+                  peerUid: 'archived-source-group', kind: 'file', fileName: 'guide.xlsx',
+                  fileUuid: '/file-uuid', fileBizId: 104,
+                },
               },
-            },
-          }],
-        }] }))
+            }],
+          },
+        ] }))
         return
       }
       if (request.method === 'POST' && request.url === '/v1/files/direct-url') {
@@ -877,14 +887,24 @@ describe('QQNT remote media routing E2E', () => {
     if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
       throw new Error('merged forward link was not mapped')
     }
-    const history = await platform.getHistory(session, link.entities[0].conversation)
-    const part = history.messages[0].content.parts[0]
+    const history = await platform.getHistory(session, link.entities[0].conversation, { limit: 2 })
+    expect(history.messages.map((message) => message.id)).toEqual([
+      'archived-text-3', 'archived-file-message',
+    ])
+    const older = await platform.getHistory(session, link.entities[0].conversation, {
+      limit: 2, before: { id: 'archived-text-3', timestamp: 8 },
+    })
+    expect(older.messages.map((message) => message.id)).toEqual([
+      'archived-text-1', 'archived-text-2',
+    ])
+    const part = history.messages[1].content.parts[0]
     if (part.type !== 'media') throw new Error('merged forward file was not mapped')
 
     expect(await collect(platform.downloadMedia(session, part.media))).toEqual(file)
     expect(resolverLocators).toEqual([expect.objectContaining({
       chatType: 2, peerUid: 'physical-group-uid', fileUuid: '/file-uuid',
     })])
+    expect(multiForwardRequests).toBe(1)
   })
 
   it('projects an animated QQ reaction into a non-empty Telegram document and serves its bytes', async () => {

@@ -872,6 +872,49 @@ describe('QQNTPlatform mapping', () => {
     expect(archivedLocator.peerUid).toBe('archived-source-group')
   })
 
+  it('opens merged-forward history at the newest edge and pages backward without refetching', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
+      id: 'outer-group', kind: 'group' as const, title: 'Outer group',
+      peerUid: 'physical-group-uid', peerUin: '10001', chatType: 2 as const,
+      lastMessage: {
+        id: 'merged-root', conversationId: 'outer-group', senderId: 'alice', timestamp: 20, outgoing: false,
+        parts: [{
+          type: 'multi-forward' as const, title: '聊天记录', preview: '6条消息的合并转发',
+          locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
+        }],
+      },
+    }] }))
+    const archived = Array.from({ length: 6 }, (_, index) => ({
+      id: `inside-${index}`, conversationId: 'archived-group', senderId: 'alice',
+      sender: { id: 'alice', name: 'Alice' }, timestamp: 100 + index, outgoing: false,
+      parts: [{ type: 'text' as const, text: `message ${index}` }],
+    }))
+    platform.client.getMultiForwardMessages = vi.fn(async () => archived)
+
+    const [dialog] = (await platform.getDialogs(session)).dialogs
+    const link = dialog.lastMessage?.content.parts[0]
+    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
+      throw new Error('merged forward link was not mapped')
+    }
+    const conversation = link.entities[0].conversation
+    await expect(platform.getHistory(session, conversation, { limit: 2 })).resolves.toMatchObject({
+      messages: [{ id: 'inside-4' }, { id: 'inside-5' }],
+    })
+    await expect(platform.getHistory(session, conversation, {
+      limit: 2, before: { id: 'inside-4', timestamp: 104 },
+    })).resolves.toMatchObject({
+      messages: [{ id: 'inside-2' }, { id: 'inside-3' }],
+    })
+    await expect(platform.getHistory(session, conversation, {
+      limit: 2, after: { id: 'inside-2', timestamp: 102 },
+    })).resolves.toMatchObject({
+      messages: [{ id: 'inside-3' }, { id: 'inside-4' }],
+    })
+    expect(platform.client.getMultiForwardMessages).toHaveBeenCalledOnce()
+  })
+
   it('hydrates missing senders in merged-forward history from QQ user profiles', async () => {
     const platform = new QQNTPlatform()
     platform.client.forwardMessages = vi.fn(async () => [{

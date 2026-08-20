@@ -824,7 +824,7 @@ export class UpdateManager {
         this._conversationViews?.remember(session.platformSessionId, chatId, conversation)
         if (this._conversationViews?.target(session.platformSessionId, chatId)) return
         try {
-          let tlMessageId = await this._store.getOldestTlMessageId(
+          let tlMessageId = await this._store.getNewestTlMessageId(
             session.platformSessionId, conversation.id,
           )
           if (!tlMessageId && platform.getHistory) {
@@ -836,7 +836,7 @@ export class UpdateManager {
                   left.timestamp - right.timestamp || left.id.localeCompare(right.id)),
                 { allocation: 'history' },
               )
-              tlMessageId = await this._store.getOldestTlMessageId(
+              tlMessageId = await this._store.getNewestTlMessageId(
                 session.platformSessionId, conversation.id,
               )
             }

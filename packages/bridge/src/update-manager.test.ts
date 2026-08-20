@@ -810,7 +810,7 @@ describe('UpdateManager', () => {
     })
   })
 
-  it('links live merged forwards to their first saved message across new RPC connections', async () => {
+  it('links live merged forwards to their latest saved message across new RPC connections', async () => {
     const conversation: IMConversation = { id: 'merged-parent', kind: 'group', title: 'Parent' }
     const virtual: IMConversation = {
       id: 'merged-virtual', kind: 'group', title: 'QQ用户的聊天记录',
@@ -829,7 +829,7 @@ describe('UpdateManager', () => {
       async getDialogs() { return { dialogs: [] } },
       async getHistory(_session, target, query) {
         expect(target.id).toBe(virtual.id)
-        return { messages: forwarded.slice(0, query.limit ?? forwarded.length) }
+        return { messages: forwarded.slice(-(query.limit ?? forwarded.length)) }
       },
     }
     const { store, manager, sent, conversationViews } = await createHarness(undefined, targetPlatform)
@@ -859,11 +859,11 @@ describe('UpdateManager', () => {
         },
       },
     })
-    const firstEntity = (update.message as tl.RawMessage).entities?.find(
+    const targetEntity = (update.message as tl.RawMessage).entities?.find(
       (entity): entity is tl.RawMessageEntityTextUrl => entity._ === 'messageEntityTextUrl',
     )
-    if (!firstEntity) throw new Error('merged forward update is missing its deep link')
-    const firstId = Number(new URL(firstEntity.url).pathname.split('/').at(-1))
+    if (!targetEntity) throw new Error('merged forward update is missing its deep link')
+    const targetId = Number(new URL(targetEntity.url).pathname.split('/').at(-1))
     const freshRpc = new DialogRpc(
       targetPlatform, session, store,
       undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined,
@@ -874,8 +874,8 @@ describe('UpdateManager', () => {
       _: 'contacts.resolveUsername', username: `bridgechat_${virtualId}`,
     })).toMatchObject({ _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualId } })
     await expect(freshRpc.getMessages({
-      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: firstId }],
-    })).resolves.toMatchObject({ messages: [{ _: 'message', id: firstId, message: 'forwarded 0' }] })
+      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: targetId }],
+    })).resolves.toMatchObject({ messages: [{ _: 'message', id: targetId, message: 'forwarded 200' }] })
     expect(payload.chats).toMatchObject([
       {
         _: 'channel', title: conversation.title, megagroup: true,
