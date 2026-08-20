@@ -516,7 +516,7 @@ describe('PlatformSubscriptionManager', () => {
     expect(await database.get('mtproto_im_message_alias', {})).toHaveLength(1_000)
     expect(await database.get('mtproto_tl_message_part', {})).toHaveLength(1_000)
     await manager.stop()
-  }, 15_000)
+  })
 
   it('starts subscriptions for active persisted sessions only', async () => {
     const database = await createDatabase()

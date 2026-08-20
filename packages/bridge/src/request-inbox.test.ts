@@ -210,7 +210,9 @@ describe('request inbox read-only boundary', () => {
     getConversation.mockClear()
     await rpc.getHistory({ _: 'messages.getHistory', peer: target.peer, offsetId: 0, offsetDate: 0, addOffset: 0, limit: 10, maxId: 0, minId: 0, hash: Long.ZERO })
     await rpc.readHistory({ _: 'messages.readHistory', peer: target.peer, maxId: target.msgId })
-    expect(localEvents).toMatchObject([{ type: 'read', conversationId: 'bridge:request-inbox' }])
+    await vi.waitFor(() => expect(localEvents).toMatchObject([
+      { type: 'read', conversationId: 'bridge:request-inbox' },
+    ]))
     expect(getHistory).not.toHaveBeenCalled()
     expect(getUser).not.toHaveBeenCalled()
     expect(getConversation).not.toHaveBeenCalled()
