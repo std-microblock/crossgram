@@ -560,7 +560,7 @@ describe('QQNTClient streaming transport', () => {
     })
   })
 
-  it('downloads user and group avatars from platform-constructed qlogo URLs', async () => {
+  it('downloads UID-scoped, legacy user, and group avatars directly from QQ CDN URLs', async () => {
     const requests: Array<{ url: string, range?: string, authorization?: string }> = []
     const client = new QQNTClient({
       endpoint: 'http://bridge.invalid/v1',
@@ -579,6 +579,11 @@ describe('QQNTClient streaming transport', () => {
       chatType: 1, peerUid: 'opaque', kind: 'image', fileName: '1715311957.jpg',
       avatarUin: '1715311957',
     }, { offset: 2, limit: 3 }))
+    const uidScoped = await collect(client.downloadFile({
+      messageId: 'avatar:user:special', elementId: 'avatar:user:special',
+      chatType: 1, peerUid: 'special', kind: 'image', fileName: '472247053.jpg',
+      avatarUin: '472247053', avatarUrl: 'https://thirdqq.qlogo.cn/avatar/special/140',
+    }, { offset: 1, limit: 4 }))
     const group = await collect(client.downloadFile({
       messageId: 'avatar:group:1058754719', elementId: 'avatar:group:1058754719',
       chatType: 2, peerUid: '1058754719', kind: 'image', fileName: 'group.jpg',
@@ -586,10 +591,14 @@ describe('QQNTClient streaming transport', () => {
     }, { offset: 4, limit: 2 }))
 
     expect(user.toString()).toBe('cde')
+    expect(uidScoped.toString()).toBe('bcde')
     expect(group.toString()).toBe('ef')
     expect(requests).toEqual([{
       url: 'https://q1.qlogo.cn/g?b=qq&nk=1715311957&s=640',
       range: 'bytes=2-4', authorization: undefined,
+    }, {
+      url: 'https://thirdqq.qlogo.cn/avatar/special/140',
+      range: 'bytes=1-4', authorization: undefined,
     }, {
       url: 'https://p.qlogo.cn/gh/1058754719/1058754719/640/',
       range: 'bytes=4-5', authorization: undefined,

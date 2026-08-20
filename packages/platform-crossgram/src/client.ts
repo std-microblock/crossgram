@@ -1777,6 +1777,8 @@ async function nativeResponseError(response: Response): Promise<string> {
 }
 
 function qqAvatarUrl(locator: QQMediaLocator): string | undefined {
+  const direct = httpUrl(locator.avatarUrl)
+  if (direct) return direct
   const userUin = locator.avatarUin?.trim()
   if (userUin && /^\d+$/.test(userUin)) {
     return `https://q1.qlogo.cn/g?b=qq&nk=${userUin}&s=640`
@@ -1789,6 +1791,16 @@ function qqAvatarUrl(locator: QQMediaLocator): string | undefined {
   }
 }
 
+function httpUrl(value: string | undefined): string | undefined {
+  if (!value) return
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : undefined
+  } catch {
+    return
+  }
+}
+
 function hasDirectUrlIdentity(locator: QQMediaLocator): boolean {
   return Boolean(locator.originImageUrl || locator.fileUuid)
 }
@@ -1798,6 +1810,7 @@ function directUrlIdentity(locator: QQMediaLocator): string {
     locator.chatType, locator.peerUid, locator.fileUuid ?? '', locator.file10MMd5 ?? '',
     locator.videoCodecFormat ?? null, locator.originImageUrl ?? '', locator.imageSpec ?? null,
     locator.avatarUin ?? '',
+    locator.avatarUrl ?? '',
   ])
 }
 

@@ -44,8 +44,9 @@ URL from `/files/direct-url`. Native videos use the same endpoint backed by
 QQNT's `getVideoPlayUrl`. The platform requests either URL directly with standard
 HTTP `Range` semantics; video documents keep `supports_streaming`, so seeking
 transfers only the requested byte range. The bridge token is never forwarded to
-the CDN. User and group avatar URLs are constructed in the platform from their
-numeric QQ IDs and fetched directly from qlogo without involving the bridge.
+the CDN. User avatar URLs prefer QQNT's UID-scoped result and fall back to the
+numeric qlogo endpoint; group avatars use group qlogo. All are fetched directly
+without involving the bridge.
 Bridge-local resources such as cloud-control emoji files use the authenticated
 `/files/download` route; this route is never used as a fallback for native QQ
 message media. Resolver, RKey, and CDN errors for native media are returned to
@@ -104,7 +105,7 @@ alias as separate fields. The adapter always exposes the stable profile nickname
 as the Telegram user name and maps the group alias to Telegram's member tag.
 On startup, legacy rows that stored group aliases as global names are restored
 from their retained QQ profile metadata.
-User avatars use QQ's fixed qlogo endpoint and group avatars continue to use QQNT's avatar service; both are
+User avatars prefer QQNT's UID-scoped CDN URL and fall back to the fixed qlogo endpoint; group avatars continue to use QQ's group qlogo endpoint. All are
 exposed through the same ranged media stream.
 
 Reactions are populated from QQ's downloaded cloud-control emoji config

@@ -243,6 +243,7 @@ interface QQMediaLocator {
   imageSpec?: 0 | 198 | 720
   videoCodecFormat?: number
   avatarUin?: string
+  avatarUrl?: string
   previewKey?: string
   cachedPath?: string
   deferred?: true
@@ -258,7 +259,8 @@ interface QQMediaLocator {
 - `file10MMd5` 是文件前 10 MiB 的 MD5，QQ 私有文件 CDN API 需要。
 - `videoCodecFormat` 仅对原生 QQ 视频元素出现，`0` 为 H.264，`1` 为
   H.265。
-- `avatarUin` 用于固定 qlogo 端点获取用户头像，不经过 bridge 下载。
+- `avatarUrl` 是 QQNT 按 UID 返回的头像直链，优先级高于 `avatarUin`。
+- `avatarUin` 用于 QQNT 没有返回 UID 头像直链时，通过固定 qlogo 端点回退，不经过 bridge 下载。
 - `deferred` 表示这是历史消息中的占位媒体，字节在适配器通过
   message-edit 事件发布后才能获取。
 
@@ -498,8 +500,8 @@ QQNT `FlashTransferService`，本接口不申请 Crossgram Highway plan。成功
   （图片、文件、语音）字节流。响应头 `content-type` 是媒体 MIME 类型。
 - `POST /v1/files/direct-url`：请求体是 `QQMediaLocator`，返回可直接
   HTTP GET 的 QQ CDN URL。视频文档保留下载端点按需 Range 拉取；图片和
-  文件则优先使用直链以绕过 bridge 字节中转。用户头像与群头像直接从
-  qlogo 构造，不经过 bridge。
+  文件则优先使用直链以绕过 bridge 字节中转。用户头像优先使用 QQNT 返回的
+  UID 直链并回退 qlogo，群头像直接从 qlogo 构造，均不经过 bridge。
 
 ### 4.6 贴纸资源
 
@@ -661,6 +663,6 @@ QQNT `FlashTransferService`，本接口不申请 Crossgram Highway plan。成功
   密钥派生出的 SHA-256 摘要进行常量时间比较。
 - `leaseId` 与 PCM token 为随机字节；客户端在认证后立即清零本地 token。
 - 带外直链只包含 QQ CDN URL，不包含 bridge token。
-- 用户头像/群头像由适配器直接向 qlogo 构造 URL 获取，不经过 bridge。
+- 用户头像优先使用 QQNT 的 UID 直链并回退 qlogo；群头像由适配器直接构造 qlogo URL，均不经过 bridge。
 - `group-join/probe` 只在配置了 token 时开放，且只返回方法描述符和宿主
   运行时版本，不执行任何 QQNT 群加入写入。
