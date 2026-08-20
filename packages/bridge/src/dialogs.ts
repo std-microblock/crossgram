@@ -1147,6 +1147,76 @@ export class DialogRpc {
     }
   }
 
+  async searchContacts(req: tl.contacts.RawSearchRequest): Promise<tl.contacts.RawFound> {
+    await this._hydratePeers()
+    const contacts = await this.getContacts()
+    const query = normalizePeerSearchQuery(req.q)
+    const limit = clampLimit(req.limit)
+    if (!query || limit === 0) {
+      return { _: 'contacts.found', myResults: [], results: [], chats: [], users: [] }
+    }
+
+    type SearchCandidate = {
+      peer: tl.TypePeer
+      label: string
+      searchText: string
+      user?: tl.RawUser
+      chat?: tl.TypeChat
+    }
+    const candidates: SearchCandidate[] = []
+    const restrictedKinds = Boolean(req.broadcasts || req.bots)
+    if (!restrictedKinds || req.bots) {
+      for (const user of contacts.users) {
+        if (user._ !== 'user' || req.bots && !user.bot) continue
+        const platformUserId = this._tlToUser.get(user.id)
+        const platformUser = platformUserId ? this._platformUsers.get(platformUserId) : undefined
+        candidates.push({
+          peer: { _: 'peerUser', userId: user.id },
+          label: [user.firstName, user.lastName].filter(Boolean).join(' '),
+          searchText: peerSearchText(
+            user.firstName, user.lastName, user.username, platformUserId,
+            platformUser?.metadata?.qq, platformUser?.metadata?.qqName,
+          ),
+          user,
+        })
+      }
+    }
+    if (!restrictedKinds || req.broadcasts) {
+      for (const conversation of this._conversations.values()) {
+        if (conversation.kind === 'direct' || this._isSubchannel(conversation)) continue
+        if (req.broadcasts && conversation.metadata?.broadcast !== true) continue
+        const chat = this._makeChat(conversation)
+        candidates.push({
+          peer: chat._ === 'channel' || chat._ === 'channelForbidden'
+            ? { _: 'peerChannel', channelId: chat.id }
+            : { _: 'peerChat', chatId: chat.id },
+          label: conversation.title,
+          searchText: peerSearchText(
+            conversation.title, conversation.id,
+            conversation.metadata?.qq, conversation.metadata?.qqName,
+            conversation.metadata?.groupCode,
+          ),
+          chat,
+        })
+      }
+    }
+
+    const matched = candidates
+      .map((candidate) => ({ candidate, rank: peerSearchRank(candidate, query) }))
+      .filter((item) => item.rank !== undefined)
+      .sort((left, right) => left.rank! - right.rank!
+        || left.candidate.label.localeCompare(right.candidate.label))
+      .slice(0, limit)
+      .map((item) => item.candidate)
+    return {
+      _: 'contacts.found',
+      myResults: matched.map((item) => item.peer),
+      results: [],
+      chats: uniqueChats(matched.flatMap((item) => item.chat ? [item.chat] : [])),
+      users: uniqueUsers(matched.flatMap((item) => item.user ? [item.user] : [])),
+    }
+  }
+
   async blockPeer(req: tl.contacts.RawBlockRequest): Promise<BlockedPeerRpcChange | undefined> {
     if (req.myStoriesFrom) return
     if (!this._blockedPeers) throw new RpcError(500, 'BLOCKLIST_UNAVAILABLE')
@@ -5197,6 +5267,29 @@ function validateCustomFilterId(filterId: number): void {
 
 function normalizeUsername(username: string): string {
   return username.normalize('NFKC').toLocaleLowerCase('en-US')
+}
+
+function normalizePeerSearchQuery(query: string): string {
+  return query.normalize('NFKC').trim().replace(/^@/, '').toLocaleLowerCase()
+}
+
+function peerSearchText(...values: unknown[]): string {
+  return values
+    .filter((value): value is string | number => typeof value === 'string' || typeof value === 'number')
+    .flatMap((value) => {
+      const normalized = String(value).normalize('NFKC').toLocaleLowerCase()
+      return normalized.startsWith('@') ? [normalized, normalized.slice(1)] : [normalized]
+    })
+    .join(' ')
+}
+
+function peerSearchRank(candidate: { label: string, searchText: string }, query: string): number | undefined {
+  const label = candidate.label.normalize('NFKC').toLocaleLowerCase()
+  if (label === query) return 0
+  if (label.startsWith(query)) return 1
+  if (candidate.searchText.includes(query)) return 2
+  const terms = query.split(/\s+/).filter(Boolean)
+  return terms.length > 1 && terms.every((term) => candidate.searchText.includes(term)) ? 3 : undefined
 }
 
 function plainUsernameMentions(text: string): Array<{ offset: number, length: number }> {

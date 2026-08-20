@@ -980,6 +980,70 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(emptyAbout)).not.toThrow()
   })
 
+  it('searches the complete contact snapshot plus known groups by names, usernames, and QQ metadata', async () => {
+    class ContactSearchPlatform extends DialogTestPlatform {
+      override async getDialogs(): Promise<IMDialogPage> {
+        const page = await super.getDialogs()
+        return {
+          dialogs: [
+            page.dialogs.find((dialog) => dialog.conversation.id === 'alice')!,
+            {
+              conversation: {
+                id: 'group-4242', kind: 'group' as const, title: '开发讨论组',
+                metadata: { groupCode: 7654321 },
+              },
+              unreadCount: 0,
+            },
+          ],
+        }
+      }
+
+      override async getContacts() {
+        return { users: [
+          {
+            id: 'bob', firstName: 'Robert', lastName: 'Builder', username: 'contact_bob',
+            metadata: { qq: 424242, qqName: '包伯' },
+          },
+          {
+            id: 'helper', firstName: 'Crossgram Helper', username: 'crossgram_helper_bot',
+            metadata: { bot: true },
+          },
+        ] }
+      }
+    }
+    const rpc = new DialogRpc(new ContactSearchPlatform(), session)
+    const search = (q: string, overrides: Partial<tl.contacts.RawSearchRequest> = {}) => rpc.searchContacts({
+      _: 'contacts.search', q, limit: 20, ...overrides,
+    })
+
+    for (const query of ['424242', '包伯', '@contact_bob', 'Robert Builder']) {
+      const result = await search(query)
+      expect(result).toMatchObject({
+        _: 'contacts.found',
+        myResults: [{ _: 'peerUser', userId: rpc.peerTlId('bob') }],
+        results: [], chats: [],
+        users: [{ firstName: 'Robert', lastName: 'Builder', contact: true, mutualContact: true }],
+      })
+      expect(() => wireRoundTrip(result)).not.toThrow()
+    }
+
+    const group = await search('开发')
+    expect(group).toMatchObject({
+      myResults: [{ _: 'peerChannel', channelId: rpc.peerTlId('group-4242') }],
+      chats: [{ _: 'channel', title: '开发讨论组' }], users: [],
+    })
+    const bot = await search('helper', { bots: true })
+    expect(bot).toMatchObject({
+      myResults: [{ _: 'peerUser', userId: rpc.peerTlId('helper') }],
+      users: [{ _: 'user', bot: true, username: 'crossgram_helper_bot' }], chats: [],
+    })
+    await expect(search('helper', { broadcasts: true })).resolves.toMatchObject({
+      myResults: [], results: [], chats: [], users: [],
+    })
+    expect(() => wireRoundTrip(group)).not.toThrow()
+    expect(() => wireRoundTrip(bot)).not.toThrow()
+  })
+
   it('uses one cold profile lookup and degrades when optional self profile loading fails', async () => {
     const platform = new DialogTestPlatform()
     const rpc = new DialogRpc(platform, session)

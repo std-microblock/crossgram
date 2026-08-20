@@ -1007,6 +1007,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getBlocked(req as tl.contacts.RawGetBlockedRequest))
   rpc.register('contacts.getContacts', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getContacts())
+  rpc.register('contacts.search', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.searchContacts(req as tl.contacts.RawSearchRequest))
   rpc.register('contacts.resolveUsername', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.resolveUsername(req as tl.contacts.RawResolveUsernameRequest))
   rpc.register('users.getUsers', async (rpc, req) =>
