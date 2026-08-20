@@ -1125,6 +1125,7 @@ describe('conversation kinds', () => {
     }])
     expect(localDeliveryOptions).toEqual([{
       excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true, forceDelivery: true,
+      messageRandomIds: [Long.fromNumber(2026)],
     }])
     expect(result).toMatchObject({
       _: 'updates', seq: 0,
@@ -1151,6 +1152,7 @@ describe('conversation kinds', () => {
 
     expect(localDeliveryOptions).toEqual([{
       excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true, forceDelivery: true,
+      messageRandomIds: [randomId],
     }])
     expect(result).toMatchObject({
       _: 'updates', seq: 0,

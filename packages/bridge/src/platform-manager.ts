@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
 import type { ServerConnection } from '@mtproto-relay/mtproto'
+import type Long from 'long'
 import { Context, Service, type Fiber } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
@@ -582,6 +583,8 @@ export interface PlatformEventDeliveryOptions {
   excludeConnection?: ServerConnection
   /** Treat the durable delivery as published even when no socket push was sent. */
   deliveredViaRpc?: boolean
+  /** Correlate observer pushes with optimistic messages created by the sending client. */
+  messageRandomIds?: readonly Long[]
   /** Internal recovery path for an unchanged projection whose update was not delivered. */
   forceDelivery?: boolean
 }

@@ -491,6 +491,54 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('correlates observer-auth-key pushes with the sending client random ID', async () => {
+    const { ctx, store, manager, sent } = await createHarness()
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '1122334455667788',
+      platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+    })
+    const conversation: IMConversation = {
+      id: 'parallel-auth-key-send', kind: 'group', title: 'Parallel Auth Key Send',
+    }
+    const message: IMMessage = {
+      id: 'parallel-auth-key-message', conversationId: conversation.id,
+      senderId: session.userId, timestamp: 1_800_000_002, outgoing: true,
+      content: { parts: [{ type: 'text', text: 'replace the optimistic item' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    const randomId = Long.fromNumber(70_001)
+
+    const response = await manager.publish(session, {
+      event: { type: 'message', conversation, message }, result,
+    }, {
+      excludeAuthKeyId: '0011223344556677',
+      deliveredViaRpc: true,
+      messageRandomIds: [randomId],
+    }) as tl.RawUpdates
+
+    expect(sent).toHaveLength(1)
+    expect(Buffer.from(sent[0].authKeyId).toString('hex')).toBe('1122334455667788')
+    expect(roundTrip(sent[0].update)).toMatchObject({
+      _: 'updates',
+      updates: [
+        { _: 'updateMessageID', randomId },
+        { _: 'updateNewChannelMessage', message: { message: 'replace the optimistic item' } },
+      ],
+    })
+    expect(response.updates).toMatchObject([
+      { _: 'updateMessageID', randomId },
+      { _: 'updateNewChannelMessage' },
+    ])
+    const delivery = await store.getUpdateDelivery(
+      `${session.platformSessionId}:message:${result.message.id}`,
+    )
+    expect(delivery?.payload).toMatchObject({
+      updates: [{ _: 'updateNewChannelMessage' }],
+    })
+    expect((delivery?.payload as any).updates).toHaveLength(1)
+  })
+
   it('returns RPC-delivered replacements while excluding only the requester connection', async () => {
     const { ctx, store, manager, sent } = await createHarness(undefined, platform, undefined, 0)
     await ctx.database.create('mtproto_auth_binding', {

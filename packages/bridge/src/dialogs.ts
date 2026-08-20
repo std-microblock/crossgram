@@ -2815,7 +2815,7 @@ export class DialogRpc {
       outgoing: true,
       replyToId: sent.replyToId ?? replyToId,
     }
-    const published = await this._publishLocalMessage(peerId, source, excludeConnection)
+    const published = await this._publishLocalMessage(peerId, source, excludeConnection, [req.randomId])
     if (systemPeer) await this._systemPeers!.receive(this._session, systemPeer, source, input)
     if (published) {
       const update = published.updates.find((item) =>
@@ -3060,7 +3060,7 @@ export class DialogRpc {
           }))
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
-    const published = await this._publishLocalMessage(peerId, source, excludeConnection)
+    const published = await this._publishLocalMessage(peerId, source, excludeConnection, randomIds)
     if (systemPeer) {
       try {
         await this._systemPeers!.receive(this._session, systemPeer, source, resolvedContent)
@@ -3116,6 +3116,7 @@ export class DialogRpc {
     conversationId: string,
     message: IMMessage,
     excludeConnection?: ServerConnection,
+    randomIds?: readonly Long[],
   ): Promise<tl.RawUpdates | undefined> {
     if (!this._store || !this._onLocalEvent) return
     const conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
@@ -3123,10 +3124,14 @@ export class DialogRpc {
     const published = await this._onLocalEvent(
       this._session,
       { type: 'message', conversation, message },
-      // The RPC result owns random_id reconciliation for every transport that
-      // shares this auth key. Pushing the full message to a parallel transport
-      // first makes Telegram clients insert it separately from the local item.
-      { ...this._localDelivery(excludeConnection, true), forceDelivery: true },
+      // Every live auth key may observe this update before the RPC result. Carry
+      // random_id on those pushes so the sending client can reconcile its local
+      // item instead of inserting the echoed server message separately.
+      {
+        ...this._localDelivery(excludeConnection, true),
+        forceDelivery: true,
+        messageRandomIds: randomIds,
+      },
     ) as tl.RawUpdates | undefined
     if (published === undefined || published._ !== 'updates') return
     return published
@@ -3135,10 +3140,14 @@ export class DialogRpc {
   private _withMessageIds(payload: tl.RawUpdates, randomIds: Long[]): tl.RawUpdates {
     let index = 0
     const updates: tl.TypeUpdate[] = []
+    const confirmed = new Set(payload.updates.flatMap((update) =>
+      update._ === 'updateMessageID' ? [update.randomId.toString()] : []))
     for (const update of payload.updates) {
       if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
         const randomId = randomIds[index++]
-        if (randomId) updates.push({ _: 'updateMessageID', id: update.message.id, randomId })
+        if (randomId && !confirmed.has(randomId.toString())) {
+          updates.push({ _: 'updateMessageID', id: update.message.id, randomId })
+        }
       }
       updates.push(update)
     }

@@ -543,7 +543,10 @@ export class UpdateManager {
     )
     if (delivery.published) {
       this._onTrace?.('update publish skipped eventKey=%s reason=already-published', eventKey)
-      return delivery.payload ? updateFromJson(delivery.payload) : undefined
+      const payload = delivery.payload ? updateFromJson(delivery.payload) : undefined
+      return payload && options.messageRandomIds?.length
+        ? withMessageIds(payload, options.messageRandomIds)
+        : payload
     }
     this._onTrace?.(
       'update delivery prepared eventKey=%s pts=%d ptsCount=%d seq=%d projection=%d created=%s changed=%s',
@@ -742,12 +745,15 @@ export class UpdateManager {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, updateToJson(payload))
+    const deliveredPayload = options.messageRandomIds?.length
+      ? withMessageIds(payload, options.messageRandomIds)
+      : payload
     this._onTrace?.(
       'update payload stored eventKey=%s updates=%d types=%s pts=%d seq=%d',
       eventKey, updates.length, updates.map((update) => update._).join(','), delivery.pts, delivery.seq,
     )
     if (await this._send(
-      session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
+      session.platformSessionId, deliveredPayload, options.excludeAuthKeyId, options.excludeConnection,
     ) || options.deliveredViaRpc) {
       await this._store.markUpdatePublished(eventKey)
       this._onTrace?.('update published eventKey=%s session=%s', eventKey, session.platformSessionId)
@@ -757,7 +763,7 @@ export class UpdateManager {
         eventKey, session.platformSessionId,
       )
     }
-    return payload
+    return deliveredPayload
   }
 
   private async _publishDelete(
@@ -1210,6 +1216,19 @@ function hexBytes(value: string): Uint8Array {
     bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16)
   }
   return bytes
+}
+
+function withMessageIds(payload: tl.RawUpdates, randomIds: readonly Long[]): tl.RawUpdates {
+  let index = 0
+  const updates: tl.TypeUpdate[] = []
+  for (const update of payload.updates) {
+    if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
+      const randomId = randomIds[index++]
+      if (randomId) updates.push({ _: 'updateMessageID', id: update.message.id, randomId })
+    }
+    updates.push(update)
+  }
+  return { ...payload, updates }
 }
 
 function conversationPeer(conversation: IMConversation, directUserId?: number): tl.TypePeer {
