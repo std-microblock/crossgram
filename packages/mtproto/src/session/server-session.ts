@@ -222,6 +222,7 @@ export class RpcDependencyRegistry {
 
 class ResumeStoredAuthKey extends Error {
   constructor(
+    readonly keyId: Uint8Array,
     readonly record: StoredAuthKey,
     readonly encryptedFrames: Uint8Array[],
   ) {
@@ -250,6 +251,7 @@ const AUTHORIZATION_TRANSITION_METHODS = new Set([
   'auth.bindTempAuthKey',
   'auth.signIn',
   'auth.importAuthorization',
+  'auth.logOut',
   'auth.exportLoginToken',
   'auth.importLoginToken',
 ])
@@ -635,7 +637,7 @@ export class ServerSession {
 
     const promise = Promise.resolve().then(async () => {
       const stored = await this._keyStore?.get(keyId)
-      return Boolean(stored && await this._adoptStoredAuthKey(stored))
+      return Boolean(stored && await this._adoptStoredAuthKey(keyId, stored))
     }).finally(() => {
       if (this._authResume?.promise === promise) this._authResume = null
     })
@@ -692,7 +694,7 @@ export class ServerSession {
               if (!stored) {
                 throw new UnknownStoredAuthKey(storedKeyId)
               }
-              interruptHandshake(new ResumeStoredAuthKey(stored, encryptedFrames))
+              interruptHandshake(new ResumeStoredAuthKey(storedKeyId, stored, encryptedFrames))
             })
             .catch((err) => {
               const error = err instanceof Error ? err : new Error(String(err))
@@ -833,7 +835,7 @@ export class ServerSession {
     }
 
     if (resumed) {
-      if (!await this._adoptStoredAuthKey(resumed.record)) {
+      if (!await this._adoptStoredAuthKey(resumed.keyId, resumed.record)) {
         this._sendAuthKeyNotFound(resumed.encryptedFrames[0].subarray(0, 8))
         return
       }
@@ -843,28 +845,39 @@ export class ServerSession {
     }
   }
 
-  private async _adoptStoredAuthKey(record: StoredAuthKey): Promise<boolean> {
-    let apiLayer = record.apiLayer
+  private async _adoptStoredAuthKey(keyId: Uint8Array, record: StoredAuthKey): Promise<boolean> {
     if (record.permanentKeyId) {
-      const permanent = await this._keyStore?.get(record.permanentKeyId)
+      const temporary = await this._keyStore?.get(keyId)
+      if (!temporary || !temporary.permanentKeyId || !typed.equal(temporary.permanentKeyId, record.permanentKeyId)) {
+        return false
+      }
+      // This is the final await before adopting either key. A durable tombstone
+      // makes this lookup fail, so no revoked record can be installed afterward.
+      const permanent = await this._keyStore?.get(temporary.permanentKeyId)
       if (!permanent || permanent.permanentKeyId) return false
       this._permAuthKey.setup(permanent.key)
-      apiLayer = permanent.apiLayer
       this._tempAuthKey = new ServerAuthKey(this._crypto, this._log, this._readerMap)
-      this._tempAuthKey.setup(record.key)
-      this._tempAuthKeyExpiresAt = record.expiresAt ?? null
+      this._tempAuthKey.setup(temporary.key)
+      this._tempAuthKeyExpiresAt = temporary.expiresAt ?? null
       this._log.info(
         'resumed temporary auth key %h for permanent key %h',
         this._tempAuthKey.id,
         this._permAuthKey.id,
       )
-    } else {
-      this._permAuthKey.setup(record.key)
-      this._log.info('resumed permanent auth key %h', this._permAuthKey.id)
+      this._generateFutureSalts()
+      this._authorized = true
+      if (permanent.apiLayer !== undefined) this._setApiLayer(permanent.apiLayer, false)
+      return true
     }
+
+    // This final lookup closes the race with durable revocation for a permanent key.
+    const permanent = await this._keyStore?.get(keyId)
+    if (!permanent || permanent.permanentKeyId || !typed.equal(permanent.key, record.key)) return false
+    this._permAuthKey.setup(permanent.key)
+    this._log.info('resumed permanent auth key %h', this._permAuthKey.id)
     this._generateFutureSalts()
     this._authorized = true
-    if (apiLayer !== undefined) this._setApiLayer(apiLayer, false)
+    if (permanent.apiLayer !== undefined) this._setApiLayer(permanent.apiLayer, false)
     return true
   }
 
@@ -1301,8 +1314,20 @@ export class ServerSession {
     }
 
     if (candidate !== this._permAuthKey) {
-      this._permAuthKey.setup(candidate.key)
-      if (storedPermanent?.apiLayer !== undefined) this._setApiLayer(storedPermanent.apiLayer, false)
+      // The temp-key save may yield long enough for another connection to
+      // tombstone this permanent identity. Make this the final await before
+      // installing the stored key on the PFS session.
+      const revalidated = await this._keyStore?.get(permanentId)
+      if (!revalidated || revalidated.permanentKeyId || !typed.equal(revalidated.key, candidate.key)) {
+        this._connection.close()
+        return {
+          _: 'mt_rpc_error',
+          errorCode: 401,
+          errorMessage: 'AUTH_KEY_UNREGISTERED',
+        } as mtp.RawMt_rpc_error
+      }
+      this._permAuthKey.setup(revalidated.key)
+      if (revalidated.apiLayer !== undefined) this._setApiLayer(revalidated.apiLayer, false)
       this._log.info('loaded permanent key %h for temp-key binding', this._permAuthKey.id)
     }
     if (apiLayer !== null) this._setApiLayer(apiLayer)
@@ -1437,6 +1462,7 @@ export class ServerSession {
 
     let debugResult: RpcResult | undefined
     const afterResponse: Array<() => void | Promise<void>> = []
+    const afterResponseSettled: Array<() => void | Promise<void>> = []
     const execute = async (): Promise<RpcReply> => {
       const release = await this._acquireRpcSlot()
       if (!release) {
@@ -1448,7 +1474,7 @@ export class ServerSession {
       }
       try {
         const result = await this._executeRpcCall(
-          msgId, unwrapped, clientSessionId, packetCtx, now, afterResponse,
+          msgId, unwrapped, clientSessionId, packetCtx, now, afterResponse, afterResponseSettled,
         )
         debugResult = result
         return this._buildRpcReply(msgId, result, method)
@@ -1475,8 +1501,11 @@ export class ServerSession {
       reply = this._buildRpcReply(msgId, debugResult, method)
     }
 
+    let responseSettled: Promise<unknown> | undefined
     if (!this._connection.closed) {
-      this._sendRpcReply(reply, clientSessionId, debugResult)
+      responseSettled = this._sendRpcReply(
+        reply, clientSessionId, debugResult, reply.resultKind !== 'mt_rpc_error',
+      )
       if (reply.resultKind !== 'mt_rpc_error') {
         for (const task of afterResponse) {
           try {
@@ -1491,6 +1520,20 @@ export class ServerSession {
         }
       }
     }
+    if (reply.resultKind !== 'mt_rpc_error') {
+      await responseSettled
+      for (const task of afterResponseSettled) {
+        try {
+          await task()
+        } catch (error) {
+          this._log.error(
+            'after-response-settled task failed for %s: %s',
+            method,
+            error instanceof Error ? error.stack ?? error.message : error,
+          )
+        }
+      }
+    }
   }
 
   private async _executeRpcCall(
@@ -1500,6 +1543,7 @@ export class ServerSession {
     packetCtx: Context,
     now: number,
     afterResponse: Array<() => void | Promise<void>>,
+    afterResponseSettled: Array<() => void | Promise<void>>,
   ): Promise<RpcResult> {
 
     // A wrapped bind must prove the requested permanent identity before its
@@ -1560,6 +1604,7 @@ export class ServerSession {
       isAuthorized: this._authorized,
       sendUpdate: (update) => this.sendUpdate(update, clientSessionId),
       afterResponse: (task) => afterResponse.push(task),
+      afterResponseSettled: (task) => afterResponseSettled.push(task),
       getPlatformData: <T>() => this._authKeyData.get<T>(this._permAuthKey.ready ? this._permAuthKey.id : null) as T,
       setPlatformData: (data) => this._authKeyData.set(this._permAuthKey.ready ? this._permAuthKey.id : null, data),
     }) as unknown as ServerRpcContext
@@ -1792,14 +1837,20 @@ export class ServerSession {
     }
   }
 
-  private _sendRpcReply(reply: RpcReply, clientSessionId: Long, debugResult?: RpcResult): void {
-    this._sendEncryptedMessage(
+  private _sendRpcReply(
+    reply: RpcReply,
+    clientSessionId: Long,
+    debugResult?: RpcResult,
+    waitForTransport = false,
+  ): Promise<unknown> | undefined {
+    const settled = this._sendEncryptedMessage(
       reply.body,
       true,
       debugResult === undefined
         ? undefined
         : { _: 'rpc_result', reqMsgId: reply.reqMsgId, result: debugResult },
       clientSessionId,
+      waitForTransport,
     )
     if (reply.resultKind === 'mt_rpc_error') {
       const args = [
@@ -1813,6 +1864,7 @@ export class ServerSession {
     } else {
       this._log.verbose('>>> rpc_result for %s: %s', reply.reqMsgId.toString(16), reply.resultKind)
     }
+    return settled ?? Promise.resolve()
   }
 
   /** Serialize a bare `Vector<X>`: `0x1cb5c415` + count + each item. */
@@ -1841,7 +1893,8 @@ export class ServerSession {
     isContentRelated: boolean,
     payload?: unknown,
     clientSessionId: Long = this._sessionId,
-  ): void {
+    waitForTransport = false,
+  ): Promise<unknown> | undefined {
     const msgId = this._msgIdGen.getMessageId(isContentRelated)
     const seqNo = this._msgIdGen.getSeqNo(isContentRelated)
 
@@ -1858,6 +1911,7 @@ export class ServerSession {
         seqNo,
       }, clientSessionId)
     }
+    if (waitForTransport) return this._connection.sendAndWait(encrypted)
     this._connection.send(encrypted)
   }
 

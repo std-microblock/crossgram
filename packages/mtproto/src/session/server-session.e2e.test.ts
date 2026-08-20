@@ -2066,6 +2066,9 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       },
       save: (id, record) => persisted.save(id, record),
       delete: id => persisted.delete(id),
+      beginRevocation: id => persisted.beginRevocation(id),
+      finishRevocation: id => persisted.finishRevocation(id),
+      recoverPendingRevocations: () => persisted.recoverPendingRevocations(),
     }
     const second = await startServer(undefined, {
       rsaKey, authKeyStore: delayedStore,
@@ -2081,7 +2084,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       releaseLookup()
       expect(await readRpcResult(client, temp)).toMatchObject({ _: 'config', thisDc: 1 })
       expect(await readRpcResult(client, temp)).toMatchObject({ _: 'config', thisDc: 1 })
-      expect(tempKeyLookups).toBe(1)
+      expect(tempKeyLookups).toBeGreaterThan(1)
       client.close()
     } finally {
       releaseLookup()

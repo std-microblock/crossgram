@@ -6,9 +6,10 @@ import { NodeCryptoProvider } from '@mtcute/node/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { AuthKeyDataStore } from './auth-key-data-store.js'
-import type { AuthKeyStore } from './auth-key-store.js'
+import { MemoryAuthKeyStore, type AuthKeyStore } from './auth-key-store.js'
 import { ServerAuthKey } from './server-auth-key.js'
 import { RpcDependencyRegistry, ServerSession } from './server-session.js'
+import { getApiLayerReaderMap } from '../rpc/api-layer.js'
 import { getServerReaderMap } from '../rpc/server-reader-map.js'
 
 describe('ServerAuthKey ID normalization', () => {
@@ -68,6 +69,102 @@ describe('ServerSession RPC error logging', () => {
     )
 
     expect(afterResponse).not.toHaveBeenCalled()
+  })
+
+  it('runs settled cleanup only after the successful response write callback', async () => {
+    let completeWriteCallback!: () => void
+    const writeCallback = new Promise<void>(resolve => { completeWriteCallback = resolve })
+    const order: string[] = []
+    const dispatch = vi.fn(async (context: {
+      afterResponse?: (task: () => void) => void
+      afterResponseSettled?: (task: () => void) => void
+    }) => {
+      context.afterResponse?.(() => { order.push('after-response') })
+      context.afterResponseSettled?.(() => { order.push('after-response-settled') })
+      return { _: 'boolTrue' as const }
+    })
+    const { session } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & {
+      _apiLayer: number
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    internal._apiLayer = 228
+    internal._sendEncryptedMessage = vi.fn((_body, _contentRelated, _payload, _sessionId, waitForTransport) => {
+      order.push('rpc-result')
+      return waitForTransport ? writeCallback : undefined
+    })
+
+    const handling = internal._handleRpcCall(
+      Long.fromInt(8), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
+    )
+    await vi.waitFor(() => expect(internal._sendEncryptedMessage).toHaveBeenCalledOnce())
+
+    expect(order).toEqual(['rpc-result', 'after-response'])
+    completeWriteCallback()
+    await handling
+    expect(order).toEqual(['rpc-result', 'after-response', 'after-response-settled'])
+  })
+
+  it('runs settled cleanup when a successful handler closes its connection before replying', async () => {
+    const cleanup = vi.fn()
+    let connection!: { closed: boolean }
+    const dispatch = vi.fn(async (context: { afterResponseSettled?: (task: () => void) => void }) => {
+      context.afterResponseSettled?.(cleanup)
+      connection.closed = true
+      return { _: 'boolTrue' as const }
+    })
+    const created = createSession(dispatch)
+    connection = created.connection
+    const internal = created.session as unknown as QueuedSession & { _apiLayer: number }
+    internal._apiLayer = 228
+
+    await internal._handleRpcCall(
+      Long.fromInt(8), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
+    )
+
+    expect(cleanup).toHaveBeenCalledOnce()
+  })
+
+  it('does not run settled cleanup when dispatch returns an RPC error', async () => {
+    const cleanup = vi.fn()
+    const dispatch = vi.fn(async (context: { afterResponseSettled?: (task: () => void) => void }) => {
+      context.afterResponseSettled?.(cleanup)
+      throw new Error('dispatch failed')
+    })
+    const { session } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & { _apiLayer: number }
+    internal._apiLayer = 228
+
+    await internal._handleRpcCall(
+      Long.fromInt(8), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
+    )
+
+    expect(cleanup).not.toHaveBeenCalled()
+  })
+
+  it('serializes auth.logOut replies with the negotiated response layer writer', () => {
+    const { session } = createSession()
+    const internal = session as unknown as {
+      _setApiLayer(layer: number): void
+      _buildRpcReply(id: Long, result: { _: 'boolTrue' | 'auth.loggedOut' }, method: string): { body: Uint8Array }
+    }
+
+    internal._setApiLayer(134)
+    const legacy = new TlBinaryReader(__tlReaderMap, internal._buildRpcReply(
+      Long.ONE, { _: 'boolTrue' }, 'auth.logOut',
+    ).body)
+    legacy.uint()
+    legacy.long(true)
+    expect(legacy.uint()).toBe(0x997275b5)
+
+    internal._setApiLayer(135)
+    const current = new TlBinaryReader(
+      getApiLayerReaderMap(135) ?? __tlReaderMap,
+      internal._buildRpcReply(Long.ONE, { _: 'auth.loggedOut' }, 'auth.logOut').body,
+    )
+    current.uint()
+    current.long(true)
+    expect(current.object()).toEqual({ _: 'auth.loggedOut' })
   })
 
   it('logs implemented RPC failures at error level with method and wire error details', () => {
@@ -217,6 +314,9 @@ describe('ServerSession Cordis packet pipeline', () => {
       }),
       save: vi.fn(),
       delete: vi.fn(),
+      beginRevocation: vi.fn(),
+      finishRevocation: vi.fn(),
+      recoverPendingRevocations: vi.fn(),
     }
     const { session } = createSession(vi.fn(), keyStore)
     const internal = session as unknown as {
@@ -234,6 +334,92 @@ describe('ServerSession Cordis packet pipeline', () => {
 
     await expect(Promise.all([first, second])).resolves.toEqual([true, true])
     expect(internal._adoptStoredAuthKey).toHaveBeenCalledOnce()
+  })
+
+  it('does not adopt a permanent record captured before durable revocation', async () => {
+    const keyId = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8)
+    const backing = new MemoryAuthKeyStore()
+    const captured = { key: new Uint8Array(256).fill(1) }
+    backing.save(keyId, captured)
+    let releaseLookup!: () => void
+    const lookupGate = new Promise<void>(resolve => { releaseLookup = resolve })
+    let markLookup!: () => void
+    const lookupStarted = new Promise<void>(resolve => { markLookup = resolve })
+    let first = true
+    const keyStore: AuthKeyStore = {
+      get: async (id) => {
+        if (first) {
+          first = false
+          markLookup()
+          await lookupGate
+          return captured
+        }
+        return backing.get(id)
+      },
+      save: (id, record) => backing.save(id, record),
+      delete: id => backing.delete(id),
+      beginRevocation: id => backing.beginRevocation(id),
+      finishRevocation: id => backing.finishRevocation(id),
+      recoverPendingRevocations: () => backing.recoverPendingRevocations(),
+    }
+    const { session } = createSession(vi.fn(), keyStore)
+    const internal = session as unknown as {
+      _resumeStoredAuthKey(id: Uint8Array): Promise<boolean>
+      _authorized: boolean
+    }
+
+    const resuming = internal._resumeStoredAuthKey(keyId)
+    await lookupStarted
+    backing.beginRevocation(keyId)
+    releaseLookup()
+
+    await expect(resuming).resolves.toBe(false)
+    expect(internal._authorized).toBe(false)
+  })
+
+  it('does not adopt a temporary record captured before permanent revocation', async () => {
+    const permanentId = Uint8Array.of(1, 1, 1, 1, 1, 1, 1, 1)
+    const temporaryId = Uint8Array.of(2, 2, 2, 2, 2, 2, 2, 2)
+    const backing = new MemoryAuthKeyStore()
+    backing.save(permanentId, { key: new Uint8Array(256).fill(1) })
+    const captured = {
+      key: new Uint8Array(256).fill(2), permanentKeyId: permanentId, expiresAt: 4_000_000_000,
+    }
+    backing.save(temporaryId, captured)
+    let releaseLookup!: () => void
+    const lookupGate = new Promise<void>(resolve => { releaseLookup = resolve })
+    let markLookup!: () => void
+    const lookupStarted = new Promise<void>(resolve => { markLookup = resolve })
+    let first = true
+    const keyStore: AuthKeyStore = {
+      get: async (id) => {
+        if (first) {
+          first = false
+          markLookup()
+          await lookupGate
+          return captured
+        }
+        return backing.get(id)
+      },
+      save: (id, record) => backing.save(id, record),
+      delete: id => backing.delete(id),
+      beginRevocation: id => backing.beginRevocation(id),
+      finishRevocation: id => backing.finishRevocation(id),
+      recoverPendingRevocations: () => backing.recoverPendingRevocations(),
+    }
+    const { session } = createSession(vi.fn(), keyStore)
+    const internal = session as unknown as {
+      _resumeStoredAuthKey(id: Uint8Array): Promise<boolean>
+      _authorized: boolean
+    }
+
+    const resuming = internal._resumeStoredAuthKey(temporaryId)
+    await lookupStarted
+    backing.beginRevocation(permanentId)
+    releaseLookup()
+
+    await expect(resuming).resolves.toBe(false)
+    expect(internal._authorized).toBe(false)
   })
 
   it('admits only one pre-auth frame into async packet middleware at a time', async () => {
@@ -532,29 +718,27 @@ describe('ServerSession decrypted RPC queue', () => {
     expect(dispatch).not.toHaveBeenCalled()
   })
 
-  it('commits asynchronous authorization state before a dependent RPC starts', async () => {
+  it('commits auth.logOut before a dependent RPC starts', async () => {
     const { session } = createSession()
     const internal = session as unknown as QueuedSession
-    const authImportMessage = Long.fromInt(1)
+    const logoutMessage = Long.fromInt(1)
     const dependentRpcMessage = Long.fromInt(2)
-    const authImportSession = Long.fromInt(0x11111111)
+    const logoutSession = Long.fromInt(0x11111111)
     const dependentRpcSession = Long.fromInt(0x22222222)
-    const bindings = new Set<string>()
     const observedSessions: string[] = []
-    let releaseAuthImport!: () => void
-    const authImportWrite = new Promise<void>(resolve => { releaseAuthImport = resolve })
-    let authImportStarted!: () => void
-    const startedAuthImport = new Promise<void>(resolve => { authImportStarted = resolve })
+    let releaseLogout!: () => void
+    const logoutCleanup = new Promise<void>(resolve => { releaseLogout = resolve })
+    let logoutStarted!: () => void
+    const startedLogout = new Promise<void>(resolve => { logoutStarted = resolve })
     let dependentStarted = false
     let completeDependent!: () => void
     const dependentCompleted = new Promise<void>(resolve => { completeDependent = resolve })
 
     internal._handleRpcCall = async (msgId, _request, clientSessionId) => {
       observedSessions.push(clientSessionId.toString(16))
-      if (msgId.eq(authImportMessage)) {
-        authImportStarted()
-        await authImportWrite
-        bindings.add('imported-auth-key')
+      if (msgId.eq(logoutMessage)) {
+        logoutStarted()
+        await logoutCleanup
         return
       }
       dependentStarted = true
@@ -563,11 +747,11 @@ describe('ServerSession decrypted RPC queue', () => {
 
     try {
       const first = internal._enqueueRpcCall(
-        authImportMessage,
-        { _: 'auth.importAuthorization' } as never,
-        authImportSession,
+        logoutMessage,
+        { _: 'auth.logOut' } as never,
+        logoutSession,
       )
-      await startedAuthImport
+      await startedLogout
       const second = internal._enqueueRpcCall(
         dependentRpcMessage,
         { _: 'help.getConfig' } as never,
@@ -577,15 +761,14 @@ describe('ServerSession decrypted RPC queue', () => {
       await Promise.resolve()
       expect(dependentStarted).toBe(false)
 
-      releaseAuthImport()
+      releaseLogout()
       await Promise.all([first, second])
-      expect(bindings.has('imported-auth-key')).toBe(true)
       expect(observedSessions).toEqual([
-        authImportSession.toString(16),
+        logoutSession.toString(16),
         dependentRpcSession.toString(16),
       ])
     } finally {
-      releaseAuthImport()
+      releaseLogout()
     }
   })
 
@@ -769,6 +952,9 @@ describe('ServerSession auth.bindTempAuthKey', () => {
       get: vi.fn(),
       save: vi.fn(),
       delete: vi.fn(),
+      beginRevocation: vi.fn(),
+      finishRevocation: vi.fn(),
+      recoverPendingRevocations: vi.fn(),
     }
     const { session, logger } = createSession(vi.fn(), keyStore)
     const crypto = new NodeCryptoProvider()
@@ -822,6 +1008,9 @@ describe('ServerSession auth.bindTempAuthKey', () => {
       get: vi.fn().mockRejectedValue(new Error('store unavailable')),
       save: vi.fn(),
       delete: vi.fn(),
+      beginRevocation: vi.fn(),
+      finishRevocation: vi.fn(),
+      recoverPendingRevocations: vi.fn(),
     }
     const { session, logger } = createSession(vi.fn(), keyStore)
     const crypto = new NodeCryptoProvider()
@@ -870,6 +1059,9 @@ describe('ServerSession auth.bindTempAuthKey', () => {
       get: vi.fn().mockResolvedValue({ key: candidateKey, apiLayer: 220 }),
       save: vi.fn().mockRejectedValue(new Error('store unavailable')),
       delete: vi.fn(),
+      beginRevocation: vi.fn(),
+      finishRevocation: vi.fn(),
+      recoverPendingRevocations: vi.fn(),
     }
     const { session, logger } = createSession(vi.fn(), keyStore)
     const internal = session as unknown as {
@@ -908,6 +1100,58 @@ describe('ServerSession auth.bindTempAuthKey', () => {
     })
   })
 
+  it('does not adopt a stored permanent key revoked while the temp binding save is pending', async () => {
+    const crypto = new NodeCryptoProvider()
+    const currentKey = Uint8Array.from({ length: 256 }, (_, index) => index)
+    const candidateKey = Uint8Array.from({ length: 256 }, (_, index) => (index + 1) & 0xff)
+    const candidateId = new Uint8Array(crypto.sha1(candidateKey).subarray(-8))
+    const backing = new MemoryAuthKeyStore()
+    backing.save(candidateId, { key: candidateKey, apiLayer: 220 })
+    let releaseSave!: () => void
+    const saveGate = new Promise<void>(resolve => { releaseSave = resolve })
+    let markSave!: () => void
+    const saveStarted = new Promise<void>(resolve => { markSave = resolve })
+    const keyStore: AuthKeyStore = {
+      get: id => backing.get(id),
+      save: async (id, record) => {
+        backing.save(id, record)
+        markSave()
+        await saveGate
+      },
+      delete: id => backing.delete(id),
+      beginRevocation: id => backing.beginRevocation(id),
+      finishRevocation: id => backing.finishRevocation(id),
+      recoverPendingRevocations: () => backing.recoverPendingRevocations(),
+    }
+    const { session, logger, connection } = createSession(vi.fn(), keyStore)
+    const internal = session as unknown as {
+      _permAuthKey: ServerAuthKey
+      _tempAuthKey: ServerAuthKey | null
+      _verifyBindInner: ReturnType<typeof vi.fn>
+      _handleRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    const originalId = new Uint8Array(crypto.sha1(currentKey).subarray(-8))
+    internal._permAuthKey.setup(currentKey)
+    internal._tempAuthKey = new ServerAuthKey(crypto, logger as unknown as Logger, getServerReaderMap())
+    internal._tempAuthKey.setup(Uint8Array.from({ length: 256 }, (_, index) => (index + 2) & 0xff))
+    internal._verifyBindInner = vi.fn().mockReturnValue(true)
+
+    const binding = internal._handleRpcCall(
+      Long.fromInt(35),
+      wrappedBindRequest(Long.fromBytesLE(Array.from(candidateId)), new Uint8Array(40)),
+      Long.fromInt(36),
+    )
+    await saveStarted
+    backing.beginRevocation(candidateId)
+    releaseSave()
+    await binding
+
+    expect(Array.from(internal._permAuthKey.id)).toEqual(Array.from(originalId))
+    expect(connection.closed).toBe(true)
+    expect(internal._sendEncryptedMessage).not.toHaveBeenCalled()
+  })
+
   it('serializes competing binds before a following RPC observes the final identity', async () => {
     const crypto = new NodeCryptoProvider()
     const currentKey = Uint8Array.from({ length: 256 }, (_, index) => index)
@@ -934,6 +1178,9 @@ describe('ServerSession auth.bindTempAuthKey', () => {
         }
       }),
       delete: vi.fn(),
+      beginRevocation: vi.fn(),
+      finishRevocation: vi.fn(),
+      recoverPendingRevocations: vi.fn(),
     }
     const dispatch = vi.fn().mockResolvedValue({ _: 'boolTrue' })
     const { session, logger } = createSession(dispatch, keyStore)
