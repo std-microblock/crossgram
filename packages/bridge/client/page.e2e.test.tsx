@@ -5,8 +5,9 @@ import { defineComponent, h, nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PlatformAccountDashboardData } from '../src/account-dashboard.js'
 import type { StickerPackDashboardData } from '../src/sticker-dashboard.js'
+import type { BotDashboardData } from '../src/bot-dashboard.js'
 
-type DashboardData = PlatformAccountDashboardData & StickerPackDashboardData
+type DashboardData = PlatformAccountDashboardData & StickerPackDashboardData & BotDashboardData
 
 const rpcState = vi.hoisted(() => ({ data: undefined as unknown as DashboardData }))
 const qrState = vi.hoisted(() => ({ result: null as { data: string } | null }))
@@ -18,7 +19,7 @@ vi.mock('@cordisjs/client', async () => {
 vi.mock('jsqr', () => ({ default: vi.fn(() => qrState.result) }))
 
 import jsQR from 'jsqr'
-import { PlatformAccountsPage, StickerPacksPage } from './page.js'
+import { BotsPage, PlatformAccountsPage, StickerPacksPage } from './page.js'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -228,6 +229,35 @@ describe('Bridge platform account page', () => {
   })
 })
 
+describe('Bridge bot management page', () => {
+  beforeEach(() => {
+    rpcState.data = dashboardData()
+  })
+
+  it('shows bot source and copies the canonical t.me link', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    rpcState.data.bots = [{
+      conversationId: 'bridge:platform-admin', title: 'CrossGram 管理助手', username: 'CrossGramAdminBot',
+      sourcePlugin: '@mtproto-relay/platform-admin-bot',
+    }]
+    const wrapper = mountBotsPage()
+
+    expect(wrapper.text()).toContain('@CrossGramAdminBot')
+    expect(wrapper.text()).toContain('@mtproto-relay/platform-admin-bot')
+    expect(wrapper.get('.bot-link-actions a').attributes('href')).toBe('https://t.me/CrossGramAdminBot')
+    await wrapper.get('.bot-link-actions button').trigger('click')
+    expect(writeText).toHaveBeenCalledWith('https://t.me/CrossGramAdminBot')
+    expect(wrapper.get('.bot-link-actions button').text()).toBe('已复制')
+    await vi.advanceTimersByTimeAsync(1_500)
+    expect(wrapper.get('.bot-link-actions button').text()).toBe('复制链接')
+    await wrapper.get('.refresh-button').trigger('click')
+    expect(rpcState.data.refreshBots).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+})
+
 function mountPage() {
   const Layout = defineComponent({
     setup(_, { slots }) {
@@ -251,6 +281,22 @@ function mountPlatformAccountsPage() {
     },
   })
   return mount(PlatformAccountsPage, {
+    global: {
+      components: {
+        'k-layout': Layout,
+        'k-icon': defineComponent({ setup: () => () => h('i') }),
+      },
+    },
+  })
+}
+
+function mountBotsPage() {
+  const Layout = defineComponent({
+    setup(_, { slots }) {
+      return () => h('div', [slots.header?.(), slots.default?.()])
+    },
+  })
+  return mount(BotsPage, {
     global: {
       components: {
         'k-layout': Layout,
@@ -306,6 +352,9 @@ function dashboardData(): DashboardData {
     updatedAt: 0,
     refresh: vi.fn(async () => undefined),
     stickerUpdatedAt: 0,
+    bots: [],
+    botUpdatedAt: 0,
+    refreshBots: vi.fn(async () => undefined),
     refreshStickerPacks: vi.fn(async () => undefined),
     setStickerPackAssigned: vi.fn(async () => undefined),
     stickerAccounts: [

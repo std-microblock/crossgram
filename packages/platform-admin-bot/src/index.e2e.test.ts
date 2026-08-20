@@ -102,6 +102,18 @@ describe('platform admin bot Cordis e2e', () => {
       : ''
     if (!identityText.includes('session-a')) throw new Error('identity command did not return the scoped identity')
 
+    const botListOutgoing = peers.makeOutgoing(session, resolution!, {
+      parts: [{ type: 'text', text: '/bots' }],
+    })
+    await peers.receive(session, resolution!, botListOutgoing)
+    const botListReply = events.filter(event => event.type === 'message').at(-1)
+    const botListText = botListReply?.type === 'message' && botListReply.message.content.parts[0]?.type === 'text'
+      ? botListReply.message.content.parts[0].text
+      : ''
+    if (!botListText.includes('https://t.me/CrossGramAdminBot')) {
+      throw new Error('bot management command did not return the t.me link')
+    }
+
     const welcome = events.find(event =>
       event.type === 'message' && event.message.id === 'bridge:platform-admin:welcome')
     if (!welcome || welcome.type !== 'message') throw new Error('welcome missing')

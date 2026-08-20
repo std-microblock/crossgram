@@ -17,6 +17,19 @@
     uploadPath: /var/lib/crossgram/data/bridge-uploads
 - id: merged-forward
   name: '@mtproto-relay/merged-forward'
+- id: platform-admin-bot
+  name: '@mtproto-relay/platform-admin-bot'
+  config:
+    allowedPlatformSessionIds: []
+    crossAccountAccess: false
+    showLoginCodes: true
+    webuiUrl: ''
+- id: telegram-bot-api
+  name: '@mtproto-relay/telegram-bot-api'
+  config:
+    verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}
+- id: qq-flash-transfer-bot
+  name: '@mtproto-relay/qq-flash-transfer-bot'
 - id: telegram-resources
   name: '@mtproto-relay/telegram-resources'
   config: {}

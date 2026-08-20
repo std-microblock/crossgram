@@ -24,7 +24,6 @@
   name: '@mtproto-relay/merged-forward'
 - id: platform-admin-bot
   name: '@mtproto-relay/platform-admin-bot'
-  disabled: true
   config:
     # Empty means every platform identity can manage only itself.
     allowedPlatformSessionIds: []
@@ -33,7 +32,6 @@
     webuiUrl: ''
 - id: telegram-bot-api
   name: '@mtproto-relay/telegram-bot-api'
-  disabled: true
   config:
     verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}
 - id: telegram-sticker-importer

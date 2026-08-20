@@ -25,6 +25,22 @@ The service reads QQNT's bearer token from `/etc/qqnt-bridge.env`. It is never
 copied into the application YAML. An explicit `token` in the QQNT plugin config
 still takes precedence over `QQNT_BRIDGE_TOKEN`.
 
+The production configuration enables the platform management bot, self-hosted
+Telegram Bot API (including `@BotFather`), and QQ Flash Transfer bot. Before its
+first deployment, set a randomly generated persistent verifier secret in the
+root-managed `/etc/crossgram.env`:
+
+```sh
+umask 077
+printf 'TELEGRAM_BOT_TOKEN_VERIFIER_SECRET=%s\n' "$(openssl rand -base64 48 | tr -d '\n')" \
+  | sudo tee -a /etc/crossgram.env >/dev/null
+```
+
+Sticker Importer remains opt-in because it needs an official Telegram Bot API
+token to download public sticker packs. Set `TELEGRAM_STICKER_IMPORTER_BOT_TOKEN`
+only after providing that token, then enable its plugin in the root-managed
+runtime YAML.
+
 Update and restart the checkout with:
 
 ```sh

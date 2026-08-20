@@ -17,6 +17,7 @@ import {
   type SystemPeer,
   type SystemPeerCallbackInput,
   type SystemPeerCallbackResult,
+  type SystemBot,
   SystemPeerCallbackError,
   type SystemPeerProvider,
   type SystemPeerService,
@@ -57,7 +58,7 @@ export const name = 'platform-admin-bot'
 export const inject = ['bridgeManagement', 'systemPeer']
 
 export function apply(ctx: Context, config: Config = {}): void {
-  const unregister = ctx.systemPeer.register(new PlatformAdminBotProvider(ctx.bridgeManagement, config))
+  const unregister = ctx.systemPeer.register(new PlatformAdminBotProvider(ctx.bridgeManagement, config, ctx.systemPeer))
   ctx.effect(() => unregister, 'platform-admin-bot.system-peer')
 }
 
@@ -87,6 +88,7 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
   constructor(
     private readonly _management: BridgeManagementService,
     config: Config = {},
+    private readonly _systemPeers?: SystemPeerService,
   ) {
     this._allowed = new Set(config.allowedPlatformSessionIds ?? [])
     this._crossAccountAccess = config.crossAccountAccess ?? false
@@ -176,6 +178,7 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
       case 'server':
       case 'server_json': return this._serverView()
       case 'stickers': return this._stickersView(session, parsePage(parsed.args[0]))
+      case 'bots': return this._botsView()
       case 'refresh': return this._refreshView()
       case 'approve': return this._approveView(session, parsed.args)
       case 'sticker': return this._stickerCommandView(session, parsed.args)
@@ -198,6 +201,9 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
       case '服务器json': return this._serverView()
       case '表情包': return this._stickersView(session, 0)
       case '刷新': return this._refreshView()
+      case '机器人':
+      case 'bot':
+      case 'bots': return this._botsView()
       default: return this._unknownView(input)
     }
   }
@@ -217,6 +223,7 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
       case 'clients': return this._clientsView(session, metadata?.page ?? 0)
       case 'server': return this._serverView()
       case 'stickers': return this._stickersView(session, metadata?.page ?? 0)
+      case 'bots': return this._botsView()
       case 'refresh': return this._refreshView()
       case 'pack': return this._stickerPackView(session, requiredMetadata(metadata, ['providerId', 'packId']))
       case 'toggle': return this._toggleStickerView(
@@ -241,6 +248,7 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
       lines.push('/sessions — Telegram 客户端会话')
       lines.push('/server — 服务器 JSON')
       lines.push('/stickers [页码] — 表情包关联')
+      lines.push('/bots — 已启用 Bot 与 t.me 链接')
       lines.push('/approve <平台ID> <登录令牌> — 批准二维码登录')
       lines.push('/sticker <providerId> <packId> <on|off> [身份ID] — 修改表情包关联')
       lines.push('/refresh — 刷新账号和表情包')
@@ -329,6 +337,15 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
     )] }))
     rows.push(...pageKeyboardRows('stickers', paged.page, paged.pages))
     return { text: lines.join('\n'), keyboard: { rows } }
+  }
+
+  private async _botsView(): Promise<BotView> {
+    const bots = this._systemPeers ? await this._systemPeers.listBots() : this.listBots()
+    const lines = [`Bot 管理（${bots.length}）`, '']
+    if (!bots.length) lines.push('暂无已启用的 Bot。')
+    for (const bot of bots) lines.push(formatBot(bot), '')
+    lines.push('提示：通过 @BotFather 可创建、查看、重置或撤销自建 Bot。')
+    return { text: lines.join('\n').trimEnd(), keyboard: backKeyboard('bots') }
   }
 
   private async _stickerPackView(
@@ -453,6 +470,7 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
         callbackButton('🧾 服务器 JSON', `${CALLBACK_PREFIX}server`, { adminAction: 'server' }),
         callbackButton('😀 表情包', `${CALLBACK_PREFIX}stickers`, { adminAction: 'stickers', page: 0 }),
       ] },
+      { buttons: [callbackButton('🤖 Bot 管理', `${CALLBACK_PREFIX}bots`, { adminAction: 'bots' })] },
       { buttons: [callbackButton('🔄 全部刷新', `${CALLBACK_PREFIX}refresh`, { adminAction: 'refresh' }, 'success')] },
     ]
     if (this._webuiUrl) rows.push({ buttons: [{ type: 'url', text: '🌐 打开 WebUI', url: this._webuiUrl }] })
@@ -620,6 +638,15 @@ function formatClient(client: BridgeManagementClientAuthorization): string {
     `IP：${client.ip}${client.country ? ` · ${client.country}` : ''}${client.region ? ` / ${client.region}` : ''}`,
     `最近活动：${formatDate(client.dateActive * 1_000)}`,
     `Auth：${truncate(client.authKeyId, 16)}`,
+  ].join('\n')
+}
+
+function formatBot(bot: SystemBot): string {
+  return [
+    `🤖 ${bot.title}`,
+    `账号：@${bot.username}`,
+    `来源：${bot.sourcePlugin}`,
+    `https://t.me/${bot.username}`,
   ].join('\n')
 }
 

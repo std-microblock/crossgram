@@ -37,6 +37,10 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain('serverHost: __CROSSGRAM_PUBLIC_HOST__')
     expect(config).toContain('/var/lib/crossgram/data/rsa-key.json')
     expect(config).toContain("name: '@mtproto-relay/merged-forward'")
+    expect(config).toContain("name: '@mtproto-relay/platform-admin-bot'")
+    expect(config).toContain("name: '@mtproto-relay/telegram-bot-api'")
+    expect(config).toContain("name: '@mtproto-relay/qq-flash-transfer-bot'")
+    expect(config).toContain('verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}')
     expect(config).toContain("name: '@mtproto-relay/mtproto-statistics'")
     expect(config).toContain("name: '@mtproto-relay/update-store-database'")
     expect(config).toContain("name: '@cordisjs/plugin-loader-webui'")
@@ -100,7 +104,7 @@ describe('Crossgram Linux deployment', () => {
     }
   })
 
-  it('adds the merged-forward viewer to an existing runtime config exactly once', () => {
+  it('adds required bridge and bot plugins to an existing runtime config exactly once', () => {
     const oldConfig = `- id: bridge
   name: '@mtproto-relay/bridge'
 - id: qqnt
@@ -108,6 +112,9 @@ describe('Crossgram Linux deployment', () => {
 `
     const migrated = migrateRuntimeConfig(oldConfig)
     expect(migrated).toContain("- id: merged-forward\n  name: '@mtproto-relay/merged-forward'")
+    expect(migrated).toContain("- id: platform-admin-bot\n  name: '@mtproto-relay/platform-admin-bot'")
+    expect(migrated).toContain("- id: telegram-bot-api\n  name: '@mtproto-relay/telegram-bot-api'")
+    expect(migrated).toContain("- id: qq-flash-transfer-bot\n  name: '@mtproto-relay/qq-flash-transfer-bot'")
     expect(migrateRuntimeConfig(migrated)).toBe(migrated)
 
     const temp = mkdtempSync(join(tmpdir(), 'crossgram-config-migration-'))

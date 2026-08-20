@@ -52,6 +52,7 @@ import { createBuiltInVoiceMediaProvider } from './voice/media-config.js'
 import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
+import type { BotDashboardData } from './bot-dashboard.js'
 import { RequestInboxSystemPeerProvider } from './request-inbox.js'
 import { ActiveSessionStore, registerActiveSessionRpc } from './active-sessions.js'
 import { ConversationViewService } from './conversation-view.js'
@@ -92,6 +93,7 @@ export * from './sticker-outline.js'
 export * from './sticker-dashboard.js'
 export * from './active-sessions.js'
 export * from './management-service.js'
+export * from './bot-dashboard.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui', 'updateStore']
@@ -465,7 +467,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()
   let publishedStickerPacks: StickerDashboardPack[] = []
-  const dashboard: PlatformAccountDashboardData & StickerPackDashboardData = {
+  const dashboard: PlatformAccountDashboardData & StickerPackDashboardData & BotDashboardData = {
     accounts: [],
     serverConfig: makeCrossGramServerConfig(
       config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, ctx.mtproto.rsaKey.publicKeyPem,
@@ -475,15 +477,21 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     stickerAccounts: [],
     stickerPacks: [],
     stickerUpdatedAt: Date.now(),
+    bots: [],
+    botUpdatedAt: Date.now(),
     async refresh() {
       await ctx.database.prepared()
       await Promise.allSettled(registry.ids.map(platformId => provision(platformId)))
       publishAccounts()
       await publishStickerPacks()
+      await publishBots()
     },
     async refreshStickerPacks() {
       await ctx.database.prepared()
       await publishStickerPacks()
+    },
+    async refreshBots() {
+      await publishBots()
     },
     async setStickerPackAssigned(platformSessionId, providerId, packId, assigned) {
       const pack = publishedStickerPacks.find((item) =>
@@ -500,7 +508,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     baseUrl: import.meta.url,
     source: '../client/index.ts',
     manifest: '../dist/manifest.json',
-    routes: ['/platform-accounts', '/sticker-packs'],
+    routes: ['/platform-accounts', '/sticker-packs', '/bots'],
   }, dashboard)
 
   const currentAccounts = (now = Date.now()) => registry.ids.sort().map((platformId) => {
@@ -548,6 +556,19 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       value.stickerPacks = snapshot.packs
     })
   }
+
+  const publishBots = async (now = Date.now()) => {
+    const bots = await systemPeers.listBots()
+    dashboardEntry.mutate((value) => {
+      value.botUpdatedAt = now
+      value.bots = bots
+    })
+  }
+
+  const stopBotDashboardRefresh = systemPeers.onChanged(() => {
+    void publishBots().catch((error) => bridgeLogger.warn('bot dashboard refresh failed: %s', String(error)))
+  })
+  ctx.effect(() => stopBotDashboardRefresh, 'mtproto-bridge.bot-dashboard')
 
   const provision = async (platformId: string) => {
     await legacyPhoneMigration

@@ -1,13 +1,38 @@
 import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
-const mergedForwardPlugin = `- id: merged-forward
+const requiredPlugins = [
+  `- id: merged-forward
   name: '@mtproto-relay/merged-forward'
-`
+`,
+  `- id: platform-admin-bot
+  name: '@mtproto-relay/platform-admin-bot'
+  config:
+    allowedPlatformSessionIds: []
+    crossAccountAccess: false
+    showLoginCodes: true
+    webuiUrl: ''
+`,
+  `- id: telegram-bot-api
+  name: '@mtproto-relay/telegram-bot-api'
+  config:
+    verifierSecret: \${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}
+`,
+  `- id: qq-flash-transfer-bot
+  name: '@mtproto-relay/qq-flash-transfer-bot'
+`,
+]
 
 export function migrateRuntimeConfig(source) {
-  if (/^\s*name:\s*['"]?@mtproto-relay\/merged-forward['"]?\s*$/m.test(source)) return source
-  return `${source}${source.endsWith('\n') ? '' : '\n'}${mergedForwardPlugin}`
+  const missing = requiredPlugins.filter((plugin) => {
+    const name = /^\s*name:\s*(.+)$/m.exec(plugin)?.[1]
+    return name && !new RegExp(`^\\s*name:\\s*${escapeRegExp(name)}\\s*$`, 'm').test(source)
+  })
+  return missing.length ? `${source}${source.endsWith('\n') ? '' : '\n'}${missing.join('')}` : source
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 export function migrateRuntimeConfigFile(path) {
@@ -32,6 +57,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.error('Usage: node migrate-runtime-config.mjs <app.yml>')
     process.exitCode = 2
   } else if (migrateRuntimeConfigFile(path)) {
-    console.log(`Added required merged-forward plugin to ${path}`)
+    console.log(`Added required Crossgram bot plugins to ${path}`)
   }
 }

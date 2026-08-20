@@ -6,6 +6,7 @@ import { computed, defineComponent, onBeforeUnmount, onMounted, ref, resolveComp
 import { useRpc } from '@cordisjs/client'
 import jsQR from 'jsqr'
 import type { PlatformAccountDashboardData, PlatformAccountView } from '../src/account-dashboard.js'
+import type { BotDashboardData } from '../src/bot-dashboard.js'
 import type {
   StickerDashboardPack, StickerPackDashboardData,
 } from '../src/sticker-dashboard.js'
@@ -429,6 +430,87 @@ export const StickerPacksPage = defineComponent({
   },
 })
 
+export const BotsPage = defineComponent({
+  name: 'BotsPage',
+  setup() {
+    const data = useRpc<BotDashboardData>()
+    const refreshing = ref(false)
+    const copied = ref<string>()
+    const error = ref<string>()
+    let copiedTimer: ReturnType<typeof setTimeout> | undefined
+    onBeforeUnmount(() => {
+      if (copiedTimer) clearTimeout(copiedTimer)
+    })
+    const refresh = async () => {
+      refreshing.value = true
+      error.value = undefined
+      try {
+        await data.value.refreshBots()
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : String(cause)
+      } finally {
+        refreshing.value = false
+      }
+    }
+    const copy = async (link: string) => {
+      try {
+        await copyText(link)
+        copied.value = link
+        if (copiedTimer) clearTimeout(copiedTimer)
+        copiedTimer = setTimeout(() => { copied.value = undefined }, 1_500)
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : '复制链接失败。'
+      }
+    }
+
+    return () => {
+      const Layout = resolveComponent('k-layout') as any
+      const Icon = resolveComponent('k-icon') as any
+      const bots = data.value.bots
+      return <Layout class="bots-page">{{
+        header: () => <div class="accounts-toolbar bots-toolbar">
+          <div>
+            <h1>Bot 管理</h1>
+            <p>所有 Bridge 内置和已创建的 Bot 均可通过 t.me 链接打开。</p>
+          </div>
+          <button type="button" class="refresh-button" disabled={refreshing.value} onClick={refresh}>
+            <Icon name="refresh" />
+            <span>{refreshing.value ? '正在刷新' : '刷新 Bot'}</span>
+          </button>
+        </div>,
+        default: () => <main class="bots-content">
+          {error.value && <div class="dashboard-error" role="alert">操作失败：{error.value}</div>}
+          {bots.length
+            ? <section class="bot-list" aria-label="已注册 Bot">
+              {bots.map((bot) => {
+                const link = `https://t.me/${bot.username}`
+                return <article class="bot-card" data-username={bot.username}>
+                  <div class="bot-avatar" aria-hidden="true">{bot.title.trim()[0] ?? 'B'}</div>
+                  <div class="bot-details">
+                    <h2>{bot.title}</h2>
+                    <code>@{bot.username}</code>
+                    <span>来源：{bot.sourcePlugin}</span>
+                  </div>
+                  <div class="bot-link-actions">
+                    <a href={link} target="_blank" rel="noreferrer">打开</a>
+                    <button type="button" class="copy-button" onClick={() => copy(link)}>
+                      {copied.value === link ? '已复制' : '复制链接'}
+                    </button>
+                  </div>
+                </article>
+              })}
+            </section>
+            : <div class="accounts-empty">
+              <Icon name="account:default" />
+              <h2>还没有已启用的 Bot</h2>
+              <p>启用平台管理、Bot API 或其他 Bot 插件后，它们会自动显示在这里。</p>
+            </div>}
+        </main>,
+      }}</Layout>
+    }
+  },
+})
+
 export function parseTelegramLoginUrl(value: string): string | undefined {
   try {
     const url = new URL(value)
@@ -478,6 +560,13 @@ export default function apply(ctx: Context): void {
     icon: 'activity:default',
     order: 111,
     component: StickerPacksPage,
+  })
+  ctx.client.router.page({
+    path: '/bots',
+    name: 'Bot 管理',
+    icon: 'activity:default',
+    order: 112,
+    component: BotsPage,
   })
 }
 
