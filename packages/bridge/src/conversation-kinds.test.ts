@@ -1124,7 +1124,7 @@ describe('conversation kinds', () => {
       message: { conversationId: 'group', outgoing: true, content: { parts: [{ text: 'fan out to B' }] } },
     }])
     expect(localDeliveryOptions).toEqual([{
-      excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true,
+      excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true, forceDelivery: true,
     }])
     expect(result).toMatchObject({
       _: 'updates', seq: 0,
@@ -1150,7 +1150,7 @@ describe('conversation kinds', () => {
     }) as tl.RawUpdates
 
     expect(localDeliveryOptions).toEqual([{
-      excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true,
+      excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true, forceDelivery: true,
     }])
     expect(result).toMatchObject({
       _: 'updates', seq: 0,

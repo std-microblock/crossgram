@@ -1244,12 +1244,13 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
-  it('returns direct and group sends as unsequenced reconciliations without same-auth-key echoes', async () => {
+  it('reconciles sends locally, suppresses same-auth echoes, and syncs forwards to another device', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     const debugEvents: MtprotoDebugEvent[] = []
     const disposeDebug = ctx.on('mtproto/debug', (event) => debugEvents.push(event))
     let requester: TestClient | undefined
     let parallel: TestClient | undefined
+    let observer: TestClient | undefined
     try {
       const platformLogin = await waitForPlatformLogin(ctx, 'static')
       requester = await TestClient.connect(port)
@@ -1321,8 +1322,54 @@ describe('bridge login e2e', () => {
             update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage')
       })
       expect(echoedUpdates).toEqual([])
+
+      observer = await TestClient.connect(port)
+      const observerKey = await doClientHandshake(observer, pubKey)
+      const observerSid = new Long(0x7654322d, 0x4abc, false)
+      const observerCode = await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 14)
+      await callRpc(observer, observerKey, observerSid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: observerCode.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 16)
+      await callRpc(observer, observerKey, observerSid, { _: 'updates.getState' }, 18)
+      const bindings = await ctx.database.get('mtproto_auth_binding', {
+        platformSessionId: platformLogin.session.id,
+      })
+      expect(bindings).toHaveLength(2)
+      expect(bindings.map((binding) => binding.authKeyId)).toContain(
+        Buffer.from(observerKey.authKeyId).toString('hex'),
+      )
+      debugEvents.length = 0
+
+      const forwarded = await callRpc(requester, key, requesterSid, {
+        _: 'messages.forwardMessages', fromPeer: { _: 'inputPeerEmpty' },
+        id: [confirmation.updates[1].message.id], randomId: [Long.fromNumber(0x45)],
+        toPeer: { _: 'inputPeerChannel', channelId: group.id, accessHash: group.accessHash },
+      }, 20)
+      expect(forwarded).toMatchObject({
+        _: 'updates', seq: 0,
+        updates: [
+          { _: 'updateMessageID', randomId: Long.fromNumber(0x45) },
+          {
+            _: 'updateNewChannelMessage',
+            message: { out: true, message: 'single confirmation path' },
+          },
+        ],
+      })
+      await expect(readPush(observer, observerKey)).resolves.toMatchObject({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewChannelMessage',
+          message: { out: true, message: 'single confirmation path' },
+        }],
+      })
     } finally {
       disposeDebug()
+      observer?.close()
       parallel?.close()
       requester?.close()
       await stop()

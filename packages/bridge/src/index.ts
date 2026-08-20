@@ -873,7 +873,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       req as tl.messages.RawEditMessageRequest, rpc.connection,
     ))
   rpc.register('messages.forwardMessages', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.forwardMessages(req as tl.messages.RawForwardMessagesRequest))
+    (await requireBridgeSession(rpc)).dialogs.forwardMessages(
+      req as tl.messages.RawForwardMessagesRequest, rpc.connection,
+    ))
   rpc.register('messages.setTyping', async (rpc) => {
     await requireBridgeSession(rpc)
     return { _: 'boolTrue' } as unknown as tl.TlObject

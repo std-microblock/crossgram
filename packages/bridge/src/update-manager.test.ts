@@ -717,6 +717,92 @@ describe('UpdateManager', () => {
     expect(entity?.url).toMatch(new RegExp(`/bridgechat_${stableId(`peer:${archive.id}`)}/\\d+$`))
   })
 
+  it('journals forwarded messages and pushes them to a different authorized device', async () => {
+    const sourceConversation: IMConversation = { id: 'forward-sync-source', kind: 'group', title: 'Source' }
+    const targetConversation: IMConversation = { id: 'forward-sync-target', kind: 'group', title: 'Target' }
+    const source: IMMessage = {
+      id: 'forward-sync-source-message', conversationId: sourceConversation.id,
+      senderId: 'alice', timestamp: 1_800_000_100,
+      content: { parts: [{ type: 'text', text: 'forward me' }] },
+    }
+    const forwardedOutput: IMMessage = {
+      ...source, id: 'forward-sync-output', conversationId: targetConversation.id,
+      senderId: session.userId, outgoing: true, timestamp: 1_800_000_101,
+    }
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        messageActions: {
+          delete: { own: { supported: true }, others: { supported: true } },
+          edit: { mode: 'native' }, forward: { mode: 'native', preservesAuthor: true },
+        },
+      },
+      async forwardMessages(_session, _from, _ids, to) {
+        return [{ ...forwardedOutput, conversationId: to.id }]
+      },
+    }
+    const { ctx, store, manager, sent } = await createHarness(undefined, targetPlatform)
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '1021324354657687', platformId: session.platformId,
+      platformSessionId: session.platformSessionId,
+    })
+    const sourceProjection = await store.ingest(session, sourceConversation, source)
+    await store.upsertConversation(session, targetConversation)
+    // Reproduce the production race: QQNT's WebSocket echo is ingested just
+    // before the native forward HTTP request resolves, but has not published a
+    // durable update yet. The RPC path must force that unchanged row through.
+    await store.ingest(session, targetConversation, forwardedOutput)
+    const rpc = new DialogRpc(
+      targetPlatform, session, store,
+      undefined, undefined, 1, undefined, undefined, undefined,
+      async (localSession, event, options) => {
+        if (event.type !== 'message') return
+        const result = await store.ingest(localSession, event.conversation, event.message)
+        return manager.publish(localSession, { event, result }, options)
+      },
+      '0011223344556677',
+    )
+    const requester = {} as ServerConnection
+
+    const forwarded = await rpc.forwardMessages({
+      _: 'messages.forwardMessages',
+      fromPeer: {
+        _: 'inputPeerChannel', channelId: stableId(`peer:${sourceConversation.id}`), accessHash: Long.ONE,
+      },
+      toPeer: {
+        _: 'inputPeerChannel', channelId: stableId(`peer:${targetConversation.id}`), accessHash: Long.ONE,
+      },
+      id: [sourceProjection.projection[0].tlMessageId], randomId: [Long.fromNumber(701)],
+    }, requester) as tl.RawUpdates
+
+    expect(forwarded).toMatchObject({
+      _: 'updates', seq: 0,
+      updates: [
+        { _: 'updateMessageID', randomId: Long.fromNumber(701) },
+        { _: 'updateNewChannelMessage', message: { message: 'forward me', out: true } },
+      ],
+    })
+    expect(sent).toHaveLength(1)
+    expect(Buffer.from(sent[0].authKeyId).toString('hex')).toBe('1021324354657687')
+    expect(sent[0].excludeConnection).toBeUndefined()
+    expect(sent[0].update).toMatchObject({
+      _: 'updates', updates: [{
+        _: 'updateNewChannelMessage', message: { message: 'forward me', out: true },
+      }],
+    })
+    await expect(manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: {
+        _: 'inputChannel', channelId: stableId(`peer:${targetConversation.id}`), accessHash: Long.ZERO,
+      },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+    })).resolves.toMatchObject({
+      _: 'updates.channelDifference', final: true,
+      newMessages: [{ message: 'forward me', out: true }],
+    })
+  })
+
   it('links live merged forwards to their first saved message across new RPC connections', async () => {
     const conversation: IMConversation = { id: 'merged-parent', kind: 'group', title: 'Parent' }
     const virtual: IMConversation = {

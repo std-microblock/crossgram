@@ -1873,7 +1873,10 @@ export class DialogRpc {
     return this._updates(conversation, updates, now)
   }
 
-  async forwardMessages(req: tl.messages.RawForwardMessagesRequest): Promise<tl.TypeUpdates> {
+  async forwardMessages(
+    req: tl.messages.RawForwardMessagesRequest,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.TypeUpdates> {
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
     if (req.id.length !== req.randomId.length) throw new RpcError(400, 'RANDOM_ID_INVALID')
@@ -1915,35 +1918,49 @@ export class DialogRpc {
       this._throwMessageAction(error, 'MESSAGE_FORWARD_FORBIDDEN')
     }
     const conversation = this._conversation(toId)
+    const publishedPayloads: tl.RawUpdates[] = []
     const projections = []
     for (const output of forwarded!) {
       const source: IMMessage<any> = { ...output, conversationId: toId, outgoing: true }
+      const published = await this._publishLocalMessage(toId, source, excludeConnection)
+      if (published) {
+        publishedPayloads.push(published)
+        continue
+      }
       const persisted = await this._store.ingest(this._session, conversation, source)
       projections.push(...persisted.projection)
     }
-    let pts = await this._reservePts(
-      projections.length,
-      Math.floor(Date.now() / 1000),
-      conversation,
-    ) - projections.length
-    const updates: tl.TypeUpdate[] = []
-    for (const [index, part] of projections.entries()) {
-      const item = await this._projectedItem(part.tlMessageId, toId)
-      if (req.randomId[index]) {
-        updates.push({ _: 'updateMessageID', id: part.tlMessageId, randomId: req.randomId[index] })
+    if (projections.length) {
+      let pts = await this._reservePts(
+        projections.length,
+        Math.floor(Date.now() / 1000),
+        conversation,
+      ) - projections.length
+      const updates: tl.TypeUpdate[] = []
+      for (const part of projections) {
+        const item = await this._projectedItem(part.tlMessageId, toId)
+        updates.push({
+          _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
+          message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
+        } as tl.TypeUpdate)
       }
-      updates.push({
-        _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
-        message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
-      } as tl.TypeUpdate)
+      publishedPayloads.push(
+        this._updates(conversation, updates, Math.floor(Date.now() / 1000)) as tl.RawUpdates,
+      )
     }
+    const payload: tl.RawUpdates = publishedPayloads.length
+      ? mergeForwardUpdates(publishedPayloads)
+      : this._updates(conversation, [], Math.floor(Date.now() / 1000)) as tl.RawUpdates
+    const projectedCount = payload.updates.filter((update) =>
+      update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage').length
+    const confirmed = this._withMessageIds(payload, req.randomId.slice(0, projectedCount))
     // Native platforms may coalesce several forwarded inputs into fewer outputs.
     // Confirm every unpaired random ID as cancelled so patched Telegram clients
     // remove their local placeholders instead of converting them to send errors.
-    for (const randomId of req.randomId.slice(projections.length)) {
-      updates.push({ _: 'updateMessageID', id: CANCELLED_MESSAGE_ID, randomId })
+    for (const randomId of req.randomId.slice(projectedCount)) {
+      confirmed.updates.push({ _: 'updateMessageID', id: CANCELLED_MESSAGE_ID, randomId })
     }
-    return this._updates(conversation, updates, Math.floor(Date.now() / 1000))
+    return confirmed
   }
 
   async uploadMedia(req: UploadMediaRequest): Promise<tl.TypeMessageMedia> {
@@ -2903,7 +2920,7 @@ export class DialogRpc {
       // The RPC result owns random_id reconciliation for every transport that
       // shares this auth key. Pushing the full message to a parallel transport
       // first makes Telegram clients insert it separately from the local item.
-      this._localDelivery(excludeConnection, true),
+      { ...this._localDelivery(excludeConnection, true), forceDelivery: true },
     ) as tl.RawUpdates | undefined
     if (published === undefined || published._ !== 'updates') return
     return published
@@ -5363,6 +5380,23 @@ function uniqueProjectedMessages(messages: ProjectedMessage[]): ProjectedMessage
 
 function uniqueChats(chats: tl.TypeChat[]): tl.TypeChat[] {
   return [...new Map(chats.map((chat) => [chat.id, chat])).values()]
+}
+
+function mergeForwardUpdates(payloads: readonly tl.RawUpdates[]): tl.RawUpdates {
+  const users = new Map<string, tl.TypeUser>()
+  const chats = new Map<string, tl.TypeChat>()
+  for (const payload of payloads) {
+    for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
+    for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
+  }
+  return {
+    _: 'updates',
+    updates: payloads.flatMap((payload) => payload.updates),
+    users: [...users.values()],
+    chats: [...chats.values()],
+    date: Math.max(...payloads.map((payload) => payload.date)),
+    seq: 0,
+  }
 }
 
 function inputPeerId(peer: tl.TypeInputPeer): number {
