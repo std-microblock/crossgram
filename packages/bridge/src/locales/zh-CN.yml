@@ -9,7 +9,7 @@ autoMuteGroupChats: 默认关闭群聊通知；可在 Telegram 中为单个群�
 blockedContentMode: 拉黑用户内容显示策略：show 保留 Telegram 默认群聊显示；hide-user 隐藏其消息和 reaction；hide-related 还会隐藏回复或 @ 该用户的消息。
 voiceWorkerSocketPath: Rust 语音工作进程的本地 Unix socket 路径；留空以禁用语音通话。
 voiceWorkerTimeoutMs: 单次本地语音工作进程请求允许的最长毫秒数。
-voiceDirectIce: 仅当配置的 MTProto 主机为回环地址时允许直接 ICE。
+voiceDirectIce: 仅当配置的 MTProto 主机为回环地址或私有 LAN 时允许直接 ICE。
 voiceTurnHost: 向 Telegram 和原生语音工作进程公布的 TURN 主机；留空以禁用 TURN。
 voiceTurnPort: 向 Telegram 和原生语音工作进程公布的 TURN 端口。
 voiceTurnSharedSecret: Coturn REST 认证共享密钥，仅用于派生单次通话凭据。

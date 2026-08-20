@@ -1,7 +1,5 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
-import { createHmac } from 'node:crypto'
-import { isIP } from 'node:net'
 import { resolve } from 'node:path'
 import Long from 'long'
 import z from 'schemastery'
@@ -50,7 +48,8 @@ import {
 } from './sticker-dashboard.js'
 import { CallRegistry, type VoiceMediaStartProvider, type VoiceWorkerClient } from './voice/call-registry.js'
 import type { VoiceCallMediaProvider } from './voice/media.js'
-import { VoiceWorkerSocketClient, type VoiceWorkerRtcServer } from './voice/voice-worker-client.js'
+import { createBuiltInVoiceMediaProvider } from './voice/media-config.js'
+import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 import { RequestInboxSystemPeerProvider } from './request-inbox.js'
@@ -128,7 +127,7 @@ export interface BridgeConfig {
   voiceWorkerTimeoutMs?: number
   /** Call-scoped real relay config source; without it voice media fails closed. */
   voiceMediaStartProvider?: VoiceMediaStartProvider
-  /** Allow direct ICE only when the configured MTProto host is loopback. */
+  /** Allow direct ICE only when the configured MTProto host is loopback or private LAN. */
   voiceDirectIce?: boolean
   /** Public TURN host advertised to both Telegram and the native worker. */
   voiceTurnHost?: string
@@ -255,36 +254,18 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       .registerContext(message.conversationId, message.reactionContext),
     conversationViews,
   )
-  const hasDirectIce = config.voiceDirectIce && isLoopbackHost(config.serverHost)
-  const voiceTurnSharedSecret = config.voiceTurnSharedSecret || process.env.CROSSGRAM_TURN_SHARED_SECRET
-  const hasTurn = Boolean(config.voiceTurnHost && voiceTurnSharedSecret)
-  const builtInMediaProvider: VoiceMediaStartProvider | undefined = hasDirectIce || hasTurn
-    ? {
-        async get(call) {
-          const rtcServers: VoiceWorkerRtcServer[] = []
-          if (hasTurn) {
-            const expires = Math.floor(Date.now() / 1_000) + (config.voiceTurnTtlSeconds ?? 3_600)
-            const username = `${expires}:${call.callId}`
-            rtcServers.push({
-              id: 1,
-              host: config.voiceTurnHost!,
-              port: config.voiceTurnPort ?? 3478,
-              username,
-              password: createHmac('sha1', voiceTurnSharedSecret!).update(username).digest('base64'),
-              turn: true,
-              tcp: false,
-            })
-          }
-          return {
-            initializationTimeoutMs: config.voiceWorkerTimeoutMs,
-            receiveTimeoutMs: config.voiceWorkerTimeoutMs,
-            enableP2p: hasDirectIce || hasTurn, allowTcp: false, protocolV1: true,
-            enableAec: true, enableNs: true, enableAgc: true, endpoints: [],
-            rtcServers,
-          }
-        },
-      }
-    : undefined
+  const builtInMediaProvider = createBuiltInVoiceMediaProvider({
+    serverHost: config.serverHost,
+    directIce: config.voiceDirectIce,
+    workerTimeoutMs: config.voiceWorkerTimeoutMs,
+    turn: {
+      host: config.voiceTurnHost,
+      port: config.voiceTurnPort,
+      sharedSecret: config.voiceTurnSharedSecret,
+      ttlSeconds: config.voiceTurnTtlSeconds,
+    },
+    envTurnSharedSecret: process.env.CROSSGRAM_TURN_SHARED_SECRET,
+  })
   const socketWorker = !config.voiceWorker && config.voiceWorkerSocketPath
     ? new VoiceWorkerSocketClient({
         socketPath: config.voiceWorkerSocketPath,
@@ -1249,12 +1230,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 }
 
 /** Normalize a phone to digits only — clients send '+' for sendCode but not for signIn. */
-function isLoopbackHost(host: string): boolean {
-  if (host === 'localhost' || host === '::1') return true
-  const family = isIP(host)
-  return family === 4 && host.split('.')[0] === '127'
-}
-
 function normPhone(p: string): string {
   return p.replace(/\D/g, '')
 }

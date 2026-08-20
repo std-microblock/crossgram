@@ -9,7 +9,7 @@ autoMuteGroupChats: Mute group chats by default; per-chat Telegram settings can 
 blockedContentMode: "Blocked-user visibility: show keeps Telegram's default group behavior; hide-user hides their messages and reactions; hide-related also hides messages replying to or mentioning them."
 voiceWorkerSocketPath: Local Unix socket path for the Rust voice worker; leave empty to disable voice calls.
 voiceWorkerTimeoutMs: Maximum time in milliseconds for one local voice-worker request.
-voiceDirectIce: Allow direct ICE only when the configured MTProto host is loopback.
+voiceDirectIce: Allow direct ICE only when the configured MTProto host is loopback or private LAN.
 voiceTurnHost: Public TURN host advertised to Telegram and the native voice worker; leave empty to disable TURN.
 voiceTurnPort: Public TURN port advertised to Telegram and the native voice worker.
 voiceTurnSharedSecret: Coturn REST-auth shared secret used only to derive call-scoped credentials.
