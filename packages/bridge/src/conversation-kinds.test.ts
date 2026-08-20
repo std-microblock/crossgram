@@ -1287,6 +1287,7 @@ describe('conversation kinds', () => {
       dialog.peer._ === 'peerChannel' && dialog.peer.channelId === groupId)).toBeDefined()
     expect(dialogs.chats).toContainEqual(expect.objectContaining({
       _: 'channel', title: 'QQ Group', megagroup: true,
+      defaultBannedRights: { _: 'chatBannedRights', untilDate: 0 },
     }))
 
     await rpc.getFullChannel({ _: 'channels.getFullChannel', channel: group })
@@ -1474,5 +1475,65 @@ describe('conversation kinds', () => {
     for (const result of [topics, byId, legacyTopics, legacyById, replies, updated]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
+  })
+
+  it('grants modern Telegram clients writable defaults for ordinary group members', async () => {
+    const memberGroup: IMConversation = {
+      id: 'member-group', kind: 'group', title: 'Member Group', selfRole: 'member',
+    }
+    const memberPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return {
+          dialogs: [{ conversation: memberGroup, unreadCount: 0, lastMessage: source(memberGroup) }],
+        }
+      },
+      async getHistory() {
+        return { messages: [source(memberGroup)] }
+      },
+    }
+    const { rpc } = await createRpc(memberPlatform)
+
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const chat = dialogs.chats[0]
+
+    expect(chat).toMatchObject({
+      _: 'channel', title: memberGroup.title, megagroup: true,
+      defaultBannedRights: { _: 'chatBannedRights', untilDate: 0 },
+    })
+    expect(chat).toMatchObject({ creator: undefined, adminRights: undefined })
+    expect(roundTrip(chat)).toMatchObject({
+      _: 'channel',
+      defaultBannedRights: {
+        _: 'chatBannedRights', sendMessages: false, sendMedia: false, sendPlain: false, untilDate: 0,
+      },
+    })
+  })
+
+  it('projects read-only groups with explicit send restrictions', async () => {
+    const readOnlyGroup: IMConversation = {
+      id: 'read-only-group', kind: 'group', title: 'Read-only Group', selfRole: 'member',
+      metadata: { readOnly: true },
+    }
+    const readOnlyPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return {
+          dialogs: [{ conversation: readOnlyGroup, unreadCount: 0, lastMessage: source(readOnlyGroup) }],
+        }
+      },
+      async getHistory() {
+        return { messages: [source(readOnlyGroup)] }
+      },
+    }
+    const { rpc } = await createRpc(readOnlyPlatform)
+
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    expect(dialogs.chats[0]).toMatchObject({
+      _: 'channel',
+      defaultBannedRights: {
+        _: 'chatBannedRights', sendMessages: true, sendMedia: true, sendPlain: true, untilDate: 0,
+      },
+    })
   })
 })

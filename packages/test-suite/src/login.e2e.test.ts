@@ -3282,6 +3282,12 @@ describe('bridge login e2e', () => {
         offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 6)
       const parentChat = dialogs.chats.find((chat: any) => chat.title === parent.title)
+      expect(parentChat).toMatchObject({
+        _: 'channel', megagroup: true,
+        defaultBannedRights: {
+          _: 'chatBannedRights', sendMessages: false, sendMedia: false, sendPlain: false, untilDate: 0,
+        },
+      })
       const parentHistory = await callRpc(client, key, sid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerChannel', channelId: parentChat.id, accessHash: Long.ZERO },

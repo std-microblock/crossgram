@@ -784,7 +784,10 @@ describe('UpdateManager', () => {
       _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: firstId }],
     })).resolves.toMatchObject({ messages: [{ _: 'message', id: firstId, message: 'forwarded 0' }] })
     expect(payload.chats).toMatchObject([
-      { _: 'channel', title: conversation.title, megagroup: true },
+      {
+        _: 'channel', title: conversation.title, megagroup: true,
+        defaultBannedRights: { _: 'chatBannedRights', untilDate: 0 },
+      },
       { _: 'chat', id: virtualId, title: virtual.title, participantsCount: 1 },
     ])
     expect(JSON.stringify(payload)).not.toContain('tg://privatepost')

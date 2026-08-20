@@ -4495,6 +4495,7 @@ export class DialogRpc {
       adminRights: creator || administrator
         ? makeAdminRights(conversation.selfPermissions, creator)
         : undefined,
+      defaultBannedRights: makeDefaultBannedRights(conversation.metadata?.readOnly === true),
       id, accessHash: Long.ONE, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
       forum: !broadcast && (
@@ -4952,6 +4953,35 @@ export function makeAdminRights(
     manageCall: permissions?.manageConversation ?? owner,
     manageTopics: permissions?.manageConversation ?? owner,
     other: permissions?.manageConversation ?? owner,
+  }
+}
+
+/**
+ * Modern Telegram clients require default_banned_rights to decide whether a
+ * regular channel member may send. Omitting it is interpreted as no granted
+ * bannable actions rather than as an unrestricted default member.
+ */
+export function makeDefaultBannedRights(readOnly = false): tl.RawChatBannedRights {
+  return {
+    _: 'chatBannedRights',
+    ...(readOnly ? {
+      sendMessages: true,
+      sendMedia: true,
+      sendStickers: true,
+      sendGifs: true,
+      sendGames: true,
+      sendInline: true,
+      embedLinks: true,
+      sendPolls: true,
+      sendPhotos: true,
+      sendVideos: true,
+      sendRoundvideos: true,
+      sendAudios: true,
+      sendVoices: true,
+      sendDocs: true,
+      sendPlain: true,
+    } : {}),
+    untilDate: 0,
   }
 }
 

@@ -4,7 +4,8 @@ import type { ServerConnection } from '@mtproto-relay/mtproto'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import {
-  makeAdminRights, makeTlArticleMedia, makeTlCardPreview, makeTlMessageMedia, projectTlMessage, stableId,
+  makeAdminRights, makeDefaultBannedRights, makeTlArticleMedia, makeTlCardPreview,
+  makeTlMessageMedia, projectTlMessage, stableId,
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
@@ -1132,6 +1133,7 @@ function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): 
     adminRights: creator || administrator
       ? makeAdminRights(conversation.selfPermissions, creator)
       : undefined,
+    defaultBannedRights: makeDefaultBannedRights(conversation.metadata?.readOnly === true),
     id, accessHash: Long.ONE, title: conversation.title,
     broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
     forum: forum || undefined,
