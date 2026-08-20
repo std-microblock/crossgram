@@ -298,6 +298,25 @@ describe('QQNTClient streaming transport', () => {
     expect(requestUrl).toBe('/conversations/group%2F1/search?q=%E6%B5%8B%E8%AF%95+key&cursor=opaque&limit=25&fromUserId=sender&minTimestamp=10&maxTimestamp=20&mediaKind=image')
   })
 
+  it('forwards group-file folder pagination', async () => {
+    let requestUrl = ''
+    server = createServer((request, response) => {
+      requestUrl = request.url ?? ''
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ items: [], nextCursor: 'next' }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+
+    await expect(client.getGroupFiles('group/1', {
+      folderId: 'folder a', cursor: 'opaque', limit: 50,
+    })).resolves.toEqual({ items: [], nextCursor: 'next' })
+    expect(requestUrl).toBe('/conversations/group%2F1/group-files?folderId=folder+a&cursor=opaque&limit=50')
+  })
+
   it('streams media directly to QQ Highway and posts only CDN metadata to the local bridge', async () => {
     const thumbnail = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
     const thumbnailMd5 = createHash('md5').update(thumbnail).digest('hex')

@@ -361,6 +361,22 @@ type IMStickerSendPlan =
 
 adapter 只负责执行最终 native/upload 输入，不实现 Telegram sticker set、收藏或最近使用逻辑。
 
+### 群文件
+
+平台可选实现 `listGroupFiles(session, conversation, { folderId, cursor, limit })`，返回原生群文件夹和文件。
+文件项必须携带可由 `downloadMedia()` 打开的 `IMMedia`；文件夹 ID、文件 ID 和分页 cursor 都作为 opaque
+字符串传递，bridge 不解析平台内部结构。
+
+对实现该能力的平台，bridge 提供两层映射：
+
+- Telegram 群聊“共享媒体 → 文件”使用 `messages.search + inputMessagesFilterDocument`，将原生群文件投影为
+  只读 document 搜索结果；由于 Telegram 没有文件夹模型，只映射当前原生列表中能表示为 document 的文件。
+- Telegram 附件菜单提供“群文件”Mini App，保留文件夹导航、分页、当前目录搜索和 Range 下载。
+  Mini App URL 使用短期 HMAC token 绑定平台 session 与群聊，浏览器侧不会接触 QQNT bridge token 或媒体 locator。
+
+移动端需要把 `bridge.groupFilesMiniApp.publicUrl` 配置为 Telegram 客户端可访问的 HTTPS 地址；默认值使用
+Cordis server 的本地 `baseUrl`，适合本机桌面客户端与开发调试。
+
 ## 10. Reaction
 
 Reaction 是消息 mutation，不属于 message text/media，也不能通过 `message-edit` 模拟。平台使用 opaque native key：

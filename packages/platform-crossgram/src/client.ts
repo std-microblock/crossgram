@@ -278,6 +278,14 @@ export class QQNTClient {
     return this.json(`/conversations/${encodeURIComponent(id)}/search${queryString(query)}`)
   }
 
+  getGroupFiles(id: string, query: {
+    folderId?: string
+    cursor?: string
+    limit?: number
+  } = {}): Promise<import('./protocol.js').WireGroupFilePage> {
+    return this.json(`/conversations/${encodeURIComponent(id)}/group-files${queryString(query)}`)
+  }
+
   getMembers(id: string, query: { cursor?: string, limit?: number } = {}): Promise<WireMemberPage> {
     return this.json(`/conversations/${encodeURIComponent(id)}/members${queryString(query)}`)
   }

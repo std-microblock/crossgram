@@ -468,6 +468,47 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('projects QQ group files into Telegram document-search messages', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.searchMessages = vi.fn()
+    platform.client.getGroupFiles = vi.fn(async () => ({
+      total: 2,
+      nextCursor: '2',
+      items: [{
+        type: 'folder' as const, id: 'folder', parentId: '', name: '资料',
+        createTime: 1, modifyTime: 2, creatorId: '1', creatorName: 'Alice', fileCount: 1,
+      }, {
+        type: 'file' as const, id: 'uuid', parentId: '', name: 'manual.pdf', size: 9,
+        uploadTime: 100, modifyTime: 110, downloadCount: 4, uploaderId: '42', uploaderName: 'Bob',
+        busId: 102,
+        media: {
+          id: 'group-file:uuid', kind: 'file' as const, name: 'manual.pdf', size: 9,
+          locator: {
+            messageId: 'group-file:uuid', elementId: 'element', chatType: 2 as const,
+            peerUid: 'group', kind: 'file' as const, fileName: 'manual.pdf',
+            fileSize: '9', fileUuid: 'uuid', fileBizId: 102,
+          },
+        },
+      }],
+    }))
+
+    await expect(platform.searchMessages(session, { id: '2:group' }, {
+      query: 'manual', cursor: '0', limit: 20, mediaKind: 'file',
+    })).resolves.toMatchObject({
+      total: 2,
+      nextCursor: '2',
+      messages: [{
+        id: 'qq-group-file:uuid', senderId: '42', timestamp: 100,
+        content: { parts: [
+          { type: 'text', text: 'manual.pdf' },
+          { type: 'media', media: { name: 'manual.pdf', locator: { fileUuid: 'uuid' } } },
+        ] },
+      }],
+    })
+    expect(platform.client.getGroupFiles).toHaveBeenCalledWith('2:group', { cursor: '0', limit: 20 })
+    expect(platform.client.searchMessages).not.toHaveBeenCalled()
+  })
+
 
   it('maps QQ wire serviceAction into IMMessage.content.serviceAction', async () => {
     const platform = new QQNTPlatform()

@@ -19,7 +19,6 @@ describe('post-login startup responses', () => {
       'help.getPremiumPromo',
       'help.getPromoData',
       'help.getTermsOfServiceUpdate',
-      'messages.getAttachMenuBots',
       'messages.getEmojiGroups',
       'messages.getEmojiStickerGroups',
       'messages.getFeaturedEmojiStickers',

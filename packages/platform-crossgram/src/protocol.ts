@@ -67,6 +67,40 @@ export interface WireFlashTransferResult {
   expiresAt?: number
 }
 
+export interface WireGroupFile {
+  type: 'file'
+  id: string
+  parentId: string
+  name: string
+  size: number
+  uploadTime: number
+  modifyTime: number
+  expiresAt?: number
+  downloadCount: number
+  uploaderId: string
+  uploaderName: string
+  busId: number
+  media: WireMedia
+}
+
+export interface WireGroupFileFolder {
+  type: 'folder'
+  id: string
+  parentId: string
+  name: string
+  createTime: number
+  modifyTime: number
+  creatorId: string
+  creatorName: string
+  fileCount: number
+}
+
+export interface WireGroupFilePage {
+  items: Array<WireGroupFile | WireGroupFileFolder>
+  nextCursor?: string
+  total?: number
+}
+
 export type QQStickerReference = (
   | {
       kind: 'sysface'

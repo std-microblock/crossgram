@@ -553,6 +553,39 @@ export interface IMMessageSearchPage<TMediaLocator = unknown> {
   total?: number
 }
 
+export interface IMGroupFile<TMediaLocator = unknown> {
+  type: 'file'
+  id: string
+  parentId: string
+  name: string
+  size: number
+  uploadTime: number
+  modifyTime: number
+  expiresAt?: number
+  downloadCount: number
+  uploaderId: string
+  uploaderName: string
+  media: IMMedia<TMediaLocator>
+}
+
+export interface IMGroupFileFolder {
+  type: 'folder'
+  id: string
+  parentId: string
+  name: string
+  createTime: number
+  modifyTime: number
+  creatorId: string
+  creatorName: string
+  fileCount: number
+}
+
+export interface IMGroupFilePage<TMediaLocator = unknown> {
+  items: Array<IMGroupFile<TMediaLocator> | IMGroupFileFolder>
+  nextCursor?: string
+  total?: number
+}
+
 export interface IMTransferProgress {
   phase: 'upload' | 'download'
   mediaIndex: number
@@ -699,6 +732,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     query: IMMessageSearchQuery,
   ): Promise<IMMessageSearchPage<TMediaLocator>>
+  listGroupFiles?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    query?: IMPageQuery & { folderId?: string },
+  ): Promise<IMGroupFilePage<TMediaLocator>>
   /** Resolve one opaque platform message, used for reply-target backfill. */
   getMessage?(
     session: PlatformSession,

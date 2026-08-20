@@ -56,6 +56,7 @@ import { ActiveSessionStore, registerActiveSessionRpc } from './active-sessions.
 import { ConversationViewService } from './conversation-view.js'
 import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.js'
 import { BridgeManagementError, BridgeManagementService } from './management-service.js'
+import { registerGroupFilesMiniApp } from './group-files-miniapp.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
@@ -104,6 +105,14 @@ export interface BridgeConfig {
   altEndpoints?: string[]
   /** HTTP prefix for platform account assets (default: /api). */
   apiPrefix?: string
+  /** Telegram attachment-menu Mini App for browsing platform-native group files. */
+  groupFilesMiniApp?: {
+    enabled?: boolean
+    path?: string
+    publicUrl?: string
+    secret?: string
+    tokenTtlSeconds?: number
+  }
   uploadPath?: string
   /** Mute group chats by default unless the Telegram user explicitly enables them. */
   autoMuteGroupChats?: boolean
@@ -143,6 +152,19 @@ export const Config = z.object({
     }
   })).default([]),
   apiPrefix: z.string().default('/api'),
+  groupFilesMiniApp: z.object({
+    enabled: z.boolean().default(true),
+    path: z.string().default('/group-files'),
+    publicUrl: z.string().default(''),
+    secret: z.string().role('secret').default(''),
+    tokenTtlSeconds: z.natural().min(60).max(3_600).default(600),
+  }).default({
+    enabled: true,
+    path: '/group-files',
+    publicUrl: '',
+    secret: '',
+    tokenTtlSeconds: 600,
+  }),
   uploadPath: z.string().default('data/bridge-uploads'),
   autoMuteGroupChats: z.boolean().default(true),
   blockedContentMode: z.union([
@@ -379,6 +401,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   registerActiveSessionRpc(rpc, activeSessions, async rpcContext =>
     (await requireBridgeSession(rpcContext)).session)
   new MtprotoBridgeService(ctx, requireBridgeSession)
+  registerGroupFilesMiniApp(ctx, platforms, requireBridgeSession, config.groupFilesMiniApp)
 
   const authorizationLocks = new Map<string, Promise<void>>()
   const withAuthorizationLock = async <T>(authKeyId: string, callback: () => Promise<T>): Promise<T> => {

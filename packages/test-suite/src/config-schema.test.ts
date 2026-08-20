@@ -19,7 +19,7 @@ import { Config as memoryUpdateStoreConfig } from '../../update-store-memory/src
 
 const cases = [
   ['bridge', bridgeConfig, [
-    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'uploadPath', 'autoMuteGroupChats',
+    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
     'blockedContentMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
     'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
   ]],
@@ -74,6 +74,13 @@ describe('plugin config schemas', () => {
       serverPort: 4430,
       altEndpoints: [],
       apiPrefix: '/api',
+      groupFilesMiniApp: {
+        enabled: true,
+        path: '/group-files',
+        publicUrl: '',
+        secret: '',
+        tokenTtlSeconds: 600,
+      },
       uploadPath: 'data/bridge-uploads',
       autoMuteGroupChats: true,
       blockedContentMode: 'hide-user',

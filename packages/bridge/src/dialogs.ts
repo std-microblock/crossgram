@@ -669,6 +669,11 @@ export class DialogRpc {
     return result
   }
 
+  async resolveInputConversation(peer: tl.TypeInputPeer): Promise<IMConversation> {
+    await this._hydratePeers()
+    return this._conversation(this._resolvePeer(peer))
+  }
+
   async search(req: tl.messages.RawSearchRequest): Promise<tl.messages.TypeMessages> {
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)

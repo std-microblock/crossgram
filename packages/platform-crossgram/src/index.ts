@@ -8,7 +8,7 @@ import zhCN from './locales/zh-CN.yml'
 import {
   IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
   messagePartText, resolvePlatformPluginId, stableId,
-  type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage,
+  type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage, type IMGroupFilePage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
   type IMMediaInput, type IMMediaUploadProbe,
   type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMTransferOptions,
@@ -25,7 +25,7 @@ import { defineQQMediaPreviewModel, mediaPreviewKey, QQMediaPreviewer } from './
 import { migrateLegacyQQMessageMedia } from './raw-media-migration.js'
 import { migrateLegacyQQGroupAliasUsers } from './user-name-migration.js'
 import type {
-  QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireMedia, WireMessage,
+  QQMediaLocator, QQStickerReference, WireCallSignalEvent, WireConversation, WireEvent, WireGroupFilePage, WireMedia, WireMessage,
   WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireRequest, WireTextPart,
 } from './protocol.js'
 
@@ -790,6 +790,44 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     query: IMMessageSearchQuery,
   ): Promise<IMMessageSearchPage<QQMediaLocator>> {
     if (isFilteredConversationId(conversation.id)) return { messages: [] }
+    if (isFilteredConversationId(conversation.id)) return { messages: [] }
+    if (query.mediaKind === 'file' && this.isGroupConversation(conversation.id)) {
+      const page = await this.listGroupFiles(session, conversation, {
+        cursor: query.cursor,
+        limit: query.limit,
+      })
+      const normalized = query.query.trim().toLocaleLowerCase()
+      const files = page.items.filter((item) => item.type === 'file').filter((file) => {
+        if (normalized && !file.name.toLocaleLowerCase().includes(normalized)) return false
+        if (query.fromUserId && file.uploaderId !== query.fromUserId) return false
+        if (query.minTimestamp && file.uploadTime <= query.minTimestamp) return false
+        if (query.maxTimestamp && file.uploadTime >= query.maxTimestamp) return false
+        return true
+      })
+      return {
+        messages: files.map((file) => ({
+          id: `qq-group-file:${file.id}`,
+          conversationId: conversation.id,
+          senderId: file.uploaderId || session.userId,
+          sender: {
+            id: file.uploaderId || session.userId,
+            firstName: file.uploaderName || file.uploaderId || 'QQ',
+            username: file.uploaderId || undefined,
+          },
+          timestamp: file.uploadTime,
+          outgoing: false,
+          metadata: { qqGroupFileId: file.id, qqGroupFileParentId: file.parentId },
+          content: {
+            parts: [
+              { type: 'text' as const, text: file.name },
+              { type: 'media' as const, media: file.media },
+            ],
+          },
+        })),
+        nextCursor: page.nextCursor,
+        total: page.total,
+      }
+    }
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
     const response = await this.client.searchMessages(conversation.id, {
       q: query.query,
@@ -805,6 +843,33 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       messages: await Promise.all(response.messages.filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
         this.prepareRequestedMessage(session, this.conversationFor(conversation.id), this.mapMessage(message)))),
       nextCursor: response.nextCursor,
+    }
+  }
+
+  async listGroupFiles(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    query: { folderId?: string, cursor?: string, limit?: number } = {},
+  ): Promise<IMGroupFilePage<QQMediaLocator>> {
+    if (!this.isGroupConversation(conversation.id)) return { items: [] }
+    const response: WireGroupFilePage = await this.client.getGroupFiles(conversation.id, query)
+    return {
+      items: response.items.map((item) => item.type === 'folder' ? { ...item } : {
+        type: 'file' as const,
+        id: item.id,
+        parentId: item.parentId,
+        name: item.name,
+        size: item.size,
+        uploadTime: item.uploadTime,
+        modifyTime: item.modifyTime,
+        expiresAt: item.expiresAt,
+        downloadCount: item.downloadCount,
+        uploaderId: item.uploaderId,
+        uploaderName: item.uploaderName,
+        media: mapMedia(item.media),
+      }),
+      nextCursor: response.nextCursor,
+      total: response.total,
     }
   }
 

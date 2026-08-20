@@ -31,9 +31,6 @@ export const startupRpcHandlers: Readonly<Record<string, StartupHandler>> = {
   'messages.getEmojiStickerGroups': () => ({
     _: 'messages.emojiGroups', hash: 0, groups: [],
   } as unknown as tl.TlObject),
-  'messages.getAttachMenuBots': () => ({
-    _: 'attachMenuBots', hash: Long.ZERO, bots: [], users: [],
-  } as unknown as tl.TlObject),
   'stories.getAllStories': () => ({
     _: 'stories.allStories', count: 0, state: '', peerStories: [], chats: [], users: [],
     stealthMode: { _: 'storiesStealthMode' },

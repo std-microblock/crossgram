@@ -3,6 +3,7 @@ serverHost: Public MTProto host advertised to Telegram clients.
 serverPort: Public MTProto port advertised to Telegram clients.
 altEndpoints: Alternate MTProto endpoints for the same data center, as host:port or [IPv6]:port strings, advertised after the primary endpoint.
 apiPrefix: HTTP prefix used for platform account assets.
+groupFilesMiniApp: Telegram attachment-menu Mini App used to browse platform-native group files.
 uploadPath: Directory used to store uploads received from Telegram clients.
 autoMuteGroupChats: Mute group chats by default; per-chat Telegram settings can override this.
 blockedContentMode: "Blocked-user visibility: show keeps Telegram's default group behavior; hide-user hides their messages and reactions; hide-related also hides messages replying to or mentioning them."
