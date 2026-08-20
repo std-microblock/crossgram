@@ -485,7 +485,7 @@
         printf '%s\n' \
           '#include <crossgram/tgcalls_shim.h>' \
           'int main(void) {' \
-          '  return crossgram_tgcalls_session_create(0, 0, 0, 0, 0, 0, 0) ==' \
+          '  return crossgram_tgcalls_session_create(0, 0, 0, 0, 0, 0, 0, 0, 0) ==' \
           '                 CROSSGRAM_TGCALLS_SHIM_STATUS_INVALID_ARGUMENT ? 0 : 1;' \
           '}' \
           > consumer/main.cpp
@@ -570,6 +570,116 @@
       cargoTestFlags = ["--features" "native-tgcalls-shim"];
     };
 
+    voiceWorkerLauncher = pkgs.writeShellScriptBin "crossgram-voice-worker-launcher" ''
+      if test "$#" -ne 0; then
+        exec ${voiceWorker}/bin/crossgram-voice-worker "$@"
+      fi
+      if test "''${CROSSGRAM_VOICE_WORKER_LAUNCHER_REEXEC:-}" != 1; then
+        exec ${pkgs.coreutils}/bin/env \
+          --default-signal=HUP --default-signal=INT --default-signal=TERM \
+          CROSSGRAM_VOICE_WORKER_LAUNCHER_REEXEC=1 "$0"
+      fi
+
+      if test -n "''${CROSSGRAM_VOICE_WORKER_SOCKET:-}"; then
+        socket="$CROSSGRAM_VOICE_WORKER_SOCKET"
+      elif test -n "''${XDG_RUNTIME_DIR:-}"; then
+        socket="$XDG_RUNTIME_DIR/crossgram/voice-worker.sock"
+      else
+        socket="''${TMPDIR:-/tmp}/crossgram-voice-worker-''${UID}/worker.sock"
+      fi
+      socket_parent="$(${pkgs.coreutils}/bin/dirname -- "$socket")"
+      ${pkgs.coreutils}/bin/mkdir -p -- "$socket_parent"
+      ${pkgs.coreutils}/bin/chmod 700 -- "$socket_parent"
+
+      # This check is deliberately repeated immediately before the worker starts.
+      # Publication below is still atomic, so a later creator wins without replacement.
+      if test -e "$socket" || test -L "$socket"; then
+        ${pkgs.coreutils}/bin/printf 'refusing to replace an existing Unix socket path: %s\\n' "$socket" >&2
+        exit 1
+      fi
+
+      staging_dir="$(${pkgs.coreutils}/bin/mktemp -d "$socket_parent/.voice-worker.XXXXXX")"
+      ${pkgs.coreutils}/bin/chmod 700 -- "$staging_dir"
+      staging_socket="$staging_dir/worker.sock"
+      worker=""
+      staging_socket_identity=""
+      published_socket_identity=""
+      cleanup() {
+        status=$?
+        trap - EXIT INT TERM HUP
+        if test -n "$published_socket_identity" || {
+          test -n "$staging_socket_identity" &&
+            ! test -e "$staging_socket" &&
+            ! test -L "$staging_socket"
+        }; then
+          current_identity="$(${pkgs.coreutils}/bin/stat -c '%d:%i' -- "$socket" 2>/dev/null || true)"
+          if test "$current_identity" = "$staging_socket_identity"; then
+            ${pkgs.coreutils}/bin/rm -f -- "$socket"
+          fi
+        fi
+        if test -n "$staging_socket_identity"; then
+          current_identity="$(${pkgs.coreutils}/bin/stat -c '%d:%i' -- "$staging_socket" 2>/dev/null || true)"
+          if test "$current_identity" = "$staging_socket_identity"; then
+            ${pkgs.coreutils}/bin/rm -f -- "$staging_socket"
+          fi
+        fi
+        ${pkgs.coreutils}/bin/rmdir -- "$staging_dir" 2>/dev/null || true
+        exit "$status"
+      }
+      forward_signal() {
+        signal="$1"
+        signal_status="$2"
+        if test -n "$worker" && kill -0 "$worker" 2>/dev/null; then
+          kill "-$signal" "$worker" || true
+        fi
+        if test -n "$worker"; then
+          wait "$worker" || true
+        fi
+        exit "$signal_status"
+      }
+      trap cleanup EXIT
+      trap 'forward_signal HUP 129' HUP
+      trap 'forward_signal INT 130' INT
+      trap 'forward_signal TERM 143' TERM
+
+      ${pkgs.coreutils}/bin/env \
+        --default-signal=HUP --default-signal=INT --default-signal=TERM \
+        ${voiceWorker}/bin/crossgram-voice-worker --unix "$staging_socket" &
+      worker="$!"
+      while kill -0 "$worker" 2>/dev/null; do
+        if test -S "$staging_socket"; then
+          staging_socket_identity="$(${pkgs.coreutils}/bin/stat -c '%d:%i' -- "$staging_socket")"
+          break
+        fi
+      done
+      if test -z "$staging_socket_identity"; then
+        wait "$worker"
+        exit "$?"
+      fi
+
+      if ${voiceWorker}/bin/crossgram-voice-worker \
+        --publish-unix-noreplace "$staging_socket" "$socket"; then
+        published_socket_identity="$staging_socket_identity"
+      else
+        publish_status=$?
+        if kill -0 "$worker" 2>/dev/null; then
+          kill -TERM "$worker" || true
+        fi
+        wait "$worker" || true
+        exit "$publish_status"
+      fi
+      current_identity="$(${pkgs.coreutils}/bin/stat -c '%d:%i' -- "$socket" 2>/dev/null || true)"
+      if test "$current_identity" != "$staging_socket_identity"; then
+        ${pkgs.coreutils}/bin/printf 'published Unix socket identity changed unexpectedly: %s\\n' "$socket" >&2
+        if kill -0 "$worker" 2>/dev/null; then
+          kill -TERM "$worker" || true
+        fi
+        wait "$worker" || true
+        exit 1
+      fi
+      wait "$worker"
+    '';
+
     tgcallsShimStrict = tgcallsShim.overrideAttrs (old: {
       pname = "crossgram-tgcalls-shim-strict";
       preConfigure =
@@ -651,44 +761,54 @@
     voiceWorkerUnixCheck = pkgs.runCommand "crossgram-voice-worker-unix-check" {
       nativeBuildInputs = with pkgs; [coreutils python3 strace util-linux];
     } ''
-      socket="$TMPDIR/voice-worker.sock"
+      runtime_dir="$TMPDIR/crossgram-runtime"
+      socket="$runtime_dir/crossgram/voice-worker.sock"
       trace="$TMPDIR/voice-worker.strace"
       worker_pid_file="$TMPDIR/voice-worker.pid"
+      unset CROSSGRAM_VOICE_WORKER_SOCKET
+      export XDG_RUNTIME_DIR="$runtime_dir"
+      test -x ${voiceWorker}/bin/crossgram-voice-worker
       worker=""
       tracer=""
       cleanup() {
         status=$?
         trap - EXIT
         if test -n "$worker" && kill -0 "$worker" 2>/dev/null; then
-          if ! kill -KILL -- "-$worker" 2>/dev/null; then
-            echo "cleanup: voice worker already exited" >&2
-          fi
+          kill -KILL -- "-$worker" 2>/dev/null || true
         fi
         if test -n "$tracer" && kill -0 "$tracer" 2>/dev/null; then
-          if ! kill -KILL "$tracer" 2>/dev/null; then
-            echo "cleanup: strace already exited" >&2
-          fi
-          set +e
-          wait "$tracer"
-          set -e
+          kill -KILL "$tracer" 2>/dev/null || true
+          wait "$tracer" || true
         fi
-        rm -f "$socket" "$worker_pid_file"
+        ${pkgs.coreutils}/bin/rm -f -- "$worker_pid_file"
         exit "$status"
+      }
+      wait_for_socket() {
+        ${pkgs.coreutils}/bin/timeout 5 ${pkgs.bash}/bin/bash -c '
+          while ! test -S "$1"; do
+            kill -0 "$2" 2>/dev/null || exit 1
+          done
+        ' bash "$socket" "$worker"
+      }
+      wait_for_exit() {
+        ${pkgs.coreutils}/bin/timeout 5 ${pkgs.bash}/bin/bash -c '
+          while kill -0 "$1" 2>/dev/null; do :; done
+        ' bash "$1"
       }
       trap cleanup EXIT
       ${pkgs.strace}/bin/strace -f -o "$trace" -e trace=network \
         ${pkgs.util-linux}/bin/setsid ${pkgs.bash}/bin/bash -c '
-          printf "%s\\n" "$$" > "$1"
-          exec "$2" --unix "$3"
-        ' bash "$worker_pid_file" ${voiceWorker}/bin/crossgram-voice-worker "$socket" &
+          ${pkgs.coreutils}/bin/printf "%s\\n" "$$" > "$1"
+          exec "$2"
+        ' bash "$worker_pid_file" ${voiceWorkerLauncher}/bin/crossgram-voice-worker-launcher &
       tracer="$!"
-      for _ in $(seq 1 100); do
-        test -s "$worker_pid_file" && test -S "$socket" && break
-        sleep 0.01
-      done
-      test -s "$worker_pid_file"
-      worker="$(cat "$worker_pid_file")"
-      test -S "$socket"
+      ${pkgs.coreutils}/bin/timeout 5 ${pkgs.bash}/bin/bash -c '
+        while ! test -s "$1"; do :; done
+      ' bash "$worker_pid_file"
+      worker="$(${pkgs.coreutils}/bin/cat "$worker_pid_file")"
+      wait_for_socket
+      test "$( ${pkgs.coreutils}/bin/stat -c %a "$runtime_dir/crossgram")" = 700
+      test "$( ${pkgs.coreutils}/bin/stat -c %a "$socket")" = 600
       ${pkgs.python3}/bin/python3 - "$socket" <<'PY'
 import socket
 import struct
@@ -714,60 +834,150 @@ def request(tag, expected_response_tag):
         response = receive_exact(client, size)
     assert response[:2] == bytes((3, expected_response_tag)), response
 
-request(1, 0x81)   # PrepareCaller
-request(11, 0x8d)  # PollEvent
-request(6, 0x86)   # Hangup
+request(1, 0x81)
+request(11, 0x8d)
+request(6, 0x86)
 PY
-      if ! kill -0 "$worker" 2>/dev/null; then
-        echo "voice worker exited before test teardown" >&2
+      if ! kill -TERM "$worker"; then
+        ${pkgs.coreutils}/bin/printf 'failed to terminate voice worker process group\\n' >&2
         exit 1
       fi
-      timeout_file="$TMPDIR/voice-worker-teardown-timeout"
-      (
-        sleep 5
-        if kill -0 "$worker" 2>/dev/null; then
-          printf 'voice worker did not stop within five seconds\\n' > "$timeout_file"
-          kill -KILL -- "-$worker"
-        fi
-        if kill -0 "$tracer" 2>/dev/null; then
-          printf 'strace did not complete within five seconds\\n' >> "$timeout_file"
-          kill -KILL "$tracer"
-        fi
-      ) &
-      watchdog="$!"
-      if ! kill -TERM -- "-$worker"; then
-        echo "failed to terminate voice worker process group" >&2
-        exit 1
-      fi
+      wait_for_exit "$tracer"
       set +e
       wait "$tracer"
       tracer_status=$?
       set -e
-      if kill -0 "$watchdog" 2>/dev/null; then
-        kill -TERM "$watchdog"
-      fi
-      set +e
-      wait "$watchdog"
-      set -e
-      if test -e "$timeout_file"; then
-        cat "$timeout_file" >&2
-        exit 1
-      fi
       case "$tracer_status" in
         0|143) ;;
         *)
-          echo "strace exited unexpectedly with status $tracer_status" >&2
+          ${pkgs.coreutils}/bin/printf 'strace exited unexpectedly with status %s\\n' "$tracer_status" >&2
           exit 1
           ;;
       esac
-      # Unix-socket IPC is expected; no internet socket is permitted before media start.
-      if grep -E 'AF_(INET|INET6)' "$trace"; then
-        echo "voice worker opened an internet socket before media start" >&2
+      if ${pkgs.gnugrep}/bin/grep -E 'AF_(INET|INET6)' "$trace"; then
+        ${pkgs.coreutils}/bin/printf 'voice worker opened an internet socket before media start\\n' >&2
         exit 1
       fi
+      worker=""
+      tracer=""
+      test ! -e "$socket"
+      test ! -L "$socket"
+      ${pkgs.coreutils}/bin/rm -f -- "$worker_pid_file"
+
+      ${pkgs.util-linux}/bin/setsid ${pkgs.bash}/bin/bash -c '
+        ${pkgs.coreutils}/bin/printf "%s\\n" "$$" > "$1"
+        exec "$2"
+      ' bash "$worker_pid_file" ${voiceWorkerLauncher}/bin/crossgram-voice-worker-launcher &
+      ${pkgs.coreutils}/bin/timeout 5 ${pkgs.bash}/bin/bash -c '
+        while ! test -s "$1"; do :; done
+      ' bash "$worker_pid_file"
+      worker="$(${pkgs.coreutils}/bin/cat "$worker_pid_file")"
+      wait_for_socket
+      if ! kill -TERM "$worker"; then
+        ${pkgs.coreutils}/bin/printf 'failed to terminate restarted voice worker process group\\n' >&2
+        exit 1
+      fi
+      wait_for_exit "$worker"
+      set +e
+      wait "$worker"
+      worker_status=$?
+      set -e
+      case "$worker_status" in
+        143) ;;
+        *)
+          ${pkgs.coreutils}/bin/printf 'restarted voice worker exited unexpectedly with status %s\\n' "$worker_status" >&2
+          exit 1
+          ;;
+      esac
+      worker=""
+      test ! -e "$socket"
+      test ! -L "$socket"
+
+      ${pkgs.coreutils}/bin/printf %s 'pre-existing file' > "$socket"
+      file_identity="$(${pkgs.coreutils}/bin/stat -c '%d:%i' -- "$socket")"
+      if PATH=/does-not-exist ${voiceWorkerLauncher}/bin/crossgram-voice-worker-launcher; then
+        ${pkgs.coreutils}/bin/printf 'launcher accepted a pre-existing file\\n' >&2
+        exit 1
+      fi
+      test "$( ${pkgs.coreutils}/bin/stat -c '%d:%i' -- "$socket")" = "$file_identity"
+      test "$( ${pkgs.coreutils}/bin/cat "$socket")" = 'pre-existing file'
+      ${pkgs.coreutils}/bin/rm -f -- "$socket"
+
+      ${pkgs.python3}/bin/python3 - \
+        ${voiceWorker}/bin/crossgram-voice-worker \
+        ${voiceWorkerLauncher}/bin/crossgram-voice-worker-launcher \
+        "$socket" <<'PY'
+import os
+import socket
+import subprocess
+import sys
+
+worker, launcher, destination = sys.argv[1:]
+parent = os.path.dirname(destination)
+source = os.path.join(parent, "publish-source.sock")
+for path in (source, destination):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+source_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+destination_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    source_socket.bind(source)
+    destination_socket.bind(destination)
+    source_inode = os.lstat(source).st_ino
+    destination_inode = os.lstat(destination).st_ino
+    result = subprocess.run([worker, "--publish-unix-noreplace", source, destination])
+    assert result.returncode != 0
+    assert os.lstat(source).st_ino == source_inode
+    assert os.lstat(destination).st_ino == destination_inode
+
+    result = subprocess.run(
+        [launcher],
+        env={**os.environ, "CROSSGRAM_VOICE_WORKER_SOCKET": destination, "PATH": "/does-not-exist"},
+    )
+    assert result.returncode != 0
+    assert os.lstat(destination).st_ino == destination_inode
+finally:
+    source_socket.close()
+    destination_socket.close()
+    for path in (source, destination):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+PY
+      test ! -e "$socket"
+      test ! -L "$socket"
+
+      explicit_socket="$TMPDIR/explicit-worker.sock"
+      explicit_worker_pid_file="$TMPDIR/explicit-worker.pid"
+      ${pkgs.util-linux}/bin/setsid ${pkgs.bash}/bin/bash -c '
+        ${pkgs.coreutils}/bin/printf "%s\\n" "$$" > "$1"
+        exec "$2" --unix "$3"
+      ' bash "$explicit_worker_pid_file" ${voiceWorkerLauncher}/bin/crossgram-voice-worker-launcher "$explicit_socket" &
+      ${pkgs.coreutils}/bin/timeout 5 ${pkgs.bash}/bin/bash -c '
+        while ! test -s "$1"; do :; done
+      ' bash "$explicit_worker_pid_file"
+      worker="$(${pkgs.coreutils}/bin/cat "$explicit_worker_pid_file")"
+      ${pkgs.coreutils}/bin/timeout 5 ${pkgs.bash}/bin/bash -c '
+        while ! test -S "$1"; do
+          kill -0 "$2" 2>/dev/null || exit 1
+        done
+      ' bash "$explicit_socket" "$worker"
+      kill -TERM "$worker"
+      wait_for_exit "$worker"
+      set +e
+      wait "$worker"
+      worker_status=$?
+      set -e
+      test "$worker_status" = 143
+      worker=""
+      test -S "$explicit_socket"
+      ${pkgs.coreutils}/bin/rm -f -- "$explicit_socket" "$explicit_worker_pid_file"
       trap - EXIT
-      rm -f "$socket" "$worker_pid_file"
-      touch "$out"
+      ${pkgs.coreutils}/bin/rm -f -- "$worker_pid_file"
+      ${pkgs.coreutils}/bin/touch "$out"
     '';
 
     corepack = pkgs.writeShellScriptBin "corepack" ''
@@ -849,6 +1059,12 @@ PY
       voice-worker = voiceWorker;
       tgcalls-artifact-licenses = tgcallsLicenses;
       tgcalls-artifact-sbom = tgcallsSbom;
+    };
+
+    apps.${system}.voice-worker = {
+      type = "app";
+      program = "${voiceWorkerLauncher}/bin/crossgram-voice-worker-launcher";
+      meta.description = "Launch the Crossgram voice worker on its default Unix socket";
     };
 
     devShells.${system}.default = pkgs.mkShell {

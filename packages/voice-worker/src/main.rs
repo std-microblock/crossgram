@@ -6,6 +6,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use nix::fcntl::{AT_FDCWD, RenameFlags, renameat2};
 use nix::sys::socket::{getsockopt, sockopt};
 use nix::unistd::Uid;
 
@@ -53,6 +55,22 @@ fn main() -> io::Result<()> {
         }
         (Some(flag), Some(path)) if flag == "--unix" && arguments.next().is_none() => {
             serve_unix(Path::new(&path))
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        (Some(flag), Some(source)) if flag == "--publish-unix-noreplace" => {
+            let destination = arguments.next().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "usage: crossgram-voice-worker [--unix PATH]",
+                )
+            })?;
+            if arguments.next().is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "usage: crossgram-voice-worker [--unix PATH]",
+                ));
+            }
+            publish_unix_noreplace(Path::new(&source), Path::new(&destination))
         }
         #[cfg(feature = "test-fake")]
         (Some(flag), Some(path)) if flag == "--unix-fake" && arguments.next().is_none() => {
@@ -171,6 +189,18 @@ const fn is_client_connection_error(kind: io::ErrorKind) -> bool {
     )
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn publish_unix_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    renameat2(
+        AT_FDCWD,
+        source,
+        AT_FDCWD,
+        destination,
+        RenameFlags::RENAME_NOREPLACE,
+    )
+    .map_err(|error| io::Error::from_raw_os_error(error as i32))
+}
+
 fn bind_unix(path: &Path) -> io::Result<UnixListener> {
     let parent = path
         .parent()
@@ -231,6 +261,8 @@ fn verify_peer_uid(stream: &UnixStream) -> io::Result<()> {
 mod tests {
     use std::fs;
     use std::io::{ErrorKind, Write};
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -561,6 +593,33 @@ mod tests {
         let error =
             accept_verified_peer(Err(io::Error::other("credential query failed"))).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn publish_unix_noreplace_preserves_source_and_destination_on_collision() {
+        let parent = socket_path("publish-noreplace");
+        let source = parent.join("source");
+        let destination = parent.join("destination");
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir(&parent).unwrap();
+        fs::write(&source, b"source").unwrap();
+        let source_inode = fs::metadata(&source).unwrap().ino();
+
+        publish_unix_noreplace(&source, &destination).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"source");
+        assert_eq!(fs::metadata(&destination).unwrap().ino(), source_inode);
+
+        fs::write(&source, b"new source").unwrap();
+        fs::write(&destination, b"destination").unwrap();
+        let destination_inode = fs::metadata(&destination).unwrap().ino();
+        let error = publish_unix_noreplace(&source, &destination).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).unwrap(), b"new source");
+        assert_eq!(fs::read(&destination).unwrap(), b"destination");
+        assert_eq!(fs::metadata(&destination).unwrap().ino(), destination_inode);
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]

@@ -12,6 +12,28 @@ This standalone Rust crate is intentionally not part of the JavaScript workspace
 
 The worker accepts framed binary requests on standard input and writes framed binary public responses on standard output. `--unix <path>` serves the same protocol on a Unix-domain socket, with exactly one request/response exchange per connection. The socket parent is forced to mode `0700`; startup refuses an existing socket path; the socket is forced to mode `0600` regardless of the process umask; Linux `SO_PEERCRED` requires the connecting process to have the worker's UID; and each connection has five-second read/write timeouts. It neither persists nor logs call endpoints, signaling, secret material, audio, or keys. Production continues to use `UnavailableMediaBackend`; the optional seam does not link or select tgcalls by itself.
 
+## Nix one-command launcher
+
+Start the Unix-socket worker with no arguments:
+
+```sh
+nix run .#voice-worker
+```
+
+The launcher chooses the socket path in this order:
+
+1. `$CROSSGRAM_VOICE_WORKER_SOCKET`, when nonempty;
+2. `$XDG_RUNTIME_DIR/crossgram/voice-worker.sock`, when `XDG_RUNTIME_DIR` is set;
+3. `${TMPDIR:-/tmp}/crossgram-voice-worker-$UID/worker.sock` otherwise.
+
+For no-argument launches, the launcher tightens the selected socket parent to `0700`, creates a private `0700` staging directory inside it, and binds the worker only in that staging directory. It records the staged socket device and inode, then atomically publishes it to the stable path through Linux `renameat2(RENAME_NOREPLACE)`. Any path already present before startup is refused, and any path that appears before publication makes startup fail closed: the stable path is never overwritten or removed. After a normal exit or `INT`, `TERM`, or `HUP`, cleanup removes only a stable socket whose device and inode still match this launch's published socket; publication failures remove only private staging artifacts. Explicit arguments bypass staging, publication, supervision, and launcher cleanup, and are passed unchanged to the real worker, for example:
+
+```sh
+nix run .#voice-worker -- --unix /custom/path
+```
+
+Set the Bridge `voiceWorkerSocketPath` to the same path selected by the launcher. The launcher does not modify or enable production runtime configuration.
+
 ## Wire format
 
 Every message is a `u32` big-endian payload length followed by a payload beginning with the one-byte protocol version (`3`) and one-byte message tag. Lengths are checked before allocation; integer fields are big-endian unless marked little-endian.
