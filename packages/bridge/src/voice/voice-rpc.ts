@@ -30,16 +30,7 @@ export class VoiceRpc {
     excludeAuthKeyId?: string,
   ): Promise<tl.phone.RawPhoneCall> {
     this._requireQq(platform)
-    if (request.video) throw new RpcError(400, 'CALL_VIDEO_UNSUPPORTED')
-    const { selfId, participantId } = await this._participants(session, request.userId)
-    try {
-      return await this._calls.request({
-        session, selfId, participantId, randomId: request.randomId,
-        gAHash: request.gAHash, protocol: request.protocol, excludeAuthKeyId,
-      })
-    } catch (error) {
-      throw asRpcError(error)
-    }
+    throw new RpcError(400, 'CALL_OUTGOING_UNSUPPORTED')
   }
 
   async received(
@@ -133,7 +124,7 @@ export class VoiceRpc {
     remotePlatformUserId: string,
     correlationId: string,
     platformControl?: PlatformCallControl,
-  ): Promise<tl.RawPhoneCallRequested | tl.RawPhoneCallDiscarded> {
+  ): Promise<tl.RawPhoneCallRequested | tl.RawPhoneCallDiscarded | undefined> {
     const [self, remote] = await Promise.all([
       this._store.getUser(session.platformId, session.userId),
       this._store.getUser(session.platformId, remotePlatformUserId),
@@ -156,21 +147,6 @@ export class VoiceRpc {
     } catch (error) {
       throw asRpcError(error)
     }
-  }
-
-  private async _participants(
-    session: PlatformSession,
-    input: tl.TypeInputUser,
-  ): Promise<{ selfId: number, participantId: number }> {
-    if (input._ !== 'inputUser' && input._ !== 'inputUserFromMessage') {
-      throw new RpcError(400, 'CALL_USER_INVALID')
-    }
-    const [self, participant] = await Promise.all([
-      this._store.getUser(session.platformId, session.userId),
-      this._store.getUserByTlId(session.platformId, input.userId),
-    ])
-    if (!self || !participant || self.id === participant.id) throw new RpcError(400, 'CALL_USER_INVALID')
-    return { selfId: self.id, participantId: participant.id }
   }
 
   private _requireQq(platform: IMPlatform): void {

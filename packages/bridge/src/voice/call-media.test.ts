@@ -115,7 +115,12 @@ class FakeWorker implements VoiceWorkerClient {
   async sendSignalingData() {}
 }
 
-function setup(options: { mediaFailure?: Error, deliveries?: () => number } = {}) {
+function setup(options: {
+  mediaFailure?: Error
+  deliveries?: () => number
+  now?: () => number
+  replay?: (update: tl.RawUpdatePhoneCall) => number
+} = {}) {
   let random = 0
   const worker = new FakeWorker()
   const media: FakeMedia[] = []
@@ -142,6 +147,7 @@ function setup(options: { mediaFailure?: Error, deliveries?: () => number } = {}
         }
       },
     },
+    now: options.now,
     randomBytes: (size) => {
       const value = new Uint8Array(size)
       value[size - 1] = ++random
@@ -151,7 +157,7 @@ function setup(options: { mediaFailure?: Error, deliveries?: () => number } = {}
       updates.push(update)
       return options.deliveries?.() ?? 1
     },
-    replay: () => options.deliveries?.() ?? 1,
+    replay: (_session, update) => options.replay?.(update) ?? options.deliveries?.() ?? 1,
   })
   return { calls, worker, media, starts, updates }
 }
@@ -172,7 +178,7 @@ async function incoming(
     session, selfId: 1, callerId: 2, correlationId: 'opaque-qq-call',
     platformCallRef: 'opaque-qq-call', platformControl,
   })
-  if (result._ !== 'phoneCallRequested') throw new Error('expected requested call')
+  if (result?._ !== 'phoneCallRequested') throw new Error('expected requested call')
   return { id: result.id, accessHash: result.accessHash }
 }
 
@@ -233,16 +239,21 @@ describe('CallRegistry QQ media composition', () => {
     expect(starts.mock.invocationCallOrder[0]).toBeLessThan(control.control.mock.invocationCallOrder[0]!)
   })
 
-  it('uses reject while QQ is ringing and hangup after it has been accepted', async () => {
+  it('normalizes a Telegram ringing rejection to busy with zero duration', async () => {
     const first = setup()
     const firstControl = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
     const ringingPeer = await incoming(first.calls, firstControl)
 
-    await first.calls.discard(session, ringingPeer, { _: 'phoneCallDiscardReasonBusy' }, 0)
+    const discarded = await first.calls.discard(session, ringingPeer, { _: 'phoneCallDiscardReasonHangup' }, 7)
     await first.calls.platformEnded(session, 'opaque-qq-call')
 
-    expect(firstControl.control).toHaveBeenCalledOnce()
-    expect(firstControl.control).toHaveBeenCalledWith('reject')
+    expect(firstControl.control).toHaveBeenCalledExactlyOnceWith('reject')
+    expect(discarded).toMatchObject({
+      reason: { _: 'phoneCallDiscardReasonBusy' }, duration: 0,
+    })
+    expect(first.updates.at(-1)?.phoneCall).toMatchObject({
+      _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonBusy' }, duration: 0,
+    })
 
     const second = setup()
     const secondControl = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
@@ -254,8 +265,15 @@ describe('CallRegistry QQ media composition', () => {
     expect(secondControl.control.mock.calls.map(([operation]) => operation)).toEqual(['accept', 'hangup'])
   })
 
-  it('turns a source-side QQ end into one Telegram discarded update without echoing a control', async () => {
-    const { calls, updates, worker } = setup()
+  it('turns a source-side ringing end into one replayable missed Telegram update without echoing a control', async () => {
+    const replayed: tl.RawUpdatePhoneCall[] = []
+    const { calls, updates, worker } = setup({
+      deliveries: () => 0,
+      replay: (update) => {
+        replayed.push(update)
+        return 1
+      },
+    })
     const control = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
     await incoming(calls, control)
 
@@ -264,8 +282,83 @@ describe('CallRegistry QQ media composition', () => {
 
     expect(control.control).not.toHaveBeenCalled()
     expect(updates.map((update) => update.phoneCall._)).toEqual(['phoneCallRequested', 'phoneCallDiscarded'])
+    expect(updates.at(-1)?.phoneCall).toMatchObject({
+      _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonMissed' }, duration: 0,
+    })
+    expect(calls.snapshot(session)).toMatchObject({
+      phoneCall: { _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonMissed' }, duration: 0 },
+    })
+    await calls.replay(session, 'authorized-reconnect')
+
+    expect(replayed).toMatchObject([{
+      phoneCall: { _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonMissed' }, duration: 0 },
+    }])
     expect(worker.discardCall).toHaveBeenCalledOnce()
     expect(calls.snapshot(session)).toBeUndefined()
+  })
+
+  it('uses zero-duration hangup when the source ends during the accepted after-response race', async () => {
+    const { calls, updates } = setup()
+    const control = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
+    const peer = await incoming(calls, control)
+    const deferred: Array<() => void | Promise<void>> = []
+
+    await calls.accept(
+      session,
+      peer,
+      new Uint8Array(256).fill(5),
+      protocol,
+      undefined,
+      (task) => deferred.push(task),
+    )
+    await calls.platformEnded(session, 'opaque-qq-call')
+    await deferred[0]!()
+
+    expect(updates.at(-1)?.phoneCall).toMatchObject({
+      _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonHangup' }, duration: 0,
+    })
+    expect(updates.filter((update) => update.phoneCall._ === 'phoneCall')).toHaveLength(0)
+    expect(control.control).toHaveBeenCalledExactlyOnceWith('accept')
+  })
+
+  it('derives active source-end duration from the Telegram active transition', async () => {
+    let now = 10_000
+    const { calls, updates } = setup({ now: () => now })
+    const control = { control: vi.fn(async (_operation: 'accept' | 'reject' | 'hangup') => {}) }
+    const peer = await incoming(calls, control)
+    await calls.accept(session, peer, new Uint8Array(256).fill(5), protocol)
+    now = 15_900
+
+    await calls.platformEnded(session, 'opaque-qq-call')
+
+    expect(updates.at(-1)?.phoneCall).toMatchObject({
+      _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonHangup' }, duration: 5,
+    })
+    expect(control.control).toHaveBeenCalledExactlyOnceWith('accept')
+  })
+
+  it('caps and never makes active source-end duration negative', async () => {
+    let now = 10_000
+    const capped = setup({ now: () => now })
+    const cappedPeer = await incoming(capped.calls)
+    await capped.calls.accept(session, cappedPeer, new Uint8Array(256).fill(5), protocol)
+    now = (10 + 90_000) * 1_000
+    await capped.calls.platformEnded(session, 'opaque-qq-call')
+
+    expect(capped.updates.at(-1)?.phoneCall).toMatchObject({
+      _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonHangup' }, duration: 86_400,
+    })
+
+    let earlierNow = 10_000
+    const earlier = setup({ now: () => earlierNow })
+    const earlierPeer = await incoming(earlier.calls)
+    await earlier.calls.accept(session, earlierPeer, new Uint8Array(256).fill(5), protocol)
+    earlierNow = 9_000
+    await earlier.calls.platformEnded(session, 'opaque-qq-call')
+
+    expect(earlier.updates.at(-1)?.phoneCall).toMatchObject({
+      _: 'phoneCallDiscarded', reason: { _: 'phoneCallDiscardReasonHangup' }, duration: 0,
+    })
   })
 
   it('rejects and acknowledges a QQ call when worker preparation fails before Telegram can ring', async () => {

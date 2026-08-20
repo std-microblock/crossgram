@@ -197,6 +197,7 @@ const MAX_SIGNALING_PER_MINUTE = 32
 const MAX_DEBUG_BYTES = 8 * 1024
 const MAX_DEBUG_KEYS = 16
 const MAX_DEBUG_PER_MINUTE = 8
+const MAX_CALL_DURATION_SECONDS = 86_400
 const DEFAULT_TIMEOUT_MS = 60_000
 const TOMBSTONE_TTL_MS = 5 * 60_000
 const MAX_TOMBSTONES = 256
@@ -220,6 +221,8 @@ export class CallRegistry {
   private readonly _incomingCalls = new Map<string, StoredCall>()
   private readonly _tombstones = new Map<string, CallTombstone>()
   private readonly _incomingTombstones = new Map<string, CallTombstone>()
+  /** HMAC-indexed source calls rejected while their Telegram session was occupied. */
+  private readonly _occupiedIncomingReceipts = new Map<string, number>()
   private readonly _sessionOperations = new Map<string, Promise<void>>()
   private readonly _signalTimes = new Map<string, number[]>()
   private readonly _debugTimes = new Map<string, number[]>()
@@ -299,10 +302,11 @@ export class CallRegistry {
   }
 
   /** Seam for a QQ/native worker to surface an incoming audio call. */
-  async receiveIncoming(input: IncomingCall): Promise<tl.RawPhoneCallRequested | tl.RawPhoneCallDiscarded> {
+  async receiveIncoming(input: IncomingCall): Promise<tl.RawPhoneCallRequested | tl.RawPhoneCallDiscarded | undefined> {
     if (!input.correlationId) throw new VoiceCallError('CALL_CORRELATION_INVALID')
     return this._serialize(input.session.platformSessionId, async () => {
       const correlationKey = this._incomingKey(input.session, input.correlationId)
+      if (this._occupiedIncomingReceipts.has(correlationKey)) return undefined
       const retried = this._incomingCalls.get(correlationKey)
       if (retried && retried.state !== 'discarded') {
         await this._deliverPending(retried)
@@ -318,6 +322,12 @@ export class CallRegistry {
         ) throw new VoiceCallError('CALL_OCCUPY_FAILED')
         await this._deliverTombstone(tombstone, input.session)
         return this._discarded(tombstone)
+      }
+      const occupied = this._sessionCalls.get(input.session.platformSessionId)
+      if (occupied && occupied.state !== 'discarded' && input.platformControl) {
+        await input.platformControl.control('reject')
+        this._rememberOccupiedIncomingReceipt(correlationKey)
+        return undefined
       }
       this._assertSessionAvailable(input.session.platformSessionId)
       const call = this._create(
@@ -498,7 +508,7 @@ export class CallRegistry {
     duration: number,
     excludeAuthKeyId?: string,
   ): Promise<tl.RawPhoneCallDiscarded> {
-    if (!Number.isSafeInteger(duration) || duration < 0 || duration > 86_400) {
+    if (!Number.isSafeInteger(duration) || duration < 0 || duration > MAX_CALL_DURATION_SECONDS) {
       throw new VoiceCallError('CALL_DURATION_INVALID')
     }
     return this._serialize(session.platformSessionId, async () => {
@@ -507,16 +517,13 @@ export class CallRegistry {
         await this._deliverTombstone(call, session, excludeAuthKeyId)
         return this._discarded(call)
       }
-      await this._controlPlatformCall(
-        call,
-        call.state === 'initializing' || call.state === 'requested' || call.state === 'received'
-          ? 'reject'
-          : 'hangup',
-      )
+      const ringingIncoming = call.telegramRole === 'recipient'
+        && (call.state === 'initializing' || call.state === 'requested' || call.state === 'received')
+      await this._controlPlatformCall(call, ringingIncoming ? 'reject' : 'hangup')
       await this._teardownWorkerCall(call)
       call.state = 'discarded'
-      call.discarded = reason
-      call.duration = duration
+      call.discarded = ringingIncoming ? { _: 'phoneCallDiscardReasonBusy' } : reason
+      call.duration = ringingIncoming ? 0 : duration
       const discarded = this._discarded(call)
       let pendingDelivery = true
       try {
@@ -535,9 +542,16 @@ export class CallRegistry {
       const correlationKey = this._incomingKey(session, correlationId)
       const call = this._incomingCalls.get(correlationKey)
       if (!call || call.state === 'discarded') return
+      const state = call.state
       await this._teardownWorkerCall(call)
       call.state = 'discarded'
-      call.discarded = { _: 'phoneCallDiscardReasonHangup' }
+      call.discarded = state === 'initializing' || state === 'requested' || state === 'received'
+        ? { _: 'phoneCallDiscardReasonMissed' }
+        : { _: 'phoneCallDiscardReasonHangup' }
+      const now = Math.floor(this._now() / 1_000)
+      call.duration = state === 'active'
+        ? Math.min(MAX_CALL_DURATION_SECONDS, Math.max(0, now - (call.startDate ?? now)))
+        : 0
       const discarded = this._discarded(call)
       let pendingDelivery = true
       try {
@@ -763,10 +777,20 @@ export class CallRegistry {
     throw new VoiceCallError('CALL_PEER_INVALID')
   }
 
+  private _rememberOccupiedIncomingReceipt(correlationKey: string): void {
+    this._occupiedIncomingReceipts.set(correlationKey, this._now() + TOMBSTONE_TTL_MS)
+    while (this._occupiedIncomingReceipts.size > MAX_TOMBSTONES) {
+      this._occupiedIncomingReceipts.delete(this._occupiedIncomingReceipts.keys().next().value!)
+    }
+  }
+
   private _pruneTombstones(): void {
     const now = this._now()
     for (const [key, tombstone] of this._tombstones) {
       if (tombstone.expiresAt <= now) this._dropTombstone(key, tombstone)
+    }
+    for (const [key, expiresAt] of this._occupiedIncomingReceipts) {
+      if (expiresAt <= now) this._occupiedIncomingReceipts.delete(key)
     }
   }
 

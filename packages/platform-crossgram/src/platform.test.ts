@@ -3,11 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
+import Long from 'long'
 import type { Logger } from 'cordis'
 import {
-  expandTelegramStrippedThumbnail, IMMediaUnavailableError, IMMessageSendRejectedError,
-  IMMessageTargetUnavailableError, PlatformMessageActions, stableId,
-  type IMMedia, type PlatformSession,
+  CallRegistry, expandTelegramStrippedThumbnail, IMMediaUnavailableError, IMMessageSendRejectedError,
+  IMMessageTargetUnavailableError, PlatformMessageActions, stableId, VoiceRpc,
+  type IMMedia, type PlatformSession, type VoiceWorkerClient,
 } from '@mtproto-relay/bridge'
 import { parseQQMarkdown, QQNTPlatform } from './index.js'
 import type { QQMediaLocator } from './protocol.js'
@@ -1854,6 +1855,69 @@ describe('QQNTPlatform mapping', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     expect(subscribe).toHaveBeenCalledTimes(2)
     expect(subscribe.mock.calls[1]?.[2]?.lastEventId).toBeUndefined()
+    await unsubscribe()
+  })
+
+  it('rejects an occupied incoming call and checkpoints it without reconnecting', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    const protocol = {
+      _: 'phoneCallProtocol' as const, udpP2p: false, udpReflector: false,
+      minLayer: 100, maxLayer: 100, libraryVersions: ['qqnt'],
+    }
+    const worker = {
+      protocol,
+      async prepareTelegramCaller() {
+        return { state: 'ready' as const, gAHash: new Uint8Array(32).fill(1) }
+      },
+      async completeTelegramCaller() {
+        return { state: 'media-active' as const, gA: new Uint8Array(256).fill(2), keyFingerprint: Long.ONE }
+      },
+      async prepareTelegramRecipient() {
+        return { state: 'ready' as const, gB: new Uint8Array(256).fill(3) }
+      },
+      async completeTelegramRecipient() {
+        return { state: 'media-active' as const, keyFingerprint: Long.ONE }
+      },
+      async discardCall() {},
+      async sendSignalingData() {},
+    } satisfies VoiceWorkerClient
+    const calls = new CallRegistry({ worker })
+    const voice = new VoiceRpc(calls, {
+      async getUser(_platformId, platformUserId) {
+        return { id: platformUserId === session.userId ? 1 : 2 }
+      },
+    } as never)
+    await voice.receiveIncoming(session, '1:alice', 'active-call')
+    const controls = vi.fn(async () => {})
+    const checkpoints: string[] = []
+    const frame = {
+      type: 'call-signal' as const, version: 1 as const, signal: 'incoming' as const, media: 'voice' as const,
+      callId: 'occupied-call',
+      conversation: {
+        id: '1:alice', kind: 'direct' as const, title: 'Alice', peerUid: 'alice', peerUin: '10001', chatType: 1 as const,
+      },
+      timestamp: 1,
+    }
+    const subscribe = vi.fn(async (handler, signal, options) => {
+      await handler(frame, 'occupied-checkpoint')
+      await options?.onEventId?.('occupied-checkpoint')
+      checkpoints.push('occupied-checkpoint')
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    platform.client.subscribe = subscribe
+
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (event.type !== 'voice-call' || event.signal !== 'incoming') return
+      await voice.receiveIncoming(session, event.conversation.id, event.callRef, {
+        control: controls,
+      })
+    })
+    await vi.waitFor(() => expect(checkpoints).toEqual(['occupied-checkpoint']))
+
+    expect(controls).toHaveBeenCalledExactlyOnceWith('reject')
+    expect(subscribe).toHaveBeenCalledOnce()
     await unsubscribe()
   })
 

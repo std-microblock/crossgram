@@ -19,18 +19,16 @@ function publicValue(value = 1): Uint8Array {
   return new Uint8Array(256).fill(value)
 }
 
-function createVoiceRpc(signalingFailure?: Error): VoiceRpc {
+function createVoiceHarness(signalingFailure?: Error) {
   const worker = {
     protocol: workerProtocol,
-    async prepareTelegramCaller() {
-      return { state: 'ready' as const, gAHash: new Uint8Array(32).fill(1) }
-    },
+    prepareTelegramCaller: vi.fn(async () => ({
+      state: 'ready' as const, gAHash: new Uint8Array(32).fill(1),
+    })),
     async completeTelegramCaller() {
       return { state: 'media-active' as const, gA: publicValue(2), keyFingerprint: Long.ONE }
     },
-    async prepareTelegramRecipient() {
-      return { state: 'ready' as const, gB: publicValue(3) }
-    },
+    prepareTelegramRecipient: vi.fn(async () => ({ state: 'ready' as const, gB: publicValue(3) })),
     async completeTelegramRecipient() {
       return { state: 'media-active' as const, keyFingerprint: Long.ONE }
     },
@@ -40,14 +38,12 @@ function createVoiceRpc(signalingFailure?: Error): VoiceRpc {
     },
   } satisfies VoiceWorkerClient
   const store = {
-    async getUser(_platformId: string, platformUserId: string) {
-      return { id: platformUserId === 'self' ? 1 : 2 }
-    },
-    async getUserByTlId() {
-      return { id: 2 }
-    },
-  } as unknown as MessageStore
-  return new VoiceRpc(new CallRegistry({
+    getUser: vi.fn(async (_platformId: string, platformUserId: string) =>
+      ({ id: platformUserId === 'self' ? 1 : 2 })),
+    getUserByTlId: vi.fn(async () => ({ id: 2 })),
+  }
+  const messageStore = store as unknown as MessageStore
+  const calls = new CallRegistry({
     worker,
     mediaStartProvider: {
       async get() {
@@ -61,14 +57,19 @@ function createVoiceRpc(signalingFailure?: Error): VoiceRpc {
         }
       },
     },
-  }), store)
+  })
+  return { voice: new VoiceRpc(calls, messageStore), calls, worker, store }
+}
+
+function createVoiceRpc(signalingFailure?: Error): VoiceRpc {
+  return createVoiceHarness(signalingFailure).voice
 }
 
 describe('VoiceRpc incoming calls', () => {
   it('accepts compatible worker-provided incoming protocols and rejects incompatible ones', async () => {
     const voice = createVoiceRpc()
     const incoming = await voice.receiveIncoming(session, 'remote', 'qq-incoming-event')
-    if (incoming._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    if (incoming?._ !== 'phoneCallRequested') throw new Error('expected requested call')
     const peer = { _: 'inputPhoneCall' as const, id: incoming.id, accessHash: incoming.accessHash }
 
     await voice.received(session, { peer } as tl.phone.RawReceivedCallRequest)
@@ -91,7 +92,7 @@ describe('VoiceRpc incoming calls', () => {
   it('registers the native active transition through the supplied after-response callback', async () => {
     const voice = createVoiceRpc()
     const incoming = await voice.receiveIncoming(session, 'remote', 'qq-incoming-after-response')
-    if (incoming._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    if (incoming?._ !== 'phoneCallRequested') throw new Error('expected requested call')
     const peer = { _: 'inputPhoneCall' as const, id: incoming.id, accessHash: incoming.accessHash }
     const afterResponse = vi.fn()
 
@@ -103,22 +104,38 @@ describe('VoiceRpc incoming calls', () => {
   })
 })
 
-describe('VoiceRpc signaling failures', () => {
-  it('returns the existing sanitized worker error after retiring the call', async () => {
-    const voice = createVoiceRpc(new Error('worker forwarding failed'))
-    const requested = await voice.request(
+describe('VoiceRpc outgoing calls', () => {
+  it('rejects Telegram-originated requests before reserving a call or preparing the worker', async () => {
+    const { voice, calls, worker, store } = createVoiceHarness()
+    const request = vi.spyOn(calls, 'request')
+
+    await expect(voice.request(
       { platformKind: 'qq' } as IMPlatform,
       session,
       {
         userId: { _: 'inputUser', userId: 2, accessHash: Long.ONE }, randomId: 1,
         gAHash: new Uint8Array(32).fill(1), protocol: workerProtocol, video: false,
       } as tl.phone.RawRequestCallRequest,
-    )
-    if (requested.phoneCall._ !== 'phoneCallRequested') throw new Error('expected requested call')
-    const peer = { _: 'inputPhoneCall' as const, id: requested.phoneCall.id, accessHash: requested.phoneCall.accessHash }
-    await voice.confirm(session, {
-      peer, gA: publicValue(), keyFingerprint: Long.ONE, protocol: workerProtocol,
-    } as tl.phone.RawConfirmCallRequest)
+    )).rejects.toMatchObject({ code: 400, text: 'CALL_OUTGOING_UNSUPPORTED' })
+
+    expect(calls.snapshot(session)).toBeUndefined()
+    expect(request).not.toHaveBeenCalled()
+    expect(store.getUser).not.toHaveBeenCalled()
+    expect(store.getUserByTlId).not.toHaveBeenCalled()
+    expect(worker.prepareTelegramCaller).not.toHaveBeenCalled()
+    expect(worker.prepareTelegramRecipient).not.toHaveBeenCalled()
+  })
+})
+
+describe('VoiceRpc signaling failures', () => {
+  it('returns the existing sanitized worker error after retiring the call', async () => {
+    const voice = createVoiceRpc(new Error('worker forwarding failed'))
+    const incoming = await voice.receiveIncoming(session, 'remote', 'qq-incoming-signaling-failure')
+    if (incoming?._ !== 'phoneCallRequested') throw new Error('expected requested call')
+    const peer = { _: 'inputPhoneCall' as const, id: incoming.id, accessHash: incoming.accessHash }
+    await voice.accept(session, {
+      peer, gB: publicValue(), protocol: workerProtocol,
+    } as tl.phone.RawAcceptCallRequest)
 
     await expect(voice.sendSignalingData(session, {
       peer, data: Uint8Array.of(1),

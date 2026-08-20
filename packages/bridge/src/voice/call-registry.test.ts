@@ -2,7 +2,7 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   CallRegistry, VoiceCallError, type VoiceCallDebugSummary, type VoiceWorkerCall, type VoiceWorkerClient,
 } from './call-registry.js'
@@ -369,6 +369,85 @@ describe('CallRegistry', () => {
     await calls.sendSignalingData(session, outgoingPeer, Uint8Array.of(2))
     await calls.saveCallDebug(session, outgoingPeer, { _: 'dataJSON', data: '{}' })
     await calls.discard(session, outgoingPeer, { _: 'phoneCallDiscardReasonHangup' }, 0)
+  })
+
+  it('rejects a distinct occupied incoming call once without affecting same-correlation retries', async () => {
+    const { calls, worker } = setup()
+    const first = await incoming(calls, 'existing-qq-call')
+    const control = { control: vi.fn(async () => {}) }
+
+    await expect(calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: control,
+    })).resolves.toBeUndefined()
+    await expect(calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'existing-qq-call', platformControl: control,
+    })).resolves.toEqual(first)
+    await calls.platformEnded(session, 'existing-qq-call')
+    await expect(calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: control,
+    })).resolves.toBeUndefined()
+
+    expect(control.control).toHaveBeenCalledExactlyOnceWith('reject')
+    expect(worker.events.filter((event) => event.operation === 'prepare-caller')).toHaveLength(1)
+    expect(calls.snapshot(session)).toBeUndefined()
+  })
+
+  it('expires occupied incoming rejection receipts with the tombstone TTL', async () => {
+    const { calls, worker, advance } = setup()
+    await incoming(calls, 'existing-qq-call')
+    const control = { control: vi.fn(async () => {}) }
+    await calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: control,
+    })
+    await calls.platformEnded(session, 'existing-qq-call')
+    advance(5 * 60_000)
+
+    await expect(calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: control,
+    })).resolves.toMatchObject({ _: 'phoneCallRequested' })
+
+    expect(control.control).toHaveBeenCalledExactlyOnceWith('reject')
+    expect(worker.events.filter((event) => event.operation === 'prepare-caller')).toHaveLength(2)
+  })
+
+  it('deduplicates concurrent occupied incoming retries after the first rejection', async () => {
+    const { calls } = setup()
+    await incoming(calls, 'existing-qq-call')
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const control = { control: vi.fn(async () => {
+      started.resolve()
+      await release.promise
+    }) }
+    const first = calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: control,
+    })
+    await started.promise
+    const retry = calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: control,
+    })
+    release.resolve()
+
+    await expect(Promise.all([first, retry])).resolves.toEqual([undefined, undefined])
+    expect(control.control).toHaveBeenCalledExactlyOnceWith('reject')
+  })
+
+  it('propagates a platform rejection failure without recording a receipt', async () => {
+    const { calls, worker } = setup()
+    await incoming(calls, 'existing-qq-call')
+    const failedControl = { control: vi.fn(async () => { throw new Error('native reject failed') }) }
+
+    await expect(calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: failedControl,
+    })).rejects.toThrow('native reject failed')
+    const retryControl = { control: vi.fn(async () => {}) }
+    await expect(calls.receiveIncoming({
+      session, selfId: 1, callerId: 2, correlationId: 'occupied-qq-call', platformControl: retryControl,
+    })).resolves.toBeUndefined()
+
+    expect(failedControl.control).toHaveBeenCalledExactlyOnceWith('reject')
+    expect(retryControl.control).toHaveBeenCalledExactlyOnceWith('reject')
+    expect(worker.events.filter((event) => event.operation === 'prepare-caller')).toHaveLength(1)
   })
 
   it('runs the Telegram-recipient flow through caller preparation and caller completion', async () => {
