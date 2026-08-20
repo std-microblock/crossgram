@@ -861,6 +861,39 @@ describe('rich-media projection', () => {
     expect(() => wireRoundTrip(media)).not.toThrow()
   })
 
+  it('omits a redundant native preview that has the original photo dimensions', () => {
+    const media = makeTlMessageMedia({
+      id: 19_856,
+      messageId: 1,
+      ordinal: 0,
+      partIndex: 0,
+      platformMediaId: 'small-outgoing-photo',
+      kind: 'image',
+      name: 'small.jpg',
+      mimeType: 'image/jpeg',
+      size: 14_256,
+      width: 277,
+      height: 119,
+      duration: null,
+      preview: {
+        size: 0,
+        width: 277,
+        height: 119,
+        locator: { imageSpec: 720 },
+      },
+      strippedThumbnail: null,
+      locator: { imageSpec: 0 },
+      voice: false,
+    }, 1_800_000_000)
+
+    expect(media).toMatchObject({
+      _: 'messageMediaPhoto',
+      photo: { _: 'photo', sizes: [
+        { _: 'photoSize', type: 'x', w: 277, h: 119, size: 14_256 },
+      ] },
+    })
+  })
+
   it('serves an advertised native photo preview for Telegram thumb_size m requests', async () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))

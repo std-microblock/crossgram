@@ -5845,14 +5845,26 @@ function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhot
     : media.preview
       ? { width: media.preview.width, height: media.preview.height }
       : { width: 1, height: 1 }
+  // QQ exposes a 720-spec URL even when a small image is already below the
+  // preview bound. In that case the "preview" and original have identical
+  // dimensions. Advertising both makes Telegram's send reconciliation match
+  // the local full-size cache entry to the preview tier first, so the final
+  // photo has to be inserted and downloaded again. Keep native previews only
+  // when they are a genuinely distinct rendition.
+  const preview = media.preview
+    && (!(media.width && media.height)
+      || media.preview.width !== dimensions.width
+      || media.preview.height !== dimensions.height)
+    ? media.preview
+    : undefined
   return {
     _: 'photo', id, accessHash, fileReference, date: timestamp,
     sizes: [
       ...(media.strippedThumbnail?.byteLength ? [{
         _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
       }] : []),
-      ...(media.preview ? [photoPreviewSize(media.preview)] : []),
-      ...originalPhotoSizes(dimensions, media.size, Boolean(media.preview)),
+      ...(preview ? [photoPreviewSize(preview)] : []),
+      ...originalPhotoSizes(dimensions, media.size, Boolean(preview)),
     ],
     dcId,
   }
