@@ -1247,10 +1247,10 @@ describe('conversation kinds', () => {
       maxId: groupMessage.id,
     })
 
-    expect(readTargets).toEqual([
+    await vi.waitFor(() => expect(readTargets).toEqual([
       { conversationId: 'direct', messageId: 'message-direct' },
       { conversationId: 'group', messageId: 'message-group' },
-    ])
+    ]))
   })
 
   it('projects every group as a megagroup and reuses its cached member snapshot', async () => {
