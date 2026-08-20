@@ -544,6 +544,49 @@ describeUnix('VoiceWorkerSocketClient', () => {
     }
   })
 
+  it('diagnoses client disposal exactly once despite diagnostic reentry', () => {
+    const diagnostics: Array<[string, string]> = []
+    let client: VoiceWorkerSocketClient
+    client = new VoiceWorkerSocketClient({
+      socketPath: '/unused/worker.sock',
+      onDiagnostic: (phase, code) => {
+        diagnostics.push([phase, code])
+        client.close()
+      },
+    })
+
+    client.close()
+    client.close()
+
+    expect(diagnostics).toEqual([['client-close', 'DISPOSED']])
+  })
+
+  it('diagnoses prepare-caller after client close', async () => {
+    const diagnostics: Array<[string, string]> = []
+    const client = new VoiceWorkerSocketClient({
+      socketPath: '/unused/worker.sock',
+      onDiagnostic: (phase, code) => diagnostics.push([phase, code]),
+    })
+    client.close()
+
+    await expect(client.prepareTelegramCaller(call)).rejects.toMatchObject({ code: 'CALL_MEDIA_UNAVAILABLE' })
+
+    expect(diagnostics).toEqual([['client-close', 'DISPOSED'], ['prepare-caller', 'CLIENT_CLOSED']])
+  })
+
+  it('diagnoses an invalid prepare-caller identity once', async () => {
+    const diagnostics: Array<[string, string]> = []
+    const client = new VoiceWorkerSocketClient({
+      socketPath: '/unused/worker.sock',
+      onDiagnostic: (phase, code) => diagnostics.push([phase, code]),
+    })
+
+    await expect(client.prepareTelegramCaller({ ...call, callId: '' }))
+      .rejects.toMatchObject({ code: 'CALL_MEDIA_UNAVAILABLE' })
+
+    expect(diagnostics).toEqual([['prepare-caller', 'CALL_MEDIA_UNAVAILABLE']])
+  })
+
   it('fails closed for worker errors, bad frames, short reads, timeouts, and aborts', async () => {
     const cases: Array<{ reply: (socket: Socket) => void, timeoutMs?: number, abort?: boolean, code: string }> = [
       { reply: (socket) => socket.end(response(Uint8Array.of(3, 0xff, 2))), code: 'CALL_OCCUPY_FAILED' },

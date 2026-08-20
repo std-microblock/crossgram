@@ -70,7 +70,7 @@ export interface VoiceWorkerSocketClientOptions {
   readonly onDiagnostic?: (phase: VoiceWorkerDiagnosticPhase, code: string) => void
 }
 
-export type VoiceWorkerDiagnosticPhase = 'prepare-caller' | 'pcm-send' | 'pcm-receive' | 'pcm-close' | 'native-error'
+export type VoiceWorkerDiagnosticPhase = 'prepare-caller' | 'client-close' | 'pcm-send' | 'pcm-receive' | 'pcm-close' | 'native-error'
 
 export type VoiceWorkerIpcRequest =
   | { readonly tag: 0x01, readonly callId: bigint }
@@ -231,7 +231,18 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
   }
 
   async prepareTelegramCaller(call: VoiceWorkerCall): Promise<VoiceWorkerCallerPreparation> {
-    const response = await this._request({ tag: 0x01, callId: this._callId(call) }, true, undefined, 'prepare-caller')
+    if (this._closed) {
+      this._diagnose('prepare-caller', 'CLIENT_CLOSED')
+      throw unavailable()
+    }
+    let callId: bigint
+    try {
+      callId = this._callId(call)
+    } catch (error) {
+      if (error instanceof VoiceCallError) this._diagnose('prepare-caller', error)
+      throw error
+    }
+    const response = await this._request({ tag: 0x01, callId }, true, undefined, 'prepare-caller')
     try {
       if (response.tag !== 0x81) throw unavailable()
       return { state: 'ready', gAHash: response.gAHash }
@@ -314,6 +325,7 @@ export class VoiceWorkerSocketClient implements VoiceWorkerClient {
   close(): void {
     if (this._closed) return
     this._closed = true
+    this._diagnose('client-close', 'DISPOSED')
     for (const socket of this._sockets) socket.destroy()
     this._sockets.clear()
     for (const controller of this._eventAborts.values()) controller.abort()
