@@ -7,6 +7,7 @@ import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
+import type { SystemPeerService } from './system-peer.js'
 import type {
   IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMMessageSearchQuery, IMPlatform, IMUser, PlatformSession,
 } from './platform.js'
@@ -24,11 +25,12 @@ const session: PlatformSession = {
 function makeViewRpc(
   platform: IMPlatform,
   views = createTestConversationViews(),
+  systemPeers?: SystemPeerService,
 ): DialogRpc {
   return new DialogRpc(
     platform, session,
     undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, systemPeers,
     views,
   )
 }
@@ -153,6 +155,29 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('DialogRpc', () => {
+  it('resolves bridge-owned bots through their t.me username as Telegram bot users', async () => {
+    const botConversation = {
+      id: 'bridge:platform-admin', kind: 'direct' as const, title: 'CrossGram Admin',
+      metadata: { bridgeOwned: true, localOnly: true, bot: true, username: 'CrossGramAdminBot' },
+    }
+    const systemPeers = {
+      resolveUsername: vi.fn(async (_session, username) => username.toLowerCase() === 'crossgramadminbot'
+        ? { peer: { id: botConversation.id, conversation: botConversation }, provider: {} }
+        : undefined),
+    } as unknown as SystemPeerService
+    const rpc = makeViewRpc(new DialogTestPlatform(), createTestConversationViews(), systemPeers)
+
+    const resolved = await rpc.resolveUsername({
+      _: 'contacts.resolveUsername', username: 'CrossGramAdminBot',
+    })
+
+    expect(resolved).toMatchObject({
+      _: 'contacts.resolvedPeer', peer: { _: 'peerUser' }, chats: [],
+      users: [{ _: 'user', bot: true, firstName: 'CrossGram Admin', username: 'CrossGramAdminBot' }],
+    })
+    expect(systemPeers.resolveUsername).toHaveBeenCalledWith(session, 'CrossGramAdminBot')
+  })
+
   it('routes Telegram inputPeerSelf through a platform Saved Messages conversation', async () => {
     const calls: string[] = []
     const saved: IMMessage = {
@@ -1430,9 +1455,9 @@ describe('DialogRpc', () => {
     // bootstrap requests without calling nonexistent upstream member APIs.
     const freshRpc = makeViewRpc(platform, views)
     const peer = { _: 'inputPeerChat' as const, chatId: temporaryId }
-    expect(freshRpc.resolveUsername({
+    await expect(freshRpc.resolveUsername({
       _: 'contacts.resolveUsername', username: `bridgechat_${temporaryId}`,
-    })).toMatchObject({
+    })).resolves.toMatchObject({
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: temporaryId },
       chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
     })

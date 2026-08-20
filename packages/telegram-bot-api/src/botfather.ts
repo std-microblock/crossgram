@@ -14,13 +14,17 @@ export { botConversationId, validUsername }
 export function registerBotFather(ctx: Context, registry: BotRegistry): () => void {
   const activeSessionIds = new Set(ctx.imPlatform.sessions.map(({ session }) => session.platformSessionId))
   const unregister = ctx.systemPeer.register(new BotFatherProvider(ctx.database, registry))
+  const stopChanged = registry.onChanged(() => ctx.systemPeer.notifyChanged())
   void ctx.database.prepared().then(async () => {
     const rows = await ctx.database.get('mtproto_platform_session', { active: true })
     await Promise.all(rows.filter((row) => !activeSessionIds.has(row.id)).map((row) =>
       ctx.systemPeer.bootstrap(sessionFromRow(row)),
     ))
   }).catch((error) => ctx.logger('telegram-bot-api').warn('BotFather bootstrap recovery failed: %s', String(error)))
-  return unregister
+  return () => {
+    stopChanged()
+    unregister()
+  }
 }
 
 class BotFatherProvider implements SystemPeerProvider {
@@ -52,6 +56,22 @@ class BotFatherProvider implements SystemPeerProvider {
     if (conversationId === BOT_FATHER_CONVERSATION_ID) return botFatherPeer()
     const bot = await this._registry.byConversation(session.platformSessionId, conversationId)
     return bot?.enabled ? botPeer(bot) : undefined
+  }
+
+  async listBots() {
+    const father = botFatherPeer()
+    const bots = await this._registry.listAll()
+    return [{
+      conversationId: father.id,
+      title: father.conversation.title,
+      username: String(father.conversation.metadata?.username),
+      sourcePlugin: '@mtproto-relay/telegram-bot-api',
+    }, ...bots.map((bot) => ({
+      conversationId: bot.conversationId,
+      title: bot.name,
+      username: bot.username,
+      sourcePlugin: '@mtproto-relay/telegram-bot-api',
+    }))]
   }
 
   async receive(session: PlatformSession, peer: SystemPeer, message: IMMessage, peers: SystemPeerService): Promise<void> {

@@ -129,6 +129,15 @@ export class BotRegistry extends Service {
     return rows.map(publicBot)
   }
 
+  /** Active bots across all owners, used only by the protected Crossgram management UI. */
+  async listAll(): Promise<BotIdentity[]> {
+    const rows = await this.ctx.database.select('mtproto_bot_identity', { enabled: true })
+      .orderBy('createdAt').execute()
+    return (await Promise.all(rows.map(async (row) =>
+      row.revokedAt || !(await this._ownerSessionActive(row)) ? undefined : publicBot(row))))
+      .filter((bot): bot is BotIdentity => Boolean(bot))
+  }
+
   async reset(owner: BotOwner, username: string): Promise<IssuedBot | undefined> {
     const row = await this._owned(owner, username)
     if (!row) return

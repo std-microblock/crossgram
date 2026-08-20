@@ -9,6 +9,18 @@ export interface SystemPeer {
   conversation: IMConversation
 }
 
+/** A bridge-owned bot that can be opened through a Telegram `t.me` link. */
+export interface SystemBot {
+  /** The conversation ID that the provider resolves for this bot. */
+  conversationId: string
+  /** Display name exposed to the WebUI and Telegram clients. */
+  title: string
+  /** Globally unique Telegram-style username, without `@`. */
+  username: string
+  /** Cordis package which registered the bot. */
+  sourcePlugin: string
+}
+
 /** A peer resolution permanently bound to the provider that resolved it. */
 export interface SystemPeerResolution {
   peer: SystemPeer
@@ -50,6 +62,8 @@ export interface SystemPeerProvider {
     input: SystemPeerCallbackInput,
     peers: SystemPeerService,
   ): Promise<SystemPeerCallbackResult | undefined>
+  /** Enumerate the Telegram-style bots owned by this provider. */
+  listBots?(): Promise<readonly SystemBot[]> | readonly SystemBot[]
 }
 
 /** A provider-neutral failure that the RPC boundary maps to its existing error text. */
@@ -66,6 +80,7 @@ export class SystemPeerCallbackError extends Error {
  */
 export class SystemPeerService extends Service {
   private readonly _providers = new Set<SystemPeerProvider>()
+  private readonly _listeners = new Set<() => void>()
   private _ingest?: (
     session: PlatformSession,
     event: IMEvent,
@@ -84,12 +99,62 @@ export class SystemPeerService extends Service {
 
   register(provider: SystemPeerProvider): Unsubscribe {
     this._providers.add(provider)
+    this._changed()
     for (const binding of this.ctx.imPlatform?.sessions ?? []) {
       void provider.bootstrap(binding.session, this).catch((error) => {
         this.ctx.logger('system-peer').warn('system peer bootstrap failed: %s', String(error))
       })
     }
-    return () => { this._providers.delete(provider) }
+    return () => {
+      if (!this._providers.delete(provider)) return
+      this._changed()
+    }
+  }
+
+  /** List bridge-owned bots for the management dashboard. */
+  async listBots(): Promise<SystemBot[]> {
+    const listed = await Promise.all([...this._providers].map(async (provider) =>
+      provider.listBots ? await provider.listBots() : []))
+    const byUsername = new Map<string, SystemBot>()
+    for (const bot of listed.flat()) {
+      const username = normalizeUsername(bot.username)
+      if (!username) continue
+      const previous = byUsername.get(username)
+      if (previous && previous.conversationId !== bot.conversationId) {
+        this.ctx.logger('system-peer').warn(
+          'duplicate system bot username @%s from %s and %s; keeping the first registration',
+          bot.username, previous.sourcePlugin, bot.sourcePlugin,
+        )
+        continue
+      }
+      byUsername.set(username, { ...bot, username: bot.username.replace(/^@/u, '') })
+    }
+    return [...byUsername.values()].sort((left, right) =>
+      left.username.localeCompare(right.username, 'en-US', { sensitivity: 'base' }))
+  }
+
+  /** Resolve a `t.me/<username>` target that is available to this platform session. */
+  async resolveUsername(session: PlatformSession, username: string): Promise<SystemPeerResolution | undefined> {
+    const normalized = normalizeUsername(username)
+    if (!normalized) return
+    for (const provider of this._providers) {
+      if (!provider.listBots) continue
+      const bot = (await provider.listBots()).find((candidate) => normalizeUsername(candidate.username) === normalized)
+      if (!bot) continue
+      const peer = await provider.resolve(session, bot.conversationId)
+      if (peer) return { peer, provider }
+    }
+  }
+
+  /** Notify dashboards when optional bot plugins or their dynamic bots change. */
+  onChanged(listener: () => void): Unsubscribe {
+    this._listeners.add(listener)
+    return () => { this._listeners.delete(listener) }
+  }
+
+  /** Called by providers whose bot list changes without being re-registered. */
+  notifyChanged(): void {
+    this._changed()
   }
 
   async bootstrap(session: PlatformSession): Promise<void> {
@@ -146,4 +211,17 @@ export class SystemPeerService extends Service {
     if (!this._ingest) throw new Error('system peer bridge is not attached')
     return this._ingest(session, event, options)
   }
+
+  private _changed(): void {
+    for (const listener of [...this._listeners]) {
+      try { listener() } catch (error) {
+        this.ctx.logger('system-peer').warn('system peer change listener failed: %s', String(error))
+      }
+    }
+  }
+}
+
+function normalizeUsername(username: string): string | undefined {
+  const normalized = username.trim().replace(/^@/u, '').toLocaleLowerCase('en-US')
+  return /^[a-z][a-z0-9_]{4,31}$/u.test(normalized) ? normalized : undefined
 }

@@ -870,9 +870,9 @@ describe('UpdateManager', () => {
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       conversationViews,
     )
-    expect(freshRpc.resolveUsername({
+    await expect(freshRpc.resolveUsername({
       _: 'contacts.resolveUsername', username: `bridgechat_${virtualId}`,
-    })).toMatchObject({ _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualId } })
+    })).resolves.toMatchObject({ _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualId } })
     await expect(freshRpc.getMessages({
       _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: targetId }],
     })).resolves.toMatchObject({ messages: [{ _: 'message', id: targetId, message: 'forwarded 200' }] })

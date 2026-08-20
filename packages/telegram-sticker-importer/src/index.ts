@@ -90,6 +90,16 @@ class StickerImporterPeerProvider implements SystemPeerProvider {
     return this._active && conversationId === TELEGRAM_STICKER_IMPORTER_CONVERSATION_ID ? stickerImporterPeer() : undefined
   }
 
+  listBots() {
+    const peer = stickerImporterPeer()
+    return [{
+      conversationId: peer.id,
+      title: peer.conversation.title,
+      username: String(peer.conversation.metadata?.username),
+      sourcePlugin: '@mtproto-relay/telegram-sticker-importer',
+    }]
+  }
+
   async receive(session: PlatformSession, peer: SystemPeer, message: IMMessage, peers: SystemPeerService): Promise<void> {
     if (!this._active || peer.id !== TELEGRAM_STICKER_IMPORTER_CONVERSATION_ID || !message.outgoing) return
     const text = plainText(message)

@@ -40,4 +40,38 @@ describe('SystemPeerService', () => {
     expect(first.callback).toHaveBeenCalledTimes(1)
     expect(second.callback).not.toHaveBeenCalled()
   })
+
+  it('lists bridge bots, resolves their t.me usernames, and signals dynamic registry changes', async () => {
+    const service = new SystemPeerService(new Context())
+    const changed = vi.fn()
+    service.onChanged(changed)
+    const provider: SystemPeerProvider = {
+      bootstrap: async () => {},
+      resolve: vi.fn(async (_session, conversationId) => conversationId === 'bridge:admin'
+        ? {
+            id: conversationId,
+            conversation: {
+              id: conversationId, kind: 'direct' as const, title: 'CrossGram Admin',
+              metadata: { bot: true, username: 'CrossGramAdminBot' },
+            },
+          }
+        : undefined),
+      listBots: () => [{
+        conversationId: 'bridge:admin', title: 'CrossGram Admin', username: 'CrossGramAdminBot',
+        sourcePlugin: '@mtproto-relay/platform-admin-bot',
+      }],
+    }
+
+    const unregister = service.register(provider)
+    expect(await service.listBots()).toEqual([{
+      conversationId: 'bridge:admin', title: 'CrossGram Admin', username: 'CrossGramAdminBot',
+      sourcePlugin: '@mtproto-relay/platform-admin-bot',
+    }])
+    await expect(service.resolveUsername(session, '@crossgramadminbot')).resolves.toMatchObject({
+      peer: { id: 'bridge:admin' }, provider,
+    })
+    service.notifyChanged()
+    unregister()
+    expect(changed).toHaveBeenCalledTimes(3)
+  })
 })

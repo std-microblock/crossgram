@@ -120,6 +120,17 @@ interface QQGroupMsgMaskPolicy {
   folderId: 0 | 1
 }
 
+/** Preserve system-peer metadata so direct bridge bots retain bot/usernames after hydration. */
+function directConversationUser(conversation: IMConversation): IMUser {
+  return {
+    id: conversation.id,
+    firstName: conversation.title,
+    avatar: conversation.avatar,
+    username: typeof conversation.metadata?.username === 'string' ? conversation.metadata.username : undefined,
+    metadata: conversation.metadata,
+  }
+}
+
 function boolObject(value: boolean): tl.TlObject {
   return { _: value ? 'boolTrue' : 'boolFalse' } as unknown as tl.TlObject
 }
@@ -313,11 +324,7 @@ export class DialogRpc {
     const usersAt = performance.now()
     await this._persistUsers(all
       .filter((dialog) => dialog.conversation.kind === 'direct')
-      .map((dialog) => ({
-        id: dialog.conversation.id,
-        firstName: dialog.conversation.title,
-        avatar: dialog.conversation.avatar,
-      })))
+      .map((dialog) => directConversationUser(dialog.conversation)))
     await this._syncStoredUsers(all.flatMap((dialog) => [
       ...(dialog.conversation.kind === 'direct' ? [dialog.conversation.id] : []),
       ...[dialog.lastMessage, dialog.readInboxMaxMessage]
@@ -1182,7 +1189,23 @@ export class DialogRpc {
       : { _: 'contacts.blocked', ...result }
   }
 
-  resolveUsername(req: tl.contacts.RawResolveUsernameRequest): tl.contacts.RawResolvedPeer {
+  async resolveUsername(req: tl.contacts.RawResolveUsernameRequest): Promise<tl.contacts.RawResolvedPeer> {
+    await this._hydratePeers()
+    const systemPeer = await this._systemPeers?.resolveUsername(this._session, req.username)
+    if (systemPeer) {
+      const conversation = systemPeer.peer.conversation
+      if (conversation.kind !== 'direct') throw new RpcError(400, 'USERNAME_NOT_OCCUPIED')
+      this._conversations.set(conversation.id, conversation)
+      const sourceUser = directConversationUser(conversation)
+      await this._persistUsers([sourceUser])
+      const user = this._makePeerUser(sourceUser)
+      this._peerUsers.set(conversation.id, user)
+      return {
+        _: 'contacts.resolvedPeer',
+        peer: { _: 'peerUser', userId: user.id },
+        chats: [], users: [user],
+      }
+    }
     const resolved = this._conversationViews?.resolveUsername(
       this._session.platformSessionId, req.username,
     )
@@ -3332,11 +3355,7 @@ export class DialogRpc {
   private async _persistDirectDialogUsers(dialogs: readonly IMDialog[]): Promise<void> {
     await this._persistUsers(dialogs
       .filter((dialog) => dialog.conversation.kind === 'direct')
-      .map((dialog) => ({
-        id: dialog.conversation.id,
-        firstName: dialog.conversation.title,
-        avatar: dialog.conversation.avatar,
-      })))
+      .map((dialog) => directConversationUser(dialog.conversation)))
   }
 
   private async _hydrateMessageConversation(peerId: string): Promise<void> {
@@ -3349,11 +3368,7 @@ export class DialogRpc {
     this._conversations.set(peerId, conversation)
     this._peerId(peerId)
     if (conversation.kind === 'direct') {
-      await this._persistUsers([{
-        id: conversation.id,
-        firstName: conversation.title,
-        avatar: conversation.avatar,
-      }])
+      await this._persistUsers([directConversationUser(conversation)])
     }
   }
 
@@ -3409,11 +3424,7 @@ export class DialogRpc {
       }
       const directUsers = dialogs
         .filter((dialog) => dialog.conversation.kind === 'direct')
-        .map((dialog) => ({
-          id: dialog.conversation.id,
-          firstName: dialog.conversation.title,
-          avatar: dialog.conversation.avatar,
-        }))
+        .map((dialog) => directConversationUser(dialog.conversation))
       await this._persistUsers(directUsers)
       for (const conversation of storedConversations) {
         this._conversations.set(conversation.id, conversation)

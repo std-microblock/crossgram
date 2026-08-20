@@ -110,6 +110,16 @@ export class PlatformAdminBotProvider implements SystemPeerProvider {
     return adminPeer()
   }
 
+  listBots() {
+    const peer = adminPeer()
+    return [{
+      conversationId: peer.id,
+      title: peer.conversation.title,
+      username: PLATFORM_ADMIN_USERNAME,
+      sourcePlugin: '@mtproto-relay/platform-admin-bot',
+    }]
+  }
+
   async receive(
     session: PlatformSession,
     peer: SystemPeer,

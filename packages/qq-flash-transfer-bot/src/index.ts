@@ -73,6 +73,16 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
     return this.binding(session)?.platform.flashTransfer ? flashTransferPeer() : undefined
   }
 
+  listBots() {
+    const peer = flashTransferPeer()
+    return [{
+      conversationId: peer.id,
+      title: peer.conversation.title,
+      username: String(peer.conversation.metadata?.username),
+      sourcePlugin: '@mtproto-relay/qq-flash-transfer-bot',
+    }]
+  }
+
   async receive(
     session: PlatformSession,
     peer: SystemPeer,
