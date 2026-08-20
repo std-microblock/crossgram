@@ -11,6 +11,7 @@ service_user=${CROSSGRAM_USER:-crossgram}
 branch=${CROSSGRAM_BRANCH:-main}
 git_command=${CROSSGRAM_GIT:-git}
 corepack_command=${CROSSGRAM_COREPACK:-corepack}
+node_command=${CROSSGRAM_NODE:-node}
 systemctl_command=${CROSSGRAM_SYSTEMCTL:-systemctl}
 
 run_as_service() {
@@ -31,6 +32,7 @@ run_as_service "$git_command" fetch --prune origin "$branch"
 run_as_service "$git_command" merge --ff-only "origin/$branch"
 run_as_service env YARN_ENABLE_SCRIPTS=true "$corepack_command" yarn install --immutable
 run_as_service "$corepack_command" yarn build
+run_as_service "$node_command" "$install_dir/deploy/migrate-runtime-config.mjs" "$install_dir/.runtime/app.yml"
 
 if [ "${1:-}" != "--no-restart" ]; then
   "$systemctl_command" restart crossgram.service

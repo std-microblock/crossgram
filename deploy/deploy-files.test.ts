@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { migrateRuntimeConfig, migrateRuntimeConfigFile } from './migrate-runtime-config.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -68,6 +69,7 @@ describe('Crossgram Linux deployment', () => {
       const runAs = fake('run-as', 'exec "$@"')
       const git = fake('git', 'printf \'git %s\\n\' "$*" >> "$CROSSGRAM_TEST_CALLS"; case "$*" in *rev-parse*) printf \'abc123\\n\';; esac')
       const corepack = fake('corepack', 'printf \'corepack %s scripts=%s\\n\' "$*" "${YARN_ENABLE_SCRIPTS:-}" >> "$CROSSGRAM_TEST_CALLS"')
+      const node = fake('node', 'printf \'node %s\\n\' "$*" >> "$CROSSGRAM_TEST_CALLS"')
       const systemctl = fake('systemctl', 'printf \'systemctl %s\\n\' "$*" >> "$CROSSGRAM_TEST_CALLS"')
 
       execFileSync('sh', [join(root, 'deploy', 'update.sh')], {
@@ -77,6 +79,7 @@ describe('Crossgram Linux deployment', () => {
           CROSSGRAM_RUN_AS: runAs,
           CROSSGRAM_GIT: git,
           CROSSGRAM_COREPACK: corepack,
+          CROSSGRAM_NODE: node,
           CROSSGRAM_SYSTEMCTL: systemctl,
           CROSSGRAM_TEST_CALLS: calls,
           CROSSGRAM_ALLOW_NON_ROOT_TEST: '1',
@@ -88,9 +91,32 @@ describe('Crossgram Linux deployment', () => {
         'git merge --ff-only origin/main',
         'corepack yarn install --immutable scripts=true',
         'corepack yarn build scripts=',
+        `node ${checkout}/deploy/migrate-runtime-config.mjs ${checkout}/.runtime/app.yml`,
         'systemctl restart crossgram.service',
         'git rev-parse --short HEAD',
       ])
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
+  })
+
+  it('adds the merged-forward viewer to an existing runtime config exactly once', () => {
+    const oldConfig = `- id: bridge
+  name: '@mtproto-relay/bridge'
+- id: qqnt
+  name: '@mtproto-relay/platform-qqnt'
+`
+    const migrated = migrateRuntimeConfig(oldConfig)
+    expect(migrated).toContain("- id: merged-forward\n  name: '@mtproto-relay/merged-forward'")
+    expect(migrateRuntimeConfig(migrated)).toBe(migrated)
+
+    const temp = mkdtempSync(join(tmpdir(), 'crossgram-config-migration-'))
+    const config = join(temp, 'app.yml')
+    try {
+      writeFileSync(config, oldConfig)
+      expect(migrateRuntimeConfigFile(config)).toBe(true)
+      expect(migrateRuntimeConfigFile(config)).toBe(false)
+      expect(readFileSync(config, 'utf8')).toBe(migrated)
     } finally {
       rmSync(temp, { recursive: true, force: true })
     }
