@@ -8,13 +8,27 @@ const authKey = new Uint8Array(8).fill(1)
 const identity = { platformId: 'static', platformSessionId: 'static-session' }
 
 describe('Telegram login tokens', () => {
-  it('parses only canonical 32-byte Telegram login URL tokens', () => {
+  it('parses canonical padded and unpadded 32-byte Telegram login URL tokens', () => {
     const encoded = Buffer.from(token).toString('base64url')
+    const padded = `${encoded}=`
     expect(encoded).toHaveLength(43)
+    expect(padded).toHaveLength(44)
     expect(parseTelegramLoginToken(`tg://login?token=${encoded}`)).toEqual(token)
+    expect(parseTelegramLoginToken(`tg://login?token=${padded}`)).toEqual(token)
+  })
+
+  it('rejects non-canonical Telegram login URL tokens', () => {
+    const encoded = Buffer.from(token).toString('base64url')
     expect(parseTelegramLoginToken(`tg://login?token=${encoded.slice(1)}`)).toBeUndefined()
     expect(parseTelegramLoginToken(`tg://login?token=${encoded}a`)).toBeUndefined()
+    expect(parseTelegramLoginToken(`tg://login?token=${encoded}==`)).toBeUndefined()
+    expect(parseTelegramLoginToken(`tg://login?token=${encoded}===`)).toBeUndefined()
+    expect(parseTelegramLoginToken(`tg://login?token=${encoded.slice(0, 20)}=${encoded.slice(20)}`)).toBeUndefined()
+    expect(parseTelegramLoginToken(`tg://login?token=${encoded.slice(0, -1)}$`)).toBeUndefined()
+    expect(parseTelegramLoginToken(`tg://login?token=${Buffer.alloc(31).toString('base64url')}`)).toBeUndefined()
     expect(parseTelegramLoginToken('https://example.com/login?token=abc')).toBeUndefined()
+    expect(parseTelegramLoginToken(`tg://logout?token=${encoded}`)).toBeUndefined()
+    expect(parseTelegramLoginToken(`tg://login/other?token=${encoded}`)).toBeUndefined()
   })
 
   it('lets the issuing auth key commit an approval only once', () => {

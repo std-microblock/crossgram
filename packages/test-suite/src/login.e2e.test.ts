@@ -801,7 +801,8 @@ describe('bridge login e2e', () => {
       const first = await callRpc(issuer, issuerKey, issuerSession, {
         _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
       }, 2)
-      const firstUrl = `tg://login?token=${Buffer.from(first.token).toString('base64url')}`
+      expect(first.token).toHaveLength(32)
+      const firstUrl = `tg://login?token=${Buffer.from(first.token).toString('base64url')}=`
       const invalidToken = await fetch(approvalUrl, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: 'tg://login?token=short' }),
       })

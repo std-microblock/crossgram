@@ -520,9 +520,12 @@ export function parseTelegramLoginUrl(value: string): string | undefined {
       || url.hostname !== 'login'
       || (url.pathname && url.pathname !== '/')
       || !token
-      || !/^[A-Za-z0-9_-]+$/.test(token)
+      || !/^[A-Za-z0-9_-]+={0,2}$/.test(token)
     ) return
-    return value
+    const decoded = atob(token.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(token.length / 4) * 4, '='))
+    const paddedCanonical = btoa(decoded).replace(/\+/g, '-').replace(/\//g, '_')
+    const canonical = paddedCanonical.replace(/=+$/, '')
+    return decoded.length === 32 && (token === canonical || token === paddedCanonical) ? value : undefined
   } catch {
     return
   }

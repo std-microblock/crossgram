@@ -165,9 +165,11 @@ export function parseTelegramLoginToken(value: string): Uint8Array | undefined {
   }
   if (url.protocol !== 'tg:' || url.hostname !== 'login' || (url.pathname && url.pathname !== '/')) return
   const encoded = url.searchParams.get('token')
-  if (!encoded || encoded.length !== 43 || !/^[A-Za-z0-9_-]+$/.test(encoded)) return
+  if (!encoded || !/^[A-Za-z0-9_-]+={0,2}$/.test(encoded)) return
   const token = new Uint8Array(Buffer.from(encoded, 'base64url'))
-  return token.length === 32 && Buffer.from(token).toString('base64url') === encoded ? token : undefined
+  const canonical = Buffer.from(token).toString('base64url')
+  const paddedCanonical = canonical.padEnd(Math.ceil(canonical.length / 4) * 4, '=')
+  return token.length === 32 && (encoded === canonical || encoded === paddedCanonical) ? token : undefined
 }
 
 function tokenKey(token: Uint8Array): string {

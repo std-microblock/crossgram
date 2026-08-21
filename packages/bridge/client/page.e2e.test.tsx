@@ -11,6 +11,7 @@ type DashboardData = PlatformAccountDashboardData & StickerPackDashboardData & B
 
 const rpcState = vi.hoisted(() => ({ data: undefined as unknown as DashboardData }))
 const qrState = vi.hoisted(() => ({ result: null as { data: string } | null }))
+const qrToken = Buffer.from(new Uint8Array(32).fill(7)).toString('base64url')
 
 vi.mock('@cordisjs/client', async () => {
   const { ref } = await import('vue')
@@ -182,6 +183,21 @@ describe('Bridge platform account page', () => {
     wrapper.unmount()
   })
 
+  it('approves an unpadded Telegram login QR', async () => {
+    rpcState.data.accounts = [{ platformId: 'static', platformKind: 'static', status: 'ready' }]
+    qrState.result = { data: `tg://login?token=${qrToken}` }
+    const wrapper = mountPlatformAccountsPage()
+    stubImageDecoder()
+
+    pasteImage()
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/login-tokens/static/approve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: `tg://login?token=${qrToken}` }),
+    }))
+    wrapper.unmount()
+  })
+
   it('accepts a Meta+V image paste for Telegram login approval', async () => {
     rpcState.data.accounts = [{ platformId: 'static', platformKind: 'static', status: 'ready' }]
     qrState.result = { data: telegramQr() }
@@ -190,6 +206,23 @@ describe('Bridge platform account page', () => {
 
     pasteImage({ metaKey: true })
     await vi.waitFor(() => expect(fetch).toHaveBeenCalled())
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['a short unpadded token', 'AB'],
+    ['a short padded token', 'AA=='],
+    ['excess trailing padding', `${qrToken}==`],
+    ['embedded padding', `${qrToken.slice(0, 20)}=${qrToken.slice(20)}`],
+  ])('does not approve a pasted Telegram QR with %s', async (_, token) => {
+    rpcState.data.accounts = [{ platformId: 'static', platformKind: 'static', status: 'ready' }]
+    qrState.result = { data: `tg://login?token=${token}` }
+    const wrapper = mountPlatformAccountsPage()
+    stubImageDecoder()
+
+    pasteImage()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('该二维码不是 Telegram 登录二维码'))
+    expect(fetch).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -307,7 +340,7 @@ function mountBotsPage() {
 }
 
 function telegramQr(): string {
-  return `tg://login?token=${Buffer.from(new Uint8Array(32).fill(7)).toString('base64url')}`
+  return `tg://login?token=${qrToken}=`
 }
 
 function pasteImage(modifiers: { ctrlKey?: boolean, metaKey?: boolean } = {}): void {
