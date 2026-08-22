@@ -357,7 +357,11 @@ export class FileAuthKeyStore implements AuthKeyStore {
   }
 
   private _syncPath(path: string): void {
-    const fd = this._fs.openSync(path, 'r')
+    // Windows rejects FlushFileBuffers/fsync for handles opened without write
+    // access (Node 24 surfaces this as EPERM). The temporary snapshot is ours,
+    // so open it read/write there while retaining the least-privilege read-only
+    // directory/file handle used by POSIX.
+    const fd = this._fs.openSync(path, this._platform === 'win32' ? 'r+' : 'r')
     try {
       this._fs.fsyncSync(fd)
     } finally {

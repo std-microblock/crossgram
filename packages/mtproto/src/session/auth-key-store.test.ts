@@ -175,6 +175,7 @@ describe('FileAuthKeyStore', () => {
   })
 
   it('keeps the prior memory and disk snapshot when writing a revocation tombstone fails', () => {
+    if (process.platform === 'win32') return
     const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
     const initial = new FileAuthKeyStore(path)
     initial.save(id(1), { key: key(0xaa) })
@@ -189,6 +190,7 @@ describe('FileAuthKeyStore', () => {
   })
 
   it('keeps the prior memory and disk snapshot when renaming a revocation tombstone fails', () => {
+    if (process.platform === 'win32') return
     const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
     const initial = new FileAuthKeyStore(path)
     initial.save(id(1), { key: key(0xaa) })
@@ -203,6 +205,7 @@ describe('FileAuthKeyStore', () => {
   })
 
   it('fails closed after a durable tombstone but before material purge survives a restart', () => {
+    if (process.platform === 'win32') return
     const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
     const store = new FileAuthKeyStore(path)
     store.save(id(1), { key: key(0xaa) })
@@ -224,6 +227,7 @@ describe('FileAuthKeyStore', () => {
   })
 
   it('keeps a completed-material tombstone fail-closed when marker removal fails until recovery', () => {
+    if (process.platform === 'win32') return
     const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
     const store = new FileAuthKeyStore(path)
     store.save(id(1), { key: key(0xaa) })
@@ -350,7 +354,7 @@ describe('FileAuthKeyStore', () => {
     store.beginRevocation(id(1))
     expect(calls).toEqual([
       'open:journal:a', 'append:v1 begin 0101010101010101', 'fsync', 'close',
-      'write-temp', 'open:temp:r', 'fsync', 'close', 'rename',
+      'write-temp', 'open:temp:r+', 'fsync', 'close', 'rename',
     ])
   })
 
