@@ -6,7 +6,7 @@ import { NodePlatform } from '@mtcute/node'
 import { connect as connectTcp } from 'node:net'
 import { once } from 'node:events'
 import Long from 'long'
-import { Mtproto } from './service.js'
+import { Mtproto, type MtprotoConfig } from './service.js'
 import type { ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair } from './crypto/rsa-keygen.js'
 import type { ServerSession } from './session/server-session.js'
@@ -67,10 +67,12 @@ function fakeSession(
   }
 }
 
-async function makeService(): Promise<{ ctx: Context, service: Mtproto, stop: () => Promise<void> }> {
+async function makeService(
+  config: Partial<MtprotoConfig> = {},
+): Promise<{ ctx: Context, service: Mtproto, stop: () => Promise<void> }> {
   const ctx = new Context()
   const service = new Mtproto(ctx, {
-    port: 0, host: '127.0.0.1', rsaKey: generateRsaKeyPair(), log,
+    port: 0, host: '127.0.0.1', rsaKey: generateRsaKeyPair(), log, ...config,
   })
   const generator = service[Service.init]()
   const initialized = await generator.next()
@@ -82,6 +84,19 @@ async function makeService(): Promise<{ ctx: Context, service: Mtproto, stop: ()
       await generator.return(undefined)
     },
   }
+}
+
+async function openSocket(port: number) {
+  const socket = connectTcp({ host: '127.0.0.1', port })
+  await once(socket, 'connect')
+  return socket
+}
+
+async function destroySocket(socket: ReturnType<typeof connectTcp>): Promise<void> {
+  if (socket.destroyed) return
+  const closed = once(socket, 'close')
+  socket.destroy()
+  await closed
 }
 
 function makeRpcContext(ctx: Context, request: { _: string }): ServerRpcContext {
@@ -530,6 +545,76 @@ describe('Mtproto connection fibers', () => {
     } finally {
       dispose()
       socket.destroy()
+      await stop()
+    }
+  })
+
+  it('evicts the oldest connection from one IP and keeps the reconnecting client online', async () => {
+    const { service, stop } = await makeService({
+      maxConnections: 8,
+      maxConnectionsPerIp: 2,
+      connectionIdleTimeoutMs: 0,
+    })
+    const sockets: Array<ReturnType<typeof connectTcp>> = []
+    try {
+      const first = await openSocket(service.port)
+      sockets.push(first)
+      const second = await openSocket(service.port)
+      sockets.push(second)
+      await vi.waitFor(() => expect(service.activeConnectionCount).toBe(2))
+
+      const firstClosed = once(first, 'close')
+      const replacement = await openSocket(service.port)
+      sockets.push(replacement)
+      await firstClosed
+
+      await vi.waitFor(() => expect(service.activeConnectionCount).toBe(2))
+      expect(first.destroyed).toBe(true)
+      expect(second.destroyed).toBe(false)
+      expect(replacement.destroyed).toBe(false)
+    } finally {
+      await Promise.all(sockets.map(destroySocket))
+      await stop()
+    }
+  })
+
+  it('enforces the global connection cap independently of the per-IP cap', async () => {
+    const { service, stop } = await makeService({
+      maxConnections: 2,
+      maxConnectionsPerIp: 8,
+      connectionIdleTimeoutMs: 0,
+    })
+    const sockets: Array<ReturnType<typeof connectTcp>> = []
+    try {
+      const first = await openSocket(service.port)
+      sockets.push(first)
+      sockets.push(await openSocket(service.port))
+      await vi.waitFor(() => expect(service.activeConnectionCount).toBe(2))
+
+      const firstClosed = once(first, 'close')
+      sockets.push(await openSocket(service.port))
+      await firstClosed
+
+      await vi.waitFor(() => expect(service.activeConnectionCount).toBe(2))
+      expect(first.destroyed).toBe(true)
+    } finally {
+      await Promise.all(sockets.map(destroySocket))
+      await stop()
+    }
+  })
+
+  it('closes a TCP connection that remains completely idle', async () => {
+    const { service, stop } = await makeService({
+      connectionIdleTimeoutMs: 50,
+      keepAliveInitialDelayMs: 10,
+    })
+    const socket = await openSocket(service.port)
+    try {
+      await once(socket, 'close')
+      expect(socket.destroyed).toBe(true)
+      await vi.waitFor(() => expect(service.activeConnectionCount).toBe(0))
+    } finally {
+      await destroySocket(socket)
       await stop()
     }
   })

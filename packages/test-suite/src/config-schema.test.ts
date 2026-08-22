@@ -24,7 +24,10 @@ const cases = [
     'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
-  ['mtproto', mtprotoConfig, ['port', 'host', 'rsaKeyPath', 'authKeyStorePath']],
+  ['mtproto', mtprotoConfig, [
+    'port', 'host', 'rsaKeyPath', 'authKeyStorePath',
+    'maxConnections', 'maxConnectionsPerIp', 'connectionIdleTimeoutMs', 'keepAliveInitialDelayMs',
+  ]],
   ['mtproto-statistics', statisticsConfig, [
     'sampleIntervalMs', 'slowThresholdMs', 'historySeconds', 'topMethods', 'topIps',
   ]],
@@ -66,6 +69,10 @@ describe('plugin config schemas', () => {
     expect(mtprotoConfig({ crypto: 'injected-for-test' })).toMatchObject({
       port: 4430,
       host: '127.0.0.1',
+      maxConnections: 256,
+      maxConnectionsPerIp: 64,
+      connectionIdleTimeoutMs: 600_000,
+      keepAliveInitialDelayMs: 60_000,
       crypto: 'injected-for-test',
     })
     expect(bridgeConfig({})).toEqual({

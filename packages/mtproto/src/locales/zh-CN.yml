@@ -2,3 +2,7 @@ port: MTProto 服务监听的 TCP 端口。设为 0 时使用临时端口。
 host: MTProto 服务绑定的主机名或 IP 地址。
 rsaKeyPath: 用于加载或创建 RSA 密钥对 JSON 文件的路径。
 authKeyStorePath: 用于持久化已授权 MTProto 密钥的路径。
+maxConnections: MTProto TCP 并发连接总上限。达到上限时淘汰最旧连接。
+maxConnectionsPerIp: 单个远端 IP 可保留的 MTProto TCP 并发连接上限。
+connectionIdleTimeoutMs: TCP 连接无活动达到此毫秒数后关闭。设为 0 时禁用。
+keepAliveInitialDelayMs: TCP 空闲达到此毫秒数后开始操作系统 keepalive 探测。

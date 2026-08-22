@@ -45,6 +45,14 @@ export interface MtprotoConfig {
   authKeyStore?: AuthKeyStore
   /** Optional mtcute logger override (default: routed through ctx.logger). */
   log?: Logger | LogManager
+  /** Maximum simultaneously retained TCP connections (default: 256). */
+  maxConnections?: number
+  /** Maximum retained TCP connections from one remote IP (default: 64). */
+  maxConnectionsPerIp?: number
+  /** Close after this many milliseconds without socket activity (default: 10 minutes; 0 disables). */
+  connectionIdleTimeoutMs?: number
+  /** Start TCP keepalive probes after this idle delay (default: 60 seconds). */
+  keepAliveInitialDelayMs?: number
 }
 
 export const Config = z.object({
@@ -52,6 +60,10 @@ export const Config = z.object({
   host: z.string().default('127.0.0.1'),
   rsaKeyPath: z.string(),
   authKeyStorePath: z.string(),
+  maxConnections: z.natural().max(65_535).default(256),
+  maxConnectionsPerIp: z.natural().max(65_535).default(64),
+  connectionIdleTimeoutMs: z.natural().max(86_400_000).default(600_000),
+  keepAliveInitialDelayMs: z.natural().max(86_400_000).default(60_000),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -59,6 +71,17 @@ export const Config = z.object({
 
 const STALL_TIMEOUT_MS = 30_000
 const STALL_WATCH_INTERVAL_MS = 5_000
+const DEFAULT_MAX_CONNECTIONS = 256
+const DEFAULT_MAX_CONNECTIONS_PER_IP = 64
+const DEFAULT_CONNECTION_IDLE_TIMEOUT_MS = 10 * 60_000
+const DEFAULT_KEEPALIVE_INITIAL_DELAY_MS = 60_000
+
+interface SocketRecord {
+  connectionId: string
+  remoteAddress: string
+  remotePort?: number
+  connectedAt: number
+}
 
 interface ConnectionFiberConfig {
   open(ctx: Context): void | (() => void | Promise<void>)
@@ -88,12 +111,17 @@ export class Mtproto extends Service {
   private readonly _log: Logger
   private readonly _sessions = new Set<ServerSession>()
   private readonly _sockets = new Set<Socket>()
+  private readonly _socketRecords = new Map<Socket, SocketRecord>()
   private readonly _connectionFibers = new Map<string, Fiber>()
   private readonly _authApiLayers = new Map<string, number>()
   private readonly _rpcDependencies = new RpcDependencyRegistry()
   private readonly _pqChallenges = new PqChallengeStore()
   private _connectionSeq = 0
   private _server: Server | null = null
+  private readonly _maxConnections: number
+  private readonly _maxConnectionsPerIp: number
+  private readonly _connectionIdleTimeoutMs: number
+  private readonly _keepAliveInitialDelayMs: number
 
   constructor(ctx: Context, public config: MtprotoConfig = {}) {
     super(ctx, 'mtproto')
@@ -108,6 +136,16 @@ export class Mtproto extends Service {
       ?? (config.authKeyStorePath
         ? new FileAuthKeyStore(resolve(process.cwd(), config.authKeyStorePath))
         : new MemoryAuthKeyStore())
+    this._maxConnections = positiveLimit(config.maxConnections, DEFAULT_MAX_CONNECTIONS)
+    this._maxConnectionsPerIp = positiveLimit(config.maxConnectionsPerIp, DEFAULT_MAX_CONNECTIONS_PER_IP)
+    this._connectionIdleTimeoutMs = nonNegativeInteger(
+      config.connectionIdleTimeoutMs,
+      DEFAULT_CONNECTION_IDLE_TIMEOUT_MS,
+    )
+    this._keepAliveInitialDelayMs = nonNegativeInteger(
+      config.keepAliveInitialDelayMs,
+      DEFAULT_KEEPALIVE_INITIAL_DELAY_MS,
+    )
 
     if (config.log) {
       this._log = 'create' in config.log && typeof config.log.create === 'function'
@@ -283,6 +321,7 @@ export class Mtproto extends Service {
       await Promise.allSettled([...this._connectionFibers.values()].map((fiber) => fiber.dispose()))
       this._connectionFibers.clear()
       this._sockets.clear()
+      this._socketRecords.clear()
       this._rpcDependencies.clear()
       await new Promise<void>((resolve) => {
         if (!server.listening) return resolve()
@@ -294,7 +333,15 @@ export class Mtproto extends Service {
 
   private _handleConnection(socket: Socket): void {
     const connectionId = `conn-${++this._connectionSeq}`
+    const record: SocketRecord = {
+      connectionId,
+      remoteAddress: normalizeRemoteAddress(socket.remoteAddress),
+      remotePort: socket.remotePort,
+      connectedAt: Date.now(),
+    }
+    this._evictConnectionsFor(record)
     this._sockets.add(socket)
+    this._socketRecords.set(socket, record)
 
     const fiber = this.ctx.plugin(connectionFiber, {
       open: (ctx) => this._openConnection(ctx, socket, connectionId),
@@ -303,6 +350,7 @@ export class Mtproto extends Service {
 
     const dispose = () => {
       this._sockets.delete(socket)
+      this._socketRecords.delete(socket)
       this._connectionFibers.delete(connectionId)
       void fiber.dispose()
     }
@@ -316,7 +364,7 @@ export class Mtproto extends Service {
   private _openConnection(ctx: Context, socket: Socket, connectionId: string) {
     const connLog = this._log.create(`conn:${socket.remoteAddress}:${socket.remotePort}`)
     socket.setNoDelay(true)
-    socket.setKeepAlive(true)
+    socket.setKeepAlive(true, this._keepAliveInitialDelayMs)
 
     let connectionCtx!: Context
     let scope!: MtprotoConnectionScope
@@ -331,6 +379,19 @@ export class Mtproto extends Service {
         connLog.error('MTProto traffic observer failed and was disabled: %s', error)
       }
     })
+    const idleTimeout = this._connectionIdleTimeoutMs
+      ? () => {
+          connLog.warn(
+            'connection idle for %d ms; closing to release retained session resources',
+            this._connectionIdleTimeoutMs,
+          )
+          connection.close()
+        }
+      : undefined
+    if (idleTimeout) {
+      socket.setTimeout(this._connectionIdleTimeoutMs)
+      socket.on('timeout', idleTimeout)
+    }
     scope = {
       id: connectionId,
       connection,
@@ -383,6 +444,9 @@ export class Mtproto extends Service {
     const emitClose = () => {
       if (closeEmitted) return
       closeEmitted = true
+      // Stop routing updates to this session immediately. Fiber disposal also
+      // removes it, but asynchronous teardown may lag behind a reconnect storm.
+      this._sessions.delete(session)
       debug({
         direction: 'client->server', phase: 'connection', timestamp: Date.now(),
         payload: { _: 'connection_closed' },
@@ -396,11 +460,60 @@ export class Mtproto extends Service {
       if (disposed) return
       disposed = true
       socket.off('close', emitClose)
-      this._sessions.delete(session)
+      if (idleTimeout) socket.off('timeout', idleTimeout)
       emitClose()
       connection.dispose()
       connection.close()
     }
+  }
+
+  private _evictConnectionsFor(incoming: SocketRecord): void {
+    while (this._countConnectionsFrom(incoming.remoteAddress) >= this._maxConnectionsPerIp) {
+      const oldest = this._oldestSocket((record) => record.remoteAddress === incoming.remoteAddress)
+      if (!oldest) break
+      this._evictSocket(oldest[0], oldest[1], 'per-IP connection limit', incoming)
+    }
+    while (this._socketRecords.size >= this._maxConnections) {
+      const oldest = this._oldestSocket(() => true)
+      if (!oldest) break
+      this._evictSocket(oldest[0], oldest[1], 'global connection limit', incoming)
+    }
+  }
+
+  private _countConnectionsFrom(remoteAddress: string): number {
+    let count = 0
+    for (const record of this._socketRecords.values()) {
+      if (record.remoteAddress === remoteAddress) count++
+    }
+    return count
+  }
+
+  private _oldestSocket(predicate: (record: SocketRecord) => boolean): [Socket, SocketRecord] | undefined {
+    for (const entry of this._socketRecords) {
+      if (predicate(entry[1])) return entry
+    }
+  }
+
+  private _evictSocket(
+    socket: Socket,
+    record: SocketRecord,
+    reason: string,
+    incoming: SocketRecord,
+  ): void {
+    this._socketRecords.delete(socket)
+    this._sockets.delete(socket)
+    this._log.warn(
+      '%s reached while accepting %s:%d (%s); evicting oldest %s:%d (%s, age=%d ms)',
+      reason,
+      incoming.remoteAddress,
+      incoming.remotePort ?? 0,
+      incoming.connectionId,
+      record.remoteAddress,
+      record.remotePort ?? 0,
+      record.connectionId,
+      Math.max(0, incoming.connectedAt - record.connectedAt),
+    )
+    socket.destroy()
   }
 
   private async _rememberApiLayer(authKeyId: Uint8Array, layer: number): Promise<void> {
@@ -426,6 +539,21 @@ export class Mtproto extends Service {
     const layer = this._authApiLayers.get(bytesHex(authKeyId))
     if (layer !== undefined) session.applyApiLayer(layer)
   }
+}
+
+function normalizeRemoteAddress(address?: string): string {
+  if (!address) return 'unknown'
+  return address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address
+}
+
+function positiveLimit(value: number | undefined, fallback: number): number {
+  if (!Number.isSafeInteger(value) || value === undefined || value <= 0) return fallback
+  return value
+}
+
+function nonNegativeInteger(value: number | undefined, fallback: number): number {
+  if (!Number.isSafeInteger(value) || value === undefined || value < 0) return fallback
+  return value
 }
 
 function equalBytes(left: Uint8Array | null, right: Uint8Array): boolean {

@@ -2,3 +2,7 @@ port: TCP port to listen on. Use 0 to select an ephemeral port.
 host: Host or IP address to bind the MTProto server to.
 rsaKeyPath: Path used to load or create the RSA key-pair JSON file.
 authKeyStorePath: Path used to persist authorized MTProto keys.
+maxConnections: Maximum simultaneous MTProto TCP connections. The oldest connection is evicted when the limit is reached.
+maxConnectionsPerIp: Maximum simultaneous MTProto TCP connections retained for one remote IP.
+connectionIdleTimeoutMs: Close a connection after this many milliseconds without socket activity. Set to 0 to disable.
+keepAliveInitialDelayMs: Start operating-system TCP keepalive probes after this many idle milliseconds.
