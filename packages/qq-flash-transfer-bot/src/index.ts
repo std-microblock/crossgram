@@ -55,14 +55,17 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
   }
 
   async bootstrap(session: PlatformSession, peers: SystemPeerService): Promise<void> {
-    if (!this.active || !this.qqBinding(session)?.platform.flashTransfer) return
+    const binding = this.qqBinding(session)
+    if (!this.active || !binding) return
     const peer = flashTransferPeer()
     await peers.emit(session, { type: 'conversation', conversation: peer.conversation })
     if (!this.active) return
     await reply(
       session,
       peer.conversation,
-      '仅支持 QQ。转发已有 QQ 文件会复用 QQNT 本地缓存；直接上传的新文件会交给 QQ 闪传上传一次。文件说明会用作闪传名称。',
+      binding.platform.flashTransfer
+        ? '仅支持 QQ。转发已有 QQ 文件会复用 QQNT 本地缓存；直接上传的新文件会交给 QQ 闪传上传一次。文件说明会用作闪传名称。'
+        : unsupportedMessage(),
       peers,
       'bridge:qq-flash-transfer:welcome',
     )
@@ -70,7 +73,7 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
 
   async resolve(session: PlatformSession, conversationId: string): Promise<SystemPeer | undefined> {
     if (!this.active || conversationId !== QQ_FLASH_TRANSFER_CONVERSATION_ID) return
-    return this.qqBinding(session)?.platform.flashTransfer ? flashTransferPeer() : undefined
+    return this.qqBinding(session) ? flashTransferPeer() : undefined
   }
 
   listBots() {
@@ -116,7 +119,11 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
   ): Promise<void> {
     const binding = this.qqBinding(session)
     const flashTransfer = binding?.platform.flashTransfer
-    if (!this.active || !flashTransfer) return
+    if (!this.active || !binding) return
+    if (!flashTransfer) {
+      await reply(session, conversation, unsupportedMessage(), peers)
+      return
+    }
     if (media.length > this.maxFiles) {
       await reply(session, conversation, `一次最多创建 ${this.maxFiles} 个文件的 QQ 闪传。`, peers)
       return
@@ -269,5 +276,10 @@ function flashTransferFailureMessage(error: unknown): string {
   if (/QQ media (?:is not available in the local cache|cache path is not trusted|cache size mismatch)/iu.test(message)) {
     return '有 QQ 文件尚未保存在 QQNT 本机缓存中，请先在 QQ 中下载该文件后再转发。'
   }
+  if (/QQ Flash Transfer is not supported by Linux QQ/iu.test(message)) return unsupportedMessage()
   return 'QQ 闪传创建失败，请稍后重试。'
+}
+
+function unsupportedMessage(): string {
+  return '当前 QQNT 环境不支持 QQ 闪传：Linux QQ 未实现此能力，请改用 Windows QQNT。'
 }

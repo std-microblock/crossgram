@@ -17,7 +17,7 @@ function outgoing(): IMMessage {
   }
 }
 
-async function fixture(config: bot.Config = {}) {
+async function fixture(config: bot.Config = {}, options: { flashTransfer?: boolean } = {}) {
   const ctx = new Context()
   const platforms = new IMPlatformService(ctx)
   const peers = new SystemPeerService(ctx)
@@ -33,7 +33,7 @@ async function fixture(config: bot.Config = {}) {
       send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 9 },
       conversations: { groups: true, channels: false, subchannels: false },
     },
-    flashTransfer: { create },
+    ...(options.flashTransfer === false ? {} : { flashTransfer: { create } }),
     async subscribe() { return () => {} },
     async sendMessage() { throw new Error('not used') },
   }
@@ -136,6 +136,26 @@ describe('QQ Flash Transfer bot', () => {
     expect(messages.at(-1)?.message.content.parts[0]).toMatchObject({
       text: expect.stringContaining('请先在 QQ 中下载'),
     })
+    await plugin.dispose()
+  })
+
+  it('keeps stale bot dialogs resolvable and explains that Linux QQ is unsupported', async () => {
+    const { plugin, peers, events, create, resolution } = await fixture({}, { flashTransfer: false })
+    events.length = 0
+    await peers.receive(session, resolution, outgoing(), { parts: [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'alpha.bin', size: 3,
+        source: { size: 3, async *stream() { throw new Error('must not stream') } },
+      },
+    }] })
+
+    expect(create).not.toHaveBeenCalled()
+    expect(events).toMatchObject([{
+      type: 'message', message: { content: { parts: [{
+        text: expect.stringContaining('Linux QQ 未实现此能力'),
+      }] } },
+    }])
     await plugin.dispose()
   })
 })

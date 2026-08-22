@@ -130,6 +130,7 @@ export class QQNTClient {
   private readonly directRangeBlockLoads = new Map<string, Promise<CachedDirectRangeBlock>>()
   private directRangeBlockBytes = 0
   private bridgeProtocol?: number
+  private bridgeFlashTransferSupported?: boolean
   private readonly revalidatedJsonResponses = new Map<string, { etag: string, value: unknown }>()
 
   constructor(options: QQNTClientOptions = {}) {
@@ -148,10 +149,29 @@ export class QQNTClient {
       ?? join(tmpdir(), `crossgram-qqnt-unranged-${process.pid}-${++unrangedCacheSequence}`)
   }
 
-  async status(): Promise<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }> {
-    const status = await this.json<{ protocolVersion: number, ready: boolean, selfUin?: string, selfUid?: string }>('/status')
+  async status(): Promise<{
+    protocolVersion: number
+    ready: boolean
+    selfUin?: string
+    selfUid?: string
+    flashTransferSupported?: boolean
+  }> {
+    const status = await this.json<{
+      protocolVersion: number
+      ready: boolean
+      selfUin?: string
+      selfUid?: string
+      flashTransferSupported?: boolean
+    }>('/status')
     this.bridgeProtocol = status.protocolVersion
+    this.bridgeFlashTransferSupported = status.protocolVersion >= 29
+      ? status.flashTransferSupported === true
+      : undefined
     return status
+  }
+
+  get flashTransferSupported(): boolean | undefined {
+    return this.bridgeFlashTransferSupported
   }
 
   async createFlashTransfer(
@@ -160,6 +180,9 @@ export class QQNTClient {
   ): Promise<WireFlashTransferResult> {
     if (this.bridgeProtocol === undefined) await this.status()
     if (this.bridgeProtocol! < 28) throw new Error('QQNT bridge protocol 28 is required for QQ Flash Transfer reuse')
+    if (this.bridgeFlashTransferSupported === false) {
+      throw new Error('QQ Flash Transfer is not supported by Linux QQ')
+    }
     if (!media.length) throw new Error('QQ Flash Transfer requires at least one file')
     const uploads: IMMediaSource[] = []
     const manifest: WireFlashTransferManifest = {

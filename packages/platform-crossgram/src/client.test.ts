@@ -166,6 +166,27 @@ describe('QQNTClient streaming transport', () => {
     expect(authorization).toBe('Bearer secret')
   })
 
+  it('rejects unsupported Linux QQ flash transfers before opening an upload request', async () => {
+    const requests: string[] = []
+    const source = vi.fn(async function* () { yield Uint8Array.of(1, 2, 3) })
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async (input) => {
+        requests.push(String(input))
+        return Response.json({
+          protocolVersion: 29, ready: true, flashTransferSupported: false,
+        })
+      }),
+    })
+
+    await expect(client.createFlashTransfer([{
+      kind: 'file', name: 'alpha.bin', size: 3, source: { size: 3, stream: source },
+    }])).rejects.toThrow('QQ Flash Transfer is not supported by Linux QQ')
+    expect(requests).toEqual(['http://bridge.invalid/v1/status'])
+    expect(source).not.toHaveBeenCalled()
+    expect(client.flashTransferSupported).toBe(false)
+  })
+
   it('lists and resolves requests through encoded authenticated bridge routes', async () => {
     const requests: Array<{ url: string, method?: string, body?: unknown, authorization?: string }> = []
     const client = new QQNTClient({
