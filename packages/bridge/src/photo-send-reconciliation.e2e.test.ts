@@ -75,7 +75,7 @@ function decodeRpcResult(bytes: Uint8Array): unknown {
 }
 
 describe('photo send reconciliation RPC e2e', () => {
-  it('round-trips one cached photo tier when QQ reports a redundant 720 preview', async () => {
+  it('round-trips one cached photo tier when QQ reports a distinct zero-byte 720 preview', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
     await Promise.all(fibers)
@@ -120,8 +120,8 @@ describe('photo send reconciliation RPC e2e', () => {
             height: 119,
             preview: {
               size: 0,
-              width: 277,
-              height: 119,
+              width: 160,
+              height: 90,
               locator: { imageSpec: 720 },
             },
             locator: { imageSpec: 0 },

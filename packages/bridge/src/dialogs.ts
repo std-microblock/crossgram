@@ -2214,7 +2214,7 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = req.location.thumbSize === 'm' && stored.media.preview
+    const media = req.location.thumbSize === 'm' && isDownloadablePreview(stored.media.preview)
       ? previewMedia(stored.media)
       : stored.media
     return {
@@ -2253,7 +2253,7 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = location.thumbSize === 'm' && stored.media.preview
+    const media = location.thumbSize === 'm' && isDownloadablePreview(stored.media.preview)
       ? previewMedia(stored.media)
       : stored.media
     let resolved: import('./platform.js').IMDirectDownload | undefined
@@ -5860,11 +5860,12 @@ function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhot
   // the local full-size cache entry to the preview tier first, so the final
   // photo has to be inserted and downloaded again. Keep native previews only
   // when they are a genuinely distinct rendition.
-  const preview = media.preview
+  const nativePreview = isDownloadablePreview(media.preview) ? media.preview : undefined
+  const preview = nativePreview
     && (!(media.width && media.height)
-      || media.preview.width !== dimensions.width
-      || media.preview.height !== dimensions.height)
-    ? media.preview
+      || nativePreview.width !== dimensions.width
+      || nativePreview.height !== dimensions.height)
+    ? nativePreview
     : undefined
   return {
     _: 'photo', id, accessHash, fileReference, date: timestamp,
@@ -5891,6 +5892,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
     : media.preview
       ? { width: media.preview.width, height: media.preview.height }
       : { width: 1, height: 1 }
+  const preview = isDownloadablePreview(media.preview) ? media.preview : undefined
   const attributes: tl.TypeDocumentAttribute[] = [
     { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
   ]
@@ -5915,13 +5917,13 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
     document: {
       _: 'document', id, accessHash, fileReference, date: timestamp,
       mimeType: media.mimeType ?? 'application/octet-stream', size: media.size ?? 0, dcId,
-      thumbs: media.strippedThumbnail?.byteLength || media.preview ? [
+      thumbs: media.strippedThumbnail?.byteLength || preview ? [
         ...(media.strippedThumbnail?.byteLength ? [{
           _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
         }] : []),
-        ...(media.preview ? [{
-          _: 'photoSize' as const, type: 'm', w: media.preview.width, h: media.preview.height,
-          size: Math.min(media.preview.size, 0x7fffffff),
+        ...(preview ? [{
+          _: 'photoSize' as const, type: 'm', w: preview.width, h: preview.height,
+          size: Math.min(preview.size, 0x7fffffff),
         }] : []),
       ] : undefined,
       attributes,
@@ -5935,6 +5937,12 @@ function previewMedia(media: IMMedia<any>): IMMedia<any> {
     id: `${media.id}:preview`, kind: 'image', mimeType: preview.mimeType,
     size: preview.size, width: preview.width, height: preview.height, locator: preview.locator,
   }
+}
+
+function isDownloadablePreview<T extends { size: number }>(
+  preview: T | null | undefined,
+): preview is T {
+  return Boolean(preview && Number.isSafeInteger(preview.size) && preview.size > 0)
 }
 
 function decodeBridgeMediaReference(bytes: Uint8Array): number | undefined {

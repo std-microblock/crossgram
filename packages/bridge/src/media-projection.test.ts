@@ -894,6 +894,76 @@ describe('rich-media projection', () => {
     })
   })
 
+  it('omits a zero-byte native preview even when it has distinct display dimensions', () => {
+    const media = makeTlMessageMedia({
+      id: 19_857,
+      messageId: 1,
+      ordinal: 0,
+      partIndex: 0,
+      platformMediaId: 'wide-zero-byte-preview',
+      kind: 'image',
+      name: 'wide.png',
+      mimeType: 'image/png',
+      size: 149_806,
+      width: 1_920,
+      height: 860,
+      duration: null,
+      preview: {
+        size: 0,
+        width: 1_280,
+        height: 573,
+        locator: { imageSpec: 720 },
+      },
+      strippedThumbnail: null,
+      locator: { imageSpec: 0 },
+      voice: false,
+    }, 1_800_000_001)
+
+    expect(media).toMatchObject({
+      _: 'messageMediaPhoto',
+      photo: { _: 'photo', sizes: [
+        { _: 'photoSize', type: 'y', w: 1_280, h: 573, size: 149_806 },
+        { _: 'photoSize', type: 'w', w: 1_920, h: 860, size: 149_806 },
+      ] },
+    })
+  })
+
+  it('does not advertise a zero-byte video preview as a downloadable thumbnail', () => {
+    const media = makeTlMessageMedia({
+      id: 19_858,
+      messageId: 1,
+      ordinal: 0,
+      partIndex: 0,
+      platformMediaId: 'video-zero-byte-preview',
+      kind: 'file',
+      name: 'clip.mp4',
+      mimeType: 'video/mp4',
+      size: 2_048,
+      width: 1_920,
+      height: 1_080,
+      duration: 4,
+      preview: {
+        size: 0,
+        width: 320,
+        height: 180,
+        locator: { imageSpec: 720 },
+      },
+      strippedThumbnail: new Uint8Array(strippedThumbnail).buffer,
+      locator: { fileUuid: 'video' },
+      voice: false,
+    }, 1_800_000_002)
+
+    if (media._ !== 'messageMediaDocument' || media.document?._ !== 'document') {
+      throw new Error('expected projected video document')
+    }
+    expect(media.document.thumbs?.map((thumb) => thumb._)).toEqual(['photoStrippedSize'])
+    expect(media.document.attributes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _: 'documentAttributeVideo', duration: 4, w: 1_920, h: 1_080, supportsStreaming: true,
+      }),
+    ]))
+  })
+
   it('serves an advertised native photo preview for Telegram thumb_size m requests', async () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
