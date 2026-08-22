@@ -201,7 +201,7 @@ describe('QQNTPlatform mapping', () => {
     expect(authorizations).toEqual(['Bearer service-token', 'Bearer configured-token'])
   })
 
-  it('removes the flash-transfer provider after protocol 29 reports Linux QQ as unsupported', async () => {
+  it('keeps the protocol flash-transfer provider despite an obsolete capability flag', async () => {
     const platform = new QQNTPlatform({
       fetch: vi.fn(async () => Response.json({
         ready: true, protocolVersion: 29, flashTransferSupported: false,
@@ -211,7 +211,7 @@ describe('QQNTPlatform mapping', () => {
 
     await platform.client.status()
 
-    expect(platform.flashTransfer).toBeUndefined()
+    expect(platform.flashTransfer).toBeDefined()
   })
 
   it('maps QQ permission and upload preparation rejections to typed platform send errors', async () => {

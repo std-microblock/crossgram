@@ -178,7 +178,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     ) => this.client.createFlashTransfer(media, options),
   }
   get flashTransfer() {
-    return this.client.flashTransferSupported === false ? undefined : this.flashTransferProvider
+    return this.flashTransferProvider
   }
   readonly voiceMedia?: VoiceCallMediaProvider
   readonly voiceCalls = {

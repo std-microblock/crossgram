@@ -114,11 +114,11 @@ describe('QQ Flash Transfer bot', () => {
     await plugin.dispose()
   })
 
-  it('explains that an uncached forwarded QQ file must be downloaded in QQ first', async () => {
+  it('explains when a forwarded QQ file lacks reusable remote hashes', async () => {
     const { plugin, peers, events, create, resolution } = await fixture()
     events.length = 0
     create.mockRejectedValueOnce(new Error(
-      'QQNT bridge 502: QQ media is not available in the local cache: archived.zip',
+      'QQNT bridge 502: QQ remote media has no reusable MD5/SHA-1 identity: archived.zip',
     ))
     await peers.receive(session, resolution, outgoing(), { parts: [{
       type: 'media',
@@ -134,12 +134,12 @@ describe('QQ Flash Transfer bot', () => {
 
     const messages = events.filter((event): event is Extract<IMEvent, { type: 'message' }> => event.type === 'message')
     expect(messages.at(-1)?.message.content.parts[0]).toMatchObject({
-      text: expect.stringContaining('请先在 QQ 中下载'),
+      text: expect.stringContaining('缺少可复用的远端 MD5/SHA-1 元数据'),
     })
     await plugin.dispose()
   })
 
-  it('keeps stale bot dialogs resolvable and explains that Linux QQ is unsupported', async () => {
+  it('keeps stale bot dialogs resolvable when the platform provider is misconfigured', async () => {
     const { plugin, peers, events, create, resolution } = await fixture({}, { flashTransfer: false })
     events.length = 0
     await peers.receive(session, resolution, outgoing(), { parts: [{
@@ -153,7 +153,7 @@ describe('QQ Flash Transfer bot', () => {
     expect(create).not.toHaveBeenCalled()
     expect(events).toMatchObject([{
       type: 'message', message: { content: { parts: [{
-        text: expect.stringContaining('Linux QQ 未实现此能力'),
+        text: expect.stringContaining('QQ 闪传服务未初始化'),
       }] } },
     }])
     await plugin.dispose()

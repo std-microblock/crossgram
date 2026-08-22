@@ -63,9 +63,7 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
     await reply(
       session,
       peer.conversation,
-      binding.platform.flashTransfer
-        ? '仅支持 QQ。转发已有 QQ 文件会复用 QQNT 本地缓存；直接上传的新文件会交给 QQ 闪传上传一次。文件说明会用作闪传名称。'
-        : unsupportedMessage(),
+      '仅支持 QQ。转发已有 QQ 文件会直接复用 QQ 远端身份与哈希元数据，不读取或重新上传 QQNT 本地缓存；新文件通过 QQ 闪传分片协议上传。文件说明会用作闪传名称。',
       peers,
       'bridge:qq-flash-transfer:welcome',
     )
@@ -121,7 +119,7 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
     const flashTransfer = binding?.platform.flashTransfer
     if (!this.active || !binding) return
     if (!flashTransfer) {
-      await reply(session, conversation, unsupportedMessage(), peers)
+      await reply(session, conversation, 'QQ 闪传服务未初始化，请检查 QQ 平台适配器。', peers)
       return
     }
     if (media.length > this.maxFiles) {
@@ -273,13 +271,11 @@ function errorText(error: unknown): string {
 
 function flashTransferFailureMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  if (/QQ media (?:is not available in the local cache|cache path is not trusted|cache size mismatch)/iu.test(message)) {
-    return '有 QQ 文件尚未保存在 QQNT 本机缓存中，请先在 QQ 中下载该文件后再转发。'
+  if (/no reusable MD5\/SHA-1 identity/iu.test(message)) {
+    return '该 QQ 文件缺少可复用的远端 MD5/SHA-1 元数据，无法直接创建闪传。'
   }
-  if (/QQ Flash Transfer is not supported by Linux QQ/iu.test(message)) return unsupportedMessage()
+  if (/cannot be reused without downloading it/iu.test(message)) {
+    return '该 QQ 远端文件已不再命中秒传，按照无重复下载策略未重新拉取并上传。'
+  }
   return 'QQ 闪传创建失败，请稍后重试。'
-}
-
-function unsupportedMessage(): string {
-  return '当前 QQNT 环境不支持 QQ 闪传：Linux QQ 未实现此能力，请改用 Windows QQNT。'
 }

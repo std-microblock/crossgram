@@ -485,11 +485,12 @@ interface SendManifest {
 
 body 只对 `source: "upload"` 的文件使用与多媒体发送相同的 4 字节大端长度分帧，
 并用零长度帧结束该文件；`source: "qq-media"` 不占用 body 中的文件序号。
-已有 QQ 媒体通过 locator 复用 QQNT 受信任的本地缓存路径，不再从 QQ 下载并跨 HTTP 重传；
-只有直接上传到工具 bot 的新文件才使用长度分帧 body 写入账户私有暂存目录。两类路径最终都只交给
-QQNT `FlashTransferService`，本接口不申请 Crossgram Highway plan。成功响应为
-`{ fileSetId, shareLink, expiresAt? }`。暂存文件保留到闪传有效期之后的清理窗口，
-避免 QQNT 后台上传仍在读取时源文件被提前删除。
+已有 QQ 媒体通过 locator 中的 QQ 远端 MD5/SHA-1 身份走协议秒传，不读取本地缓存、
+不重新下载，也不占用 HTTP body；只有直接上传到工具 bot 的新文件才使用长度分帧 body
+写入短期暂存目录。Bridge 通过 `0x93cf/0x93d0/0x93db` 创建并登记文件集，再以
+`0x12a9_100` 申请秒传或 `sliceupload` 分片上传、`0x12a9_103` 绑定文件，最后通过
+`0x93d1_1` 完成文件集。整个流程不调用 QQNT `FlashTransferService`。成功响应为
+`{ fileSetId, shareLink, expiresAt? }`；协议上传完成后立即删除新文件暂存数据。
 
 ### 4.6 媒体下载
 
