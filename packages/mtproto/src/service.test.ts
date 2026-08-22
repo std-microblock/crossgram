@@ -42,22 +42,26 @@ function fakeConnection(stalledForMs: number): FakeConnection {
 }
 
 interface FakeSession {
-  authKeyId: Uint8Array
+  authKeyId: Uint8Array | null
   connection: FakeConnection
   acceptsUpdates: boolean
   sendUpdate: ReturnType<typeof vi.fn>
+  sendLoginTokenUpdate: ReturnType<typeof vi.fn>
+  supersedeLoginToken: ReturnType<typeof vi.fn>
   apiLayer: number | null
   applyApiLayer: ReturnType<typeof vi.fn>
 }
 
 function fakeSession(
-  authKeyId: Uint8Array,
+  authKeyId: Uint8Array | null,
   connection: FakeConnection,
   acceptsUpdates: boolean,
 ): FakeSession {
   return {
     authKeyId, connection, acceptsUpdates,
     sendUpdate: vi.fn(),
+    sendLoginTokenUpdate: vi.fn(() => true),
+    supersedeLoginToken: vi.fn(),
     apiLayer: 228,
     applyApiLayer: vi.fn(),
   }
@@ -299,6 +303,59 @@ describe('Mtproto stalled-connection handling', () => {
       expect(delivered).toBe(0)
       expect(stalledA.sendUpdate).not.toHaveBeenCalled()
       expect(stalledB.sendUpdate).not.toHaveBeenCalled()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('sends a QR login approval notification only to matching eligible connections', async () => {
+    const { service, stop } = await makeService()
+    try {
+      const token = new Uint8Array(32).fill(7)
+      const first = fakeSession(authKeyA, fakeConnection(0), false)
+      const second = fakeSession(authKeyA, fakeConnection(0), false)
+      const rejected = fakeSession(authKeyA, fakeConnection(0), false)
+      rejected.sendLoginTokenUpdate.mockReturnValue(false)
+      const stalled = fakeSession(authKeyA, fakeConnection(40_000), false)
+      const noAuthKey = fakeSession(null, fakeConnection(0), false)
+      const otherKey = fakeSession(authKeyB, fakeConnection(0), false)
+      sessionsOf(service).add(first)
+      sessionsOf(service).add(second)
+      sessionsOf(service).add(rejected)
+      sessionsOf(service).add(stalled)
+      sessionsOf(service).add(noAuthKey)
+      sessionsOf(service).add(otherKey)
+
+      expect(service.sendLoginTokenUpdateToAuthKey(authKeyA, token)).toBe(2)
+      expect(first.sendLoginTokenUpdate).toHaveBeenCalledWith(token)
+      expect(second.sendLoginTokenUpdate).toHaveBeenCalledWith(token)
+      expect(rejected.sendLoginTokenUpdate).toHaveBeenCalledWith(token)
+      expect(stalled.sendLoginTokenUpdate).not.toHaveBeenCalled()
+      expect(noAuthKey.sendLoginTokenUpdate).not.toHaveBeenCalled()
+      expect(otherKey.sendLoginTokenUpdate).not.toHaveBeenCalled()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('clears a superseded QR token only on other connections with the same key', async () => {
+    const { service, stop } = await makeService()
+    try {
+      const token = new Uint8Array(32).fill(7)
+      const origin = fakeSession(authKeyA, fakeConnection(0), false)
+      const sibling = fakeSession(authKeyA, fakeConnection(0), false)
+      const otherKey = fakeSession(authKeyB, fakeConnection(0), false)
+      sessionsOf(service).add(origin)
+      sessionsOf(service).add(sibling)
+      sessionsOf(service).add(otherKey)
+
+      ;(service as unknown as {
+        _supersedeLoginToken(authKeyId: Uint8Array, token: Uint8Array, origin: FakeConnection): void
+      })._supersedeLoginToken(authKeyA, token, origin.connection)
+
+      expect(origin.supersedeLoginToken).not.toHaveBeenCalled()
+      expect(sibling.supersedeLoginToken).toHaveBeenCalledWith(token)
+      expect(otherKey.supersedeLoginToken).not.toHaveBeenCalled()
     } finally {
       await stop()
     }

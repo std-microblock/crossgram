@@ -784,6 +784,8 @@ describe('bridge login e2e', () => {
 
   it('lets any account-list viewer approve QR tokens and keeps permanent keys bound', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const disposeDebug = ctx.on('mtproto/debug', event => debugEvents.push(event))
     let issuer: TestClient | undefined
     let other: TestClient | undefined
     try {
@@ -802,6 +804,13 @@ describe('bridge login e2e', () => {
         _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
       }, 2)
       expect(first.token).toHaveLength(32)
+      ctx.mtproto.sendUpdateToAuthKey(issuerKey.authKeyId, {
+        _: 'updateShort', update: { _: 'updateConfig' }, date: nowSec(),
+      })
+      expect(debugEvents.filter((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'updateShort'
+      ))).toEqual([])
       const firstUrl = `tg://login?token=${Buffer.from(first.token).toString('base64url')}=`
       const invalidToken = await fetch(approvalUrl, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: 'tg://login?token=short' }),
@@ -825,6 +834,9 @@ describe('bridge login e2e', () => {
       expect((await fetch(approvalUrl, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: firstUrl }),
       })).status).toBe(200)
+      expect(await readPush(issuer, issuerKey)).toMatchObject({
+        _: 'updateShort', update: { _: 'updateLoginToken' },
+      })
 
       expect(await callRpc(other, otherKey, otherSession, {
         _: 'auth.importLoginToken', token: first.token,
@@ -880,8 +892,76 @@ describe('bridge login e2e', () => {
         offsetPeer: { _: 'inputPeerEmpty' }, limit: 1, hash: Long.ZERO,
       }, 16)).toMatchObject({ _: expect.stringMatching(/^messages\.dialogs/) })
     } finally {
+      disposeDebug()
       other?.close()
       issuer?.close()
+      await stop()
+    }
+  }, 30_000)
+
+  it('notifies only the connection that issued the approved replacement token', async () => {
+    const { ctx, port, pubKey, stop } = await startApp()
+    const debugEvents: MtprotoDebugEvent[] = []
+    const disposeDebug = ctx.on('mtproto/debug', event => debugEvents.push(event))
+    let first: TestClient | undefined
+    let second: TestClient | undefined
+    try {
+      await waitForPlatformLogin(ctx, 'static')
+      first = await TestClient.connect(port)
+      const key = await doClientHandshake(first, pubKey)
+      const firstSession = Long.fromInt(0x77331130)
+      const firstToken = await callRpc(first, key, firstSession, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 2)
+      const firstConnectionId = debugEvents.find((event) => (
+        event.direction === 'client->server'
+        && event.phase === 'connection'
+        && (event.payload as { _?: string })._ === 'connection_opened'
+      ))?.connectionId
+      expect(firstConnectionId).toBeTruthy()
+
+      second = await TestClient.connect(port)
+      const secondSession = Long.fromInt(0x77331131)
+      const secondToken = await callRpc(second, key, secondSession, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 4)
+      expect(secondToken.token).not.toEqual(firstToken.token)
+      const secondConnectionId = debugEvents.filter((event) => (
+        event.direction === 'client->server'
+        && event.phase === 'connection'
+        && (event.payload as { _?: string })._ === 'connection_opened'
+      )).at(-1)?.connectionId
+      expect(secondConnectionId).toBeTruthy()
+      ctx.mtproto.sendUpdateToAuthKey(key.authKeyId, {
+        _: 'updateShort', update: { _: 'updateConfig' }, date: nowSec(),
+      })
+      expect(await readPush(first, key)).toMatchObject({
+        _: 'updateShort', update: { _: 'updateConfig' },
+      })
+
+      debugEvents.length = 0
+      const approvalUrl = `http://127.0.0.1:${ctx.server.port}/api/login-tokens/static/approve`
+      expect((await fetch(approvalUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: `tg://login?token=${Buffer.from(secondToken.token).toString('base64url')}` }),
+      })).status).toBe(200)
+      expect(await readPush(second, key)).toMatchObject({
+        _: 'updateShort', update: { _: 'updateLoginToken' },
+      })
+      expect(debugEvents.filter((event) => (
+        event.direction === 'server->client'
+        && (event.payload as { _?: string })._ === 'updateShort'
+      )).map(event => event.connectionId)).toEqual([secondConnectionId])
+      expect(secondConnectionId).not.toBe(firstConnectionId)
+
+      expect(await callRpc(second, key, secondSession, {
+        _: 'auth.exportLoginToken', apiId: 1, apiHash: 'x', exceptIds: [],
+      }, 6)).toMatchObject({ _: 'auth.loginTokenSuccess' })
+    } finally {
+      disposeDebug()
+      second?.close()
+      first?.close()
       await stop()
     }
   }, 30_000)

@@ -34,7 +34,7 @@ describe('Telegram login tokens', () => {
   it('lets the issuing auth key commit an approval only once', () => {
     const store = new LoginTokenStore()
     store.issue(authKey, token)
-    expect(store.approve(token, identity)).toBe(true)
+    expect(store.approve(token, identity)).toEqual(authKey)
     const claim = store.claim(token, authKey)
     expect(claim?.identity).toEqual(identity)
     expect(store.claim(token, authKey)).toBeUndefined()
@@ -68,6 +68,31 @@ describe('Telegram login tokens', () => {
       .toEqual(new Uint8Array(32).fill(10))
   })
 
+  it('retains the existing token when a replacement cannot be issued', () => {
+    const store = new LoginTokenStore(1_000, Date.now, 2, 1)
+    const otherAuthKey = new Uint8Array(8).fill(2)
+    const otherToken = new Uint8Array(32).fill(8)
+    store.issue(authKey, token, 'issuer')
+    store.issue(otherAuthKey, otherToken, 'full')
+
+    expect(() => store.issue(authKey, new Uint8Array(32).fill(9), 'full'))
+      .toThrow(LoginTokenSourceLimitError)
+    expect(store.approve(token, identity)).toEqual(authKey)
+    expect(store.claim(token, authKey)?.identity).toEqual(identity)
+  })
+
+  it('retains the existing token when a replacement token already belongs to another key', () => {
+    const store = new LoginTokenStore()
+    const otherAuthKey = new Uint8Array(8).fill(2)
+    const replacement = new Uint8Array(32).fill(8)
+    store.issue(authKey, token)
+    store.issue(otherAuthKey, replacement)
+
+    expect(() => store.issue(authKey, replacement)).toThrow(LoginTokenStoreFullError)
+    expect(store.approve(token, identity)).toEqual(authKey)
+    expect(store.claim(token, authKey)?.identity).toEqual(identity)
+  })
+
   it('evicts the oldest token so refreshed old keys cannot block a new key', () => {
     const store = new LoginTokenStore(1_000, Date.now, 2)
     const otherAuthKey = new Uint8Array(8).fill(2)
@@ -78,7 +103,7 @@ describe('Telegram login tokens', () => {
     for (const byte of [9, 10, 11]) store.issue(authKey, new Uint8Array(32).fill(byte))
 
     store.issue(thirdAuthKey, new Uint8Array(32).fill(12))
-    expect(store.approve(otherToken, identity)).toBe(false)
+    expect(store.approve(otherToken, identity)).toBeUndefined()
   })
 
   it('never evicts approved or claimed tokens when capacity is full', () => {
@@ -89,19 +114,56 @@ describe('Telegram login tokens', () => {
     const claimedToken = new Uint8Array(32).fill(9)
     store.issue(approvedAuthKey, approvedToken)
     store.issue(claimedAuthKey, claimedToken)
-    expect(store.approve(approvedToken, identity)).toBe(true)
-    expect(store.approve(claimedToken, identity)).toBe(true)
+    expect(store.approve(approvedToken, identity)).toEqual(approvedAuthKey)
+    expect(store.approve(claimedToken, identity)).toEqual(claimedAuthKey)
     expect(store.claim(claimedToken, claimedAuthKey)).toBeDefined()
 
     expect(() => store.issue(authKey, token)).toThrow(LoginTokenStoreFullError)
     expect(store.claim(approvedToken, approvedAuthKey)?.identity).toEqual(identity)
   })
 
+  it('uses the protocol-second expiry boundary for approval and import', () => {
+    const issuedAt = 1_000_999
+    const expiresAt = 1_060_000
+    let now = issuedAt
+
+    const beforeExpiry = new LoginTokenStore(60_000, () => now)
+    const beforeToken = new Uint8Array(32).fill(7)
+    beforeExpiry.issue(authKey, beforeToken)
+    expect(beforeExpiry.expiresAt(beforeToken)).toBe(expiresAt)
+    now = expiresAt - 1
+    expect(beforeExpiry.approve(beforeToken, identity)).toEqual(authKey)
+    expect(beforeExpiry.claim(beforeToken, authKey)?.identity).toEqual(identity)
+
+    now = issuedAt
+    const atExpiryApproval = new LoginTokenStore(60_000, () => now)
+    const atExpiryToken = new Uint8Array(32).fill(8)
+    atExpiryApproval.issue(authKey, atExpiryToken)
+    now = expiresAt
+    expect(atExpiryApproval.approve(atExpiryToken, identity)).toBeUndefined()
+
+    now = issuedAt
+    const atExpiryImport = new LoginTokenStore(60_000, () => now)
+    const importToken = new Uint8Array(32).fill(9)
+    atExpiryImport.issue(authKey, importToken)
+    expect(atExpiryImport.approve(importToken, identity)).toEqual(authKey)
+    now = expiresAt
+    expect(atExpiryImport.claim(importToken, authKey)).toBeUndefined()
+
+    now = issuedAt
+    const afterExpiry = new LoginTokenStore(60_000, () => now)
+    const afterToken = new Uint8Array(32).fill(10)
+    afterExpiry.issue(authKey, afterToken)
+    now = expiresAt + 1
+    expect(afterExpiry.approve(afterToken, identity)).toBeUndefined()
+    expect(afterExpiry.claim(afterToken, authKey)).toBeUndefined()
+  })
+
   it('rejects expired tokens and tokens from a different auth key', () => {
     let now = 0
     const store = new LoginTokenStore(1_000, () => now)
     store.issue(authKey, token)
-    expect(store.approve(token, identity)).toBe(true)
+    expect(store.approve(token, identity)).toEqual(authKey)
     expect(store.claim(token, new Uint8Array(8).fill(2))).toBeUndefined()
     now = 1_000
     expect(store.claim(token, authKey)).toBeUndefined()

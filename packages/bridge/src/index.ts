@@ -619,10 +619,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     if (!parsed) throw new BridgeManagementError('AUTH_TOKEN_INVALID')
     const account = provisionedAccounts.get(platformId)
     if (!account) throw new BridgeManagementError('PLATFORM_ACCOUNT_UNAVAILABLE')
-    if (!loginTokens.approve(parsed, {
+    const authKeyId = loginTokens.approve(parsed, {
       platformId: account.session.platformId,
       platformSessionId: account.session.platformSessionId,
-    })) throw new BridgeManagementError('AUTH_TOKEN_INVALID')
+    })
+    if (!authKeyId) throw new BridgeManagementError('AUTH_TOKEN_INVALID')
+    ctx.mtproto.sendLoginTokenUpdateToAuthKey(authKeyId, parsed)
   }
 
   management.attach({
@@ -1237,9 +1239,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     try {
       const token = loginTokens.issue(rpc.authKeyId, undefined, rpc.connection.remoteAddress)
+      const expiresAt = loginTokens.expiresAt(token)
+      if (!expiresAt) throw new LoginTokenStoreFullError()
       return {
         _: 'auth.loginToken',
-        expires: Math.floor(Date.now() / 1000) + 60,
+        expires: Math.floor(expiresAt / 1_000),
         token,
       } as unknown as tl.TlObject
     } catch (error) {

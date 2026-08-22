@@ -181,6 +181,17 @@ export class Mtproto extends Service {
     return targets.length
   }
 
+  /** Notify every eligible unauthenticated connection that its QR login token was approved. */
+  sendLoginTokenUpdateToAuthKey(authKeyId: Uint8Array, token: Uint8Array): number {
+    let delivered = 0
+    for (const session of this._sessions) {
+      if (!equalBytes(session.authKeyId, authKeyId) || session.connection.stalledForMs >= STALL_TIMEOUT_MS) continue
+      this._applyKnownApiLayer(session)
+      if (session.sendLoginTokenUpdate(token)) delivered++
+    }
+    return delivered
+  }
+
   /** Whether a permanent auth key is still registered for resumed connections. */
   async hasAuthKey(authKeyId: Uint8Array): Promise<boolean> {
     return Boolean(await this._authKeyStore.get(authKeyId))
@@ -212,6 +223,14 @@ export class Mtproto extends Service {
     for (const session of [...this._sessions]) {
       if (session.connection !== exceptConnection && equalBytes(session.authKeyId, authKeyId)) {
         session.connection.close()
+      }
+    }
+  }
+
+  private _supersedeLoginToken(authKeyId: Uint8Array, token: Uint8Array, origin: ServerConnection): void {
+    for (const session of this._sessions) {
+      if (session.connection !== origin && equalBytes(session.authKeyId, authKeyId)) {
+        session.supersedeLoginToken(token)
       }
     }
   }
@@ -341,6 +360,7 @@ export class Mtproto extends Service {
       debug,
       (authKeyId, layer) => { void this._rememberApiLayer(authKeyId, layer) },
       (authKeyId) => this._authApiLayers.get(bytesHex(authKeyId)),
+      (authKeyId, token, origin) => this._supersedeLoginToken(authKeyId, token, origin),
       this._rpcDependencies,
       this._pqChallenges,
     )

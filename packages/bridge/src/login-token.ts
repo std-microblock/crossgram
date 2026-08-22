@@ -50,19 +50,22 @@ export class LoginTokenStore {
     this.cleanupIfDue()
     const authKey = tokenKey(authKeyId)
     const previous = this.tokenByAuthKey.get(authKey)
-    if (previous) {
-      const entry = this.get(previous)
-      if (entry?.identity || entry?.claimed) throw new LoginTokenStoreFullError()
-      this.delete(previous)
-    }
-    if (source && (this.tokensBySource.get(source)?.size ?? 0) >= this.maxEntriesPerSource) {
-      throw new LoginTokenSourceLimitError()
-    }
-    if (this.entries.size >= this.maxEntries && !this.evictOldest()) throw new LoginTokenStoreFullError()
+    const previousEntry = previous ? this.get(previous) : undefined
+    if (previousEntry?.identity || previousEntry?.claimed) throw new LoginTokenStoreFullError()
     const copy = new Uint8Array(token)
     const key = tokenKey(copy)
-    if (this.entries.has(key)) throw new LoginTokenStoreFullError()
-    this.entries.set(key, { authKeyId: authKey, expiresAt: this.now() + this.ttlMs, source })
+    if (key !== previous && this.entries.has(key)) throw new LoginTokenStoreFullError()
+    if (
+      source
+      && (this.tokensBySource.get(source)?.size ?? 0) >= this.maxEntriesPerSource
+      && previousEntry?.source !== source
+    ) throw new LoginTokenSourceLimitError()
+    if (!previousEntry && this.entries.size >= this.maxEntries && !this.evictOldest()) {
+      throw new LoginTokenStoreFullError()
+    }
+    if (previous) this.delete(previous)
+    const expiresAt = Math.floor((this.now() + this.ttlMs) / 1_000) * 1_000
+    this.entries.set(key, { authKeyId: authKey, expiresAt, source })
     this.tokenByAuthKey.set(authKey, key)
     if (source) {
       const tokens = this.tokensBySource.get(source) ?? new Set<string>()
@@ -72,13 +75,17 @@ export class LoginTokenStore {
     return copy
   }
 
-  approve(token: Uint8Array, identity: LoginTokenIdentity): boolean {
+  approve(token: Uint8Array, identity: LoginTokenIdentity): Uint8Array | undefined {
     const key = tokenKey(token)
     const entry = this.get(key)
-    if (!entry || entry.identity || entry.claimed) return false
+    if (!entry || entry.identity || entry.claimed) return
     entry.identity = identity
     this.approvedByAuthKey.set(entry.authKeyId, key)
-    return true
+    return new Uint8Array(Buffer.from(entry.authKeyId, 'hex'))
+  }
+
+  expiresAt(token: Uint8Array): number | undefined {
+    return this.get(tokenKey(token))?.expiresAt
   }
 
   claim(token: Uint8Array, authKeyId: Uint8Array): LoginTokenClaim | undefined {

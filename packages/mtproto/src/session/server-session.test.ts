@@ -1228,6 +1228,178 @@ describe('ServerSession auth.bindTempAuthKey', () => {
   })
 })
 
+describe('ServerSession QR login notifications', () => {
+  it('sends only updateLoginToken to the session that issued the approved token', () => {
+    const { session } = createSession()
+    const token = new Uint8Array(32).fill(7)
+    const internal = session as unknown as {
+      _authorized: boolean
+      _loginTokenPending: boolean
+      _loginToken: Uint8Array | null
+      _apiLayer: number | null
+      _sessionId: Long
+      _sessionIdSet: boolean
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    internal._authorized = true
+    internal._loginTokenPending = true
+    internal._loginToken = token
+    internal._apiLayer = 228
+    internal._sessionId = Long.fromInt(7)
+    internal._sessionIdSet = true
+
+    session.sendUpdate({ _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+    expect(internal._sendEncryptedMessage).not.toHaveBeenCalled()
+    expect(session.sendLoginTokenUpdate(new Uint8Array(32).fill(8))).toBe(false)
+
+    expect(session.sendLoginTokenUpdate(token)).toBe(true)
+    expect(internal._sendEncryptedMessage).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      true,
+      expect.objectContaining({
+        _: 'updateShort', update: { _: 'updateLoginToken' }, date: expect.any(Number),
+      }),
+      Long.fromInt(7),
+    )
+  })
+
+  it('clears a superseded QR token so ordinary updates resume', () => {
+    const { session } = createSession()
+    const internal = session as unknown as {
+      _authorized: boolean
+      _loginTokenPending: boolean
+      _loginToken: Uint8Array | null
+      _apiLayer: number | null
+      _sessionId: Long
+      _sessionIdSet: boolean
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    internal._authorized = true
+    internal._loginTokenPending = true
+    internal._loginToken = new Uint8Array(32).fill(7)
+    internal._apiLayer = 228
+    internal._sessionId = Long.fromInt(7)
+    internal._sessionIdSet = true
+
+    session.supersedeLoginToken(new Uint8Array(32).fill(8))
+    expect(internal._loginTokenPending).toBe(false)
+    expect(internal._loginToken).toBeNull()
+    session.sendUpdate({ _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+    expect(internal._sendEncryptedMessage).toHaveBeenCalledOnce()
+  })
+
+  it('uses the protocol-second expiry boundary for ordinary and QR updates', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_999)
+    try {
+      const { session } = createSession()
+      const token = new Uint8Array(32).fill(7)
+      const internal = session as unknown as {
+        _authorized: boolean
+        _loginTokenPending: boolean
+        _loginToken: Uint8Array | null
+        _loginTokenExpiresAt: number | null
+        _apiLayer: number | null
+        _sessionId: Long
+        _sessionIdSet: boolean
+        _sendEncryptedMessage: ReturnType<typeof vi.fn>
+      }
+      internal._authorized = true
+      internal._loginTokenPending = true
+      internal._loginToken = token
+      internal._loginTokenExpiresAt = 1_060
+      internal._apiLayer = 228
+      internal._sessionId = Long.fromInt(7)
+      internal._sessionIdSet = true
+
+      session.sendUpdate({ _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+      expect(internal._sendEncryptedMessage).not.toHaveBeenCalled()
+
+      vi.setSystemTime(1_059_999)
+      expect(session.sendLoginTokenUpdate(token)).toBe(true)
+      internal._sendEncryptedMessage.mockClear()
+      session.sendUpdate({ _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+      expect(internal._sendEncryptedMessage).not.toHaveBeenCalled()
+
+      vi.setSystemTime(1_060_000)
+      session.sendUpdate({ _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+      expect(internal._sendEncryptedMessage).toHaveBeenCalledOnce()
+      expect(session.sendLoginTokenUpdate(token)).toBe(false)
+
+      vi.setSystemTime(1_060_001)
+      expect(session.sendLoginTokenUpdate(token)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not send a QR login notification without its issued token, API layer, session, or open connection', () => {
+    const { session, connection } = createSession()
+    const token = new Uint8Array(32).fill(7)
+    const internal = session as unknown as {
+      _authorized: boolean
+      _loginTokenPending: boolean
+      _loginToken: Uint8Array | null
+      _apiLayer: number | null
+      _sessionIdSet: boolean
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    internal._authorized = true
+    internal._loginTokenPending = true
+    internal._loginToken = null
+    internal._apiLayer = 228
+    internal._sessionIdSet = true
+    expect(session.sendLoginTokenUpdate(token)).toBe(false)
+
+    internal._loginToken = token
+    internal._apiLayer = null
+    expect(session.sendLoginTokenUpdate(token)).toBe(false)
+
+    internal._apiLayer = 228
+    internal._sessionIdSet = false
+    expect(session.sendLoginTokenUpdate(token)).toBe(false)
+
+    internal._sessionIdSet = true
+    connection.closed = true
+    expect(session.sendLoginTokenUpdate(token)).toBe(false)
+    expect(internal._sendEncryptedMessage).not.toHaveBeenCalled()
+  })
+
+  it('clears the pending token after login success so ordinary updates resume', async () => {
+    const dispatch = vi.fn().mockResolvedValue({ _: 'auth.loginTokenSuccess' })
+    const { session } = createSession(dispatch)
+    const token = new Uint8Array(32).fill(7)
+    const internal = session as unknown as {
+      _authorized: boolean
+      _loginTokenPending: boolean
+      _loginToken: Uint8Array | null
+      _apiLayer: number | null
+      _sessionId: Long
+      _sessionIdSet: boolean
+      _handleRpcCall: (msgId: Long, request: never, clientSessionId: Long) => Promise<void>
+      _buildRpcReply: ReturnType<typeof vi.fn>
+      _sendEncryptedMessage: ReturnType<typeof vi.fn>
+    }
+    internal._authorized = true
+    internal._loginTokenPending = true
+    internal._loginToken = token
+    internal._apiLayer = 228
+    internal._sessionId = Long.fromInt(7)
+    internal._sessionIdSet = true
+    internal._buildRpcReply = vi.fn(() => ({
+      reqMsgId: Long.ONE, body: new Uint8Array(), resultKind: 'auth.loginTokenSuccess',
+    }))
+
+    await internal._handleRpcCall(Long.ONE, { _: 'auth.exportLoginToken' } as never, Long.fromInt(7))
+    expect(internal._loginTokenPending).toBe(false)
+    expect(internal._loginToken).toBeNull()
+
+    internal._sendEncryptedMessage.mockClear()
+    session.sendUpdate({ _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+    expect(internal._sendEncryptedMessage).toHaveBeenCalledOnce()
+  })
+})
+
 function createSession(
   dispatch = vi.fn(),
   keyStore?: AuthKeyStore,
@@ -1269,6 +1441,7 @@ function createSession(
     dispatch,
     new AuthKeyDataStore(),
     keyStore,
+    undefined,
     undefined,
     undefined,
     undefined,

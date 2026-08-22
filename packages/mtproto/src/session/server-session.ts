@@ -298,6 +298,9 @@ export class ServerSession {
   private _sessionIdSet = false
   private _serverSalt = Long.ZERO
   private _authorized = false
+  private _loginTokenPending = false
+  private _loginToken: Uint8Array | null = null
+  private _loginTokenExpiresAt: number | null = null
   private _apiLayer: number | null = null
   private _clientInfo: MtprotoClientInfo | undefined
   private _responseWriterMap: TlWriterMap
@@ -353,6 +356,7 @@ export class ServerSession {
     private readonly _debug?: MtprotoDebugListener,
     private readonly _onApiLayer?: (authKeyId: Uint8Array, layer: number) => void,
     private readonly _getApiLayer?: (authKeyId: Uint8Array) => number | undefined,
+    private readonly _onLoginTokenIssued?: (authKeyId: Uint8Array, token: Uint8Array, origin: ServerConnection) => void,
     private readonly _dependencyRegistry?: RpcDependencyRegistry,
     private readonly _pqChallenges = new PqChallengeStore(),
   ) {
@@ -398,7 +402,8 @@ export class ServerSession {
    * fallback so early post-login updates remain deliverable.
    */
   sendUpdate(update: tl.TypeUpdates, clientSessionId?: Long): void {
-    if (!this._authorized) return
+    this._clearExpiredLoginToken()
+    if (!this._authorized || this._loginTokenPending) return
     const targetSessionId = clientSessionId
       ?? this._updateSessionId
       ?? (this._sessionIdSet ? this._sessionId : undefined)
@@ -419,6 +424,43 @@ export class ServerSession {
     }
     const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
     this._sendEncryptedMessage(serialized, true, update, targetSessionId)
+  }
+
+  private _clearLoginToken(): void {
+    this._loginTokenPending = false
+    this._loginToken = null
+    this._loginTokenExpiresAt = null
+  }
+
+  private _clearExpiredLoginToken(): void {
+    if (this._loginTokenExpiresAt !== null && this._loginTokenExpiresAt <= Math.floor(Date.now() / 1_000)) {
+      this._clearLoginToken()
+    }
+  }
+
+  /** Clear a QR token superseded by an export on another connection. */
+  supersedeLoginToken(token: Uint8Array): void {
+    if (this._loginToken && !typed.equal(this._loginToken, token)) this._clearLoginToken()
+  }
+
+  /** Send the sole pre-authorization update required by the QR-login protocol. */
+  sendLoginTokenUpdate(token: Uint8Array): boolean {
+    this._clearExpiredLoginToken()
+    if (
+      !this._authorized
+      || !this._loginTokenPending
+      || !this._loginToken
+      || !typed.equal(this._loginToken, token)
+      || this._apiLayer === null
+      || !this._sessionIdSet
+      || this._connection.closed
+    ) return false
+    const update: tl.TypeUpdates = {
+      _: 'updateShort', update: { _: 'updateLoginToken' }, date: Math.floor(Date.now() / 1_000),
+    }
+    const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
+    this._sendEncryptedMessage(serialized, true, update, this._sessionId)
+    return true
   }
 
   get authKeyId(): Uint8Array | null {
@@ -1476,6 +1518,15 @@ export class ServerSession {
         const result = await this._executeRpcCall(
           msgId, unwrapped, clientSessionId, packetCtx, now, afterResponse, afterResponseSettled,
         )
+        const resultKind = (result as { _: string })._
+        if (method === 'auth.exportLoginToken' && resultKind === 'auth.loginToken') {
+          this._loginTokenPending = true
+          this._loginToken = new Uint8Array((result as { token: Uint8Array }).token)
+          this._loginTokenExpiresAt = (result as { expires: number }).expires
+          this._onLoginTokenIssued?.(this._permAuthKey.id, this._loginToken, this._connection)
+        } else if (resultKind === 'auth.authorization' || resultKind === 'auth.loginTokenSuccess') {
+          this._clearLoginToken()
+        }
         debugResult = result
         return this._buildRpcReply(msgId, result, method)
       } finally {
