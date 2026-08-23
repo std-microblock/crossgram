@@ -3058,7 +3058,12 @@ export class DialogRpc {
           this._session, { id: peerId }, resolvedContent, {
             onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
           }))
-    const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
+    const source: IMMessage = {
+      ...sent,
+      conversationId: peerId,
+      outgoing: true,
+      replyToId: sent.replyToId ?? replyToId,
+    }
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
     const published = await this._publishLocalMessage(peerId, source, excludeConnection, randomIds)
     if (systemPeer) {
@@ -4374,6 +4379,14 @@ export class DialogRpc {
       this._session.platformSessionId, replyTo.replyToMsgId, conversationId,
     )
     if (!projected) return
+    for (const projectedPart of projected.parts) this._rememberMessage({
+      source: projected.source,
+      tlId: projectedPart.tlMessageId,
+      ordinal: projectedPart.ordinal,
+      groupedId: projectedPart.groupedId ?? undefined,
+      media: projected.media.find((entry) => entry.id === projectedPart.mediaId),
+      mediaRows: projected.media,
+    })
     const part = projected.parts.find((item) => item.tlMessageId === replyTo.replyToMsgId)
     const ordinal = part?.ordinal ?? 0
     const nativeSequence = part?.nativeSequence ?? qqMessageSequenceFromMetadata(projected.source.metadata)

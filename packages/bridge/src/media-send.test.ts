@@ -647,6 +647,28 @@ describe('media send streaming', () => {
     expect([...consumed[0][0]]).toEqual([...png])
   })
 
+  it('preserves a media reply when the platform send response omits reply metadata', async () => {
+    const { rpc, uploads, store, inputs, peerId } = await createHarness()
+    const target = await store.ingest(session, conversation, {
+      id: 'reply-target', conversationId: conversation.id, senderId: 'peer', timestamp: 1_700_000_000,
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    })
+    await uploads.savePart(session.platformSessionId, '890', 0, Uint8Array.of(1, 2, 3))
+
+    const sent = await rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(890), message: '',
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId: target.projection[0]!.tlMessageId },
+      media: { _: 'inputMediaUploadedPhoto', file: inputFile(890, 1, 'reply.png') },
+    }) as tl.RawUpdates
+
+    expect(inputs[0]).toMatchObject({ replyToId: 'reply-target' })
+    const update = sent.updates.find((item) => item._ === 'updateNewMessage') as tl.RawUpdateNewMessage
+    expect(update.message).toMatchObject({
+      _: 'message',
+      replyTo: { _: 'messageReplyHeader', replyToMsgId: target.projection[0]!.tlMessageId },
+    })
+  })
+
   it('rejects missing parts before invoking the platform', async () => {
     const { rpc, uploads, inputs, peerId } = await createHarness()
     await uploads.savePart(session.platformSessionId, '9', 0, new Uint8Array([1]))
