@@ -360,6 +360,7 @@ export class PlatformSubscriptionManager {
     event: IMEvent,
     options?: PlatformEventDeliveryOptions,
   ): Promise<PlatformEventPublishResult> {
+    const queuedAt = performance.now()
     const key = session.platformSessionId
     const subscription = this._subscriptions.get(key)
     if (!subscription) {
@@ -370,7 +371,11 @@ export class PlatformSubscriptionManager {
       session.platformId, key, platformEventSummary(event), subscription.state.pending > 0,
     )
     const previous = subscription.state.tail
+    let queueWaitMs = 0
+    let executeMs = 0
     const current = previous.catch(() => {}).then(async () => {
+      queueWaitMs = performance.now() - queuedAt
+      const executeAt = performance.now()
       const parent = subscription.state.context
       if (!parent) throw new Error(`platform session fiber is not initialized: ${key}`)
       const config: PlatformEventFiberConfig = {
@@ -392,6 +397,7 @@ export class PlatformSubscriptionManager {
         return config.result
       } finally {
         await fiber.dispose()
+        executeMs = performance.now() - executeAt
       }
     })
     subscription.state.pending++
@@ -403,6 +409,15 @@ export class PlatformSubscriptionManager {
       )
       this._onError(error, session)
     }).finally(() => {
+      const totalMs = performance.now() - queuedAt
+      if (options?.deliveredViaRpc && totalMs >= 100) {
+        this._onTrace?.(
+          'slow local event profile platform=%s session=%s %s queueWaitMs=%d executeMs=%d totalMs=%d pending=%d',
+          session.platformId, key, platformEventSummary(event),
+          profileMilliseconds(queueWaitMs), profileMilliseconds(executeMs), profileMilliseconds(totalMs),
+          subscription.state.pending,
+        )
+      }
       subscription.state.pending--
       if (subscription.state.tail === current) subscription.state.tail = Promise.resolve()
     })

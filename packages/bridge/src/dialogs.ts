@@ -1717,23 +1717,35 @@ export class DialogRpc {
 
   async sendMedia(req: SendMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     return this._sendMediaOnce(req.randomId.toString(), async () => {
+      const startedAt = performance.now()
       const resolved = await this._resolveSendMedia(req.media)
+      const resolveMs = performance.now() - startedAt
       const parts: IMMessageInput['parts'] = []
       if (req.message) parts.push(this._inputTextPart(req.message, req.entities))
       if ('sticker' in resolved) {
+        const sendAt = performance.now()
         parts.push({ type: 'sticker', sticker: resolved.sticker })
         const updates = await this._sendRichContent(
           req.peer, { parts }, [], [req.randomId], req.replyTo, excludeConnection,
         )
+        const sendMs = performance.now() - sendAt
         await this._stickers?.markUsedByRef(resolved.providerId, resolved.stickerId)
         if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+        this._traceSlowMediaRpc('sendMedia', {
+          resolveMs, sendMs, totalMs: performance.now() - startedAt,
+        })
         return updates
       }
       parts.push({ type: 'media', media: resolved.media })
+      const sendAt = performance.now()
       const updates = await this._sendRichContent(
         req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo, excludeConnection,
       )
+      const sendMs = performance.now() - sendAt
       if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+      this._traceSlowMediaRpc('sendMedia', {
+        resolveMs, sendMs, totalMs: performance.now() - startedAt,
+      })
       return updates
     })
   }
@@ -2131,12 +2143,20 @@ export class DialogRpc {
 
   async uploadMedia(req: UploadMediaRequest): Promise<tl.TypeMessageMedia> {
     if (!this._uploads) throw new RpcError(400, 'MEDIA_UPLOAD_UNAVAILABLE')
+    const startedAt = performance.now()
     await this._hydratePeers()
+    const hydrateMs = performance.now() - startedAt
     this._resolvePeer(req.peer)
+    const resolveAt = performance.now()
     const resolved = await this._resolveUploadedMedia(req.media)
+    const resolveMs = performance.now() - resolveAt
     const staged: StagedMedia = { ...resolved, timestamp: Math.floor(Date.now() / 1000) }
     this._uploads.stage(staged)
-    return makeStagedMessageMedia(staged, this._dcId)
+    const result = makeStagedMessageMedia(staged, this._dcId)
+    this._traceSlowMediaRpc('uploadMedia', {
+      hydrateMs, resolveMs, totalMs: performance.now() - startedAt,
+    })
+    return result
   }
 
   async getFile(req: tl.upload.RawGetFileRequest): Promise<tl.upload.TypeFile> {
@@ -3015,6 +3035,7 @@ export class DialogRpc {
     replyTo?: tl.TypeInputReplyTo,
     excludeConnection?: ServerConnection,
   ): Promise<tl.TypeUpdates> {
+    const startedAt = performance.now()
     const media = content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
     const stickers = content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
@@ -3024,9 +3045,12 @@ export class DialogRpc {
     }
 
     await this._hydratePeers()
+    const hydrateMs = performance.now() - startedAt
     const peerId = this._resolveMessageTarget(inputPeer, replyTo)
     this._assertWritableConversation(peerId)
+    const replyAt = performance.now()
     const replyTarget = await this._resolveReplyTarget(peerId, replyTo)
+    const replyMs = performance.now() - replyAt
     const replyToId = replyTarget?.id
     const systemPeer = await this._systemPeers?.resolve(this._session, peerId)
     if (!systemPeer) {
@@ -3054,18 +3078,23 @@ export class DialogRpc {
         ? { replyToNativeSequence: replyTarget.nativeSequence }
         : {}),
     }
+    const platformAt = performance.now()
     const sent = systemPeer
       ? this._systemPeers!.makeOutgoing(this._session, systemPeer, resolvedContent)
       : await this._sendToPlatform(() => this._platform.sendMessage(
           this._session, { id: peerId }, resolvedContent, {
             onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
           }))
+    const platformMs = performance.now() - platformAt
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
     const replyToTopId = replyTopMessageId(replyTo)
+    const publishAt = performance.now()
     const published = await this._publishLocalMessage(
       peerId, source, excludeConnection, randomIds, replyToTopId,
     )
+    const publishMs = performance.now() - publishAt
+    const cleanupAt = performance.now()
     if (systemPeer) {
       try {
         await this._systemPeers!.receive(this._session, systemPeer, source, resolvedContent)
@@ -3075,7 +3104,14 @@ export class DialogRpc {
     } else {
       await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
     }
-    if (published) return this._withMessageIds(published, randomIds, replyToTopId)
+    const cleanupMs = performance.now() - cleanupAt
+    if (published) {
+      this._traceSlowMediaRpc('sendRichContent', {
+        hydrateMs, replyMs, platformMs, publishMs, cleanupMs,
+        totalMs: performance.now() - startedAt,
+      })
+      return this._withMessageIds(published, randomIds, replyToTopId)
+    }
     const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
       ?? { id: peerId, kind: 'direct' as const, title: peerId }
     const persisted = await this._store.ingest(this._session, conversation, source)
@@ -3107,7 +3143,7 @@ export class DialogRpc {
       } as tl.TypeUpdate, replyToTopId))
     }
     const target = this._conversation(peerId)
-    return {
+    const result: tl.RawUpdates = {
       _: 'updates', updates,
       users: target.kind === 'direct'
         ? uniqueUsers([this._makeSelfUser(), await this._getPeerUser(peerId)])
@@ -3115,6 +3151,18 @@ export class DialogRpc {
       chats: target.kind === 'direct' ? [] : [this._makeChat(target)],
       date: source.timestamp, seq: 0,
     }
+    this._traceSlowMediaRpc('sendRichContent', {
+      hydrateMs, replyMs, platformMs, publishMs, cleanupMs,
+      fallbackMs: performance.now() - cleanupAt - cleanupMs,
+      totalMs: performance.now() - startedAt,
+    })
+    return result
+  }
+
+  private _traceSlowMediaRpc(operation: string, stages: Record<string, number>): void {
+    if ((stages.totalMs ?? 0) < 100) return
+    const format = `slow media rpc profile operation=%s ${Object.keys(stages).map((name) => `${name}=%d`).join(' ')}`
+    this._onTrace?.(format, operation, ...Object.values(stages).map(profileMilliseconds))
   }
 
   private async _publishLocalMessage(

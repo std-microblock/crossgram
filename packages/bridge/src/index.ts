@@ -206,7 +206,15 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
   const bridgeLogger = ctx.logger('bridge')
   const historyTrace = (format: string, ...args: unknown[]) => {
-    if (format.startsWith('slow dialogs rpc profile')) bridgeLogger.info(format, ...args)
+    if (
+      format.startsWith('slow dialogs rpc profile')
+      || format.startsWith('slow media rpc profile')
+      || format.startsWith('message store write profile')
+    ) bridgeLogger.info(format, ...args)
+    else bridgeLogger.debug(format, ...args)
+  }
+  const eventTrace = (format: string, ...args: unknown[]) => {
+    if (format.startsWith('slow local event profile')) bridgeLogger.info(format, ...args)
     else bridgeLogger.debug(format, ...args)
   }
   const authTransfers = new AuthTransferStore()
@@ -350,7 +358,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       }
       return updates.publish(session, event, options)
     },
-    (format, ...args) => bridgeLogger.debug(format, ...args),
+    eventTrace,
     ctx,
   )
   platforms.attachLocalMessageIngress(
