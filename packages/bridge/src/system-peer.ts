@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { Service, type Context } from 'cordis'
-import type { IMConversation, IMEvent, IMMessage, IMMessageInput, PlatformSession, Unsubscribe } from './platform.js'
+import type {
+  IMConversation, IMEvent, IMMediaUploadPreparation, IMMediaUploadProbe, IMMessage, IMMessageInput,
+  PlatformSession, Unsubscribe,
+} from './platform.js'
 import type { PlatformEventDeliveryOptions, PlatformEventPublishResult } from './platform-manager.js'
 
 /** A bridge-owned direct peer supplied by an optional, provider-neutral package. */
@@ -55,6 +58,13 @@ export interface SystemPeerProvider {
     peers: SystemPeerService,
     input?: IMMessageInput,
   ): Promise<void>
+  /** Let a local peer consume Telegram upload parts without platform staging. */
+  prepareMediaUpload?(
+    session: PlatformSession,
+    peer: SystemPeer,
+    media: IMMediaUploadProbe,
+    peers: SystemPeerService,
+  ): Promise<IMMediaUploadPreparation | undefined>
   /** Resolve a provider-owned callback from its durable source message. */
   callback?(
     session: PlatformSession,
@@ -181,6 +191,14 @@ export class SystemPeerService extends Service {
     input?: IMMessageInput,
   ): Promise<void> {
     await resolution.provider.receive?.(session, resolution.peer, message, this, input)
+  }
+
+  async prepareMediaUpload(
+    session: PlatformSession,
+    resolution: SystemPeerResolution,
+    media: IMMediaUploadProbe,
+  ): Promise<IMMediaUploadPreparation | undefined> {
+    return resolution.provider.prepareMediaUpload?.(session, resolution.peer, media, this)
   }
 
   async callback(

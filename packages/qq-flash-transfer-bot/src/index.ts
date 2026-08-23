@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from 'cordis'
 import type {
-  ActivePlatformSession, IMConversation, IMMediaInput, IMMessage, IMMessageInput, PlatformSession,
-  SystemPeer, SystemPeerProvider, SystemPeerService,
+  ActivePlatformSession, IMConversation, IMMediaInput, IMMediaUploadPreparation, IMMediaUploadProbe,
+  IMMessage, IMMessageInput, PlatformSession, SystemPeer, SystemPeerProvider, SystemPeerService,
 } from '@mtproto-relay/bridge'
 import z from 'schemastery'
 
@@ -106,6 +106,15 @@ export class QQFlashTransferPeerProvider implements SystemPeerProvider {
       return
     }
     return this.enqueue(session.platformSessionId, () => this.create(session, peer.conversation, media, text, peers))
+  }
+
+  async prepareMediaUpload(
+    session: PlatformSession,
+    peer: SystemPeer,
+    media: IMMediaUploadProbe,
+  ): Promise<IMMediaUploadPreparation | undefined> {
+    if (!this.active || peer.id !== QQ_FLASH_TRANSFER_CONVERSATION_ID) return
+    return this.qqBinding(session)?.platform.flashTransfer?.prepareUpload?.(session, media)
   }
 
   private async create(

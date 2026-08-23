@@ -63,6 +63,15 @@ export interface WireFlashTransferUploadFile {
   size: number
 }
 
+/** Bytes already streamed into QQ's file CDN by the upload preflight path. */
+export interface WireFlashTransferUploadedFile {
+  source: 'uploaded'
+  name: string
+  size: number
+  md5: string
+  sha1: string
+}
+
 export interface WireFlashTransferQQMediaFile {
   source: 'qq-media'
   name: string
@@ -72,7 +81,7 @@ export interface WireFlashTransferQQMediaFile {
 
 export interface WireFlashTransferManifest {
   name?: string
-  files: Array<WireFlashTransferUploadFile | WireFlashTransferQQMediaFile>
+  files: Array<WireFlashTransferUploadFile | WireFlashTransferUploadedFile | WireFlashTransferQQMediaFile>
   framing: 'length-prefixed-v1'
 }
 

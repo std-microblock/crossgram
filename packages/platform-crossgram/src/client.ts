@@ -184,6 +184,13 @@ export class QQNTClient {
         }
         const locator = qqMediaOriginLocator(item.origin)
         if (locator) return { source: 'qq-media', name: item.name || 'file', size: size!, locator }
+        const prepared = fastUpload(item.source)
+        if (prepared?.uploaded && prepared.plan.prepared.kind === 'file') {
+          return {
+            source: 'uploaded', name: item.name || 'file', size: size!,
+            md5: prepared.hashes.md5, sha1: prepared.hashes.sha1,
+          }
+        }
         uploads.push(item.source)
         return { source: 'upload', name: item.name || 'file', size: size! }
       }),
@@ -198,6 +205,16 @@ export class QQNTClient {
       duplex: 'half',
     } as RequestInit & { duplex: 'half' })
     return responseJson(response)
+  }
+
+  async prepareFlashTransferUpload(
+    conversationId: string,
+    media: IMMediaUploadProbe,
+    signal?: AbortSignal,
+  ): Promise<IMMediaUploadPreparation | undefined> {
+    if (this.bridgeProtocol === undefined) await this.status()
+    if (this.bridgeProtocol! < 30) return
+    return this.prepareFastUpload(conversationId, media, signal, 'file')
   }
 
   getRequests(query: { kind?: 'friend' | 'group-join', cursor?: string, limit?: number } = {}): Promise<WireRequestPage> {
@@ -440,8 +457,9 @@ export class QQNTClient {
     conversationId: string,
     media: IMMediaUploadProbe,
     signal?: AbortSignal,
+    kindOverride?: 'image' | 'video' | 'file',
   ): Promise<IMMediaUploadPreparation | undefined> {
-    const kind = outboundMediaKind({ ...media, name: media.name ?? 'upload' })
+    const kind = kindOverride ?? outboundMediaKind({ ...media, name: media.name ?? 'upload' })
     const plan = await this.prepareMediaUpload(conversationId, {
       kind,
       name: media.name ?? 'upload',

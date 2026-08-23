@@ -287,6 +287,14 @@ export interface IMFlashTransferResult {
 
 /** Optional platform-native bulk transfer creator used by bridge-owned tools. */
 export interface IMFlashTransferProvider {
+  /**
+   * Prepare one Telegram upload for direct platform ingestion before file parts
+   * arrive. The completed media is later passed back to {@link create}.
+   */
+  prepareUpload?(
+    session: PlatformSession,
+    media: IMMediaUploadProbe,
+  ): Promise<IMMediaUploadPreparation | undefined>
   create(
     session: PlatformSession,
     media: readonly IMMediaInput[],

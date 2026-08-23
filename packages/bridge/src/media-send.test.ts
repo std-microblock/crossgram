@@ -310,6 +310,40 @@ describe('media send streaming', () => {
     expect(inputs[0].parts[0]).toMatchObject({ type: 'media', media: { name: 'rapid.jpg', size: 4 } })
   })
 
+  it('routes upload preflight through a system peer instead of the backing platform', async () => {
+    const prepared = vi.fn(async (_session, _peer, media) => ({
+      media: {
+        kind: media.kind, name: media.name, size: media.hashes.size,
+        source: { size: media.hashes.size, async *stream() {} },
+      },
+    }))
+    const provider: SystemPeerProvider = {
+      bootstrap: async () => {},
+      resolve: async (_session, conversationId) => conversationId === conversation.id
+        ? { id: conversation.id, conversation }
+        : undefined,
+      prepareMediaUpload: prepared,
+    }
+    const { rpc, platform, peerId } = await createHarness(0, provider)
+    platform.prepareMediaUpload = vi.fn(async () => { throw new Error('must not prepare against platform peer') })
+
+    await expect(rpc.prepareMediaUpload({
+      peer: peer(peerId), fileId: Long.fromNumber(9_003), name: 'flash.bin',
+      size: Long.fromNumber(4), kind: 'file', mimeType: 'application/octet-stream',
+      md5: Uint8Array.from({ length: 16 }, (_, index) => index),
+      sha1: Uint8Array.from({ length: 20 }, (_, index) => index),
+      file10mMd5: Uint8Array.from({ length: 16 }, (_, index) => index),
+      width: 0, height: 0, duration: 0,
+    })).resolves.toMatchObject({ _: 'boolTrue' })
+
+    expect(prepared).toHaveBeenCalledOnce()
+    expect(prepared.mock.calls[0]?.slice(0, 3)).toEqual([
+      session, expect.objectContaining({ id: conversation.id }),
+      expect.objectContaining({ name: 'flash.bin', hashes: expect.objectContaining({ size: 4 }) }),
+    ])
+    expect(platform.prepareMediaUpload).not.toHaveBeenCalled()
+  })
+
   it('keeps a cache-miss native plan, streams ordered parts into its sink, and sends without rereading bytes', async () => {
     const { rpc, platform, uploads, peerId } = await createHarness()
     const bytes = Buffer.from('first-second')

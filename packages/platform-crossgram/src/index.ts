@@ -31,7 +31,7 @@ import type {
 
 
 const MIN_PROTOCOL_VERSION = 19
-const MAX_PROTOCOL_VERSION = 29
+const MAX_PROTOCOL_VERSION = 30
 
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
@@ -171,6 +171,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   readonly client: QQNTClient
   private readonly flashTransferProvider = {
+    prepareUpload: async (
+      session: PlatformSession,
+      media: IMMediaUploadProbe,
+    ) => this.client.prepareFlashTransferUpload(
+      await this.flashTransferUploadConversationId(), media,
+    ),
     create: (
       _session: PlatformSession,
       media: readonly import('@mtproto-relay/bridge').IMMediaInput[],
@@ -1668,6 +1674,31 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return this.savedMessagesConversationIds.get(session.platformSessionId)
       ?? await this.discoverSavedMessagesConversation(session)
       ?? conversationId
+  }
+
+  /** Select a real QQ C2C/group target for CDN negotiation without sending it a message. */
+  private async flashTransferUploadConversationId(): Promise<string> {
+    const known = [...this.conversations.values()].filter((conversation) => {
+      const chatType = conversation.metadata?.chatType
+      return chatType === 1 || chatType === 2
+    })
+    const preferred = known.find((conversation) => conversation.metadata?.chatType === 1) ?? known[0]
+    const knownWireId = preferred?.metadata?.qqConversationId
+    if (typeof knownWireId === 'string' && knownWireId) return knownWireId
+    if (preferred) return preferred.id
+
+    let cursor: string | undefined
+    const seen = new Set<string>()
+    do {
+      const page = await this.client.getDialogs({ cursor, limit: 100 })
+      const selected = page.conversations.find((conversation) => conversation.chatType === 1)
+        ?? page.conversations.find((conversation) => conversation.chatType === 2)
+      if (selected) return selected.id
+      cursor = page.nextCursor
+      if (cursor && seen.has(cursor)) break
+      if (cursor) seen.add(cursor)
+    } while (cursor)
+    throw new Error('QQ Flash Transfer upload requires a QQ friend or group conversation for CDN negotiation')
   }
 
   private async discoverSavedMessagesConversation(session: PlatformSession): Promise<string | undefined> {

@@ -5,7 +5,7 @@ import {
   cardUrl, IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
   isArticleMessage, messageMentionsUser, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
-  type IMMedia, type IMMediaInput,
+  type IMMedia, type IMMediaInput, type IMMediaUploadProbe,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
   type IMReactionDefinition, type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
   type PlatformSession,
@@ -2303,7 +2303,7 @@ export class DialogRpc {
       sha1: Buffer.from(req.sha1).toString('hex'),
       file10MMd5: Buffer.from(req.file10mMd5).toString('hex'),
     }
-    const preparation = await this._platform.prepareMediaUpload(this._session, { id: conversationId }, {
+    const probe: IMMediaUploadProbe = {
       kind,
       name: req.name,
       mimeType: req.mimeType || undefined,
@@ -2312,7 +2312,12 @@ export class DialogRpc {
       height: req.height > 0 ? req.height : undefined,
       duration: req.duration > 0 ? req.duration : undefined,
       hashes,
-    }).catch(() => undefined)
+    }
+    const systemPeer = await this._systemPeers?.resolve(this._session, conversationId)
+    const preparation = await (systemPeer
+      ? this._systemPeers!.prepareMediaUpload(this._session, systemPeer, probe)
+      : this._platform.prepareMediaUpload(this._session, { id: conversationId }, probe)
+    ).catch(() => undefined)
     if (!preparation) return boolObject(false)
     const status = await this._uploads.prepare(
       this._session.platformSessionId, fileId, hashes, preparation,

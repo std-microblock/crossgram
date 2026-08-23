@@ -166,6 +166,68 @@ describe('QQNTClient streaming transport', () => {
     expect(authorization).toBe('Bearer secret')
   })
 
+  it('reuses a completed preflight Highway upload without sending its bytes to Flash Transfer again', async () => {
+    const bytes = Buffer.from('direct-to-highway')
+    const hashes = {
+      size: bytes.length,
+      md5: createHash('md5').update(bytes).digest('hex'),
+      sha1: createHash('sha1').update(bytes).digest('hex'),
+      file10MMd5: createHash('md5').update(bytes).digest('hex'),
+    }
+    const highwayBodies: Buffer[] = []
+    let manifest: Record<string, unknown> | undefined
+    let flashBody: Buffer | undefined
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async (input, init) => {
+        const url = String(input)
+        if (url.endsWith('/status')) return Response.json({ protocolVersion: 30, ready: true })
+        if (url.endsWith('/uploads/prepare')) {
+          expect(JSON.parse(String(init?.body))).toMatchObject({
+            conversationId: 'saved-device', media: { kind: 'file', name: 'direct.bin', ...hashes },
+          })
+          return Response.json({
+            prepared: { kind: 'file', fileUuid: 'preflight-file', exists: false, commandId: 95 },
+            highway: {
+              servers: [{ host: 'highway.invalid', port: 80 }], ticket: 'dGlja2V0', extendInfo: 'ZXh0',
+              selfUin: '10000', commandId: 95, sequenceStart: 1, blockSize: 4,
+              fileSize: bytes.length, fileMd5: hashes.md5,
+            },
+          })
+        }
+        if (url.includes('/cgi-bin/httpconn')) {
+          highwayBodies.push(highwayBody(Buffer.from(init?.body as Uint8Array)))
+          return new Response(Uint8Array.from(highwayResponse()))
+        }
+        if (url.endsWith('/flash-transfers')) {
+          manifest = JSON.parse(Buffer.from(new Headers(init?.headers).get('x-qqnt-flash-manifest')!, 'base64url').toString())
+          flashBody = init?.body
+            ? Buffer.from(await new Response(Uint8Array.from(init.body as Uint8Array)).arrayBuffer())
+            : Buffer.alloc(0)
+          return Response.json({ fileSetId: 'set', shareLink: 'https://qfile.qq.com/q/code' })
+        }
+        throw new Error(`unexpected URL: ${url}`)
+      }),
+    })
+
+    const preparation = await client.prepareFlashTransferUpload('saved-device', {
+      kind: 'image', name: 'direct.bin', size: bytes.length, hashes,
+    })
+    expect(preparation?.sink).toBeDefined()
+    await preparation!.sink!.write(bytes.subarray(0, 7))
+    await preparation!.sink!.write(bytes.subarray(7))
+    await preparation!.sink!.complete()
+    expect(Buffer.concat(highwayBodies)).toEqual(bytes)
+
+    await client.createFlashTransfer([preparation!.media])
+
+    expect(manifest).toEqual({
+      framing: 'length-prefixed-v1',
+      files: [{ source: 'uploaded', name: 'direct.bin', size: bytes.length, md5: hashes.md5, sha1: hashes.sha1 }],
+    })
+    expect(flashBody).toEqual(Buffer.alloc(0))
+  })
+
   it('ignores the obsolete capability flag and uses the protocol flash endpoint', async () => {
     const requests: string[] = []
     const source = vi.fn(async function* () { yield Uint8Array.of(1, 2, 3) })

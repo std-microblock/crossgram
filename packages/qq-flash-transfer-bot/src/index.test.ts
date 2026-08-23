@@ -26,6 +26,12 @@ async function fixture(config: bot.Config = {}, options: { flashTransfer?: boole
   const create = vi.fn(async () => ({
     fileSetId: 'fileset-1', shareLink: 'https://qq.example/flash/code', expiresAt: 2_000_000_000_000,
   }))
+  const prepareUpload = vi.fn(async (_session, media) => ({
+    media: {
+      kind: media.kind, name: media.name, size: media.hashes.size,
+      source: { size: media.hashes.size, async *stream() {} },
+    },
+  }))
   const platform: IMPlatform = {
     platformKind: 'qq',
     capabilities: {
@@ -33,7 +39,7 @@ async function fixture(config: bot.Config = {}, options: { flashTransfer?: boole
       send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 9 },
       conversations: { groups: true, channels: false, subchannels: false },
     },
-    ...(options.flashTransfer === false ? {} : { flashTransfer: { create } }),
+    ...(options.flashTransfer === false ? {} : { flashTransfer: { create, prepareUpload } }),
     async subscribe() { return () => {} },
     async sendMessage() { throw new Error('not used') },
   }
@@ -42,10 +48,24 @@ async function fixture(config: bot.Config = {}, options: { flashTransfer?: boole
   await plugin
   const resolution = await peers.resolve(session, bot.QQ_FLASH_TRANSFER_CONVERSATION_ID)
   if (!resolution) throw new Error('missing QQ Flash Transfer bot')
-  return { plugin, peers, events, create, resolution }
+  return { plugin, peers, events, create, prepareUpload, resolution }
 }
 
 describe('QQ Flash Transfer bot', () => {
+  it('delegates upload preflight to the QQ flash-transfer provider', async () => {
+    const { plugin, peers, prepareUpload, resolution } = await fixture()
+    const probe = {
+      kind: 'file' as const, name: 'preflight.bin', size: 4,
+      hashes: { size: 4, md5: '11'.repeat(16), sha1: '22'.repeat(20), file10MMd5: '11'.repeat(16) },
+    }
+
+    await expect(peers.prepareMediaUpload(session, resolution, probe)).resolves.toMatchObject({
+      media: { name: 'preflight.bin', size: 4 },
+    })
+    expect(prepareUpload).toHaveBeenCalledWith(session, probe)
+    await plugin.dispose()
+  })
+
   it('uses the caption as the set name and returns a clickable share link', async () => {
     const { plugin, peers, events, create, resolution } = await fixture()
     events.length = 0
