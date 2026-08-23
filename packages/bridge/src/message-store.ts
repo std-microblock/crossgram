@@ -1567,7 +1567,7 @@ export class MessageStore {
     const placeholder = user.firstName === user.id
       && !user.lastName && !user.username && !user.avatar
       && Object.keys(user.metadata ?? {}).length === 0
-    await database.upsert('mtproto_im_user', [{
+    const values = {
       platformId,
       platformUserId: user.id,
       firstName: placeholder && existing ? existing.firstName : user.firstName,
@@ -1576,12 +1576,10 @@ export class MessageStore {
       avatar: (user.avatar ?? existing?.avatar ?? null) as JsonValue | null,
       metadata: { ...existing?.metadata, ...user.metadata },
       updatedAt: now,
-    }], ['platformId', 'platformUserId'])
-    const [row] = await database.get('mtproto_im_user', {
-      platformId, platformUserId: user.id,
-    })
-    if (!row) throw new Error(`failed to persist platform user ${platformId}:${user.id}`)
-    return row
+    }
+    if (!existing) return database.create('mtproto_im_user', values)
+    await database.set('mtproto_im_user', { id: existing.id }, values)
+    return { ...existing, ...values }
   }
 
   private async _upsertConversation(
@@ -1613,7 +1611,7 @@ export class MessageStore {
       || existing.spacePlatformId !== (conversation.spaceId ?? null)
       || JSON.stringify(existing.avatar) !== JSON.stringify(conversation.avatar ?? existing.avatar ?? null)
       || JSON.stringify(existing.metadata) !== JSON.stringify(conversation.metadata ?? {})
-    await database.upsert('mtproto_im_conversation', [{
+    const values = {
       platformSessionId: session.platformSessionId,
       platformConversationId: conversation.id,
       kind: conversation.kind,
@@ -1624,12 +1622,11 @@ export class MessageStore {
       metadata: conversation.metadata ?? {},
       unreadCount: unreadCount ?? existing?.unreadCount ?? 0,
       updatedAt: now,
-    }], ['platformSessionId', 'platformConversationId'])
-    const [row] = await database.get('mtproto_im_conversation', {
-      platformSessionId: session.platformSessionId,
-      platformConversationId: conversation.id,
-    })
-    if (!row) throw new Error('failed to persist conversation')
+    }
+    const row = existing
+      ? { ...existing, ...values }
+      : await database.create('mtproto_im_conversation', values)
+    if (existing) await database.set('mtproto_im_conversation', { id: existing.id }, values)
     if (peerChanged) this._peerRevision++
     return row
   }
@@ -1740,14 +1737,12 @@ export class MessageStore {
     }
     const projection = await database.select('mtproto_tl_message_part', { messageId: message.id })
       .orderBy('ordinal').execute()
-    for (const part of projection) {
+    const updatedProjection = await Promise.all(projection.map(async (part) => {
       const mediaId = media[article ? 0 : part.ordinal]?.id ?? null
-      if (part.mediaId !== mediaId || part.groupedId !== groupedId) {
-        await database.set('mtproto_tl_message_part', { id: part.id }, { mediaId, groupedId })
-      }
-    }
-    const updatedProjection = await database.select('mtproto_tl_message_part', { messageId: message.id })
-      .orderBy('ordinal').execute()
+      if (part.mediaId === mediaId && part.groupedId === groupedId) return part
+      await database.set('mtproto_tl_message_part', { id: part.id }, { mediaId, groupedId })
+      return { ...part, mediaId, groupedId }
+    }))
     return { projection: updatedProjection, addedTlMessageIds, removedTlMessageIds }
   }
 

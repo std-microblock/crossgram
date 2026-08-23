@@ -1045,7 +1045,6 @@ describe('MessageStore', () => {
     expect(get.mock.calls.map(([table]) => table)).toEqual([
       'mtproto_im_conversation',
       'mtproto_im_conversation',
-      'mtproto_im_conversation',
       'mtproto_im_user',
       'mtproto_im_user',
       'mtproto_im_user',
@@ -1053,9 +1052,9 @@ describe('MessageStore', () => {
       'mtproto_im_message',
       'mtproto_tl_message_part',
     ])
-    expect(get).toHaveBeenCalledTimes(9)
-    expect(upsert).toHaveBeenCalledTimes(2)
-    expect(set).not.toHaveBeenCalled()
+    expect(get).toHaveBeenCalledTimes(8)
+    expect(upsert).toHaveBeenCalledTimes(1)
+    expect(set).toHaveBeenCalledTimes(1)
   })
 
   it('serializes concurrent allocations without duplicate IDs', async () => {

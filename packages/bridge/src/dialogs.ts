@@ -3178,8 +3178,11 @@ export class DialogRpc {
     replyToTopId?: number,
   ): Promise<tl.RawUpdates | undefined> {
     if (!this._store || !this._onLocalEvent) return
-    const conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
-      ?? this._conversation(conversationId)
+    // The target was hydrated and validated before the platform send. Event
+    // ingestion persists it again atomically with the message, so reading the
+    // same conversation back from the database here only adds a serialized
+    // round trip to the send RPC's critical path.
+    const conversation = this._conversation(conversationId)
     const published = await this._onLocalEvent(
       this._session,
       { type: 'message', conversation, message },
