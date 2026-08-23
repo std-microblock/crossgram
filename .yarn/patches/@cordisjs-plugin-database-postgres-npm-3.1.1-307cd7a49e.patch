@@ -1,0 +1,36 @@
+diff --git a/lib/index.js b/lib/index.js
+index 696f81069d6f7d681e9607c7fac78135db8dfc67..7df3c575ee664092afeb4b2227acd532f19e6f75 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -15,6 +15,18 @@ function escapeId(value) {
+   return '"' + value.replace(/"/g, '""') + '"';
+ }
+ __name(escapeId, "escapeId");
++function truncateIdentifier(source) {
++  let result = "";
++  let bytes = 0;
++  for (const character of source) {
++    const size = Buffer.byteLength(character);
++    if (bytes + size > 63) break;
++    result += character;
++    bytes += size;
++  }
++  return result;
++}
++__name(truncateIdentifier, "truncateIdentifier");
+ function formatTime(time) {
+   const year = time.getFullYear().toString();
+   const month = Time.toDigits(time.getMonth() + 1);
+@@ -497,10 +509,10 @@ parameters: %o` : ``), query, parameters.length ? parameters : "");
+         return column?.column_name;
+       });
+       if (oldKeys.every(Boolean)) {
+-        const name3 = `unique:${table.name}:` + oldKeys.join("+");
++        const name3 = truncateIdentifier(`unique:${table.name}:` + oldKeys.join("+"));
+         oldIndex = constraints.find((info) => info.constraint_name === name3);
+       }
+-      const name2 = `unique:${table.name}:` + makeArray(key).join("+");
++      const name2 = truncateIdentifier(`unique:${table.name}:` + makeArray(key).join("+"));
+       if (!oldIndex) {
+         create.push(`CONSTRAINT ${escapeId(name2)} UNIQUE (${createIndex(key)})`);
+       } else if (shouldUpdate) {

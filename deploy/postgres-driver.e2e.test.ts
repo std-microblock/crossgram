@@ -31,7 +31,17 @@ suite('Crossgram PostgreSQL driver E2E', () => {
     ctx.model.extend('crossgram_postgres_e2e' as any, {
       id: 'unsigned', payload: 'json', bytes: 'binary', updatedAt: 'timestamp', counter: 'unsigned',
     }, { primary: 'id' })
+    ctx.model.extend('crossgram_postgres_constraint_name_e2e' as any, {
+      id: 'unsigned', platformSessionId: 'string', platformConversationId: 'text',
+    }, {
+      primary: 'id', autoInc: true,
+      unique: [['platformSessionId', 'platformConversationId']],
+    })
     await ctx.database.prepared()
+    // PostgreSQL truncates identifiers to 63 bytes. The driver must compare
+    // against that canonical name on every later schema preparation instead
+    // of repeatedly trying to add the already-existing unique constraint.
+    await expect(ctx.database.prepared()).resolves.toBeUndefined()
 
     await ctx.database.remove('crossgram_postgres_e2e' as any, {})
     await ctx.database.create('crossgram_postgres_e2e' as any, {
@@ -46,5 +56,13 @@ suite('Crossgram PostgreSQL driver E2E', () => {
     expect(row).toMatchObject({ id: 1, payload: { driver: 'postgres', nested: { ok: true } }, counter: 2 })
     expect(Buffer.from(row.bytes)).toEqual(Buffer.from([1, 2, 3]))
     expect(row.updatedAt).toEqual(new Date('2026-08-23T00:00:00.000Z'))
+
+    await ctx.database.remove('crossgram_postgres_constraint_name_e2e' as any, {})
+    await ctx.database.create('crossgram_postgres_constraint_name_e2e' as any, {
+      platformSessionId: 'session', platformConversationId: 'conversation',
+    })
+    await expect(ctx.database.create('crossgram_postgres_constraint_name_e2e' as any, {
+      platformSessionId: 'session', platformConversationId: 'conversation',
+    })).rejects.toThrow()
   }, 30_000)
 })
