@@ -64,6 +64,35 @@ describe('QQ Highway protobuf transport', () => {
     )).rejects.toThrow('expected 8 bytes, received 7')
   })
 
+  it('stagger-races a hanging server and reuses the winner for later blocks', async () => {
+    const calls: string[] = []
+    const fetch = vi.fn((input, init) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.includes('127.0.0.3:3')) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true })
+        })
+      }
+      return Promise.resolve(new Response(Uint8Array.from(responseFrame())))
+    }) as typeof globalThis.fetch
+    const racingPlan = {
+      ...plan,
+      servers: [{ host: '127.0.0.3', port: 3 }, { host: '127.0.0.4', port: 4 }],
+    }
+
+    const startedAt = performance.now()
+    await uploadHighway(racingPlan, (async function* () { yield body })(), fetch)
+    expect(performance.now() - startedAt).toBeLessThan(1_000)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toContain('127.0.0.4:4')
+
+    calls.length = 0
+    await uploadHighway(racingPlan, (async function* () { yield body })(), fetch)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('127.0.0.4:4')
+  })
+
   it('flushes complete blocks immediately and retains only the final partial block', async () => {
     const frames: Buffer[] = []
     const fetch = vi.fn(async (_input, init) => {
