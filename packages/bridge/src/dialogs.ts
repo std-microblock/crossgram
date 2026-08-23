@@ -3160,7 +3160,7 @@ export class DialogRpc {
   }
 
   private _traceSlowMediaRpc(operation: string, stages: Record<string, number>): void {
-    if ((stages.totalMs ?? 0) < 100) return
+    if ((stages.totalMs ?? 0) < 1_000) return
     const format = `slow media rpc profile operation=%s ${Object.keys(stages).map((name) => `${name}=%d`).join(' ')}`
     this._onTrace?.(format, operation, ...Object.values(stages).map(profileMilliseconds))
   }

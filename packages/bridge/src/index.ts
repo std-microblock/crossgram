@@ -209,7 +209,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     if (
       format.startsWith('slow dialogs rpc profile')
       || format.startsWith('slow media rpc profile')
-      || format.startsWith('message store write profile')
     ) bridgeLogger.info(format, ...args)
     else bridgeLogger.debug(format, ...args)
   }

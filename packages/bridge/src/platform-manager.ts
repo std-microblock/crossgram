@@ -410,7 +410,7 @@ export class PlatformSubscriptionManager {
       this._onError(error, session)
     }).finally(() => {
       const totalMs = performance.now() - queuedAt
-      if (options?.deliveredViaRpc && totalMs >= 100) {
+      if (options?.deliveredViaRpc && totalMs >= 1_000) {
         this._onTrace?.(
           'slow local event profile platform=%s session=%s %s queueWaitMs=%d executeMs=%d totalMs=%d pending=%d',
           session.platformId, key, platformEventSummary(event),
