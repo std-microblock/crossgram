@@ -46,7 +46,7 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain("name: '@mtproto-relay/update-store-database'")
     expect(config).toContain("name: '@cordisjs/plugin-loader-webui'")
     expect(config).toContain("name: '@cordisjs/plugin-database-postgres'")
-    expect(config).toContain('password: ${CROSSGRAM_POSTGRES_PASSWORD}')
+    expect(config).toContain('password:\n          __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD')
     expect(config).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
     expect(config).toContain('retention: 10000')
     expect(config).toContain('historySeconds: 900')
@@ -135,7 +135,9 @@ describe('Crossgram Linux deployment', () => {
     expect(migrated).toContain("- id: telegram-bot-api\n  name: '@mtproto-relay/telegram-bot-api'")
     expect(migrated).toContain("- id: qq-flash-transfer-bot\n  name: '@mtproto-relay/qq-flash-transfer-bot'")
     expect(migrated).toContain("    - id: database-postgres\n      name: '@cordisjs/plugin-database-postgres'")
-    expect(migrated).toContain('        password: ${CROSSGRAM_POSTGRES_PASSWORD}')
+    expect(migrated).toContain(
+      '        password:\n          __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD',
+    )
     expect(migrated).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
     expect(migrateRuntimeConfig(migrated)).toBe(migrated)
 

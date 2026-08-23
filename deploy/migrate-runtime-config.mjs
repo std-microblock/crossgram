@@ -38,7 +38,8 @@ const postgresPlugin = `- id: database-postgres
     host: 127.0.0.1
     port: 5432
     user: crossgram
-    password: \${CROSSGRAM_POSTGRES_PASSWORD}
+    password:
+      __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD
     database: crossgram
     max: 10
 `
