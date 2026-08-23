@@ -951,6 +951,14 @@ export class DialogRpc {
           output.push(item)
         }
       }
+      // PlatformDataService persists search hits before this method reads their
+      // projections. A fresh DialogRpc still needs those durable user rows in
+      // its process-local ID maps before message entities and reactions can be
+      // projected. History reads already perform the same hydration step.
+      await this._syncStoredUsers([
+        peerId,
+        ...output.flatMap(({ source }) => messageReferencedUserIds(source)),
+      ])
       await this._rememberReplyTargets(output.map((item) => item.source))
       return output
     }

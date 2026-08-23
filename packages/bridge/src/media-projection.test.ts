@@ -274,6 +274,45 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('shared-media search', () => {
+  it('hydrates persisted mention users before projecting native search results', async () => {
+    const { store } = await createStore()
+    const mention: IMMessage = {
+      id: 'search-mention', conversationId: conversation.id, senderId: 'alice',
+      timestamp: 1_800_000_080,
+      content: { parts: [{
+        type: 'text', text: '@Carol gpt',
+        entities: [{ type: 'mention', offset: 0, length: 6, userId: 'carol' }],
+      }] },
+    }
+    const searchable: IMPlatform = {
+      ...platform,
+      async searchMessages() { return { messages: [mention] } },
+    }
+    const rpc = new DialogRpc(searchable, session, store)
+    await rpc.getDialogs(dialogsRequest())
+    const peer = {
+      _: 'inputPeerUser' as const, userId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO,
+    }
+
+    const result = await rpc.search({
+      _: 'messages.search', peer, q: 'gpt', filter: { _: 'inputMessagesFilterEmpty' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 20,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    })
+
+    if (result._ === 'messages.messagesNotModified') throw new Error('expected search result')
+    const message = result.messages[0]
+    expect(message).toMatchObject({
+      _: 'message', message: '@Carol gpt',
+      entities: [{ _: 'messageEntityMentionName', offset: 0, length: 6 }],
+    })
+    const carol = await store.getUser(session.platformId, 'carol')
+    expect(carol).toBeDefined()
+    expect(message?._ === 'message' ? message.entities?.[0] : undefined)
+      .toMatchObject({ userId: carol!.id })
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('classifies photos, videos, files, GIFs, audio, voice, and links', async () => {
     const { store } = await createStore()
     const searched: IMMessage[] = [

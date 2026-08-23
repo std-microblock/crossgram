@@ -3370,6 +3370,99 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
+  it('projects native search hits whose mentioned users were not loaded by dialogs or history', async () => {
+    const conversation: bridge.IMConversation = {
+      id: 'search-mention-room', kind: 'group', title: 'Search mention room',
+    }
+    const lastMessage: bridge.IMMessage = {
+      id: 'search-baseline', conversationId: conversation.id,
+      senderId: 'alice', sender: { id: 'alice', firstName: 'Alice' },
+      timestamp: 1_700_001_000,
+      content: { parts: [{ type: 'text', text: 'baseline' }] },
+    }
+    const searchText = '@Carol discussed gpt'
+    const searchMessage: bridge.IMMessage = {
+      id: 'search-native-hit', conversationId: conversation.id,
+      senderId: 'alice', sender: { id: 'alice', firstName: 'Alice' },
+      timestamp: 1_700_000_999,
+      content: { parts: [{
+        type: 'text', text: searchText,
+        entities: [{ type: 'mention', offset: 0, length: '@Carol'.length, userId: 'carol' }],
+      }] },
+    }
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+      },
+      async getAccount() {
+        return { credentials: {}, user: { id: 'self', firstName: 'Search Test User' } }
+      },
+      async subscribe() { return () => {} },
+      async getDialogs() {
+        return { dialogs: [{ conversation, unreadCount: 0, lastMessage }] }
+      },
+      async getHistory() { return { messages: [lastMessage] } },
+      async searchMessages() { return { messages: [searchMessage] } },
+      async getUser(_session, id) {
+        return id === 'alice' ? { id, firstName: 'Alice' }
+          : id === 'carol' ? { id, firstName: 'Carol' }
+            : null
+      },
+      async sendMessage() {
+        throw new Error('sending is disabled for the search mention e2e platform')
+      },
+    }
+    const platformId = 'search-mention-e2e'
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    let client: TestClient | undefined
+    try {
+      const platformLogin = await waitForPlatformLogin(ctx, platformId)
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x34567894, 0x5abc, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(platformLogin.auth.totpSecret),
+      }, 4)
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      }, 6)
+      const chat = dialogs.chats.find((item: any) => item.title === conversation.title)
+      const searched = await callRpc(client, key, sid, {
+        _: 'messages.search',
+        peer: { _: 'inputPeerChannel', channelId: chat.id, accessHash: Long.ZERO },
+        q: 'gpt', filter: { _: 'inputMessagesFilterEmpty' }, minDate: 0, maxDate: 0,
+        offsetId: 0, addOffset: 0, limit: 20, maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 8)
+
+      expect(searched.messages).toHaveLength(1)
+      expect(searched.messages[0]).toMatchObject({
+        _: 'message', message: searchText,
+        entities: [{
+          _: 'messageEntityMentionName', offset: 0, length: '@Carol'.length,
+          userId: expect.any(Number),
+        }],
+      })
+      const mentionedUserId = searched.messages[0].entities[0].userId
+      const users = await callRpc(client, key, sid, {
+        _: 'users.getUsers',
+        id: [{ _: 'inputUser', userId: mentionedUserId, accessHash: Long.ZERO }],
+      }, 10)
+      expect(users).toMatchObject([{ _: 'user', id: mentionedUserId, firstName: 'Carol' }])
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30000)
+
   it('forwards gray-tip service notifications silently without silencing ordinary messages', async () => {
     const conversation: bridge.IMConversation = {
       id: 'gray-tip-room', kind: 'group', title: 'Gray-tip room',
