@@ -2815,7 +2815,9 @@ export class DialogRpc {
       outgoing: true,
       replyToId: sent.replyToId ?? replyToId,
     }
-    const published = await this._publishLocalMessage(peerId, source, excludeConnection, [req.randomId])
+    const published = await this._publishLocalMessage(
+      peerId, source, excludeConnection, [req.randomId], replyTopMessageId(req.replyTo),
+    )
     if (systemPeer) await this._systemPeers!.receive(this._session, systemPeer, source, input)
     if (published) {
       const update = published.updates.find((item) =>
@@ -2829,7 +2831,7 @@ export class DialogRpc {
       // returned Updates without forwarding that out-of-band random ID, which
       // leaves their optimistic local item pending and inserts this message as
       // a second item. updateMessageID makes reconciliation self-contained.
-      return this._withMessageIds(published, [req.randomId])
+      return this._withMessageIds(published, [req.randomId], replyTopMessageId(req.replyTo))
     }
     let persisted: Awaited<ReturnType<MessageStore['ingest']>> | undefined
     if (this._store) {
@@ -2850,10 +2852,10 @@ export class DialogRpc {
       _: 'updates',
       updates: [
         { _: 'updateMessageID', id, randomId: req.randomId },
-        {
+        withReplyToTopId({
           _: channel ? 'updateNewChannelMessage' : 'updateNewMessage',
           message: await this._projectMessage(item), pts, ptsCount: 1,
-        } as tl.TypeUpdate,
+        } as tl.TypeUpdate, replyTopMessageId(req.replyTo)),
       ],
       users: channel
         ? [this._makeSelfUser()]
@@ -3060,7 +3062,10 @@ export class DialogRpc {
           }))
     const source: IMMessage = { ...sent, conversationId: peerId, outgoing: true }
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
-    const published = await this._publishLocalMessage(peerId, source, excludeConnection, randomIds)
+    const replyToTopId = replyTopMessageId(replyTo)
+    const published = await this._publishLocalMessage(
+      peerId, source, excludeConnection, randomIds, replyToTopId,
+    )
     if (systemPeer) {
       try {
         await this._systemPeers!.receive(this._session, systemPeer, source, resolvedContent)
@@ -3070,7 +3075,7 @@ export class DialogRpc {
     } else {
       await Promise.all(uploads.map((upload) => this._uploads!.complete(upload)))
     }
-    if (published) return this._withMessageIds(published, randomIds)
+    if (published) return this._withMessageIds(published, randomIds, replyToTopId)
     const conversation = await this._store.getConversation(this._session.platformSessionId, peerId)
       ?? { id: peerId, kind: 'direct' as const, title: peerId }
     const persisted = await this._store.ingest(this._session, conversation, source)
@@ -3096,10 +3101,10 @@ export class DialogRpc {
       if (randomId) {
         updates.push({ _: 'updateMessageID', id: part.tlMessageId, randomId })
       }
-      updates.push({
+      updates.push(withReplyToTopId({
         _: this._isTelegramChannel(conversation) ? 'updateNewChannelMessage' : 'updateNewMessage',
         message: await this._projectMessage(item), pts: ++pts, ptsCount: 1,
-      } as tl.TypeUpdate)
+      } as tl.TypeUpdate, replyToTopId))
     }
     const target = this._conversation(peerId)
     return {
@@ -3117,6 +3122,7 @@ export class DialogRpc {
     message: IMMessage,
     excludeConnection?: ServerConnection,
     randomIds?: readonly Long[],
+    replyToTopId?: number,
   ): Promise<tl.RawUpdates | undefined> {
     if (!this._store || !this._onLocalEvent) return
     const conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
@@ -3131,13 +3137,18 @@ export class DialogRpc {
         ...this._localDelivery(excludeConnection, true),
         forceDelivery: true,
         messageRandomIds: randomIds,
+        ...(replyToTopId ? { messageReplyToTopId: replyToTopId } : {}),
       },
     ) as tl.RawUpdates | undefined
     if (published === undefined || published._ !== 'updates') return
     return published
   }
 
-  private _withMessageIds(payload: tl.RawUpdates, randomIds: Long[]): tl.RawUpdates {
+  private _withMessageIds(
+    payload: tl.RawUpdates,
+    randomIds: Long[],
+    replyToTopId?: number,
+  ): tl.RawUpdates {
     let index = 0
     const updates: tl.TypeUpdate[] = []
     const confirmed = new Set(payload.updates.flatMap((update) =>
@@ -3149,7 +3160,7 @@ export class DialogRpc {
           updates.push({ _: 'updateMessageID', id: update.message.id, randomId })
         }
       }
-      updates.push(update)
+      updates.push(withReplyToTopId(update, replyToTopId))
     }
     return {
       ...payload,
@@ -5654,6 +5665,26 @@ function inputPeerId(peer: tl.TypeInputPeer): number {
   if (peer._ === 'inputPeerChat') return peer.chatId
   if (peer._ === 'inputPeerChannel') return peer.channelId
   return 0
+}
+
+function replyTopMessageId(replyTo: tl.TypeInputReplyTo | undefined): number | undefined {
+  return replyTo?._ === 'inputReplyToMessage' && replyTo.topMsgId && replyTo.topMsgId > 0
+    ? replyTo.topMsgId
+    : undefined
+}
+
+function withReplyToTopId(update: tl.TypeUpdate, replyToTopId: number | undefined): tl.TypeUpdate {
+  if (!replyToTopId
+    || (update._ !== 'updateNewMessage' && update._ !== 'updateNewChannelMessage')
+    || update.message._ !== 'message'
+    || update.message.replyTo?._ !== 'messageReplyHeader') return update
+  return {
+    ...update,
+    message: {
+      ...update.message,
+      replyTo: { ...update.message.replyTo, replyToTopId },
+    },
+  }
 }
 
 function hasDraftContent(request: tl.messages.RawSaveDraftRequest): boolean {

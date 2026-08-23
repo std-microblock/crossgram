@@ -86,14 +86,17 @@ describe('sent-message observer reconciliation e2e', () => {
       },
       async subscribe() { return () => {} },
       async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0 }] } },
-      async getHistory() { return { messages: [] } },
+      async getHistory() { return { messages: [{
+        id: 'qq-reply-target', conversationId: conversation.id, senderId: 'friend', timestamp: 1_799_999_999,
+        content: { parts: [{ type: 'text', text: 'reply target' }] },
+      }] } },
       async getUser(_session, id) { return { id, firstName: id === session.userId ? 'Current' : id } },
       async sendMessage(_session, target, input): Promise<IMMessage> {
         const text = input.parts.find((part) => part.type === 'text')
         if (!text || text.type !== 'text') throw new Error('expected sent text')
         return {
           id: 'qq-sent-text', conversationId: target.id, senderId: session.userId,
-          outgoing: true, timestamp: 1_800_000_000,
+          outgoing: true, timestamp: 1_800_000_000, replyToId: input.replyToId,
           content: { parts: [{ type: 'text', text: text.text }] },
         }
       },
@@ -124,13 +127,22 @@ describe('sent-message observer reconciliation e2e', () => {
     rpc.register('messages.sendMessage', async (context, request) =>
       dialogs.sendMessage(request as tl.messages.RawSendMessageRequest, context.connection))
     const randomId = Long.fromNumber(80_001)
+    const targetPeer = {
+      _: 'inputPeerChannel' as const,
+      channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ZERO,
+    }
+    const history = await dialogs.getHistory({
+      _: 'messages.getHistory', peer: targetPeer, offsetId: 0, offsetDate: 0,
+      addOffset: 0, limit: 10, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    const replyToMsgId = (history.messages.find((message) =>
+      message._ === 'message' && message.message === 'reply target') as tl.RawMessage).id
 
     const response = await roundTripRpc(rpc, {
       _: 'messages.sendMessage',
-      peer: {
-        _: 'inputPeerChannel', channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ZERO,
-      },
+      peer: targetPeer,
       message: 'keep the optimistic text item',
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId, topMsgId: 1 },
       randomId,
     }) as tl.RawUpdates
 
@@ -138,13 +150,19 @@ describe('sent-message observer reconciliation e2e', () => {
     expect(observerPushes[0].authKeyId).toBe(OBSERVER_AUTH_KEY)
     expect(observerPushes[0].payload.updates).toMatchObject([
       { _: 'updateMessageID', randomId },
-      { _: 'updateNewChannelMessage', message: { message: 'keep the optimistic text item' } },
+      { _: 'updateNewChannelMessage', message: {
+        message: 'keep the optimistic text item',
+        replyTo: { _: 'messageReplyHeader', replyToMsgId, replyToTopId: 1 },
+      } },
     ])
     expect(response).toMatchObject({
       _: 'updates', seq: 0,
       updates: [
         { _: 'updateMessageID', randomId },
-        { _: 'updateNewChannelMessage', message: { message: 'keep the optimistic text item' } },
+        { _: 'updateNewChannelMessage', message: {
+          message: 'keep the optimistic text item',
+          replyTo: { _: 'messageReplyHeader', replyToMsgId, replyToTopId: 1 },
+        } },
       ],
     })
     expect((observerPushes[0].payload.updates[0] as tl.RawUpdateMessageID).id)

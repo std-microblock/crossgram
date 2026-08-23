@@ -501,9 +501,17 @@ describe('UpdateManager', () => {
     const conversation: IMConversation = {
       id: 'parallel-auth-key-send', kind: 'group', title: 'Parallel Auth Key Send',
     }
+    const target: IMMessage = {
+      id: 'parallel-auth-key-target', conversationId: conversation.id,
+      senderId: 'friend', timestamp: 1_800_000_001,
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    }
+    const targetResult = await store.ingest(session, conversation, target)
+    const replyToMsgId = targetResult.projection[0]!.tlMessageId
     const message: IMMessage = {
       id: 'parallel-auth-key-message', conversationId: conversation.id,
       senderId: session.userId, timestamp: 1_800_000_002, outgoing: true,
+      replyToId: target.id,
       content: { parts: [{ type: 'text', text: 'replace the optimistic item' }] },
     }
     const result = await store.ingest(session, conversation, message)
@@ -515,6 +523,7 @@ describe('UpdateManager', () => {
       excludeAuthKeyId: '0011223344556677',
       deliveredViaRpc: true,
       messageRandomIds: [randomId],
+      messageReplyToTopId: 1,
     }) as tl.RawUpdates
 
     expect(sent).toHaveLength(1)
@@ -523,19 +532,28 @@ describe('UpdateManager', () => {
       _: 'updates',
       updates: [
         { _: 'updateMessageID', randomId },
-        { _: 'updateNewChannelMessage', message: { message: 'replace the optimistic item' } },
+        { _: 'updateNewChannelMessage', message: {
+          message: 'replace the optimistic item',
+          replyTo: { _: 'messageReplyHeader', replyToMsgId, replyToTopId: 1 },
+        } },
       ],
     })
     expect(response.updates).toMatchObject([
       { _: 'updateMessageID', randomId },
-      { _: 'updateNewChannelMessage' },
+      { _: 'updateNewChannelMessage', message: {
+        replyTo: { _: 'messageReplyHeader', replyToMsgId, replyToTopId: 1 },
+      } },
     ])
     const delivery = await store.getUpdateDelivery(
       `${session.platformSessionId}:message:${result.message.id}`,
     )
     expect(delivery?.payload).toMatchObject({
-      updates: [{ _: 'updateNewChannelMessage' }],
+      updates: [{
+        _: 'updateNewChannelMessage',
+        message: { replyTo: { _: 'messageReplyHeader', replyToMsgId } },
+      }],
     })
+    expect((delivery?.payload as any).updates[0].message.replyTo.replyToTopId).toBeUndefined()
     expect((delivery?.payload as any).updates).toHaveLength(1)
   })
 

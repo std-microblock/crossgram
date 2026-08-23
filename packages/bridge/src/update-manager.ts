@@ -544,8 +544,8 @@ export class UpdateManager {
     if (delivery.published) {
       this._onTrace?.('update publish skipped eventKey=%s reason=already-published', eventKey)
       const payload = delivery.payload ? updateFromJson(delivery.payload) : undefined
-      return payload && options.messageRandomIds?.length
-        ? withMessageIds(payload, options.messageRandomIds)
+      return payload && (options.messageRandomIds?.length || options.messageReplyToTopId)
+        ? withSendReconciliation(payload, options.messageRandomIds, options.messageReplyToTopId)
         : payload
     }
     this._onTrace?.(
@@ -745,8 +745,8 @@ export class UpdateManager {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, updateToJson(payload))
-    const deliveredPayload = options.messageRandomIds?.length
-      ? withMessageIds(payload, options.messageRandomIds)
+    const deliveredPayload = options.messageRandomIds?.length || options.messageReplyToTopId
+      ? withSendReconciliation(payload, options.messageRandomIds, options.messageReplyToTopId)
       : payload
     this._onTrace?.(
       'update payload stored eventKey=%s updates=%d types=%s pts=%d seq=%d',
@@ -1218,17 +1218,35 @@ function hexBytes(value: string): Uint8Array {
   return bytes
 }
 
-function withMessageIds(payload: tl.RawUpdates, randomIds: readonly Long[]): tl.RawUpdates {
+function withSendReconciliation(
+  payload: tl.RawUpdates,
+  randomIds: readonly Long[] | undefined,
+  replyToTopId: number | undefined,
+): tl.RawUpdates {
   let index = 0
   const updates: tl.TypeUpdate[] = []
   for (const update of payload.updates) {
     if (update._ === 'updateNewMessage' || update._ === 'updateNewChannelMessage') {
-      const randomId = randomIds[index++]
+      const randomId = randomIds?.[index++]
       if (randomId) updates.push({ _: 'updateMessageID', id: update.message.id, randomId })
     }
-    updates.push(update)
+    updates.push(withReplyToTopId(update, replyToTopId))
   }
   return { ...payload, updates }
+}
+
+function withReplyToTopId(update: tl.TypeUpdate, replyToTopId: number | undefined): tl.TypeUpdate {
+  if (!replyToTopId
+    || (update._ !== 'updateNewMessage' && update._ !== 'updateNewChannelMessage')
+    || update.message._ !== 'message'
+    || update.message.replyTo?._ !== 'messageReplyHeader') return update
+  return {
+    ...update,
+    message: {
+      ...update.message,
+      replyTo: { ...update.message.replyTo, replyToTopId },
+    },
+  }
 }
 
 function conversationPeer(conversation: IMConversation, directUserId?: number): tl.TypePeer {

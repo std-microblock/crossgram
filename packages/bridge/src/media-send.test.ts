@@ -42,6 +42,7 @@ async function createHarness(failSends = 0, systemPeerProvider?: SystemPeerProvi
   const consumed: Uint8Array[][] = []
   const remoteFiles: Uint8Array[] = []
   const inputs: IMMessageInput[] = []
+  const historyMessages: IMMessage[] = []
   let sequence = 0
   const platform: IMPlatform = {
     capabilities: {
@@ -51,7 +52,7 @@ async function createHarness(failSends = 0, systemPeerProvider?: SystemPeerProvi
     },
     async subscribe() { return () => {} },
     async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0 }] } },
-    async getHistory() { return { messages: [] } },
+    async getHistory() { return { messages: historyMessages } },
     async getUser(_session, id) { return { id, firstName: id } },
     async sendMessage(_session, target, content, options): Promise<IMMessage> {
       inputs.push(content)
@@ -95,7 +96,8 @@ async function createHarness(failSends = 0, systemPeerProvider?: SystemPeerProvi
       }
       return {
         id: `sent-${++sequence}`, conversationId: target.id, senderId: 'self', outgoing: true,
-        timestamp: 1_800_000_000 + sequence, content: { parts: outputParts },
+        timestamp: 1_800_000_000 + sequence, replyToId: content.replyToId,
+        content: { parts: outputParts },
       }
     },
     async *downloadMedia(_session, media, options) {
@@ -135,7 +137,7 @@ async function createHarness(failSends = 0, systemPeerProvider?: SystemPeerProvi
     await rm(directory, { recursive: true, force: true })
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { rpc, platform, uploads, store, consumed, inputs, progress, peerId }
+  return { rpc, platform, uploads, store, consumed, inputs, progress, peerId, historyMessages }
 }
 
 function inputFile(id: number, parts: number, name: string): tl.RawInputFile {
@@ -435,6 +437,40 @@ describe('media send streaming', () => {
       _: 'inputDocumentFileLocation', id: document.id, accessHash: document.accessHash,
       fileReference: new TextEncoder().encode('bridge-media:999'), thumbSize: '',
     })).rejects.toThrow('FILE_REFERENCE_INVALID')
+  })
+
+  it('echoes the optimistic reply top id in a sent-photo confirmation', async () => {
+    const { rpc, uploads, peerId, historyMessages } = await createHarness()
+    historyMessages.push({
+      id: 'reply-target', conversationId: conversation.id, senderId: 'friend', timestamp: 1_799_999_999,
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    })
+    const history = await rpc.getHistory({
+      _: 'messages.getHistory', peer: peer(peerId), offsetId: 0, offsetDate: 0,
+      addOffset: 0, limit: 10, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    const replyToMsgId = (history.messages.find((message) =>
+      message._ === 'message' && message.message === 'reply target') as tl.RawMessage).id
+    await uploads.savePart(session.platformSessionId, '43', 0, Uint8Array.of(1, 2, 3))
+
+    const result = await rpc.sendMedia({
+      _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(43), message: '',
+      replyTo: { _: 'inputReplyToMessage', replyToMsgId, topMsgId: 1 },
+      media: { _: 'inputMediaUploadedPhoto', file: inputFile(43, 1, 'reply.jpg') },
+    }) as tl.RawUpdates
+    const decoded = wireRoundTrip(result)
+
+    expect(decoded.updates).toMatchObject([
+      { _: 'updateMessageID', randomId: Long.fromNumber(43) },
+      {
+        _: 'updateNewMessage',
+        message: {
+          replyTo: {
+            _: 'messageReplyHeader', replyToMsgId, replyToTopId: 1,
+          },
+        },
+      },
+    ])
   })
 
   it('keeps ordinary document audio non-voice while preserving its duration', async () => {

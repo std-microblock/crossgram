@@ -585,6 +585,8 @@ export interface PlatformEventDeliveryOptions {
   deliveredViaRpc?: boolean
   /** Correlate observer pushes with optimistic messages created by the sending client. */
   messageRandomIds?: readonly Long[]
+  /** Preserve the sending client's reply thread root while reconciling its optimistic item. */
+  messageReplyToTopId?: number
   /** Internal recovery path for an unchanged projection whose update was not delivered. */
   forceDelivery?: boolean
 }
