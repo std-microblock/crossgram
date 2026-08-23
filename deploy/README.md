@@ -1,9 +1,10 @@
 # Linux deployment
 
 Crossgram runs as the unprivileged `crossgram` user. Its checkout lives in
-`/opt/crossgram`, while the database, MTProto auth keys, RSA key, and media
-cache live under `/var/lib/crossgram/data`. The WebUI binds only to localhost;
-the MTProto listener uses port 4430 by default.
+`/opt/crossgram`, while MTProto auth keys, the RSA key, upload parts, and media
+cache live under `/var/lib/crossgram/data`. Production persistence uses
+PostgreSQL. The WebUI binds only to localhost; the MTProto listener uses port
+4430 by default.
 
 The rendered runtime configuration lives at `/opt/crossgram/.runtime/app.yml`
 so Cordis can resolve workspace plugins from the checkout. Git updates do not
@@ -36,6 +37,17 @@ printf 'TELEGRAM_BOT_TOKEN_VERIFIER_SECRET=%s\n' "$(openssl rand -base64 48 | tr
   | sudo tee -a /etc/crossgram.env >/dev/null
 ```
 
+Provision the local `crossgram` PostgreSQL role/database and persist its random
+password in `/etc/crossgram.env` before starting the service:
+
+```sh
+sudo /opt/crossgram/deploy/provision-postgres.sh
+```
+
+The provisioner is idempotent and never prints the password. Existing runtime
+configuration is migrated from the SQLite driver to PostgreSQL during updates.
+SQLite data is not copied automatically.
+
 Sticker Importer remains opt-in because it needs an official Telegram Bot API
 token to download public sticker packs. Set `TELEGRAM_STICKER_IMPORTER_BOT_TOKEN`
 only after providing that token, then enable its plugin in the root-managed
@@ -51,7 +63,8 @@ The updater only accepts a fast-forward from `origin/main`, then runs
 `yarn install --immutable`, `yarn build`, and restarts the service. It never
 resets local data or overwrites the files under `/var/lib/crossgram`.
 Yarn dependency build scripts are enabled only for the immutable install so
-the locked native dependencies (including SQLite and Sharp) are usable.
+the locked native dependencies used by development tests and media processing
+remain usable.
 
 After the first successful start creates the RSA key, generate one JSON file
 that both Crossgram Android and Crossgram Desktop can import:

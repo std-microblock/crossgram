@@ -52,12 +52,15 @@
   config:
     - id: database-core
       name: '@cordisjs/plugin-database'
-    - id: database-sqlite
-      name: '@cordisjs/plugin-database-sqlite'
+    - id: database-postgres
+      name: '@cordisjs/plugin-database-postgres'
       config:
-        path: /var/lib/crossgram/data/cordis.db
-        journalMode: wal
-        busyTimeout: 5000
+        host: 127.0.0.1
+        port: 5432
+        user: crossgram
+        password: ${CROSSGRAM_POSTGRES_PASSWORD}
+        database: crossgram
+        max: 10
 - id: update-store
   name: '@mtproto-relay/update-store-database'
   config:

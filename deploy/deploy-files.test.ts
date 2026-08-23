@@ -5,19 +5,20 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { migrateRuntimeConfig, migrateRuntimeConfigFile } from './migrate-runtime-config.mjs'
+import { migrateDatabaseDriver, migrateRuntimeConfig, migrateRuntimeConfigFile } from './migrate-runtime-config.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 
 describe('Crossgram Linux deployment', () => {
   it('keeps installer and updater valid POSIX shell', () => {
-    for (const file of ['install.sh', 'update.sh']) {
+    for (const file of ['install.sh', 'update.sh', 'provision-postgres.sh']) {
       expect(() => execFileSync('sh', ['-n', join(root, 'deploy', file)]), file).not.toThrow()
     }
     const stages = execFileSync('git', [
-      'ls-files', '--stage', 'deploy/install.sh', 'deploy/update.sh', 'deploy/generate-client-config.mjs',
+      'ls-files', '--stage', 'deploy/install.sh', 'deploy/update.sh', 'deploy/provision-postgres.sh',
+      'deploy/generate-client-config.mjs',
     ], { cwd: root, encoding: 'utf8' }).trim().split('\n')
-    expect(stages).toHaveLength(3)
+    expect(stages).toHaveLength(4)
     expect(stages.every((stage) => stage.startsWith('100755 '))).toBe(true)
   })
 
@@ -44,6 +45,9 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain("name: '@mtproto-relay/mtproto-statistics'")
     expect(config).toContain("name: '@mtproto-relay/update-store-database'")
     expect(config).toContain("name: '@cordisjs/plugin-loader-webui'")
+    expect(config).toContain("name: '@cordisjs/plugin-database-postgres'")
+    expect(config).toContain('password: ${CROSSGRAM_POSTGRES_PASSWORD}')
+    expect(config).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
     expect(config).toContain('retention: 10000')
     expect(config).toContain('historySeconds: 900')
     expect(config).not.toMatch(/^\s*token:/m)
@@ -56,6 +60,10 @@ describe('Crossgram Linux deployment', () => {
     expect(installer).toContain('chown "$service_user:$service_user" "$runtime_config"')
     expect(installer).toContain('chmod 0600 "$runtime_config"')
     expect(installer).not.toContain('> "$runtime_config"')
+    const provisioner = readFileSync(join(root, 'deploy', 'provision-postgres.sh'), 'utf8')
+    expect(provisioner).toContain('CROSSGRAM_POSTGRES_PASSWORD')
+    expect(provisioner).toContain('CREATE DATABASE')
+    expect(provisioner).not.toContain('cordis.db')
   })
 
   it('fast-forwards, installs immutably, builds, and restarts during an update', () => {
@@ -107,6 +115,17 @@ describe('Crossgram Linux deployment', () => {
   it('adds required bridge and bot plugins to an existing runtime config exactly once', () => {
     const oldConfig = `- id: bridge
   name: '@mtproto-relay/bridge'
+- id: database
+  name: '@cordisjs/plugin-group'
+  config:
+    - id: database-core
+      name: '@cordisjs/plugin-database'
+    - id: database-sqlite
+      name: '@cordisjs/plugin-database-sqlite'
+      config:
+        path: /var/lib/crossgram/data/cordis.db
+        journalMode: wal
+        busyTimeout: 5000
 - id: qqnt
   name: '@mtproto-relay/platform-qqnt'
 `
@@ -115,6 +134,9 @@ describe('Crossgram Linux deployment', () => {
     expect(migrated).toContain("- id: platform-admin-bot\n  name: '@mtproto-relay/platform-admin-bot'")
     expect(migrated).toContain("- id: telegram-bot-api\n  name: '@mtproto-relay/telegram-bot-api'")
     expect(migrated).toContain("- id: qq-flash-transfer-bot\n  name: '@mtproto-relay/qq-flash-transfer-bot'")
+    expect(migrated).toContain("    - id: database-postgres\n      name: '@cordisjs/plugin-database-postgres'")
+    expect(migrated).toContain('        password: ${CROSSGRAM_POSTGRES_PASSWORD}')
+    expect(migrated).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
     expect(migrateRuntimeConfig(migrated)).toBe(migrated)
 
     const temp = mkdtempSync(join(tmpdir(), 'crossgram-config-migration-'))
@@ -131,6 +153,29 @@ describe('Crossgram Linux deployment', () => {
     } finally {
       rmSync(temp, { recursive: true, force: true })
     }
+  })
+
+  it('replaces disabled PostgreSQL placeholders and active SQLite with one configured driver', () => {
+    const source = `- id: database
+  name: '@cordisjs/plugin-group'
+  config:
+    - id: sqlite
+      name: '@cordisjs/plugin-database-sqlite'
+      config:
+        path: ./data/cordis.db
+    - id: postgres-old
+      name: '@cordisjs/plugin-database-postgres'
+      disabled: true
+    - id: mongo
+      name: '@cordisjs/plugin-database-mongo'
+      disabled: true
+`
+    const migrated = migrateDatabaseDriver(source)
+    expect(migrated.match(/name: '@cordisjs\/plugin-database-postgres'/g)).toHaveLength(1)
+    expect(migrated).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
+    expect(migrated).toContain("    - id: database-postgres")
+    expect(migrated).toContain("    - id: mongo")
+    expect(migrateDatabaseDriver(migrated)).toBe(migrated)
   })
 
   it('generates the shared Android and Desktop import JSON from the persisted RSA key', () => {
