@@ -995,7 +995,10 @@ export class DialogRpc {
   }
 
   async getMessages(req: GetMessagesRequest): Promise<tl.messages.TypeMessages> {
-    await this._hydrateUsers()
+    // Basic-chat conversation views use messages.getMessages for deep-link
+    // bootstrap just like direct peers. Hydrate persisted conversations as
+    // well as users so a fresh process can validate those virtual owners.
+    await this._hydratePeers()
     return this._getMessages(req.id)
   }
 
@@ -1031,20 +1034,26 @@ export class DialogRpc {
           this._session.platformSessionId,
           requestedId,
           expectedPeerId,
-          expectedPeerId ? undefined : 'direct',
         )
         if (projected) {
-          for (const part of projected.parts) {
-            this._rememberMessage({
-              source: projected.source,
-              tlId: part.tlMessageId,
-              ordinal: part.ordinal,
-              groupedId: part.groupedId ?? undefined,
-              media: projected.media.find((entry) => entry.id === part.mediaId),
-              mediaRows: projected.media,
-            })
+          const conversation = this._conversations.get(projected.source.conversationId)
+          const allowed = expectedPeerId
+            ? projected.source.conversationId === expectedPeerId
+            : conversation?.kind === 'direct'
+              || (conversation !== undefined && this._isConversationView(conversation))
+          if (allowed) {
+            for (const part of projected.parts) {
+              this._rememberMessage({
+                source: projected.source,
+                tlId: part.tlMessageId,
+                ordinal: part.ordinal,
+                groupedId: part.groupedId ?? undefined,
+                media: projected.media.find((entry) => entry.id === part.mediaId),
+                mediaRows: projected.media,
+              })
+            }
+            ref = this._tlToMessage.get(requestedId)
           }
-          ref = this._tlToMessage.get(requestedId)
         }
       }
       if (!ref) {
@@ -3695,7 +3704,15 @@ export class DialogRpc {
       await this._persistUsers(directUsers)
       for (const conversation of storedConversations) {
         this._conversations.set(conversation.id, conversation)
-        this._peerId(conversation.id)
+        const peerId = this._peerId(conversation.id)
+        // Conversation-view links are durable, but their provider registry is
+        // intentionally process-local. Rebuild it from persisted conversation
+        // metadata so old merged-forward links survive a service restart.
+        if (this._isConversationView(conversation)) {
+          this._conversationViews?.remember(
+            this._session.platformSessionId, peerId, conversation,
+          )
+        }
       }
       for (const dialog of dialogs) {
         this._conversations.set(dialog.conversation.id, dialog.conversation)
