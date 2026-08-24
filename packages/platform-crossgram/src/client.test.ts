@@ -112,6 +112,27 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
+  it('forwards the request origin so native observer echoes can be suppressed', async () => {
+    const requests: Array<{ url: string, body: unknown }> = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async (input, init) => {
+        requests.push({ url: String(input), body: JSON.parse(String(init?.body)) })
+        return Response.json({ messages: [] })
+      }),
+    })
+
+    await client.forwardMessages('from', ['first', 'second'], 'to', true, 'forward-origin')
+
+    expect(requests).toEqual([{
+      url: 'http://bridge.invalid/v1/messages/forward',
+      body: {
+        from: 'from', to: 'to', messageIds: ['first', 'second'], merged: true,
+        originRequestId: 'forward-origin',
+      },
+    }])
+  })
+
   it('reuses QQ-origin media and streams only new inputs through the flash-transfer endpoint', async () => {
     let manifest: Record<string, unknown> | undefined
     let body: Buffer<ArrayBufferLike> = Buffer.alloc(0)

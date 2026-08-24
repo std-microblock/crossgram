@@ -756,11 +756,12 @@ export class QQNTClient {
     messageIds: readonly string[],
     to: string,
     merged: boolean,
+    originRequestId?: string,
   ): Promise<WireMessage[]> {
     const response = await this.json<{ messages: WireMessage[] }>('/messages/forward', false, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ from, to, messageIds, merged }),
+      body: JSON.stringify({ from, to, messageIds, merged, originRequestId }),
     })
     return response.messages
   }

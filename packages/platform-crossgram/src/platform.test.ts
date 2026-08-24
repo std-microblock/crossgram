@@ -1002,9 +1002,9 @@ describe('QQNTPlatform mapping', () => {
 
   it('uses QQ merged forward only for multiple preserved-source messages', async () => {
     const platform = new QQNTPlatform()
-    platform.client.forwardMessages = vi.fn(async (_from, ids, to, merged) => [{
+    platform.client.forwardMessages = vi.fn(async (_from, ids, to, merged, originRequestId) => [{
       id: merged ? 'merged' : `forwarded-${ids[0]}`, conversationId: to,
-      senderId: 'self', timestamp: 10, outgoing: true,
+      senderId: 'self', timestamp: 10, outgoing: true, originRequestId,
       parts: merged ? [{
         type: 'multi-forward' as const, title: 'Alice 和 Bob 的聊天记录',
         preview: 'Alice: first\nBob: second',
@@ -1024,8 +1024,14 @@ describe('QQNTPlatform mapping', () => {
         },
       }],
     }] } }])
-    expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(1, 'from', ['a'], 'to', false)
-    expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(2, 'from', ['a', 'b'], 'to', true)
+    expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(
+      1, 'from', ['a'], 'to', false, expect.any(String),
+    )
+    expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(
+      2, 'from', ['a', 'b'], 'to', true, expect.any(String),
+    )
+    expect((platform.client.forwardMessages as ReturnType<typeof vi.fn>).mock.calls[0]![4])
+      .not.toBe((platform.client.forwardMessages as ReturnType<typeof vi.fn>).mock.calls[1]![4])
 
     const link = merged[0].content.parts[0]
     if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
@@ -1157,7 +1163,9 @@ describe('QQNTPlatform mapping', () => {
 
     expect(outputs).toMatchObject([{ id: 'resent-copy from relay store' }])
     expect(platform.client.getMessage).not.toHaveBeenCalled()
-    expect(platform.client.forwardMessages).toHaveBeenCalledWith('from', ['native-a'], 'to', false)
+    expect(platform.client.forwardMessages).toHaveBeenCalledWith(
+      'from', ['native-a'], 'to', false, expect.any(String),
+    )
   })
 
   it('projects inline QQ faces as Telegram custom emoji data and restores their face index', async () => {
@@ -1381,9 +1389,12 @@ describe('QQNTPlatform mapping', () => {
     const handlers = (platform.client.subscribe as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0])
     await handlers[0](echo)
     await handlers[1](echo)
+    const edit = { ...echo, type: 'message-edit' as const, eventId: 'sent-finalized' }
+    await handlers[0](edit)
+    await handlers[1](edit)
     expect(sent.id).toBe('sent')
     expect(ownEvents).toEqual([])
-    expect(otherEvents).toHaveLength(1)
+    expect(otherEvents).toMatchObject([{ type: 'message' }, { type: 'message-edit' }])
     await unsubscribeOwn()
     await unsubscribeOther()
     expect(wireHandler).toBeTypeOf('function')

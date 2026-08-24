@@ -420,9 +420,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               )
               return
             }
-            if (event.type === 'message' && event.message.originRequestId
+            if ((event.type === 'message' || event.type === 'message-edit') && event.message.originRequestId
               && this.originSessions.get(event.message.originRequestId) === platformSessionId) {
-              knownLastMessageIds.set(event.conversation.id, event.message.id)
+              if (event.type === 'message') knownLastMessageIds.set(event.conversation.id, event.message.id)
               this.logger?.debug(
                 'WebSocket event filtered session=%s reason=own-origin streamEventId=%s message=%s originRequestId=%s',
                 platformSessionId, eventId ?? '<none>', event.message.id, event.message.originRequestId,
@@ -1177,17 +1177,24 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       return this.copyForwardedMessages(session, from, messageIds, to, options)
     }
     const merged = messageIds.length > 1
+    const originRequestId = randomUUID()
+    this.originSessions.set(originRequestId, session.platformSessionId)
     try {
-      const messages = await this.client.forwardMessages(
-        await this.wireConversationId(session, from.id), messageIds,
-        await this.wireConversationId(session, to.id), merged,
-      )
-      return Promise.all(messages.map((message) =>
-        this.prepareInitialMessage(this.mapMessage(message, to.id))))
-    } catch (error) {
-      if (!isNativeForwardRejection(error)
-        || options.sourceMessages?.length !== messageIds.length) throw error
-      return this.copyForwardedMessages(session, from, messageIds, to, options)
+      try {
+        const messages = await this.client.forwardMessages(
+          await this.wireConversationId(session, from.id), messageIds,
+          await this.wireConversationId(session, to.id), merged, originRequestId,
+        )
+        return Promise.all(messages.map((message) =>
+          this.prepareInitialMessage(this.mapMessage(message, to.id))))
+      } catch (error) {
+        if (!isNativeForwardRejection(error)
+          || options.sourceMessages?.length !== messageIds.length) throw error
+        return this.copyForwardedMessages(session, from, messageIds, to, options)
+      }
+    } finally {
+      const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
+      timer.unref()
     }
   }
 
