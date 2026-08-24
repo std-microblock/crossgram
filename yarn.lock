@@ -2062,6 +2062,7 @@ __metadata:
     "@types/ws": "npm:^8.18.1"
     schemastery: "npm:^3.18.0"
     sharp: "npm:^0.35.3"
+    undici: "npm:^8.10.0"
     vitest: "npm:^4.1.10"
     ws: "npm:^8.21.3"
   peerDependencies:

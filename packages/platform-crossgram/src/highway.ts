@@ -1,13 +1,20 @@
 import { createHash } from 'node:crypto'
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf'
+import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici'
 import {
   HighwayRequestHeadSchema, HighwayResponseHeadSchema,
 } from './generated/qqnt/highway_pb.js'
 
 const HIGHWAY_APP_ID = 1_600_001_604
-const HIGHWAY_FALLBACK_DELAY_MS = 100
-const HIGHWAY_ATTEMPT_TIMEOUT_MS = 3_000
+const HIGHWAY_CONNECT_TIMEOUT_MS = 3_000
+const HIGHWAY_RESPONSE_TIMEOUT_MS = 30_000
+const HIGHWAY_ATTEMPT_TIMEOUT_MS = 60_000
 const preferredHighwayServers = new Map<string, string>()
+const highwayDispatcher = new Agent({
+  connectTimeout: HIGHWAY_CONNECT_TIMEOUT_MS,
+  headersTimeout: HIGHWAY_RESPONSE_TIMEOUT_MS,
+  bodyTimeout: HIGHWAY_RESPONSE_TIMEOUT_MS,
+})
 
 export type QQPreparedMedia =
   | { kind: 'image', fileUuid: string, msgInfo: string, compatQMsg?: string }
@@ -50,6 +57,7 @@ export class QQHighwayUploadWriter {
     private readonly _fetchImpl: typeof globalThis.fetch,
     private readonly _options: {
       signal?: AbortSignal
+      attemptTimeoutMs?: number
       onProgress?(transferredBytes: number): void | Promise<void>
     } = {},
   ) {
@@ -99,7 +107,13 @@ export class QQHighwayUploadWriter {
       this._uploaded,
       block,
     )
-    await postHighwayBlock(this._plan, frame, this._fetchImpl, this._options.signal)
+    await postHighwayBlock(
+      this._plan,
+      frame,
+      this._fetchImpl,
+      this._options.signal,
+      this._options.attemptTimeoutMs,
+    )
     this._uploaded += block.length
     this._buffer = Buffer.allocUnsafe(this._plan.blockSize)
     this._bufferedLength = 0
@@ -111,7 +125,11 @@ export async function uploadHighway(
   plan: QQHighwayUploadPlan,
   source: AsyncIterable<Uint8Array>,
   fetchImpl: typeof globalThis.fetch,
-  options: { signal?: AbortSignal, onProgress?(transferredBytes: number): void | Promise<void> } = {},
+  options: {
+    signal?: AbortSignal
+    attemptTimeoutMs?: number
+    onProgress?(transferredBytes: number): void | Promise<void>
+  } = {},
 ): Promise<void> {
   const writer = new QQHighwayUploadWriter(plan, fetchImpl, options)
   for await (const chunk of source) await writer.write(chunk)
@@ -173,22 +191,21 @@ async function postHighwayBlock(
   frame: Buffer,
   fetchImpl: typeof globalThis.fetch,
   signal?: AbortSignal,
+  attemptTimeoutMs = HIGHWAY_ATTEMPT_TIMEOUT_MS,
 ): Promise<void> {
   const serverKey = plan.servers.map(highwayServerKey).sort().join(',')
   const preferred = preferredHighwayServers.get(serverKey)
   const servers = [...plan.servers].sort((left, right) =>
     Number(highwayServerKey(right) === preferred) - Number(highwayServerKey(left) === preferred))
-  const controllers = servers.map(() => new AbortController())
-  try {
-    const winner = await Promise.any(servers.map(async (server, index) => {
-      const controller = controllers[index]!
+  const post = fetchImpl === globalThis.fetch ? defaultHighwayFetch : fetchImpl
+  let lastError: unknown
+  for (const server of servers) {
+    try {
       const attemptSignal = AbortSignal.any([
-        controller.signal,
-        AbortSignal.timeout(HIGHWAY_ATTEMPT_TIMEOUT_MS),
+        AbortSignal.timeout(attemptTimeoutMs),
         ...(signal ? [signal] : []),
       ])
-      if (index) await abortableDelay(index * HIGHWAY_FALLBACK_DELAY_MS, attemptSignal)
-      const response = await fetchImpl(
+      const response = await post(
         `http://${server.host}:${server.port}/cgi-bin/httpconn?htcmd=0x6FF0087&uin=${encodeURIComponent(plan.selfUin)}`,
         {
           method: 'POST', body: Uint8Array.from(frame), signal: attemptSignal,
@@ -197,35 +214,19 @@ async function postHighwayBlock(
       )
       if (!response.ok) throw new Error(`QQ Highway HTTP ${response.status}: ${await response.text()}`)
       decodeHighwayResponse(new Uint8Array(await response.arrayBuffer()))
-      return highwayServerKey(server)
-    }))
-    preferredHighwayServers.set(serverKey, winner)
-  } catch (error) {
-    if (signal?.aborted) throw signal.reason ?? error
-    const errors = error instanceof AggregateError ? error.errors : [error]
-    throw new Error(`all QQ Highway upload servers failed: ${errorMessage(errors.at(-1))}`)
-  } finally {
-    for (const controller of controllers) controller.abort()
+      preferredHighwayServers.set(serverKey, highwayServerKey(server))
+      return
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error
+      lastError = error
+    }
   }
+  preferredHighwayServers.delete(serverKey)
+  throw new Error(`all QQ Highway upload servers failed: ${errorMessage(lastError)}`)
 }
 
 function highwayServerKey(server: { host: string, port: number }): string {
   return `${server.host}:${server.port}`
-}
-
-function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('operation aborted'))
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(done, ms)
-    const onAbort = () => done(signal.reason ?? new Error('operation aborted'))
-    function done(error?: unknown) {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', onAbort)
-      if (error) reject(error)
-      else resolve()
-    }
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 function validateHighwayPlan(plan: QQHighwayUploadPlan): void {
@@ -248,3 +249,9 @@ function hex(value: string, name: string, length: number): Buffer {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+const defaultHighwayFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+  undiciFetch(input as string | URL, {
+    ...(init as UndiciRequestInit),
+    dispatcher: highwayDispatcher,
+  }) as unknown as Promise<Response>) as typeof globalThis.fetch

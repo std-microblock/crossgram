@@ -64,7 +64,7 @@ describe('QQ Highway protobuf transport', () => {
     )).rejects.toThrow('expected 8 bytes, received 7')
   })
 
-  it('stagger-races a hanging server and reuses the winner for later blocks', async () => {
+  it('bounds a hanging server without duplicating a block and reuses the fallback winner', async () => {
     const calls: string[] = []
     const fetch = vi.fn((input, init) => {
       const url = String(input)
@@ -81,14 +81,25 @@ describe('QQ Highway protobuf transport', () => {
       servers: [{ host: '127.0.0.3', port: 3 }, { host: '127.0.0.4', port: 4 }],
     }
 
-    const startedAt = performance.now()
-    await uploadHighway(racingPlan, (async function* () { yield body })(), fetch)
-    expect(performance.now() - startedAt).toBeLessThan(1_000)
+    const upload = uploadHighway(
+      racingPlan,
+      (async function* () { yield body })(),
+      fetch,
+      { attemptTimeoutMs: 20 },
+    )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(calls).toHaveLength(1)
+    await upload
     expect(calls).toHaveLength(2)
     expect(calls[1]).toContain('127.0.0.4:4')
 
     calls.length = 0
-    await uploadHighway(racingPlan, (async function* () { yield body })(), fetch)
+    await uploadHighway(
+      racingPlan,
+      (async function* () { yield body })(),
+      fetch,
+      { attemptTimeoutMs: 20 },
+    )
     expect(calls).toHaveLength(1)
     expect(calls[0]).toContain('127.0.0.4:4')
   })
