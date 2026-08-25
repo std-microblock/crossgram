@@ -8,6 +8,7 @@ import * as adminBot from '../../platform-admin-bot/src/index.js'
 import * as qqnt from '../../platform-crossgram/src/index.js'
 import * as discord from '../../platform-discord/src/index.js'
 import * as matrix from '../../platform-matrix/src/index.js'
+import * as wechat from '../../platform-wechat/src/index.js'
 import * as staticPlatform from '../../platform-static/src/index.js'
 import * as satoriPlatform from '../../platform-satori/src/index.js'
 import * as satoriExporter from '../../satori-exporter/src/index.js'
@@ -19,7 +20,7 @@ import * as updateStoreMemory from '../../update-store-memory/src/index.js'
 import * as updateStoreDatabase from '../../update-store-database/src/index.js'
 
 const modules = {
-  bridge, debug, mtproto, statistics, adminBot, qqnt, discord, matrix, staticPlatform, satoriPlatform,
+  bridge, debug, mtproto, statistics, adminBot, qqnt, discord, matrix, wechat, staticPlatform, satoriPlatform,
   satoriExporter, flashTransfer, botApi, resources, stickerImporter, updateStoreMemory, updateStoreDatabase,
 }
 
@@ -50,5 +51,14 @@ describe('loader WebUI config discovery', () => {
     expect(root.dict).toHaveProperty('grayTipFilters')
     expect(plugin.Config({})).toMatchObject({ grayTipFilters: ['回应了你的消息'] })
     expect(plugin.Config({ grayTipFilters: [] })).toMatchObject({ grayTipFilters: [] })
+  })
+
+  it('does not expose a configurable WeChat callback listener host', () => {
+    const plugin = Loader.prototype.unwrapExports(wechat)
+    const serialized = JSON.parse(JSON.stringify({ schema: plugin.Config }))
+    const root = serialized.schema.refs[serialized.schema.uid]
+
+    expect(root.dict).not.toHaveProperty('callbackHost')
+    expect(plugin.Config({})).not.toHaveProperty('callbackHost')
   })
 })

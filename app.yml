@@ -94,6 +94,15 @@
     proxy: http://127.0.0.1:7890
     syncTimeoutMs: 30000
     requestTimeoutMs: 30000
+- id: wechat
+  name: '@mtproto-relay/platform-wechat'
+  disabled: true
+  config:
+    endpoint: http://127.0.0.1:18888/api/
+    callbackPort: 23456
+    requestTimeoutMs: 30000
+    maxCallbackBytes: 1048576
+    maxCallbackConnections: 32
 - id: mtproto-debug
   name: '@mtproto-relay/mtproto-debug'
   config:

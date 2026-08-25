@@ -1,0 +1,5 @@
+endpoint: ComWeChat HTTP API endpoint. ComWeChat has no authentication; use only http:// or https:// on a local or protected network.
+callbackPort: TCP port on which ComWeChat delivers message callbacks.
+requestTimeoutMs: Maximum duration of one ComWeChat HTTP request in milliseconds.
+maxCallbackBytes: Maximum accepted byte size of one ComWeChat callback payload.
+maxCallbackConnections: Maximum simultaneous ComWeChat callback TCP connections. Excess idle connections are immediately closed.

@@ -25,6 +25,7 @@
     "@mtproto-relay/platform-matrix": "workspace:*",
     "@mtproto-relay/platform-satori": "workspace:*",
     "@mtproto-relay/platform-static": "workspace:*",
+    "@mtproto-relay/platform-wechat": "workspace:*",
     "@mtproto-relay/satori-exporter": "workspace:*",
     "@mtproto-relay/telegram-resources": "workspace:*",
     "@mtproto-relay/update-store-database": "workspace:*",

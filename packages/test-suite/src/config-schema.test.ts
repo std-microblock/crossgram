@@ -7,6 +7,7 @@ import { Config as adminBotConfig } from '../../platform-admin-bot/src/index.js'
 import { Config as qqntConfig } from '../../platform-crossgram/src/index.js'
 import { Config as discordConfig } from '../../platform-discord/src/index.js'
 import { Config as matrixConfig } from '../../platform-matrix/src/index.js'
+import { Config as wechatConfig } from '../../platform-wechat/src/index.js'
 import { Config as staticConfig } from '../../platform-static/src/index.js'
 import { Config as satoriConfig } from '../../platform-satori/src/index.js'
 import { Config as exporterConfig } from '../../satori-exporter/src/index.js'
@@ -40,6 +41,9 @@ const cases = [
   ]],
   ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'proxy', 'syncTimeoutMs', 'requestTimeoutMs']],
+  ['wechat', wechatConfig, [
+    'endpoint', 'callbackPort', 'requestTimeoutMs', 'maxCallbackBytes', 'maxCallbackConnections',
+  ]],
   ['static', staticConfig, ['instanceId', 'mediaPath', 'transferChunkSize', 'eventIntervalMs', 'historySize']],
   ['satori', satoriConfig, ['bot']],
   ['satori-exporter', exporterConfig, ['platformId', 'platform', 'maxMediaBytes']],
@@ -117,6 +121,13 @@ describe('plugin config schemas', () => {
     expect(discordConfig({ token: 'user-token' })).toMatchObject({
       token: 'user-token', includeBots: true, downloadChunkSize: 256 * 1024,
     })
+    expect(wechatConfig({})).toEqual({
+      endpoint: 'http://127.0.0.1:18888/api/',
+      callbackPort: 23_456,
+      requestTimeoutMs: 30_000,
+      maxCallbackBytes: 1_048_576,
+      maxCallbackConnections: 32,
+    })
     expect(statisticsConfig({})).toEqual({
       sampleIntervalMs: 1_000,
       slowThresholdMs: 1_000,
@@ -157,6 +168,10 @@ describe('plugin config schemas', () => {
       homeserver: 'https://matrix.example.org', accessToken: 'token', syncTimeoutMs: 0,
     })).toThrow(/syncTimeoutMs/)
     expect(() => staticConfig({ transferChunkSize: 0 })).toThrow(/transferChunkSize/)
+    expect(() => wechatConfig({ endpoint: 'file:///tmp/comwechat' })).toThrow(/endpoint/)
+    expect(() => wechatConfig({ callbackPort: 0 })).toThrow(/callbackPort/)
+    expect(() => wechatConfig({ maxCallbackBytes: 0 })).toThrow(/maxCallbackBytes/)
+    expect(() => wechatConfig({ maxCallbackConnections: 0 })).toThrow(/maxCallbackConnections/)
     expect(() => exporterConfig({ platformId: undefined as unknown as string })).toThrow(/platformId/)
     expect(() => exporterConfig({ platformId: 'qqnt', maxMediaBytes: 0 })).toThrow(/maxMediaBytes/)
     expect(() => statisticsConfig({ sampleIntervalMs: 499 })).toThrow(/sampleIntervalMs/)

@@ -1,0 +1,5 @@
+endpoint: ComWeChat HTTP API 地址。ComWeChat 没有鉴权，只能使用 http:// 或 https://，并应部署在本机或受保护网络中。
+callbackPort: 接收 ComWeChat 消息回调的 TCP 端口。
+requestTimeoutMs: 单个 ComWeChat HTTP 请求的最长等待时间（毫秒）。
+maxCallbackBytes: 单个 ComWeChat 回调允许的最大字节数。
+maxCallbackConnections: 同时允许的 ComWeChat 回调 TCP 连接数上限；超出的空闲连接会立即关闭。

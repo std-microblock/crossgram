@@ -1,0 +1,22 @@
+{
+  "name": "@mtproto-relay/platform-wechat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {},
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@mtproto-relay/bridge": "workspace:*",
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  },
+  "scripts": {
+    "test": "vitest run --config ../../vitest.config.mts packages/platform-wechat",
+    "test:e2e": "vitest run --config ../../vitest.mtproto-e2e.config.mts packages/platform-wechat"
+  }
+}
