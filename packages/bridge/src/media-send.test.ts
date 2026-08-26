@@ -338,6 +338,21 @@ describe('media send streaming', () => {
     }))
   })
 
+  it('falls back before platform preparation for a legacy video probe without SHA-1 checkpoints', async () => {
+    const { rpc, platform, peerId } = await createHarness()
+    platform.prepareMediaUpload = vi.fn(async () => {
+      throw new Error('legacy video probes must use the disk-backed upload path')
+    })
+
+    await expect(rpc.prepareMediaUpload({
+      peer: peer(peerId), fileId: Long.fromNumber(9_004), name: 'legacy-video.mp4',
+      size: Long.fromNumber(2 * 1024 * 1024), kind: 'file', mimeType: 'video/mp4',
+      md5: new Uint8Array(16), sha1: new Uint8Array(20), file10mMd5: new Uint8Array(16),
+      width: 1280, height: 720, duration: 60,
+    })).resolves.toMatchObject({ _: 'boolFalse' })
+    expect(platform.prepareMediaUpload).not.toHaveBeenCalled()
+  })
+
   it('routes upload preflight through a system peer instead of the backing platform', async () => {
     const prepared = vi.fn(async (_session, _peer, media) => ({
       media: {
