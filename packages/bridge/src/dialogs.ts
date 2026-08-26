@@ -2323,7 +2323,8 @@ export class DialogRpc {
       { length: req.sha1Checkpoints.length / 20 },
       (_, index) => Buffer.from(req.sha1Checkpoints.subarray(index * 20, index * 20 + 20)).toString('hex'),
     )
-    if (req.kind === 'video' && sha1Checkpoints.length !== Math.ceil(size / (1024 * 1024))) {
+    const video = req.kind === 'video' || req.mimeType.toLowerCase().startsWith('video/')
+    if (video && sha1Checkpoints.length !== Math.ceil(size / (1024 * 1024))) {
       return boolObject(false)
     }
     await this._hydratePeers()
