@@ -310,6 +310,34 @@ describe('media send streaming', () => {
     expect(inputs[0].parts[0]).toMatchObject({ type: 'media', media: { name: 'rapid.jpg', size: 4 } })
   })
 
+  it('passes V3 video dimensions, duration, size, and thumbnail bytes to native preflight', async () => {
+    const { rpc, platform, peerId } = await createHarness()
+    const prepare = vi.fn(async (_session, _conversation, media) => ({
+      media: {
+        kind: media.kind, name: media.name, mimeType: media.mimeType, size: media.hashes.size,
+        width: media.width, height: media.height, duration: media.duration,
+        source: { size: media.hashes.size, async *stream() {} },
+      },
+    }))
+    platform.prepareMediaUpload = prepare
+    const thumbnail = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9)
+
+    await expect(rpc.prepareMediaUploadV3({
+      peer: peer(peerId), fileId: Long.fromNumber(9_004), name: 'rapid.mp4',
+      size: Long.fromNumber(7_340_032), kind: 'video', mimeType: 'video/mp4',
+      md5: new Uint8Array(16), sha1: new Uint8Array(20), sha1Checkpoints: new Uint8Array(140),
+      file10mMd5: new Uint8Array(16), width: 1920, height: 1080, duration: 37.5,
+      thumbnail, thumbnailWidth: 320, thumbnailHeight: 180,
+    })).resolves.toMatchObject({ _: 'boolTrue' })
+
+    expect(prepare).toHaveBeenCalledWith(session, { id: conversation.id }, expect.objectContaining({
+      kind: 'file', name: 'rapid.mp4', mimeType: 'video/mp4', size: 7_340_032,
+      width: 1920, height: 1080, duration: 37.5,
+      thumbnail: { bytes: thumbnail, width: 320, height: 180 },
+      hashes: expect.objectContaining({ size: 7_340_032 }),
+    }))
+  })
+
   it('routes upload preflight through a system peer instead of the backing platform', async () => {
     const prepared = vi.fn(async (_session, _peer, media) => ({
       media: {

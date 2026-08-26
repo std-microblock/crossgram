@@ -68,6 +68,11 @@ export interface PrepareMediaUploadRequest {
 export interface PrepareMediaUploadV2Request extends PrepareMediaUploadRequest {
   sha1Checkpoints: Uint8Array
 }
+export interface PrepareMediaUploadV3Request extends PrepareMediaUploadV2Request {
+  thumbnail: Uint8Array
+  thumbnailWidth: number
+  thumbnailHeight: number
+}
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 type MentionReadPublisher = (
   session: PlatformSession,
@@ -2310,6 +2315,12 @@ export class DialogRpc {
   }
 
   async prepareMediaUploadV2(req: PrepareMediaUploadV2Request): Promise<tl.TlObject> {
+    return this.prepareMediaUploadV3({
+      ...req, thumbnail: new Uint8Array(), thumbnailWidth: 0, thumbnailHeight: 0,
+    })
+  }
+
+  async prepareMediaUploadV3(req: PrepareMediaUploadV3Request): Promise<tl.TlObject> {
     if (!this._uploads || !this._platform.prepareMediaUpload) return boolObject(false)
     const fileId = req.fileId.toString()
     const size = req.size.toNumber()
@@ -2317,6 +2328,11 @@ export class DialogRpc {
     const kind = req.kind === 'image' ? 'image' : req.kind === 'file' || req.kind === 'video' ? 'file' : undefined
     if (!kind || req.md5.length !== 16 || req.sha1.length !== 20 || req.file10mMd5.length !== 16
       || req.sha1Checkpoints.length % 20 !== 0) {
+      return boolObject(false)
+    }
+    const hasThumbnail = req.thumbnail.length > 0
+    if (hasThumbnail !== (req.thumbnailWidth > 0 && req.thumbnailHeight > 0)
+      || hasThumbnail && (req.kind !== 'video' || req.thumbnail.length > 1024 * 1024)) {
       return boolObject(false)
     }
     const sha1Checkpoints = Array.from(
@@ -2344,6 +2360,9 @@ export class DialogRpc {
       width: req.width > 0 ? req.width : undefined,
       height: req.height > 0 ? req.height : undefined,
       duration: req.duration > 0 ? req.duration : undefined,
+      thumbnail: hasThumbnail ? {
+        bytes: req.thumbnail.slice(), width: req.thumbnailWidth, height: req.thumbnailHeight,
+      } : undefined,
       hashes,
     }
     const systemPeer = await this._systemPeers?.resolve(this._session, conversationId)

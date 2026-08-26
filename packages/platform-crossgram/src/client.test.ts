@@ -249,6 +249,69 @@ describe('QQNTClient streaming transport', () => {
     expect(flashBody).toEqual(Buffer.alloc(0))
   })
 
+  it('sends client video metadata and thumbnail bytes during hash-first preflight', async () => {
+    const video = Buffer.from('already-on-qq')
+    const thumbnail = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
+    const hashes = {
+      size: video.length,
+      md5: createHash('md5').update(video).digest('hex'),
+      sha1: createHash('sha1').update(video).digest('hex'),
+      sha1Checkpoints: [createHash('sha1').update(video).digest('hex')],
+      file10MMd5: createHash('md5').update(video).digest('hex'),
+    }
+    const thumbnailMd5 = createHash('md5').update(thumbnail).digest('hex')
+    const thumbnailSha1 = createHash('sha1').update(thumbnail).digest('hex')
+    const highwayBodies: Buffer[] = []
+    const client = new QQNTClient({
+      endpoint: 'http://bridge.invalid/v1',
+      fetch: vi.fn(async (input, init) => {
+        const url = String(input)
+        if (url.endsWith('/uploads/prepare')) {
+          expect(JSON.parse(String(init?.body))).toMatchObject({
+            conversationId: 'video-room',
+            media: {
+              kind: 'video', name: 'clip.mp4', mimeType: 'video/mp4', size: video.length,
+              width: 1920, height: 1080, duration: 12.5,
+              thumbnail: {
+                size: thumbnail.length, md5: thumbnailMd5, sha1: thumbnailSha1,
+                width: 320, height: 180,
+              },
+            },
+          })
+          return Response.json({
+            prepared: { kind: 'video', fileUuid: 'video-uuid', exists: true, commandId: 1005 },
+            auxiliaryHighways: [{
+              role: 'thumbnail',
+              highway: {
+                servers: [{ host: 'highway.invalid', port: 80 }], ticket: 'dGlja2V0', extendInfo: 'ZXh0',
+                selfUin: '10000', commandId: 1006, sequenceStart: 1, blockSize: 4,
+                fileSize: thumbnail.length, fileMd5: thumbnailMd5,
+              },
+            }],
+          })
+        }
+        if (url.includes('/cgi-bin/httpconn')) {
+          highwayBodies.push(highwayBody(Buffer.from(init?.body as Uint8Array)))
+          return new Response(Uint8Array.from(highwayResponse()))
+        }
+        throw new Error(`unexpected URL: ${url}`)
+      }),
+    })
+
+    const preparation = await client.prepareFastUpload('video-room', {
+      kind: 'file', name: 'clip.mp4', mimeType: 'video/mp4', size: video.length,
+      width: 1920, height: 1080, duration: 12.5,
+      hashes, thumbnail: { bytes: thumbnail, width: 320, height: 180 },
+    })
+
+    expect(preparation?.sink).toBeUndefined()
+    expect(Buffer.concat(highwayBodies)).toEqual(thumbnail)
+    expect(preparation?.media).toMatchObject({
+      kind: 'file', name: 'clip.mp4', size: video.length,
+      width: 1920, height: 1080, duration: 12.5,
+    })
+  })
+
   it('ignores the obsolete capability flag and uses the protocol flash endpoint', async () => {
     const requests: string[] = []
     const source = vi.fn(async function* () { yield Uint8Array.of(1, 2, 3) })

@@ -249,9 +249,17 @@ export interface IMMediaUploadHashes {
   file10MMd5: string
 }
 
+/** Client-prepared thumbnail used by a native video upload preflight. */
+export interface IMMediaUploadThumbnail {
+  bytes: Uint8Array
+  width: number
+  height: number
+}
+
 /** Metadata-only upload probe computed before Telegram starts sending file parts. */
 export interface IMMediaUploadProbe extends Omit<IMMediaInput, 'source'> {
   hashes: IMMediaUploadHashes
+  thumbnail?: IMMediaUploadThumbnail
 }
 
 /** Native upload sink fed in file order by the bridge after a metadata-only probe. */

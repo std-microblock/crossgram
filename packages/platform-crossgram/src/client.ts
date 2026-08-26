@@ -460,6 +460,7 @@ export class QQNTClient {
     kindOverride?: 'image' | 'video' | 'file',
   ): Promise<IMMediaUploadPreparation | undefined> {
     const kind = kindOverride ?? outboundMediaKind({ ...media, name: media.name ?? 'upload' })
+    const thumbnail = kind === 'video' ? hashVideoThumbnail(media.thumbnail) : undefined
     const plan = await this.prepareMediaUpload(conversationId, {
       kind,
       name: media.name ?? 'upload',
@@ -472,6 +473,7 @@ export class QQNTClient {
       width: media.width,
       height: media.height,
       duration: media.duration,
+      ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
     }, signal)
     if (plan.prepared.kind !== kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
     if (plan.highway
@@ -481,7 +483,8 @@ export class QQNTClient {
     }
     const uploadAuxiliaryHighways = async () => {
       for (const auxiliary of plan.auxiliaryHighways ?? []) {
-        const bytes = auxiliary.bytes ? Buffer.from(auxiliary.bytes, 'base64url') : undefined
+        const inline = auxiliary.bytes ? Buffer.from(auxiliary.bytes, 'base64url') : undefined
+        const bytes = matchingAuxiliaryBytes(auxiliary.highway, thumbnail?.bytes, inline)
         if (!bytes) throw new Error(`QQNT bridge returned no usable ${auxiliary.role} bytes`)
         if (
           auxiliary.highway.fileSize !== bytes.length
