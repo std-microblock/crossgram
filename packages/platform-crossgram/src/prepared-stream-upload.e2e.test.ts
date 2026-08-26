@@ -9,6 +9,7 @@ import { UploadManager } from '../../bridge/src/upload-manager.js'
 import { QQNTClient } from './client.js'
 
 const HIGHWAY_BLOCK_BYTES = 1024 * 1024
+const HIGHWAY_SELECTION_BYTES = 128 * 1024
 const TELEGRAM_PART_BYTES = 512 * 1024
 
 describe('prepared Telegram-to-QQ Highway streaming E2E', () => {
@@ -25,7 +26,7 @@ describe('prepared Telegram-to-QQ Highway streaming E2E', () => {
       rm(directory, { recursive: true, force: true })))
   })
 
-  it('retains a cache-miss plan, forwards each 1 MiB block, and posts only the prepared QQ result', async () => {
+  it('retains a cache-miss plan, selects with a small block, and posts only the prepared QQ result', async () => {
     const bytes = Buffer.alloc(2 * HIGHWAY_BLOCK_BYTES + TELEGRAM_PART_BYTES / 2, 0x5a)
     const hashes = {
       size: bytes.length,
@@ -103,18 +104,18 @@ describe('prepared Telegram-to-QQ Highway streaming E2E', () => {
     await uploads.savePart('session', '700', 1, parts[1]!)
     expect(frames).toHaveLength(0)
     await uploads.savePart('session', '700', 0, parts[0]!)
-    expect(frames.map(highwayBody).map((body) => body.length)).toEqual([HIGHWAY_BLOCK_BYTES])
+    expect(frames.map(highwayBody).map((body) => body.length)).toEqual([HIGHWAY_SELECTION_BYTES])
     await uploads.savePart('session', '700', 3, parts[3]!)
     expect(frames).toHaveLength(1)
     await uploads.savePart('session', '700', 2, parts[2]!)
-    expect(frames.map(highwayBody).map((body) => body.length)).toEqual([
-      HIGHWAY_BLOCK_BYTES, HIGHWAY_BLOCK_BYTES,
-    ])
+    await vi.waitFor(() => expect(frames.map(highwayBody).map((body) => body.length)).toEqual([
+      HIGHWAY_SELECTION_BYTES, HIGHWAY_BLOCK_BYTES,
+    ]))
     await uploads.savePart('session', '700', 4, parts[4]!)
 
     expect(Buffer.concat(frames.map(highwayBody)).equals(bytes)).toBe(true)
     expect(frames.map(highwayBody).map((body) => body.length)).toEqual([
-      HIGHWAY_BLOCK_BYTES, HIGHWAY_BLOCK_BYTES, TELEGRAM_PART_BYTES / 2,
+      HIGHWAY_SELECTION_BYTES, HIGHWAY_BLOCK_BYTES, HIGHWAY_BLOCK_BYTES, HIGHWAY_SELECTION_BYTES,
     ])
     expect(await readdir(uploadRoot)).toEqual([])
     const staged = uploads.getStaged('session', '700')

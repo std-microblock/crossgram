@@ -11,6 +11,7 @@ const HIGHWAY_RESPONSE_TIMEOUT_MS = 30_000
 const HIGHWAY_ATTEMPT_TIMEOUT_MS = 60_000
 const HIGHWAY_FALLBACK_DELAY_MS = 500
 const HIGHWAY_MAX_IN_FLIGHT_BLOCKS = 8
+const HIGHWAY_SELECTION_BLOCK_BYTES = 128 * 1024
 const preferredHighwayServers = new Map<string, { server: string }>()
 const highwayDispatcher = new Agent({
   connectTimeout: HIGHWAY_CONNECT_TIMEOUT_MS,
@@ -69,7 +70,11 @@ export class QQHighwayUploadWriter {
     } = {},
   ) {
     validateHighwayPlan(_plan)
-    this._buffer = Buffer.allocUnsafe(_plan.blockSize)
+    this._buffer = Buffer.allocUnsafe(Math.min(
+      _plan.blockSize,
+      _plan.fileSize,
+      HIGHWAY_SELECTION_BLOCK_BYTES,
+    ))
   }
 
   async write(value: Uint8Array): Promise<void> {
@@ -86,11 +91,11 @@ export class QQHighwayUploadWriter {
     }
     let offset = 0
     while (offset < chunk.length) {
-      const length = Math.min(this._plan.blockSize - this._bufferedLength, chunk.length - offset)
+      const length = Math.min(this._buffer.length - this._bufferedLength, chunk.length - offset)
       chunk.copy(this._buffer, this._bufferedLength, offset, offset + length)
       this._bufferedLength += length
       offset += length
-      if (this._bufferedLength === this._plan.blockSize) await this._flush(this._buffer)
+      if (this._bufferedLength === this._buffer.length) await this._flush(this._buffer)
     }
   }
 

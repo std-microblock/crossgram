@@ -81,7 +81,7 @@ describe('QQ Highway server selection E2E', () => {
     await uploadHighway(plan, (async function* () { yield body })(), globalThis.fetch)
 
     expect(received[0]).toHaveLength(1)
-    expect(received[1]).toHaveLength(4)
+    expect(received[1]).toHaveLength(6)
     expect(Buffer.concat(received[1].map(highwayBody))).toEqual(Buffer.concat([body, body]))
   })
 
