@@ -45,6 +45,45 @@ describe('QQ Highway server selection E2E', () => {
     expect(received[0]).toBeGreaterThan(body.length)
     expect(received[1]).toBe(0)
   })
+
+  it('hedges a response-hung server once, then pins the healthy server for every later block', async () => {
+    const body = Buffer.alloc(512 * 1024, 0x6b)
+    const received: Buffer[][] = [[], []]
+    const primary = await listen(createServer(async (request) => {
+      received[0].push(await collect(request))
+      // Deliberately leave the response open. A real bad Highway node observed
+      // in production accepted the request body but never returned headers.
+    }))
+    const fallback = await listen(createServer(async (request, response) => {
+      received[1].push(await collect(request))
+      response.setHeader('connection', 'close')
+      response.end(highwayResponse())
+    }))
+    servers.push(primary.server, fallback.server)
+
+    const plan: QQHighwayUploadPlan = {
+      servers: [primary.address, fallback.address],
+      ticket: Buffer.from('ticket').toString('base64url'),
+      extendInfo: Buffer.from('extend').toString('base64url'),
+      selfUin: '1715311957', commandId: 1003, sequenceStart: 9,
+      blockSize: body.length / 2, fileSize: body.length,
+      fileMd5: createHash('md5').update(body).digest('hex'),
+    }
+
+    const startedAt = performance.now()
+    await uploadHighway(
+      plan,
+      (async function* () { yield body })(),
+      globalThis.fetch,
+      { attemptTimeoutMs: 5_000, fallbackDelayMs: 50 },
+    )
+    expect(performance.now() - startedAt).toBeLessThan(1_000)
+    await uploadHighway(plan, (async function* () { yield body })(), globalThis.fetch)
+
+    expect(received[0]).toHaveLength(1)
+    expect(received[1]).toHaveLength(4)
+    expect(Buffer.concat(received[1].map(highwayBody))).toEqual(Buffer.concat([body, body]))
+  })
 })
 
 async function listen(server: Server): Promise<{
@@ -66,4 +105,10 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
 
 function highwayResponse(): Buffer {
   return Buffer.from([0x28, 0, 0, 0, 0, 0, 0, 0, 0, 0x29])
+}
+
+function highwayBody(frame: Buffer): Buffer {
+  const headLength = frame.readUInt32BE(1)
+  const bodyLength = frame.readUInt32BE(5)
+  return frame.subarray(9 + headLength, 9 + headLength + bodyLength)
 }

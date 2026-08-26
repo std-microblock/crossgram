@@ -53,7 +53,12 @@ describe('QQ Highway protobuf transport', () => {
       ...plan,
       servers: [{ host: '127.0.0.1', port: 1 }, { host: '127.0.0.2', port: 2 }],
     }
-    await uploadHighway(retryPlan, (async function* () { yield body })(), fetch)
+    await uploadHighway(
+      retryPlan,
+      (async function* () { yield body })(),
+      fetch,
+      { fallbackDelayMs: 0 },
+    )
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(String(vi.mocked(fetch).mock.calls[1]![0])).toContain('127.0.0.2:2')
 
@@ -64,7 +69,7 @@ describe('QQ Highway protobuf transport', () => {
     )).rejects.toThrow('expected 8 bytes, received 7')
   })
 
-  it('bounds a hanging server without duplicating a block and reuses the fallback winner', async () => {
+  it('hedges a hanging initial server and reuses the fallback winner', async () => {
     const calls: string[] = []
     const fetch = vi.fn((input, init) => {
       const url = String(input)
@@ -85,9 +90,9 @@ describe('QQ Highway protobuf transport', () => {
       racingPlan,
       (async function* () { yield body })(),
       fetch,
-      { attemptTimeoutMs: 20 },
+      { attemptTimeoutMs: 20, fallbackDelayMs: 5 },
     )
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    await new Promise((resolve) => setTimeout(resolve, 2))
     expect(calls).toHaveLength(1)
     await upload
     expect(calls).toHaveLength(2)
@@ -98,10 +103,58 @@ describe('QQ Highway protobuf transport', () => {
       racingPlan,
       (async function* () { yield body })(),
       fetch,
-      { attemptTimeoutMs: 20 },
+      { attemptTimeoutMs: 20, fallbackDelayMs: 5 },
     )
     expect(calls).toHaveLength(1)
     expect(calls[0]).toContain('127.0.0.4:4')
+  })
+
+  it('does not erase a server preference learned while another selection is failing', async () => {
+    const concurrentPlan = {
+      ...plan,
+      servers: [{ host: '127.0.0.5', port: 5 }, { host: '127.0.0.6', port: 6 }],
+    }
+    const rejects: Array<(error: Error) => void> = []
+    const failingFetch = vi.fn((_input, init) => new Promise<Response>((_resolve, reject) => {
+      const fail = (error: Error) => reject(error)
+      rejects.push(fail)
+      init?.signal?.addEventListener('abort', () => fail(init.signal!.reason), { once: true })
+    })) as typeof globalThis.fetch
+    const failingUpload = uploadHighway(
+      concurrentPlan,
+      (async function* () { yield body })(),
+      failingFetch,
+      { attemptTimeoutMs: 1_000, fallbackDelayMs: 0 },
+    )
+    await vi.waitFor(() => expect(rejects).toHaveLength(2))
+
+    const learningCalls: string[] = []
+    const learningFetch = vi.fn(async (input) => {
+      const url = String(input)
+      learningCalls.push(url)
+      return url.includes('127.0.0.5:5')
+        ? new Response('unavailable', { status: 503 })
+        : new Response(Uint8Array.from(responseFrame()))
+    }) as typeof globalThis.fetch
+    await uploadHighway(
+      concurrentPlan,
+      (async function* () { yield body })(),
+      learningFetch,
+      { fallbackDelayMs: 0 },
+    )
+    expect(learningCalls).toHaveLength(2)
+
+    for (const reject of rejects) reject(new Error('concurrent selection failed'))
+    await expect(failingUpload).rejects.toThrow('concurrent selection failed')
+
+    const reusedCalls: string[] = []
+    const reusedFetch = vi.fn(async (input) => {
+      reusedCalls.push(String(input))
+      return new Response(Uint8Array.from(responseFrame()))
+    }) as typeof globalThis.fetch
+    await uploadHighway(concurrentPlan, (async function* () { yield body })(), reusedFetch)
+    expect(reusedCalls).toHaveLength(1)
+    expect(reusedCalls[0]).toContain('127.0.0.6:6')
   })
 
   it('flushes complete blocks immediately and retains only the final partial block', async () => {

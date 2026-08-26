@@ -9,7 +9,8 @@ const HIGHWAY_APP_ID = 1_600_001_604
 const HIGHWAY_CONNECT_TIMEOUT_MS = 3_000
 const HIGHWAY_RESPONSE_TIMEOUT_MS = 30_000
 const HIGHWAY_ATTEMPT_TIMEOUT_MS = 60_000
-const preferredHighwayServers = new Map<string, string>()
+const HIGHWAY_FALLBACK_DELAY_MS = 500
+const preferredHighwayServers = new Map<string, { server: string }>()
 const highwayDispatcher = new Agent({
   connectTimeout: HIGHWAY_CONNECT_TIMEOUT_MS,
   headersTimeout: HIGHWAY_RESPONSE_TIMEOUT_MS,
@@ -58,6 +59,7 @@ export class QQHighwayUploadWriter {
     private readonly _options: {
       signal?: AbortSignal
       attemptTimeoutMs?: number
+      fallbackDelayMs?: number
       onProgress?(transferredBytes: number): void | Promise<void>
     } = {},
   ) {
@@ -101,6 +103,7 @@ export class QQHighwayUploadWriter {
   }
 
   private async _flush(block: Buffer): Promise<void> {
+    const hedge = this._blockIndex === 0
     const frame = encodeHighwayFrame(
       this._plan,
       this._plan.sequenceStart + this._blockIndex++,
@@ -113,6 +116,8 @@ export class QQHighwayUploadWriter {
       this._fetchImpl,
       this._options.signal,
       this._options.attemptTimeoutMs,
+      this._options.fallbackDelayMs,
+      hedge,
     )
     this._uploaded += block.length
     this._buffer = Buffer.allocUnsafe(this._plan.blockSize)
@@ -128,6 +133,7 @@ export async function uploadHighway(
   options: {
     signal?: AbortSignal
     attemptTimeoutMs?: number
+    fallbackDelayMs?: number
     onProgress?(transferredBytes: number): void | Promise<void>
   } = {},
 ): Promise<void> {
@@ -192,41 +198,95 @@ async function postHighwayBlock(
   fetchImpl: typeof globalThis.fetch,
   signal?: AbortSignal,
   attemptTimeoutMs = HIGHWAY_ATTEMPT_TIMEOUT_MS,
+  fallbackDelayMs = HIGHWAY_FALLBACK_DELAY_MS,
+  hedge = true,
 ): Promise<void> {
   const serverKey = plan.servers.map(highwayServerKey).sort().join(',')
-  const preferred = preferredHighwayServers.get(serverKey)
-  const servers = [...plan.servers].sort((left, right) =>
-    Number(highwayServerKey(right) === preferred) - Number(highwayServerKey(left) === preferred))
   const post = fetchImpl === globalThis.fetch ? defaultHighwayFetch : fetchImpl
-  let lastError: unknown
-  for (const server of servers) {
+  const preferred = preferredHighwayServers.get(serverKey)
+  const ordered = [...plan.servers].sort((left, right) =>
+    Number(highwayServerKey(right) === preferred?.server)
+      - Number(highwayServerKey(left) === preferred?.server))
+  const preferredServer = preferred
+    ? ordered.find((server) => highwayServerKey(server) === preferred.server)
+    : undefined
+  let preferredError: unknown
+  if (!hedge && preferredServer) {
     try {
-      const attemptSignal = AbortSignal.any([
-        AbortSignal.timeout(attemptTimeoutMs),
-        ...(signal ? [signal] : []),
-      ])
-      const response = await post(
-        `http://${server.host}:${server.port}/cgi-bin/httpconn?htcmd=0x6FF0087&uin=${encodeURIComponent(plan.selfUin)}`,
-        {
-          method: 'POST', body: Uint8Array.from(frame), signal: attemptSignal,
-          headers: { connection: 'keep-alive', 'content-type': 'application/octet-stream' },
-        },
-      )
-      if (!response.ok) throw new Error(`QQ Highway HTTP ${response.status}: ${await response.text()}`)
-      decodeHighwayResponse(new Uint8Array(await response.arrayBuffer()))
-      preferredHighwayServers.set(serverKey, highwayServerKey(server))
+      await postHighwayServer(plan, frame, preferredServer, post, signal, attemptTimeoutMs)
+      preferredHighwayServers.set(serverKey, { server: preferred.server })
       return
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error
-      lastError = error
+      preferredError = error
+      if (preferredHighwayServers.get(serverKey) === preferred) preferredHighwayServers.delete(serverKey)
     }
   }
-  preferredHighwayServers.delete(serverKey)
-  throw new Error(`all QQ Highway upload servers failed: ${errorMessage(lastError)}`)
+  const servers = !hedge && preferredServer
+    ? ordered.filter((server) => server !== preferredServer)
+    : ordered
+  const controllers = servers.map(() => new AbortController())
+  try {
+    const winner = await Promise.any(servers.map(async (server, index) => {
+      const candidateSignal = AbortSignal.any([
+        controllers[index]!.signal,
+        ...(signal ? [signal] : []),
+      ])
+      if (index) await abortableDelay(index * fallbackDelayMs, candidateSignal)
+      await postHighwayServer(plan, frame, server, post, candidateSignal, attemptTimeoutMs)
+      return highwayServerKey(server)
+    }))
+    preferredHighwayServers.set(serverKey, { server: winner })
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error
+    if (preferredHighwayServers.get(serverKey) === preferred) preferredHighwayServers.delete(serverKey)
+    const errors = error instanceof AggregateError ? error.errors : [error]
+    throw new Error(`all QQ Highway upload servers failed: ${errorMessage(errors.at(-1) ?? preferredError)}`)
+  } finally {
+    for (const controller of controllers) controller.abort()
+  }
+}
+
+async function postHighwayServer(
+  plan: QQHighwayUploadPlan,
+  frame: Buffer,
+  server: { host: string, port: number },
+  post: typeof globalThis.fetch,
+  signal: AbortSignal | undefined,
+  attemptTimeoutMs: number,
+): Promise<void> {
+  const attemptSignal = AbortSignal.any([
+    AbortSignal.timeout(attemptTimeoutMs),
+    ...(signal ? [signal] : []),
+  ])
+  const response = await post(
+    `http://${server.host}:${server.port}/cgi-bin/httpconn?htcmd=0x6FF0087&uin=${encodeURIComponent(plan.selfUin)}`,
+    {
+      method: 'POST', body: Uint8Array.from(frame), signal: attemptSignal,
+      headers: { connection: 'keep-alive', 'content-type': 'application/octet-stream' },
+    },
+  )
+  if (!response.ok) throw new Error(`QQ Highway HTTP ${response.status}: ${await response.text()}`)
+  decodeHighwayResponse(new Uint8Array(await response.arrayBuffer()))
 }
 
 function highwayServerKey(server: { host: string, port: number }): string {
   return `${server.host}:${server.port}`
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('operation aborted'))
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms)
+    const onAbort = () => done(signal.reason ?? new Error('operation aborted'))
+    function done(error?: unknown) {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function validateHighwayPlan(plan: QQHighwayUploadPlan): void {
