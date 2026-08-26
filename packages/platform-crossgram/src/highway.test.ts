@@ -39,7 +39,7 @@ describe('QQ Highway protobuf transport', () => {
   })
 
   it('decodes protobuf-es response errors and rejects malformed frames', () => {
-    expect(() => decodeHighwayResponse(responseFrame())).not.toThrow()
+    expect(decodeHighwayResponse(responseFrame({ offset: 3, length: 4 }))).toEqual({ offset: 3, length: 4 })
     expect(() => decodeHighwayResponse(responseFrame({ errorCode: 9 }))).toThrow('error=9')
     expect(() => decodeHighwayResponse(responseFrame({ returnCode: 7 }))).toThrow('return=7')
     expect(() => decodeHighwayResponse(Buffer.from([0x28, 0x29]))).toThrow('invalid QQ Highway')
@@ -246,12 +246,32 @@ describe('QQ Highway protobuf transport', () => {
     await writer.complete()
     expect(maxActive).toBe(8)
   })
+
+  it('falls back to HTTP when every forced TCP candidate fails', async () => {
+    const fetch = vi.fn(async () => new Response(Uint8Array.from(responseFrame()))) as typeof globalThis.fetch
+    await uploadHighway(
+      { ...plan, servers: [{ host: '127.0.0.1', port: 1 }] },
+      (async function* () { yield body })(),
+      fetch,
+      { transport: 'tcp', fallbackDelayMs: 0 },
+    )
+    expect(fetch).toHaveBeenCalledOnce()
+  })
 })
 
-function responseFrame(options: { errorCode?: number, returnCode?: number } = {}): Buffer {
+function responseFrame(options: {
+  errorCode?: number
+  returnCode?: number
+  offset?: number
+  length?: number
+} = {}): Buffer {
   const head = Buffer.from(toBinary(HighwayResponseHeadSchema, create(HighwayResponseHeadSchema, {
     errorCode: options.errorCode ?? 0,
-    segment: options.returnCode ? { returnCode: options.returnCode } : undefined,
+    segment: {
+      returnCode: options.returnCode ?? 0,
+      offset: BigInt(options.offset ?? 0),
+      length: options.length ?? 0,
+    },
   })))
   const frame = Buffer.alloc(10 + head.length)
   frame[0] = 0x28

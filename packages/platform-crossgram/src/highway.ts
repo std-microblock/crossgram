@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { once } from 'node:events'
+import { connect, type Socket } from 'node:net'
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf'
 import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici'
 import {
@@ -12,7 +14,10 @@ const HIGHWAY_ATTEMPT_TIMEOUT_MS = 60_000
 const HIGHWAY_FALLBACK_DELAY_MS = 500
 const HIGHWAY_MAX_IN_FLIGHT_BLOCKS = 8
 const HIGHWAY_SELECTION_BLOCK_BYTES = 128 * 1024
+const HIGHWAY_TCP_SELECTION_TIMEOUT_MS = 60_000
+const HIGHWAY_TCP_UPLOAD_TIMEOUT_MS = 20 * 60_000
 const preferredHighwayServers = new Map<string, { server: string }>()
+const preferredHighwayTcpServers = new Map<string, { server: string }>()
 const highwayDispatcher = new Agent({
   connectTimeout: HIGHWAY_CONNECT_TIMEOUT_MS,
   headersTimeout: HIGHWAY_RESPONSE_TIMEOUT_MS,
@@ -56,6 +61,7 @@ export class QQHighwayUploadWriter {
   private _blockIndex = 0
   private _closed = false
   private _failure?: unknown
+  private _tcp?: QQHighwayTcpConnection
   private readonly _controller = new AbortController()
   private readonly _inFlight = new Set<Promise<void>>()
 
@@ -66,6 +72,7 @@ export class QQHighwayUploadWriter {
       signal?: AbortSignal
       attemptTimeoutMs?: number
       fallbackDelayMs?: number
+      transport?: 'auto' | 'http' | 'tcp'
       onProgress?(transferredBytes: number): void | Promise<void>
     } = {},
   ) {
@@ -107,6 +114,7 @@ export class QQHighwayUploadWriter {
     }
     try {
       if (this._bufferedLength) await this._flush(this._buffer.subarray(0, this._bufferedLength))
+      await this._tcp?.complete()
       await Promise.all([...this._inFlight])
       this._throwIfFailed()
       this._closed = true
@@ -119,6 +127,7 @@ export class QQHighwayUploadWriter {
   abort(reason: unknown = new Error('QQ Highway upload aborted')): void {
     this._closed = true
     this._bufferedLength = 0
+    this._tcp?.close(reason)
     if (!this._controller.signal.aborted) this._controller.abort(reason)
   }
 
@@ -126,7 +135,7 @@ export class QQHighwayUploadWriter {
     const blockIndex = this._blockIndex++
     const offset = this._scheduled
     this._scheduled += block.length
-    const frame = encodeHighwayFrame(
+    const httpFrame = encodeHighwayFrame(
       this._plan,
       this._plan.sequenceStart + blockIndex,
       offset,
@@ -134,22 +143,40 @@ export class QQHighwayUploadWriter {
     )
     this._buffer = Buffer.allocUnsafe(this._plan.blockSize)
     this._bufferedLength = 0
+    const signal = AbortSignal.any([
+      this._controller.signal,
+      ...(this._options.signal ? [this._options.signal] : []),
+    ])
+    if (blockIndex === 0 && shouldUseHighwayTcp(this._plan, this._fetchImpl, this._options.transport)) {
+      const tcpFrame = encodeHighwayFrame(this._plan, 0, offset, block)
+      try {
+        this._tcp = await selectHighwayTcp(
+          this._plan,
+          tcpFrame,
+          signal,
+          (uploaded) => this._reportProgress(uploaded),
+          this._options.fallbackDelayMs,
+        )
+        return
+      } catch (error) {
+        if (signal.aborted) throw signal.reason ?? error
+        // HTTP is QQ's documented fallback when every persistent TCP candidate fails.
+      }
+    } else if (this._tcp) {
+      await this._tcp.send(encodeHighwayFrame(this._plan, 0, offset, block))
+      return
+    }
     const upload = async () => {
-      const signal = AbortSignal.any([
-        this._controller.signal,
-        ...(this._options.signal ? [this._options.signal] : []),
-      ])
       await postHighwayBlock(
         this._plan,
-        frame,
+        httpFrame,
         this._fetchImpl,
         signal,
         this._options.attemptTimeoutMs,
         this._options.fallbackDelayMs,
         blockIndex === 0,
       )
-      this._uploaded += block.length
-      await this._options.onProgress?.(this._uploaded)
+      await this._reportProgress(this._uploaded + block.length)
     }
     if (blockIndex === 0) {
       await upload()
@@ -174,6 +201,12 @@ export class QQHighwayUploadWriter {
   private _throwIfFailed(): void {
     if (this._failure) throw this._failure
   }
+
+  private async _reportProgress(uploaded: number): Promise<void> {
+    if (uploaded <= this._uploaded) return
+    this._uploaded = uploaded
+    await this._options.onProgress?.(uploaded)
+  }
 }
 
 export async function uploadHighway(
@@ -184,6 +217,7 @@ export async function uploadHighway(
     signal?: AbortSignal
     attemptTimeoutMs?: number
     fallbackDelayMs?: number
+    transport?: 'auto' | 'http' | 'tcp'
     onProgress?(transferredBytes: number): void | Promise<void>
   } = {},
 ): Promise<void> {
@@ -230,7 +264,7 @@ export function encodeHighwayFrame(
   return frame
 }
 
-export function decodeHighwayResponse(payload: Uint8Array): void {
+export function decodeHighwayResponse(payload: Uint8Array): { offset: number, length: number } {
   const buffer = Buffer.from(payload)
   if (buffer.length < 10 || buffer[0] !== 0x28 || buffer[buffer.length - 1] !== 0x29) {
     throw new Error('invalid QQ Highway response frame')
@@ -245,6 +279,196 @@ export function decodeHighwayResponse(payload: Uint8Array): void {
   if (head.errorCode || returnCode) {
     throw new Error(`QQ Highway rejected block: error=${head.errorCode} return=${returnCode}`)
   }
+  return {
+    offset: Number(head.segment?.offset ?? 0n),
+    length: head.segment?.length ?? 0,
+  }
+}
+
+class QQHighwayTcpConnection {
+  private readonly _socket: Socket
+  private readonly _ready = deferred<void>()
+  private readonly _firstAck = deferred<void>()
+  private readonly _completed = deferred<void>()
+  private readonly _failed = deferred<void>()
+  private readonly _acknowledged = new Set<string>()
+  private _acknowledgedBytes = 0
+  private _buffer = Buffer.alloc(0)
+  private _failure?: unknown
+  private _closed = false
+  private _progressTail = Promise.resolve()
+
+  constructor(
+    readonly server: { host: string, port: number },
+    private readonly _plan: QQHighwayUploadPlan,
+    signal: AbortSignal,
+    private readonly _onProgress: (uploaded: number) => void | Promise<void>,
+  ) {
+    this._socket = connect(server.port, server.host)
+    this._socket.setNoDelay(true)
+    this._socket.once('connect', () => this._ready.resolve())
+    this._socket.on('data', (chunk) => this._onData(Buffer.from(chunk)))
+    this._socket.once('error', (error) => this._fail(error))
+    this._socket.once('close', () => {
+      if (!this._closed && this._acknowledgedBytes < this._plan.fileSize) {
+        this._fail(new Error('QQ Highway TCP connection closed before upload completion'))
+      }
+    })
+    const onAbort = () => this.close(signal.reason ?? new Error('upload aborted'))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }
+
+  async send(frame: Buffer): Promise<void> {
+    await this._ready.promise
+    this._throwIfFailed()
+    if (this._socket.write(frame)) return
+    await Promise.race([once(this._socket, 'drain').then(() => undefined), this._failed.promise])
+    this._throwIfFailed()
+  }
+
+  firstAck(): Promise<void> {
+    return this._firstAck.promise
+  }
+
+  async complete(): Promise<void> {
+    if (this._acknowledgedBytes < this._plan.fileSize) {
+      await Promise.race([
+        this._completed.promise,
+        timeout(HIGHWAY_TCP_UPLOAD_TIMEOUT_MS, 'QQ Highway TCP upload timed out'),
+      ])
+    }
+    await this._progressTail
+    this._closed = true
+    this._socket.end()
+  }
+
+  close(reason: unknown = new Error('QQ Highway TCP connection closed')): void {
+    if (this._closed) return
+    this._closed = true
+    if (this._acknowledgedBytes < this._plan.fileSize) this._fail(reason)
+    this._socket.destroy(reason instanceof Error ? reason : new Error(String(reason)))
+  }
+
+  private _onData(chunk: Buffer): void {
+    if (this._closed) return
+    this._buffer = Buffer.concat([this._buffer, chunk])
+    try {
+      while (this._buffer.length >= 10) {
+        if (this._buffer[0] !== 0x28) throw new Error('invalid QQ Highway TCP response frame')
+        const frameLength = 9 + this._buffer.readUInt32BE(1) + this._buffer.readUInt32BE(5) + 1
+        if (this._buffer.length < frameLength) return
+        const result = decodeHighwayResponse(this._buffer.subarray(0, frameLength))
+        this._buffer = this._buffer.subarray(frameLength)
+        const key = `${result.offset}:${result.length}`
+        if (!this._acknowledged.has(key)) {
+          this._acknowledged.add(key)
+          this._acknowledgedBytes += result.length
+          const uploaded = this._acknowledgedBytes
+          this._progressTail = this._progressTail.then(() => this._onProgress(uploaded))
+        }
+        this._firstAck.resolve()
+        if (this._acknowledgedBytes >= this._plan.fileSize) this._completed.resolve()
+      }
+    } catch (error) {
+      this._fail(error)
+    }
+  }
+
+  private _fail(error: unknown): void {
+    if (this._failure) return
+    this._failure = error
+    this._ready.reject(error)
+    this._firstAck.reject(error)
+    this._completed.reject(error)
+    this._failed.reject(error)
+    if (!this._socket.destroyed) {
+      this._socket.destroy(error instanceof Error ? error : new Error(String(error)))
+    }
+  }
+
+  private _throwIfFailed(): void {
+    if (this._failure) throw this._failure
+  }
+}
+
+async function selectHighwayTcp(
+  plan: QQHighwayUploadPlan,
+  firstFrame: Buffer,
+  signal: AbortSignal,
+  onProgress: (uploaded: number) => void | Promise<void>,
+  fallbackDelayMs = HIGHWAY_FALLBACK_DELAY_MS,
+): Promise<QQHighwayTcpConnection> {
+  const serverKey = plan.servers.map(highwayServerKey).sort().join(',')
+  const preferred = preferredHighwayTcpServers.get(serverKey)
+  const ordered = [...plan.servers].sort((left, right) =>
+    Number(highwayServerKey(right) === preferred?.server)
+      - Number(highwayServerKey(left) === preferred?.server))
+  // QQNT/NapCat prefer the final server returned by HttpConn when no prior
+  // successful endpoint exists. Preserve that order before staggering races.
+  if (!preferred) ordered.reverse()
+  const selectionController = new AbortController()
+  const selectionSignal = AbortSignal.any([selectionController.signal, signal])
+  const connections = ordered.map((server) =>
+    new QQHighwayTcpConnection(server, plan, signal, onProgress))
+  try {
+    const winner = await Promise.race([
+      Promise.any(connections.map(async (connection, index) => {
+        if (index) await abortableDelay(index * fallbackDelayMs, selectionSignal)
+        await connection.send(firstFrame)
+        await connection.firstAck()
+        return connection
+      })),
+      timeout(HIGHWAY_TCP_SELECTION_TIMEOUT_MS, 'QQ Highway TCP server selection timed out'),
+    ])
+    preferredHighwayTcpServers.set(serverKey, { server: highwayServerKey(winner.server) })
+    for (const connection of connections) {
+      if (connection !== winner) connection.close(new Error('QQ Highway TCP fallback lost selection race'))
+    }
+    return winner
+  } catch (error) {
+    if (preferredHighwayTcpServers.get(serverKey) === preferred) preferredHighwayTcpServers.delete(serverKey)
+    for (const connection of connections) connection.close(error)
+    throw error
+  } finally {
+    selectionController.abort()
+  }
+}
+
+function shouldUseHighwayTcp(
+  plan: QQHighwayUploadPlan,
+  fetchImpl: typeof globalThis.fetch,
+  transport: 'auto' | 'http' | 'tcp' = 'auto',
+): boolean {
+  if (transport === 'tcp') return true
+  if (transport === 'http' || fetchImpl !== globalThis.fetch) return false
+  return plan.servers.some((server) => !isLoopbackHost(server.host))
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '::1' || host.startsWith('127.')
+}
+
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve(value?: T | PromiseLike<T>): void
+  reject(reason?: unknown): void
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise as (value?: T | PromiseLike<T>) => void
+    reject = rejectPromise
+  })
+  void promise.catch(() => undefined)
+  return { promise, resolve, reject }
+}
+
+function timeout(ms: number, message: string): Promise<never> {
+  return new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    timer.unref()
+  })
 }
 
 async function postHighwayBlock(
