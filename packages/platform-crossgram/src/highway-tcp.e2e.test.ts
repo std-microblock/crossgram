@@ -73,6 +73,32 @@ describe('QQ Highway persistent TCP E2E', () => {
     expect(progress).toEqual([4, 8, 12, 16])
   })
 
+  it('keeps the first TCP segment at the negotiated block size', async () => {
+    const blockSize = 256 * 1024
+    const body = Buffer.alloc(blockSize + 7, 0x4c)
+    const received: ReceivedFrame[] = []
+    const server = await listen(createServer((socket) => {
+      sockets.add(socket)
+      parseFrames(socket, (frame) => {
+        received.push(frame)
+        socket.write(responseFrame(frame.offset, frame.length))
+      })
+    }))
+    servers.push(server.server)
+
+    await uploadHighway(
+      highwayPlan(body, [server.address], blockSize),
+      (async function* () { yield body })(),
+      globalThis.fetch,
+      { transport: 'tcp' },
+    )
+
+    expect(received.map(({ offset, length }) => ({ offset, length }))).toEqual([
+      { offset: 0, length: blockSize },
+      { offset: blockSize, length: 7 },
+    ])
+  })
+
   it('races a hung endpoint, closes the loser, and keeps later frames on the winner', async () => {
     const body = Buffer.alloc(12, 0x5a)
     const hungFrames: ReceivedFrame[] = []

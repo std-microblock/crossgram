@@ -77,10 +77,12 @@ export class QQHighwayUploadWriter {
     } = {},
   ) {
     validateHighwayPlan(_plan)
+    const selectionBlockSize = shouldUseHighwayTcp(_plan, _fetchImpl, _options.transport)
+      ? _plan.blockSize
+      : Math.min(_plan.blockSize, HIGHWAY_SELECTION_BLOCK_BYTES)
     this._buffer = Buffer.allocUnsafe(Math.min(
-      _plan.blockSize,
       _plan.fileSize,
-      HIGHWAY_SELECTION_BLOCK_BYTES,
+      selectionBlockSize,
     ))
   }
 
