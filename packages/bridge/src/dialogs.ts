@@ -65,6 +65,9 @@ export interface PrepareMediaUploadRequest {
   height: number
   duration: number
 }
+export interface PrepareMediaUploadV2Request extends PrepareMediaUploadRequest {
+  sha1Checkpoints: Uint8Array
+}
 type HistoryWindow = Partial<GetHistoryRequest> & Pick<GetHistoryRequest, 'limit'>
 type MentionReadPublisher = (
   session: PlatformSession,
@@ -2303,12 +2306,24 @@ export class DialogRpc {
   }
 
   async prepareMediaUpload(req: PrepareMediaUploadRequest): Promise<tl.TlObject> {
+    return this.prepareMediaUploadV2({ ...req, sha1Checkpoints: new Uint8Array() })
+  }
+
+  async prepareMediaUploadV2(req: PrepareMediaUploadV2Request): Promise<tl.TlObject> {
     if (!this._uploads || !this._platform.prepareMediaUpload) return boolObject(false)
     const fileId = req.fileId.toString()
     const size = req.size.toNumber()
     if (!fileId || !Number.isSafeInteger(size) || size <= 0 || !req.name) return boolObject(false)
     const kind = req.kind === 'image' ? 'image' : req.kind === 'file' || req.kind === 'video' ? 'file' : undefined
-    if (!kind || req.md5.length !== 16 || req.sha1.length !== 20 || req.file10mMd5.length !== 16) {
+    if (!kind || req.md5.length !== 16 || req.sha1.length !== 20 || req.file10mMd5.length !== 16
+      || req.sha1Checkpoints.length % 20 !== 0) {
+      return boolObject(false)
+    }
+    const sha1Checkpoints = Array.from(
+      { length: req.sha1Checkpoints.length / 20 },
+      (_, index) => Buffer.from(req.sha1Checkpoints.subarray(index * 20, index * 20 + 20)).toString('hex'),
+    )
+    if (req.kind === 'video' && sha1Checkpoints.length !== Math.ceil(size / (1024 * 1024))) {
       return boolObject(false)
     }
     await this._hydratePeers()
@@ -2318,6 +2333,7 @@ export class DialogRpc {
       size,
       md5: Buffer.from(req.md5).toString('hex'),
       sha1: Buffer.from(req.sha1).toString('hex'),
+      ...(sha1Checkpoints.length ? { sha1Checkpoints } : {}),
       file10MMd5: Buffer.from(req.file10mMd5).toString('hex'),
     }
     const probe: IMMediaUploadProbe = {

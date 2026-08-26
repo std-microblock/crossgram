@@ -4,9 +4,11 @@ import { createServer, type Server } from 'node:http'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fromBinary } from '@bufbuild/protobuf'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UploadManager } from '../../bridge/src/upload-manager.js'
 import { QQNTClient } from './client.js'
+import { HighwayRequestHeadSchema } from './generated/qqnt/highway_pb.js'
 
 const HIGHWAY_BLOCK_BYTES = 1024 * 1024
 const HIGHWAY_SELECTION_BYTES = 128 * 1024
@@ -113,8 +115,9 @@ describe('prepared Telegram-to-QQ Highway streaming E2E', () => {
     ]))
     await uploads.savePart('session', '700', 4, parts[4]!)
 
-    expect(Buffer.concat(frames.map(highwayBody)).equals(bytes)).toBe(true)
-    expect(frames.map(highwayBody).map((body) => body.length)).toEqual([
+    const orderedFrames = [...frames].sort((left, right) => highwayOffset(left) - highwayOffset(right))
+    expect(Buffer.concat(orderedFrames.map(highwayBody)).equals(bytes)).toBe(true)
+    expect(orderedFrames.map(highwayBody).map((body) => body.length)).toEqual([
       HIGHWAY_SELECTION_BYTES, HIGHWAY_BLOCK_BYTES, HIGHWAY_BLOCK_BYTES, HIGHWAY_SELECTION_BYTES,
     ])
     expect(await readdir(uploadRoot)).toEqual([])
@@ -151,4 +154,12 @@ function highwayBody(frame: Buffer): Buffer {
   const headLength = frame.readUInt32BE(1)
   const bodyLength = frame.readUInt32BE(5)
   return frame.subarray(9 + headLength, 9 + headLength + bodyLength)
+}
+
+function highwayOffset(frame: Buffer): number {
+  const headLength = frame.readUInt32BE(1)
+  return Number(fromBinary(
+    HighwayRequestHeadSchema,
+    frame.subarray(9, 9 + headLength),
+  ).segment?.offset ?? 0n)
 }

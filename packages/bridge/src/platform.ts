@@ -243,6 +243,8 @@ export interface IMMediaUploadHashes {
   size: number
   md5: string
   sha1: string
+  /** QQ cumulative SHA-1 states for each 1 MiB boundary, followed by the final digest. */
+  sha1Checkpoints?: string[]
   /** MD5 of the first 10 MiB, used by QQ private-file rapid upload. */
   file10MMd5: string
 }

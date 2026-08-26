@@ -467,6 +467,7 @@ export class QQNTClient {
       size: media.hashes.size,
       md5: media.hashes.md5,
       sha1: media.hashes.sha1,
+      sha1Checkpoints: media.hashes.sha1Checkpoints,
       file10MMd5: media.hashes.file10MMd5,
       width: media.width,
       height: media.height,
@@ -527,6 +528,7 @@ export class QQNTClient {
       size: number
       md5: string
       sha1: string
+      sha1Checkpoints?: string[]
       file10MMd5: string
       width?: number
       height?: number

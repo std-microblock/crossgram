@@ -109,6 +109,34 @@ describe('historical server reader map', () => {
       width: 640, height: 480, duration: 0,
     })
   })
+
+  it('decodes cumulative SHA-1 checkpoints for the V2 upload preflight', () => {
+    const peer = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'inputPeerUser', userId: 42, accessHash: Long.ZERO,
+    } as any)
+    const request = TlBinaryWriter.manual(512)
+    request.uint(0xf75adc0f)
+    request.raw(peer)
+    request.long(Long.fromNumber(9_002))
+    request.string('video.mp4')
+    request.long(Long.fromNumber(1234))
+    request.string('video')
+    request.string('video/mp4')
+    request.bytes(new Uint8Array(16))
+    request.bytes(new Uint8Array(20))
+    request.bytes(new Uint8Array(20))
+    request.bytes(new Uint8Array(16))
+    request.int(640)
+    request.int(480)
+    request.double(1)
+
+    expect(new TlBinaryReader(getServerReaderMap(), request.result()).object()).toMatchObject({
+      _: 'crossgram.prepareMediaUploadV2',
+      fileId: Long.fromNumber(9_002),
+      kind: 'video',
+      sha1Checkpoints: new Uint8Array(20),
+    })
+  })
 })
 
 function tlString(value: string): Uint8Array {
