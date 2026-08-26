@@ -176,6 +176,76 @@ describe('QQ Highway protobuf transport', () => {
     expect(frames).toHaveLength(2)
     expect(highwayBody(frames[1]!)).toEqual(Buffer.from([5, 6]))
   })
+
+  it('pipelines later blocks after the first server selection and keeps protocol offsets ordered', async () => {
+    const frames: Buffer[] = []
+    const releases: Array<() => void> = []
+    let active = 0
+    let maxActive = 0
+    const progress: number[] = []
+    const fetch = vi.fn(async (_input, init) => {
+      frames.push(Buffer.from(init?.body as Uint8Array))
+      if (frames.length === 1) return new Response(Uint8Array.from(responseFrame()))
+      active++
+      maxActive = Math.max(maxActive, active)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      active--
+      return new Response(Uint8Array.from(responseFrame()))
+    }) as typeof globalThis.fetch
+    const writer = new QQHighwayUploadWriter(
+      { ...plan, fileSize: 12, blockSize: 4 },
+      fetch,
+      { onProgress: (uploaded) => { progress.push(uploaded) } },
+    )
+
+    await writer.write(Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]))
+    expect(frames).toHaveLength(3)
+    expect(maxActive).toBe(2)
+    expect(frames.map(highwayOffset)).toEqual([0n, 4n, 8n])
+    expect(frames.map(highwayBody)).toEqual([
+      Buffer.from([1, 2, 3, 4]),
+      Buffer.from([5, 6, 7, 8]),
+      Buffer.from([9, 10, 11, 12]),
+    ])
+
+    const completing = writer.complete()
+    releases[1]!()
+    await new Promise((resolve) => setImmediate(resolve))
+    releases[0]!()
+    await completing
+    expect(progress).toEqual([4, 8, 12])
+  })
+
+  it('bounds the per-upload block pipeline to eight requests', async () => {
+    const releases: Array<() => void> = []
+    let calls = 0
+    let active = 0
+    let maxActive = 0
+    const fetch = vi.fn(async () => {
+      calls++
+      if (calls === 1) return new Response(Uint8Array.from(responseFrame()))
+      active++
+      maxActive = Math.max(maxActive, active)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      active--
+      return new Response(Uint8Array.from(responseFrame()))
+    }) as typeof globalThis.fetch
+    const writer = new QQHighwayUploadWriter({ ...plan, fileSize: 40, blockSize: 4 }, fetch)
+
+    const writing = writer.write(Buffer.alloc(40, 0x4d))
+    await vi.waitFor(() => expect(calls).toBe(9))
+    expect(active).toBe(8)
+    expect(maxActive).toBe(8)
+
+    releases.shift()!()
+    await vi.waitFor(() => expect(calls).toBe(10))
+    expect(active).toBe(8)
+    releases.shift()!()
+    await writing
+    for (const release of releases.splice(0)) release()
+    await writer.complete()
+    expect(maxActive).toBe(8)
+  })
 })
 
 function responseFrame(options: { errorCode?: number, returnCode?: number } = {}): Buffer {
@@ -196,4 +266,9 @@ function highwayBody(frame: Buffer): Buffer {
   const headLength = frame.readUInt32BE(1)
   const bodyLength = frame.readUInt32BE(5)
   return frame.subarray(9 + headLength, 9 + headLength + bodyLength)
+}
+
+function highwayOffset(frame: Buffer): bigint {
+  const headLength = frame.readUInt32BE(1)
+  return fromBinary(HighwayRequestHeadSchema, frame.subarray(9, 9 + headLength)).segment!.offset
 }

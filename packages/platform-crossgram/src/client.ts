@@ -513,7 +513,7 @@ export class QQNTClient {
           await writer.complete()
           await uploadAuxiliaryHighways()
         },
-        abort: () => writer.abort(),
+        abort: (reason) => writer.abort(reason),
       },
     }
   }

@@ -84,6 +84,41 @@ describe('QQ Highway server selection E2E', () => {
     expect(received[1]).toHaveLength(4)
     expect(Buffer.concat(received[1].map(highwayBody))).toEqual(Buffer.concat([body, body]))
   })
+
+  it('sends later blocks concurrently after the first block selects a server', async () => {
+    const body = Buffer.alloc(3 * 128 * 1024, 0x7c)
+    let requests = 0
+    let releaseLater!: () => void
+    const laterArrived = new Promise<void>((resolve) => { releaseLater = resolve })
+    const server = await listen(createServer(async (request, response) => {
+      await collect(request)
+      requests++
+      if (requests === 1) {
+        response.end(highwayResponse())
+        return
+      }
+      if (requests === 3) releaseLater()
+      await laterArrived
+      response.end(highwayResponse())
+    }))
+    servers.push(server.server)
+    const plan: QQHighwayUploadPlan = {
+      servers: [server.address],
+      ticket: Buffer.from('ticket').toString('base64url'),
+      extendInfo: Buffer.from('extend').toString('base64url'),
+      selfUin: '1715311957', commandId: 1003, sequenceStart: 9,
+      blockSize: body.length / 3, fileSize: body.length,
+      fileMd5: createHash('md5').update(body).digest('hex'),
+    }
+
+    await uploadHighway(
+      plan,
+      (async function* () { yield body })(),
+      globalThis.fetch,
+      { attemptTimeoutMs: 2_000 },
+    )
+    expect(requests).toBe(3)
+  })
 })
 
 async function listen(server: Server): Promise<{

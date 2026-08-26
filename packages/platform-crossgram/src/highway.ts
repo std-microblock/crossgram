@@ -10,6 +10,7 @@ const HIGHWAY_CONNECT_TIMEOUT_MS = 3_000
 const HIGHWAY_RESPONSE_TIMEOUT_MS = 30_000
 const HIGHWAY_ATTEMPT_TIMEOUT_MS = 60_000
 const HIGHWAY_FALLBACK_DELAY_MS = 500
+const HIGHWAY_MAX_IN_FLIGHT_BLOCKS = 8
 const preferredHighwayServers = new Map<string, { server: string }>()
 const highwayDispatcher = new Agent({
   connectTimeout: HIGHWAY_CONNECT_TIMEOUT_MS,
@@ -49,9 +50,13 @@ export class QQHighwayUploadWriter {
   private _buffer: Buffer
   private _bufferedLength = 0
   private _received = 0
+  private _scheduled = 0
   private _uploaded = 0
   private _blockIndex = 0
   private _closed = false
+  private _failure?: unknown
+  private readonly _controller = new AbortController()
+  private readonly _inFlight = new Set<Promise<void>>()
 
   constructor(
     private readonly _plan: QQHighwayUploadPlan,
@@ -69,6 +74,7 @@ export class QQHighwayUploadWriter {
 
   async write(value: Uint8Array): Promise<void> {
     if (this._closed) throw new Error('QQ Highway upload is already closed')
+    this._throwIfFailed()
     if (this._options.signal?.aborted) {
       throw this._options.signal.reason ?? new Error('upload aborted')
     }
@@ -90,39 +96,78 @@ export class QQHighwayUploadWriter {
 
   async complete(): Promise<void> {
     if (this._closed) throw new Error('QQ Highway upload is already closed')
+    this._throwIfFailed()
     if (this._received !== this._plan.fileSize) {
       throw new Error(`incomplete upload: expected ${this._plan.fileSize} bytes, received ${this._received}`)
     }
-    if (this._bufferedLength) await this._flush(this._buffer.subarray(0, this._bufferedLength))
-    this._closed = true
+    try {
+      if (this._bufferedLength) await this._flush(this._buffer.subarray(0, this._bufferedLength))
+      await Promise.all([...this._inFlight])
+      this._throwIfFailed()
+      this._closed = true
+    } catch (error) {
+      this.abort(error)
+      throw error
+    }
   }
 
-  abort(): void {
+  abort(reason: unknown = new Error('QQ Highway upload aborted')): void {
     this._closed = true
     this._bufferedLength = 0
+    if (!this._controller.signal.aborted) this._controller.abort(reason)
   }
 
   private async _flush(block: Buffer): Promise<void> {
-    const hedge = this._blockIndex === 0
+    const blockIndex = this._blockIndex++
+    const offset = this._scheduled
+    this._scheduled += block.length
     const frame = encodeHighwayFrame(
       this._plan,
-      this._plan.sequenceStart + this._blockIndex++,
-      this._uploaded,
+      this._plan.sequenceStart + blockIndex,
+      offset,
       block,
     )
-    await postHighwayBlock(
-      this._plan,
-      frame,
-      this._fetchImpl,
-      this._options.signal,
-      this._options.attemptTimeoutMs,
-      this._options.fallbackDelayMs,
-      hedge,
-    )
-    this._uploaded += block.length
     this._buffer = Buffer.allocUnsafe(this._plan.blockSize)
     this._bufferedLength = 0
-    await this._options.onProgress?.(this._uploaded)
+    const upload = async () => {
+      const signal = AbortSignal.any([
+        this._controller.signal,
+        ...(this._options.signal ? [this._options.signal] : []),
+      ])
+      await postHighwayBlock(
+        this._plan,
+        frame,
+        this._fetchImpl,
+        signal,
+        this._options.attemptTimeoutMs,
+        this._options.fallbackDelayMs,
+        blockIndex === 0,
+      )
+      this._uploaded += block.length
+      await this._options.onProgress?.(this._uploaded)
+    }
+    if (blockIndex === 0) {
+      await upload()
+      return
+    }
+    const task = upload()
+    this._inFlight.add(task)
+    void task.then(
+      () => this._inFlight.delete(task),
+      (error) => {
+        this._inFlight.delete(task)
+        this._failure ??= error
+        if (!this._controller.signal.aborted) this._controller.abort(error)
+      },
+    )
+    if (this._inFlight.size >= HIGHWAY_MAX_IN_FLIGHT_BLOCKS) {
+      await Promise.race(this._inFlight)
+      this._throwIfFailed()
+    }
+  }
+
+  private _throwIfFailed(): void {
+    if (this._failure) throw this._failure
   }
 }
 
@@ -138,8 +183,13 @@ export async function uploadHighway(
   } = {},
 ): Promise<void> {
   const writer = new QQHighwayUploadWriter(plan, fetchImpl, options)
-  for await (const chunk of source) await writer.write(chunk)
-  await writer.complete()
+  try {
+    for await (const chunk of source) await writer.write(chunk)
+    await writer.complete()
+  } catch (error) {
+    writer.abort(error)
+    throw error
+  }
 }
 
 export function encodeHighwayFrame(
