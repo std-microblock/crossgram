@@ -1,5 +1,6 @@
 import type { tl } from '@mtcute/core'
 import Long from 'long'
+import { createHash } from 'node:crypto'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import {
   cardUrl, IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
@@ -2257,7 +2258,15 @@ export class DialogRpc {
         bytes: await readSourceRange(staged.media.source, offset, req.limit),
       }
     }
-    const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
+    const reference = decodeBridgeMediaReference(req.location.fileReference)
+    if (reference && (!req.location.accessHash.equals(req.location.id)
+      || !req.location.id.equals(Long.fromNumber(reference.publicId)))) {
+      throw new RpcError(400, 'FILE_REFERENCE_INVALID')
+    }
+    const stored = await this._store.getMedia(
+      this._session.platformSessionId,
+      reference?.rowId ?? req.location.id.toNumber(),
+    )
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
     const media = req.location.thumbSize === 'm' && isDownloadablePreview(stored.media.preview)
       ? previewMedia(stored.media)
@@ -2273,30 +2282,31 @@ export class DialogRpc {
     if (location._ !== 'inputDocumentFileLocation' && location._ !== 'inputPhotoFileLocation') {
       throw new RpcError(400, 'LOCATION_INVALID')
     }
-    const mediaId = location.id.toNumber()
-    if (!Number.isSafeInteger(mediaId) || mediaId <= 0 || !location.accessHash.equals(location.id)) {
+    const publicId = location.id.toNumber()
+    if (!Number.isSafeInteger(publicId) || publicId <= 0 || !location.accessHash.equals(location.id)) {
       throw new RpcError(400, 'FILE_REFERENCE_INVALID')
     }
     if (location._ === 'inputDocumentFileLocation' && !location.thumbSize) {
       let asset: import('./platform.js').IMDirectDownload | undefined
       let bridgeAsset = false
-      if (isBridgeReactionReference(location.fileReference, mediaId)) {
+      if (isBridgeReactionReference(location.fileReference, publicId)) {
         bridgeAsset = true
-        asset = await this._reactions?.getFileUrl(mediaId).catch(() => undefined)
+        asset = await this._reactions?.getFileUrl(publicId).catch(() => undefined)
       } else if (isBridgeStickerReference(location.fileReference)) {
         bridgeAsset = true
-        asset = await this._stickers?.getFileUrl(mediaId, location.fileReference).catch(() => undefined)
+        asset = await this._stickers?.getFileUrl(publicId, location.fileReference).catch(() => undefined)
       }
       if (asset) return directDownloadJSON(asset)
       if (bridgeAsset) throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
     }
-    if (decodeBridgeMediaReference(location.fileReference) !== mediaId) {
+    const reference = decodeBridgeMediaReference(location.fileReference)
+    if (!reference || reference.publicId !== publicId) {
       throw new RpcError(400, 'FILE_REFERENCE_INVALID')
     }
     if (!this._store || !this._platform.resolveMediaUrl) {
       throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
     }
-    const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
+    const stored = await this._store.getMedia(this._session.platformSessionId, reference.rowId)
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
     const media = location.thumbSize === 'm' && isDownloadablePreview(stored.media.preview)
       ? previewMedia(stored.media)
@@ -3043,11 +3053,12 @@ export class DialogRpc {
       }
     }
     const nativeId = media.id.id.toNumber()
+    const reference = decodeBridgeMediaReference(media.id.fileReference)
     if (Number.isSafeInteger(nativeId) && nativeId > 0
       && media.id.accessHash.equals(media.id.id)
-      && decodeBridgeMediaReference(media.id.fileReference) === nativeId
+      && reference?.publicId === nativeId
       && this._store) {
-      const stored = await this._store.getMedia(this._session.platformSessionId, nativeId)
+      const stored = await this._store.getMedia(this._session.platformSessionId, reference.rowId)
       if (stored) {
         const resolved = this._mediaInputFromOrigin(stored.media)
         return {
@@ -5989,13 +6000,14 @@ function makeTlRichText(
 }
 
 function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhoto {
-  const id = Long.fromNumber(media.id)
+  const publicId = bridgeMediaPublicId(media)
+  const id = Long.fromNumber(publicId)
   // Real Telegram media always carries a non-zero access hash. The bridge
   // resolves downloads from its durable media row, so this synthetic hash is
   // only for clients (notably Desktop) that disable the download action when
   // access_hash is zero.
-  const accessHash = Long.fromNumber(media.id)
-  const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
+  const accessHash = id
+  const fileReference = new TextEncoder().encode(`bridge-media:${media.id}:${publicId}`)
   const dimensions = media.width && media.height
     ? { width: media.width, height: media.height }
     : media.preview
@@ -6031,9 +6043,10 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   if (media.kind === 'image' && !isAnimatedImageMime(media.mimeType)) {
     return { _: 'messageMediaPhoto', photo: makeTlPhoto(media, timestamp, dcId) }
   }
-  const id = Long.fromNumber(media.id)
-  const accessHash = Long.fromNumber(media.id)
-  const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
+  const publicId = bridgeMediaPublicId(media)
+  const id = Long.fromNumber(publicId)
+  const accessHash = id
+  const fileReference = new TextEncoder().encode(`bridge-media:${media.id}:${publicId}`)
   const dimensions = media.width && media.height
     ? { width: media.width, height: media.height }
     : media.preview
@@ -6092,17 +6105,33 @@ function isDownloadablePreview<T extends { size: number }>(
   return Boolean(preview && Number.isSafeInteger(preview.size) && preview.size > 0)
 }
 
-function decodeBridgeMediaReference(bytes: Uint8Array): number | undefined {
+interface BridgeMediaReference {
+  rowId: number
+  publicId: number
+}
+
+export function bridgeMediaPublicId(media: Pick<IMMediaRow, 'platformMediaId'>): number {
+  const digest = createHash('sha256')
+    .update('crossgram-media-v2\0')
+    .update(media.platformMediaId)
+    .digest()
+  const id = (digest.readUInt32BE(0) & 0x1fffff) * 0x1_0000_0000 + digest.readUInt32BE(4)
+  return id || 1
+}
+
+function decodeBridgeMediaReference(bytes: Uint8Array): BridgeMediaReference | undefined {
   let value: string
   try {
     value = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
   } catch {
     return
   }
-  const match = /^bridge-media:([1-9]\d*)$/.exec(value)
+  const match = /^bridge-media:([1-9]\d*)(?::([1-9]\d*))?$/.exec(value)
   if (!match) return
-  const id = Number(match[1])
-  return Number.isSafeInteger(id) ? id : undefined
+  const rowId = Number(match[1])
+  const publicId = Number(match[2] ?? match[1])
+  if (!Number.isSafeInteger(rowId) || !Number.isSafeInteger(publicId)) return
+  return { rowId, publicId }
 }
 
 function isBridgeStickerReference(bytes: Uint8Array): boolean {

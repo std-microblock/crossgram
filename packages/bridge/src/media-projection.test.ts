@@ -9,7 +9,9 @@ import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
-import { DialogRpc, makeTlArticleMedia, makeTlMessageMedia, projectTlMessage, stableId } from './dialogs.js'
+import {
+  bridgeMediaPublicId, DialogRpc, makeTlArticleMedia, makeTlMessageMedia, projectTlMessage, stableId,
+} from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
@@ -273,6 +275,17 @@ function wireRoundTrip<T>(object: T): T {
   return new TlBinaryReader(__tlReaderMap, bytes).object() as T
 }
 
+it('derives cache-safe Telegram media IDs from durable upstream identity', () => {
+  const first = bridgeMediaPublicId({ platformMediaId: 'upstream-message-a:original-v1' })
+  const repeated = bridgeMediaPublicId({ platformMediaId: 'upstream-message-a:original-v1' })
+  const reusedRow = bridgeMediaPublicId({ platformMediaId: 'upstream-message-b:original-v1' })
+
+  expect(first).toBe(repeated)
+  expect(reusedRow).not.toBe(first)
+  expect(Number.isSafeInteger(first)).toBe(true)
+  expect(first).toBeGreaterThan(0)
+})
+
 describe('shared-media search', () => {
   it('hydrates persisted mention users before projecting native search results', async () => {
     const { store } = await createStore()
@@ -442,6 +455,42 @@ function mediaMessage(
 }
 
 describe('rich-media projection', () => {
+  it('routes cache-safe public photo IDs back to the durable media row', async () => {
+    const { store, peerId } = await createStore()
+    const persisted = await store.ingest(session, conversation, album)
+    const rowId = persisted.projection.find((part) => part.mediaId !== null)?.mediaId
+    if (!rowId) throw new Error('expected persisted media row')
+    const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-cache-id-'))
+    disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
+    const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
+    const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const projected = (history.messages.at(-1) as tl.RawMessage).media as tl.RawMessageMediaPhoto
+    if (projected.photo?._ !== 'photo') throw new Error('expected projected photo')
+    const publicId = projected.photo.id.toNumber()
+    const reference = new TextDecoder().decode(projected.photo.fileReference)
+
+    expect(publicId).not.toBe(rowId)
+    expect(reference).toBe(`bridge-media:${rowId}:${publicId}`)
+    await expect(rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPhotoFileLocation', id: projected.photo.id, accessHash: projected.photo.accessHash,
+        fileReference: projected.photo.fileReference, thumbSize: '',
+      },
+      offset: 0, limit: 1024,
+    })).resolves.toMatchObject({ _: 'upload.file', bytes: new TextEncoder().encode('photo') })
+    await expect(rpc.getFileUrl({
+      _: 'inputPhotoFileLocation', id: projected.photo.id, accessHash: projected.photo.accessHash,
+      fileReference: projected.photo.fileReference, thumbSize: '',
+    })).resolves.toMatchObject({ _: 'dataJSON' })
+
+    const tampered = Long.fromNumber(publicId + 1)
+    await expect(rpc.getFileUrl({
+      _: 'inputPhotoFileLocation', id: tampered, accessHash: tampered,
+      fileReference: projected.photo.fileReference, thumbSize: '',
+    })).rejects.toThrow('FILE_REFERENCE_INVALID')
+  })
+
   it('projects raw GIF/APNG images as documents with client-decodable metadata', () => {
     for (const mimeType of ['image/gif', 'image/apng']) {
       expect(makeTlMessageMedia({
@@ -855,11 +904,13 @@ describe('rich-media projection', () => {
       'messageMediaDocument', 'messageMediaPhoto',
     ])
     expect((messages[0].media as tl.RawMessageMediaDocument).document).toMatchObject({
-      _: 'document', accessHash: Long.fromNumber(2), mimeType: 'application/pdf', size: 5678,
+      _: 'document',
+      accessHash: Long.fromNumber(bridgeMediaPublicId({ platformMediaId: 'document' })),
+      mimeType: 'application/pdf', size: 5678,
       attributes: [{ _: 'documentAttributeFilename', fileName: 'report.pdf' }],
     })
     expect((messages[1].media as tl.RawMessageMediaPhoto).photo).toMatchObject({
-      _: 'photo', accessHash: Long.fromNumber(1), sizes: [
+      _: 'photo', accessHash: Long.fromNumber(bridgeMediaPublicId({ platformMediaId: 'photo' })), sizes: [
         { _: 'photoStrippedSize', type: 'i', bytes: strippedThumbnail },
         { _: 'photoSize', type: 'm', w: 320, h: 240, size: 7 },
         { _: 'photoSize', type: 'x', w: 800, h: 600, size: 1234 },
