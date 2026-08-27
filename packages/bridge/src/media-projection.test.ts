@@ -781,6 +781,42 @@ describe('rich-media projection', () => {
     expect(wireRoundTrip(result).messages[0]).toMatchObject({ richMessage: { _: 'richMessage' }, media: undefined })
   })
 
+  it('asks the conversation-view provider for rich-message links instead of hard-coding one viewer', () => {
+    const linked: IMConversation = {
+      id: 'linked-archive', kind: 'group', title: 'Linked archive',
+      metadata: { conversationView: 'custom-view' },
+    }
+    const article: IMMessage = {
+      ...album,
+      id: 'linked-rich-message',
+      content: { parts: [
+        { type: 'media', media: { id: 'first', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+        { type: 'text', text: 'open archive', entities: [{
+          type: 'conversation-link', offset: 0, length: 12, conversation: linked,
+        }] },
+        { type: 'media', media: { id: 'second', kind: 'image', mimeType: 'image/jpeg', locator: null } },
+      ] },
+    }
+    const mediaRows = [
+      { id: 1, partIndex: 0, platformMediaId: 'first', width: 1, height: 1, size: 1 },
+      { id: 2, partIndex: 2, platformMediaId: 'second', width: 1, height: 1, size: 1 },
+    ] as never
+
+    expect(makeTlArticleMedia(article, mediaRows)?.blocks[1]).toMatchObject({
+      _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'open archive' },
+    })
+    expect(makeTlArticleMedia(
+      article, mediaRows, 1, {
+        conversationLink: (conversation) => `https://viewer.example/${conversation.id}`,
+      },
+    )?.blocks[1]).toMatchObject({
+      _: 'pageBlockParagraph', text: {
+        _: 'textUrl', text: { _: 'textPlain', text: 'open archive' },
+        url: 'https://viewer.example/linked-archive',
+      },
+    })
+  })
+
   it('preserves mentions, custom emoji, and partial blockquotes in rich-message history', async () => {
     const { store, peerId } = await createStore()
     const definition = {

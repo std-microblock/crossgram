@@ -882,7 +882,7 @@ describe('UpdateManager', () => {
       id: 'merged-virtual', kind: 'group', title: 'QQ用户的聊天记录',
       metadata: {
         conversationView: 'merged-forward',
-        qqMultiForwardPreview: 'Alice: 第一条\nBob: 第二条',
+        conversationViewPreview: 'Alice: 第一条\nBob: 第二条',
       },
     }
     const forwarded = Array.from({ length: 201 }, (_, index): IMMessage => ({

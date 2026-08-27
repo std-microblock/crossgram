@@ -1453,7 +1453,7 @@ describe('DialogRpc', () => {
       id: 'temporary-forward', kind: 'group' as const, title: '聊天记录',
       metadata: {
         conversationView: 'merged-forward',
-        qqMultiForwardPreview: 'Bob: native preview\nAlice: work',
+        conversationViewPreview: 'Bob: native preview\nAlice: work',
       },
     }
     platform.addMessage('alice', {

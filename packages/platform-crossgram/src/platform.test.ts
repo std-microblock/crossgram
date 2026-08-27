@@ -851,7 +851,7 @@ describe('QQNTPlatform mapping', () => {
     }
     expect(link.entities[0].conversation.metadata).toMatchObject({
       conversationView: 'merged-forward',
-      qqMultiForwardPreview: 'Alice: hello\nBob: [图片]',
+      conversationViewPreview: 'Alice: hello\nBob: [图片]',
     })
 
     const archivedLocator = {
@@ -1020,7 +1020,7 @@ describe('QQNTPlatform mapping', () => {
         type: 'conversation-link', offset: 0, length: 6,
         conversation: {
           kind: 'group', title: 'Alice 和 Bob 的聊天记录',
-          metadata: { qqMultiForwardPreview: 'Alice: first\nBob: second' },
+          metadata: { conversationViewPreview: 'Alice: first\nBob: second' },
         },
       }],
     }] } }])
@@ -1111,7 +1111,7 @@ describe('QQNTPlatform mapping', () => {
     if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
       throw new Error('merged forward link was not mapped')
     }
-    expect(link.entities[0].conversation.metadata?.qqMultiForwardPreview)
+    expect(link.entities[0].conversation.metadata?.conversationViewPreview)
       .toBe('Alice: 第一条具体内容\nBob: [图片]')
     expect(platform.client.getMultiForwardMessages).toHaveBeenCalledOnce()
   })

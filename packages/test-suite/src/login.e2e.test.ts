@@ -3544,12 +3544,12 @@ describe('bridge login e2e', () => {
       id: 'virtual-forward', kind: 'group', title: 'Alice 和 Bob 的聊天记录',
       metadata: {
         conversationView: 'merged-forward',
-        qqMultiForwardPreview: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
+        conversationViewPreview: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
       },
     }
     const innerVirtual: bridge.IMConversation = {
       id: 'inner-virtual-forward', kind: 'group', title: 'Bob 和 Carol 的聊天记录',
-      metadata: { conversationView: 'merged-forward', qqMultiForwardPreview: 'Carol: inner first message' },
+      metadata: { conversationView: 'merged-forward', conversationViewPreview: 'Carol: inner first message' },
     }
     const merged: bridge.IMMessage = {
       id: 'merged-root', conversationId: parent.id, senderId: 'alice', timestamp: 1_700_001_000,

@@ -3754,7 +3754,7 @@ export class DialogRpc {
         const peerId = this._peerId(conversation.id)
         // Conversation-view links are durable, but their provider registry is
         // intentionally process-local. Rebuild it from persisted conversation
-        // metadata so old merged-forward links survive a service restart.
+        // metadata so linked views survive a service restart.
         if (this._isConversationView(conversation)) {
           this._conversationViews?.remember(
             this._session.platformSessionId, peerId, conversation,
@@ -3970,11 +3970,14 @@ export class DialogRpc {
     const sticker = source.content.parts.find((part) => part.type === 'sticker')
     const card = source.content.parts.find((part) => part.type === 'card')
     const richMessage = makeTlArticleMedia(
-      source, item.mediaRows ?? [], this._dcId, this._userId.bind(this),
-      this._reactions ? (definition) => {
-        const reaction = this._reactions!.toTlReaction(source.conversationId, definition)
-        return reaction._ === 'reactionCustomEmoji' ? reaction.documentId.toNumber() : undefined
-      } : undefined,
+      source, item.mediaRows ?? [], this._dcId, {
+        userId: this._userId.bind(this),
+        customEmojiId: this._reactions ? (definition) => {
+          const reaction = this._reactions!.toTlReaction(source.conversationId, definition)
+          return reaction._ === 'reactionCustomEmoji' ? reaction.documentId.toNumber() : undefined
+        } : undefined,
+        conversationLink: (linked) => this._conversationLinkUrl(linked),
+      },
     )
     const reply = this._messageReplyHeader(source)
     return projectTlMessage({
@@ -5911,12 +5914,17 @@ function memberSearchText(member: IMConversationMember<any>): string {
     .toLocaleLowerCase()
 }
 
+export interface TlArticleProjectionOptions {
+  userId?: (platformUserId: string) => number
+  customEmojiId?: (definition: IMReactionDefinition) => number | undefined
+  conversationLink?: (conversation: IMConversation) => string | undefined
+}
+
 export function makeTlArticleMedia(
   source: IMMessage,
   mediaRows: readonly IMMediaRow[],
   dcId = 1,
-  userId?: (platformUserId: string) => number,
-  customEmojiId?: (definition: IMReactionDefinition) => number | undefined,
+  options: TlArticleProjectionOptions = {},
 ): tl.RawRichMessage | undefined {
   if (!isArticleMessage(source)) return
   const photos: tl.RawPhoto[] = []
@@ -5931,7 +5939,9 @@ export function makeTlArticleMedia(
         const start = boundaries[index]!
         const end = boundaries[index + 1]!
         if (start === end) continue
-        const text = makeTlRichText(part.text, part.entities, start, end, userId, customEmojiId)
+        const text = makeTlRichText(
+          part.text, part.entities, start, end, options,
+        )
         blocks.push(quotes.some((entity) => entity.offset <= start && entity.offset + entity.length >= end)
           ? { _: 'pageBlockBlockquote', text, caption: { _: 'textEmpty' } }
           : { _: 'pageBlockParagraph', text })
@@ -5961,8 +5971,7 @@ function makeTlRichText(
   entities: readonly IMTextEntity[] | undefined,
   start = 0,
   end = text.length,
-  userId?: (platformUserId: string) => number,
-  customEmojiId?: (definition: IMReactionDefinition) => number | undefined,
+  options: TlArticleProjectionOptions = {},
 ): tl.TypeRichText {
   const valid = validArticleEntities(text, entities).filter((entity) => entity.type !== 'blockquote'
     && entity.offset < end && entity.offset + entity.length > start)
@@ -5983,16 +5992,15 @@ function makeTlRichText(
       else if (entity.type === 'strikethrough') segment = { _: 'textStrike', text: segment }
       else if (entity.type === 'code' || entity.type === 'pre') segment = { _: 'textFixed', text: segment }
       else if (entity.type === 'text-link') segment = { _: 'textUrl', text: segment, url: entity.url, webpageId: Long.ZERO }
-      else if (entity.type === 'mention' && userId) segment = { _: 'textMentionName', text: segment, userId: userId(entity.userId) }
+      else if (entity.type === 'mention' && options.userId) {
+        segment = { _: 'textMentionName', text: segment, userId: options.userId(entity.userId) }
+      }
       else if (entity.type === 'custom-emoji' && entity.definition.presentation.type === 'custom') {
-        const id = customEmojiId?.(entity.definition)
+        const id = options.customEmojiId?.(entity.definition)
         if (id !== undefined) segment = { _: 'textCustomEmoji', documentId: Long.fromNumber(id), alt: text.slice(segmentStart, segmentEnd) }
       } else if (entity.type === 'conversation-link') {
-        segment = {
-          _: 'textUrl', text: segment,
-          url: `https://t.me/bridgechat_${stableId(`peer:${entity.conversation.id}`)}`,
-          webpageId: Long.ZERO,
-        }
+        const url = options.conversationLink?.(entity.conversation)
+        if (url) segment = { _: 'textUrl', text: segment, url, webpageId: Long.ZERO }
       }
     }
     segments.push(segment)

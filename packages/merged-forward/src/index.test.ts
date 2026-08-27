@@ -8,7 +8,7 @@ const context = {
     id: 'qqnt-multi-forward:test', kind: 'group' as const, title: 'Alice 和 Bob 的聊天记录',
     metadata: {
       conversationView: 'merged-forward',
-      qqMultiForwardPreview: 'Alice: hello\nBob: world',
+      conversationViewPreview: 'Alice: hello\nBob: world',
     },
   },
 }
@@ -58,7 +58,7 @@ describe('merged-forward conversation view provider', () => {
         ...context.conversation,
         metadata: {
           ...context.conversation.metadata,
-          qqMultiForwardPreview: '3条消息的合并转发',
+          conversationViewPreview: '3条消息的合并转发',
         },
       },
     }

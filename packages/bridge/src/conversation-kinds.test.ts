@@ -1020,7 +1020,7 @@ describe('conversation kinds', () => {
       async forwardMessages(_session, _from, _ids, to) {
         const virtual: IMConversation = {
           id: 'virtual-merged', kind: 'group', title: '聊天记录',
-          metadata: { conversationView: 'merged-forward', qqMultiForwardPreview: 'Alice: one\nBob: two' },
+          metadata: { conversationView: 'merged-forward', conversationViewPreview: 'Alice: one\nBob: two' },
         }
         return [{
           id: 'merged-output', conversationId: to.id, senderId: 'self', outgoing: true, timestamp: 20,

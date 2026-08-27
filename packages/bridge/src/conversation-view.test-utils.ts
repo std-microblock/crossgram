@@ -14,7 +14,7 @@ export function createTestConversationViews(): ConversationViewService {
       webpage: {
         _: 'webPage', id: Long.ONE, url, displayUrl: context.conversation.title, hash: 0,
         type: 'telegram_message', title: context.conversation.title,
-        description: String(context.conversation.metadata?.qqMultiForwardPreview ?? '点击查看合并转发消息'),
+        description: String(context.conversation.metadata?.conversationViewPreview ?? '点击查看合并转发消息'),
       },
     }),
     makeChat: (context) => ({

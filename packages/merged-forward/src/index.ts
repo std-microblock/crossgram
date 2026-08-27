@@ -25,7 +25,7 @@ export function makeMergedForwardProvider(): ConversationViewProvider {
       return `https://t.me/bridgechat_${context.chatId}${target ? `/${target.tlMessageId}` : ''}`
     },
     makePreview(context, url) {
-      const preview = context.conversation.metadata?.qqMultiForwardPreview
+      const preview = context.conversation.metadata?.conversationViewPreview
       const detailedPreview = typeof preview === 'string' && isDetailedConversationPreview(preview)
         ? preview.trim()
         : undefined

@@ -651,9 +651,13 @@ export class UpdateManager {
         )
       }
       const richMessage = makeTlArticleMedia(
-        projected.source, projected.media, this._dcId,
-        (platformUserId) => requiredUserId(userIds, platformUserId),
-        (definition) => customReactionDocumentId(session.platformSessionId, definition),
+        projected.source, projected.media, this._dcId, {
+          userId: (platformUserId) => requiredUserId(userIds, platformUserId),
+          customEmojiId: (definition) => customReactionDocumentId(session.platformSessionId, definition),
+          conversationLink: (linked) => conversationLinkUrl(
+            session.platformSessionId, linked, this._conversationViews,
+          ),
+        },
       )
       const message = projectTlMessage({
         conversation: displayConversation,

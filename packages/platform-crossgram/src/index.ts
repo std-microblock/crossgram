@@ -1995,14 +1995,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       }
       const entities = await Promise.all(part.entities.map(async (entity) => {
         if (entity.type !== 'conversation-link') return entity
-        const existing = entity.conversation.metadata?.qqMultiForwardPreview
+        const existing = entity.conversation.metadata?.conversationViewPreview
         if (typeof existing === 'string' && isDetailedMultiForwardPreview(existing)) return entity
         const preview = await this.resolveMultiForwardPreview(entity.conversation)
         if (!preview) return entity
         changed = true
         const conversation = {
           ...entity.conversation,
-          metadata: { ...entity.conversation.metadata, qqMultiForwardPreview: preview },
+          metadata: { ...entity.conversation.metadata, conversationViewPreview: preview },
         } as IMConversation<QQMediaLocator>
         this.conversations.set(conversation.id, conversation)
         return { ...entity, conversation }
@@ -2066,8 +2066,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       title: title || '聊天记录',
       metadata: {
         conversationView: 'merged-forward',
-        qqTemporaryMultiForward: true,
-        ...(preview ? { qqMultiForwardPreview: preview } : {}),
+        readOnly: true,
+        ...(preview ? { conversationViewPreview: preview } : {}),
       },
     }
     this.multiForwardLocators.set(id, locator)
