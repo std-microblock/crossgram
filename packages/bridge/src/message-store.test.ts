@@ -9,6 +9,7 @@ import Long from 'long'
 import { getApiLayerWriterMap } from '@mtproto-relay/mtproto'
 import { defineModels } from './models.js'
 import { MessageStore } from './message-store.js'
+import { MessageProjectionPipeline } from './message-projection.js'
 import type { IMConversation, IMMessage, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
@@ -25,7 +26,7 @@ afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
 
-async function createStore() {
+async function createStore(messageProjection?: MessageProjectionPipeline) {
   const ctx = new Context()
   const fibers = [
     ctx.plugin(Database),
@@ -38,10 +39,39 @@ async function createStore() {
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { ctx, store: new MessageStore(ctx.database) }
+  return { ctx, store: new MessageStore(ctx.database, undefined, undefined, undefined, messageProjection) }
 }
 
 describe('MessageStore', () => {
+  it('persists a custom Cordis projection plan and keeps allocated Telegram IDs stable', async () => {
+    const projectionCtx = new Context()
+    const pipeline = new MessageProjectionPipeline(projectionCtx)
+    const planned = vi.fn(async (input, next) => {
+      expect(input).toMatchObject({
+        session, conversation: { id: 'custom-plan' }, source: { id: 'custom-plan-message' }, allocation: 'history',
+      })
+      const fallback = await next()
+      expect(fallback).toEqual({ parts: [{}], grouped: false })
+      return { parts: [{}, {}], grouped: false }
+    })
+    projectionCtx.on('bridge/message/project-plan', planned)
+    const { store } = await createStore(pipeline)
+    const conversation: IMConversation = { id: 'custom-plan', kind: 'group', title: 'Custom plan' }
+    const message: IMMessage = {
+      id: 'custom-plan-message', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      content: { parts: [{ type: 'text', text: 'split me' }] },
+    }
+
+    const first = await store.ingest(session, conversation, message, { allocation: 'history' })
+    const second = await store.ingest(session, conversation, message, { allocation: 'history' })
+
+    expect(first.projection).toHaveLength(2)
+    expect(first.projection.map((part) => part.ordinal)).toEqual([0, 1])
+    expect(second.projection.map((part) => part.tlMessageId))
+      .toEqual(first.projection.map((part) => part.tlMessageId))
+    expect(planned).toHaveBeenCalledOnce()
+  })
+
   it('persists unread mention navigation state and never re-unreads an acknowledged message', async () => {
     const { store } = await createStore()
     const conversation: IMConversation = { id: 'mentions', kind: 'group', title: 'Mentions' }

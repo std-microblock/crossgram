@@ -80,7 +80,8 @@ async function createHarness(
       sent.push({ authKeyId, update, excludeConnection })
       return deliveredConnections
     },
-    1, undefined, projectSticker, blockedPeers, registerReactions, conversationViews,
+    1, undefined, projectSticker, blockedPeers, registerReactions,
+    conversationViews, conversationViews.messageProjection,
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -775,7 +776,7 @@ describe('UpdateManager', () => {
       targetPlatform, session, store,
       undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      conversationViews,
+      conversationViews, conversationViews.messageProjection,
     )
     const forwarded = await rpc.forwardMessages({
       _: 'messages.forwardMessages',

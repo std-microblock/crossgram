@@ -31,7 +31,7 @@ function makeViewRpc(
     platform, session,
     undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined,
     undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, systemPeers,
-    views,
+    views, views.messageProjection,
   )
 }
 

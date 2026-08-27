@@ -82,11 +82,12 @@ describe('persisted conversation views', () => {
 
     // Model a full service restart: the durable store survives while the
     // process-local conversation-view registry starts empty.
+    const conversationViews = createTestConversationViews()
     const rpc = new DialogRpc(
       platform, session, store,
       undefined, undefined, 1, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, createTestConversationViews(),
+      undefined, conversationViews, conversationViews.messageProjection,
     )
 
     await expect(rpc.resolveUsername({
@@ -116,11 +117,12 @@ describe('persisted conversation views', () => {
       session, ordinaryGroup, message(ordinaryGroup, 'group-message', 'not a basic-chat view'),
     )
     const targetId = stored.projection[0].tlMessageId
+    const conversationViews = createTestConversationViews()
     const rpc = new DialogRpc(
       platform, session, store,
       undefined, undefined, 1, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, createTestConversationViews(),
+      undefined, conversationViews, conversationViews.messageProjection,
     )
 
     await expect(rpc.getMessages({

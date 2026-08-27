@@ -1,71 +1,108 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { stableId, type MessageProjectionInput } from '@mtproto-relay/bridge'
 import { makeMergedForwardProvider } from './index.js'
 
-const context = {
-  platformSessionId: 'session-1',
-  chatId: 123,
-  conversation: {
-    id: 'qqnt-multi-forward:test', kind: 'group' as const, title: 'Alice 和 Bob 的聊天记录',
-    metadata: {
-      conversationView: 'merged-forward',
-      conversationViewPreview: 'Alice: hello\nBob: world',
-    },
+const conversation = {
+  id: 'qqnt-multi-forward:test', kind: 'group' as const, title: 'Alice 和 Bob 的聊天记录',
+  metadata: {
+    conversationView: 'merged-forward',
+    conversationViewPreview: 'Alice: hello\nBob: world',
   },
 }
 
-describe('merged-forward conversation view provider', () => {
-  it('owns only explicitly tagged merged-forward conversations', () => {
-    const provider = makeMergedForwardProvider()
-    expect(provider.supports(context.conversation)).toBe(true)
-    expect(provider.supports({
-      id: 'ordinary', kind: 'group', title: 'Ordinary', metadata: { virtual: true },
-    })).toBe(false)
-  })
+function input(loadConversation?: MessageProjectionInput['loadConversation']): MessageProjectionInput {
+  return {
+    mode: 'history',
+    session: {
+      platformId: 'test', platformSessionId: 'session-1', userId: 'self',
+      credentials: {}, metadata: {},
+    },
+    conversation: { id: 'outer', kind: 'group', title: 'Outer' },
+    tlMessageId: 10,
+    ordinal: 0,
+    draft: {
+      source: {
+        id: 'outer-message', conversationId: 'outer', senderId: 'alice', timestamp: 1,
+        content: { parts: [{
+          type: 'text', text: '查看聊天记录', entities: [{
+            type: 'conversation-link', offset: 0, length: 6, conversation,
+          }],
+        }] },
+      },
+      chats: [],
+    },
+    loadConversation,
+  }
+}
 
-  it('creates cross-client deep links and native preview cards', () => {
-    const provider = makeMergedForwardProvider()
-    const link = provider.makeLink(context, {
-      conversationId: context.conversation.id,
-      platformMessageId: 'first',
-      tlMessageId: 456,
+describe('merged-forward projection', () => {
+  it('owns state, deep links, preview cards, and synthetic peers inside the feature', () => {
+    const projection = makeMergedForwardProvider()
+    expect(projection.supports(conversation)).toBe(true)
+    expect(projection.supports({ id: 'ordinary', kind: 'group', title: 'Ordinary' })).toBe(false)
+    expect(projection.remember('session-1', 123, conversation)).toBe('https://t.me/bridgechat_123')
+    projection.setTarget('session-1', 123, {
+      conversationId: conversation.id, platformMessageId: 'first', tlMessageId: 456,
     })
-    expect(link).toBe('https://t.me/bridgechat_123/456')
-    expect(provider.makePreview(context, link)).toMatchObject({
-      _: 'messageMediaWebPage', manual: true, safe: true,
+    expect(projection.makeLink('session-1', 123)).toBe('https://t.me/bridgechat_123/456')
+    expect(projection.makePreview('session-1', 123)).toMatchObject({
       webpage: {
-        _: 'webPage', url: link, type: 'telegram_message',
-        title: context.conversation.title,
+        url: 'https://t.me/bridgechat_123/456',
+        title: conversation.title,
         description: 'Alice: hello\nBob: world',
       },
     })
-    expect(provider.makeChat(context, 1)).toMatchObject({
-      _: 'chat', left: true, id: 123, title: context.conversation.title, participantsCount: 1,
+    expect(projection.makeChat('session-1', 123, 1)).toMatchObject({
+      _: 'chat', left: true, id: 123, title: conversation.title,
     })
-    expect(provider.makeChat(context, 1)).not.toHaveProperty('creator')
-    expect(provider.makeFullChat(context, { _: 'peerNotifySettings' })).toMatchObject({
-      fullChat: {
-        _: 'chatFull', participants: { _: 'chatParticipantsForbidden', chatId: 123 },
-      },
-      chats: [{ _: 'chat', left: true, id: 123 }], users: [],
+    expect(projection.resolveUsername('session-1', 'bridgechat_123')).toMatchObject({
+      chatId: 123, conversation,
     })
   })
 
-  it('hides generic counters and resolves only its synthetic usernames', () => {
-    const provider = makeMergedForwardProvider()
-    const generic = {
-      ...context,
-      conversation: {
-        ...context.conversation,
-        metadata: {
-          ...context.conversation.metadata,
-          conversationViewPreview: '3条消息的合并转发',
-        },
-      },
-    }
-    expect(provider.makePreview(generic, provider.makeLink(generic)).webpage).toMatchObject({
-      _: 'webPage', description: '点击查看合并转发消息',
+  it('projects conversation links through the message waterfall and deduplicates target loading', async () => {
+    const projection = makeMergedForwardProvider()
+    let release!: () => void
+    const wait = new Promise<void>((resolve) => { release = resolve })
+    const loadConversation = vi.fn(async () => {
+      await wait
+      return [{
+        conversationId: conversation.id, platformMessageId: 'latest',
+        tlMessageId: 456, timestamp: 100,
+      }]
     })
-    expect(provider.resolveUsername?.('bridgechat_123')).toBe(123)
-    expect(provider.resolveUsername?.('ordinary_user')).toBeUndefined()
+    const first = input(loadConversation)
+    const second = input(loadConversation)
+    const chatId = stableId(`peer:${conversation.id}`)
+    const render = (value: MessageProjectionInput) => projection.project(value, async () => ({
+      message: {
+        _: 'message', id: value.tlMessageId, peerId: { _: 'peerChannel', channelId: 1 },
+        date: 1, message: '查看聊天记录', entities: [],
+      },
+      chats: value.draft.chats,
+    }))
+    const pending = [render(first), render(second)]
+    release()
+    const [one, two] = await Promise.all(pending)
+
+    expect(loadConversation).toHaveBeenCalledOnce()
+    for (const [result, value] of [[one, first], [two, second]] as const) {
+      expect(value.draft.source.content.parts[0]).toMatchObject({
+        entities: [{ type: 'text-link', url: `https://t.me/bridgechat_${chatId}/456` }],
+      })
+      expect(value.draft.media).toMatchObject({ _: 'messageMediaWebPage' })
+      expect(result.chats).toMatchObject([{ _: 'chat', left: true, id: chatId }])
+    }
+  })
+
+  it('uses a generic fallback description for counter-only previews', () => {
+    const projection = makeMergedForwardProvider()
+    projection.remember('session-1', 123, {
+      ...conversation,
+      metadata: { ...conversation.metadata, conversationViewPreview: '3条消息的合并转发' },
+    })
+    expect(projection.makePreview('session-1', 123)?.webpage).toMatchObject({
+      description: '点击查看合并转发消息',
+    })
   })
 })

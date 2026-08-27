@@ -204,6 +204,7 @@ async function createRpc(
         }
       }
     : undefined
+  const conversationViews = createTestConversationViews()
   return {
     ctx,
     store,
@@ -214,7 +215,7 @@ async function createRpc(
       undefined, undefined, 1, undefined, reactions,
       undefined, onLocalEvent, '0011223344556677',
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      createTestConversationViews(),
+      conversationViews, conversationViews.messageProjection,
     ),
   }
 }
@@ -1054,7 +1055,11 @@ describe('conversation kinds', () => {
     const mergedPlatform: IMPlatform = {
       ...platform,
       async getHistory(_session, target) {
-        const conversation = conversations.find((item) => item.id === target.id)!
+        const conversation = conversations.find((item) => item.id === target.id)
+        if (!conversation) return { messages: [{
+          id: 'virtual-merged-target', conversationId: target.id, senderId: 'alice', timestamp: 9,
+          content: { parts: [{ type: 'text', text: 'merged transcript' }] },
+        }] }
         return { messages: Array.from({ length: 7 }, (_, index) => ({
           ...source(conversation), id: `merge-source-${index}`, timestamp: 10 + index,
         })) }

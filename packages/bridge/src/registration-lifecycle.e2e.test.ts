@@ -1,7 +1,6 @@
 import { Context } from 'cordis'
-import Long from 'long'
 import { describe, expect, it, vi } from 'vitest'
-import { ConversationViewService, type ConversationViewProvider } from './conversation-view.js'
+import { ConversationViewService } from './conversation-view.js'
 import type { PlatformSession } from './platform.js'
 import { SystemPeerService, type SystemPeerProvider } from './system-peer.js'
 
@@ -13,32 +12,6 @@ const session: PlatformSession = {
 const conversation = {
   id: 'merged-forward:lifecycle', kind: 'group' as const, title: 'Lifecycle view',
   metadata: { conversationView: 'merged-forward' },
-}
-
-const conversationProvider: ConversationViewProvider = {
-  id: 'merged-forward-lifecycle',
-  supports: (value) => value.metadata?.conversationView === 'merged-forward',
-  makeLink: (context) => `https://t.me/bridgechat_${context.chatId}`,
-  makePreview: (context, url) => ({
-    _: 'messageMediaWebPage', manual: true, safe: true,
-    webpage: {
-      _: 'webPage', id: Long.ONE, url, displayUrl: context.conversation.title, hash: 0,
-      type: 'telegram_message', title: context.conversation.title,
-    },
-  }),
-  makeChat: (context) => ({
-    _: 'chat', left: true, id: context.chatId, title: context.conversation.title,
-    photo: { _: 'chatPhotoEmpty' }, participantsCount: 1, date: 0, version: 1,
-  }),
-  makeFullChat: (context, notifySettings) => ({
-    _: 'messages.chatFull',
-    fullChat: {
-      _: 'chatFull', id: context.chatId, about: '',
-      participants: { _: 'chatParticipantsForbidden', chatId: context.chatId },
-      chatPhoto: { _: 'photoEmpty', id: Long.ZERO }, notifySettings, botInfo: [],
-    },
-    chats: [], users: [],
-  }),
 }
 
 const systemProvider: SystemPeerProvider = {
@@ -64,10 +37,18 @@ describe('Cordis-owned bridge registrations', () => {
     })
     await services
     const changed = vi.fn()
+    const records = new Map<number, typeof conversation>()
     const ownerPlugin = (scope: Context) => {
       scope.systemPeer.onChanged(changed)
       scope.systemPeer.register(systemProvider)
-      scope.conversationView.register(conversationProvider)
+      scope.on('bridge/conversation-view/supports', (value) =>
+        value.metadata?.conversationView === 'merged-forward' || undefined)
+      scope.on('bridge/conversation-view/remember', (_sessionId, chatId, value) => {
+        if (value.metadata?.conversationView !== 'merged-forward') return
+        records.set(chatId, value as typeof conversation)
+        return `https://t.me/bridgechat_${chatId}`
+      })
+      scope.on('bridge/conversation-view/resolve', (_sessionId, chatId) => records.get(chatId))
     }
     ownerPlugin.inject = ['systemPeer', 'conversationView']
     const owner = ctx.plugin(ownerPlugin)
