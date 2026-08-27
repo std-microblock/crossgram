@@ -67,7 +67,8 @@ if ! id "$service_user" >/dev/null 2>&1; then
   useradd --system --create-home --home-dir "$state_dir" --shell /usr/sbin/nologin "$service_user"
 fi
 install -d -m 0755 -o "$service_user" -g "$service_user" "$install_dir"
-install -d -m 0700 -o "$service_user" -g "$service_user" "$state_dir" "$state_dir/data"
+install -d -m 0700 -o "$service_user" -g "$service_user" \
+  "$state_dir" "$state_dir/data" "$state_dir/debug-scripts" "$state_dir/debug-results"
 
 if [ ! -d "$install_dir/.git" ]; then
   if ! runuser -u "$service_user" -- env HOME="$state_dir" git clone --branch "$branch" "$repo_url" "$install_dir"; then

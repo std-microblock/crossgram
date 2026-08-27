@@ -146,6 +146,12 @@
   name: '@mtproto-relay/update-store-database'
   config:
     retention: 10000
+- id: debug-scripts
+  name: '@mtproto-relay/debug-scripts'
+  config:
+    root: ./data/debug-scripts
+    results: ./data/debug-results
+    ttl: 1800000
 - id: 7bf6f701
   name: '@cordisjs/plugin-group'
   label: SSO

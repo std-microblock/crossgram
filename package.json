@@ -27,7 +27,7 @@
     "skill:test": "node --test .agents/skills/inspect-relay/scripts/*.test.mjs",
     "test:unit": "yarn test:unit:vitest && yarn test:unit:node",
     "test:unit:vitest": "vitest run",
-    "test:unit:node": "node --test scripts/sync-telegram-schemas.test.mjs scripts/check-commit-message.unit.test.mjs binary_patch/patch-tdesktop.unit.test.cjs .agents/skills/inspect-relay/scripts/inspect-relay.unit.test.mjs",
+    "test:unit:node": "node --test scripts/sync-telegram-schemas.test.mjs scripts/check-commit-message.unit.test.mjs binary_patch/patch-tdesktop.unit.test.cjs .agents/skills/inspect-relay/scripts/probe-relay.unit.test.mjs",
     "test:e2e": "yarn test:e2e:commit-message && yarn test:e2e:mtproto",
     "test:e2e:commit-message": "node --test scripts/check-commit-message.e2e.test.mjs",
     "test:e2e:mtproto": "yarn build && vitest run --config vitest.mtproto-e2e.config.mts --maxWorkers=1",

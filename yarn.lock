@@ -1944,6 +1944,19 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/debug-scripts@workspace:packages/debug-scripts":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/debug-scripts@workspace:packages/debug-scripts"
+  dependencies:
+    chokidar: "npm:^4.0.3"
+    schemastery: "npm:^3.18.0"
+    tsx: "npm:@cordiverse/tsx@4.19.3-fix.3"
+    vitest: "npm:^4.1.10"
+  peerDependencies:
+    cordis: ^4.0.0-rc.7
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/merged-forward@workspace:*, @mtproto-relay/merged-forward@workspace:packages/merged-forward":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/merged-forward@workspace:packages/merged-forward"

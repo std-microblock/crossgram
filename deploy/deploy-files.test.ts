@@ -41,6 +41,9 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain("name: '@mtproto-relay/platform-admin-bot'")
     expect(config).toContain("name: '@mtproto-relay/telegram-bot-api'")
     expect(config).toContain("name: '@mtproto-relay/qq-flash-transfer-bot'")
+    expect(config).toContain("name: '@mtproto-relay/debug-scripts'")
+    expect(config).toContain('root: /var/lib/crossgram/debug-scripts')
+    expect(config).toContain('results: /var/lib/crossgram/debug-results')
     expect(config).toContain('verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}')
     expect(config).toContain("name: '@mtproto-relay/mtproto-statistics'")
     expect(config).toContain("name: '@mtproto-relay/update-store-database'")
@@ -55,6 +58,7 @@ describe('Crossgram Linux deployment', () => {
     expect(installer).toContain('runtime_config=$install_dir/.runtime/app.yml')
     expect(installer).toContain('if [ ! -e "$runtime_config" ]; then')
     expect(installer).toContain('install -d -m 0700 -o "$service_user" -g "$service_user" "$install_dir/.runtime"')
+    expect(installer).toContain('"$state_dir/debug-scripts" "$state_dir/debug-results"')
     expect(installer).toContain('ln -sfn ../package.json "$install_dir/.runtime/package.json"')
     expect(installer).toContain('install -m 0600 -o "$service_user" -g "$service_user"')
     expect(installer).toContain('chown "$service_user:$service_user" "$runtime_config"')
@@ -134,6 +138,8 @@ describe('Crossgram Linux deployment', () => {
     expect(migrated).toContain("- id: platform-admin-bot\n  name: '@mtproto-relay/platform-admin-bot'")
     expect(migrated).toContain("- id: telegram-bot-api\n  name: '@mtproto-relay/telegram-bot-api'")
     expect(migrated).toContain("- id: qq-flash-transfer-bot\n  name: '@mtproto-relay/qq-flash-transfer-bot'")
+    expect(migrated).toContain("- id: debug-scripts\n  name: '@mtproto-relay/debug-scripts'")
+    expect(migrated).toContain('root: /var/lib/crossgram/debug-scripts')
     expect(migrated).toContain("    - id: database-postgres\n      name: '@cordisjs/plugin-database-postgres'")
     expect(migrated).toContain(
       '        password:\n          __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD',

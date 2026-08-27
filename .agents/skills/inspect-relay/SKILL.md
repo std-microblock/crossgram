@@ -1,57 +1,114 @@
 ---
 name: inspect-relay
-description: Inspect and collect mtproto-relay runtime diagnostics, including persisted Koishi/Cordis logs, live MTProto debug events, a message with all related SQLite rows, arbitrary database tables, and read-only SQL. Use when debugging mtproto-relay behavior, tracing a Telegram or QQNT message, checking service errors, comparing protocol traffic with stored state, or when asked to 拉日志、查消息、查数据库、看 MTProto debug、排查转发问题.
+description: Inspect the live Crossgram/Cordis process by deploying short-lived TypeScript probes through the production debug-scripts runner. Use when tracing relay behavior, querying the active database, reading recent Cordis logs, inspecting services or memory state, attaching temporary event listeners, or diagnosing production-only Telegram/QQNT behavior. Also use for Crossgram service health and journald fallback when the process cannot load probes.
 ---
 
 # Inspect Relay
 
-Use the bundled `scripts/inspect-relay.mjs` instead of composing ad-hoc PowerShell or SQLite commands. It emits JSON and opens SQLite databases read-only.
+Use `scripts/probe-relay.mjs` as the control plane. Prefer a process-local probe over ad-hoc SQL, copied databases, permanent debug APIs, or temporary changes to production packages.
 
-## Locate the runtime
-
-Run from the repository or pass `--root <path>`. The script discovers `data/cordis.db` and `data/logs.db` by walking upward. Override them with `--db` and `--logs-db`.
+## Check the runner
 
 ```sh
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs doctor
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs doctor
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs list
 ```
 
-If the active deployment is on another host, run the same command over SSH in that deployment checkout. Do not copy a live SQLite database unless SQLite's backup mechanism is used.
+The default host is `root@118.89.184.208`. Override it with `--host` or `CROSSGRAM_INSPECT_HOST`.
 
-## Gather only relevant evidence
-
-Start narrow, then expand:
+If Crossgram is stopped or the runner is unavailable, use SSH only for the fallback surface:
 
 ```sh
-# Recent persisted Koishi/Cordis logs
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs logs --limit 200 --since 30m --level warn
-
-# Filter logs by logger name or text
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs logs --name mtproto --grep RPC
-
-# Current MTProto capture buffer through the read-only HTTP API
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --limit 100 --name messages.sendMessage
-
-# Correlate a result, connection, or decoded payload field
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --request-message-id 0x1234
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --connection-id conn-7 --grep RPC_ERROR
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs mtproto --field payload.peer.channelId=42 --since 10m
-
-# Internal message id and every directly related row
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs message 42
-
-# Native platform message id, optionally scoped to a conversation
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs message qq-message-id --platform-id --conversation 12
-
-# Generic table access and read-only SQL
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs tables
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs table mtproto_update_delivery --where published=false --limit 100
-node .agents/skills/inspect-relay/scripts/inspect-relay.mjs sql "SELECT * FROM mtproto_auth_session LIMIT 20"
+ssh root@118.89.184.208 'systemctl status crossgram --no-pager'
+ssh root@118.89.184.208 'journalctl -u crossgram -n 200 --no-pager'
 ```
 
-The `mtproto` command calls `/api/mtproto-debug/events` and falls back to the legacy WebUI snapshot on older deployments. Use `--webui http://127.0.0.1:3140` when the server differs, `--capture-path <path>` for a customized plugin path, or `--legacy-webui` to force the old protocol. Filters include `--since`, `--until`, `--after-id`, `--before-id`, `--id`, `--name`, `--direction`, `--phase`, `--connection-id`, `--message-id`, `--request-message-id`, `--auth-key-id`, `--session-id`, `--grep`, and repeatable `--field path=value`. Add `--compact` for JSONL-friendly compact output and `--output <file>` to save UTF-8 JSON.
+## Write a probe
 
-## Correlate results
+Create a self-contained `.ts` file under the repository `work/` directory. Every probe must export `apply(ctx)` and publish bounded structured results.
 
-For message delivery issues, collect the message bundle first, then query logs and MTProto events using its `primaryPlatformMessageId`, Telegram `tlMessageId`, conversation id, or nearby timestamp. Read [references/schema.md](references/schema.md) only when table relationships are needed.
+```ts
+export async function apply(ctx) {
+  await ctx.debugScript.publish({
+    script: ctx.debugScript.name,
+    generation: ctx.debugScript.generation,
+    value: "ok",
+  });
+}
+```
 
-Never expose `credentials`, `totpSecret`, auth keys, access tokens, or unrelated message contents in the final response. Summarize findings and cite identifiers; retain raw output locally unless the user explicitly requests it.
+Use Cordis-managed effects for listeners, timers, and other resources so removal or hot reload cleans them up:
+
+```ts
+export function apply(ctx) {
+  ctx.on("some/event", (value) => ctx.debugScript.publish(value));
+  ctx.effect(() => {
+    const timer = setInterval(
+      () => ctx.debugScript.publish({ alive: true }),
+      1000,
+    );
+    return () => clearInterval(timer);
+  });
+}
+```
+
+## Common inspections
+
+Query the active database through `ctx.database`; never read credentials or connect separately:
+
+```ts
+export async function apply(ctx) {
+  const rows = await ctx.database
+    .select("mtproto_im_message", { id: 42 })
+    .execute();
+  await ctx.debugScript.publish(rows);
+}
+```
+
+Read recent in-process Cordis logs from the built-in bounded buffer:
+
+```ts
+export async function apply(ctx) {
+  const rows = ctx.logger.buffer
+    .filter((item) => item.name.includes("mtproto"))
+    .slice(-200)
+    .map(({ sn, ts, name, type, level, args }) => ({
+      sn,
+      ts,
+      name,
+      type,
+      level,
+      args,
+    }));
+  await ctx.debugScript.publish(rows);
+}
+```
+
+Inspect services through the same `ctx` received by normal plugins. Do not serialize whole Context, Fiber, socket, request, or database objects; select the exact scalar fields needed.
+
+## Deploy and collect
+
+For a one-shot probe that publishes at least one result:
+
+```sh
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs run work/probe.ts
+```
+
+`run` uploads atomically, waits for a result, prints JSON, and removes the probe. For longer captures:
+
+```sh
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs deploy work/probe.ts --name issue/probe.ts
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs wait issue/probe.ts --result --timeout 30000
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs status issue/probe.ts
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs remove issue/probe.ts
+```
+
+The runtime also expires active probes automatically. Always remove probes explicitly after collecting evidence and run `cleanup` if a previous interrupted investigation left files behind.
+
+## Safety
+
+- Start narrow and publish only identifiers and fields relevant to the issue.
+- Do not publish credentials, TOTP secrets, auth keys, access tokens, or unrelated message contents.
+- Do not mutate production state unless the user explicitly asks for that mutation.
+- Do not run builds, broad scans, unbounded queries, or CPU-heavy analysis on the production server.
+- Keep probes self-contained. Hot reload is transactional for the entry module, but global mutations and unmanaged native handles cannot be rolled back safely.

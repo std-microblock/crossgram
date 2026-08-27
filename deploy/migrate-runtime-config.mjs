@@ -21,6 +21,13 @@ const requiredPlugins = [
   `- id: qq-flash-transfer-bot
   name: '@mtproto-relay/qq-flash-transfer-bot'
 `,
+  `- id: debug-scripts
+  name: '@mtproto-relay/debug-scripts'
+  config:
+    root: /var/lib/crossgram/debug-scripts
+    results: /var/lib/crossgram/debug-results
+    ttl: 1800000
+`,
 ]
 
 export function migrateRuntimeConfig(source) {
