@@ -17,6 +17,7 @@ import {
   TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS,
 } from './message-id.js'
 import { REQUEST_INBOX_CONVERSATION_ID, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
+import type { MessageProjectionPipeline, MessageProjectionPlan } from './message-projection.js'
 
 export interface IngestResult {
   message: IMMessageRow
@@ -118,6 +119,7 @@ export class MessageStore {
       retention: updateDeliveryRetention,
     }),
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
+    private readonly _messageProjection?: MessageProjectionPipeline,
   ) {}
 
   /** Monotonic process-local version used to invalidate materialized read caches. */
@@ -482,7 +484,7 @@ export class MessageStore {
       storedMedia.push(stored)
     }
     const { projection, addedTlMessageIds, removedTlMessageIds } = await this._ensureProjection(
-      database, platformSessionId, conversationRow, message, source, storedMedia,
+      database, session, conversationRow, message, source, storedMedia,
       options.allocation ?? 'live',
       source.nativeOrderKey,
       allocationCache,
@@ -1654,7 +1656,7 @@ export class MessageStore {
 
   private async _ensureProjection(
     database: Database,
-    platformSessionId: string,
+    session: PlatformSession,
     conversation: IMConversationRow,
     message: IMMessageRow,
     source: IMMessage,
@@ -1663,10 +1665,30 @@ export class MessageStore {
     nativeOrderKey: string | undefined,
     allocationCache: ProjectionAllocationCache,
   ): Promise<{ projection: TlMessagePartRow[], addedTlMessageIds: number[], removedTlMessageIds: number[] }> {
-    const article = isArticleMessage(source)
+    const platformSessionId = session.platformSessionId
+    const defaultPlan = (): MessageProjectionPlan => {
+      const article = isArticleMessage(source)
+      return {
+        parts: article
+          ? [{ mediaPartIndex: media[0]?.partIndex }]
+          : media.length
+            ? media.map((item) => ({ mediaPartIndex: item.partIndex }))
+            : [{}],
+        grouped: !article && media.length > 1 && new Set(media.map((item) => item.kind)).size === 1,
+      }
+    }
+    const plan = this._messageProjection
+      ? await this._messageProjection.plan({
+          session,
+          conversation: toConversation(conversation),
+          source,
+          allocation,
+        }, defaultPlan)
+      : defaultPlan()
+    if (!plan.parts.length) throw new Error('message projection plan must contain at least one part')
     const addedTlMessageIds: number[] = []
     const removedTlMessageIds: number[] = []
-    const count = article ? 1 : Math.max(1, media.length)
+    const count = plan.parts.length
     const scope = conversation.kind !== 'direct'
       ? `channel:${platformSessionId}:${conversation.parentPlatformConversationId ?? conversation.platformConversationId}`
       : `account:${platformSessionId}`
@@ -1706,7 +1728,7 @@ export class MessageStore {
       }
       if (Object.keys(values).length) await database.set('mtproto_tl_message_part', { id: part.id }, values)
     }
-    const groupable = !article && count > 1 && new Set(media.map((item) => item.kind)).size === 1
+    const groupable = plan.grouped && count > 1
     let groupedId = existing.find((part) => part.groupedId)?.groupedId ?? groupedIdBeforeMigration
     if (!groupable && groupedId) {
       groupedId = null
@@ -1745,7 +1767,7 @@ export class MessageStore {
           platformSessionId,
           conversationId: conversation.id,
           messageId: message.id,
-          mediaId: media[article ? 0 : ordinal]?.id ?? null,
+          mediaId: projectionMediaId(plan, media, ordinal),
           scope,
           tlMessageId,
           nativeSequence: nativeSequence ?? null,
@@ -1759,7 +1781,7 @@ export class MessageStore {
     const projection = await database.select('mtproto_tl_message_part', { messageId: message.id })
       .orderBy('ordinal').execute()
     const updatedProjection = await Promise.all(projection.map(async (part) => {
-      const mediaId = media[article ? 0 : part.ordinal]?.id ?? null
+      const mediaId = projectionMediaId(plan, media, part.ordinal)
       if (part.mediaId === mediaId && part.groupedId === groupedId) return part
       await database.set('mtproto_tl_message_part', { id: part.id }, { mediaId, groupedId })
       return { ...part, mediaId, groupedId }
@@ -2174,6 +2196,16 @@ function toConversation(row: IMConversationRow): IMConversation {
     avatar: row.avatar === null ? undefined : row.avatar as unknown as IMConversation['avatar'],
     metadata: row.metadata,
   }
+}
+
+function projectionMediaId(
+  plan: MessageProjectionPlan,
+  media: readonly IMMediaRow[],
+  ordinal: number,
+): number | null {
+  const partIndex = plan.parts[ordinal]?.mediaPartIndex
+  if (partIndex === undefined) return null
+  return media.find((item) => item.partIndex === partIndex)?.id ?? null
 }
 
 function messageMetadata(message: IMMessage): JsonObject {

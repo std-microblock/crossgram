@@ -1948,7 +1948,9 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/merged-forward@workspace:packages/merged-forward"
   dependencies:
+    "@mtcute/core": "npm:^0.30.3"
     "@mtproto-relay/bridge": "workspace:*"
+    "@mtproto-relay/mtproto": "workspace:*"
     long: "npm:^5.3.2"
     vitest: "npm:^4.1.10"
   peerDependencies:

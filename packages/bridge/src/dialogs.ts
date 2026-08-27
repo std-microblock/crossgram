@@ -38,6 +38,7 @@ import {
   decodeDialogFilterTitle, encodeDialogFilterTitle,
   type DialogFolderStore, type StoredDialogFilter,
 } from './dialog-folders.js'
+import type { MessageProjectionPipeline } from './message-projection.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -274,6 +275,7 @@ export class DialogRpc {
     private readonly _dialogFolders?: DialogFolderStore,
     private readonly _systemPeers?: SystemPeerService,
     private readonly _conversationViews?: ConversationViewService,
+    private readonly _messageProjection?: MessageProjectionPipeline,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     if (store) {
@@ -350,7 +352,6 @@ export class DialogRpc {
     // absent during cold start. The no-store path still allocates Telegram IDs
     // oldest-first from history.
     if (!this._store) await Promise.all(all.map((dialog) => this._loadHistory(dialog.conversation.id)))
-    await this._prepareConversationViewTargets(all.flatMap((dialog) => dialog.lastMessage ? [dialog.lastMessage] : []))
     const projectionsAt = performance.now()
     const dialogProjections = new Map<string, MaterializedMessage[]>()
     if (this._store) {
@@ -660,7 +661,6 @@ export class DialogRpc {
     const selectAt = performance.now()
     const visible = await this._visibleMessages(all)
     const { filtered, start, page } = selectHistoryWindow(visible, req)
-    await this._prepareConversationViewTargets(page.map((item) => item.source))
     const selectMs = performance.now() - selectAt
     const conversation = this._conversation(peerId)
     const sendersAt = performance.now()
@@ -670,14 +670,15 @@ export class DialogRpc {
       : []
     const sendersMs = performance.now() - sendersAt
     const projectAt = performance.now()
+    const projected = await this._projectMessages(page)
     const result = {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
-      messages: await this._projectMessages(page),
+      messages: projected.messages,
       topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
-        ...this._linkedChats(page.map((item) => item.source)),
+        ...projected.chats,
       ]),
       users: uniqueUsers([...peerUser, ...senders, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
@@ -726,13 +727,14 @@ export class DialogRpc {
     const users = await this._messageSenders(page.map((item) => item.source))
     const count = filtered.length
     const sliced = requestedLimit === 0 ? count > 0 : page.length < count || start > 0
+    const projected = await this._projectMessages(page)
     return {
       _: sliced ? 'messages.messagesSlice' : 'messages.messages',
       ...(sliced ? { count } : {}),
-      messages: await this._projectMessages(page), topics: [],
+      messages: projected.messages, topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
-        ...this._linkedChats(page.map((item) => item.source)),
+        ...projected.chats,
       ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
@@ -787,13 +789,17 @@ export class DialogRpc {
       minId: req.minId,
     })
     const users = await this._messageSenders(page.map((item) => item.source))
+    const projected = await this._projectMessages(page)
     return {
       _: page.length < filtered.length ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length ? { count: filtered.length } : {}),
-      messages: await this._projectMessages(page), topics: [],
-      chats: conversation.kind === 'direct' ? [] : [this._makeChat(
-        conversation.parentId ? this._conversation(conversation.parentId) : conversation,
-      )],
+      messages: projected.messages, topics: [],
+      chats: uniqueChats([
+        ...(conversation.kind === 'direct' ? [] : [this._makeChat(
+          conversation.parentId ? this._conversation(conversation.parentId) : conversation,
+        )]),
+        ...projected.chats,
+      ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
   }
@@ -914,13 +920,14 @@ export class DialogRpc {
     const sliced = Boolean(
       hasMore || cursorState || req.offsetId > 0 || start > 0 || requestedLimit === 0 && count > 0,
     )
+    const projected = await this._projectMessages(page)
     return {
       _: sliced ? 'messages.messagesSlice' : 'messages.messages',
       ...(sliced ? { count } : {}),
-      messages: await this._projectMessages(page), topics: [],
+      messages: projected.messages, topics: [],
       chats: uniqueChats([
         ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
-        ...this._linkedChats(page.map((item) => item.source)),
+        ...projected.chats,
       ]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     } as unknown as tl.messages.TypeMessages
@@ -1026,7 +1033,7 @@ export class DialogRpc {
   ): Promise<tl.messages.TypeMessages> {
     const users = new Map<number, tl.RawUser>()
     const messages: tl.TypeMessage[] = []
-    const linkedSources: IMMessage[] = []
+    const projectionChats: tl.TypeChat[] = []
 
     for (const input of ids) {
       const requestedId = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
@@ -1090,8 +1097,9 @@ export class DialogRpc {
         continue
       }
       const referencedUsers = await this._messageUsers(found.source)
-      messages.push(await this._projectMessage(found))
-      linkedSources.push(found.source)
+      const rendered = await this._makeMessage(found)
+      messages.push(rendered.message)
+      projectionChats.push(...rendered.chats)
       for (const user of referencedUsers) users.set(user.id, user)
     }
 
@@ -1107,7 +1115,7 @@ export class DialogRpc {
       messages, topics: [],
       chats: uniqueChats([
         ...(expectedConversation ? [this._makeChat(expectedConversation)] : []),
-        ...this._linkedChats(linkedSources),
+        ...projectionChats,
       ]),
       users: [...users.values()],
     } as unknown as tl.messages.TypeMessages
@@ -1487,11 +1495,13 @@ export class DialogRpc {
     }
     const users = await this._messageSenders(page.map((item) => item.top.source))
     const pts = await this._channelPts(parent)
+    const projected = await this._projectMessages(page.map((item) => item.top))
     return {
       _: 'messages.forumTopics', count,
       topics: page.map((item) => item.topic),
-      messages: await this._projectMessages(page.map((item) => item.top)),
-      chats: [this._makeChat(parent)], users: uniqueUsers([...users, this._makeSelfUser()]), pts,
+      messages: projected.messages,
+      chats: uniqueChats([this._makeChat(parent), ...projected.chats]),
+      users: uniqueUsers([...users, this._makeSelfUser()]), pts,
     }
   }
 
@@ -1534,10 +1544,11 @@ export class DialogRpc {
     const topic = (await this._materializeTopic(this._conversation(parentId), child)).topic
     const users = await this._messageSenders(page.map((item) => item.source))
     const pts = await this._channelPts(this._conversation(parentId))
+    const projected = await this._projectMessages(page)
     return {
       _: 'messages.channelMessages', pts, count: filtered.length,
-      messages: await this._projectMessages(page), topics: [topic],
-      chats: [this._makeChat(this._conversation(parentId))],
+      messages: projected.messages, topics: [topic],
+      chats: uniqueChats([this._makeChat(this._conversation(parentId)), ...projected.chats]),
       users: uniqueUsers([...users, this._makeSelfUser()]),
     }
   }
@@ -3941,62 +3952,98 @@ export class DialogRpc {
     }
   }
 
-  private async _projectMessages(items: readonly MaterializedMessage[]): Promise<tl.TypeMessage[]> {
-    await this._prepareConversationViewTargets(items.map((item) => item.source))
-    return items.map((item) => this._makeMessage(item))
+  private async _projectMessages(
+    items: readonly MaterializedMessage[],
+  ): Promise<{ messages: tl.TypeMessage[], chats: tl.TypeChat[] }> {
+    const projected = await Promise.all(items.map((item) => this._makeMessage(item)))
+    return {
+      messages: projected.map((item) => item.message),
+      chats: uniqueChats(projected.flatMap((item) => item.chats)),
+    }
   }
 
   private async _projectMessage(item: MaterializedMessage): Promise<tl.TypeMessage> {
-    return (await this._projectMessages([item]))[0]!
+    return (await this._projectMessages([item])).messages[0]!
   }
 
-  private _makeMessage(item: MaterializedMessage): tl.TypeMessage {
+  private async _makeMessage(
+    item: MaterializedMessage,
+  ): Promise<import('./message-projection.js').MessageProjectionResult> {
     const source = this._blockedPeers?.filterMessageReactions(
       this._session.platformSessionId, item.source,
     ) ?? item.source
     const { tlId } = item
     const conversation = this._conversation(source.conversationId)
-    const sticker = source.content.parts.find((part) => part.type === 'sticker')
-    const card = source.content.parts.find((part) => part.type === 'card')
-    const richMessage = makeTlArticleMedia(
-      source, item.mediaRows ?? [], this._dcId, {
-        userId: this._userId.bind(this),
-        customEmojiId: this._reactions ? (definition) => {
-          const reaction = this._reactions!.toTlReaction(source.conversationId, definition)
-          return reaction._ === 'reactionCustomEmoji' ? reaction.documentId.toNumber() : undefined
-        } : undefined,
-        conversationLink: (linked) => this._conversationLinkUrl(linked),
-      },
-    )
-    const reply = this._messageReplyHeader(source)
-    return projectTlMessage({
-      conversation,
+    const draft: import('./message-projection.js').MessageProjectionDraft = {
       source,
-      tlId,
+      chats: [] as tl.TypeChat[],
+    }
+    const fallback = () => {
+      const projectedSource = draft.source
+      const sticker = projectedSource.content.parts.find((part) => part.type === 'sticker')
+      const card = projectedSource.content.parts.find((part) => part.type === 'card')
+      const reply = this._messageReplyHeader(projectedSource)
+      const richMessage = draft.richMessage ?? makeTlArticleMedia(
+        projectedSource, item.mediaRows ?? [], this._dcId, {
+          userId: this._userId.bind(this),
+          customEmojiId: this._reactions ? (definition) => {
+            const reaction = this._reactions!.toTlReaction(projectedSource.conversationId, definition)
+            return reaction._ === 'reactionCustomEmoji' ? reaction.documentId.toNumber() : undefined
+          } : undefined,
+        },
+      )
+      return {
+        message: projectTlMessage({
+          conversation,
+          source: projectedSource,
+          tlId,
+          ordinal: item.ordinal,
+          fromId: {
+            _: 'peerUser',
+            userId: projectedSource.outgoing ? this._selfId : this._userId(projectedSource.senderId),
+          },
+          peerId: this._conversationPeer(conversation),
+          groupedId: item.groupedId ?? undefined,
+          richMessage,
+          media: richMessage ? undefined : (draft.media ?? (item.media
+            ? makeTlMessageMedia(item.media, projectedSource.timestamp, this._dcId)
+            : sticker?.type === 'sticker'
+              ? this._stickers?.makeMessageMedia(sticker.sticker)
+              : card?.type === 'card'
+                ? makeTlCardPreview(card.card, this._dcId)
+                : undefined)),
+          entities: draft.entities ?? (item.ordinal === 0 ? this._messageEntities(projectedSource) : undefined),
+          reactions: projectedSource.reactionContext?.reactions.length
+            ? this._reactions?.messageReactions(
+                projectedSource.conversationId, projectedSource, (id) => this._userId(id),
+              )
+            : undefined,
+          replyToTlId: reply?.replyToMsgId,
+          topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
+          mentioned: item.ordinal === 0 && this._messageMentioned(projectedSource, reply?.replyToMsgId),
+          unreadMention: item.unreadMention,
+        }),
+        chats: draft.chats,
+      }
+    }
+    if (!this._messageProjection) return fallback()
+    return this._messageProjection.project({
+      mode: 'history',
+      session: this._session,
+      conversation,
+      tlMessageId: tlId,
       ordinal: item.ordinal,
-      fromId: {
-        _: 'peerUser',
-        userId: source.outgoing ? this._selfId : this._userId(source.senderId),
-      },
-      peerId: this._conversationPeer(conversation),
-      groupedId: item.groupedId ?? undefined,
-      richMessage,
-      media: richMessage ? undefined : (item.media
-        ? makeTlMessageMedia(item.media, source.timestamp, this._dcId)
-        : sticker?.type === 'sticker'
-          ? this._stickers?.makeMessageMedia(sticker.sticker)
-          : card?.type === 'card'
-            ? makeTlCardPreview(card.card, this._dcId)
-            : this._conversationPreviewMedia(source)),
-      entities: item.ordinal === 0 ? this._messageEntities(source) : undefined,
-      reactions: source.reactionContext?.reactions.length
-        ? this._reactions?.messageReactions(source.conversationId, source, (id) => this._userId(id))
-        : undefined,
-      replyToTlId: reply?.replyToMsgId,
-      topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
-      mentioned: item.ordinal === 0 && this._messageMentioned(source, reply?.replyToMsgId),
-      unreadMention: item.unreadMention,
-    })
+      draft,
+      loadConversation: async (linked) => (await this._loadHistory(linked.id, { limit: 200 }))
+        .filter((candidate) => candidate.ordinal === 0)
+        .map((candidate) => ({
+          conversationId: linked.id,
+          platformMessageId: candidate.source.id,
+          tlMessageId: candidate.tlId,
+          timestamp: candidate.source.timestamp,
+        })),
+      bindConversation: (_linked, _chatId, target) => this._rememberConversationViewTarget(target),
+    }, fallback)
   }
 
   private _rememberMessage(item: MaterializedMessage): void {
@@ -4260,11 +4307,6 @@ export class DialogRpc {
             length: entity.length,
             userId: this._userId(entity.userId),
           })
-        } else if (entity.type === 'conversation-link') {
-          const url = this._conversationLinkUrl(entity.conversation)
-          if (url) output.push({
-            _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length, url,
-          })
         } else if (entity.type === 'text-link') {
           output.push({
             _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
@@ -4307,54 +4349,6 @@ export class DialogRpc {
     return output.length ? output : undefined
   }
 
-  private async _prepareConversationViewTargets(messages: readonly IMMessage[]): Promise<void> {
-    if (!this._platform.getHistory || !this._conversationViews) return
-    const targets = await this._conversationViews.prepareTargets(
-      this._session.platformSessionId,
-      messages,
-      (conversation) => this._peerId(conversation.id),
-      async (conversation) => {
-        try {
-          // Telegram Android opens a linked message and then grows history
-          // upward. Target the newest archived message so the whole transcript
-          // remains reachable instead of stranding everything after its first
-          // message below the initial viewport.
-          const history = await this._loadHistory(conversation.id, { limit: 200 })
-          const latest = history
-            .filter((item) => item.ordinal === 0)
-            .sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId)[0]
-          if (!latest) return
-          return {
-            conversationId: conversation.id,
-            platformMessageId: latest.source.id,
-            tlMessageId: latest.tlId,
-          }
-        } catch {
-          // A failed optional lookup leaves the conversation view addressable.
-        }
-      },
-    )
-    for (const target of targets) this._rememberConversationViewTarget(target)
-  }
-
-  private _conversationPreviewMedia(source: IMMessage): tl.RawMessageMediaWebPage | undefined {
-    const linked = source.content.parts
-      .filter((part) => part.type === 'text')
-      .flatMap((part) => part.entities ?? [])
-      .find((entity) => entity.type === 'conversation-link')
-    if (!linked || linked.type !== 'conversation-link') return
-
-    const chatId = this._peerId(linked.conversation.id)
-    this._conversationLinkUrl(linked.conversation)
-    return this._conversationViews?.makePreview(this._session.platformSessionId, chatId)
-  }
-
-  private _conversationLinkUrl(conversation: import('./platform.js').IMConversation): string | undefined {
-    const chatId = this._peerId(conversation.id)
-    this._conversations.set(conversation.id, conversation)
-    return this._conversationViews?.remember(this._session.platformSessionId, chatId, conversation)
-  }
-
   private _rememberConversationViewTarget(target: ConversationViewMessageTarget): void {
     this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}`, target.tlMessageId)
     this._messageToTl.set(`${target.conversationId}\u0000${target.platformMessageId}\u00000`, target.tlMessageId)
@@ -4362,24 +4356,6 @@ export class DialogRpc {
       peerId: target.conversationId,
       platformMessageId: target.platformMessageId,
       ordinal: 0,
-    })
-  }
-
-  private _linkedChats(messages: readonly IMMessage[]): tl.TypeChat[] {
-    const conversations = new Map<string, import('./platform.js').IMConversation>()
-    for (const message of messages) {
-      for (const part of message.content.parts) {
-        if (part.type !== 'text') continue
-        for (const entity of part.entities ?? []) {
-          if (entity.type !== 'conversation-link') continue
-          conversations.set(entity.conversation.id, entity.conversation)
-        }
-      }
-    }
-    return [...conversations.values()].map((conversation) => {
-      this._conversations.set(conversation.id, conversation)
-      this._peerId(conversation.id)
-      return this._makeChat(conversation)
     })
   }
 

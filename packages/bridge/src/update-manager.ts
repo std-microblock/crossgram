@@ -22,6 +22,7 @@ import type { ConversationViewService } from './conversation-view.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 import { updateFromJson, updateToJson } from './update-json.js'
+import type { MessageProjectionPipeline } from './message-projection.js'
 
 export interface MentionReadPublishResult {
   pts: number
@@ -48,6 +49,7 @@ export class UpdateManager {
     private readonly _blockedPeers?: BlockedPeerStore,
     private readonly _registerReactions?: (session: PlatformSession, message: IMMessage) => void,
     private readonly _conversationViews?: ConversationViewService,
+    private readonly _messageProjection?: MessageProjectionPipeline,
   ) {}
 
   private async _hydrateReactionUsers(
@@ -557,7 +559,6 @@ export class UpdateManager {
       ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
       : undefined
     const platform = this._registry.require(session.platformId)
-    await this._prepareConversationViewTargets(session, platform, visibleMessage)
     const selfProfile = await platform.getUser?.(session, session.userId)
       ?? {
         id: session.userId,
@@ -586,6 +587,7 @@ export class UpdateManager {
     let pts = delivery.pts - delivery.ptsCount
     const addedTlMessageIds = new Set(result.addedTlMessageIds)
     const updates: tl.TypeUpdate[] = []
+    const projectionChats: tl.TypeChat[] = []
     for (const part of result.projection) {
       const projected = await this._store.findProjectedByTlId(
         session.platformSessionId, part.tlMessageId, event.conversation.id,
@@ -635,8 +637,6 @@ export class UpdateManager {
           )
         }
       }
-      const sticker = projected.source.content.parts.find((item) => item.type === 'sticker')
-      const card = projected.source.content.parts.find((item) => item.type === 'card')
       const mentioned = event.conversation.kind !== 'direct'
         && part.ordinal === 0 && projected.source.outgoing !== true && (
         messageMentionsUser(projected.source, session.userId)
@@ -651,51 +651,71 @@ export class UpdateManager {
           true,
         )
       }
-      const richMessage = makeTlArticleMedia(
-        projected.source, projected.media, this._dcId, {
-          userId: (platformUserId) => requiredUserId(userIds, platformUserId),
-          customEmojiId: (definition) => customReactionDocumentId(session.platformSessionId, definition),
-          conversationLink: (linked) => conversationLinkUrl(
-            session.platformSessionId, linked, this._conversationViews,
-          ),
-        },
-      )
-      const message = projectTlMessage({
-        conversation: displayConversation,
+      const draft: import('./message-projection.js').MessageProjectionDraft = {
         source: projected.source,
-        tlId: part.tlMessageId,
-        ordinal: part.ordinal,
-        groupedId: part.groupedId ?? undefined,
-        fromId: { _: 'peerUser', userId: event.message.outgoing ? selfRow.id : senderRow.id },
-        peerId: directPeerRow ? { _: 'peerUser', userId: directPeerRow.id } : undefined,
-        richMessage,
-        media: richMessage ? undefined : (media
-          ? makeTlMessageMedia(media, projected.source.timestamp, this._dcId)
-          : sticker?.type === 'sticker'
-            ? this._projectSticker?.(session, sticker.sticker)
-            : card?.type === 'card'
-              ? makeTlCardPreview(card.card, this._dcId)
-               : makeConversationPreviewMedia(
-                   projected.source, session.platformSessionId, this._conversationViews,
-                 )),
-        entities: makeMessageEntities(
-          projected.source, session.platformSessionId, userIds, this._conversationViews,
-        ),
-        reactions: visibleMessage.reactionContext?.reactions.length
-          ? makeMessageReactions(
-              this._blockedPeers?.filterMessageReactions(session.platformSessionId, projected.source)
-                ?? projected.source,
-              session.platformSessionId,
-              (userId) => userIds.get(userId),
-              platform.capabilities.reactions?.actorList === true,
-              session.userId,
-            )
-          : undefined,
-        topicId,
-        replyToTlId: replied?.parts[0]?.tlMessageId ?? nativeReplyTo,
-        mentioned,
-        unreadMention: mentioned,
-      })
+        chats: [] as tl.TypeChat[],
+      }
+      const fallback = () => {
+        const projectedSource = draft.source
+        const projectedSticker = projectedSource.content.parts.find((item) => item.type === 'sticker')
+        const projectedCard = projectedSource.content.parts.find((item) => item.type === 'card')
+        const richMessage = draft.richMessage ?? makeTlArticleMedia(
+          projectedSource, projected.media, this._dcId, {
+            userId: (platformUserId) => requiredUserId(userIds, platformUserId),
+            customEmojiId: (definition) => customReactionDocumentId(session.platformSessionId, definition),
+          },
+        )
+        return {
+          message: projectTlMessage({
+            conversation: displayConversation,
+            source: projectedSource,
+            tlId: part.tlMessageId,
+            ordinal: part.ordinal,
+            groupedId: part.groupedId ?? undefined,
+            fromId: { _: 'peerUser', userId: projectedSource.outgoing ? selfRow.id : senderRow.id },
+            peerId: directPeerRow ? { _: 'peerUser', userId: directPeerRow.id } : undefined,
+            richMessage,
+            media: richMessage ? undefined : (draft.media ?? (media
+              ? makeTlMessageMedia(media, projectedSource.timestamp, this._dcId)
+              : projectedSticker?.type === 'sticker'
+                ? this._projectSticker?.(session, projectedSticker.sticker)
+                : projectedCard?.type === 'card'
+                  ? makeTlCardPreview(projectedCard.card, this._dcId)
+                  : undefined)),
+            entities: draft.entities ?? makeMessageEntities(
+              projectedSource, session.platformSessionId, userIds,
+            ),
+            reactions: projectedSource.reactionContext?.reactions.length
+              ? makeMessageReactions(
+                  this._blockedPeers?.filterMessageReactions(session.platformSessionId, projectedSource)
+                    ?? projectedSource,
+                  session.platformSessionId,
+                  (userId) => userIds.get(userId),
+                  platform.capabilities.reactions?.actorList === true,
+                  session.userId,
+                )
+              : undefined,
+            topicId,
+            replyToTlId: replied?.parts[0]?.tlMessageId ?? nativeReplyTo,
+            mentioned,
+            unreadMention: mentioned,
+          }),
+          chats: draft.chats,
+        }
+      }
+      const rendered = this._messageProjection
+        ? await this._messageProjection.project({
+            mode: 'update',
+            session,
+            conversation: displayConversation,
+            tlMessageId: part.tlMessageId,
+            ordinal: part.ordinal,
+            draft,
+            loadConversation: (linked) => this._loadProjectionCandidates(session, platform, linked),
+          }, fallback)
+        : fallback()
+      const message = rendered.message
+      projectionChats.push(...rendered.chats)
       updates.push({
         _: isEdit && !addedTlMessageIds.has(part.tlMessageId)
           ? event.conversation.kind !== 'direct' ? 'updateEditChannelMessage' : 'updateEditMessage'
@@ -743,8 +763,7 @@ export class UpdateManager {
       ...(displayConversation.kind === 'direct'
         ? []
         : [this._makeChat(session, displayConversation, topicId !== undefined)]),
-      ...linkedConversations(event.message).map((conversation) =>
-        this._makeChat(session, conversation)),
+      ...projectionChats,
     ]
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users, chats, date: delivery.date, seq: delivery.seq,
@@ -824,52 +843,27 @@ export class UpdateManager {
     return payload
   }
 
-  private async _prepareConversationViewTargets(
+  private async _loadProjectionCandidates(
     session: PlatformSession,
     platform: IMPlatform,
-    message: IMMessage,
-  ): Promise<void> {
-    if (!this._conversationViews) return
-    await this._conversationViews.prepareTargets(
-      session.platformSessionId,
-      [message],
-      (conversation) => stableId(`peer:${conversation.id}`),
-      async (conversation) => {
-        try {
-          let tlMessageId = await this._store.getNewestTlMessageId(
-            session.platformSessionId, conversation.id,
-          )
-          if (!tlMessageId && platform.getHistory) {
-            const history = await platform.getHistory(session, { id: conversation.id }, { limit: 200 })
-            if (history.messages.length) {
-              await this._store.ingestMany(
-                session, conversation,
-                history.messages.slice().sort((left, right) =>
-                  left.timestamp - right.timestamp || left.id.localeCompare(right.id)),
-                { allocation: 'history' },
-              )
-              tlMessageId = await this._store.getNewestTlMessageId(
-                session.platformSessionId, conversation.id,
-              )
-            }
-          }
-          if (!tlMessageId) return
-          const projected = await this._store.findProjectedByTlId(
-            session.platformSessionId, tlMessageId, conversation.id,
-          )
-          if (!projected) return
-          return {
-            conversationId: conversation.id,
-            platformMessageId: projected.source.id,
-            tlMessageId,
-          }
-        } catch (error) {
-          this._onTrace?.(
-            'conversation view target failed conversation=%s error=%s', conversation.id, String(error),
-          )
-        }
-      },
+    conversation: IMConversation,
+  ): Promise<import('./message-projection.js').LinkedConversationProjectionCandidate[]> {
+    if (!platform.getHistory) return []
+    const history = await platform.getHistory(session, { id: conversation.id }, { limit: 200 })
+    if (!history.messages.length) return []
+    const ordered = history.messages.slice().sort((left, right) =>
+      left.timestamp - right.timestamp || left.id.localeCompare(right.id))
+    const ingested = await this._store.ingestMany(
+      session, conversation, ordered, { allocation: 'history' },
     )
+    return ingested.flatMap((result, index) => result.projection
+      .filter((part) => part.ordinal === 0)
+      .map((part) => ({
+        conversationId: conversation.id,
+        platformMessageId: ordered[index]!.id,
+        tlMessageId: part.tlMessageId,
+        timestamp: ordered[index]!.timestamp,
+      })))
   }
 
   private _makeChat(session: PlatformSession, conversation: IMConversation, forum = false): tl.TypeChat {
@@ -1078,7 +1072,6 @@ function makeMessageEntities(
   message: IMMessage,
   platformSessionId: string,
   userIds: ReadonlyMap<string, number>,
-  conversationViews?: ConversationViewService,
 ): tl.TypeMessageEntity[] | undefined {
   const entities: tl.TypeMessageEntity[] = []
   const rendered = message.content.parts.flatMap((part) => {
@@ -1093,11 +1086,6 @@ function makeMessageEntities(
         entities.push({
           _: 'messageEntityMentionName', offset: base + entity.offset, length: entity.length,
           userId: requiredUserId(userIds, entity.userId),
-        })
-      } else if (entity.type === 'conversation-link') {
-        const url = conversationLinkUrl(platformSessionId, entity.conversation, conversationViews)
-        if (url) entities.push({
-          _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length, url,
         })
       } else if (entity.type === 'text-link') {
         entities.push({
@@ -1148,17 +1136,6 @@ function requiredUserId(userIds: ReadonlyMap<string, number>, platformUserId: st
   return id
 }
 
-function linkedConversations(message: IMMessage): import('./platform.js').IMConversation[] {
-  const conversations = new Map<string, import('./platform.js').IMConversation>()
-  for (const part of message.content.parts) {
-    if (part.type !== 'text') continue
-    for (const entity of part.entities ?? []) {
-      if (entity.type === 'conversation-link') conversations.set(entity.conversation.id, entity.conversation)
-    }
-  }
-  return [...conversations.values()]
-}
-
 function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): tl.TypeChat {
   const id = stableId(`peer:${conversation.id}`)
   const broadcast = conversation.metadata?.broadcast === true
@@ -1178,28 +1155,6 @@ function makeUpdateChat(conversation: IMConversation, forum = false, dcId = 1): 
       : { _: 'chatPhotoEmpty' }, date: 0,
     participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
   }
-}
-
-function conversationLinkUrl(
-  platformSessionId: string,
-  conversation: IMConversation,
-  conversationViews?: ConversationViewService,
-): string | undefined {
-  return conversationViews?.remember(
-    platformSessionId, stableId(`peer:${conversation.id}`), conversation,
-  )
-}
-
-function makeConversationPreviewMedia(
-  message: IMMessage,
-  platformSessionId: string,
-  conversationViews?: ConversationViewService,
-): tl.RawMessageMediaWebPage | undefined {
-  const linked = linkedConversations(message)[0]
-  if (!linked) return
-  const chatId = stableId(`peer:${linked.id}`)
-  conversationViews?.remember(platformSessionId, chatId, linked)
-  return conversationViews?.makePreview(platformSessionId, chatId)
 }
 
 function makeUpdateAvatar(mediaId: string, dcId: number, kind: 'user'): tl.RawUserProfilePhoto

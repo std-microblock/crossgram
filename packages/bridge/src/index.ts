@@ -61,6 +61,7 @@ import { ConversationViewService } from './conversation-view.js'
 import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.js'
 import { BridgeManagementError, BridgeManagementService } from './management-service.js'
 import { registerGroupFilesMiniApp } from './group-files-miniapp.js'
+import { MessageProjectionPipeline } from './message-projection.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
@@ -96,6 +97,7 @@ export * from './sticker-dashboard.js'
 export * from './active-sessions.js'
 export * from './management-service.js'
 export * from './bot-dashboard.js'
+export * from './message-projection.js'
 
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui', 'updateStore']
@@ -218,6 +220,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   }
   const authTransfers = new AuthTransferStore()
   const loginTokens = new LoginTokenStore()
+  const messageProjection = new MessageProjectionPipeline(ctx)
 
   defineModels(ctx)
   const activeSessions = new ActiveSessionStore(
@@ -228,7 +231,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (authKeyId, originConnection) => ctx.mtproto.beginAuthKeyRevocation(authKeyId, originConnection),
     authKeyId => ctx.mtproto.finishAuthKeyRevocation(authKeyId),
   )
-  const store = new MessageStore(ctx.database, undefined, ctx.updateStore, historyTrace)
+  const store = new MessageStore(ctx.database, undefined, ctx.updateStore, historyTrace, messageProjection)
   const drafts = new DraftStore(ctx.database)
   const notificationSettings = new NotificationSettingsStore(
     ctx.database, config.autoMuteGroupChats ?? true,
@@ -268,6 +271,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, message) => reactionRpcFor(registry.require(session.platformId), session)
       .registerContext(message.conversationId, message.reactionContext),
     conversationViews,
+    messageProjection,
   )
   const builtInMediaProvider = createBuiltInVoiceMediaProvider({
     serverHost: config.serverHost,
@@ -403,6 +407,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       await calls.replay(session, authKeyId)
     },
     conversationViews,
+    messageProjection,
   )
   new MtprotoBridgeService(ctx, requireBridgeSession)
   registerGroupFilesMiniApp(ctx, platforms, requireBridgeSession, config.groupFilesMiniApp)
@@ -847,8 +852,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getAllDrafts())
   rpc.register('messages.getHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
-  rpc.register('messages.getFullChat', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.getFullChat(req as tl.messages.RawGetFullChatRequest))
   rpc.register('messages.getMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
   rpc.register('channels.getMessages', async (rpc, req) =>
@@ -1338,6 +1341,7 @@ export function createSessionResolver(
     rpc: ServerRpcContext,
   ) => void | Promise<void>,
   conversationViews?: ConversationViewService,
+  messageProjection?: MessageProjectionPipeline,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
   const authorizedConnections = new WeakSet<object>()
@@ -1420,6 +1424,7 @@ export function createSessionResolver(
         dialogFolders,
         systemPeers,
         conversationViews,
+        messageProjection,
       )
       return state
     }
