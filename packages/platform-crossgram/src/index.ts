@@ -11,6 +11,7 @@ import {
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage, type IMGroupFilePage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
   type IMMediaInput, type IMMediaUploadPreparation, type IMMediaUploadProbe,
+  type IMMessageBundle, type IMMessageSnapshot, type JsonValue,
   type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMTransferOptions,
   type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
   type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
@@ -67,7 +68,6 @@ const REACTION_CATALOG_RPC_GRACE_MS = 250
 const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
-const MULTI_FORWARD_CONVERSATION_PREFIX = 'qqnt-multi-forward:'
 const MULTI_FORWARD_CACHE_LIMIT = 256
 const SPLIT_OUTGOING_MESSAGE_CACHE_LIMIT = 4_096
 const INVALID_ZERO_PEER_CONVERSATION_ID = '0'
@@ -197,6 +197,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       operation: 'accept' | 'reject' | 'hangup',
     ) => this.client.controlCall(callRef, operation),
   }
+  readonly messageBundles = {
+    load: (session: PlatformSession, locator: JsonValue) =>
+      this.loadMessageBundle(session, parseMultiForwardLocator(locator)),
+  }
   private readonly database?: Database
   private readonly qqVoiceMedia?: QQVoiceMedia
   private readonly conversations = new Map<string, IMConversation<QQMediaLocator>>()
@@ -208,7 +212,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
   private readonly splitOutgoingMessages = new Map<string, WireMessage>()
-  private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
   private readonly multiForwardMessages = new Map<string, Promise<WireMessage[]>>()
   private readonly multiForwardPreviewJobs = new Map<string, Promise<string | undefined>>()
   private readonly legacyDialogCleanupJobs = new Map<string, Promise<void>>()
@@ -667,9 +670,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversationId: string,
   ): Promise<IMConversation<QQMediaLocator> | null> {
     if (isInvalidZeroPeerConversationId(conversationId)) return null
-    if (isMultiForwardConversationId(conversationId)) {
-      return this.conversations.get(conversationId) ?? null
-    }
     const wireId = await this.wireConversationId(_session, conversationId)
     return this.mapConversation(await this.client.getConversation(wireId), _session)
   }
@@ -773,33 +773,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<QQMediaLocator>> {
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
-    const multiForward = this.multiForwardLocators.get(conversation.id)
-    if (multiForward) {
-      const messages = selectMultiForwardHistory(
-        (await this.loadMultiForwardMessages(multiForward))
-          .filter((message) => !this.isFilteredGrayTip(message)),
-        query,
-      )
-      const senders = new Map<string, Promise<IMUser<QQMediaLocator> | null>>()
-      await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
-      return {
-        messages: await Promise.all(messages.map(async (message) => {
-          const mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), multiForward)
-          let sender = mapped.sender
-          if (!sender) {
-            let pending = senders.get(message.senderId)
-            if (!pending) {
-              pending = this.getUser(session, message.senderId).catch(() => null)
-              senders.set(message.senderId, pending)
-            }
-            sender = (await pending) ?? undefined
-          }
-          return this.prepareRequestedMessage(session, this.conversationFor(conversation.id), {
-            ...mapped, sender, conversationId: conversation.id,
-          })
-        })),
-      }
-    }
     if (isFilteredConversationId(conversation.id)) return { messages: [] }
     const response = await this.client.getHistory(
       await this.wireConversationId(session, conversation.id), {
@@ -1339,6 +1312,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
         if (part.type === 'text') return { ...part }
         if (part.type === 'card') return { type: 'text' as const, text: messagePartText(part) }
+        if (part.type === 'message-bundle') return { type: 'text' as const, text: part.bundle.title }
         if (part.type === 'sticker') return {
           type: 'sticker' as const,
           sticker: {
@@ -1746,26 +1720,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         await database.remove('mtproto_notification_settings', { id: { $in: notificationSettingIds } })
       }
 
-      const fakeUsers = (await database.get('mtproto_im_user', {
-        platformId: session.platformId,
-      })).filter((row) => isMultiForwardConversationId(row.platformUserId))
-      if (fakeUsers.length) {
-        const fakeUserIds = fakeUsers.map((row) => row.id)
-        const referenced = new Set((await database.get('mtproto_im_message', {
-          senderUserId: { $in: fakeUserIds },
-        })).map((row) => row.senderUserId))
-        const unused = fakeUserIds.filter((id) => !referenced.has(id))
-        if (unused.length) await database.remove('mtproto_im_user', { id: { $in: unused } })
-      }
       for (const id of platformConversationIds) {
         this.conversations.delete(id)
         this.firstUnreadSeq.delete(id)
       }
       this.logger?.warn(
-        'Removed persisted filtered QQ dialogs session=%s conversations=%d messages=%d zeroPeers=%d mergedForwards=%d',
+        'Removed persisted filtered QQ dialogs session=%s conversations=%d messages=%d zeroPeers=%d',
         session.platformSessionId, conversations.length, messages.length,
         platformConversationIds.filter(isInvalidZeroPeerConversationId).length,
-        platformConversationIds.filter(isMultiForwardConversationId).length,
       )
     }).then(() => {
       this.legacyDialogCleanupSessions.add(session.platformSessionId)
@@ -1935,7 +1897,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     input = this.splitOutgoingMessages.get(input.id) ?? input
     const message = mapMessage(
       conversationId ? { ...input, conversationId } : input,
-      this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
+      this.reactionCatalog, this.stickerProviderId,
       (media) => this.mediaPreviews.project(media),
     )
     return message
@@ -1990,57 +1952,42 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMMessage<QQMediaLocator>> {
     let changed = false
     const parts = await Promise.all(message.content.parts.map(async (part) => {
-      if (part.type !== 'text' || !part.entities?.some((entity) => entity.type === 'conversation-link')) {
-        return part
-      }
-      const entities = await Promise.all(part.entities.map(async (entity) => {
-        if (entity.type !== 'conversation-link') return entity
-        const existing = entity.conversation.metadata?.conversationViewPreview
-        if (typeof existing === 'string' && isDetailedMultiForwardPreview(existing)) return entity
-        const preview = await this.resolveMultiForwardPreview(entity.conversation)
-        if (!preview) return entity
-        changed = true
-        const conversation = {
-          ...entity.conversation,
-          metadata: { ...entity.conversation.metadata, conversationViewPreview: preview },
-        } as IMConversation<QQMediaLocator>
-        this.conversations.set(conversation.id, conversation)
-        return { ...entity, conversation }
-      }))
-      return entities.some((entity, index) => entity !== part.entities![index])
-        ? { ...part, entities }
-        : part
+      if (part.type !== 'message-bundle') return part
+      if (part.bundle.preview && isDetailedMultiForwardPreview(part.bundle.preview)) return part
+      const preview = await this.resolveMultiForwardPreview(part.bundle)
+      if (!preview) return part
+      changed = true
+      return { ...part, bundle: { ...part.bundle, preview } }
     }))
     return changed ? { ...message, content: { ...message.content, parts } } : message
   }
 
   private resolveMultiForwardPreview(
-    conversation: IMConversation<unknown>,
+    bundle: IMMessageBundle,
   ): Promise<string | undefined> {
-    const locator = this.multiForwardLocators.get(conversation.id)
-    if (!locator) return Promise.resolve(undefined)
-    const existing = this.multiForwardPreviewJobs.get(conversation.id)
+    const locator = parseMultiForwardLocator(bundle.locator)
+    const existing = this.multiForwardPreviewJobs.get(bundle.id)
     if (existing) return existing
     const pending = this.loadMultiForwardMessages(locator)
       .then((messages) => wireMultiForwardPreview(messages))
       .catch((error) => {
         this.logger?.warn(
-          'merged-forward preview lookup failed conversation=%s error=%s',
-          conversation.id, formatError(error),
+          'merged-forward preview lookup failed bundle=%s error=%s',
+          bundle.id, formatError(error),
         )
         return undefined
       })
       .finally(() => {
-        if (this.multiForwardPreviewJobs.get(conversation.id) === pending) {
-          this.multiForwardPreviewJobs.delete(conversation.id)
+        if (this.multiForwardPreviewJobs.get(bundle.id) === pending) {
+          this.multiForwardPreviewJobs.delete(bundle.id)
         }
       })
-    this.multiForwardPreviewJobs.set(conversation.id, pending)
+    this.multiForwardPreviewJobs.set(bundle.id, pending)
     return pending
   }
 
   private loadMultiForwardMessages(locator: WireMultiForwardLocator): Promise<WireMessage[]> {
-    const key = multiForwardConversationId(locator)
+    const key = multiForwardBundleId(locator)
     const existing = this.multiForwardMessages.get(key)
     if (existing) return existing
     const pending = this.client.getMultiForwardMessages(locator).catch((error) => {
@@ -2054,25 +2001,29 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return pending
   }
 
-  private readonly registerMultiForward = (
-    title: string,
-    preview: string | undefined,
+  private async loadMessageBundle(
+    session: PlatformSession,
     locator: WireMultiForwardLocator,
-  ): IMConversation<QQMediaLocator> => {
-    const id = multiForwardConversationId(locator)
-    const conversation: IMConversation<QQMediaLocator> = {
-      id,
-      kind: 'group',
-      title: title || '聊天记录',
-      metadata: {
-        conversationView: 'merged-forward',
-        readOnly: true,
-        ...(preview ? { conversationViewPreview: preview } : {}),
-      },
-    }
-    this.multiForwardLocators.set(id, locator)
-    this.conversations.set(id, conversation)
-    return conversation
+  ): Promise<IMMessageSnapshot<QQMediaLocator>[]> {
+    const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
+    const messages = (await this.loadMultiForwardMessages(locator))
+      .filter((message) => !this.isFilteredGrayTip(message))
+    const senders = new Map<string, Promise<IMUser<QQMediaLocator> | null>>()
+    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
+    return Promise.all(messages.map(async (message) => {
+      let mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), locator)
+      if (!mapped.sender) {
+        let pending = senders.get(message.senderId)
+        if (!pending) {
+          pending = this.getUser(session, message.senderId).catch(() => null)
+          senders.set(message.senderId, pending)
+        }
+        mapped = { ...mapped, sender: (await pending) ?? undefined }
+      }
+      mapped = await this.prepareMultiForwardPreviews(mapped)
+      const { conversationId: _conversationId, ...snapshot } = mapped
+      return snapshot
+    }))
   }
 }
 
@@ -2253,11 +2204,6 @@ function mapMessage(
   input: WireMessage,
   reactionCatalog?: IMReactionContext,
   stickerProviderId = 'qqnt:stickers',
-  registerMultiForward?: (
-    title: string,
-    preview: string | undefined,
-    locator: WireMultiForwardLocator,
-  ) => IMConversation<QQMediaLocator>,
   projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator> {
   return {
@@ -2295,7 +2241,7 @@ function mapMessage(
     } : undefined,
     content: {
       serviceAction: input.serviceAction,
-      parts: mapParts(input, stickerProviderId, reactionCatalog, registerMultiForward, projectMedia),
+      parts: mapParts(input, stickerProviderId, reactionCatalog, projectMedia),
       inlineKeyboard: mapInlineKeyboard(input),
     },
   }
@@ -2333,11 +2279,6 @@ function mapParts(
   input: WireMessage,
   stickerProviderId: string,
   reactionCatalog?: IMReactionContext,
-  registerMultiForward?: (
-    title: string,
-    preview: string | undefined,
-    locator: WireMultiForwardLocator,
-  ) => IMConversation<QQMediaLocator>,
   projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator>['content']['parts'] {
   const parts: IMMessage<QQMediaLocator>['content']['parts'] = []
@@ -2361,13 +2302,14 @@ function mapParts(
     } else if (part.type === 'inline-keyboard') {
       continue
     } else if (part.type === 'multi-forward') {
-      const conversation = registerMultiForward?.(part.title, part.preview, part.locator)
-      const text = '查看聊天记录'
       parts.push({
-        type: 'text', text,
-        entities: conversation ? [{
-          type: 'conversation-link', offset: 0, length: text.length, conversation,
-        }] : undefined,
+        type: 'message-bundle',
+        bundle: {
+          id: multiForwardBundleId(part.locator),
+          title: part.title || '聊天记录',
+          preview: part.preview,
+          locator: { ...part.locator },
+        },
       })
     } else if (part.type === 'sticker') {
       parts.push({
@@ -2475,46 +2417,26 @@ function isReactionResourceLocator(value: unknown): value is { reactionKey: stri
     && typeof (value as { reactionKey?: unknown }).reactionKey === 'string')
 }
 
-function multiForwardConversationId(locator: WireMultiForwardLocator): string {
-  return `qqnt-multi-forward:${JSON.stringify([
+function multiForwardBundleId(locator: WireMultiForwardLocator): string {
+  return `qqnt-message-bundle:${JSON.stringify([
     locator.conversationId, locator.rootMessageId, locator.parentMessageId ?? '',
   ])}`
 }
 
-function selectMultiForwardHistory(
-  messages: readonly WireMessage[],
-  query: IMHistoryQuery,
-): WireMessage[] {
-  if (query.limit === undefined && !query.before && !query.after) return [...messages]
-  const limit = Math.max(0, query.limit ?? messages.length)
-  if (!limit) return []
-  // QQ returns an archived transcript in display order. Preserve that order
-  // for equal timestamps while normalizing older/newer anchors for Telegram's
-  // history contract.
-  const ordered = messages.map((message, index) => ({ message, index }))
-    .sort((left, right) => left.message.timestamp - right.message.timestamp || left.index - right.index)
-    .map(({ message }) => message)
-  if (query.after) {
-    const anchor = ordered.findIndex((message) => message.id === query.after!.id)
-    const newer = anchor >= 0
-      ? ordered.slice(anchor + 1)
-      : ordered.filter((message) => message.timestamp > query.after!.timestamp)
-    return newer.slice(0, limit)
+function parseMultiForwardLocator(value: JsonValue): WireMultiForwardLocator {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('invalid QQ merged-forward locator')
   }
-  if (query.before) {
-    const anchor = ordered.findIndex((message) => message.id === query.before!.id)
-    const older = anchor >= 0
-      ? ordered.slice(0, anchor)
-      : ordered.filter((message) => message.timestamp < query.before!.timestamp)
-    return older.slice(-limit)
+  const { conversationId, rootMessageId, parentMessageId } = value
+  if (typeof conversationId !== 'string' || typeof rootMessageId !== 'string'
+    || (parentMessageId !== undefined && typeof parentMessageId !== 'string')) {
+    throw new TypeError('invalid QQ merged-forward locator')
   }
-  // Opening a Telegram chat starts at the newest edge and loads upward. A
-  // merged-forward view must therefore expose its tail as the initial page.
-  return ordered.slice(-limit)
-}
-
-function isMultiForwardConversationId(value: string): boolean {
-  return value.startsWith(MULTI_FORWARD_CONVERSATION_PREFIX)
+  return {
+    conversationId,
+    rootMessageId,
+    ...(typeof parentMessageId === 'string' && parentMessageId ? { parentMessageId } : {}),
+  }
 }
 
 function isInvalidZeroPeerConversationId(value: string): boolean {
@@ -2526,7 +2448,7 @@ function isDeviceConversation(conversation: WireConversation): boolean {
 }
 
 function isFilteredConversationId(value: string): boolean {
-  return isMultiForwardConversationId(value) || isInvalidZeroPeerConversationId(value)
+  return isInvalidZeroPeerConversationId(value)
 }
 
 function normalizeTextPart(
