@@ -4317,47 +4317,33 @@ export class DialogRpc {
   }
 
   private async _prepareConversationViewTargets(messages: readonly IMMessage[]): Promise<void> {
-    if (!this._platform.getHistory) return
-    const conversations = new Map<string, import('./platform.js').IMConversation>()
-    for (const message of messages) {
-      for (const part of message.content.parts) {
-        if (part.type !== 'text') continue
-        for (const entity of part.entities ?? []) {
-          if (entity.type === 'conversation-link' && this._isConversationView(entity.conversation)) {
-            conversations.set(entity.conversation.id, entity.conversation)
+    if (!this._platform.getHistory || !this._conversationViews) return
+    const targets = await this._conversationViews.prepareTargets(
+      this._session.platformSessionId,
+      messages,
+      (conversation) => this._peerId(conversation.id),
+      async (conversation) => {
+        try {
+          // Telegram Android opens a linked message and then grows history
+          // upward. Target the newest archived message so the whole transcript
+          // remains reachable instead of stranding everything after its first
+          // message below the initial viewport.
+          const history = await this._loadHistory(conversation.id, { limit: 200 })
+          const latest = history
+            .filter((item) => item.ordinal === 0)
+            .sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId)[0]
+          if (!latest) return
+          return {
+            conversationId: conversation.id,
+            platformMessageId: latest.source.id,
+            tlMessageId: latest.tlId,
           }
+        } catch {
+          // A failed optional lookup leaves the conversation view addressable.
         }
-      }
-    }
-    await Promise.all([...conversations.values()].map(async (conversation) => {
-      const chatId = this._peerId(conversation.id)
-      const existing = this._conversationViews?.target(this._session.platformSessionId, chatId)
-      if (existing) {
-        this._rememberConversationViewTarget(existing)
-        return
-      }
-      this._conversationLinkUrl(conversation)
-      try {
-        // Telegram Android opens a linked message and then grows history
-        // upward. Target the newest archived message so the whole transcript
-        // remains reachable instead of stranding everything after its first
-        // message below the initial viewport.
-        const history = await this._loadHistory(conversation.id, { limit: 200 })
-        const latest = history
-          .filter((item) => item.ordinal === 0)
-          .sort((left, right) => right.source.timestamp - left.source.timestamp || right.tlId - left.tlId)[0]
-        if (!latest) return
-        const target = {
-          conversationId: conversation.id,
-          platformMessageId: latest.source.id,
-          tlMessageId: latest.tlId,
-        }
-        this._conversationViews?.setTarget(this._session.platformSessionId, chatId, target)
-        this._rememberConversationViewTarget(target)
-      } catch {
-        // A failed optional lookup leaves the conversation view addressable.
-      }
-    }))
+      },
+    )
+    for (const target of targets) this._rememberConversationViewTarget(target)
   }
 
   private _conversationPreviewMedia(source: IMMessage): tl.RawMessageMediaWebPage | undefined {

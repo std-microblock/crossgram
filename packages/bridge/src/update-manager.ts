@@ -828,12 +828,12 @@ export class UpdateManager {
     platform: IMPlatform,
     message: IMMessage,
   ): Promise<void> {
-    await Promise.all(linkedConversations(message)
-      .filter((conversation) => this._conversationViews?.supports(conversation) === true)
-      .map(async (conversation) => {
-        const chatId = stableId(`peer:${conversation.id}`)
-        this._conversationViews?.remember(session.platformSessionId, chatId, conversation)
-        if (this._conversationViews?.target(session.platformSessionId, chatId)) return
+    if (!this._conversationViews) return
+    await this._conversationViews.prepareTargets(
+      session.platformSessionId,
+      [message],
+      (conversation) => stableId(`peer:${conversation.id}`),
+      async (conversation) => {
         try {
           let tlMessageId = await this._store.getNewestTlMessageId(
             session.platformSessionId, conversation.id,
@@ -857,17 +857,18 @@ export class UpdateManager {
             session.platformSessionId, tlMessageId, conversation.id,
           )
           if (!projected) return
-          this._conversationViews?.setTarget(session.platformSessionId, chatId, {
+          return {
             conversationId: conversation.id,
             platformMessageId: projected.source.id,
             tlMessageId,
-          })
+          }
         } catch (error) {
           this._onTrace?.(
             'conversation view target failed conversation=%s error=%s', conversation.id, String(error),
           )
         }
-      }))
+      },
+    )
   }
 
   private _makeChat(session: PlatformSession, conversation: IMConversation, forum = false): tl.TypeChat {

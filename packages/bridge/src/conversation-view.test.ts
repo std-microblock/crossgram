@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Long from 'long'
 import { ConversationViewService, type ConversationViewProvider } from './conversation-view.js'
@@ -64,6 +64,38 @@ describe('ConversationViewService', () => {
       fullChat: { participants: { _: 'chatParticipantsForbidden', chatId: 100 } },
       chats: [{ _: 'chat', left: true, id: 100 }], users: [],
     })
+  })
+
+  it('deduplicates linked conversations and concurrent target resolution across projection paths', async () => {
+    const service = createTestConversationViews()
+    const message = {
+      id: 'outer', conversationId: 'ordinary', senderId: 'alice', timestamp: 1,
+      content: { parts: [{
+        type: 'text' as const, text: 'open twice', entities: [
+          { type: 'conversation-link' as const, offset: 0, length: 4, conversation },
+          { type: 'conversation-link' as const, offset: 5, length: 5, conversation },
+        ],
+      }] },
+    }
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    const resolveTarget = vi.fn(async () => {
+      await pending
+      return { conversationId: conversation.id, platformMessageId: 'latest', tlMessageId: 200 }
+    })
+
+    const first = service.prepareTargets('session-a', [message], () => 100, resolveTarget)
+    const second = service.prepareTargets('session-a', [message], () => 100, resolveTarget)
+    release()
+
+    await expect(first).resolves.toEqual([{
+      conversationId: conversation.id, platformMessageId: 'latest', tlMessageId: 200,
+    }])
+    await expect(second).resolves.toEqual([{
+      conversationId: conversation.id, platformMessageId: 'latest', tlMessageId: 200,
+    }])
+    expect(resolveTarget).toHaveBeenCalledOnce()
+    expect(service.target('session-a', 100)?.tlMessageId).toBe(200)
   })
 
   it('keeps the returned disposer for explicit early teardown and clears owned records', () => {

@@ -1,6 +1,6 @@
 import { Service, type Context } from 'cordis'
 import type { tl } from '@mtcute/core'
-import type { IMConversation } from './platform.js'
+import type { IMConversation, IMMessage } from './platform.js'
 
 export interface ConversationViewMessageTarget {
   conversationId: string
@@ -42,6 +42,7 @@ interface ConversationViewRecord extends ConversationViewContext {
 export class ConversationViewService extends Service {
   private readonly _providers = new Map<string, ConversationViewProvider>()
   private readonly _records = new Map<string, Map<number, ConversationViewRecord>>()
+  private readonly _targetJobs = new Map<string, Promise<ConversationViewMessageTarget | undefined>>()
 
   constructor(ctx: Context) {
     super(ctx, 'conversationView')
@@ -124,6 +125,45 @@ export class ConversationViewService extends Service {
     record.target = target
   }
 
+  /**
+   * Discover linked views in projected messages and resolve their deep-link
+   * targets once per account/chat. Dialog and live-update paths share this
+   * orchestration while retaining their own history/storage implementations.
+   */
+  async prepareTargets(
+    platformSessionId: string,
+    messages: readonly IMMessage[],
+    chatIdFor: (conversation: IMConversation) => number,
+    resolveTarget: (
+      conversation: IMConversation,
+      chatId: number,
+    ) => Promise<ConversationViewMessageTarget | undefined>,
+  ): Promise<ConversationViewMessageTarget[]> {
+    const conversations = linkedViewConversations(messages)
+      .filter((conversation) => this.supports(conversation))
+    const targets = await Promise.all(conversations.map(async (conversation) => {
+      const chatId = chatIdFor(conversation)
+      this.remember(platformSessionId, chatId, conversation)
+      const existing = this.target(platformSessionId, chatId)
+      if (existing) return existing
+
+      const key = `${platformSessionId}\u0000${chatId}\u0000${conversation.id}`
+      let pending = this._targetJobs.get(key)
+      if (!pending) {
+        pending = resolveTarget(conversation, chatId)
+        this._targetJobs.set(key, pending)
+        pending.finally(() => {
+          if (this._targetJobs.get(key) === pending) this._targetJobs.delete(key)
+        }).catch(() => {})
+      }
+      const target = await pending
+      const record = this._records.get(platformSessionId)?.get(chatId)
+      if (target && record && record.conversation.id === conversation.id) record.target = target
+      return target
+    }))
+    return targets.filter((target): target is ConversationViewMessageTarget => target !== undefined)
+  }
+
   makeLink(platformSessionId: string, chatId: number): string | undefined {
     const record = this._records.get(platformSessionId)?.get(chatId)
     if (!record) return
@@ -160,4 +200,19 @@ export class ConversationViewService extends Service {
       if (provider.supports(conversation)) return provider
     }
   }
+}
+
+function linkedViewConversations(messages: readonly IMMessage[]): IMConversation[] {
+  const conversations = new Map<string, IMConversation>()
+  for (const message of messages) {
+    for (const part of message.content.parts) {
+      if (part.type !== 'text') continue
+      for (const entity of part.entities ?? []) {
+        if (entity.type === 'conversation-link') {
+          conversations.set(entity.conversation.id, entity.conversation)
+        }
+      }
+    }
+  }
+  return [...conversations.values()]
 }
