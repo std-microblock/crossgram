@@ -329,7 +329,18 @@ export class DebugScripts extends Service {
           : exports
       if (typeof unwrapped.apply !== 'function')
         throw new Error(`${name} must export function apply(ctx)`)
-      candidate = unwrapped as unknown as Plugin
+      const apply = unwrapped.apply as Plugin.Function
+      candidate = {
+        name: `debug-script:${name}`,
+        inject: Object.entries(this.ctx.reflect.props)
+          .filter(
+            ([service, property]) =>
+              property.type === 'service' &&
+              this.ctx.get(service) !== undefined,
+          )
+          .map(([service]) => service),
+        apply: (ctx) => apply(ctx, undefined),
+      }
     } catch (error) {
       await this.fail(record, error)
       return

@@ -60,6 +60,10 @@ describe('debug scripts runtime', () => {
     const results = join(root, 'results')
     const disposed = join(root, 'disposed.txt')
     const ctx = new Context()
+    const database = ctx.plugin((serviceCtx) =>
+      serviceCtx.provide('database', { ready: true }),
+    )
+    await database
     const runner = ctx.plugin(debugScripts, {
       root: scripts,
       results,
@@ -72,7 +76,11 @@ describe('debug scripts runtime', () => {
     const source = (version: number) => `
       import { appendFileSync } from 'node:fs'
       export async function apply(ctx) {
-        await ctx.debugScript.publish({ version: ${version}, generation: ctx.debugScript.generation })
+        await ctx.debugScript.publish({
+          version: ${version},
+          generation: ctx.debugScript.generation,
+          databaseReady: ctx.database.ready,
+        })
         ctx.effect(() => () => appendFileSync(${JSON.stringify(disposed)}, ${JSON.stringify(String(version))}))
       }
     `
@@ -82,6 +90,10 @@ describe('debug scripts runtime', () => {
       (value) => value.state === 'active' && resultVersion(value) === 1,
     )
     expect(status.activeGeneration).toBe(1)
+    expect(
+      (status.results.at(-1)?.value as { databaseReady?: boolean })
+        .databaseReady,
+    ).toBe(true)
 
     writeFileSync(probe, source(2))
     status = await waitFor(
@@ -108,6 +120,7 @@ describe('debug scripts runtime', () => {
     expect(readFileSync(disposed, 'utf8')).toBe('12')
 
     await runner.dispose()
+    await database.dispose()
   })
 
   it('expires probes and disposes their Cordis effects at the configured TTL', async () => {
