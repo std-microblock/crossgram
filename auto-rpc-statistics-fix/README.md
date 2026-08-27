@@ -8,4 +8,4 @@ and post-deployment verification.
 ## Entries
 
 - [2026-08-27: read-only statistics service and inspect-relay command](./2026-08-27-debug-statistics-reader.md)
-
+- [2026-08-27: `messages.sendMedia` legacy video SHA-1 checkpoints](./2026-08-27-messages-send-media-video-sha1-checkpoints.md)
