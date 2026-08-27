@@ -2,8 +2,7 @@
 
 Date: 2026-08-27 UTC (2026-08-28 CST)
 
-Status: implementation and local verification complete; production deployment
-and live probe verification pending.
+Status: deployed and live probe verified.
 
 ## Motivation
 
@@ -34,6 +33,9 @@ monitor to an undocumented transport.
    structured result, prints the result value directly, and removes the probe.
    It reads the complete collector snapshot plus the latest 300 second points,
    180 minute points, and 48 hour points.
+6. Probe unload removes the record from `debug-results/index.json` before
+   persisting the final `unloaded` or `expired` status file. `list` therefore
+   reflects active runner records instead of accumulating stale probes.
 
 ## Safety properties
 
@@ -65,7 +67,28 @@ monitor to an undocumented transport.
   packages/debug-scripts/src/index.test.ts --maxWorkers=1`: 12 passed.
 - `yarn typecheck`: passed.
 
-## Production verification checklist
+## Initial production verification
+
+- Deployed Crossgram revision: `041174d`.
+- Deployment used `yarn install --immutable --mode=skip-build`; no build or
+  heavy analysis ran on the production server.
+- `crossgram.service` became active at 2026-08-27 20:43:46 UTC
+  (2026-08-28 04:43:46 CST), with `NRestarts=0` and no error-priority journal
+  entries in the deployment window.
+- `probe-relay.mjs statistics` returned a 32,315-byte structured result and the
+  temporary script reached `unloaded` after collection.
+- First post-restart window: 2026-08-27 20:43:53–20:44:22 UTC. It contained 40
+  RPCs across 6 methods. Overall avg was 57.06 ms, P90 250 ms, P99 828.55 ms,
+  and 7 errors (18%).
+- Two events were opened immediately from this short validation window:
+  - `messages.search`: 6/6 errors, all
+    `QQNT group file listing failed: undefined`; dedicated root-cause/fix agent
+    started.
+  - `messages.sendMedia`: one 828.55 ms failed request with invalid cumulative
+    SHA-1 checkpoints; dedicated agent started to determine whether it was a
+    synthetic probe or real client traffic before deciding on a fix/exception.
+
+## Repeatable production verification checklist
 
 After deployment:
 

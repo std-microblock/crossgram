@@ -48,6 +48,10 @@ function readStatus(
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
+function readIndex(results: string): unknown[] {
+  return JSON.parse(readFileSync(join(results, 'index.json'), 'utf8'))
+}
+
 function resultVersion(status: DebugScriptStatus): number | undefined {
   return (status.results.at(-1)?.value as { version?: number } | undefined)
     ?.version
@@ -119,6 +123,7 @@ describe('debug scripts runtime', () => {
     )
     expect(status.activeGeneration).toBe(2)
     expect(readFileSync(disposed, 'utf8')).toBe('12')
+    expect(readIndex(results)).toEqual([])
 
     await runner.dispose()
     await database.dispose()
@@ -155,6 +160,7 @@ describe('debug scripts runtime', () => {
     )
     expect(status.results.at(-1)?.value).toBe('ready')
     expect(readFileSync(disposed, 'utf8')).toBe('disposed')
+    expect(readIndex(results)).toEqual([])
 
     await runner.dispose()
   })
