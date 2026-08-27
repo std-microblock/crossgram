@@ -920,7 +920,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMDirectDownload | undefined>
 }
 
-export function messageText(message: IMMessage<unknown>): string {
+export type IMProjectableMessage<TMediaLocator = unknown> =
+  | IMMessage<TMediaLocator>
+  | IMMessageSnapshot<TMediaLocator>
+
+export function messageText(message: IMProjectableMessage<unknown>): string {
   return message.content.parts.map(messagePartText).filter(Boolean).join('\n')
 }
 
@@ -953,11 +957,11 @@ function cardKindLabel(kind: IMMessageCard['kind']): string {
   return '分享'
 }
 
-export function messageMedia<TMediaLocator>(message: IMMessage<TMediaLocator>): IMMedia<TMediaLocator>[] {
+export function messageMedia<TMediaLocator>(message: IMProjectableMessage<TMediaLocator>): IMMedia<TMediaLocator>[] {
   return message.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
 }
 
-export function isArticleMessage(message: IMMessage<unknown>): boolean {
+export function isArticleMessage(message: IMProjectableMessage<unknown>): boolean {
   const media = messageMedia(message)
   return media.length >= 2
     && message.content.parts.every((part) => part.type === 'text' || part.type === 'media')

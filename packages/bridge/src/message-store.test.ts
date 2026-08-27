@@ -48,7 +48,8 @@ describe('MessageStore', () => {
     const pipeline = new MessageProjectionPipeline(projectionCtx)
     const planned = vi.fn(async (input, next) => {
       expect(input).toMatchObject({
-        session, conversation: { id: 'custom-plan' }, source: { id: 'custom-plan-message' }, allocation: 'history',
+        session, target: { conversation: { id: 'custom-plan' } },
+        source: { id: 'custom-plan-message' }, allocation: 'history',
       })
       const fallback = await next()
       expect(fallback).toEqual({ parts: [{}], grouped: false })
