@@ -847,6 +847,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getAllDrafts())
   rpc.register('messages.getHistory', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getHistory(req as tl.messages.RawGetHistoryRequest))
+  rpc.register('messages.getFullChat', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getFullChat(req as tl.messages.RawGetFullChatRequest))
   rpc.register('messages.getMessages', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getMessages(req as tl.messages.RawGetMessagesRequest))
   rpc.register('channels.getMessages', async (rpc, req) =>

@@ -1,5 +1,4 @@
 import type { Context } from 'cordis'
-import type { tl } from '@mtcute/core'
 import Long from 'long'
 import {
   stableId,
@@ -8,10 +7,9 @@ import {
   type ConversationViewProvider,
   type IMConversation,
 } from '@mtproto-relay/bridge'
-import type { ServerRpcContext } from '@mtproto-relay/mtproto'
 
 export const name = 'merged-forward-viewer'
-export const inject = ['conversationView', 'mtproto', 'mtprotoBridge']
+export const inject = ['conversationView']
 
 export const MERGED_FORWARD_VIEW = 'merged-forward'
 
@@ -69,87 +67,7 @@ export function makeMergedForwardProvider(): ConversationViewProvider {
 }
 
 export function apply(ctx: Context): void {
-  const provider = makeMergedForwardProvider()
-  ctx.conversationView.register(provider)
-  const register = (method: string, handler: (
-    rpc: ServerRpcContext,
-    request: tl.RpcMethod,
-  ) => Promise<tl.TlObject | undefined>) => {
-    ctx.mtproto.register(method, handler)
-  }
-
-  register('contacts.resolveUsername', async (rpc, request) => {
-    const req = request as tl.contacts.RawResolveUsernameRequest
-    const chatId = provider.resolveUsername!(req.username)
-    if (chatId === undefined) return
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    if (!ctx.conversationView.resolve(state.session.platformSessionId, chatId)) return
-    return state.dialogs.resolveUsername(req)
-  })
-
-  register('messages.getFullChat', async (rpc, request) => {
-    const req = request as tl.messages.RawGetFullChatRequest
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    if (!ctx.conversationView.resolve(state.session.platformSessionId, req.chatId)) return
-    return state.dialogs.getFullChat(req)
-  })
-
-  register('messages.getHistory', async (rpc, request) => {
-    const req = request as tl.messages.RawGetHistoryRequest
-    const state = await resolveViewPeer(ctx, rpc, req.peer)
-    if (!state) return
-    return state.dialogs.getHistory(req)
-  })
-
-  register('messages.readHistory', async (rpc, request) => {
-    const req = request as tl.messages.RawReadHistoryRequest
-    const state = await resolveViewPeer(ctx, rpc, req.peer)
-    if (!state) return
-    return state.dialogs.readHistory(req, rpc.connection)
-  })
-
-  register('messages.getScheduledHistory', async (rpc, request) => {
-    const req = request as tl.messages.RawGetScheduledHistoryRequest
-    const state = await resolveViewPeer(ctx, rpc, req.peer)
-    if (!state) return
-    return state.dialogs.getScheduledHistory(req)
-  })
-
-  register('messages.getPeerSettings', async (rpc, request) => {
-    const req = request as tl.messages.RawGetPeerSettingsRequest
-    const state = await resolveViewPeer(ctx, rpc, req.peer)
-    if (!state) return
-    return state.dialogs.getPeerSettings(req)
-  })
-
-  register('messages.getPeerDialogs', async (rpc, request) => {
-    const req = request as tl.messages.RawGetPeerDialogsRequest
-    const chatIds = req.peers.flatMap((item) => {
-      const peer = item._ === 'inputDialogPeer' ? item.peer : undefined
-      return peer?._ === 'inputPeerChat' ? [peer.chatId] : []
-    })
-    if (!chatIds.length) return
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    if (!chatIds.some((chatId) =>
-      ctx.conversationView.resolve(state.session.platformSessionId, chatId))) return
-    return state.dialogs.getPeerDialogs(req)
-  })
-
-  register('messages.getMessages', async (rpc, request) => {
-    const req = request as tl.messages.RawGetMessagesRequest
-    const ids = req.id.flatMap((item) => item._ === 'inputMessageID' ? [item.id] : [])
-    if (!ids.length) return
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    if (!ids.some((id) => ctx.conversationView.ownsMessage(state.session.platformSessionId, id))) return
-    return state.dialogs.getMessages(req)
-  })
-}
-
-async function resolveViewPeer(ctx: Context, rpc: ServerRpcContext, peer: tl.TypeInputPeer) {
-  if (peer._ !== 'inputPeerChat') return
-  const state = await ctx.mtprotoBridge.resolveSession(rpc)
-  if (!ctx.conversationView.resolve(state.session.platformSessionId, peer.chatId)) return
-  return state
+  ctx.conversationView.register(makeMergedForwardProvider())
 }
 
 function isDetailedConversationPreview(value: string): boolean {
