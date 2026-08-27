@@ -108,17 +108,19 @@ export class SystemPeerService extends Service {
   }
 
   register(provider: SystemPeerProvider): Unsubscribe {
-    this._providers.add(provider)
-    this._changed()
-    for (const binding of this.ctx.imPlatform?.sessions ?? []) {
-      void provider.bootstrap(binding.session, this).catch((error) => {
-        this.ctx.logger('system-peer').warn('system peer bootstrap failed: %s', String(error))
-      })
-    }
-    return () => {
-      if (!this._providers.delete(provider)) return
+    return this.ctx.effect(() => {
+      this._providers.add(provider)
       this._changed()
-    }
+      for (const binding of this.ctx.get('imPlatform')?.sessions ?? []) {
+        void provider.bootstrap(binding.session, this).catch((error) => {
+          this.ctx.logger('system-peer').warn('system peer bootstrap failed: %s', String(error))
+        })
+      }
+      return () => {
+        if (!this._providers.delete(provider)) return
+        this._changed()
+      }
+    }, 'systemPeer.register')
   }
 
   /** List bridge-owned bots for the management dashboard. */
@@ -158,8 +160,10 @@ export class SystemPeerService extends Service {
 
   /** Notify dashboards when optional bot plugins or their dynamic bots change. */
   onChanged(listener: () => void): Unsubscribe {
-    this._listeners.add(listener)
-    return () => { this._listeners.delete(listener) }
+    return this.ctx.effect(() => {
+      this._listeners.add(listener)
+      return () => { this._listeners.delete(listener) }
+    }, 'systemPeer.onChanged')
   }
 
   /** Called by providers whose bot list changes without being re-registered. */

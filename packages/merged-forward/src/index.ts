@@ -68,14 +68,14 @@ export function makeMergedForwardProvider(): ConversationViewProvider {
   }
 }
 
-export function apply(ctx: Context): () => void {
+export function apply(ctx: Context): void {
   const provider = makeMergedForwardProvider()
-  const disposers: Array<() => unknown> = [ctx.conversationView.register(provider)]
+  ctx.conversationView.register(provider)
   const register = (method: string, handler: (
     rpc: ServerRpcContext,
     request: tl.RpcMethod,
   ) => Promise<tl.TlObject | undefined>) => {
-    disposers.push(ctx.mtproto.register(method, handler))
+    ctx.mtproto.register(method, handler)
   }
 
   register('contacts.resolveUsername', async (rpc, request) => {
@@ -143,10 +143,6 @@ export function apply(ctx: Context): () => void {
     if (!ids.some((id) => ctx.conversationView.ownsMessage(state.session.platformSessionId, id))) return
     return state.dialogs.getMessages(req)
   })
-
-  return () => {
-    for (const dispose of disposers.reverse()) dispose()
-  }
 }
 
 async function resolveViewPeer(ctx: Context, rpc: ServerRpcContext, peer: tl.TypeInputPeer) {

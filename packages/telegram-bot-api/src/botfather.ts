@@ -11,20 +11,16 @@ export const BOT_FATHER_CONVERSATION_ID = 'bridge:botfather'
 
 export { botConversationId, validUsername }
 
-export function registerBotFather(ctx: Context, registry: BotRegistry): () => void {
+export function registerBotFather(ctx: Context, registry: BotRegistry): void {
   const activeSessionIds = new Set(ctx.imPlatform.sessions.map(({ session }) => session.platformSessionId))
-  const unregister = ctx.systemPeer.register(new BotFatherProvider(ctx.database, registry))
-  const stopChanged = registry.onChanged(() => ctx.systemPeer.notifyChanged())
+  ctx.systemPeer.register(new BotFatherProvider(ctx.database, registry))
+  registry.onChanged(() => ctx.systemPeer.notifyChanged())
   void ctx.database.prepared().then(async () => {
     const rows = await ctx.database.get('mtproto_platform_session', { active: true })
     await Promise.all(rows.filter((row) => !activeSessionIds.has(row.id)).map((row) =>
       ctx.systemPeer.bootstrap(sessionFromRow(row)),
     ))
   }).catch((error) => ctx.logger('telegram-bot-api').warn('BotFather bootstrap recovery failed: %s', String(error)))
-  return () => {
-    stopChanged()
-    unregister()
-  }
 }
 
 class BotFatherProvider implements SystemPeerProvider {

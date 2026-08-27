@@ -58,8 +58,7 @@ export const name = 'platform-admin-bot'
 export const inject = ['bridgeManagement', 'systemPeer']
 
 export function apply(ctx: Context, config: Config = {}): void {
-  const unregister = ctx.systemPeer.register(new PlatformAdminBotProvider(ctx.bridgeManagement, config, ctx.systemPeer))
-  ctx.effect(() => unregister, 'platform-admin-bot.system-peer')
+  ctx.systemPeer.register(new PlatformAdminBotProvider(ctx.bridgeManagement, config, ctx.systemPeer))
 }
 
 interface BotView {

@@ -46,10 +46,9 @@ export function apply(ctx: Context, config: Config): void {
     config.maxImportsPerSession ?? 100,
     config.importCooldownMs ?? 3_000,
   )
-  const unregister = ctx.systemPeer.register(peerProvider)
+  ctx.systemPeer.register(peerProvider)
   ctx.effect(() => async () => {
     await peerProvider.dispose()
-    unregister()
   }, 'telegram-sticker-importer.system-peer')
 }
 

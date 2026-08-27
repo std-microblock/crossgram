@@ -23,20 +23,16 @@ export function apply(ctx: Context, config: Config): void {
     for (const binding of scope.imPlatform.sessions) {
       exporter.start(binding.platform, binding.session)
     }
-    const stopSessions = scope.imPlatform.onSessionChange((event, binding) => {
+    scope.imPlatform.onSessionChange((event, binding) => {
       if (event === 'activate') exporter.start(binding.platform, binding.session)
       else exporter.stop(binding.registrationId)
     })
-    const stopEvents = scope.imPlatform.onCommittedEvent((session, committed) => {
+    scope.imPlatform.onCommittedEvent((session, committed) => {
       if (committed.event.type !== 'message') return
       const message = committed as Extract<CommittedPlatformEvent, { event: { type: 'message' } }>
       exporter.handleMessage(session, message.event.conversation, message.event.message, message.result)
     })
-    return () => {
-      stopEvents()
-      stopSessions()
-      exporter.stop()
-    }
+    return () => exporter.stop()
   })
 }
 

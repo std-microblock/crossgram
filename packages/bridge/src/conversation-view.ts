@@ -48,20 +48,22 @@ export class ConversationViewService extends Service {
   }
 
   register(provider: ConversationViewProvider): () => void {
-    if (this._providers.has(provider.id)) {
-      throw new Error(`duplicate conversation view provider: ${provider.id}`)
-    }
-    this._providers.set(provider.id, provider)
-    return () => {
-      if (this._providers.get(provider.id) !== provider) return
-      this._providers.delete(provider.id)
-      for (const [sessionId, records] of this._records) {
-        for (const [chatId, record] of records) {
-          if (record.provider === provider) records.delete(chatId)
-        }
-        if (!records.size) this._records.delete(sessionId)
+    return this.ctx.effect(() => {
+      if (this._providers.has(provider.id)) {
+        throw new Error(`duplicate conversation view provider: ${provider.id}`)
       }
-    }
+      this._providers.set(provider.id, provider)
+      return () => {
+        if (this._providers.get(provider.id) !== provider) return
+        this._providers.delete(provider.id)
+        for (const [sessionId, records] of this._records) {
+          for (const [chatId, record] of records) {
+            if (record.provider === provider) records.delete(chatId)
+          }
+          if (!records.size) this._records.delete(sessionId)
+        }
+      }
+    }, `conversationView.register(${provider.id})`)
   }
 
   supports(conversation: IMConversation): boolean {

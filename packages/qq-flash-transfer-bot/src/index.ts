@@ -29,10 +29,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     config.maxFiles ?? 100,
     config.maxTotalBytes ?? 100 * 1024 ** 3,
   )
-  const unregister = ctx.systemPeer.register(provider)
+  ctx.systemPeer.register(provider)
   ctx.effect(() => async () => {
     await provider.dispose()
-    unregister()
   }, 'qq-flash-transfer-bot.system-peer')
 }
 

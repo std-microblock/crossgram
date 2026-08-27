@@ -1,9 +1,40 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from 'cordis'
+import Long from 'long'
+import { ConversationViewService, type ConversationViewProvider } from './conversation-view.js'
 import { createTestConversationViews } from './conversation-view.test-utils.js'
 
 const conversation = {
   id: 'view-1', kind: 'group' as const, title: 'Conversation view',
   metadata: { conversationView: 'merged-forward' },
+}
+
+function provider(id = 'merged-forward-unit'): ConversationViewProvider {
+  return {
+    id,
+    supports: (value) => value.metadata?.conversationView === 'merged-forward',
+    makeLink: (context) => `https://t.me/bridgechat_${context.chatId}`,
+    makePreview: (context, url) => ({
+      _: 'messageMediaWebPage', manual: true, safe: true,
+      webpage: {
+        _: 'webPage', id: Long.ONE, url, displayUrl: context.conversation.title, hash: 0,
+        type: 'telegram_message', title: context.conversation.title,
+      },
+    }),
+    makeChat: (context) => ({
+      _: 'chat', left: true, id: context.chatId, title: context.conversation.title,
+      photo: { _: 'chatPhotoEmpty' }, participantsCount: 1, date: 0, version: 1,
+    }),
+    makeFullChat: (context, notifySettings) => ({
+      _: 'messages.chatFull',
+      fullChat: {
+        _: 'chatFull', id: context.chatId, about: '',
+        participants: { _: 'chatParticipantsForbidden', chatId: context.chatId },
+        chatPhoto: { _: 'photoEmpty', id: Long.ZERO }, notifySettings, botInfo: [],
+      },
+      chats: [], users: [],
+    }),
+  }
 }
 
 describe('ConversationViewService', () => {
@@ -33,5 +64,16 @@ describe('ConversationViewService', () => {
       fullChat: { participants: { _: 'chatParticipantsForbidden', chatId: 100 } },
       chats: [{ _: 'chat', left: true, id: 100 }], users: [],
     })
+  })
+
+  it('keeps the returned disposer for explicit early teardown and clears owned records', () => {
+    const service = new ConversationViewService(new Context())
+    const unregister = service.register(provider())
+    expect(service.remember('session-a', 100, conversation)).toBe('https://t.me/bridgechat_100')
+
+    unregister()
+
+    expect(service.supports(conversation)).toBe(false)
+    expect(service.resolve('session-a', 100)).toBeUndefined()
   })
 })

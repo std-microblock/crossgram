@@ -469,7 +469,7 @@ export function apply(ctx: Context, config: Config): void {
   defineBotModels(ctx)
   defineTelegramBotApiModels(ctx)
   const registry = new BotRegistry(ctx, config.verifierSecret)
-  const unregister = registerBotFather(ctx, registry)
+  registerBotFather(ctx, registry)
   const runtimes = new Map<string, BotRuntime>()
   const runtime = (bot: BotIdentity) => {
     let current = runtimes.get(bot.id)
@@ -480,18 +480,18 @@ export function apply(ctx: Context, config: Config): void {
     return current
   }
   const report = (scope: string, error: unknown) => ctx.logger('telegram-bot-api').warn('%s: %s', scope, String(error))
-  const stopCommitted = ctx.imPlatform.onCommittedEvent((session, event) => {
+  ctx.imPlatform.onCommittedEvent((session, event) => {
     const committed = event.event
     if (committed.type !== 'message' || committed.message.outgoing !== true) return
     void ctx.botRegistry.byConversation(session.platformSessionId, committed.conversation.id)
       .then((bot) => bot?.enabled ? runtime(bot).handleCommitted(session, event, bot) : undefined)
       .catch((error) => report('bot lookup failed', error))
   })
-  const stopChanged = ctx.botRegistry.onChanged((bot) => {
+  ctx.botRegistry.onChanged((bot) => {
     const current = runtimes.get(bot.id)
     if (current) void current.invalidate(bot).catch((error) => report('generation invalidation failed', error))
   })
-  const stopSession = ctx.imPlatform.onSessionChange((event, binding) => {
+  ctx.imPlatform.onSessionChange((event, binding) => {
     if (event !== 'activate') return
     void ctx.database.get('mtproto_bot_api_state', {}).then(async (states) => {
       for (const state of states) {
@@ -525,8 +525,8 @@ export function apply(ctx: Context, config: Config): void {
       res.status = failure.code; res.json({ ok: false, error_code: failure.code, description: failure.message } satisfies TelegramApiResponse)
     }
   }
-  const get = ctx.server.get('/bot:token/:method', route)
-  const post = ctx.server.post('/bot:token/:method', route)
+  ctx.server.get('/bot:token/:method', route)
+  ctx.server.post('/bot:token/:method', route)
   void ctx.database.prepared().then(async () => {
     const states = await ctx.database.get('mtproto_bot_api_state', {})
     for (const state of states) {
@@ -536,7 +536,6 @@ export function apply(ctx: Context, config: Config): void {
     }
   }).catch((error) => report('webhook recovery failed', error))
   ctx.effect(() => () => {
-    get.dispose(); post.dispose(); stopCommitted(); stopChanged(); stopSession(); unregister()
     for (const current of runtimes.values()) current.dispose()
   }, 'telegram-bot-api')
 }

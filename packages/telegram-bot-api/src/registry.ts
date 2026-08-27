@@ -176,8 +176,10 @@ export class BotRegistry extends Service {
   }
 
   onChanged(listener: (bot: BotIdentity) => void): () => void {
-    this._listeners.add(listener)
-    return () => this._listeners.delete(listener)
+    return this.ctx.effect(() => {
+      this._listeners.add(listener)
+      return () => this._listeners.delete(listener)
+    }, 'botRegistry.onChanged')
   }
 
   private async _owned(owner: BotOwner, username: string): Promise<BotIdentityRow | undefined> {
