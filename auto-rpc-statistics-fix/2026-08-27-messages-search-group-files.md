@@ -4,9 +4,10 @@ Event ID: `2026-08-27T20:43:53Z-messages.search-group-files`
 
 Date: 2026-08-27 UTC (2026-08-28 CST)
 
-Status: root cause fixed and pushed in `qqnt-bridge`; production deployment
-and post-deployment metric verification pending. The event is **not resolved**
-while production still runs the old bridge behavior.
+Status: root cause fixed, released, and installed as `qqnt-bridge v1.0.31`.
+Post-deployment metric verification is blocked on a required QQ QR login after
+both retained login snapshots were rejected. The event is **not resolved**
+until QQNT is ready and a fresh production window passes.
 
 ## Detection and impact
 
@@ -86,6 +87,10 @@ Branch: `fix/rpc-messages-search`
 
 Commit: `649f2d6 group-files: await native list callback`
 
+Release commit: `12f1e4d release: bump version to 1.0.31`
+
+Tag: `v1.0.31`
+
 The fix:
 
 - corrects the handwritten `getGroupFileList` return type to `number`;
@@ -117,10 +122,45 @@ An initial full test run before building the native addon had five unrelated
 missing-artifact failures. After the documented local native build, the full
 suite passed. No build or heavy analysis ran on the production server.
 
+## Release and production deployment
+
+GitHub Actions run `33116520537` completed successfully:
+
+- Linux tests: passed;
+- Windows tests: passed;
+- Linux package: passed;
+- Windows package: passed;
+- release publication: passed.
+
+The standard maintenance workstation command deployed the Actions-built
+`v1.0.31` Linux release. The production server did not compile or test the
+package.
+
+During the controlled restart, QQ rejected both the preserved pre-update login
+state and the installer's rollback snapshot. This is a known upstream QQ login
+behavior that has also occurred during earlier bridge updates. The installer
+left the new bridge running rather than silently claiming success:
+
+- `qqnt-bridge.service`: active/running;
+- systemd restart count: 0;
+- protocol version: 31;
+- QQNT kernel: not ready;
+- login phase: waiting for QR scan.
+
+A fresh QR was rendered to a local untracked maintenance file for the operator
+and the remote temporary PNG was removed. No QR URL or login material was
+written to this document or committed.
+
+While QQNT is not ready, the production statistics window beginning
+`2026-08-27T21:14:04Z` showed `messages.search` at 130/130 errors. Those new
+errors are `503 kernel not ready`, not the original
+`group file listing failed: undefined` failure. They cannot validate or refute
+the code fix until the same QQ account is restored.
+
 ## Deployment and verification checklist
 
-The fix cannot be called resolved until an Actions-built `qqnt-bridge` release
-containing `649f2d6` is deployed by the standard maintenance process.
+The fix cannot be called resolved until QQNT finishes the required QR login and
+a post-login production window is collected.
 
 After deployment:
 
@@ -136,4 +176,3 @@ After deployment:
    increasing;
 6. only mark this event resolved after a fresh window has zero occurrences of
    that reason and the RPC remains within the latency thresholds.
-
