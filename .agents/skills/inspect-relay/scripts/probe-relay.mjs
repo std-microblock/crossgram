@@ -4,7 +4,11 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { copyFile, mkdir, readFile, rename, rm } from 'node:fs/promises'
 import { basename, dirname, join, posix, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const statisticsProbe = fileURLToPath(
+  new URL('../probes/mtproto-statistics.ts', import.meta.url),
+)
 
 export function parseArgs(argv) {
   const [command = 'doctor', ...tokens] = argv
@@ -261,6 +265,24 @@ async function cleanup(options) {
   }
 }
 
+async function runProbe(filename, name, options, keep = false) {
+  await deploy(filename, name, options)
+  try {
+    return await wait(name, options, true)
+  } finally {
+    if (!keep) await removeProbe(name, options)
+  }
+}
+
+export function latestResultValue(status, name = status?.script || 'probe') {
+  const result = status?.results?.at(-1)
+  if (!result) {
+    const detail = status?.error ? `: ${status.error}` : ''
+    throw new Error(`${name} did not publish a result${detail}`)
+  }
+  return result.value
+}
+
 export async function run(argv, io = {}) {
   const { command, options: raw } = parseArgs(argv)
   const options = runtimeOptions(raw, io.env)
@@ -291,18 +313,31 @@ export async function run(argv, io = {}) {
   } else if (command === 'cleanup') {
     await cleanup(options)
     result = { cleaned: true }
+  } else if (command === 'statistics') {
+    const name = normalizeScriptName(
+      String(
+        raw.name ||
+          `inspect-relay/mtproto-statistics-${randomUUID()}.ts`,
+      ),
+    )
+    const current = await runProbe(
+      statisticsProbe,
+      name,
+      options,
+      raw.keep === true || raw.keep === 'true',
+    )
+    result = latestResultValue(current, name)
   } else if (command === 'run') {
     const filename = raw._[0]
     if (!filename)
       throw new Error('Usage: run <probe.ts> [--name path/probe.ts] [--keep]')
     const name = normalizeScriptName(String(raw.name || basename(filename)))
-    await deploy(filename, name, options)
-    try {
-      result = await wait(name, options, true)
-    } finally {
-      if (raw.keep !== true && raw.keep !== 'true')
-        await removeProbe(name, options)
-    }
+    result = await runProbe(
+      filename,
+      name,
+      options,
+      raw.keep === true || raw.keep === 'true',
+    )
   } else {
     throw new Error(`Unknown command: ${command}`)
   }
