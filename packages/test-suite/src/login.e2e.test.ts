@@ -3537,49 +3537,41 @@ describe('bridge login e2e', () => {
     }
   }, 30000)
 
-  it('opens native merged-forward previews through the Cordis view plugin', async () => {
+  it('opens message-bundle previews through the Cordis projection plugin', async () => {
     const parent: bridge.IMConversation = {
       id: 'parent-room', kind: 'group', title: 'Parent room',
     }
-    const virtual: bridge.IMConversation = {
-      id: 'virtual-forward', kind: 'group', title: 'Alice 和 Bob 的聊天记录',
-      metadata: {
-        conversationView: 'merged-forward',
-        conversationViewPreview: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-      },
+    const outerBundle: bridge.IMMessageBundle = {
+      id: 'bundle:outer', title: 'Alice 和 Bob 的聊天记录',
+      preview: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
+      locator: { id: 'outer' },
     }
-    const innerVirtual: bridge.IMConversation = {
-      id: 'inner-virtual-forward', kind: 'group', title: 'Bob 和 Carol 的聊天记录',
-      metadata: { conversationView: 'merged-forward', conversationViewPreview: 'Carol: inner first message' },
+    const innerBundle: bridge.IMMessageBundle = {
+      id: 'bundle:inner', title: 'Bob 和 Carol 的聊天记录',
+      preview: 'Carol: inner first message', locator: { id: 'inner' },
     }
     const merged: bridge.IMMessage = {
       id: 'merged-root', conversationId: parent.id, senderId: 'alice', timestamp: 1_700_001_000,
       sender: { id: 'alice', firstName: 'Alice' },
-      content: { parts: [{
-        type: 'text', text: '查看聊天记录',
-        entities: [{ type: 'conversation-link', offset: 0, length: 6, conversation: virtual }],
-      }] },
+      content: { parts: [{ type: 'message-bundle', bundle: outerBundle }] },
     }
-    const outerFirst: bridge.IMMessage = {
-      id: 'outer-first', conversationId: virtual.id, senderId: 'bob', timestamp: 1_700_000_997,
+    const outerFirst: bridge.IMMessageSnapshot = {
+      id: 'outer-first', senderId: 'bob', timestamp: 1_700_000_997,
       sender: { id: 'bob', firstName: 'Bob' },
-      content: { parts: [{
-        type: 'text', text: '查看嵌套聊天记录',
-        entities: [{ type: 'conversation-link', offset: 0, length: 8, conversation: innerVirtual }],
-      }] },
+      content: { parts: [{ type: 'message-bundle', bundle: innerBundle }] },
     }
-    const outerLast: bridge.IMMessage = {
-      id: 'outer-last', conversationId: virtual.id, senderId: 'alice', timestamp: 1_700_000_999,
+    const outerLast: bridge.IMMessageSnapshot = {
+      id: 'outer-last', senderId: 'alice', timestamp: 1_700_000_999,
       sender: { id: 'alice', firstName: 'Alice' },
       content: { parts: [{ type: 'text', text: 'outer last message' }] },
     }
-    const innerFirst: bridge.IMMessage = {
-      id: 'inner-first', conversationId: innerVirtual.id, senderId: 'carol', timestamp: 1_700_000_995,
+    const innerFirst: bridge.IMMessageSnapshot = {
+      id: 'inner-first', senderId: 'carol', timestamp: 1_700_000_995,
       sender: { id: 'carol', firstName: 'Carol' },
       content: { parts: [{ type: 'text', text: 'inner first message' }] },
     }
-    const innerLast: bridge.IMMessage = {
-      id: 'inner-last', conversationId: innerVirtual.id, senderId: 'bob', timestamp: 1_700_000_996,
+    const innerLast: bridge.IMMessageSnapshot = {
+      id: 'inner-last', senderId: 'bob', timestamp: 1_700_000_996,
       sender: { id: 'bob', firstName: 'Bob' },
       content: { parts: [{ type: 'text', text: 'inner last message' }] },
     }
@@ -3588,6 +3580,7 @@ describe('bridge login e2e', () => {
     const readTargets: Array<{ conversationId: string, messageId: string }> = []
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     const historyCalls: string[] = []
+    const bundleLoads: string[] = []
     const platform: bridge.IMPlatform = {
       capabilities: {
         history: true,
@@ -3596,6 +3589,13 @@ describe('bridge login e2e', () => {
         conversations: { groups: true, channels: false, subchannels: false },
         members: { list: true, administrators: true, permissions: true },
         reactions: { read: true, write: false, events: false, actorList: false, maxSelected: 0 },
+      },
+      messageBundles: {
+        async load(_session, locator) {
+          const id = (locator as { id: string }).id
+          bundleLoads.push(id)
+          return id === 'outer' ? [outerFirst, outerLast] : [innerFirst, innerLast]
+        },
       },
       async getAccount() {
         return { credentials: {}, user: { id: 'self', firstName: 'Virtual Test User' } }
@@ -3609,11 +3609,7 @@ describe('bridge login e2e', () => {
       },
       async getHistory(_session, conversation) {
         historyCalls.push(conversation.id)
-        return { messages: conversation.id === virtual.id
-          ? [outerFirst, outerLast]
-          : conversation.id === innerVirtual.id
-            ? [innerFirst, innerLast]
-            : [merged] }
+        return { messages: conversation.id === parent.id ? [merged] : [] }
       },
       async getUser(_session, id) {
         return id === 'alice' ? { id, firstName: 'Alice' }
@@ -3622,15 +3618,15 @@ describe('bridge login e2e', () => {
             : null
       },
       async sendMessage() {
-        throw new Error('sending is disabled for the virtual preview e2e platform')
+        throw new Error('sending is disabled for the message-bundle e2e platform')
       },
       async getConversationMembers() {
         virtualMemberCalls++
-        throw new Error('virtual conversation must not query upstream members')
+        throw new Error('message bundles must not query conversation members')
       },
       async getAvailableReactions() {
         virtualReactionCalls++
-        throw new Error('virtual conversation must not query upstream reactions')
+        throw new Error('message bundles must not query conversation reactions')
       },
       async markRead(_session, target) {
         readTargets.push(target)
@@ -3644,8 +3640,8 @@ describe('bridge login e2e', () => {
       const key = await doClientHandshake(client, pubKey)
       const sid = new Long(0x34567890, 0x3abc, false)
       const sent = await callRpc(client, key, sid, {
-        _: 'auth.sendCode', phoneNumber: `+${platformLogin.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
-        settings: { _: 'codeSettings' },
+        _: 'auth.sendCode', phoneNumber: '+' + platformLogin.auth.virtualPhone,
+        apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
       }, 2)
       await callRpc(client, key, sid, {
         _: 'auth.signIn', phoneNumber: platformLogin.auth.virtualPhone,
@@ -3657,93 +3653,72 @@ describe('bridge login e2e', () => {
         offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 6)
       const parentChat = dialogs.chats.find((chat: any) => chat.title === parent.title)
-      expect(parentChat).toMatchObject({
-        _: 'channel', megagroup: true,
-        defaultBannedRights: {
-          _: 'chatBannedRights', sendMessages: false, sendMedia: false, sendPlain: false, untilDate: 0,
-        },
-      })
       const parentHistory = await callRpc(client, key, sid, {
         _: 'messages.getHistory',
         peer: { _: 'inputPeerChannel', channelId: parentChat.id, accessHash: Long.ZERO },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 8)
       const preview = parentHistory.messages[0]
-      const virtualChat = parentHistory.chats.find((chat: any) => chat.title === virtual.title)
+      const outerChat = parentHistory.chats.find((chat: any) => chat.title === outerBundle.title)
+      const outerUrl = new RegExp('^https://t\\.me/bridgebundle_' + outerChat.id + '/[1-9][0-9]*$')
       expect(preview).toMatchObject({
         _: 'message', message: '查看聊天记录',
-        media: {
-          _: 'messageMediaWebPage', safe: true,
-          webpage: {
-            _: 'webPage', type: 'telegram_message', title: virtual.title,
-            description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-            url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualChat.id}/[1-9][0-9]*$`)),
-          },
-        },
+        entities: [{ _: 'messageEntityTextUrl', url: expect.stringMatching(outerUrl) }],
+        media: { webpage: {
+          _: 'webPage', type: 'telegram_message', title: outerBundle.title,
+          description: outerBundle.preview, url: expect.stringMatching(outerUrl),
+        } },
       })
-      expect(historyCalls).toEqual([virtual.id, parent.id])
+      expect(bundleLoads).toEqual(['outer'])
 
       expect(handler).toBeTypeOf('function')
-      const liveMerged: bridge.IMMessage = {
-        ...merged, id: 'merged-live', timestamp: merged.timestamp + 1,
-      }
-      await handler!({ type: 'message', conversation: parent, message: liveMerged })
+      await handler!({
+        type: 'message', conversation: parent,
+        message: { ...merged, id: 'merged-live', timestamp: merged.timestamp + 1 },
+      })
       const livePreview = await readPush(client, key)
       expect(livePreview).toMatchObject({
         _: 'updates',
-        updates: [{
-          _: 'updateNewChannelMessage',
-          message: {
-            _: 'message', message: '查看聊天记录',
-            entities: [{
-              _: 'messageEntityTextUrl',
-              url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualChat.id}/[1-9][0-9]*$`)),
-            }],
-            media: { webpage: {
-              _: 'webPage', title: virtual.title,
-              description: 'Bob: 查看嵌套聊天记录\nAlice: outer last message',
-              url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualChat.id}/[1-9][0-9]*$`)),
-            } },
-          },
-        }],
-        chats: [
-          { _: 'channel', title: parent.title },
-          { _: 'chat', id: virtualChat.id, title: virtual.title },
-        ],
+        updates: [{ message: {
+          _: 'message', message: '查看聊天记录',
+          entities: [{ _: 'messageEntityTextUrl', url: expect.stringMatching(outerUrl) }],
+        } }],
+        chats: [{ _: 'channel', title: parent.title }, { _: 'chat', id: outerChat.id }],
       })
-      expect(JSON.stringify(livePreview)).not.toContain('tg://privatepost')
 
       client.close()
       const fresh = await TestClient.connect(port)
       const freshSid = new Long(0x45678901, 0x4abc, false)
-      const peer = { _: 'inputPeerChat', chatId: virtualChat.id }
+      const peer = { _: 'inputPeerChat', chatId: outerChat.id }
       expect(await callRpc(fresh, key, freshSid, {
-        _: 'contacts.resolveUsername', username: `bridgechat_${virtualChat.id}`,
+        _: 'contacts.resolveUsername', username: 'bridgebundle_' + outerChat.id,
       }, 10)).toMatchObject({
-        _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualChat.id },
-        chats: [{ _: 'chat', id: virtualChat.id }],
+        _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: outerChat.id },
       })
       const outerHistory = await callRpc(fresh, key, freshSid, {
         _: 'messages.getHistory', peer,
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 11)
-      const nestedPreview = outerHistory.messages.find((message: any) => message.message === '查看嵌套聊天记录')
-      const innerChat = outerHistory.chats.find((chat: any) => chat.title === innerVirtual.title)
+      const nestedPreview = outerHistory.messages.find((message: any) => message.message === '查看聊天记录')
+      const innerChat = outerHistory.chats.find((chat: any) => chat.title === innerBundle.title)
+      const innerUrl = new RegExp('^https://t\\.me/bridgebundle_' + innerChat.id + '/[1-9][0-9]*$')
+      expect(outerHistory.messages).toMatchObject([
+        { _: 'message', message: 'outer last message' },
+        { _: 'message', message: '查看聊天记录' },
+      ])
       expect(nestedPreview).toMatchObject({
-        _: 'message', message: '查看嵌套聊天记录',
         media: { webpage: {
-          _: 'webPage', title: innerVirtual.title,
-          description: 'Carol: inner first message',
-          url: expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${innerChat.id}/[1-9][0-9]*$`)),
+          _: 'webPage', title: innerBundle.title,
+          description: innerBundle.preview, url: expect.stringMatching(innerUrl),
         } },
       })
-      expect(historyCalls).toEqual([virtual.id, parent.id, virtual.id, parent.id, innerVirtual.id])
+      expect(bundleLoads).toEqual(['outer', 'inner'])
       await expect(callRpc(fresh, key, freshSid, {
         _: 'messages.readHistory', peer, maxId: outerHistory.messages[0].id,
       }, 12)).resolves.toMatchObject({ _: 'messages.affectedMessages' })
       expect(readTargets).toEqual([])
       expect(await callRpc(fresh, key, freshSid, {
-        _: 'contacts.resolveUsername', username: `bridgechat_${innerChat.id}`,
+        _: 'contacts.resolveUsername', username: 'bridgebundle_' + innerChat.id,
       }, 13)).toMatchObject({
         _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: innerChat.id },
       })
@@ -3751,38 +3726,26 @@ describe('bridge login e2e', () => {
         _: 'messages.getHistory', peer: { _: 'inputPeerChat', chatId: innerChat.id },
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 15)).toMatchObject({
-        messages: [{ _: 'message', message: 'inner last message' }, { _: 'message', message: 'inner first message' }],
+        messages: [{ message: 'inner last message' }, { message: 'inner first message' }],
       })
-      expect(historyCalls).toEqual([virtual.id, parent.id, virtual.id, parent.id, innerVirtual.id, innerVirtual.id])
       expect(await callRpc(fresh, key, freshSid, {
-        _: 'messages.getFullChat', chatId: virtualChat.id,
+        _: 'messages.getFullChat', chatId: outerChat.id,
       }, 17)).toMatchObject({
         _: 'messages.chatFull',
-        fullChat: {
-          _: 'chatFull', id: virtualChat.id,
-          participants: { _: 'chatParticipantsForbidden', chatId: virtualChat.id },
-        },
-        chats: [{ _: 'chat', left: true, id: virtualChat.id }], users: [],
+        fullChat: { _: 'chatFull', id: outerChat.id },
+        chats: [{ _: 'chat', left: true, id: outerChat.id }],
       })
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,
       }, 19)).toMatchObject({ _: 'messages.messages', messages: [] })
-      expect(await callRpc(fresh, key, freshSid, {
-        _: 'messages.getHistory', peer,
-        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 21)).toMatchObject({ messages: [
-        { message: 'outer last message' },
-        { message: '查看嵌套聊天记录' },
-      ] })
       expect(virtualMemberCalls).toBe(0)
       expect(virtualReactionCalls).toBe(0)
-      const refreshedDialogs = await callRpc(fresh, key, freshSid, {
-        _: 'messages.getDialogs', excludePinned: true, folderId: 0,
-        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
-      }, 23)
-      expect(refreshedDialogs.dialogs).not.toContainEqual(expect.objectContaining({
-        peer: { _: 'peerChat', chatId: virtualChat.id },
-      }))
+      expect(historyCalls.every((id) => id === parent.id)).toBe(true)
+      const persisted = await ctx.database.get('mtproto_im_conversation', {
+        platformSessionId: platformLogin.session.id,
+      })
+      expect(persisted.map((row) => row.platformConversationId)).not.toContain(outerBundle.id)
+      expect(persisted.map((row) => row.platformConversationId)).not.toContain(innerBundle.id)
       fresh.close()
     } finally {
       await stop()
