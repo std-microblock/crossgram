@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { stableId, type MessageProjectionInput } from '@mtproto-relay/bridge'
+import { stableId, type BridgeSessionState, type MessageProjectionInput } from '@mtproto-relay/bridge'
 import { makeMergedForwardProvider } from './index.js'
 
 const conversation = {
@@ -42,7 +42,7 @@ describe('merged-forward projection', () => {
     expect(projection.supports({ id: 'ordinary', kind: 'group', title: 'Ordinary' })).toBe(false)
     expect(projection.remember('session-1', 123, conversation)).toBe('https://t.me/bridgechat_123')
     projection.setTarget('session-1', 123, {
-      conversationId: conversation.id, platformMessageId: 'first', tlMessageId: 456,
+      conversationId: conversation.id, platformMessageId: 'first', tlMessageId: 456, timestamp: 1,
     })
     expect(projection.makeLink('session-1', 123)).toBe('https://t.me/bridgechat_123/456')
     expect(projection.makePreview('session-1', 123)).toMatchObject({
@@ -52,7 +52,7 @@ describe('merged-forward projection', () => {
         description: 'Alice: hello\nBob: world',
       },
     })
-    expect(projection.makeChat('session-1', 123, 1)).toMatchObject({
+    expect(projection.makeChat('session-1', 123)).toMatchObject({
       _: 'chat', left: true, id: 123, title: conversation.title,
     })
     expect(projection.resolveUsername('session-1', 'bridgechat_123')).toMatchObject({
@@ -104,5 +104,34 @@ describe('merged-forward projection', () => {
     expect(projection.makePreview('session-1', 123)?.webpage).toMatchObject({
       description: '点击查看合并转发消息',
     })
+  })
+
+  it('rebuilds feature-owned records and deep-link targets from the durable message store', async () => {
+    const projection = makeMergedForwardProvider()
+    const chatId = stableId(`peer:${conversation.id}`)
+    const listConversations = vi.fn(async () => [conversation])
+    const readProjectedHistory = vi.fn(async () => [{
+      source: {
+        id: 'persisted-latest', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+        content: { parts: [{ type: 'text' as const, text: 'persisted transcript' }] },
+      },
+      parts: [{ ordinal: 0, tlMessageId: 789 }],
+      media: [],
+    }])
+    const state = {
+      session: input().session,
+      store: { listConversations, readProjectedHistory },
+    } as unknown as BridgeSessionState
+
+    await projection.ensureHydrated(state)
+    await projection.ensureHydrated(state)
+
+    expect(projection.resolve('session-1', chatId)).toEqual(conversation)
+    expect(projection.target('session-1', chatId)).toMatchObject({
+      conversationId: conversation.id, platformMessageId: 'persisted-latest', tlMessageId: 789,
+    })
+    expect(projection.makeLink('session-1', chatId)).toBe(`https://t.me/bridgechat_${chatId}/789`)
+    expect(listConversations).toHaveBeenCalledOnce()
+    expect(readProjectedHistory).toHaveBeenCalledOnce()
   })
 })

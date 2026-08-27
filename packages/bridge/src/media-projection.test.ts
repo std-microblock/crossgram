@@ -766,7 +766,7 @@ describe('rich-media projection', () => {
     expect(wireRoundTrip(result).messages[0]).toMatchObject({ richMessage: { _: 'richMessage' }, media: undefined })
   })
 
-  it('asks the conversation-view provider for rich-message links instead of hard-coding one viewer', () => {
+  it('accepts feature-supplied rich-message links instead of hard-coding a viewer', () => {
     const linked: IMConversation = {
       id: 'linked-archive', kind: 'group', title: 'Linked archive',
       metadata: { conversationView: 'custom-view' },

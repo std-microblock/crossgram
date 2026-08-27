@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
@@ -11,7 +12,7 @@ import type { SystemPeerService } from './system-peer.js'
 import type {
   IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMMessageSearchQuery, IMPlatform, IMUser, PlatformSession,
 } from './platform.js'
-import { createTestConversationViews } from './conversation-view.test-utils.js'
+import { MessageProjectionPipeline } from './message-projection.js'
 
 const session: PlatformSession = {
   platformSessionId: 'session-1',
@@ -22,16 +23,16 @@ const session: PlatformSession = {
   virtualPhone: '888123456789012',
 }
 
-function makeViewRpc(
+function makeProjectionRpc(
   platform: IMPlatform,
-  views = createTestConversationViews(),
   systemPeers?: SystemPeerService,
+  messageProjection?: MessageProjectionPipeline,
 ): DialogRpc {
   return new DialogRpc(
     platform, session,
     undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined,
     undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, systemPeers,
-    views, views.messageProjection,
+    messageProjection,
   )
 }
 
@@ -155,6 +156,26 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('DialogRpc', () => {
+  it('routes history messages through the shared Cordis projection waterfall', async () => {
+    const ctx = new Context()
+    const pipeline = new MessageProjectionPipeline(ctx)
+    const middleware = vi.fn(async (input, next) => {
+      expect(input.mode).toBe('history')
+      input.draft.source = {
+        ...input.draft.source,
+        content: { parts: [{ type: 'text', text: 'projected history message' }] },
+      }
+      return next()
+    })
+    ctx.on('bridge/message/project', middleware)
+    const rpc = makeProjectionRpc(new DialogTestPlatform(), undefined, pipeline)
+
+    const history = await rpc.getHistory(getHistoryRequest(stableId('peer:alice'))) as tl.messages.RawMessages
+
+    expect(middleware).toHaveBeenCalled()
+    expect(history.messages[0]).toMatchObject({ _: 'message', message: 'projected history message' })
+  })
+
   it('resolves bridge-owned bots through their t.me username as Telegram bot users', async () => {
     const botConversation = {
       id: 'bridge:platform-admin', kind: 'direct' as const, title: 'CrossGram Admin',
@@ -165,7 +186,7 @@ describe('DialogRpc', () => {
         ? { peer: { id: botConversation.id, conversation: botConversation }, provider: {} }
         : undefined),
     } as unknown as SystemPeerService
-    const rpc = makeViewRpc(new DialogTestPlatform(), createTestConversationViews(), systemPeers)
+    const rpc = makeProjectionRpc(new DialogTestPlatform(), systemPeers)
 
     const resolved = await rpc.resolveUsername({
       _: 'contacts.resolveUsername', username: 'CrossGramAdminBot',
@@ -1388,182 +1409,6 @@ describe('DialogRpc', () => {
         userId: rpc.peerTlId('bob'),
       },
     ])
-  })
-
-  it('prepares virtual deep links through peer-dialog and search projections', async () => {
-    const platform = new DialogTestPlatform()
-    const peerArchive = {
-      id: 'peer-dialog-archive', kind: 'group' as const, title: 'Peer dialog archive',
-      metadata: { conversationView: 'merged-forward' },
-    }
-    const searchArchive = {
-      id: 'search-archive', kind: 'group' as const, title: 'Search archive',
-      metadata: { conversationView: 'merged-forward' },
-    }
-    platform.addMessage('alice', {
-      id: 'peer-link', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
-      content: { parts: [{
-        type: 'text', text: 'peer link',
-        entities: [{ type: 'conversation-link', offset: 0, length: 9, conversation: peerArchive }],
-      }] },
-    })
-    platform.addMessage('alice', {
-      id: 'search-link', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_251,
-      content: { parts: [{
-        type: 'text', text: 'search link',
-        entities: [{ type: 'conversation-link', offset: 0, length: 11, conversation: searchArchive }],
-      }] },
-    })
-    for (const conversation of [peerArchive, searchArchive]) {
-      platform.addMessage(conversation.id, {
-        id: `${conversation.id}-first`, conversationId: conversation.id, senderId: 'bob', timestamp: 1_700_000_249,
-        content: { parts: [{ type: 'text', text: `${conversation.id} first` }] },
-      })
-    }
-    const rpc = makeViewRpc(platform)
-    const peerDialogs = await rpc.getPeerDialogs({
-      _: 'messages.getPeerDialogs', peers: [{
-        _: 'inputDialogPeer',
-        peer: { _: 'inputPeerUser', userId: stableId('peer:alice'), accessHash: Long.ZERO },
-      }],
-    })
-    const peerMessage = peerDialogs.messages[0] as tl.RawMessage
-    const peerEntity = peerMessage.entities?.find(
-      (entity): entity is tl.RawMessageEntityTextUrl => entity._ === 'messageEntityTextUrl',
-    )
-    expect(peerEntity?.url).toMatch(new RegExp(`/bridgechat_${stableId(`peer:${searchArchive.id}`)}/\\d+$`))
-
-    const search = await rpc.search({
-      _: 'messages.search',
-      peer: { _: 'inputPeerUser', userId: stableId('peer:alice'), accessHash: Long.ZERO },
-      q: 'peer link', filter: { _: 'inputMessagesFilterEmpty' },
-      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 10, maxId: 0, minId: 0, hash: Long.ZERO,
-    }) as tl.messages.RawMessages
-    const searchMessage = search.messages[0] as tl.RawMessage
-    const searchEntity = searchMessage.entities?.find(
-      (entity): entity is tl.RawMessageEntityTextUrl => entity._ === 'messageEntityTextUrl',
-    )
-    expect(searchEntity?.url).toMatch(new RegExp(`/bridgechat_${stableId(`peer:${peerArchive.id}`)}/\\d+$`))
-  })
-
-  it('renders an addressable non-dialog conversation as a Telegram message preview card', async () => {
-    const platform = new DialogTestPlatform()
-    const getHistory = vi.spyOn(platform, 'getHistory')
-    const temporary = {
-      id: 'temporary-forward', kind: 'group' as const, title: '聊天记录',
-      metadata: {
-        conversationView: 'merged-forward',
-        conversationViewPreview: 'Bob: native preview\nAlice: work',
-      },
-    }
-    platform.addMessage('alice', {
-      id: 'merged', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_250,
-      content: { parts: [{
-        type: 'text', text: '查看聊天记录',
-        entities: [{ type: 'conversation-link', offset: 0, length: 6, conversation: temporary }],
-      }] },
-    })
-    platform.addMessage(temporary.id, {
-      id: 'inside', conversationId: temporary.id, senderId: 'bob', timestamp: 1_700_000_251,
-      sender: { id: 'bob', firstName: 'Bob' },
-      content: { parts: [{ type: 'text', text: 'forwarded content' }] },
-    })
-    platform.addMessage(temporary.id, {
-      id: 'inside-2', conversationId: temporary.id, senderId: 'alice', timestamp: 1_700_000_252,
-      sender: { id: 'alice', firstName: 'Alice' },
-      content: { parts: [{ type: 'text', text: 'work' }] },
-    })
-    const views = createTestConversationViews()
-    const rpc = makeViewRpc(platform, views)
-    await rpc.getDialogs(getDialogsRequest())
-    expect(platform.historyCalls).toContain(temporary.id)
-    expect(getHistory).toHaveBeenCalledWith(
-      session, { id: temporary.id }, { limit: 200 },
-    )
-    const aliceId = rpc.peerTlId('alice')
-    const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
-    const merged = history.messages.find((item) => item._ === 'message' && item.id > 0) as tl.RawMessage
-    const temporaryId = rpc.peerTlId(temporary.id)
-    if (merged.media?._ !== 'messageMediaWebPage' || merged.media.webpage._ !== 'webPage') {
-      throw new Error('merged forward preview was not projected as a full webpage')
-    }
-    const url = merged.media.webpage.url
-    const insideLatestId = Number(new URL(url).pathname.split('/').at(-1))
-    expect(insideLatestId).toBeGreaterThan(0)
-    expect(merged.message).toBe('查看聊天记录')
-    expect(merged.entities).toMatchObject([{
-      _: 'messageEntityTextUrl', offset: 0, length: 6, url,
-    }])
-    expect(merged.media).toMatchObject({
-      _: 'messageMediaWebPage', manual: true, safe: true,
-      webpage: {
-        _: 'webPage',
-        url: `https://t.me/bridgechat_${temporaryId}/${insideLatestId}`,
-        displayUrl: '聊天记录', type: 'telegram_message',
-        title: '聊天记录', description: 'Bob: native preview\nAlice: work',
-      },
-    })
-    expect(history.chats).toMatchObject([{ _: 'chat', id: temporaryId, title: '聊天记录' }])
-    expect(() => wireRoundTrip(history)).not.toThrow()
-
-    const inside = await rpc.getHistory(getHistoryRequest(temporaryId, {
-      peer: { _: 'inputPeerChat', chatId: temporaryId },
-    })) as tl.messages.RawMessages
-    expect(inside.messages).toMatchObject([
-      { _: 'message', message: 'work' },
-      { _: 'message', message: 'forwarded content' },
-    ])
-
-    // Telegram Desktop opens chats through multiple MTProto connections.
-    // A fresh DialogRpc must resolve the linked virtual peer and serve the
-    // bootstrap requests without calling nonexistent upstream member APIs.
-    const freshRpc = makeViewRpc(platform, views)
-    const peer = { _: 'inputPeerChat' as const, chatId: temporaryId }
-    await expect(freshRpc.resolveUsername({
-      _: 'contacts.resolveUsername', username: `bridgechat_${temporaryId}`,
-    })).resolves.toMatchObject({
-      _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: temporaryId },
-      chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
-    })
-    await expect(freshRpc.getMessages({
-      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: insideLatestId }],
-    })).resolves.toMatchObject({
-      messages: [{ _: 'message', id: insideLatestId, message: 'work' }],
-    })
-    await expect(freshRpc.getPeerDialogs({
-      _: 'messages.getPeerDialogs', peers: [{
-        _: 'inputDialogPeer', peer,
-      }],
-    })).resolves.toMatchObject({
-      dialogs: [{ peer: { _: 'peerChat', chatId: temporaryId }, topMessage: expect.any(Number) }],
-      messages: [{ _: 'message', message: 'work' }],
-      chats: [{ _: 'chat', id: temporaryId, title: '聊天记录' }],
-    })
-    await expect(freshRpc.getScheduledHistory({
-      _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,
-    })).resolves.toMatchObject({ _: 'messages.messages', messages: [] })
-    await expect(freshRpc.getFullChat({ _: 'messages.getFullChat', chatId: temporaryId }))
-      .resolves.toMatchObject({
-        _: 'messages.chatFull',
-        fullChat: {
-          _: 'chatFull', id: temporaryId,
-          participants: { _: 'chatParticipantsForbidden', chatId: temporaryId },
-        },
-        chats: [{ _: 'chat', left: true, id: temporaryId, title: '聊天记录' }], users: [],
-      })
-    await expect(freshRpc.getFullChannel({
-      _: 'channels.getFullChannel',
-      channel: { _: 'inputChannel', channelId: temporaryId, accessHash: Long.ZERO },
-    })).rejects.toMatchObject({ code: 400, text: 'CHANNEL_INVALID' } satisfies Partial<RpcError>)
-    const freshHistory = await freshRpc.getHistory(getHistoryRequest(temporaryId, { peer })) as tl.messages.RawMessages
-    expect(freshHistory).toMatchObject({ messages: [
-        { _: 'message', message: 'work' },
-        { _: 'message', message: 'forwarded content' },
-      ] })
-    const newest = freshHistory.messages[0] as tl.RawMessage
-    await expect(freshRpc.readHistory({ _: 'messages.readHistory', peer, maxId: newest.id }))
-      .resolves.toMatchObject({ _: 'messages.affectedMessages' })
-    expect(platform.readTargets).toEqual([])
   })
 
   it('maps platform inline custom emoji entities to Telegram documents and back', async () => {

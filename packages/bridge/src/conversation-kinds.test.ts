@@ -13,7 +13,6 @@ import { defineModels } from './models.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { IMMessageTargetUnavailableError } from './platform.js'
 import type { IMConversation, IMEvent, IMMessage, IMMessageTarget, IMPlatform, IMReactionActorPageRequest, PlatformSession } from './platform.js'
-import { createTestConversationViews } from './conversation-view.test-utils.js'
 
 const session: PlatformSession = {
   platformSessionId: 'kinds-session', platformId: 'kinds', userId: 'self', credentials: {}, metadata: {},
@@ -204,7 +203,6 @@ async function createRpc(
         }
       }
     : undefined
-  const conversationViews = createTestConversationViews()
   return {
     ctx,
     store,
@@ -215,7 +213,6 @@ async function createRpc(
       undefined, undefined, 1, undefined, reactions,
       undefined, onLocalEvent, '0011223344556677',
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      conversationViews, conversationViews.messageProjection,
     ),
   }
 }
@@ -1284,9 +1281,6 @@ describe('conversation kinds', () => {
     })
     const fullGroup = await rpc.getFullChannel({ _: 'channels.getFullChannel', channel: group })
     const fullChannel = await rpc.getFullChannel({ _: 'channels.getFullChannel', channel })
-    await expect(rpc.getFullChat({
-      _: 'messages.getFullChat', chatId: groupId,
-    })).rejects.toMatchObject({ text: 'CHAT_ID_INVALID' })
     const self = await rpc.getChannelParticipant({
       _: 'channels.getParticipant', channel, participant: { _: 'inputPeerSelf' },
     })

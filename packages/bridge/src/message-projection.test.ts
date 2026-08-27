@@ -77,11 +77,9 @@ describe('MessageProjectionPipeline', () => {
       const ctx = new Context()
       const pipeline = new MessageProjectionPipeline(ctx)
       const loadConversation = vi.fn(async () => [])
-      const bindConversation = vi.fn()
       ctx.on('bridge/message/project', async (input, next) => {
         expect(input.mode).toBe(mode)
         expect(input.loadConversation).toBe(loadConversation)
-        expect(input.bindConversation).toBe(bindConversation)
         input.draft.source = {
           ...input.draft.source,
           content: { parts: [{ type: 'text', text: `projected:${input.mode}` }] },
@@ -93,7 +91,7 @@ describe('MessageProjectionPipeline', () => {
         })
         return next()
       })
-      const input = { ...projectInput(mode), loadConversation, bindConversation }
+      const input = { ...projectInput(mode), loadConversation }
 
       await expect(pipeline.project(input, () => ({
         message: rendered(input), chats: input.draft.chats,

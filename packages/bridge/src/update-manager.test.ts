@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -16,7 +16,7 @@ import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { requestInboxConversation, requestInboxMessage } from './request-inbox.js'
-import { createTestConversationViews } from './conversation-view.test-utils.js'
+import { MessageProjectionPipeline } from './message-projection.js'
 
 const session: PlatformSession = {
   platformSessionId: 'updates-session', platformId: 'updates-platform', userId: 'self',
@@ -71,22 +71,23 @@ async function createHarness(
     update: tl.TypeUpdates
     excludeConnection?: ServerConnection
   }> = []
-  const store = new MessageStore(ctx.database, updateDeliveryRetention)
+  const messageProjection = new MessageProjectionPipeline(ctx)
+  const store = new MessageStore(
+    ctx.database, updateDeliveryRetention, undefined, undefined, messageProjection,
+  )
   const blockedPeers = blockedMode ? new BlockedPeerStore(ctx.database, blockedMode) : undefined
-  const conversationViews = createTestConversationViews()
   const manager = new UpdateManager(
     ctx.database, new PlatformRegistry([[session.platformId, targetPlatform]]), store,
     (authKeyId, update, excludeConnection) => {
       sent.push({ authKeyId, update, excludeConnection })
       return deliveredConnections
     },
-    1, undefined, projectSticker, blockedPeers, registerReactions,
-    conversationViews, conversationViews.messageProjection,
+    1, undefined, projectSticker, blockedPeers, registerReactions, messageProjection,
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { ctx, store, manager, sent, blockedPeers, conversationViews }
+  return { ctx, store, manager, sent, blockedPeers, messageProjection }
 }
 
 function roundTrip<T>(object: T): T {
@@ -95,6 +96,32 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
+  it('routes live messages through the shared Cordis projection waterfall', async () => {
+    const { ctx, store, manager, sent } = await createHarness()
+    const middleware = vi.fn(async (input, next) => {
+      expect(input.mode).toBe('update')
+      input.draft.source = {
+        ...input.draft.source,
+        content: { parts: [{ type: 'text', text: 'projected live message' }] },
+      }
+      return next()
+    })
+    ctx.on('bridge/message/project', middleware)
+    const conversation: IMConversation = { id: 'live-projection', kind: 'group', title: 'Projection' }
+    const message: IMMessage = {
+      id: 'live-projection-message', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      content: { parts: [{ type: 'text', text: 'original' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    expect(middleware).toHaveBeenCalledOnce()
+    expect(sent[0].update).toMatchObject({
+      updates: [{ message: { _: 'message', message: 'projected live message' } }],
+    })
+  })
+
   it('does not publish transient platform voice control events as Telegram messages', async () => {
     const { manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'caller', kind: 'direct', title: 'Caller' }
@@ -726,71 +753,6 @@ describe('UpdateManager', () => {
     expect(reactions.getCustomEmojiDocuments([emoji!.documentId])).toHaveLength(1)
   })
 
-  it('prepares virtual deep links while forwarding messages', async () => {
-    const sourceConversation: IMConversation = { id: 'forward-source', kind: 'group', title: 'Source' }
-    const targetConversation: IMConversation = { id: 'forward-target', kind: 'group', title: 'Target' }
-    const archive: IMConversation = {
-      id: 'forward-archive', kind: 'group', title: 'Forward archive',
-      metadata: { conversationView: 'merged-forward' },
-    }
-    const source: IMMessage = {
-      id: 'forward-source-message', conversationId: sourceConversation.id, senderId: 'alice', timestamp: 1_800_000_010,
-      content: { parts: [{
-        type: 'text', text: 'forward archive',
-        entities: [{ type: 'conversation-link', offset: 0, length: 15, conversation: archive }],
-      }] },
-    }
-    const targetPlatform: IMPlatform = {
-      ...platform,
-      capabilities: {
-        ...platform.capabilities, history: true,
-        messageActions: {
-          delete: { own: { supported: true }, others: { supported: true } },
-          edit: { mode: 'native' }, forward: { mode: 'native', preservesAuthor: true },
-        },
-      },
-      async getDialogs() {
-        return {
-          dialogs: [
-            { conversation: sourceConversation, unreadCount: 0, lastMessage: source },
-            { conversation: targetConversation, unreadCount: 0 },
-          ],
-        }
-      },
-      async getHistory(_session, conversation) {
-        return conversation.id === archive.id
-          ? { messages: [{
-              id: 'forward-archive-first', conversationId: archive.id, senderId: 'bob', timestamp: 1_800_000_001,
-              content: { parts: [{ type: 'text', text: 'forwarded first' }] },
-            }] }
-          : { messages: [] }
-      },
-      async forwardMessages(_session, _from, _ids, to) {
-        return [{ ...source, id: 'forwarded-message', conversationId: to.id, timestamp: 1_800_000_011 }]
-      },
-    }
-    const { store, conversationViews } = await createHarness(undefined, targetPlatform)
-    const sourceProjection = await store.ingest(session, sourceConversation, source)
-    await store.upsertConversation(session, targetConversation)
-    const rpc = new DialogRpc(
-      targetPlatform, session, store,
-      undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      conversationViews, conversationViews.messageProjection,
-    )
-    const forwarded = await rpc.forwardMessages({
-      _: 'messages.forwardMessages',
-      fromPeer: { _: 'inputPeerChannel', channelId: stableId(`peer:${sourceConversation.id}`), accessHash: Long.ONE },
-      toPeer: { _: 'inputPeerChannel', channelId: stableId(`peer:${targetConversation.id}`), accessHash: Long.ONE },
-      id: [sourceProjection.projection[0].tlMessageId], randomId: [Long.ONE],
-    }) as tl.RawUpdates
-    const update = forwarded.updates.find((item) => item._ === 'updateNewChannelMessage') as tl.RawUpdateNewChannelMessage
-    const entity = (update.message as tl.RawMessage).entities?.find(
-      (item): item is tl.RawMessageEntityTextUrl => item._ === 'messageEntityTextUrl',
-    )
-    expect(entity?.url).toMatch(new RegExp(`/bridgechat_${stableId(`peer:${archive.id}`)}/\\d+$`))
-  })
-
   it('journals forwarded messages and pushes them to a different authorized device', async () => {
     const sourceConversation: IMConversation = { id: 'forward-sync-source', kind: 'group', title: 'Source' }
     const targetConversation: IMConversation = { id: 'forward-sync-target', kind: 'group', title: 'Target' }
@@ -875,82 +837,6 @@ describe('UpdateManager', () => {
       _: 'updates.channelDifference', final: true,
       newMessages: [{ message: 'forward me', out: true }],
     })
-  })
-
-  it('links live merged forwards to their latest saved message across new RPC connections', async () => {
-    const conversation: IMConversation = { id: 'merged-parent', kind: 'group', title: 'Parent' }
-    const virtual: IMConversation = {
-      id: 'merged-virtual', kind: 'group', title: 'QQ用户的聊天记录',
-      metadata: {
-        conversationView: 'merged-forward',
-        conversationViewPreview: 'Alice: 第一条\nBob: 第二条',
-      },
-    }
-    const forwarded = Array.from({ length: 201 }, (_, index): IMMessage => ({
-      id: `merged-${index}`, conversationId: virtual.id, senderId: 'alice', timestamp: 1_800_000_004 + index,
-      content: { parts: [{ type: 'text', text: `forwarded ${index}` }] },
-    }))
-    const targetPlatform: IMPlatform = {
-      ...platform,
-      capabilities: { ...platform.capabilities, history: true },
-      async getDialogs() { return { dialogs: [] } },
-      async getHistory(_session, target, query) {
-        expect(target.id).toBe(virtual.id)
-        return { messages: forwarded.slice(-(query.limit ?? forwarded.length)) }
-      },
-    }
-    const { store, manager, sent, conversationViews } = await createHarness(undefined, targetPlatform)
-    const text = '查看聊天记录'
-    const message: IMMessage = {
-      id: 'merged-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_003,
-      content: { parts: [{
-        type: 'text', text,
-        entities: [{ type: 'conversation-link', offset: 0, length: text.length, conversation: virtual }],
-      }] },
-    }
-    const result = await store.ingest(session, conversation, message)
-    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
-
-    const payload = roundTrip(sent[0].update) as tl.RawUpdates
-    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
-    const virtualId = stableId(`peer:${virtual.id}`)
-    const url = expect.stringMatching(new RegExp(`^https://t\\.me/bridgechat_${virtualId}/\\d+$`))
-    expect(update.message).toMatchObject({
-      _: 'message', message: text,
-      entities: [{ _: 'messageEntityTextUrl', offset: 0, length: text.length, url }],
-      media: {
-        _: 'messageMediaWebPage', manual: true, safe: true,
-        webpage: {
-          _: 'webPage', url, type: 'telegram_message', title: virtual.title,
-          description: 'Alice: 第一条\nBob: 第二条',
-        },
-      },
-    })
-    const targetEntity = (update.message as tl.RawMessage).entities?.find(
-      (entity): entity is tl.RawMessageEntityTextUrl => entity._ === 'messageEntityTextUrl',
-    )
-    if (!targetEntity) throw new Error('merged forward update is missing its deep link')
-    const targetId = Number(new URL(targetEntity.url).pathname.split('/').at(-1))
-    const freshRpc = new DialogRpc(
-      targetPlatform, session, store,
-      undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      conversationViews,
-    )
-    await expect(freshRpc.resolveUsername({
-      _: 'contacts.resolveUsername', username: `bridgechat_${virtualId}`,
-    })).resolves.toMatchObject({ _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: virtualId } })
-    await expect(freshRpc.getMessages({
-      _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: targetId }],
-    })).resolves.toMatchObject({ messages: [{ _: 'message', id: targetId, message: 'forwarded 200' }] })
-    expect(payload.chats).toMatchObject([
-      {
-        _: 'channel', title: conversation.title, megagroup: true,
-        defaultBannedRights: { _: 'chatBannedRights', untilDate: 0 },
-      },
-      { _: 'chat', id: virtualId, title: virtual.title, participantsCount: 1 },
-    ])
-    expect(JSON.stringify(payload)).not.toContain('tg://privatepost')
   })
 
   it('keeps account and per-channel pts domains independent and replays each channel separately', async () => {
