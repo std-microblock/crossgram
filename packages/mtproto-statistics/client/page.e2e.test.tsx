@@ -47,6 +47,15 @@ describe('MTProto statistics dashboard e2e', () => {
     expect(wrapper.text()).toContain('接收速度')
 
     await wrapper.findAll('.statistics-tabs button')[3]!.trigger('click')
+    expect(wrapper.text()).toContain('文件直连 / 中转比例')
+    expect(wrapper.text()).toContain('直连比例')
+    expect(wrapper.text()).toContain('50.00%')
+    expect(wrapper.text()).toContain('分设备文件路由')
+    expect(wrapper.text()).toContain('Pixel 10')
+    expect(wrapper.text()).toContain('tdesktop')
+    expect(wrapper.findAll('.statistics-pie')).toHaveLength(1)
+
+    await wrapper.findAll('.statistics-tabs button')[4]!.trigger('click')
     expect(wrapper.text()).toContain('事件循环 P99')
     expect(wrapper.text()).toContain('GC 时间')
     expect(wrapper.text()).toContain('Cgroup Anon')
@@ -139,6 +148,18 @@ function statisticsData(): MtprotoStatisticsData {
       missingRpcs: {
         count: 1, uniqueMethods: 1,
         methods: [{ method: 'unknown.method', count: 1, lastSeenAt: Date.now() }],
+      },
+      fileRoutes: {
+        directFiles: 3, relayFiles: 3, totalFiles: 6, directRate: 0.5,
+        devices: [{
+          deviceModel: 'Pixel 10', systemVersion: 'SDK 36', appVersion: '12.9.0',
+          langPack: 'android', apiId: 6, directFiles: 2, relayFiles: 1,
+          totalFiles: 3, directRate: 0.67, lastSeenAt: Date.now(),
+        }, {
+          deviceModel: 'Workstation', systemVersion: 'Windows 11', appVersion: '6.1',
+          langPack: 'tdesktop', apiId: 2040, directFiles: 1, relayFiles: 2,
+          totalFiles: 3, directRate: 0.33, lastSeenAt: Date.now(),
+        }],
       },
       ips: [{
         address: '203.0.113.9', activeConnections: 2, totalConnections: 5,

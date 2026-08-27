@@ -46,6 +46,11 @@ describe('MTProto statistics Muon entry e2e', () => {
     expect(listeners.get('mtproto/packet')?.options).toEqual({ prepend: true })
 
     const connection = fakeConnection()
+    const rpcContext = {
+      mtprotoConnection: connection,
+      authKeyId: new Uint8Array([1, 2, 3, 4]),
+      clientInfo: connection.clientInfo,
+    }
     listeners.get('mtproto/connection')!.listener(connection, 'open')
     listeners.get('mtproto/traffic')!.listener({
       connection, direction: 'received', bytes: 4_096, timestamp: Date.now(),
@@ -59,12 +64,31 @@ describe('MTProto statistics Muon entry e2e', () => {
       async () => undefined,
     )
     await listeners.get('mtproto/rpc')!.listener.call(
-      { mtprotoConnection: connection },
+      rpcContext,
       { _: 'messages.getHistory' },
       async () => ({ _: 'messages.messages' }),
     )
+    const fileLocation = {
+      _: 'inputDocumentFileLocation', id: '100', accessHash: '100',
+      fileReference: new TextEncoder().encode('bridge-media:100'), thumbSize: '',
+    }
     await listeners.get('mtproto/rpc')!.listener.call(
-      { mtprotoConnection: connection },
+      rpcContext,
+      { _: 'crossgram.getFileUrl', location: fileLocation },
+      async () => ({ _: 'dataJSON', data: '{"url":"https://cdn.example/file"}' }),
+    )
+    await listeners.get('mtproto/rpc')!.listener.call(
+      rpcContext,
+      { _: 'upload.getFile', location: fileLocation, offset: 0, limit: 131_072 },
+      async () => ({ _: 'upload.file', bytes: new Uint8Array(131_072) }),
+    )
+    await listeners.get('mtproto/rpc')!.listener.call(
+      rpcContext,
+      { _: 'upload.getFile', location: fileLocation, offset: 131_072, limit: 131_072 },
+      async () => ({ _: 'upload.file', bytes: new Uint8Array(64) }),
+    )
+    await listeners.get('mtproto/rpc')!.listener.call(
+      rpcContext,
       {
         _: 'upload.getFile', offset: 0, limit: 131_072,
         location: { _: 'inputDocumentFileLocation', id: '42', thumbSize: 'm' },
@@ -75,7 +99,7 @@ describe('MTProto statistics Muon entry e2e', () => {
       }),
     )
     await listeners.get('mtproto/rpc')!.listener.call(
-      { mtprotoConnection: connection },
+      rpcContext,
       {
         _: 'messages.faveSticker', unfave: false,
         id: { _: 'inputDocument', id: '77' },
@@ -86,7 +110,7 @@ describe('MTProto statistics Muon entry e2e', () => {
       }),
     )
     await listeners.get('mtproto/rpc')!.listener.call(
-      { mtprotoConnection: connection },
+      rpcContext,
       { _: 'unknown.method' },
       async () => ({
         _: 'mt_rpc_error', errorCode: 500,
@@ -99,7 +123,7 @@ describe('MTProto statistics Muon entry e2e', () => {
     expect(mutations).toBe(1)
     expect(data.snapshot).toMatchObject({
       activeConnections: 1,
-      rpc: { count: 4, errors: 3 },
+      rpc: { count: 7, errors: 3 },
       packets: { count: 1, bytes: 128 },
       traffic: { receivedBytes: 4_096, sentBytes: 2_048 },
     })
@@ -136,6 +160,17 @@ describe('MTProto statistics Muon entry e2e', () => {
       count: 1, uniqueMethods: 1,
       methods: [expect.objectContaining({ method: 'unknown.method', count: 1 })],
     })
+    expect(data.snapshot.fileRoutes).toEqual({
+      directFiles: 1,
+      relayFiles: 1,
+      totalFiles: 2,
+      directRate: 0.5,
+      devices: [expect.objectContaining({
+        deviceModel: 'Crossgram Android', systemVersion: 'SDK 36', appVersion: '12.9.0',
+        langPack: 'android', apiId: 6, directFiles: 1, relayFiles: 1,
+        totalFiles: 2, directRate: 0.5,
+      })],
+    })
     expect(data.snapshot.ips[0]).toMatchObject({ address: '198.51.100.8', activeConnections: 1 })
     expect(data.series.seconds).toHaveLength(1)
 
@@ -146,6 +181,9 @@ describe('MTProto statistics Muon entry e2e', () => {
     expect(data.snapshot.failureReasons).toEqual([])
     expect(data.snapshot.recentFailures).toEqual([])
     expect(data.snapshot.missingRpcs).toEqual({ count: 0, uniqueMethods: 0, methods: [] })
+    expect(data.snapshot.fileRoutes).toEqual({
+      directFiles: 0, relayFiles: 0, totalFiles: 0, directRate: 0, devices: [],
+    })
     expect(data.series.seconds).toEqual([])
     cleanups.forEach(cleanup => cleanup())
   })
@@ -154,6 +192,10 @@ describe('MTProto statistics Muon entry e2e', () => {
 function fakeConnection(): MtprotoConnectionScope {
   return {
     id: 'conn-e2e', remoteAddress: '198.51.100.8', remotePort: 443,
+    clientInfo: {
+      apiId: 6, deviceModel: 'Crossgram Android', systemVersion: 'SDK 36',
+      appVersion: '12.9.0', systemLangCode: 'zh-CN', langPack: 'android', langCode: 'zh-CN',
+    },
     connection: {} as never, session: {} as never,
   }
 }

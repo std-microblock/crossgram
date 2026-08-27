@@ -1,7 +1,8 @@
 import type { MtprotoConnectionScope, MtprotoTrafficSample } from '@mtproto-relay/mtproto'
 import { LatencyHistogram } from './histogram.js'
 import type {
-  IpSnapshot, MissingRpcSnapshot, RpcFailureCategory, RpcFailureSnapshot, RpcMethodCountSnapshot, RpcMethodSnapshot,
+  FileRouteDeviceSnapshot, IpSnapshot, MissingRpcSnapshot, RpcFailureCategory, RpcFailureSnapshot,
+  RpcMethodCountSnapshot, RpcMethodSnapshot,
   RpcFailureReasonSnapshot, RpcFailureSample, RuntimeSnapshot, SlowRpcSample,
   StatisticsPoint, StatisticsSeries, StatisticsSnapshot,
 } from './types.js'
@@ -35,6 +36,26 @@ interface RpcFailureReasonState extends RpcFailureState {
   errorMessage: string
 }
 
+interface FileRouteDeviceState {
+  deviceModel: string
+  systemVersion: string
+  appVersion: string
+  langPack: string
+  apiId: number
+  directFiles: number
+  relayFiles: number
+  lastSeenAt: number
+}
+
+export interface FileRouteDevice {
+  key: string
+  deviceModel: string
+  systemVersion: string
+  appVersion: string
+  langPack: string
+  apiId: number
+}
+
 export interface CollectorOptions {
   slowThresholdMs: number
   topMethods: number
@@ -57,6 +78,9 @@ const EMPTY_RUNTIME: RuntimeSnapshot = {
 const MAX_FAILURE_REASONS = 2_048
 const MAX_RECENT_FAILURES = 100
 const MAX_ERROR_MESSAGE_LENGTH = 500
+const MAX_FILE_ROUTE_DEVICES = 2_048
+const MAX_FILE_ROUTE_TRANSFERS = 16_384
+const FILE_ROUTE_TRANSFER_TTL_MS = 10 * 60_000
 
 export class StatisticsCollector {
   readonly series: StatisticsSeries = { seconds: [], minutes: [], hours: [] }
@@ -73,6 +97,8 @@ export class StatisticsCollector {
   private readonly connections = new Map<string, string>()
   private readonly slowest: SlowRpcSample[] = []
   private readonly recentFailures: RpcFailureSample[] = []
+  private readonly fileRouteDevices = new Map<string, FileRouteDeviceState>()
+  private readonly fileRouteTransfers = new Map<string, number>()
   private rpcErrors = 0
   private missingRpcCount = 0
   private intervalRpcErrors = 0
@@ -82,6 +108,8 @@ export class StatisticsCollector {
   private intervalReceivedBytes = 0
   private intervalSentBytes = 0
   private totalConnections = 0
+  private directFiles = 0
+  private relayFiles = 0
   private minuteBucket: StatisticsPoint[] = []
   private hourBucket: StatisticsPoint[] = []
   private minuteKey = -1
@@ -130,6 +158,68 @@ export class StatisticsCollector {
     this.packet.record(durationMs)
     this.intervalPacket.record(durationMs)
     this.packetBytes += Math.max(0, bytes)
+  }
+
+  recordFileRoute(input: {
+    route: 'direct' | 'relay'
+    fileKey: string
+    transferOwner: string
+    device: FileRouteDevice
+    at?: number
+  }): boolean {
+    const at = input.at ?? Date.now()
+    const transferKey = `${input.route}\u0000${input.transferOwner}\u0000${input.fileKey}`
+    const previous = this.fileRouteTransfers.get(transferKey)
+    if (previous !== undefined && at - previous < FILE_ROUTE_TRANSFER_TTL_MS) {
+      this.fileRouteTransfers.delete(transferKey)
+      this.fileRouteTransfers.set(transferKey, at)
+      return false
+    }
+    this.fileRouteTransfers.set(transferKey, at)
+    this.pruneFileRouteTransfers(at)
+
+    let deviceKey = input.device.key
+    let deviceInput = input.device
+    let device = this.fileRouteDevices.get(deviceKey)
+    if (!device && this.fileRouteDevices.size >= MAX_FILE_ROUTE_DEVICES) {
+      deviceKey = 'other'
+      deviceInput = {
+        key: deviceKey,
+        deviceModel: '其他设备',
+        systemVersion: '—',
+        appVersion: '—',
+        langPack: 'other',
+        apiId: 0,
+      }
+      device = this.fileRouteDevices.get(deviceKey)
+    }
+    if (!device) {
+      device = {
+        deviceModel: deviceInput.deviceModel,
+        systemVersion: deviceInput.systemVersion,
+        appVersion: deviceInput.appVersion,
+        langPack: deviceInput.langPack,
+        apiId: deviceInput.apiId,
+        directFiles: 0,
+        relayFiles: 0,
+        lastSeenAt: at,
+      }
+      this.fileRouteDevices.set(deviceKey, device)
+    }
+    device.deviceModel = deviceInput.deviceModel
+    device.systemVersion = deviceInput.systemVersion
+    device.appVersion = deviceInput.appVersion
+    device.langPack = deviceInput.langPack
+    device.apiId = deviceInput.apiId
+    device.lastSeenAt = at
+    if (input.route === 'direct') {
+      this.directFiles++
+      device.directFiles++
+    } else {
+      this.relayFiles++
+      device.relayFiles++
+    }
+    return true
   }
 
   recordRpc(input: {
@@ -291,6 +381,13 @@ export class StatisticsCollector {
         uniqueMethods: this.missingRpcs.size,
         methods: this.missingRpcSnapshots(),
       },
+      fileRoutes: {
+        directFiles: this.directFiles,
+        relayFiles: this.relayFiles,
+        totalFiles: this.directFiles + this.relayFiles,
+        directRate: ratio(this.directFiles, this.directFiles + this.relayFiles),
+        devices: this.fileRouteDeviceSnapshots(),
+      },
       ips: this.ipSnapshots(),
       slowest: [...this.slowest],
     }
@@ -308,6 +405,8 @@ export class StatisticsCollector {
     this.missingRpcs.clear()
     this.slowest.length = 0
     this.recentFailures.length = 0
+    this.fileRouteDevices.clear()
+    this.fileRouteTransfers.clear()
     this.rpcErrors = 0
     this.missingRpcCount = 0
     this.intervalRpcErrors = 0
@@ -317,6 +416,8 @@ export class StatisticsCollector {
     this.intervalReceivedBytes = 0
     this.intervalSentBytes = 0
     this.totalConnections = this.connections.size
+    this.directFiles = 0
+    this.relayFiles = 0
     this.series.seconds.length = 0
     this.series.minutes.length = 0
     this.series.hours.length = 0
@@ -375,6 +476,17 @@ export class StatisticsCollector {
       .slice(0, this.options.topMethods)
   }
 
+  private fileRouteDeviceSnapshots(): FileRouteDeviceSnapshot[] {
+    return [...this.fileRouteDevices.values()].map((device) => ({
+      ...device,
+      totalFiles: device.directFiles + device.relayFiles,
+      directRate: ratio(device.directFiles, device.directFiles + device.relayFiles),
+    })).sort((left, right) =>
+      right.totalFiles - left.totalFiles
+      || right.lastSeenAt - left.lastSeenAt)
+      .slice(0, 500)
+  }
+
   private ipSnapshots(): IpSnapshot[] {
     return [...this.ips.entries()].map(([address, state]) => ({
       address,
@@ -406,6 +518,16 @@ export class StatisticsCollector {
       this.ips.set(address, state)
     }
     return state
+  }
+
+  private pruneFileRouteTransfers(at: number): void {
+    for (const [key, lastSeenAt] of this.fileRouteTransfers) {
+      if (
+        at - lastSeenAt < FILE_ROUTE_TRANSFER_TTL_MS
+        && this.fileRouteTransfers.size <= MAX_FILE_ROUTE_TRANSFERS
+      ) break
+      this.fileRouteTransfers.delete(key)
+    }
   }
 
   private recordFailureReason(input: {

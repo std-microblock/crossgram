@@ -10,7 +10,7 @@ import type {
 } from '../src/types.js'
 import './style.css'
 
-type DashboardTab = 'overview' | 'rpc' | 'network' | 'runtime'
+type DashboardTab = 'overview' | 'rpc' | 'network' | 'files' | 'runtime'
 type Range = 'seconds' | 'minutes' | 'hours'
 
 interface PieSlice {
@@ -149,13 +149,17 @@ export const StatisticsPage = defineComponent({
         { label: '成功', value: snapshot.rpc.count - snapshot.rpc.errors, color: '#39b980' },
         { label: '失败', value: snapshot.rpc.errors, color: '#e05d6f' },
       ]
+      const fileRouteSlices: PieSlice[] = [
+        { label: '直连', value: snapshot.fileRoutes.directFiles, color: '#39b980' },
+        { label: '中转', value: snapshot.fileRoutes.relayFiles, color: '#e49b3d' },
+      ]
       return <Layout class="mtproto-statistics-page">{
         {
           header: () => <div class="statistics-toolbar">
             <nav class="statistics-tabs" aria-label="Statistics sections">
-              {(['overview', 'rpc', 'network', 'runtime'] as DashboardTab[]).map(item => <button
+              {(['overview', 'rpc', 'network', 'files', 'runtime'] as DashboardTab[]).map(item => <button
                 type="button" class={{ active: tab.value === item }} onClick={() => { tab.value = item }}
-              >{{ overview: '总览', rpc: 'RPC', network: '网络 / IP', runtime: '运行时' }[item]}</button>)}
+              >{{ overview: '总览', rpc: 'RPC', network: '网络 / IP', files: '文件', runtime: '运行时' }[item]}</button>)}
             </nav>
             <div class="statistics-range">
               {(['seconds', 'minutes', 'hours'] as Range[]).map(item => <button
@@ -214,6 +218,24 @@ export const StatisticsPage = defineComponent({
                 <MetricCard label="连接" value={`${snapshot.activeConnections} 活跃`} detail={`${snapshot.totalConnections} 累计`} points={values(point => point.activeConnections).value} color="#e49b3d" />
               </section>
               <Panel title="来源 IP"><IpTable rows={snapshot.ips} /></Panel>
+            </>}
+            {tab.value === 'files' && <>
+              <section class="statistics-grid compact">
+                <MetricCard label="文件路由" value={formatInteger(snapshot.fileRoutes.totalFiles)} detail="去重后的文件路由会话" points={[]} />
+                <MetricCard label="直连比例" value={formatPercent(snapshot.fileRoutes.directRate)} detail={`${formatInteger(snapshot.fileRoutes.directFiles)} 个文件直连`} points={[]} color="#39b980" />
+                <MetricCard label="直连" value={formatInteger(snapshot.fileRoutes.directFiles)} detail="成功取得直连 URL" points={[]} color="#39b980" />
+                <MetricCard label="中转" value={formatInteger(snapshot.fileRoutes.relayFiles)} detail="由 upload.getFile 返回内容" points={[]} color="#e49b3d" />
+              </section>
+              <section class="statistics-two-column">
+                <PieChart title="文件直连 / 中转比例" slices={fileRouteSlices} totalLabel="文件" />
+                <Panel title="统计口径">
+                  <div class="statistics-note">
+                    直连按成功返回直连 URL 统计，中转按成功返回文件内容统计；同一设备、同一文件、同一路由的连续分片会在 10 分钟窗口内去重。
+                    客户端取得直连 URL 后若 HTTP 下载失败并回退中转，两条路由都会记录。
+                  </div>
+                </Panel>
+              </section>
+              <Panel title="分设备文件路由"><FileRouteDeviceTable rows={snapshot.fileRoutes.devices} /></Panel>
             </>}
             {tab.value === 'runtime' && <>
               <section class="statistics-grid">
@@ -323,6 +345,21 @@ const IpTable = defineComponent({
       formatInteger(row.rpcCount), `${formatBytes(row.receivedBytes)} (${formatRate(row.receivedBytesPerSecond)})`,
       `${formatBytes(row.sentBytes)} (${formatRate(row.sentBytesPerSecond)})`, formatTime(row.lastSeenAt),
     ])} />
+  },
+})
+
+const FileRouteDeviceTable = defineComponent({
+  props: { rows: { type: Array as () => MtprotoStatisticsData['snapshot']['fileRoutes']['devices'], required: true } },
+  setup(props) {
+    return () => <Table
+      headers={['设备', '系统', '客户端', 'Lang Pack / API ID', '直连', '中转', '直连比例', '最后活动']}
+      rows={props.rows.map(row => [
+        <code title={row.deviceModel}>{row.deviceModel}</code>, row.systemVersion,
+        row.appVersion, `${row.langPack} / ${row.apiId}`,
+        formatInteger(row.directFiles), formatInteger(row.relayFiles), formatPercent(row.directRate),
+        formatTime(row.lastSeenAt),
+      ])}
+    />
   },
 })
 

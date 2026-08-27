@@ -80,6 +80,27 @@ export interface IpSnapshot {
   lastSeenAt: number
 }
 
+export interface FileRouteDeviceSnapshot {
+  deviceModel: string
+  systemVersion: string
+  appVersion: string
+  langPack: string
+  apiId: number
+  directFiles: number
+  relayFiles: number
+  totalFiles: number
+  directRate: number
+  lastSeenAt: number
+}
+
+export interface FileRouteSnapshot {
+  directFiles: number
+  relayFiles: number
+  totalFiles: number
+  directRate: number
+  devices: FileRouteDeviceSnapshot[]
+}
+
 export interface RuntimeSnapshot {
   cpuPercent: number
   rssBytes: number
@@ -159,6 +180,7 @@ export interface StatisticsSnapshot {
     uniqueMethods: number
     methods: MissingRpcSnapshot[]
   }
+  fileRoutes: FileRouteSnapshot
   ips: IpSnapshot[]
   slowest: SlowRpcSample[]
 }

@@ -63,8 +63,62 @@ describe('StatisticsCollector', () => {
       rpc: { count: 0 }, traffic: { receivedBytes: 0, sentBytes: 0 },
       failures: [],
       missingRpcs: { count: 0, uniqueMethods: 0, methods: [] },
+      fileRoutes: { directFiles: 0, relayFiles: 0, totalFiles: 0, directRate: 0, devices: [] },
     })
     expect(collector.series.seconds).toEqual([])
+  })
+
+  it('deduplicates file route chunks and aggregates direct versus relay usage per device', () => {
+    const collector = createCollector()
+    const android = {
+      key: 'android', deviceModel: 'Pixel 10', systemVersion: 'SDK 36',
+      appVersion: '12.9.0', langPack: 'android', apiId: 6,
+    }
+    const desktop = {
+      key: 'desktop', deviceModel: 'Workstation', systemVersion: 'Windows 11',
+      appVersion: '6.1', langPack: 'tdesktop', apiId: 2040,
+    }
+
+    expect(collector.recordFileRoute({
+      route: 'direct', fileKey: 'document:1', transferOwner: 'auth:android', device: android, at: 1_000,
+    })).toBe(true)
+    expect(collector.recordFileRoute({
+      route: 'direct', fileKey: 'document:1', transferOwner: 'auth:android', device: android, at: 2_000,
+    })).toBe(false)
+    expect(collector.recordFileRoute({
+      route: 'relay', fileKey: 'document:2', transferOwner: 'auth:android', device: android, at: 3_000,
+    })).toBe(true)
+    expect(collector.recordFileRoute({
+      route: 'relay', fileKey: 'document:2', transferOwner: 'auth:android', device: android, at: 4_000,
+    })).toBe(false)
+    expect(collector.recordFileRoute({
+      route: 'direct', fileKey: 'document:3', transferOwner: 'auth:desktop', device: desktop, at: 5_000,
+    })).toBe(true)
+    expect(collector.recordFileRoute({
+      route: 'direct', fileKey: 'document:1', transferOwner: 'auth:android', device: android, at: 602_001,
+    })).toBe(true)
+
+    expect(collector.snapshot(runtime()).fileRoutes).toEqual({
+      directFiles: 3,
+      relayFiles: 1,
+      totalFiles: 4,
+      directRate: 0.75,
+      devices: [
+        expect.objectContaining({
+          deviceModel: 'Pixel 10', directFiles: 2, relayFiles: 1,
+          totalFiles: 3, directRate: 0.67, lastSeenAt: 602_001,
+        }),
+        expect.objectContaining({
+          deviceModel: 'Workstation', directFiles: 1, relayFiles: 0,
+          totalFiles: 1, directRate: 1, lastSeenAt: 5_000,
+        }),
+      ],
+    })
+
+    collector.reset(700_000)
+    expect(collector.snapshot(runtime()).fileRoutes).toEqual({
+      directFiles: 0, relayFiles: 0, totalFiles: 0, directRate: 0, devices: [],
+    })
   })
 
   it('rolls completed wall-clock minutes and hours into long-term reports', () => {

@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks'
 import type { Context } from 'cordis'
-import type { RpcResult } from '@mtproto-relay/mtproto'
+import type { MtprotoClientInfo, RpcResult } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { StatisticsCollector } from './collector.js'
 import { RuntimeMonitor } from './runtime.js'
@@ -102,6 +102,19 @@ export function apply(ctx: Context, config: Config = {}): void {
         errorMessage,
         requestSummary: summarizeRpcRequest(request as unknown as Record<string, unknown>),
       })
+      if (!failed) {
+        const route = fileRouteObservation(
+          request as unknown as Record<string, unknown>,
+          result as unknown as Record<string, unknown> | undefined,
+        )
+        if (route) {
+          collector.recordFileRoute({
+            ...route,
+            transferOwner: transferOwnerKey(this.authKeyId, this.mtprotoConnection.id),
+            device: fileRouteDevice(this.clientInfo ?? this.mtprotoConnection.clientInfo),
+          })
+        }
+      }
     }
   }, { prepend: true })
 
@@ -170,6 +183,63 @@ function summarizeRpcRequest(request: Record<string, unknown>): string | undefin
   }
 }
 
+function fileRouteObservation(
+  request: Record<string, unknown>,
+  result: Record<string, unknown> | undefined,
+): { route: 'direct' | 'relay', fileKey: string } | undefined {
+  const location = objectValue(request.location)
+  if (!location) return
+  const fileKey = fileLocationKey(location)
+  if (request._ === 'crossgram.getFileUrl' && result?._ === 'dataJSON') {
+    return { route: 'direct', fileKey }
+  }
+  if (request._ === 'upload.getFile' && (result?._ === 'upload.file' || result?._ === 'upload.fileCdnRedirect')) {
+    return { route: 'relay', fileKey }
+  }
+}
+
+function fileLocationKey(location: Record<string, unknown>): string {
+  return [
+    stringValue(location._) ?? 'unknown',
+    valueKey(location.id),
+    valueKey(location.volumeId),
+    valueKey(location.localId),
+    valueKey(location.secret),
+    valueKey(location.photoId),
+    valueKey(location.accessHash),
+    valueKey(location.thumbSize),
+    valueKey(location.fileReference),
+  ].join('|')
+}
+
+function fileRouteDevice(client: MtprotoClientInfo | undefined): {
+  key: string
+  deviceModel: string
+  systemVersion: string
+  appVersion: string
+  langPack: string
+  apiId: number
+} {
+  const device = {
+    deviceModel: deviceText(client?.deviceModel, '未知设备'),
+    systemVersion: deviceText(client?.systemVersion, '未知系统'),
+    appVersion: deviceText(client?.appVersion, '未知版本'),
+    langPack: deviceText(client?.langPack, 'unknown'),
+    apiId: client?.apiId ?? 0,
+  }
+  return { ...device, key: Object.values(device).join('\u0000') }
+}
+
+function transferOwnerKey(authKeyId: Uint8Array | null, connectionId: string): string {
+  if (!authKeyId?.length) return `connection:${connectionId}`
+  return `auth:${bytesKey(authKeyId)}`
+}
+
+function deviceText(value: string | undefined, fallback: string): string {
+  const text = value?.trim()
+  return text ? text.slice(0, 128) : fallback
+}
+
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' ? value as Record<string, unknown> : undefined
 }
@@ -183,4 +253,15 @@ function stringValue(value: unknown): string | undefined {
   if (value === undefined || value === null) return
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (typeof (value as { toString?: unknown }).toString === 'function') return String(value)
+}
+
+function valueKey(value: unknown): string {
+  if (value instanceof Uint8Array) return bytesKey(value)
+  return stringValue(value) ?? ''
+}
+
+function bytesKey(bytes: Uint8Array): string {
+  let result = ''
+  for (const byte of bytes) result += byte.toString(16).padStart(2, '0')
+  return result
 }
