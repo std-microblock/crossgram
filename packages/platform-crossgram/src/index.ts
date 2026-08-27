@@ -29,6 +29,8 @@ import type {
   WireMultiForwardLocator, WireNativeAvsdkEvent, WireReactionState, WireRequest, WireTextPart,
 } from './protocol.js'
 
+type QQOutboundMedia = NonNullable<Parameters<QQNTClient['sendMessage']>[2]>[number]
+
 
 const MIN_PROTOCOL_VERSION = 19
 const MAX_PROTOCOL_VERSION = 30
@@ -67,6 +69,7 @@ const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CONVERSATION_PREFIX = 'qqnt-multi-forward:'
 const MULTI_FORWARD_CACHE_LIMIT = 256
+const SPLIT_OUTGOING_MESSAGE_CACHE_LIMIT = 4_096
 const INVALID_ZERO_PEER_CONVERSATION_ID = '0'
 const GLOBAL_SUBSCRIPTION_LEASES_KEY = '__crossgramQQNTSubscriptionLeasesV1' as const
 const EMPTY_GROUP_REACTION_CATALOG: IMReactionContext = {
@@ -204,6 +207,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalogRetryAt = 0
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
+  private readonly splitOutgoingMessages = new Map<string, WireMessage>()
   private readonly multiForwardLocators = new Map<string, WireMultiForwardLocator>()
   private readonly multiForwardMessages = new Map<string, Promise<WireMessage[]>>()
   private readonly multiForwardPreviewJobs = new Map<string, Promise<string | undefined>>()
@@ -617,7 +621,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         afterId: previousId,
         limit: 100,
       })
-      const messages = await Promise.all(response.messages
+      const messages = await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
         .filter((message) => message.id !== previousId && !this.isFilteredGrayTip(message))
         .map((message) => this.prepareRequestedMessage(
           session, conversation, this.mapMessage(message, conversation.id),
@@ -809,7 +813,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     })
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
-      messages: await Promise.all(response.messages.filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
+      messages: await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
+        .filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
         this.prepareRequestedMessage(
           session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
         ))),
@@ -874,7 +879,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     })
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return {
-      messages: await Promise.all(response.messages.filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
+      messages: await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
+        .filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
         this.prepareRequestedMessage(
           session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
         ))),
@@ -1102,7 +1108,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     if (voiceParts.length && (voiceParts.length !== 1 || mediaParts.length !== 1 || text || sticker || content.replyToId || content.replyToNativeSequence)) {
       throw new Error('QQNT voice messages must contain exactly one voice item without a reply')
     }
-    const media = mediaParts.map((part, index) => ({
+    const media: QQOutboundMedia[] = mediaParts.map((part, index) => ({
       kind: part.media.kind,
       name: part.media.name ?? `upload-${Date.now()}-${index}`,
       mimeType: part.media.mimeType,
@@ -1117,8 +1123,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     try {
       let sent: WireMessage
       try {
-        sent = await this.client.sendMessage(
-          await this.wireConversationId(session, conversation.id), text, media.length ? media : undefined,
+        sent = await this.sendWireMessage(
+          await this.wireConversationId(session, conversation.id), text, media,
           options, originRequestId, sticker, textParts,
           content.replyToId, content.replyToNativeSequence,
         )
@@ -1142,6 +1148,121 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       const timer = setTimeout(() => this.originSessions.delete(originRequestId), 120_000)
       timer.unref()
     }
+  }
+
+  private async sendWireMessage(
+    conversationId: string,
+    text: string | undefined,
+    media: QQOutboundMedia[],
+    options: IMTransferOptions,
+    originRequestId: string,
+    sticker: QQStickerReference | undefined,
+    textParts: WireTextPart[],
+    replyToId: string | undefined,
+    replyToSequence: string | undefined,
+  ): Promise<WireMessage> {
+    if (!media.some(isOrdinaryQQFile)) {
+      return this.client.sendMessage(
+        conversationId, text, media.length ? media : undefined, options,
+        originRequestId, sticker, textParts, replyToId, replyToSequence,
+      )
+    }
+
+    type SendPlan = {
+      media: Array<{ item: QQOutboundMedia, index: number }>
+      includeText?: boolean
+      includeReply?: boolean
+    }
+    const plans: SendPlan[] = []
+    const hasText = Boolean(text || textParts.length)
+    const firstIsFile = isOrdinaryQQFile(media[0]!)
+    if (hasText && firstIsFile) plans.push({ media: [], includeText: true, includeReply: true })
+    let richMedia: SendPlan['media'] = []
+    const flushRichMedia = () => {
+      if (!richMedia.length) return
+      plans.push({ media: richMedia })
+      richMedia = []
+    }
+    for (const [index, item] of media.entries()) {
+      if (isOrdinaryQQFile(item)) {
+        flushRichMedia()
+        plans.push({ media: [{ item, index }] })
+      } else {
+        richMedia.push({ item, index })
+      }
+    }
+    flushRichMedia()
+    if (!hasText || !firstIsFile) {
+      const contextual = plans.find((plan) => plan.media.some(({ item }) => !isOrdinaryQQFile(item)))
+      if (contextual) {
+        contextual.includeText = hasText
+        contextual.includeReply = true
+      }
+    }
+
+    const sentMessages: WireMessage[] = []
+    const sentMedia = new Array<Extract<WireMessage['parts'][number], { type: 'media' }> | undefined>(media.length)
+    const mediaSourceIds = new Array<string | undefined>(media.length)
+    for (const plan of plans) {
+      const planOptions: IMTransferOptions = options.onProgress
+        ? {
+            ...options,
+            onProgress: (progress) => {
+              const globalIndex = plan.media[progress.mediaIndex]?.index
+              return options.onProgress!({
+                ...progress,
+                mediaIndex: globalIndex ?? progress.mediaIndex,
+              })
+            },
+          }
+        : options
+      const sent = await this.client.sendMessage(
+        conversationId,
+        plan.includeText ? text : undefined,
+        plan.media.length ? plan.media.map(({ item }) => item) : undefined,
+        planOptions,
+        originRequestId,
+        undefined,
+        plan.includeText ? textParts : undefined,
+        plan.includeReply ? replyToId : undefined,
+        plan.includeReply ? replyToSequence : undefined,
+      )
+      sentMessages.push(sent)
+      const outputMedia = sent.parts.filter((part) => part.type === 'media')
+      if (outputMedia.length !== plan.media.length) {
+        throw new Error(`QQNT returned ${outputMedia.length} media items for a ${plan.media.length}-item send`)
+      }
+      for (const [localIndex, { index }] of plan.media.entries()) {
+        sentMedia[index] = outputMedia[localIndex]!
+        mediaSourceIds[index] = sent.id
+      }
+    }
+
+    const primary = sentMessages[0]
+    if (!primary) throw new Error('QQNT produced no message for a non-empty send plan')
+    const orderedMedia = sentMedia.map((part) => {
+      if (!part) throw new Error('QQNT omitted media from a split send')
+      return part
+    })
+    const orderedSourceIds = mediaSourceIds.map((id) => {
+      if (!id) throw new Error('QQNT omitted a physical message ID from a split send')
+      return id
+    })
+    const logicalMessage: WireMessage = {
+      ...primary,
+      sourceIds: orderedSourceIds,
+      originRequestId,
+      replyToId: primary.replyToId ?? replyToId,
+      parts: [
+        ...textParts,
+        ...orderedMedia,
+      ],
+    }
+    for (const sent of sentMessages) this.splitOutgoingMessages.set(sent.id, logicalMessage)
+    while (this.splitOutgoingMessages.size > SPLIT_OUTGOING_MESSAGE_CACHE_LIMIT) {
+      this.splitOutgoingMessages.delete(this.splitOutgoingMessages.keys().next().value!)
+    }
+    return logicalMessage
   }
 
   async prepareMediaUpload(
@@ -1811,12 +1932,25 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private mapMessage(input: WireMessage, conversationId?: string): IMMessage<QQMediaLocator> {
+    input = this.splitOutgoingMessages.get(input.id) ?? input
     const message = mapMessage(
       conversationId ? { ...input, conversationId } : input,
       this.reactionCatalog, this.stickerProviderId, this.registerMultiForward,
       (media) => this.mediaPreviews.project(media),
     )
     return message
+  }
+
+  private collapseSplitOutgoingMessages(messages: readonly WireMessage[]): WireMessage[] {
+    const seen = new Set<string>()
+    const output: WireMessage[] = []
+    for (const message of messages) {
+      const logical = this.splitOutgoingMessages.get(message.id) ?? message
+      if (seen.has(logical.id)) continue
+      seen.add(logical.id)
+      output.push(logical)
+    }
+    return output
   }
 
   private rebaseMultiForwardMedia(
@@ -2107,6 +2241,12 @@ function fileVideoMimeType(name: string | undefined): string | undefined {
   if (extension === 'flv') return 'video/x-flv'
   if (extension === 'asf') return 'video/x-ms-asf'
   if (extension === 'mod') return 'video/mod'
+}
+
+function isOrdinaryQQFile(media: Pick<QQOutboundMedia, 'kind' | 'name' | 'mimeType'>): boolean {
+  return media.kind === 'file'
+    && !media.mimeType?.toLowerCase().startsWith('video/')
+    && !fileVideoMimeType(media.name)
 }
 
 function mapMessage(

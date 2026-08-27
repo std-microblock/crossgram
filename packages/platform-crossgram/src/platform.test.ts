@@ -3028,6 +3028,86 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.capabilities.send?.maxMedia).toBe(9)
   })
 
+  it('splits ordinary QQ files into physical messages while retaining one logical Telegram send', async () => {
+    const platform = new QQNTPlatform()
+    const calls: Array<{
+      text?: string
+      names: string[]
+      replyToId?: string
+      originRequestId?: string
+    }> = []
+    let sequence = 0
+    platform.client.sendMessage = vi.fn(async (
+      _conversation, text, media, options, originRequestId, _sticker, textParts, replyToId,
+    ) => {
+      const id = `physical-${++sequence}`
+      calls.push({
+        text,
+        names: media?.map((item) => item.name) ?? [],
+        replyToId,
+        originRequestId,
+      })
+      for (const [mediaIndex, item] of media?.entries() ?? []) {
+        await options.onProgress?.({
+          phase: 'upload', mediaIndex, transferredBytes: item.source.size ?? 0,
+          totalBytes: item.source.size,
+        })
+      }
+      return {
+        id, conversationId: '1:u', senderId: 'self', timestamp: 10 + sequence, outgoing: true,
+        originRequestId,
+        replyToId,
+        parts: [
+          ...(textParts ?? []),
+          ...(media ?? []).map((item, index) => ({
+            type: 'media' as const,
+            media: {
+              id: `${id}-${index}`, kind: item.kind, name: item.name, mimeType: item.mimeType,
+              size: item.source.size,
+              locator: {
+                messageId: id, elementId: `${id}-${index}`, chatType: 1 as const,
+                peerUid: 'u', kind: item.kind, fileName: item.name,
+              },
+            },
+          })),
+        ],
+      }
+    })
+    const progress: Array<[number, number]> = []
+    const source = (size: number) => ({
+      size,
+      async *stream() { yield new Uint8Array(size) },
+    })
+
+    const sent = await platform.sendMessage(session, { id: '1:u' }, {
+      replyToId: 'reply-target',
+      parts: [
+        { type: 'text', text: 'two attachments' },
+        { type: 'media', media: { kind: 'file', name: 'one.bin', source: source(2) } },
+        { type: 'media', media: { kind: 'file', name: 'two.txt', source: source(3) } },
+      ],
+    }, {
+      onProgress: (item) => { progress.push([item.mediaIndex, item.transferredBytes]) },
+    })
+
+    expect(calls).toHaveLength(3)
+    expect(calls.map(({ text, names, replyToId }) => ({ text, names, replyToId }))).toEqual([
+      { text: 'two attachments', names: [], replyToId: 'reply-target' },
+      { text: undefined, names: ['one.bin'], replyToId: undefined },
+      { text: undefined, names: ['two.txt'], replyToId: undefined },
+    ])
+    expect(new Set(calls.map((call) => call.originRequestId)).size).toBe(1)
+    expect(progress).toEqual([[0, 2], [1, 3]])
+    expect(sent).toMatchObject({
+      id: 'physical-1', sourceIds: ['physical-2', 'physical-3'], replyToId: 'reply-target',
+      content: { parts: [
+        { type: 'text', text: 'two attachments' },
+        { type: 'media', media: { name: 'one.bin', locator: { messageId: 'physical-2' } } },
+        { type: 'media', media: { name: 'two.txt', locator: { messageId: 'physical-3' } } },
+      ] },
+    })
+  })
+
   it('maps QQ device sessions to Saved Messages and keeps wire calls physical', async () => {
     const platform = new QQNTPlatform()
     const physicalId = 'device:8:phone'
