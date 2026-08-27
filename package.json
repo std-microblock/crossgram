@@ -34,6 +34,7 @@
     "profile:history": "tsx packages/test-suite/src/profile-history.ts",
     "profile:dialogs": "tsx packages/test-suite/src/profile-history.ts --operation dialogs",
     "profile:conversation": "tsx packages/test-suite/src/profile-history.ts --operation conversation",
+    "mtproto:e2e": "tsx packages/mtproto-e2e-client/src/cli.ts",
     "typecheck": "tsc --project tsconfig.test.json --pretty false",
     "prepare": "husky"
   },

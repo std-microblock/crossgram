@@ -1991,6 +1991,17 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/mtproto-e2e-client@workspace:*, @mtproto-relay/mtproto-e2e-client@workspace:packages/mtproto-e2e-client":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/mtproto-e2e-client@workspace:packages/mtproto-e2e-client"
+  dependencies:
+    "@mtcute/core": "npm:^0.30.3"
+    "@mtcute/node": "npm:^0.30.3"
+    tsx: "npm:@cordiverse/tsx@4.19.3-fix.3"
+    vitest: "npm:^4.1.10"
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/mtproto-statistics@workspace:packages/mtproto-statistics":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/mtproto-statistics@workspace:packages/mtproto-statistics"
@@ -2223,6 +2234,7 @@ __metadata:
     "@mtproto-relay/bridge": "workspace:*"
     "@mtproto-relay/merged-forward": "workspace:*"
     "@mtproto-relay/mtproto": "workspace:*"
+    "@mtproto-relay/mtproto-e2e-client": "workspace:*"
     "@mtproto-relay/platform-discord": "workspace:*"
     "@mtproto-relay/platform-matrix": "workspace:*"
     "@mtproto-relay/platform-satori": "workspace:*"

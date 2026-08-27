@@ -3,7 +3,7 @@ import { bigint, typed, u8 } from '@fuman/utils'
 import { Bytes } from '@fuman/io'
 import { request as httpRequest } from 'node:http'
 import { connect, type Socket } from 'node:net'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -30,6 +30,7 @@ import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramResourcesPlugin from '@mtproto-relay/telegram-resources'
 import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
 import DatabaseUpdateStore from '@mtproto-relay/update-store-database'
+import { openE2eClient, runE2eProbe, type E2eClientEvent } from '@mtproto-relay/mtproto-e2e-client'
 import { updateToJson } from '../../bridge/src/update-json.js'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
@@ -4958,4 +4959,84 @@ describe('bridge login e2e', () => {
       await stop()
     }
   }, 15000)
+
+  it('uses an mtcute probe client with automatic QR approval and persisted credentials', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mtproto-e2e-client-'))
+    const profileRoot = join(directory, 'profiles')
+    const { ctx, port, rsaKey, stop } = await startApp()
+    const firstEvents: E2eClientEvent[] = []
+    try {
+      await waitForPlatformLogin(ctx, 'static')
+      const first = await openE2eClient({
+        root: profileRoot,
+        profile: 'local-server',
+        host: '127.0.0.1',
+        port,
+        publicKeyPem: rsaKey.publicKeyPem,
+        approval: {
+          kind: 'http',
+          origin: `http://127.0.0.1:${ctx.server.port}`,
+          platformId: 'static',
+        },
+        onEvent: event => firstEvents.push(event),
+      })
+      try {
+        await expect(first.client.call({ _: 'updates.getState' })).resolves.toMatchObject({
+          _: 'updates.state', pts: expect.any(Number),
+        })
+      } finally {
+        await first.close()
+      }
+      expect(firstEvents.map(event => event.event)).toContain('auth-required')
+      expect(firstEvents.map(event => event.event)).toContain('auth-approved')
+
+      const secondEvents: E2eClientEvent[] = []
+      const second = await openE2eClient({
+        root: profileRoot,
+        profile: 'local-server',
+        host: '127.0.0.1',
+        port,
+        publicKeyPem: rsaKey.publicKeyPem,
+        onEvent: event => secondEvents.push(event),
+      })
+      try {
+        await expect(second.client.call({
+          _: 'messages.getDialogs', excludePinned: false,
+          offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' },
+          limit: 10, hash: Long.ZERO,
+        })).resolves.toMatchObject({ _: expect.stringMatching(/^messages\.dialogs/) })
+      } finally {
+        await second.close()
+      }
+      expect(secondEvents.map(event => event.event)).not.toContain('auth-required')
+      expect(secondEvents.map(event => event.event)).not.toContain('auth-approved')
+      expect(secondEvents.map(event => event.event)).toContain('authenticated')
+
+      const probePath = join(directory, 'state-probe.ts')
+      await writeFile(probePath, [
+        'export async function run({ call, publish }) {',
+        "  const state = await call({ _: 'updates.getState' })",
+        "  publish({ stage: 'state', result: state._, pts: state.pts })",
+        "  return { ok: state._ === 'updates.state' }",
+        '}',
+        '',
+      ].join('\n'))
+      const results: unknown[] = []
+      await runE2eProbe(probePath, {
+        root: profileRoot,
+        profile: 'local-server',
+        host: '127.0.0.1',
+        port,
+        publicKeyPem: rsaKey.publicKeyPem,
+        onResult: value => results.push(value),
+      })
+      expect(results).toEqual([
+        { stage: 'state', result: 'updates.state', pts: expect.any(Number) },
+        { ok: true },
+      ])
+    } finally {
+      await stop()
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 30_000)
 })

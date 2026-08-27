@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug MTProto E2E"
+  short_description: "Run persistent local mtcute probes against Crossgram"
+  default_prompt: "Use $debug-mtproto-e2e to reproduce this issue with a local MTProto client and collect bounded evidence."
