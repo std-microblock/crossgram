@@ -7,7 +7,6 @@
   "cordis": {
     "service": {
       "required": [
-        "conversationView",
         "mtproto",
         "mtprotoBridge"
       ]

@@ -57,7 +57,6 @@ import { RequestInboxSystemPeerProvider } from './request-inbox.js'
 import {
   ActiveSessionStore, createAuthorizationReservationQueue, registerActiveSessionRpc,
 } from './active-sessions.js'
-import { ConversationViewService } from './conversation-view.js'
 import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.js'
 import { BridgeManagementError, BridgeManagementService } from './management-service.js'
 import { registerGroupFilesMiniApp } from './group-files-miniapp.js'
@@ -65,7 +64,7 @@ import { MessageProjectionPipeline } from './message-projection.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
-export { stableId } from './dialogs.js'
+export { DialogRpc, stableId, type ProjectedDialogPeer } from './dialogs.js'
 export * from './message-store.js'
 export * from './message-actions.js'
 export * from './platform-manager.js'
@@ -88,7 +87,6 @@ export * from './voice/media.js'
 export * from './voice/voice-worker-client.js'
 export * from './voice/voice-rpc.js'
 export * from './system-peer.js'
-export * from './conversation-view.js'
 export * from './bridge-service.js'
 export * from './stripped-thumbnail.js'
 export * from './image-dimensions.js'
@@ -102,7 +100,7 @@ export * from './message-projection.js'
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui', 'updateStore']
 export const provide = [
-  'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'conversationView', 'mtprotoBridge', 'bridgeManagement',
+  'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'mtprotoBridge', 'bridgeManagement',
 ]
 
 export interface BridgeConfig {
@@ -200,7 +198,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const stickerProviders = new IMStickerService(ctx)
   const resources = new TelegramResourceService(ctx)
   const systemPeers = new SystemPeerService(ctx)
-  const conversationViews = new ConversationViewService(ctx)
   const management = new BridgeManagementService(ctx)
   const registry = platforms.registry
   const rpc = ctx.mtproto
@@ -270,7 +267,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     blockedPeers,
     (session, message) => reactionRpcFor(registry.require(session.platformId), session)
       .registerContext(message.conversationId, message.reactionContext),
-    conversationViews,
     messageProjection,
   )
   const builtInMediaProvider = createBuiltInVoiceMediaProvider({
@@ -406,7 +402,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       await activeSessions.touch(rpcContext, session)
       await calls.replay(session, authKeyId)
     },
-    conversationViews,
     messageProjection,
   )
   new MtprotoBridgeService(ctx, requireBridgeSession)
@@ -1340,7 +1335,6 @@ export function createSessionResolver(
     authKeyId: string,
     rpc: ServerRpcContext,
   ) => void | Promise<void>,
-  conversationViews?: ConversationViewService,
   messageProjection?: MessageProjectionPipeline,
 ) {
   const loading = new Map<string, Promise<BridgeSessionState>>()
@@ -1405,7 +1399,7 @@ export function createSessionResolver(
       await subscriptions.ensure(session)
       if (notify) await notifyAuthorizedSession(session, rpc)
       const state: BridgeSessionState = {
-        generation, platform, session,
+        generation, platform, session, store,
         stickers: stickerRpcFor(platform, session),
         dialogs: undefined as never,
       }
@@ -1423,7 +1417,6 @@ export function createSessionResolver(
         blockedPeers,
         dialogFolders,
         systemPeers,
-        conversationViews,
         messageProjection,
       )
       return state

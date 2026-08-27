@@ -47,12 +47,6 @@ export interface MessageProjectionInput {
   loadConversation?: (
     conversation: IMConversation,
   ) => Promise<LinkedConversationProjectionCandidate[]>
-  /** Makes a selected linked target addressable to later peer/message RPCs. */
-  bindConversation?: (
-    conversation: IMConversation,
-    chatId: number,
-    target: LinkedConversationProjectionCandidate,
-  ) => void
 }
 
 export interface MessageProjectionResult {

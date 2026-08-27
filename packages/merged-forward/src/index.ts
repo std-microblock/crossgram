@@ -3,31 +3,37 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import {
   stableId,
-  type ConversationViewContext,
-  type ConversationViewMessageTarget,
+  type BridgeSessionState,
   type IMConversation,
+  type LinkedConversationProjectionCandidate,
   type MessageProjectionInput,
   type MessageProjectionResult,
+  type ProjectedDialogPeer,
 } from '@mtproto-relay/bridge'
 import type { ServerRpcContext } from '@mtproto-relay/mtproto'
 
 export const name = 'merged-forward-viewer'
-export const inject = ['conversationView', 'mtproto', 'mtprotoBridge']
+export const inject = ['mtproto', 'mtprotoBridge']
 
 export const MERGED_FORWARD_VIEW = 'merged-forward'
 
-interface MergedForwardRecord extends ConversationViewContext {
-  target?: ConversationViewMessageTarget
+interface MergedForwardRecord {
+  platformSessionId: string
+  chatId: number
+  conversation: IMConversation
+  target?: LinkedConversationProjectionCandidate
 }
 
 export function isMergedForwardConversation(conversation: IMConversation): boolean {
   return conversation.metadata?.conversationView === MERGED_FORWARD_VIEW
 }
 
-/** Feature-owned address book, renderer, target cache, and RPC admission policy. */
+/** Feature-owned address book, renderer, target cache, durable recovery, and RPC admission policy. */
 export class MergedForwardProjection {
   private readonly _records = new Map<string, Map<number, MergedForwardRecord>>()
-  private readonly _targetJobs = new Map<string, Promise<ConversationViewMessageTarget | undefined>>()
+  private readonly _targetJobs = new Map<string, Promise<LinkedConversationProjectionCandidate | undefined>>()
+  private readonly _hydrateJobs = new Map<string, Promise<void>>()
+  private readonly _hydratedSessions = new Set<string>()
 
   supports(conversation: IMConversation): boolean {
     return isMergedForwardConversation(conversation)
@@ -66,17 +72,24 @@ export class MergedForwardProjection {
   }
 
   ownsMessage(platformSessionId: string, tlMessageId: number): boolean {
-    for (const record of this._records.get(platformSessionId)?.values() ?? []) {
-      if (record.target?.tlMessageId === tlMessageId) return true
-    }
-    return false
+    return this.recordOwningMessage(platformSessionId, tlMessageId) !== undefined
   }
 
-  target(platformSessionId: string, chatId: number): ConversationViewMessageTarget | undefined {
+  recordOwningMessage(platformSessionId: string, tlMessageId: number): MergedForwardRecord | undefined {
+    for (const record of this._records.get(platformSessionId)?.values() ?? []) {
+      if (record.target?.tlMessageId === tlMessageId) return record
+    }
+  }
+
+  target(platformSessionId: string, chatId: number): LinkedConversationProjectionCandidate | undefined {
     return this._record(platformSessionId, chatId)?.target
   }
 
-  setTarget(platformSessionId: string, chatId: number, target: ConversationViewMessageTarget): boolean {
+  setTarget(
+    platformSessionId: string,
+    chatId: number,
+    target: LinkedConversationProjectionCandidate,
+  ): boolean {
     const record = this._record(platformSessionId, chatId)
     if (!record) return false
     record.target = target
@@ -103,14 +116,13 @@ export class MergedForwardProjection {
         _: 'webPage',
         id: Long.fromNumber(stableId(`conversation-preview:${record.conversation.id}`)),
         url, displayUrl: record.conversation.title, hash: 0,
-        type: 'telegram_message',
-        title: record.conversation.title,
+        type: 'telegram_message', title: record.conversation.title,
         description: detailedPreview ?? '点击查看合并转发消息',
       },
     }
   }
 
-  makeChat(platformSessionId: string, chatId: number, _dcId: number): tl.TypeChat | undefined {
+  makeChat(platformSessionId: string, chatId: number): tl.TypeChat | undefined {
     const record = this._record(platformSessionId, chatId)
     if (!record) return
     return {
@@ -124,17 +136,59 @@ export class MergedForwardProjection {
     chatId: number,
     notifySettings: tl.TypePeerNotifySettings,
   ): tl.messages.RawChatFull | undefined {
-    const chat = this.makeChat(platformSessionId, chatId, 1)
+    const chat = this.makeChat(platformSessionId, chatId)
     if (!chat) return
     return {
       _: 'messages.chatFull',
       fullChat: {
         _: 'chatFull', id: chatId, about: '',
         participants: { _: 'chatParticipantsForbidden', chatId },
-        chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
-        notifySettings, botInfo: [],
+        chatPhoto: { _: 'photoEmpty', id: Long.ZERO }, notifySettings, botInfo: [],
       },
       chats: [chat], users: [],
+    }
+  }
+
+  projectedPeer(platformSessionId: string, chatId: number): ProjectedDialogPeer | undefined {
+    const record = this._record(platformSessionId, chatId)
+    const chat = this.makeChat(platformSessionId, chatId)
+    if (!record || !chat) return
+    return {
+      conversation: record.conversation,
+      peer: { _: 'peerChat', chatId },
+      chat,
+    }
+  }
+
+  async ensureHydrated(state: BridgeSessionState): Promise<void> {
+    const sessionId = state.session.platformSessionId
+    if (this._hydratedSessions.has(sessionId)) return
+    const existing = this._hydrateJobs.get(sessionId)
+    if (existing) return existing
+    const pending = (async () => {
+      const conversations = await state.store.listConversations(sessionId)
+      for (const conversation of conversations) {
+        if (!this.supports(conversation)) continue
+        const chatId = stableId(`peer:${conversation.id}`)
+        this.remember(sessionId, chatId, conversation)
+        if (this.target(sessionId, chatId)) continue
+        const [latest] = await state.store.readProjectedHistory(sessionId, conversation.id, { limit: 1 })
+        const part = latest?.parts.find((candidate) => candidate.ordinal === 0)
+        if (!latest || !part) continue
+        this.setTarget(sessionId, chatId, {
+          conversationId: conversation.id,
+          platformMessageId: latest.source.id,
+          tlMessageId: part.tlMessageId,
+          timestamp: latest.source.timestamp,
+        })
+      }
+      this._hydratedSessions.add(sessionId)
+    })()
+    this._hydrateJobs.set(sessionId, pending)
+    try {
+      await pending
+    } finally {
+      if (this._hydrateJobs.get(sessionId) === pending) this._hydrateJobs.delete(sessionId)
     }
   }
 
@@ -155,12 +209,11 @@ export class MergedForwardProjection {
       const conversation = entity.conversation
       const chatId = stableId(`peer:${conversation.id}`)
       this.remember(input.session.platformSessionId, chatId, conversation)
-      const target = await this._ensureTarget(input, conversation, chatId)
-      if (target) input.bindConversation?.(conversation, chatId, { ...target, timestamp: 0 })
+      await this._ensureTarget(input, conversation, chatId)
       const url = this.makeLink(input.session.platformSessionId, chatId)
       if (!url) continue
       urls.set(conversation.id, url)
-      const chat = this.makeChat(input.session.platformSessionId, chatId, 1)
+      const chat = this.makeChat(input.session.platformSessionId, chatId)
       if (chat) input.draft.chats.push(chat)
     }
     if (!urls.size) return next()
@@ -197,13 +250,15 @@ export class MergedForwardProjection {
   clear(): void {
     this._records.clear()
     this._targetJobs.clear()
+    this._hydrateJobs.clear()
+    this._hydratedSessions.clear()
   }
 
   private async _ensureTarget(
     input: MessageProjectionInput,
     conversation: IMConversation,
     chatId: number,
-  ): Promise<ConversationViewMessageTarget | undefined> {
+  ): Promise<LinkedConversationProjectionCandidate | undefined> {
     const existing = this.target(input.session.platformSessionId, chatId)
     if (existing || !input.loadConversation) return existing
     const key = `${input.session.platformSessionId}\u0000${chatId}\u0000${conversation.id}`
@@ -213,9 +268,8 @@ export class MergedForwardProjection {
         const latest = candidates.slice().sort((left, right) =>
           right.timestamp - left.timestamp || right.tlMessageId - left.tlMessageId)[0]
         if (!latest) return
-        const target: ConversationViewMessageTarget = latest
-        this.setTarget(input.session.platformSessionId, chatId, target)
-        return target
+        this.setTarget(input.session.platformSessionId, chatId, latest)
+        return latest
       })
       this._targetJobs.set(key, pending)
       pending.finally(() => {
@@ -236,28 +290,6 @@ export function makeMergedForwardProvider(): MergedForwardProjection {
 
 export function apply(ctx: Context): void {
   const projection = new MergedForwardProjection()
-  ctx.on('bridge/conversation-view/supports', (conversation) =>
-    projection.supports(conversation) || undefined)
-  ctx.on('bridge/conversation-view/remember', (platformSessionId, chatId, conversation) =>
-    projection.remember(platformSessionId, chatId, conversation))
-  ctx.on('bridge/conversation-view/resolve', (platformSessionId, chatId) =>
-    projection.resolve(platformSessionId, chatId))
-  ctx.on('bridge/conversation-view/resolve-username', (platformSessionId, username) =>
-    projection.resolveUsername(platformSessionId, username))
-  ctx.on('bridge/conversation-view/owns-message', (platformSessionId, tlMessageId) =>
-    projection.ownsMessage(platformSessionId, tlMessageId) || undefined)
-  ctx.on('bridge/conversation-view/target', (platformSessionId, chatId) =>
-    projection.target(platformSessionId, chatId))
-  ctx.on('bridge/conversation-view/set-target', (platformSessionId, chatId, target) =>
-    projection.setTarget(platformSessionId, chatId, target) || undefined)
-  ctx.on('bridge/conversation-view/make-link', (platformSessionId, chatId) =>
-    projection.makeLink(platformSessionId, chatId))
-  ctx.on('bridge/conversation-view/make-preview', (platformSessionId, chatId) =>
-    projection.makePreview(platformSessionId, chatId))
-  ctx.on('bridge/conversation-view/make-chat', (platformSessionId, chatId, dcId) =>
-    projection.makeChat(platformSessionId, chatId, dcId))
-  ctx.on('bridge/conversation-view/make-full-chat', (platformSessionId, chatId, notifySettings) =>
-    projection.makeFullChat(platformSessionId, chatId, notifySettings))
   ctx.on('bridge/message/project', (input, next) => projection.project(input, next))
   ctx.on('mtproto/rpc', async function (
     this: ServerRpcContext,
@@ -277,18 +309,34 @@ async function routeMergedForwardRpc(
   rpc: ServerRpcContext,
   request: tl.RpcMethod,
 ): Promise<unknown | undefined> {
+  const resolveState = async () => {
+    const state = await ctx.mtprotoBridge.resolveSession(rpc)
+    await projection.ensureHydrated(state)
+    return state
+  }
   if (request._ === 'contacts.resolveUsername') {
     const req = request as tl.contacts.RawResolveUsernameRequest
     if (!/^bridgechat_\d+$/.test(req.username)) return
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    if (!projection.resolveUsername(state.session.platformSessionId, req.username)) return
-    return state.dialogs.resolveUsername(req)
+    const state = await resolveState()
+    const resolved = projection.resolveUsername(state.session.platformSessionId, req.username)
+    if (!resolved) return
+    const chat = projection.makeChat(state.session.platformSessionId, resolved.chatId)
+    if (!chat) return
+    return {
+      _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: resolved.chatId },
+      chats: [chat], users: [],
+    }
   }
   if (request._ === 'messages.getFullChat') {
     const req = request as tl.messages.RawGetFullChatRequest
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    if (!projection.resolve(state.session.platformSessionId, req.chatId)) return
-    return state.dialogs.getFullChat(req)
+    const state = await resolveState()
+    const conversation = projection.resolve(state.session.platformSessionId, req.chatId)
+    if (!conversation) return
+    return projection.makeFullChat(
+      state.session.platformSessionId,
+      req.chatId,
+      await state.dialogs.getConversationNotifySettings(conversation),
+    )
   }
   if (
     request._ === 'messages.getHistory'
@@ -301,28 +349,98 @@ async function routeMergedForwardRpc(
       | tl.messages.RawGetScheduledHistoryRequest
       | tl.messages.RawGetPeerSettingsRequest
     if (req.peer._ !== 'inputPeerChat') return
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    if (!projection.resolve(state.session.platformSessionId, req.peer.chatId)) return
-    if (request._ === 'messages.getHistory') return state.dialogs.getHistory(request)
-    if (request._ === 'messages.readHistory') return state.dialogs.readHistory(request, rpc.connection)
-    if (request._ === 'messages.getScheduledHistory') return state.dialogs.getScheduledHistory(request)
-    return state.dialogs.getPeerSettings(request)
+    const state = await resolveState()
+    const projectedPeer = projection.projectedPeer(state.session.platformSessionId, req.peer.chatId)
+    if (!projectedPeer) return
+    if (request._ === 'messages.getHistory') return state.dialogs.getProjectedHistory(request, projectedPeer)
+    if (request._ === 'messages.readHistory') {
+      return state.dialogs.readProjectedHistory(request, projectedPeer, rpc.connection)
+    }
+    if (request._ === 'messages.getScheduledHistory') {
+      return state.dialogs.getProjectedScheduledHistory(projectedPeer)
+    }
+    return state.dialogs.getProjectedPeerSettings(projectedPeer)
   }
   if (request._ === 'messages.getPeerDialogs') {
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
+    const state = await resolveState()
     const req = request as tl.messages.RawGetPeerDialogsRequest
-    const owned = req.peers.some((item) => item._ === 'inputDialogPeer'
-      && item.peer._ === 'inputPeerChat'
-      && projection.resolve(state.session.platformSessionId, item.peer.chatId))
-    return owned ? state.dialogs.getPeerDialogs(req) : undefined
+    const projectedEntries = req.peers.flatMap((item, index) => {
+      if (item._ !== 'inputDialogPeer' || item.peer._ !== 'inputPeerChat') return []
+      const projected = projection.projectedPeer(state.session.platformSessionId, item.peer.chatId)
+      return projected ? [{ index, projected }] : []
+    })
+    if (!projectedEntries.length) return
+    const projectedIndexes = new Set(projectedEntries.map((entry) => entry.index))
+    const ordinaryPeers = req.peers.filter((_item, index) => !projectedIndexes.has(index))
+    const projectedResult = await state.dialogs.getProjectedPeerDialogs(
+      projectedEntries.map((entry) => entry.projected),
+    )
+    const ordinaryResult = ordinaryPeers.length
+      ? await state.dialogs.getPeerDialogs({ ...req, peers: ordinaryPeers })
+      : undefined
+    return mergePeerDialogs(projectedResult, ordinaryResult)
   }
   if (request._ === 'messages.getMessages') {
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
+    const state = await resolveState()
     const req = request as tl.messages.RawGetMessagesRequest
-    const owned = req.id.some((item) => item._ === 'inputMessageID'
+    const ownedIds = req.id.filter((item) => item._ === 'inputMessageID'
       && projection.ownsMessage(state.session.platformSessionId, item.id))
-    return owned ? state.dialogs.getMessages(req) : undefined
+    if (!ownedIds.length) return
+    const ordinaryIds = req.id.filter((item) => !ownedIds.includes(item))
+    const peers = [...new Set(ownedIds.flatMap((item) => {
+      if (item._ !== 'inputMessageID') return []
+      const record = projection.recordOwningMessage(state.session.platformSessionId, item.id)
+      const projected = record
+        ? projection.projectedPeer(state.session.platformSessionId, record.chatId)
+        : undefined
+      return projected ? [projected] : []
+    }))]
+    const projectedResult = await state.dialogs.getProjectedMessages({ ...req, id: ownedIds }, peers)
+    const ordinaryResult = ordinaryIds.length
+      ? await state.dialogs.getMessages({ ...req, id: ordinaryIds })
+      : undefined
+    return mergeMessages(req.id, projectedResult, ordinaryResult)
   }
+}
+
+function mergePeerDialogs(
+  projected: tl.messages.RawPeerDialogs,
+  ordinary?: tl.messages.RawPeerDialogs,
+): tl.messages.RawPeerDialogs {
+  if (!ordinary) return projected
+  return {
+    _: 'messages.peerDialogs',
+    dialogs: [...ordinary.dialogs, ...projected.dialogs],
+    messages: [...ordinary.messages, ...projected.messages],
+    chats: uniqueById([...ordinary.chats, ...projected.chats]),
+    users: uniqueById([...ordinary.users, ...projected.users]),
+    state: ordinary.state,
+  }
+}
+
+function mergeMessages(
+  requested: readonly tl.TypeInputMessage[],
+  projected: tl.messages.TypeMessages,
+  ordinary?: tl.messages.TypeMessages,
+): tl.messages.RawMessages {
+  const projectedMessages = projected as Exclude<tl.messages.TypeMessages, tl.messages.RawMessagesNotModified>
+  const ordinaryMessages = ordinary as Exclude<tl.messages.TypeMessages, tl.messages.RawMessagesNotModified> | undefined
+  const candidates = [...(ordinaryMessages?.messages ?? []), ...projectedMessages.messages]
+  const byId = new Map(candidates.map((message) => [message.id, message]))
+  return {
+    _: 'messages.messages',
+    messages: requested.map((input) => {
+      const id = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
+      return byId.get(id) ?? { _: 'messageEmpty', id }
+    }),
+    topics: [],
+    chats: uniqueById([...(ordinaryMessages?.chats ?? []), ...projectedMessages.chats]),
+    users: uniqueById([...(ordinaryMessages?.users ?? []), ...projectedMessages.users]),
+  }
+}
+
+function uniqueById<T extends { _: string, id: number }>(items: readonly T[]): T[] {
+  return [...new Map(items.map((item) => [`${item._}:${item.id}`, item])).values()]
 }
 
 function isDetailedConversationPreview(value: string): boolean {
@@ -331,5 +449,3 @@ function isDetailedConversationPreview(value: string): boolean {
     || /^(?:共)?[xX×\d]+条消息的合并转发$/.test(compact)
     || /^(?:合并转发|聊天记录)$/.test(compact))
 }
-
-export type { ConversationViewContext, ConversationViewMessageTarget }

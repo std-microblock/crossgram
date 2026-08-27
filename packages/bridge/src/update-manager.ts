@@ -18,7 +18,6 @@ import type {
   CommittedPlatformEvent, PlatformEventDeliveryOptions, PlatformEventPublishResult, PlatformRegistry,
 } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
-import type { ConversationViewService } from './conversation-view.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 import { updateFromJson, updateToJson } from './update-json.js'
@@ -48,7 +47,6 @@ export class UpdateManager {
     ) => tl.TypeMessageMedia | undefined,
     private readonly _blockedPeers?: BlockedPeerStore,
     private readonly _registerReactions?: (session: PlatformSession, message: IMMessage) => void,
-    private readonly _conversationViews?: ConversationViewService,
     private readonly _messageProjection?: MessageProjectionPipeline,
   ) {}
 
@@ -184,7 +182,7 @@ export class UpdateManager {
       }
       const payload: tl.RawUpdates = {
         _: 'updates', updates, users: [],
-        chats: channelId === undefined ? [] : [this._makeChat(session, group.conversation)],
+        chats: channelId === undefined ? [] : [this._makeChat(group.conversation)],
         date: delivery.date, seq: delivery.seq,
       }
       await this._store.setUpdatePayload(eventKey, updateToJson(payload))
@@ -442,7 +440,7 @@ export class UpdateManager {
     void pts
     const payload: tl.RawUpdates = {
       _: 'updates', updates, users: reactionUsers.users,
-      chats: displayConversation.kind === 'direct' ? [] : [this._makeChat(session, displayConversation)],
+      chats: displayConversation.kind === 'direct' ? [] : [this._makeChat(displayConversation)],
       date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, updateToJson(payload))
@@ -491,7 +489,7 @@ export class UpdateManager {
     }
     const payload: tl.RawUpdates = {
       _: 'updates', updates: [update], users: [],
-      chats: channelId === undefined ? [] : [this._makeChat(session, displayConversation)],
+      chats: channelId === undefined ? [] : [this._makeChat(displayConversation)],
       date: delivery.date, seq: delivery.seq,
     }
     await this._store.setUpdatePayload(eventKey, updateToJson(payload))
@@ -762,7 +760,7 @@ export class UpdateManager {
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []
-        : [this._makeChat(session, displayConversation, topicId !== undefined)]),
+        : [this._makeChat(displayConversation, topicId !== undefined)]),
       ...projectionChats,
     ]
     const payload: tl.RawUpdates = {
@@ -830,7 +828,7 @@ export class UpdateManager {
       users: [],
       chats: displayConversation.kind === 'direct'
         ? []
-        : [this._makeChat(session, displayConversation, !!event.conversation.parentId)],
+        : [this._makeChat(displayConversation, !!event.conversation.parentId)],
       date: delivery.date,
       seq: delivery.seq,
     }
@@ -866,13 +864,7 @@ export class UpdateManager {
       })))
   }
 
-  private _makeChat(session: PlatformSession, conversation: IMConversation, forum = false): tl.TypeChat {
-    const chatId = stableId(`peer:${conversation.id}`)
-    if (this._conversationViews?.supports(conversation)) {
-      this._conversationViews.remember(session.platformSessionId, chatId, conversation)
-      const projected = this._conversationViews.makeChat(session.platformSessionId, chatId, this._dcId)
-      if (projected) return projected
-    }
+  private _makeChat(conversation: IMConversation, forum = false): tl.TypeChat {
     return makeUpdateChat(conversation, forum, this._dcId)
   }
 
