@@ -918,6 +918,52 @@ describe('MessageStore', () => {
     )).resolves.toMatchObject({ source: { id: 'target' } })
   })
 
+  it('prefers an ordinary QQ message over a later gray tip that reuses its msgSeq', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'qq-gray-tip-reply', kind: 'group' as const, title: 'QQ gray-tip reply' }
+    const target: IMMessage = {
+      id: 'content-490124', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      metadata: { qqMsgSeq: '490124' },
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    }
+    const grayTip: IMMessage = {
+      id: 'gray-tip-490124', conversationId: conversation.id, senderId: 'system', timestamp: 104,
+      metadata: { qqMsgSeq: '490124' },
+      content: {
+        parts: [],
+        serviceAction: { type: 'custom', text: 'Alice poked Bob' },
+      },
+    }
+    const reply: IMMessage = {
+      id: 'reply-490125', conversationId: conversation.id, senderId: 'bob', timestamp: 105,
+      metadata: { qqMsgSeq: '490125', qqReplyToMsgSeq: '490124' },
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const targetResult = await store.ingest(session, conversation, target)
+    const grayTipResult = await store.ingest(session, conversation, grayTip)
+    await store.ingest(session, conversation, reply)
+
+    await expect(store.findProjectedByNativeSequence(
+      session.platformSessionId, conversation.id, 490124,
+    )).resolves.toMatchObject({
+      source: { id: target.id, content: { parts: [{ text: 'reply target' }] } },
+      parts: [{ tlMessageId: targetResult.projection[0].tlMessageId }],
+    })
+    await expect(store.findReplyTarget(session.platformSessionId, reply)).resolves.toMatchObject({
+      source: { id: target.id },
+      parts: [{ tlMessageId: targetResult.projection[0].tlMessageId }],
+    })
+    expect(grayTipResult.projection[0].tlMessageId).not.toBe(targetResult.projection[0].tlMessageId)
+
+    await ctx.database.set('mtproto_im_message', { id: targetResult.message.id }, { deleted: true })
+    await expect(store.findProjectedByNativeSequence(
+      session.platformSessionId, conversation.id, 490124,
+    )).resolves.toMatchObject({
+      source: { id: grayTip.id, content: { serviceAction: { type: 'custom' } } },
+      parts: [{ tlMessageId: grayTipResult.projection[0].tlMessageId }],
+    })
+  })
+
 
   it('keeps duplicate platform-provided group IDs addressable with a synthetic fallback', async () => {
     const { store } = await createStore()

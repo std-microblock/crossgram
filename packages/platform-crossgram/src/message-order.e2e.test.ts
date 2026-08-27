@@ -9,9 +9,10 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
+import type { tl } from '@mtcute/core'
 import {
-  MessageStore, StickerRpc, type IMConversation, type IMMessage, type IngestResult,
-  type PlatformSession, type Unsubscribe,
+  MessageStore, PlatformRegistry, StickerRpc, UpdateManager,
+  type IMConversation, type IMMessage, type IngestResult, type PlatformSession, type Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { DialogRpc, makeTlMessageMedia } from '../../bridge/src/dialogs.js'
 import { defineModels } from '../../bridge/src/models.js'
@@ -130,6 +131,127 @@ describe('QQNT same-second message ordering E2E', () => {
       .toEqual([0x40000007, 0x40000009, 0x4000000b])
     expect(await ctx.database.get('mtproto_im_message', {})).toHaveLength(3)
     expect(await ctx.database.get('mtproto_tl_message_part', {})).toHaveLength(3)
+  })
+
+  it('keeps a live reply on content when a later QQ gray tip reuses the target msgSeq', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const replySession = { ...session, platformSessionId: 'qqnt-shared-sequence-reply-e2e' }
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: replySession.platformId,
+      platformSessionId: replySession.platformSessionId,
+    })
+    const conversation = {
+      id: 'shared-sequence-group', kind: 'group' as const, title: 'Shared sequence group',
+      peerUid: 'shared-sequence-group', peerUin: '499314568', chatType: 2 as const,
+    }
+    const wireMessages = [{
+      id: 'content-490124', conversationId: conversation.id, senderId: 'alice',
+      timestamp: 1_800_000_100, outgoing: false, msgSeq: '490124',
+      parts: [{ type: 'text', text: 'reply target' }],
+    }, {
+      id: 'gray-tip-490124', conversationId: conversation.id, senderId: 'system',
+      timestamp: 1_800_000_104, outgoing: false, msgSeq: '490124',
+      serviceAction: { type: 'custom', text: 'Alice poked Bob' }, parts: [],
+    }, {
+      id: 'reply-490125', conversationId: conversation.id, senderId: 'bob',
+      timestamp: 1_800_000_105, outgoing: false, msgSeq: '490125',
+      telegramReplyToMessageId: 490124,
+      parts: [{ type: 'text', text: 'reply' }],
+    }]
+
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    const server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    webSocketServer.on('connection', (webSocket) => {
+      for (const [index, message] of wireMessages.entries()) {
+        webSocket.send(JSON.stringify({
+          id: String(index + 1),
+          event: { type: 'message', conversation, message },
+        }))
+      }
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing reply E2E server address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    })
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    vi.spyOn(platform, 'getUser').mockImplementation(async (_session, id) => ({
+      id, firstName: `User ${id}`,
+    }))
+    const store = new MessageStore(ctx.database)
+    const sent: tl.TypeUpdates[] = []
+    const manager = new UpdateManager(
+      ctx.database, new PlatformRegistry([[replySession.platformId, platform]]), store,
+      (_authKeyId, update) => {
+        sent.push(update)
+        return 1
+      },
+    )
+    const complete = Promise.withResolvers<void>()
+    let delivered = 0
+    const unsubscribe = await platform.subscribe(replySession, async (event) => {
+      if (event.type !== 'message') return
+      const result = await store.ingest(replySession, event.conversation, event.message)
+      await manager.publish(replySession, { event, result })
+      if (++delivered === wireMessages.length) complete.resolve()
+    })
+    try {
+      await Promise.race([
+        complete.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('QQNT reply E2E timed out')), 5_000)),
+      ])
+    } finally {
+      await unsubscribe()
+    }
+
+    const target = await store.findProjectedByPlatformId(
+      replySession.platformSessionId, conversation.id, 'content-490124',
+    )
+    const grayTip = await store.findProjectedByPlatformId(
+      replySession.platformSessionId, conversation.id, 'gray-tip-490124',
+    )
+    const replyUpdate = sent.at(-1) as tl.RawUpdates
+    const replyMessage = (replyUpdate.updates[0] as tl.RawUpdateNewChannelMessage).message as tl.RawMessage
+    expect(target).toBeDefined()
+    expect(grayTip).toBeDefined()
+    expect(replyMessage.replyTo).toMatchObject({
+      _: 'messageReplyHeader', replyToMsgId: target!.parts[0].tlMessageId,
+    })
+    expect(replyMessage.replyTo).not.toMatchObject({
+      replyToMsgId: grayTip!.parts[0].tlMessageId,
+    })
   })
 
   it('closes a stale same-session WebSocket before replacing it and keeps the replacement subscribed', async () => {

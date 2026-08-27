@@ -943,14 +943,32 @@ export class MessageStore {
       platformSessionId, platformConversationId,
     })
     if (!conversation) return
-    const [part] = await this._database.select('mtproto_tl_message_part', {
+    const parts = await this._database.select('mtproto_tl_message_part', {
       platformSessionId,
       conversationId: conversation.id,
       nativeSequence,
-    }).orderBy('ordinal').limit(1).execute()
-    if (!part) return
-    const [row] = await this._database.get('mtproto_im_message', { id: part.messageId })
-    if (!row || row.deleted) return
+    }).orderBy('ordinal').orderBy('id').execute()
+    if (!parts.length) return
+    const rows = await this._database.get('mtproto_im_message', {
+      id: { $in: [...new Set(parts.map((part) => part.messageId))] },
+      deleted: false,
+    })
+    const rowsById = new Map(rows.map((row) => [row.id, row]))
+    // QQ gray-tip/service sidecars can reuse the msgSeq of the ordinary
+    // message immediately before them. Replies to that sequence still target
+    // the ordinary message, so a service row must only be used when it is the
+    // sole surviving candidate. Keep the oldest projection as the stable
+    // tiebreaker for duplicate candidates of the same kind.
+    const candidates = parts.flatMap((part) => {
+      const row = rowsById.get(part.messageId)
+      return row ? [{ part, row }] : []
+    }).sort((left, right) =>
+      Number(messageRowHasServiceAction(left.row)) - Number(messageRowHasServiceAction(right.row))
+      || left.part.ordinal - right.part.ordinal
+      || left.part.id - right.part.id)
+    const selected = candidates[0]
+    if (!selected) return
+    const { row } = selected
     return {
       source: await this._hydrateMessage(row),
       parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })
@@ -2062,6 +2080,12 @@ export class MessageStore {
       }
     }
   }
+}
+
+function messageRowHasServiceAction(row: IMMessageRow): boolean {
+  const content = row.content
+  return typeof content === 'object' && content !== null && !Array.isArray(content)
+    && 'serviceAction' in content && content.serviceAction !== undefined && content.serviceAction !== null
 }
 
 function groupByMessageId<T extends { messageId: number }>(
