@@ -964,6 +964,38 @@ describe('MessageStore', () => {
     })
   })
 
+  it('prefers an exact platform reply msgId over conflicting QQ sequence metadata', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'qq-exact-reply', kind: 'group' as const, title: 'QQ exact reply' }
+    const sequenceTarget: IMMessage = {
+      id: 'sequence-target', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      metadata: { qqMsgSeq: '490124' },
+      content: { parts: [{ type: 'text', text: 'sequence target' }] },
+    }
+    const exactTarget: IMMessage = {
+      id: 'exact-msg-id-target', conversationId: conversation.id, senderId: 'alice', timestamp: 101,
+      metadata: { qqMsgSeq: '490123' },
+      content: { parts: [{ type: 'text', text: 'exact target' }] },
+    }
+    const reply: IMMessage = {
+      id: 'reply', conversationId: conversation.id, senderId: 'bob', timestamp: 102,
+      replyToId: exactTarget.id,
+      metadata: { qqMsgSeq: '490125', qqReplyToMsgSeq: '490124' },
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const sequenceResult = await store.ingest(session, conversation, sequenceTarget)
+    const exactResult = await store.ingest(session, conversation, exactTarget)
+    await store.ingest(session, conversation, reply)
+
+    const resolved = await store.findReplyTarget(session.platformSessionId, reply)
+
+    expect(resolved).toMatchObject({
+      source: { id: exactTarget.id },
+      parts: [{ tlMessageId: exactResult.projection[0].tlMessageId }],
+    })
+    expect(resolved?.parts[0].tlMessageId).not.toBe(sequenceResult.projection[0].tlMessageId)
+  })
+
 
   it('keeps duplicate platform-provided group IDs addressable with a synthetic fallback', async () => {
     const { store } = await createStore()

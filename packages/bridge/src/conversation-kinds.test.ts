@@ -826,6 +826,48 @@ describe('conversation kinds', () => {
     expect(getMessage).not.toHaveBeenCalled()
   })
 
+  it('projects a stored exact QQ reply msgId ahead of conflicting native-sequence metadata', async () => {
+    const group = conversations.find((item) => item.id === 'group')!
+    const sequenceTarget: IMMessage = {
+      ...source(group), id: 'sequence-target', timestamp: 1,
+      metadata: { qqMsgSeq: '5850632', telegramMessageId: 5_850_632 },
+    }
+    const exactTarget: IMMessage = {
+      ...source(group), id: 'exact-target', timestamp: 2,
+      metadata: { qqMsgSeq: '5850633', telegramMessageId: 5_850_633 },
+    }
+    const reply: IMMessage = {
+      ...source(group), id: 'reply', timestamp: 3, replyToId: exactTarget.id,
+      metadata: {
+        qqMsgSeq: '5850634', telegramMessageId: 5_850_634,
+        qqReplyToMsgSeq: '5850632', telegramReplyToMessageId: 5_850_632,
+      },
+    }
+    const exactPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: [{ conversation: group, unreadCount: 0, lastMessage: reply }] } },
+      async getHistory() { return { messages: [reply, exactTarget, sequenceTarget] } },
+    }
+    const { rpc, store } = await createRpc(exactPlatform)
+    const result = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: stableId('peer:group'), accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
+    const exactProjected = await store.findProjectedByPlatformId(
+      session.platformSessionId, group.id, exactTarget.id,
+    )
+    const sequenceProjected = await store.findProjectedByPlatformId(
+      session.platformSessionId, group.id, sequenceTarget.id,
+    )
+    const projectedReply = result.messages[0] as tl.RawMessage
+
+    expect(projectedReply.replyTo).toMatchObject({
+      _: 'messageReplyHeader', replyToMsgId: exactProjected!.parts[0].tlMessageId,
+    })
+    expect(projectedReply.replyTo).not.toMatchObject({
+      replyToMsgId: sequenceProjected!.parts[0].tlMessageId,
+    })
+  })
+
   it('accepts channel input peers for groups, returns sender users, and sends to the original target IDs', async () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())

@@ -1008,6 +1008,12 @@ export class MessageStore {
     platformSessionId: string,
     source: IMMessage,
   ): Promise<ProjectedMessage | undefined> {
+    if (source.replyToId) {
+      const projected = await this.findProjectedByPlatformId(
+        platformSessionId, source.conversationId, source.replyToId,
+      )
+      if (projected) return projected
+    }
     const nativeSequence = qqReplySequenceFromMetadata(source.metadata)
     if (nativeSequence !== undefined) {
       const projected = await this.findProjectedByNativeSequence(
@@ -1022,9 +1028,6 @@ export class MessageStore {
       )
       if (projected) return projected
     }
-    return source.replyToId
-      ? this.findProjectedByPlatformId(platformSessionId, source.conversationId, source.replyToId)
-      : undefined
   }
 
   /** Persist the Telegram `mentioned` classification without re-unreading an acknowledged row. */

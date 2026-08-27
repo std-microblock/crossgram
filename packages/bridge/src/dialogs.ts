@@ -4037,6 +4037,12 @@ export class DialogRpc {
     if (!this._store) return
     const targets = new Map<string, { conversationId: string, targetId: string }>()
     for (const message of messages) {
+      if (message.replyToId) {
+        const key = `${message.conversationId}\u0000${message.replyToId}\u00000`
+        if (!this._messageToTl.has(key)) targets.set(key, {
+          conversationId: message.conversationId, targetId: message.replyToId,
+        })
+      }
       const qqReplySequence = qqReplySequenceFromMetadata(message.metadata)
       if (qqReplySequence !== undefined) {
         const key = qqSequenceKey(message.conversationId, qqReplySequence)
@@ -4075,11 +4081,6 @@ export class DialogRpc {
         }
         continue
       }
-      if (!message.replyToId) continue
-      const key = `${message.conversationId}\u0000${message.replyToId}\u00000`
-      if (!this._messageToTl.has(key)) targets.set(key, {
-        conversationId: message.conversationId, targetId: message.replyToId,
-      })
     }
     await Promise.all([...targets.values()].map(async ({ conversationId, targetId }) => {
       let projected = await this._store!.findProjectedByPlatformId(
@@ -4104,6 +4105,12 @@ export class DialogRpc {
   }
 
   private _messageReplyHeader(source: IMMessage): tl.RawMessageReplyHeader | undefined {
+    if (source.replyToId) {
+      const replyToMsgId = this._messageToTl.get(
+        `${source.conversationId}\u0000${source.replyToId}\u00000`,
+      )
+      if (replyToMsgId) return { _: 'messageReplyHeader', replyToMsgId }
+    }
     const qqReplySequence = qqReplySequenceFromMetadata(source.metadata)
     if (qqReplySequence !== undefined) {
       const replyToMsgId = this._messageToTl.get(qqSequenceKey(source.conversationId, qqReplySequence))
@@ -4111,11 +4118,6 @@ export class DialogRpc {
     }
     const nativeReplyTo = qqReplySequence === undefined ? telegramReplyToMessageId(source) : undefined
     if (nativeReplyTo) return { _: 'messageReplyHeader', replyToMsgId: nativeReplyTo }
-    if (!source.replyToId) return
-    const replyToMsgId = this._messageToTl.get(
-      `${source.conversationId}\u0000${source.replyToId}\u00000`,
-    )
-    return replyToMsgId ? { _: 'messageReplyHeader', replyToMsgId } : undefined
   }
 
   private _messageMentioned(source: IMMessage, replyToTlId?: number): boolean {

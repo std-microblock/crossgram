@@ -602,18 +602,19 @@ export class UpdateManager {
       const nativeReplyTo = qqReplySequence === undefined
         ? telegramReplyToMessageId(projected.source)
         : undefined
-      let replied = qqReplySequence === undefined
-        ? nativeReplyTo
-          ? await this._store.findProjectedByTlId(
-              session.platformSessionId, nativeReplyTo, event.conversation.id,
-            )
-          : undefined
-        : await this._store.findProjectedByNativeSequence(
-            session.platformSessionId, event.conversation.id, qqReplySequence,
+      let replied = projected.source.replyToId
+        ? await this._store.findProjectedByPlatformId(
+            session.platformSessionId, event.conversation.id, projected.source.replyToId,
           )
-      if (!replied && projected.source.replyToId) {
-        replied = await this._store.findProjectedByPlatformId(
-          session.platformSessionId, event.conversation.id, projected.source.replyToId,
+        : undefined
+      if (!replied && qqReplySequence !== undefined) {
+        replied = await this._store.findProjectedByNativeSequence(
+            session.platformSessionId, event.conversation.id, qqReplySequence,
+        )
+      }
+      if (!replied && nativeReplyTo) {
+        replied = await this._store.findProjectedByTlId(
+          session.platformSessionId, nativeReplyTo, event.conversation.id,
         )
       }
       if (!replied && projected.source.replyToId && platform.getMessage) {
@@ -691,7 +692,7 @@ export class UpdateManager {
             )
           : undefined,
         topicId,
-        replyToTlId: nativeReplyTo ?? replied?.parts[0]?.tlMessageId,
+        replyToTlId: replied?.parts[0]?.tlMessageId ?? nativeReplyTo,
         mentioned,
         unreadMention: mentioned,
       })
