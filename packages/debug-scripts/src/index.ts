@@ -466,8 +466,8 @@ export class DebugScripts extends Service {
     record.status.state = state
     record.status.updatedAt = Date.now()
     record.status.expiresAt = undefined
-    await this.persist(record)
     this.records.delete(name)
+    await this.persist(record)
     this.ctx.logger('debug-scripts').info('%s %s', state, name)
   }
 
