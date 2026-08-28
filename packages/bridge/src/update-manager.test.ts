@@ -1083,7 +1083,7 @@ describe('UpdateManager', () => {
       maxId: directResult.tlMessageId, stillUnreadCount: 0, pts: 2, ptsCount: 1,
     }, {
       _: 'updateReadChannelInbox', channelId: stableId('peer:group-read'),
-      maxId: groupResult.tlMessageId, stillUnreadCount: 0, pts: 3,
+      maxId: groupResult.tlMessageId, stillUnreadCount: 0, pts: 2,
     }])
     for (const item of sent) expect(() => roundTrip(item.update)).not.toThrow()
   })
@@ -1179,8 +1179,8 @@ describe('UpdateManager', () => {
     expect(() => roundTrip(sent[0].update)).not.toThrow()
   })
 
-  it('retains channel mention acknowledgements for channel difference recovery', async () => {
-    const { manager, sent } = await createHarness()
+  it('does not consume channel pts for mention acknowledgements', async () => {
+    const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'mention-channel', kind: 'group', title: 'Mention Channel' }
     const channelId = stableId(`peer:${conversation.id}`)
 
@@ -1195,15 +1195,23 @@ describe('UpdateManager', () => {
       _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
     })).resolves.toMatchObject({
       _: 'updates.difference',
-      otherUpdates: [{ _: 'updateChannelTooLong', channelId, pts: 2 }],
+      otherUpdates: [],
     })
+
+    const message: IMMessage = {
+      id: 'after-mention-read', conversationId: conversation.id, senderId: 'alice', timestamp: 45,
+      content: { parts: [{ type: 'text', text: 'after mention read' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
     await expect(manager.getChannelDifference(session.platformSessionId, {
       _: 'updates.getChannelDifference', force: true,
       channel: { _: 'inputChannel', channelId, accessHash: Long.ZERO },
       filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
     })).resolves.toMatchObject({
       _: 'updates.channelDifference', pts: 2,
-      otherUpdates: [{ _: 'updateChannelReadMessagesContents', channelId, messages: [44] }],
+      newMessages: [{ message: 'after mention read' }],
     })
     expect(() => roundTrip(sent[0].update)).not.toThrow()
   })

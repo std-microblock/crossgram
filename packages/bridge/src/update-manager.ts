@@ -258,7 +258,10 @@ export class UpdateManager {
     const delivery = await this._store.prepareUpdateDelivery(
       eventKey,
       session.platformSessionId,
-      messageIds.length,
+      // updateChannelReadMessagesContents carries no channel pts. Advancing
+      // the channel cursor for this acknowledgement makes clients see a hole
+      // before the next channel message and repeatedly call getChannelDifference.
+      channelId === undefined ? messageIds.length : 0,
       date,
       channelId,
     )
@@ -463,7 +466,11 @@ export class UpdateManager {
     const eventKey = `${session.platformSessionId}:read:${event.conversationId}:${event.upToMessageId}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
     delivery ??= await this._store.prepareUpdateDelivery(
-      eventKey, session.platformSessionId, 1, result.message.timestamp, channelId,
+      // Telegram clients apply updateReadChannelInbox as read state, but do
+      // not use it as a channel-update queue item. Keep it on the current
+      // channel pts instead of creating a permanent gap before the next message.
+      eventKey, session.platformSessionId, channelId === undefined ? 1 : 0,
+      result.message.timestamp, channelId,
     )
     if (delivery.published) return
 
@@ -958,7 +965,7 @@ export class UpdateManager {
     // when multiple events share the same second because channel difference is
     // itself pts-deduplicated.
     const changedChannels = new Map<number, number>()
-    for (const delivery of channelDeliveries.filter((delivery) => delivery.payload)) {
+    for (const delivery of channelDeliveries.filter((delivery) => delivery.payload && delivery.ptsCount > 0)) {
       const channelId = Number(delivery.scope.slice('channel:'.length))
       if (!Number.isSafeInteger(channelId)) continue
       changedChannels.set(channelId, Math.max(changedChannels.get(channelId) ?? 0, delivery.pts))

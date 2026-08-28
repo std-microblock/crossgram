@@ -1242,6 +1242,18 @@ export class DialogRpc {
     }
   }
 
+  /**
+   * The bridge does not expose pinned dialogs, but Telegram clients send this
+   * housekeeping RPC during dialog synchronization. A successful no-op is
+   * preferable to METHOD_NOT_IMPLEMENTED, which Android keeps retrying.
+   */
+  async reorderPinnedDialogs(
+    req: tl.messages.RawReorderPinnedDialogsRequest,
+  ): Promise<tl.TlObject> {
+    if (req.folderId !== 0 && req.folderId !== 1) throw new RpcError(400, 'FOLDER_ID_INVALID')
+    return { _: 'boolTrue' } as unknown as tl.TlObject
+  }
+
   async getContacts(): Promise<tl.contacts.RawContacts> {
     await this._hydrateUsers()
     const platformUsers: IMUser<any>[] = []

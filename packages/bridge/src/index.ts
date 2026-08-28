@@ -880,6 +880,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getScheduledHistory(req as tl.messages.RawGetScheduledHistoryRequest))
   rpc.register('messages.getPinnedDialogs', async (rpc) =>
     (await requireBridgeSession(rpc)).dialogs.getPinnedDialogs())
+  rpc.register('messages.reorderPinnedDialogs', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.reorderPinnedDialogs(
+      req as tl.messages.RawReorderPinnedDialogsRequest,
+    ))
   rpc.register('messages.sendMessage', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.sendMessage(
       req as tl.messages.RawSendMessageRequest, rpc.connection,
