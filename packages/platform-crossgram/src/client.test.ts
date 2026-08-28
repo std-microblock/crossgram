@@ -505,6 +505,7 @@ describe('QQNTClient streaming transport', () => {
     const thumbnail = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
     const thumbnailMd5 = createHash('md5').update(thumbnail).digest('hex')
     const thumbnailSha1 = createHash('sha1').update(thumbnail).digest('hex')
+    const videoSha1 = createHash('sha1').update(Buffer.from([1, 2, 3, 4, 5])).digest('hex')
     const highwayFrames: Buffer[] = []
     const localMessageBodies: Buffer[] = []
     let manifest: Record<string, any> | undefined
@@ -519,6 +520,8 @@ describe('QQNTClient streaming transport', () => {
         expect(body).toMatchObject({ conversationId: '1:uid', media: {
           kind: 'video', name: 'x.mp4', size: 5,
           md5: '7cfdd07889b3295d6a550914ab35e068',
+          sha1: videoSha1,
+          sha1Checkpoints: [videoSha1],
           thumbnail: {
             size: thumbnail.length, md5: thumbnailMd5, sha1: thumbnailSha1,
             width: 320, height: 180,
@@ -597,6 +600,7 @@ describe('QQNTClient streaming transport', () => {
         mimeType: 'video/mp4', width: 320, height: 200, duration: 9, size: 5,
         md5: '7cfdd07889b3295d6a550914ab35e068',
         sha1: '11966ab9c099f8fabefac54c08d5be2bd8c903af',
+        sha1Checkpoints: [videoSha1],
         file10MMd5: '7cfdd07889b3295d6a550914ab35e068',
         thumbnail: {
           size: thumbnail.length, md5: thumbnailMd5, sha1: thumbnailSha1,
@@ -608,6 +612,63 @@ describe('QQNTClient streaming transport', () => {
       }],
     })
     expect(manifest).not.toHaveProperty('mediaFraming')
+  })
+
+  it('computes cumulative video SHA-1 checkpoints across arbitrary source chunk boundaries', async () => {
+    const blockSize = 1024 * 1024
+    const video = Buffer.alloc(blockSize + 37)
+    for (let index = 0; index < video.length; index++) video[index] = index % 251
+    const expectedCheckpoints = [
+      createHash('sha1').update(video.subarray(0, blockSize)).digest('hex'),
+      createHash('sha1').update(video).digest('hex'),
+    ]
+    let preparedMedia: Record<string, any> | undefined
+    server = createServer(async (request, response) => {
+      if (request.url === '/status') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ protocolVersion: 24 }))
+        return
+      }
+      if (request.url === '/uploads/prepare') {
+        preparedMedia = JSON.parse((await collect(request)).toString()).media
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          prepared: { kind: 'video', fileUuid: 'cached-video', msgInfo: 'bXNn' },
+        }))
+        return
+      }
+      await collect(request)
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({
+        id: 'sent', conversationId: '1:uid', senderId: 'self', timestamp: 1, outgoing: true, parts: [],
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({
+      endpoint: `http://127.0.0.1:${address.port}`,
+      videoThumbnail: async () => ({ bytes: Buffer.of(1), width: 1, height: 1 }),
+    })
+
+    await client.sendMessage('1:uid', undefined, [{
+      kind: 'file', name: 'boundary.mp4', mimeType: 'video/mp4',
+      source: {
+        size: video.length,
+        async *stream() {
+          yield video.subarray(0, 333_333)
+          yield video.subarray(333_333, blockSize + 11)
+          yield video.subarray(blockSize + 11)
+        },
+      },
+    }])
+
+    expect(preparedMedia).toMatchObject({
+      size: video.length,
+      sha1: expectedCheckpoints[1],
+      sha1Checkpoints: expectedCheckpoints,
+    })
   })
 
   it('does not silently accept a short media source', async () => {
