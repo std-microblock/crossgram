@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildRemoteInstallCommand,
+  latestResultValue,
   localPaths,
   normalizeScriptName,
   parseArgs,
@@ -82,5 +83,23 @@ test('runtime options apply bounded defaults and environment host overrides', ()
   assert.throws(
     () => runtimeOptions({ timeout: 1 }, {}),
     /Invalid numeric option/,
+  )
+})
+
+test('latestResultValue unwraps the newest published probe result', () => {
+  assert.deepEqual(
+    latestResultValue({
+      script: 'statistics.ts',
+      results: [{ value: { count: 1 } }, { value: { count: 2 } }],
+    }),
+    { count: 2 },
+  )
+  assert.throws(
+    () => latestResultValue({
+      script: 'statistics.ts',
+      error: 'service unavailable',
+      results: [],
+    }),
+    /did not publish a result: service unavailable/,
   )
 })

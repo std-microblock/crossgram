@@ -23,6 +23,25 @@ ssh root@118.89.184.208 'systemctl status crossgram --no-pager'
 ssh root@118.89.184.208 'journalctl -u crossgram -n 200 --no-pager'
 ```
 
+## Read MTProto statistics
+
+Use the built-in one-shot probe to read the live, read-only
+`mtprotoStatistics` service. It returns the same bounded snapshot and time
+series used by the WebUI, including per-RPC count, average, P90, P99, errors,
+error rate, failure reasons, slow samples, and runtime data:
+
+```sh
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs statistics
+```
+
+The command deploys the bundled probe through `debug-scripts`, waits for one
+published result, prints that result directly as JSON, and removes the probe.
+To stay safely below the debug result size limit, it includes the latest 300
+second points, 180 minute points, and 48 hour points; the snapshot itself is
+complete and contains all collector-retained per-RPC rows.
+Use `--keep` only when diagnosing the runner itself; ordinary monitoring must
+leave no active probe behind.
+
 ## Write a probe
 
 Create a self-contained `.ts` file under the repository `work/` directory. Every probe must export `apply(ctx)` and publish bounded structured results.
