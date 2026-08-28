@@ -769,7 +769,6 @@ describe('rich-media projection', () => {
   it('accepts feature-supplied rich-message links instead of hard-coding a viewer', () => {
     const linked: IMConversation = {
       id: 'linked-archive', kind: 'group', title: 'Linked archive',
-      metadata: { conversationView: 'custom-view' },
     }
     const article: IMMessage = {
       ...album,

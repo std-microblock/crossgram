@@ -64,7 +64,12 @@ import { MessageProjectionPipeline } from './message-projection.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
-export { DialogRpc, stableId, type ProjectedDialogPeer } from './dialogs.js'
+export {
+  DialogRpc, makeTlCardPreview, makeTlMessageMedia, makeTlTransientMessageMedia,
+  projectTlMessage, stableId,
+} from './dialogs.js'
+export * from './message-projection.js'
+export * from './detached-message-projection.js'
 export * from './message-store.js'
 export * from './message-actions.js'
 export * from './platform-manager.js'
@@ -1337,6 +1342,7 @@ export function createSessionResolver(
   ) => void | Promise<void>,
   messageProjection?: MessageProjectionPipeline,
 ) {
+  const projection = messageProjection ?? new MessageProjectionPipeline(ctx)
   const loading = new Map<string, Promise<BridgeSessionState>>()
   const authorizedConnections = new WeakSet<object>()
   const authorizingConnections = new WeakMap<object, Promise<void>>()
@@ -1399,7 +1405,7 @@ export function createSessionResolver(
       await subscriptions.ensure(session)
       if (notify) await notifyAuthorizedSession(session, rpc)
       const state: BridgeSessionState = {
-        generation, platform, session, store,
+        generation, platform, session, projection,
         stickers: stickerRpcFor(platform, session),
         dialogs: undefined as never,
       }
@@ -1417,7 +1423,7 @@ export function createSessionResolver(
         blockedPeers,
         dialogFolders,
         systemPeers,
-        messageProjection,
+        projection,
       )
       return state
     }

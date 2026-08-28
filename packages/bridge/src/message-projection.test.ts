@@ -6,7 +6,7 @@ import {
   type MessageProjectionInput,
   type MessageProjectionPlanInput,
 } from './message-projection.js'
-import type { IMConversation, IMMessage, PlatformSession } from './platform.js'
+import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
 
 const session: PlatformSession = {
   platformId: 'test', platformSessionId: 'projection-session', userId: 'self',
@@ -22,13 +22,29 @@ const source: IMMessage = {
   content: { parts: [{ type: 'text', text: 'original' }] },
 }
 
-function planInput(allocation: 'live' | 'history' = 'live'): MessageProjectionPlanInput {
-  return { session, conversation, source, allocation }
+const platform: IMPlatform = {
+  capabilities: {
+    history: true,
+    send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+    conversations: { groups: true, channels: false, subchannels: false },
+  },
+  async subscribe() { return () => {} },
+  async sendMessage() { throw new Error('unused') },
 }
 
-function projectInput(mode: 'history' | 'update'): MessageProjectionInput {
+function planInput(allocation: 'live' | 'history' = 'live'): MessageProjectionPlanInput {
+  return { session, target: { conversation, title: conversation.title }, source, allocation }
+}
+
+function projectInput(mode: 'history' | 'update' | 'bundle'): MessageProjectionInput {
   return {
-    mode, session, conversation, tlMessageId: 100, ordinal: 0,
+    mode, platform, session,
+    target: {
+      conversation,
+      peer: { _: 'peerChannel', channelId: 1 },
+      title: conversation.title,
+    },
+    tlMessageId: 100, ordinal: 0,
     draft: { source, chats: [] },
   }
 }
@@ -71,15 +87,14 @@ describe('MessageProjectionPipeline', () => {
     ])
   })
 
-  it.each(['history', 'update'] as const)(
+  it.each(['history', 'update', 'bundle'] as const)(
     'lets feature middleware mutate the %s draft before the shared default renderer',
     async (mode) => {
       const ctx = new Context()
       const pipeline = new MessageProjectionPipeline(ctx)
-      const loadConversation = vi.fn(async () => [])
       ctx.on('bridge/message/project', async (input, next) => {
         expect(input.mode).toBe(mode)
-        expect(input.loadConversation).toBe(loadConversation)
+        expect(input.target.peer).toEqual({ _: 'peerChannel', channelId: 1 })
         input.draft.source = {
           ...input.draft.source,
           content: { parts: [{ type: 'text', text: `projected:${input.mode}` }] },
@@ -91,7 +106,7 @@ describe('MessageProjectionPipeline', () => {
         })
         return next()
       })
-      const input = { ...projectInput(mode), loadConversation }
+      const input = projectInput(mode)
 
       await expect(pipeline.project(input, () => ({
         message: rendered(input), chats: input.draft.chats,

@@ -3,13 +3,14 @@ import type { ServerRpcContext } from '@mtproto-relay/mtproto'
 import type { DialogRpc } from './dialogs.js'
 import type { IMPlatform, PlatformSession } from './platform.js'
 import type { StickerRpc } from './sticker-rpc.js'
-import type { MessageStore } from './message-store.js'
+import type { MessageProjectionPipeline } from './message-projection.js'
 
 export interface BridgeSessionState {
   generation: object
   platform: IMPlatform
   session: PlatformSession
-  store: MessageStore
+  /** The sole bridge capability reused by virtual message features. */
+  projection: MessageProjectionPipeline
   dialogs: DialogRpc
   stickers: StickerRpc
 }
