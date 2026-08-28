@@ -625,6 +625,28 @@ describe('PlatformDataService', () => {
     })
   })
 
+  it('returns a fresh dialog page while a replay backlog delays persistence', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'replay-backlog-room', kind: 'group', title: 'Replay backlog' }
+    const store = new MessageStore(database)
+    const release = Promise.withResolvers<void>()
+    vi.spyOn(store, 'ingestDialogs').mockImplementation(async () => release.promise)
+    platform.getDialogs = vi.fn(async () => ({
+      dialogs: [{ conversation, unreadCount: 0, lastMessage: incoming('fresh-latest', conversation.id) }],
+    }))
+    const data = new PlatformDataService(platform, session, store)
+
+    const startedAt = Date.now()
+    const page = await data.getDialogsPage({ limit: 100 })
+    expect(page.dialogs[0]?.lastMessage?.id).toBe('fresh-latest')
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
+
+    release.resolve()
+    await vi.waitFor(() => expect(store.ingestDialogs).toHaveBeenCalledOnce())
+  })
+
   it('keeps dialog preview and opened history on the same recovered latest message', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
