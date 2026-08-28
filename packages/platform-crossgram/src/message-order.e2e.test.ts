@@ -1289,21 +1289,14 @@ describe('QQNT remote media routing E2E', () => {
 
     const platform = new QQNTPlatform({ endpoint: `http://127.0.0.1:${address.port}/v1` })
     const [dialog] = (await platform.getDialogs(session)).dialogs
-    const link = dialog.lastMessage?.content.parts[0]
-    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
-      throw new Error('merged forward link was not mapped')
-    }
-    const history = await platform.getHistory(session, link.entities[0].conversation, { limit: 2 })
-    expect(history.messages.map((message) => message.id)).toEqual([
-      'archived-text-3', 'archived-file-message',
+    const bundlePart = dialog.lastMessage?.content.parts[0]
+    if (bundlePart?.type !== 'message-bundle') throw new Error('merged-forward bundle was not mapped')
+    const snapshots = await platform.messageBundles.load(session, bundlePart.bundle.locator)
+    expect(snapshots.map((message) => message.id)).toEqual([
+      'archived-text-0', 'archived-text-1', 'archived-text-2', 'archived-text-3',
+      'archived-file-message',
     ])
-    const older = await platform.getHistory(session, link.entities[0].conversation, {
-      limit: 2, before: { id: 'archived-text-3', timestamp: 8 },
-    })
-    expect(older.messages.map((message) => message.id)).toEqual([
-      'archived-text-1', 'archived-text-2',
-    ])
-    const part = history.messages[1].content.parts[0]
+    const part = snapshots[4].content.parts[0]
     if (part.type !== 'media') throw new Error('merged forward file was not mapped')
 
     expect(await collect(platform.downloadMedia(session, part.media))).toEqual(file)

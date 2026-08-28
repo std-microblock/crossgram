@@ -2,194 +2,65 @@ import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import {
+  projectDetachedMessage,
   stableId,
   type BridgeSessionState,
-  type IMConversation,
-  type LinkedConversationProjectionCandidate,
+  type IMMessageBundle,
+  type IMMessageSnapshot,
   type MessageProjectionInput,
   type MessageProjectionResult,
-  type ProjectedDialogPeer,
 } from '@mtproto-relay/bridge'
 import type { ServerRpcContext } from '@mtproto-relay/mtproto'
 
 export const name = 'merged-forward-viewer'
 export const inject = ['mtproto', 'mtprotoBridge']
 
-export const MERGED_FORWARD_VIEW = 'merged-forward'
-
-interface MergedForwardRecord {
+interface BundleRecord {
   platformSessionId: string
   chatId: number
-  conversation: IMConversation
-  target?: LinkedConversationProjectionCandidate
+  bundle: IMMessageBundle
+  snapshots?: Promise<IMMessageSnapshot[]>
+  projection?: Promise<ProjectedBundle>
 }
 
-export function isMergedForwardConversation(conversation: IMConversation): boolean {
-  return conversation.metadata?.conversationView === MERGED_FORWARD_VIEW
+interface ProjectedBundle {
+  messages: tl.TypeMessage[]
+  chats: tl.TypeChat[]
+  users: tl.TypeUser[]
 }
 
-/** Feature-owned address book, renderer, target cache, durable recovery, and RPC admission policy. */
+/**
+ * Ephemeral feature-owned registry. It remembers only bundles encountered in
+ * projected messages; it never restores virtual dialogs from MessageStore.
+ */
 export class MergedForwardProjection {
-  private readonly _records = new Map<string, Map<number, MergedForwardRecord>>()
-  private readonly _targetJobs = new Map<string, Promise<LinkedConversationProjectionCandidate | undefined>>()
-  private readonly _hydrateJobs = new Map<string, Promise<void>>()
-  private readonly _hydratedSessions = new Set<string>()
+  private readonly _records = new Map<string, Map<number, BundleRecord>>()
 
-  supports(conversation: IMConversation): boolean {
-    return isMergedForwardConversation(conversation)
-  }
-
-  remember(platformSessionId: string, chatId: number, conversation: IMConversation): string | undefined {
-    if (!this.supports(conversation)) return
-    const records = this._records.get(platformSessionId) ?? new Map<number, MergedForwardRecord>()
-    const previous = records.get(chatId)
-    const record: MergedForwardRecord = {
-      platformSessionId,
-      chatId,
-      conversation,
-      ...(previous?.conversation.id === conversation.id && previous.target
-        ? { target: previous.target }
-        : {}),
+  remember(platformSessionId: string, bundle: IMMessageBundle): BundleRecord {
+    const chatId = bundleChatId(bundle)
+    const records = this._records.get(platformSessionId) ?? new Map<number, BundleRecord>()
+    const existing = records.get(chatId)
+    if (existing?.bundle.id === bundle.id) {
+      existing.bundle = bundle
+      return existing
     }
+    const record = { platformSessionId, chatId, bundle }
     records.set(chatId, record)
     this._records.set(platformSessionId, records)
-    return this.makeLink(platformSessionId, chatId)
+    return record
   }
 
-  resolve(platformSessionId: string, chatId: number): IMConversation | undefined {
-    return this._record(platformSessionId, chatId)?.conversation
+  resolve(platformSessionId: string, chatId: number): BundleRecord | undefined {
+    return this._records.get(platformSessionId)?.get(chatId)
   }
 
-  resolveUsername(
-    platformSessionId: string,
-    username: string,
-  ): { chatId: number, conversation: IMConversation } | undefined {
-    const match = /^bridgechat_(\d+)$/.exec(username)
-    if (!match) return
-    const chatId = Number(match[1])
-    const conversation = this.resolve(platformSessionId, chatId)
-    return conversation ? { chatId, conversation } : undefined
+  records(platformSessionId: string): Iterable<BundleRecord> {
+    return this._records.get(platformSessionId)?.values() ?? []
   }
 
-  ownsMessage(platformSessionId: string, tlMessageId: number): boolean {
-    return this.recordOwningMessage(platformSessionId, tlMessageId) !== undefined
-  }
-
-  recordOwningMessage(platformSessionId: string, tlMessageId: number): MergedForwardRecord | undefined {
-    for (const record of this._records.get(platformSessionId)?.values() ?? []) {
-      if (record.target?.tlMessageId === tlMessageId) return record
-    }
-  }
-
-  target(platformSessionId: string, chatId: number): LinkedConversationProjectionCandidate | undefined {
-    return this._record(platformSessionId, chatId)?.target
-  }
-
-  setTarget(
-    platformSessionId: string,
-    chatId: number,
-    target: LinkedConversationProjectionCandidate,
-  ): boolean {
-    const record = this._record(platformSessionId, chatId)
-    if (!record) return false
-    record.target = target
-    return true
-  }
-
-  makeLink(platformSessionId: string, chatId: number): string | undefined {
-    const record = this._record(platformSessionId, chatId)
-    if (!record) return
-    return `https://t.me/bridgechat_${chatId}${record.target ? `/${record.target.tlMessageId}` : ''}`
-  }
-
-  makePreview(platformSessionId: string, chatId: number): tl.RawMessageMediaWebPage | undefined {
-    const record = this._record(platformSessionId, chatId)
-    const url = this.makeLink(platformSessionId, chatId)
-    if (!record || !url) return
-    const preview = record.conversation.metadata?.conversationViewPreview
-    const detailedPreview = typeof preview === 'string' && isDetailedConversationPreview(preview)
-      ? preview.trim()
-      : undefined
-    return {
-      _: 'messageMediaWebPage', manual: true, safe: true,
-      webpage: {
-        _: 'webPage',
-        id: Long.fromNumber(stableId(`conversation-preview:${record.conversation.id}`)),
-        url, displayUrl: record.conversation.title, hash: 0,
-        type: 'telegram_message', title: record.conversation.title,
-        description: detailedPreview ?? '点击查看合并转发消息',
-      },
-    }
-  }
-
-  makeChat(platformSessionId: string, chatId: number): tl.TypeChat | undefined {
-    const record = this._record(platformSessionId, chatId)
-    if (!record) return
-    return {
-      _: 'chat', left: true, id: chatId, title: record.conversation.title,
-      photo: { _: 'chatPhotoEmpty' }, participantsCount: 1, date: 0, version: 1,
-    }
-  }
-
-  makeFullChat(
-    platformSessionId: string,
-    chatId: number,
-    notifySettings: tl.TypePeerNotifySettings,
-  ): tl.messages.RawChatFull | undefined {
-    const chat = this.makeChat(platformSessionId, chatId)
-    if (!chat) return
-    return {
-      _: 'messages.chatFull',
-      fullChat: {
-        _: 'chatFull', id: chatId, about: '',
-        participants: { _: 'chatParticipantsForbidden', chatId },
-        chatPhoto: { _: 'photoEmpty', id: Long.ZERO }, notifySettings, botInfo: [],
-      },
-      chats: [chat], users: [],
-    }
-  }
-
-  projectedPeer(platformSessionId: string, chatId: number): ProjectedDialogPeer | undefined {
-    const record = this._record(platformSessionId, chatId)
-    const chat = this.makeChat(platformSessionId, chatId)
-    if (!record || !chat) return
-    return {
-      conversation: record.conversation,
-      peer: { _: 'peerChat', chatId },
-      chat,
-    }
-  }
-
-  async ensureHydrated(state: BridgeSessionState): Promise<void> {
-    const sessionId = state.session.platformSessionId
-    if (this._hydratedSessions.has(sessionId)) return
-    const existing = this._hydrateJobs.get(sessionId)
-    if (existing) return existing
-    const pending = (async () => {
-      const conversations = await state.store.listConversations(sessionId)
-      for (const conversation of conversations) {
-        if (!this.supports(conversation)) continue
-        const chatId = stableId(`peer:${conversation.id}`)
-        this.remember(sessionId, chatId, conversation)
-        if (this.target(sessionId, chatId)) continue
-        const [latest] = await state.store.readProjectedHistory(sessionId, conversation.id, { limit: 1 })
-        const part = latest?.parts.find((candidate) => candidate.ordinal === 0)
-        if (!latest || !part) continue
-        this.setTarget(sessionId, chatId, {
-          conversationId: conversation.id,
-          platformMessageId: latest.source.id,
-          tlMessageId: part.tlMessageId,
-          timestamp: latest.source.timestamp,
-        })
-      }
-      this._hydratedSessions.add(sessionId)
-    })()
-    this._hydrateJobs.set(sessionId, pending)
-    try {
-      await pending
-    } finally {
-      if (this._hydrateJobs.get(sessionId) === pending) this._hydrateJobs.delete(sessionId)
-    }
+  resolveUsername(platformSessionId: string, username: string): BundleRecord | undefined {
+    const match = /^bridgebundle_(\d+)$/.exec(username)
+    return match ? this.resolve(platformSessionId, Number(match[1])) : undefined
   }
 
   async project(
@@ -197,90 +68,159 @@ export class MergedForwardProjection {
     next: () => MessageProjectionResult | Promise<MessageProjectionResult>,
   ): Promise<MessageProjectionResult> {
     if (input.ordinal !== 0) return next()
-    const linked = input.draft.source.content.parts
-      .filter((part) => part.type === 'text')
-      .flatMap((part) => part.entities ?? [])
-      .filter((entity) => entity.type === 'conversation-link' && this.supports(entity.conversation))
-    if (!linked.length) return next()
+    const bundles = input.draft.source.content.parts
+      .filter((part): part is Extract<typeof part, { type: 'message-bundle' }> => part.type === 'message-bundle')
+    if (!bundles.length) return next()
 
-    const urls = new Map<string, string>()
-    for (const entity of linked) {
-      if (entity.type !== 'conversation-link' || urls.has(entity.conversation.id)) continue
-      const conversation = entity.conversation
-      const chatId = stableId(`peer:${conversation.id}`)
-      this.remember(input.session.platformSessionId, chatId, conversation)
-      await this._ensureTarget(input, conversation, chatId)
-      const url = this.makeLink(input.session.platformSessionId, chatId)
-      if (!url) continue
-      urls.set(conversation.id, url)
-      const chat = this.makeChat(input.session.platformSessionId, chatId)
-      if (chat) input.draft.chats.push(chat)
+    const links = new Map<string, string>()
+    const targets = new Map<string, number>()
+    for (const part of bundles) {
+      const record = this.remember(input.session.platformSessionId, part.bundle)
+      const snapshots = await this.loadSnapshots(input, record)
+      const latest = newestSnapshot(snapshots)
+      const target = latest ? bundleMessageId(part.bundle, latest, 0) : undefined
+      if (target) targets.set(part.bundle.id, target)
+      links.set(part.bundle.id, this.makeLink(
+        record,
+        target,
+      ))
+      input.draft.chats.push(this.makeChat(record, snapshots))
     }
-    if (!urls.size) return next()
 
     const source = input.draft.source
     input.draft.source = {
       ...source,
       content: {
         ...source.content,
-        parts: source.content.parts.map((part) => part.type !== 'text' ? part : {
-          ...part,
-          entities: part.entities?.map((entity) => {
-            if (entity.type !== 'conversation-link') return entity
-            const url = urls.get(entity.conversation.id)
-            return url ? {
-              type: 'text-link' as const, offset: entity.offset, length: entity.length, url,
-            } : entity
-          }),
+        parts: source.content.parts.map((part) => {
+          if (part.type !== 'message-bundle') return part
+          const text = '查看聊天记录'
+          return {
+            type: 'text' as const,
+            text,
+            entities: [{
+              type: 'text-link' as const,
+              offset: 0,
+              length: text.length,
+              url: links.get(part.bundle.id)!,
+            }],
+          }
         }),
       },
     }
     if (!source.content.parts.some((part) =>
       part.type === 'media' || part.type === 'sticker' || part.type === 'card')) {
-      const first = linked[0]
-      if (first?.type === 'conversation-link') {
-        input.draft.media = this.makePreview(
-          input.session.platformSessionId, stableId(`peer:${first.conversation.id}`),
-        )
-      }
+      const record = this.resolve(input.session.platformSessionId, bundleChatId(bundles[0].bundle))
+      if (record) input.draft.media = this.makePreview(record, targets.get(bundles[0].bundle.id))
     }
     return next()
   }
 
+  makeLink(record: BundleRecord, messageId?: number): string {
+    return `https://t.me/bridgebundle_${record.chatId}${messageId ? `/${messageId}` : ''}`
+  }
+
+  makeChat(record: BundleRecord, snapshots: readonly IMMessageSnapshot[] = []): tl.RawChat {
+    return {
+      _: 'chat', left: true, id: record.chatId, title: record.bundle.title,
+      photo: { _: 'chatPhotoEmpty' },
+      participantsCount: Math.max(1, new Set(snapshots.map((item) => item.senderId)).size),
+      date: 0, version: 1,
+    }
+  }
+
+  makePreview(record: BundleRecord, messageId?: number): tl.RawMessageMediaWebPage {
+    const url = this.makeLink(record, messageId)
+    return {
+      _: 'messageMediaWebPage', manual: true, safe: true,
+      webpage: {
+        _: 'webPage',
+        id: Long.fromNumber(stableId(`merged-forward-preview:${record.bundle.id}`)),
+        url, displayUrl: record.bundle.title, hash: 0,
+        type: 'telegram_message', title: record.bundle.title,
+        description: record.bundle.preview?.trim() || '点击查看合并转发消息',
+      },
+    }
+  }
+
+  makeFullChat(record: BundleRecord, snapshots: readonly IMMessageSnapshot[]): tl.messages.RawChatFull {
+    const chat = this.makeChat(record, snapshots)
+    return {
+      _: 'messages.chatFull',
+      fullChat: {
+        _: 'chatFull', id: record.chatId, about: '',
+        participants: { _: 'chatParticipantsForbidden', chatId: record.chatId },
+        chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
+        notifySettings: { _: 'peerNotifySettings' }, botInfo: [],
+      },
+      chats: [chat], users: [],
+    }
+  }
+
+  loadSnapshots(input: Pick<MessageProjectionInput, 'platform' | 'session'>, record: BundleRecord) {
+    if (record.snapshots) return record.snapshots
+    const provider = input.platform.messageBundles
+    record.snapshots = provider
+      ? provider.load(input.session, record.bundle.locator)
+      : Promise.resolve([])
+    record.snapshots.catch(() => {
+      record.snapshots = undefined
+    })
+    return record.snapshots
+  }
+
+  materialize(state: BridgeSessionState, record: BundleRecord): Promise<ProjectedBundle> {
+    if (record.projection) return record.projection
+    record.projection = this.buildProjection(state, record)
+    record.projection.catch(() => {
+      record.projection = undefined
+    })
+    return record.projection
+  }
+
   clear(): void {
     this._records.clear()
-    this._targetJobs.clear()
-    this._hydrateJobs.clear()
-    this._hydratedSessions.clear()
   }
 
-  private async _ensureTarget(
-    input: MessageProjectionInput,
-    conversation: IMConversation,
-    chatId: number,
-  ): Promise<LinkedConversationProjectionCandidate | undefined> {
-    const existing = this.target(input.session.platformSessionId, chatId)
-    if (existing || !input.loadConversation) return existing
-    const key = `${input.session.platformSessionId}\u0000${chatId}\u0000${conversation.id}`
-    let pending = this._targetJobs.get(key)
-    if (!pending) {
-      pending = input.loadConversation(conversation).then((candidates) => {
-        const latest = candidates.slice().sort((left, right) =>
-          right.timestamp - left.timestamp || right.tlMessageId - left.tlMessageId)[0]
-        if (!latest) return
-        this.setTarget(input.session.platformSessionId, chatId, latest)
-        return latest
+  private async buildProjection(state: BridgeSessionState, record: BundleRecord): Promise<ProjectedBundle> {
+    const snapshots = await this.loadSnapshots(state, record)
+    const peer = { _: 'peerChat' as const, chatId: record.chatId }
+    const replyIds = new Map(snapshots.map((snapshot) => [
+      snapshot.id,
+      bundleMessageId(record.bundle, snapshot, 0),
+    ]))
+    const messages: tl.TypeMessage[] = []
+    const chats: tl.TypeChat[] = [this.makeChat(record, snapshots)]
+    const users = new Map<number, tl.TypeUser>()
+
+    for (const snapshot of snapshots) {
+      users.set(bundleUserId(state, snapshot.senderId), makeBundleUser(state, snapshot))
+      const rendered = await projectDetachedMessage({
+        pipeline: state.projection,
+        platform: state.platform,
+        session: state.session,
+        stickers: state.stickers,
+        source: snapshot,
+        target: { peer, title: record.bundle.title },
+        messageId: (ordinal) => bundleMessageId(record.bundle, snapshot, ordinal),
+        mediaId: (partIndex) => stableId(
+          `merged-forward-media:${record.bundle.id}:${snapshot.id}:${partIndex}`,
+        ),
+        userId: (id) => bundleUserId(state, id),
+        replyToMessageId: snapshot.replyToId ? replyIds.get(snapshot.replyToId) : undefined,
+        groupedId: String(stableId(
+          `merged-forward-group:${record.bundle.id}:${snapshot.groupId ?? snapshot.id}`,
+        )),
       })
-      this._targetJobs.set(key, pending)
-      pending.finally(() => {
-        if (this._targetJobs.get(key) === pending) this._targetJobs.delete(key)
-      }).catch(() => {})
+      messages.push(...rendered.messages)
+      chats.push(...rendered.chats)
     }
-    return pending
-  }
-
-  private _record(platformSessionId: string, chatId: number): MergedForwardRecord | undefined {
-    return this._records.get(platformSessionId)?.get(chatId)
+    messages.sort((left, right) => messageDate(right) - messageDate(left) || right.id - left.id)
+    return {
+      messages,
+      chats: uniqueById(chats),
+      users: [...users.values()],
+    }
   }
 }
 
@@ -309,34 +249,25 @@ async function routeMergedForwardRpc(
   rpc: ServerRpcContext,
   request: tl.RpcMethod,
 ): Promise<unknown | undefined> {
-  const resolveState = async () => {
-    const state = await ctx.mtprotoBridge.resolveSession(rpc)
-    await projection.ensureHydrated(state)
-    return state
-  }
+  const resolveState = () => ctx.mtprotoBridge.resolveSession(rpc)
   if (request._ === 'contacts.resolveUsername') {
     const req = request as tl.contacts.RawResolveUsernameRequest
-    if (!/^bridgechat_\d+$/.test(req.username)) return
+    if (!/^bridgebundle_\d+$/.test(req.username)) return
     const state = await resolveState()
-    const resolved = projection.resolveUsername(state.session.platformSessionId, req.username)
-    if (!resolved) return
-    const chat = projection.makeChat(state.session.platformSessionId, resolved.chatId)
-    if (!chat) return
+    const record = projection.resolveUsername(state.session.platformSessionId, req.username)
+    if (!record) return
+    const snapshots = await projection.loadSnapshots(state, record)
     return {
-      _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: resolved.chatId },
-      chats: [chat], users: [],
+      _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: record.chatId },
+      chats: [projection.makeChat(record, snapshots)], users: [],
     }
   }
   if (request._ === 'messages.getFullChat') {
     const req = request as tl.messages.RawGetFullChatRequest
     const state = await resolveState()
-    const conversation = projection.resolve(state.session.platformSessionId, req.chatId)
-    if (!conversation) return
-    return projection.makeFullChat(
-      state.session.platformSessionId,
-      req.chatId,
-      await state.dialogs.getConversationNotifySettings(conversation),
-    )
+    const record = projection.resolve(state.session.platformSessionId, req.chatId)
+    if (!record) return
+    return projection.makeFullChat(record, await projection.loadSnapshots(state, record))
   }
   if (
     request._ === 'messages.getHistory'
@@ -350,102 +281,156 @@ async function routeMergedForwardRpc(
       | tl.messages.RawGetPeerSettingsRequest
     if (req.peer._ !== 'inputPeerChat') return
     const state = await resolveState()
-    const projectedPeer = projection.projectedPeer(state.session.platformSessionId, req.peer.chatId)
-    if (!projectedPeer) return
-    if (request._ === 'messages.getHistory') return state.dialogs.getProjectedHistory(request, projectedPeer)
+    const record = projection.resolve(state.session.platformSessionId, req.peer.chatId)
+    if (!record) return
     if (request._ === 'messages.readHistory') {
-      return state.dialogs.readProjectedHistory(request, projectedPeer, rpc.connection)
+      return { _: 'messages.affectedMessages', pts: 0, ptsCount: 0 }
     }
     if (request._ === 'messages.getScheduledHistory') {
-      return state.dialogs.getProjectedScheduledHistory(projectedPeer)
+      const snapshots = await projection.loadSnapshots(state, record)
+      return {
+        _: 'messages.messages', messages: [], topics: [],
+        chats: [projection.makeChat(record, snapshots)], users: [],
+      }
     }
-    return state.dialogs.getProjectedPeerSettings(projectedPeer)
+    if (request._ === 'messages.getPeerSettings') {
+      const snapshots = await projection.loadSnapshots(state, record)
+      return {
+        _: 'messages.peerSettings', settings: { _: 'peerSettings' },
+        chats: [projection.makeChat(record, snapshots)], users: [],
+      }
+    }
+    const bundle = await projection.materialize(state, record)
+    const page = selectHistory(bundle.messages, request as tl.messages.RawGetHistoryRequest)
+    return {
+      _: 'messages.messagesSlice', count: bundle.messages.length,
+      messages: page, topics: [], chats: bundle.chats, users: bundle.users,
+    }
   }
   if (request._ === 'messages.getPeerDialogs') {
     const state = await resolveState()
     const req = request as tl.messages.RawGetPeerDialogsRequest
-    const projectedEntries = req.peers.flatMap((item, index) => {
+    const records = req.peers.flatMap((item, index) => {
       if (item._ !== 'inputDialogPeer' || item.peer._ !== 'inputPeerChat') return []
-      const projected = projection.projectedPeer(state.session.platformSessionId, item.peer.chatId)
-      return projected ? [{ index, projected }] : []
+      const record = projection.resolve(state.session.platformSessionId, item.peer.chatId)
+      return record ? [{ index, record }] : []
     })
-    if (!projectedEntries.length) return
-    const projectedIndexes = new Set(projectedEntries.map((entry) => entry.index))
-    const ordinaryPeers = req.peers.filter((_item, index) => !projectedIndexes.has(index))
-    const projectedResult = await state.dialogs.getProjectedPeerDialogs(
-      projectedEntries.map((entry) => entry.projected),
-    )
-    const ordinaryResult = ordinaryPeers.length
+    if (!records.length) return
+    const virtualIndexes = new Set(records.map((entry) => entry.index))
+    const ordinaryPeers = req.peers.filter((_item, index) => !virtualIndexes.has(index))
+    const projected = await Promise.all(records.map(async ({ record }) => {
+      const bundle = await projection.materialize(state, record)
+      const top = bundle.messages[0]?.id ?? 0
+      return { record, bundle, top }
+    }))
+    const ordinary = ordinaryPeers.length
       ? await state.dialogs.getPeerDialogs({ ...req, peers: ordinaryPeers })
       : undefined
-    return mergePeerDialogs(projectedResult, ordinaryResult)
+    return {
+      _: 'messages.peerDialogs',
+      dialogs: [
+        ...(ordinary?.dialogs ?? []),
+        ...projected.map(({ record, top }): tl.RawDialog => ({
+          _: 'dialog', peer: { _: 'peerChat', chatId: record.chatId }, topMessage: top,
+          readInboxMaxId: top, readOutboxMaxId: top, unreadCount: 0,
+          unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
+          notifySettings: { _: 'peerNotifySettings' },
+        })),
+      ],
+      messages: [...(ordinary?.messages ?? []), ...projected.flatMap(({ bundle }) => bundle.messages.slice(0, 1))],
+      chats: uniqueById([...(ordinary?.chats ?? []), ...projected.flatMap(({ bundle }) => bundle.chats)]),
+      users: uniqueById([...(ordinary?.users ?? []), ...projected.flatMap(({ bundle }) => bundle.users)]),
+      state: ordinary?.state ?? { _: 'updates.state', pts: 0, qts: 0, date: 0, seq: 0, unreadCount: 0 },
+    }
   }
   if (request._ === 'messages.getMessages') {
     const state = await resolveState()
     const req = request as tl.messages.RawGetMessagesRequest
-    const ownedIds = req.id.filter((item) => item._ === 'inputMessageID'
-      && projection.ownsMessage(state.session.platformSessionId, item.id))
-    if (!ownedIds.length) return
-    const ordinaryIds = req.id.filter((item) => !ownedIds.includes(item))
-    const peers = [...new Set(ownedIds.flatMap((item) => {
-      if (item._ !== 'inputMessageID') return []
-      const record = projection.recordOwningMessage(state.session.platformSessionId, item.id)
-      const projected = record
-        ? projection.projectedPeer(state.session.platformSessionId, record.chatId)
-        : undefined
-      return projected ? [projected] : []
-    }))]
-    const projectedResult = await state.dialogs.getProjectedMessages({ ...req, id: ownedIds }, peers)
-    const ordinaryResult = ordinaryIds.length
-      ? await state.dialogs.getMessages({ ...req, id: ordinaryIds })
+    const bundles = await Promise.all(
+      [...projection.records(state.session.platformSessionId)]
+        .map((record) => projection.materialize(state, record)),
+    )
+    const virtualById = new Map(bundles.flatMap((bundle) => bundle.messages.map((message) => [message.id, message])))
+    const requestedIds = req.id.map(inputMessageId)
+    const ordinaryInputs = req.id.filter((input) => !virtualById.has(inputMessageId(input)))
+    if (ordinaryInputs.length === req.id.length) return
+    const ordinary = ordinaryInputs.length
+      ? await state.dialogs.getMessages({ ...req, id: ordinaryInputs })
       : undefined
-    return mergeMessages(req.id, projectedResult, ordinaryResult)
+    const ordinaryMessages = ordinary && ordinary._ !== 'messages.messagesNotModified'
+      ? ordinary.messages
+      : []
+    const byId = new Map([...ordinaryMessages, ...virtualById.values()].map((message) => [message.id, message]))
+    return {
+      _: 'messages.messages',
+      messages: requestedIds.map((id) => byId.get(id) ?? { _: 'messageEmpty', id }),
+      topics: [],
+      chats: uniqueById([
+        ...(ordinary && ordinary._ !== 'messages.messagesNotModified' ? ordinary.chats : []),
+        ...bundles.flatMap((bundle) => bundle.chats),
+      ]),
+      users: uniqueById([
+        ...(ordinary && ordinary._ !== 'messages.messagesNotModified' ? ordinary.users : []),
+        ...bundles.flatMap((bundle) => bundle.users),
+      ]),
+    }
   }
 }
 
-function mergePeerDialogs(
-  projected: tl.messages.RawPeerDialogs,
-  ordinary?: tl.messages.RawPeerDialogs,
-): tl.messages.RawPeerDialogs {
-  if (!ordinary) return projected
+function newestSnapshot(snapshots: readonly IMMessageSnapshot[]): IMMessageSnapshot | undefined {
+  return snapshots.map((snapshot, index) => ({ snapshot, index }))
+    .sort((left, right) => right.snapshot.timestamp - left.snapshot.timestamp || right.index - left.index)[0]
+    ?.snapshot
+}
+
+function bundleChatId(bundle: IMMessageBundle): number {
+  return stableId(`merged-forward-chat:${bundle.id}`)
+}
+
+function bundleMessageId(bundle: IMMessageBundle, snapshot: IMMessageSnapshot, ordinal: number): number {
+  return stableId(`merged-forward-message:${bundle.id}:${snapshot.id}:${ordinal}`)
+}
+
+function bundleUserId(state: BridgeSessionState, platformUserId: string): number {
+  return stableId(`merged-forward-user:${state.session.platformSessionId}:${platformUserId}`)
+}
+
+function makeBundleUser(state: BridgeSessionState, snapshot: IMMessageSnapshot): tl.RawUser {
+  const id = bundleUserId(state, snapshot.senderId)
+  const source = snapshot.sender
   return {
-    _: 'messages.peerDialogs',
-    dialogs: [...ordinary.dialogs, ...projected.dialogs],
-    messages: [...ordinary.messages, ...projected.messages],
-    chats: uniqueById([...ordinary.chats, ...projected.chats]),
-    users: uniqueById([...ordinary.users, ...projected.users]),
-    state: ordinary.state,
+    _: 'user', id, accessHash: Long.fromNumber(id),
+    firstName: source?.firstName || snapshot.senderId,
+    lastName: source?.lastName,
+    username: source?.username,
+    photo: { _: 'userProfilePhotoEmpty' },
   }
 }
 
-function mergeMessages(
-  requested: readonly tl.TypeInputMessage[],
-  projected: tl.messages.TypeMessages,
-  ordinary?: tl.messages.TypeMessages,
-): tl.messages.RawMessages {
-  const projectedMessages = projected as Exclude<tl.messages.TypeMessages, tl.messages.RawMessagesNotModified>
-  const ordinaryMessages = ordinary as Exclude<tl.messages.TypeMessages, tl.messages.RawMessagesNotModified> | undefined
-  const candidates = [...(ordinaryMessages?.messages ?? []), ...projectedMessages.messages]
-  const byId = new Map(candidates.map((message) => [message.id, message]))
-  return {
-    _: 'messages.messages',
-    messages: requested.map((input) => {
-      const id = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
-      return byId.get(id) ?? { _: 'messageEmpty', id }
-    }),
-    topics: [],
-    chats: uniqueById([...(ordinaryMessages?.chats ?? []), ...projectedMessages.chats]),
-    users: uniqueById([...(ordinaryMessages?.users ?? []), ...projectedMessages.users]),
+function selectHistory(
+  messages: readonly tl.TypeMessage[],
+  request: tl.messages.RawGetHistoryRequest,
+): tl.TypeMessage[] {
+  let filtered = [...messages]
+  if (request.maxId > 0) filtered = filtered.filter((message) => message.id < request.maxId)
+  if (request.minId > 0) filtered = filtered.filter((message) => message.id > request.minId)
+  let start = 0
+  if (request.offsetId > 0) {
+    const anchor = filtered.findIndex((message) => message.id === request.offsetId)
+    start = anchor < 0 ? 0 : anchor + 1
   }
+  start = Math.max(0, start + request.addOffset)
+  return filtered.slice(start, start + Math.max(0, request.limit))
+}
+
+function inputMessageId(input: tl.TypeInputMessage): number {
+  return input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
+}
+
+function messageDate(message: tl.TypeMessage): number {
+  return message._ === 'messageEmpty' ? 0 : message.date
 }
 
 function uniqueById<T extends { _: string, id: number }>(items: readonly T[]): T[] {
   return [...new Map(items.map((item) => [`${item._}:${item.id}`, item])).values()]
-}
-
-function isDetailedConversationPreview(value: string): boolean {
-  const compact = value.replace(/\s+/g, '')
-  return !(/^(?:点击)?查看(?:[xX×\d]+条)?(?:消息的)?(?:合并)?转发(?:消息)?$/.test(compact)
-    || /^(?:共)?[xX×\d]+条消息的合并转发$/.test(compact)
-    || /^(?:合并转发|聊天记录)$/.test(compact))
 }

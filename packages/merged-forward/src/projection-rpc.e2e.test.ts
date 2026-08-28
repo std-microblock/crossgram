@@ -13,7 +13,9 @@ import {
   stableId,
   type BridgeSessionState,
   type IMConversation,
+  type IMMessageBundle,
   type IMMessage,
+  type IMMessageSnapshot,
   type IMPlatform,
   type PlatformSession,
 } from '@mtproto-relay/bridge'
@@ -26,21 +28,29 @@ const session: PlatformSession = {
 }
 
 const outer: IMConversation = { id: 'outer-dialog', kind: 'group', title: 'Outer dialog' }
-const archive: IMConversation = {
-  id: 'qqnt-multi-forward:rpc-e2e', kind: 'group', title: 'Alice 和 Bob 的聊天记录',
-  metadata: {
-    conversationView: 'merged-forward',
-    conversationViewPreview: 'Alice: first\nBob: latest',
-  },
+const bundle: IMMessageBundle = {
+  id: 'bundle:rpc-e2e', title: 'Alice 和 Bob 的聊天记录',
+  preview: 'Alice: first\nBob: latest', locator: { root: 'rpc-e2e' },
 }
-const innerMessages: IMMessage[] = [
+const innerMessages: IMMessageSnapshot[] = [
   {
-    id: 'inner-first', conversationId: archive.id, senderId: 'alice', timestamp: 100,
+    id: 'inner-media', senderId: 'alice', timestamp: 99,
+    sender: { id: 'alice', firstName: 'Alice' },
+    content: { parts: [{
+      type: 'media',
+      media: {
+        id: 'archived-file', kind: 'file', name: 'archive.txt', mimeType: 'text/plain', size: 6,
+        locator: { id: 'archived-file' },
+      },
+    }] },
+  },
+  {
+    id: 'inner-first', senderId: 'alice', timestamp: 100,
     sender: { id: 'alice', firstName: 'Alice' },
     content: { parts: [{ type: 'text', text: 'first' }] },
   },
   {
-    id: 'inner-latest', conversationId: archive.id, senderId: 'bob', timestamp: 101,
+    id: 'inner-latest', senderId: 'bob', timestamp: 101,
     sender: { id: 'bob', firstName: 'Bob' },
     content: { parts: [{ type: 'text', text: 'latest' }] },
   },
@@ -48,10 +58,7 @@ const innerMessages: IMMessage[] = [
 const outerMessage: IMMessage = {
   id: 'outer-message', conversationId: outer.id, senderId: 'alice', timestamp: 102,
   sender: { id: 'alice', firstName: 'Alice' },
-  content: { parts: [{
-    type: 'text', text: '查看聊天记录',
-    entities: [{ type: 'conversation-link', offset: 0, length: 6, conversation: archive }],
-  }] },
+  content: { parts: [{ type: 'message-bundle', bundle }] },
 }
 
 const platform: IMPlatform = {
@@ -61,6 +68,7 @@ const platform: IMPlatform = {
     send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
     conversations: { groups: true, channels: false, subchannels: false },
   },
+  messageBundles: { async load() { return innerMessages } },
   async subscribe() { return () => {} },
   async sendMessage() { throw new Error('unused') },
   async getDialogs() {
@@ -68,10 +76,13 @@ const platform: IMPlatform = {
   },
   async getHistory(_session, conversation) {
     if (conversation.id === outer.id) return { messages: [outerMessage] }
-    if (conversation.id === archive.id) return { messages: innerMessages }
     return { messages: [] }
   },
   async getUser(_session, id) { return { id, firstName: id } },
+  async *downloadMedia() { yield new TextEncoder().encode('bundle') },
+  async resolveMediaUrl() {
+    return { url: 'https://cdn.example.test/bundle', expiresAt: Date.now() + 60_000, supportsRange: true }
+  },
 }
 
 const disposals: Array<() => Promise<void>> = []
@@ -106,7 +117,7 @@ describe('merged-forward projection and RPC e2e', () => {
     const dialogs = makeDialogs(store, pipeline)
     const bridge = ctx.plugin((scope) => {
       new MtprotoBridgeService(scope, async () => ({
-        generation: {}, platform, session, store, dialogs, stickers: {} as never,
+        generation: {}, platform, session, projection: pipeline, dialogs, stickers: {} as never,
       } satisfies BridgeSessionState))
     })
     await bridge
@@ -129,19 +140,19 @@ describe('merged-forward projection and RPC e2e', () => {
       (item): item is tl.RawMessageEntityTextUrl => item._ === 'messageEntityTextUrl',
     )
     if (!entity) throw new Error('merged-forward projection did not create a deep link')
-    const chatId = stableId(`peer:${archive.id}`)
+    const chatId = stableId(`merged-forward-chat:${bundle.id}`)
     const targetId = Number(new URL(entity.url).pathname.split('/').at(-1))
-    expect(entity.url).toBe(`https://t.me/bridgechat_${chatId}/${targetId}`)
+    expect(entity.url).toBe(`https://t.me/bridgebundle_${chatId}/${targetId}`)
     expect(projectedOuter.media).toMatchObject({ _: 'messageMediaWebPage' })
 
     const rpc = { connection: { remoteAddress: '127.0.0.1' } } as never
     const resolvedUsername = await ctx.mtproto.dispatch(rpc, {
-      _: 'contacts.resolveUsername', username: `bridgechat_${chatId}`,
+      _: 'contacts.resolveUsername', username: `bridgebundle_${chatId}`,
     } as never)
     if (resolvedUsername._ === 'mt_rpc_error') throw new Error(resolvedUsername.errorMessage)
     expect(resolvedUsername).toMatchObject({
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId },
-      chats: [{ _: 'chat', id: chatId, title: archive.title }],
+      chats: [{ _: 'chat', id: chatId, title: bundle.title }],
     })
     const peer = { _: 'inputPeerChat' as const, chatId }
     await expect(ctx.mtproto.dispatch(rpc, {
@@ -152,8 +163,35 @@ describe('merged-forward projection and RPC e2e', () => {
       messages: [
         { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'latest' },
         { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'first' },
+        { _: 'message', peerId: { _: 'peerChat', chatId }, media: { _: 'messageMediaDocument' } },
       ],
     })
+    const projectedHistory = await ctx.mtproto.dispatch(rpc, {
+      _: 'messages.getHistory', peer,
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    } as never) as tl.messages.RawMessagesSlice
+    const mediaMessage = projectedHistory.messages.find((message) =>
+      message._ === 'message' && message.media?._ === 'messageMediaDocument') as tl.RawMessage
+    if (mediaMessage.media?._ !== 'messageMediaDocument'
+      || !mediaMessage.media.document
+      || mediaMessage.media.document._ !== 'document') throw new Error('bundle media was not projected')
+    const document = mediaMessage.media.document
+    const location = {
+      _: 'inputDocumentFileLocation' as const,
+      id: document.id,
+      accessHash: document.accessHash,
+      fileReference: document.fileReference,
+      thumbSize: '',
+    }
+    await expect(dialogs.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location, offset: 0, limit: 16,
+    })).resolves.toMatchObject({ bytes: new TextEncoder().encode('bundle') })
+    await expect(dialogs.getFileUrl(location)).resolves.toMatchObject({
+      _: 'dataJSON', data: expect.stringContaining('https://cdn.example.test/bundle'),
+    })
+    await expect(ctx.database.get('mtproto_im_media', {})).resolves.toEqual([])
     await expect(ctx.mtproto.dispatch(rpc, {
       _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: targetId }],
     } as never)).resolves.toMatchObject({
