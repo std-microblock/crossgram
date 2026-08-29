@@ -200,8 +200,12 @@ describe('merged-forward projection and RPC e2e', () => {
     await expect(ctx.mtproto.dispatch(rpc, {
       _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeer', peer }],
     } as never)).resolves.toMatchObject({
-      dialogs: [{ peer: { _: 'peerChat', chatId }, topMessage: targetId }],
-      messages: [{ _: 'message', id: targetId, message: 'latest' }],
+      // The synthetic peer is a history-only view.  It must not be returned
+      // as a dialog (or with a top message), otherwise clients persist it in
+      // the left-hand chat list after opening the link.
+      dialogs: [],
+      messages: [],
+      chats: [{ _: 'chat', id: chatId, title: bundle.title }],
     })
     await expect(ctx.mtproto.dispatch(rpc, {
       _: 'messages.getFullChat', chatId,

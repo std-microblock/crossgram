@@ -318,28 +318,24 @@ async function routeMergedForwardRpc(
     if (!records.length) return
     const virtualIndexes = new Set(records.map((entry) => entry.index))
     const ordinaryPeers = req.peers.filter((_item, index) => !virtualIndexes.has(index))
-    const projected = await Promise.all(records.map(async ({ record }) => {
-      const bundle = await projection.materialize(state, record)
-      const top = bundle.messages[0]?.id ?? 0
-      return { record, bundle, top }
+    // Synthetic peers are history-only views, not dialogs.  Returning a
+    // `dialog` (or its top message) here makes Telegram clients mark the
+    // peer as having a real dialog entry and persist it in the left chat
+    // list.  Keep the peer entity available for resolving/opening the view,
+    // but deliberately leave the dialog and message vectors untouched.
+    const projectedChats = await Promise.all(records.map(async ({ record }) => {
+      const snapshots = await projection.loadSnapshots(state, record)
+      return projection.makeChat(record, snapshots)
     }))
     const ordinary = ordinaryPeers.length
       ? await state.dialogs.getPeerDialogs({ ...req, peers: ordinaryPeers })
       : undefined
     return {
       _: 'messages.peerDialogs',
-      dialogs: [
-        ...(ordinary?.dialogs ?? []),
-        ...projected.map(({ record, top }): tl.RawDialog => ({
-          _: 'dialog', peer: { _: 'peerChat', chatId: record.chatId }, topMessage: top,
-          readInboxMaxId: top, readOutboxMaxId: top, unreadCount: 0,
-          unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
-          notifySettings: { _: 'peerNotifySettings' },
-        })),
-      ],
-      messages: [...(ordinary?.messages ?? []), ...projected.flatMap(({ bundle }) => bundle.messages.slice(0, 1))],
-      chats: uniqueById([...(ordinary?.chats ?? []), ...projected.flatMap(({ bundle }) => bundle.chats)]),
-      users: uniqueById([...(ordinary?.users ?? []), ...projected.flatMap(({ bundle }) => bundle.users)]),
+      dialogs: ordinary?.dialogs ?? [],
+      messages: ordinary?.messages ?? [],
+      chats: uniqueById([...(ordinary?.chats ?? []), ...projectedChats]),
+      users: ordinary?.users ?? [],
       state: ordinary?.state ?? { _: 'updates.state', pts: 0, qts: 0, date: 0, seq: 0, unreadCount: 0 },
     }
   }
