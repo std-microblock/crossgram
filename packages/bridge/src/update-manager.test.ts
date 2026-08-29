@@ -122,6 +122,26 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('publishes a live message that was already persisted by a concurrent history read', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'history-live-race', kind: 'group', title: 'History/live race' }
+    const message: IMMessage = {
+      id: 'history-live-race-message', conversationId: conversation.id, senderId: 'alice', timestamp: 101,
+      content: { parts: [{ type: 'text', text: 'arrived while history was loading' }] },
+    }
+
+    await store.ingest(session, conversation, message, { allocation: 'history' })
+    const liveResult = await store.ingest(session, conversation, message)
+    expect(liveResult).toMatchObject({ created: false, changed: false })
+
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result: liveResult })
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0].update).toMatchObject({
+      _: 'updates', updates: [{ _: 'updateNewChannelMessage', message: { message: 'arrived while history was loading' } }],
+    })
+  })
+
   it('does not publish transient platform voice control events as Telegram messages', async () => {
     const { manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'caller', kind: 'direct', title: 'Caller' }
