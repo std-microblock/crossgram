@@ -1181,7 +1181,7 @@ describe('QQNTPlatform mapping', () => {
             type: 'qq-face' as const,
             offset: '柚子不是说上工了'.length,
             length: '/续标识'.length,
-            faceId: '14', faceType: 1,
+            faceId: '14', faceType: 2,
           }],
         }],
       }],
