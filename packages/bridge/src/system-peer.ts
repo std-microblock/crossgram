@@ -220,7 +220,19 @@ export class SystemPeerService extends Service {
       senderId: session.userId,
       content: {
         parts: content.parts.map((part) => part.type === 'media'
-          ? { type: 'media' as const, media: { ...part.media, id: `bridge:system-peer-media:${randomUUID()}` } }
+          ? {
+            type: 'media' as const,
+            media: {
+              ...part.media,
+              id: `bridge:system-peer-media:${randomUUID()}`,
+              // IMMediaInput deliberately omits locator at the top level when
+              // reusing an existing platform media; recover it from origin so
+              // the persisted system-peer message remains downloadable.
+              ...((part.media.origin?.locator) !== undefined
+                ? { locator: part.media.origin.locator }
+                : {}),
+            },
+          }
           : part) as IMMessage['content']['parts'],
       },
       timestamp: Math.floor(Date.now() / 1_000),

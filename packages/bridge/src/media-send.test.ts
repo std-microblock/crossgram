@@ -219,6 +219,9 @@ describe('media send streaming', () => {
       type: 'media',
       media: { name: 'existing.bin', size: 4, origin: { id: 'remote-qq-file', locator: origin.locator } },
     })
+    const persisted = await store.readHistory(session.platformSessionId, conversation.id, { limit: 20 })
+    const persistedMedia = persisted.find((message) => message.outgoing)?.content.parts.find((part) => part.type === 'media')
+    expect(persistedMedia).toMatchObject({ type: 'media', media: { locator: origin.locator } })
     expect(result._).toBe('updates')
     expect((result as tl.RawUpdates).updates).toContainEqual(expect.objectContaining({
       _: 'updateMessageID', randomId: Long.fromNumber(4_001),
