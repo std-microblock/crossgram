@@ -746,29 +746,22 @@ describe('QQNTPlatform mapping', () => {
     }))
   })
 
-  it('filters and cleans temporary and zero-peer dialogs without hiding real QQ service messages', async () => {
-    const temporaryId = 'qqnt-multi-forward:["633125440","7668634613890478612",""]'
+  it('filters and cleans zero-peer dialogs without hiding real QQ service messages', async () => {
     const remove = vi.fn(async () => {})
     const database = {
       withTransaction: vi.fn(async (callback: (database: any) => Promise<void>) => callback({
         get: vi.fn(async (table: string, query: any) => {
           if (table === 'mtproto_im_conversation') return [{
-            id: 41, platformSessionId: session.platformSessionId, platformConversationId: temporaryId,
-          }, {
             id: 42, platformSessionId: session.platformSessionId, platformConversationId: '0',
           }]
           if (table === 'mtproto_im_message' && query.conversationId) return [
-            { id: 51, conversationId: 41 }, { id: 52, conversationId: 42 },
+            { id: 52, conversationId: 42 },
           ]
           if (table === 'mtproto_im_message') return []
           if (table === 'mtproto_notification_settings') return [
             { id: 'peer-zero', scope: 'peer:0' },
-            { id: 'topic-temporary', scope: `topic:${temporaryId}:7` },
             { id: 'real-peer', scope: 'peer:real-group' },
           ]
-          if (table === 'mtproto_im_user') return [{
-            id: 61, platformId: session.platformId, platformUserId: temporaryId,
-          }]
           return []
         }),
         remove,
@@ -777,9 +770,6 @@ describe('QQNTPlatform mapping', () => {
     const platform = new QQNTPlatform({}, 'qqnt:stickers', undefined, undefined, database as any)
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
-      id: temporaryId, kind: 'direct' as const, title: temporaryId,
-      peerUid: temporaryId, peerUin: '', chatType: 1 as const,
-    }, {
       id: '0', kind: 'group' as const, title: '0',
       peerUid: '0', peerUin: '0', chatType: 2 as const,
     }, {
@@ -800,15 +790,10 @@ describe('QQNTPlatform mapping', () => {
         lastMessage: { content: { serviceAction: { type: 'custom', text: '群公告已更新' }, parts: [] } },
       }],
     })
-    await expect(platform.getConversation(session, temporaryId)).resolves.toBeNull()
     await expect(platform.getConversation(session, '0')).resolves.toBeNull()
-    await expect(platform.getHistory(session, { id: temporaryId })).resolves.toEqual({ messages: [] })
     await expect(platform.getHistory(session, { id: '0' })).resolves.toEqual({ messages: [] })
     await expect(platform.searchMessages(session, { id: '0' }, { query: 'ignored' })).resolves.toEqual({ messages: [] })
     await expect(platform.getMessage(session, { id: '0' }, 'ghost')).resolves.toBeNull()
-    await expect(platform.markRead(session, {
-      conversationId: temporaryId, messageId: 'inside-forward',
-    })).resolves.toBeUndefined()
     await expect(platform.markRead(session, {
       conversationId: '0', messageId: 'ghost',
     })).resolves.toBeUndefined()
@@ -816,17 +801,16 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getConversation).not.toHaveBeenCalled()
     expect(platform.client.getHistory).not.toHaveBeenCalled()
     expect(platform.client.markRead).not.toHaveBeenCalled()
-    expect(remove).toHaveBeenCalledWith('mtproto_im_message_reaction', { messageId: { $in: [51, 52] } })
-    expect(remove).toHaveBeenCalledWith('mtproto_message_mention', { messageId: { $in: [51, 52] } })
-    expect(remove).toHaveBeenCalledWith('mtproto_im_conversation', { id: { $in: [41, 42] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_im_message_reaction', { messageId: { $in: [52] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_message_mention', { messageId: { $in: [52] } })
+    expect(remove).toHaveBeenCalledWith('mtproto_im_conversation', { id: { $in: [42] } })
     expect(remove).toHaveBeenCalledWith('mtproto_channel_update_state', {
       platformSessionId: session.platformSessionId,
-      channelId: { $in: [stableId(`peer:${temporaryId}`), stableId('peer:0')].map(String) },
+      channelId: { $in: [stableId('peer:0')].map(String) },
     })
     expect(remove).toHaveBeenCalledWith('mtproto_notification_settings', {
-      id: { $in: ['peer-zero', 'topic-temporary'] },
+      id: { $in: ['peer-zero'] },
     })
-    expect(remove).toHaveBeenCalledWith('mtproto_im_user', { id: { $in: [61] } })
   })
 
   it('downloads merged-forward files through the physical outer QQ conversation', async () => {
@@ -845,13 +829,12 @@ describe('QQNTPlatform mapping', () => {
       },
     }] }))
     const [dialog] = (await platform.getDialogs(session)).dialogs
-    const link = dialog.lastMessage?.content.parts[0]
-    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
-      throw new Error('merged forward link was not mapped')
-    }
-    expect(link.entities[0].conversation.metadata).toMatchObject({
-      conversationView: 'merged-forward',
-      conversationViewPreview: 'Alice: hello\nBob: [图片]',
+    const bundlePart = dialog.lastMessage?.content.parts[0]
+    if (bundlePart?.type !== 'message-bundle') throw new Error('merged-forward bundle was not mapped')
+    expect(bundlePart.bundle).toMatchObject({
+      title: '聊天记录',
+      preview: 'Alice: hello\nBob: [图片]',
+      locator: { conversationId: 'outer-group', rootMessageId: 'merged-root' },
     })
 
     const archivedLocator = {
@@ -869,8 +852,8 @@ describe('QQNTPlatform mapping', () => {
     }])
     platform.client.downloadFile = vi.fn(async function* () { yield new TextEncoder().encode('contents') })
 
-    const history = await platform.getHistory(session, link.entities[0].conversation)
-    const part = history.messages[0].content.parts[0]
+    const snapshots = await platform.messageBundles.load(session, bundlePart.bundle.locator)
+    const part = snapshots[0].content.parts[0]
     if (part.type !== 'media') throw new Error('merged forward file was not mapped')
     const chunks: Uint8Array[] = []
     for await (const chunk of platform.downloadMedia(session, part.media)) chunks.push(chunk)
@@ -886,7 +869,7 @@ describe('QQNTPlatform mapping', () => {
     expect(archivedLocator.peerUid).toBe('archived-source-group')
   })
 
-  it('opens merged-forward history at the newest edge and pages backward without refetching', async () => {
+  it('loads the complete merged-forward bundle without routing through platform history', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
@@ -906,27 +889,23 @@ describe('QQNTPlatform mapping', () => {
       parts: [{ type: 'text' as const, text: `message ${index}` }],
     }))
     platform.client.getMultiForwardMessages = vi.fn(async () => archived)
+    platform.client.getHistory = vi.fn()
 
     const [dialog] = (await platform.getDialogs(session)).dialogs
-    const link = dialog.lastMessage?.content.parts[0]
-    if (link?.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
-      throw new Error('merged forward link was not mapped')
-    }
-    const conversation = link.entities[0].conversation
-    await expect(platform.getHistory(session, conversation, { limit: 2 })).resolves.toMatchObject({
-      messages: [{ id: 'inside-4' }, { id: 'inside-5' }],
-    })
-    await expect(platform.getHistory(session, conversation, {
-      limit: 2, before: { id: 'inside-4', timestamp: 104 },
-    })).resolves.toMatchObject({
-      messages: [{ id: 'inside-2' }, { id: 'inside-3' }],
-    })
-    await expect(platform.getHistory(session, conversation, {
-      limit: 2, after: { id: 'inside-2', timestamp: 102 },
-    })).resolves.toMatchObject({
-      messages: [{ id: 'inside-3' }, { id: 'inside-4' }],
-    })
+    const part = dialog.lastMessage?.content.parts[0]
+    if (part?.type !== 'message-bundle') throw new Error('merged-forward bundle was not mapped')
+    await expect(platform.messageBundles.load(session, part.bundle.locator)).resolves.toMatchObject(
+      archived.map((message) => ({
+        id: message.id,
+        senderId: message.senderId,
+        sender: { id: 'alice', firstName: 'Alice' },
+        timestamp: message.timestamp,
+        content: { parts: message.parts },
+      })),
+    )
+    await expect(platform.messageBundles.load(session, part.bundle.locator)).resolves.toHaveLength(6)
     expect(platform.client.getMultiForwardMessages).toHaveBeenCalledOnce()
+    expect(platform.client.getHistory).not.toHaveBeenCalled()
   })
 
   it('hydrates missing senders in merged-forward history from QQ user profiles', async () => {
@@ -977,17 +956,15 @@ describe('QQNTPlatform mapping', () => {
     })
 
     const [merged] = await platform.forwardMessages(session, { id: 'from' }, ['a', 'b'], { id: 'to' })
-    const link = merged.content.parts[0]
-    if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
-      throw new Error('merged forward link was not mapped')
-    }
-    const history = await platform.getHistory(session, link.entities[0].conversation)
+    const part = merged.content.parts[0]
+    if (part.type !== 'message-bundle') throw new Error('merged-forward bundle was not mapped')
+    const snapshots = await platform.messageBundles.load(session, part.bundle.locator)
 
-    expect(history.messages[0]).toMatchObject({
+    expect(snapshots[0]).toMatchObject({
       sender: { id: 'provided-alice', firstName: 'Provided Alice' },
     })
-    expect(history.messages.slice(1, 4).map((message) => message.sender)).toEqual([undefined, undefined, undefined])
-    expect(history.messages.slice(4)).toMatchObject([{
+    expect(snapshots.slice(1, 4).map((message) => message.sender)).toEqual([undefined, undefined, undefined])
+    expect(snapshots.slice(4)).toMatchObject([{
       sender: { id: 'archived-alice', avatar: { id: 'avatar:archived-alice:original-v1' } },
     }, {
       sender: { id: 'archived-alice', avatar: { id: 'avatar:archived-alice:original-v1' } },
@@ -1016,13 +993,12 @@ describe('QQNTPlatform mapping', () => {
       .resolves.toMatchObject([{ id: 'forwarded-a' }])
     const merged = await platform.forwardMessages(session, { id: 'from' }, ['a', 'b'], { id: 'to' })
     expect(merged).toMatchObject([{ id: 'merged', content: { parts: [{
-      type: 'text', text: '查看聊天记录', entities: [{
-        type: 'conversation-link', offset: 0, length: 6,
-        conversation: {
-          kind: 'group', title: 'Alice 和 Bob 的聊天记录',
-          metadata: { conversationViewPreview: 'Alice: first\nBob: second' },
-        },
-      }],
+      type: 'message-bundle',
+      bundle: {
+        title: 'Alice 和 Bob 的聊天记录',
+        preview: 'Alice: first\nBob: second',
+        locator: { conversationId: 'from', rootMessageId: 'merged' },
+      },
     }] } }])
     expect(platform.client.forwardMessages).toHaveBeenNthCalledWith(
       1, 'from', ['a'], 'to', false, expect.any(String),
@@ -1033,10 +1009,8 @@ describe('QQNTPlatform mapping', () => {
     expect((platform.client.forwardMessages as ReturnType<typeof vi.fn>).mock.calls[0]![4])
       .not.toBe((platform.client.forwardMessages as ReturnType<typeof vi.fn>).mock.calls[1]![4])
 
-    const link = merged[0].content.parts[0]
-    if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
-      throw new Error('merged forward link was not mapped')
-    }
+    const bundlePart = merged[0].content.parts[0]
+    if (bundlePart.type !== 'message-bundle') throw new Error('merged-forward bundle was not mapped')
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getMultiForwardMessages = vi.fn()
       .mockResolvedValueOnce([{
@@ -1051,23 +1025,19 @@ describe('QQNTPlatform mapping', () => {
         id: 'nested-message', conversationId: 'archived-peer', senderId: 'bob', timestamp: 8, outgoing: false,
         parts: [{ type: 'text' as const, text: 'nested content' }],
       }])
-    const outerHistory = await platform.getHistory(session, link.entities[0].conversation)
-    expect(outerHistory).toMatchObject({
-      messages: [{
-        id: 'nested-card', conversationId: link.entities[0].conversation.id,
-        content: { parts: [{ type: 'text', text: '查看聊天记录' }] },
-      }],
-    })
-    const nestedLink = outerHistory.messages[0].content.parts[0]
-    if (nestedLink.type !== 'text' || nestedLink.entities?.[0]?.type !== 'conversation-link') {
-      throw new Error('nested merged forward link was not mapped')
-    }
-    await expect(platform.getHistory(session, nestedLink.entities[0].conversation)).resolves.toMatchObject({
-      messages: [{
-        id: 'nested-message', conversationId: nestedLink.entities[0].conversation.id,
-        content: { parts: [{ type: 'text', text: 'nested content' }] },
-      }],
-    })
+    const outer = await platform.messageBundles.load(session, bundlePart.bundle.locator)
+    expect(outer).toMatchObject([{
+      id: 'nested-card',
+      content: { parts: [{
+        type: 'message-bundle',
+        bundle: { title: '嵌套聊天记录', preview: 'Carol: nested' },
+      }] },
+    }])
+    const nestedPart = outer[0].content.parts[0]
+    if (nestedPart.type !== 'message-bundle') throw new Error('nested bundle was not mapped')
+    await expect(platform.messageBundles.load(session, nestedPart.bundle.locator)).resolves.toMatchObject([{
+      id: 'nested-message', content: { parts: [{ type: 'text', text: 'nested content' }] },
+    }])
     expect(platform.client.getMultiForwardMessages).toHaveBeenNthCalledWith(1, {
       conversationId: 'from', rootMessageId: 'merged',
     })
@@ -1107,11 +1077,9 @@ describe('QQNTPlatform mapping', () => {
     const [merged] = await platform.forwardMessages(
       session, { id: 'from' }, ['a', 'b'], { id: 'to' },
     )
-    const link = merged.content.parts[0]
-    if (link.type !== 'text' || link.entities?.[0]?.type !== 'conversation-link') {
-      throw new Error('merged forward link was not mapped')
-    }
-    expect(link.entities[0].conversation.metadata?.conversationViewPreview)
+    const part = merged.content.parts[0]
+    if (part.type !== 'message-bundle') throw new Error('merged-forward bundle was not mapped')
+    expect(part.bundle.preview)
       .toBe('Alice: 第一条具体内容\nBob: [图片]')
     expect(platform.client.getMultiForwardMessages).toHaveBeenCalledOnce()
   })

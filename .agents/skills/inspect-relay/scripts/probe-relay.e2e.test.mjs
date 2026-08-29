@@ -119,3 +119,73 @@ test('CLI wait observes a result written asynchronously by the runtime', async (
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('statistics deploys the bundled probe, unwraps its result, and removes it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'probe-relay-statistics-e2e-'))
+  const name = 'monitor/mtproto-statistics.ts'
+  const deployed = join(root, 'debug-scripts', 'monitor', 'mtproto-statistics.ts')
+  const status = join(
+    root,
+    'debug-results',
+    'monitor',
+    'mtproto-statistics.ts.json',
+  )
+  let publisher
+  try {
+    publisher = setInterval(() => {
+      if (!existsSync(deployed) || existsSync(status)) return
+      mkdirSync(join(root, 'debug-results', 'monitor'), { recursive: true })
+      writeFileSync(
+        status,
+        JSON.stringify({
+          script: name,
+          state: 'active',
+          generation: 1,
+          results: [
+            {
+              value: {
+                snapshot: {
+                  methods: [
+                    {
+                      method: 'messages.getHistory',
+                      count: 12,
+                      averageMs: 40,
+                      p90Ms: 90,
+                      p99Ms: 150,
+                      errors: 0,
+                      errorRate: 0,
+                    },
+                  ],
+                },
+                series: { seconds: [], minutes: [], hours: [] },
+              },
+            },
+          ],
+        }),
+      )
+    }, 10)
+    const result = await execute(
+      [
+        'statistics',
+        '--name',
+        name,
+        '--timeout',
+        '3000',
+        '--interval',
+        '25',
+        '--local-root',
+        root,
+      ],
+      root,
+    )
+    assert.equal(
+      result.snapshot.methods[0].method,
+      'messages.getHistory',
+    )
+    assert.equal(result.snapshot.methods[0].p99Ms, 150)
+    assert.equal(existsSync(deployed), false)
+  } finally {
+    clearInterval(publisher)
+    rmSync(root, { recursive: true, force: true })
+  }
+})

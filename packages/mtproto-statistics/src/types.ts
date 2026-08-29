@@ -196,3 +196,5 @@ export interface MtprotoStatisticsData {
   series: StatisticsSeries
   reset(): Promise<void>
 }
+
+export type MtprotoStatisticsReport = Omit<MtprotoStatisticsData, 'reset'>

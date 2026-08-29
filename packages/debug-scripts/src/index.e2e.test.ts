@@ -1,5 +1,6 @@
 import { Context } from 'cordis'
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import * as debugScripts from './index.js'
 import type { DebugScriptStatus } from './index.js'
@@ -45,6 +46,10 @@ function readStatus(
   const path = join(results, `${name}.json`)
   if (!existsSync(path)) return
   return JSON.parse(readFileSync(path, 'utf8'))
+}
+
+function readIndex(results: string): unknown[] {
+  return JSON.parse(readFileSync(join(results, 'index.json'), 'utf8'))
 }
 
 function resultVersion(status: DebugScriptStatus): number | undefined {
@@ -118,6 +123,7 @@ describe('debug scripts runtime', () => {
     )
     expect(status.activeGeneration).toBe(2)
     expect(readFileSync(disposed, 'utf8')).toBe('12')
+    expect(readIndex(results)).toEqual([])
 
     await runner.dispose()
     await database.dispose()
@@ -154,7 +160,77 @@ describe('debug scripts runtime', () => {
     )
     expect(status.results.at(-1)?.value).toBe('ready')
     expect(readFileSync(disposed, 'utf8')).toBe('disposed')
+    expect(readIndex(results)).toEqual([])
 
     await runner.dispose()
+  })
+
+  it('runs the bundled MTProto statistics probe against the injected read-only service', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'debug-scripts-statistics-e2e-'))
+    temporary.push(root)
+    const scripts = join(root, 'scripts')
+    const results = join(root, 'results')
+    const ctx = new Context()
+    let readOptions: unknown
+    const statistics = ctx.plugin((serviceCtx) =>
+      serviceCtx.provide('mtprotoStatistics', {
+        read(options: unknown) {
+          readOptions = options
+          return {
+            snapshot: {
+              methods: [
+                {
+                  method: 'messages.getHistory',
+                  count: 20,
+                  averageMs: 35,
+                  p90Ms: 80,
+                  p99Ms: 120,
+                  errors: 1,
+                  errorRate: 0.05,
+                },
+              ],
+            },
+            series: { seconds: [], minutes: [], hours: [] },
+          }
+        },
+      }),
+    )
+    await statistics
+    const runner = ctx.plugin(debugScripts, {
+      root: scripts,
+      results,
+      debounce: 25,
+      ttl: 10_000,
+    })
+    await runner
+
+    mkdirSync(scripts, { recursive: true })
+    copyFileSync(
+      resolve(
+        import.meta.dirname,
+        '../../../.agents/skills/inspect-relay/probes/mtproto-statistics.ts',
+      ),
+      join(scripts, 'mtproto-statistics.ts'),
+    )
+    const status = await waitFor(
+      () => readStatus(results, 'mtproto-statistics.ts'),
+      (value) => value.state === 'active' && value.results.length > 0,
+    )
+    expect(status.results.at(-1)?.value).toMatchObject({
+      snapshot: {
+        methods: [
+          {
+            method: 'messages.getHistory',
+            count: 20,
+            p99Ms: 120,
+            errorRate: 0.05,
+          },
+        ],
+      },
+    })
+    expect(readOptions).toEqual({ seconds: 300, minutes: 180, hours: 48 })
+
+    await runner.dispose()
+    await statistics.dispose()
   })
 })

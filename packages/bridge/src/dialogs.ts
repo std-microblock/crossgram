@@ -8,7 +8,7 @@ import {
   type IMMedia, type IMMediaInput, type IMMediaUploadProbe,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
   type IMReactionDefinition, type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
-  type PlatformSession,
+  type IMProjectableMessage, type JsonValue, type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
 import {
@@ -104,13 +104,6 @@ interface MaterializedMessage {
   media?: IMMediaRow
   mediaRows?: IMMediaRow[]
   unreadMention?: boolean
-}
-
-/** Per-request Telegram presentation supplied by a feature that already resolved an IM conversation. */
-export interface ProjectedDialogPeer {
-  conversation: IMConversation
-  peer: tl.TypePeer
-  chat: tl.TypeChat
 }
 
 interface SearchCursorState {
@@ -500,45 +493,6 @@ export class DialogRpc {
     }
   }
 
-  async getProjectedPeerDialogs(
-    projectedPeers: readonly ProjectedDialogPeer[],
-  ): Promise<tl.messages.RawPeerDialogs> {
-    await this._hydratePeers()
-    const dialogs: tl.RawDialog[] = []
-    const messages: tl.TypeMessage[] = []
-    const chats: tl.TypeChat[] = []
-    const users: tl.RawUser[] = [this._makeSelfUser()]
-    for (const projectedPeer of projectedPeers) {
-      const conversation = projectedPeer.conversation
-      this._conversations.set(conversation.id, conversation)
-      const history = await this._visibleMessages(await this._loadHistory(conversation.id, { limit: 1 }))
-      const top = history[0]
-      const rendered = top ? await this._makeMessage(top, projectedPeer) : undefined
-      const topMessage = top?.tlId ?? 0
-      dialogs.push({
-        _: 'dialog', peer: projectedPeer.peer, topMessage,
-        readInboxMaxId: topMessage, readOutboxMaxId: topMessage,
-        unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
-        notifySettings: await this._peerNotifySettings(conversation.id),
-      })
-      if (rendered) {
-        messages.push(rendered.message)
-        chats.push(...rendered.chats)
-        users.push(...await this._messageSenders([top!.source]))
-      }
-      chats.push(projectedPeer.chat)
-    }
-    const state = await this._store?.getUpdateState(this._session.platformSessionId)
-    return {
-      _: 'messages.peerDialogs', dialogs, messages,
-      chats: uniqueChats(chats), users: uniqueUsers(users),
-      state: {
-        _: 'updates.state', pts: state?.pts ?? this._pts, qts: state?.qts ?? 0,
-        date: state?.date ?? Math.floor(Date.now() / 1000), seq: state?.seq ?? 0, unreadCount: 0,
-      },
-    }
-  }
-
   async getDialogFilters(): Promise<tl.messages.RawDialogFilters> {
     await this._hydratePeers()
     const filters = await this._dialogFolders?.listFilters(this._session.platformSessionId)
@@ -688,25 +642,13 @@ export class DialogRpc {
     const hydrateMs = performance.now() - startedAt
     const peerId = this._resolvePeer(req.peer)
     return this._getHistoryForConversation(
-      req, this._conversation(peerId), undefined, startedAt, hydrateMs,
+      req, this._conversation(peerId), startedAt, hydrateMs,
     )
-  }
-
-  async getProjectedHistory(
-    req: GetHistoryRequest,
-    projectedPeer: ProjectedDialogPeer,
-  ): Promise<tl.messages.TypeMessages> {
-    const startedAt = performance.now()
-    await this._hydratePeers()
-    const hydrateMs = performance.now() - startedAt
-    this._conversations.set(projectedPeer.conversation.id, projectedPeer.conversation)
-    return this._getHistoryForConversation(req, projectedPeer.conversation, projectedPeer, startedAt, hydrateMs)
   }
 
   private async _getHistoryForConversation(
     req: GetHistoryRequest,
     conversation: IMConversation,
-    projectedPeer: ProjectedDialogPeer | undefined,
     startedAt: number,
     hydrateMs: number,
   ): Promise<tl.messages.TypeMessages> {
@@ -725,16 +667,14 @@ export class DialogRpc {
       : []
     const sendersMs = performance.now() - sendersAt
     const projectAt = performance.now()
-    const projected = await this._projectMessages(page, projectedPeer)
+    const projected = await this._projectMessages(page)
     const result = {
       _: page.length < filtered.length || start > 0 ? 'messages.messagesSlice' : 'messages.messages',
       ...(page.length < filtered.length || start > 0 ? { count: filtered.length } : {}),
       messages: projected.messages,
       topics: [],
       chats: uniqueChats([
-        ...(projectedPeer
-          ? [projectedPeer.chat]
-          : conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
+        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
         ...projected.chats,
       ]),
       users: uniqueUsers([...peerUser, ...senders, this._makeSelfUser()]),
@@ -1059,17 +999,6 @@ export class DialogRpc {
     return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
   }
 
-  async readProjectedHistory(
-    _req: tl.messages.RawReadHistoryRequest,
-    projectedPeer: ProjectedDialogPeer,
-    _excludeConnection?: ServerConnection,
-  ): Promise<tl.messages.RawAffectedMessages> {
-    await this._hydratePeers()
-    this._conversations.set(projectedPeer.conversation.id, projectedPeer.conversation)
-    const state = await this._store?.getUpdateState(this._session.platformSessionId)
-    return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
-  }
-
   async getScheduledHistory(
     req: tl.messages.RawGetScheduledHistoryRequest,
   ): Promise<tl.messages.TypeMessages> {
@@ -1077,58 +1006,9 @@ export class DialogRpc {
     return this._emptyMessages(this._conversation(this._resolvePeer(req.peer)))
   }
 
-  async getProjectedScheduledHistory(projectedPeer: ProjectedDialogPeer): Promise<tl.messages.TypeMessages> {
-    await this._hydratePeers()
-    this._conversations.set(projectedPeer.conversation.id, projectedPeer.conversation)
-    return {
-      _: 'messages.messages', messages: [], topics: [],
-      chats: [projectedPeer.chat], users: [this._makeSelfUser()],
-    }
-  }
-
   async getMessages(req: GetMessagesRequest): Promise<tl.messages.TypeMessages> {
     await this._hydratePeers()
     return this._getMessages(req.id)
-  }
-
-  async getProjectedMessages(
-    req: GetMessagesRequest,
-    projectedPeers: readonly ProjectedDialogPeer[],
-  ): Promise<tl.messages.TypeMessages> {
-    await this._hydratePeers()
-    const byConversation = new Map(projectedPeers.map((item) => [item.conversation.id, item]))
-    for (const item of projectedPeers) this._conversations.set(item.conversation.id, item.conversation)
-    const messages: tl.TypeMessage[] = []
-    const chats: tl.TypeChat[] = []
-    const users: tl.RawUser[] = [this._makeSelfUser()]
-    for (const input of req.id) {
-      const requestedId = input._ === 'inputMessageID' || input._ === 'inputMessageReplyTo' ? input.id : 0
-      const stored = this._store
-        ? await this._store.findProjectedByTlId(this._session.platformSessionId, requestedId)
-        : undefined
-      const projectedPeer = stored ? byConversation.get(stored.source.conversationId) : undefined
-      const part = stored?.parts.find((candidate) => candidate.tlMessageId === requestedId)
-      if (!stored || !projectedPeer || !part) {
-        messages.push({ _: 'messageEmpty', id: requestedId } as tl.RawMessageEmpty)
-        continue
-      }
-      await this._syncStoredUsers(messageReferencedUserIds(stored.source))
-      await this._rememberReplyTargets([stored.source])
-      const item: MaterializedMessage = {
-        source: stored.source, tlId: part.tlMessageId, ordinal: part.ordinal,
-        groupedId: part.groupedId ?? undefined,
-        media: stored.media.find((entry) => entry.id === part.mediaId), mediaRows: stored.media,
-      }
-      this._rememberMessage(item)
-      const rendered = await this._makeMessage(item, projectedPeer)
-      messages.push(rendered.message)
-      chats.push(projectedPeer.chat, ...rendered.chats)
-      users.push(await this._getMessageSender(stored.source))
-    }
-    return {
-      _: 'messages.messages', messages, topics: [],
-      chats: uniqueChats(chats), users: uniqueUsers(users),
-    }
   }
 
   async getChannelMessages(req: GetChannelMessagesRequest): Promise<tl.messages.TypeMessages> {
@@ -1490,19 +1370,6 @@ export class DialogRpc {
       chats: conversation.kind === 'direct' ? [] : [this._makeChat(conversation)],
       users: conversation.kind === 'direct' ? [await this._getPeerUser(peerId)] : [],
     }
-  }
-
-  async getProjectedPeerSettings(projectedPeer: ProjectedDialogPeer): Promise<tl.messages.RawPeerSettings> {
-    await this._hydratePeers()
-    this._conversations.set(projectedPeer.conversation.id, projectedPeer.conversation)
-    return {
-      _: 'messages.peerSettings', settings: { _: 'peerSettings' },
-      chats: [projectedPeer.chat], users: [],
-    }
-  }
-
-  async getConversationNotifySettings(conversation: IMConversation): Promise<tl.TypePeerNotifySettings> {
-    return this._peerNotifySettings(conversation.id)
   }
 
   async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
@@ -2354,6 +2221,20 @@ export class DialogRpc {
         }
       }
     }
+    const transient = this._messageProjection?.resolveMedia(
+      this._session,
+      req.location.id.toNumber(),
+    )
+    if (transient && this._platform.downloadMedia) {
+      const media = req.location.thumbSize === 'm' && isDownloadablePreview(transient.media.preview)
+        ? previewMedia(transient.media)
+        : transient.media
+      return {
+        _: 'upload.file', type: storageFileType(media.mimeType ?? 'application/octet-stream'),
+        mtime: transient.timestamp,
+        bytes: await this._downloadMediaRange(media, offset, req.limit),
+      }
+    }
     if (!this._uploads || !this._store || !this._platform.downloadMedia) {
       throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
     }
@@ -2400,14 +2281,16 @@ export class DialogRpc {
     if (decodeBridgeMediaReference(location.fileReference) !== mediaId) {
       throw new RpcError(400, 'FILE_REFERENCE_INVALID')
     }
-    if (!this._store || !this._platform.resolveMediaUrl) {
+    if (!this._platform.resolveMediaUrl) {
       throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
     }
-    const stored = await this._store.getMedia(this._session.platformSessionId, mediaId)
-    if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = location.thumbSize === 'm' && isDownloadablePreview(stored.media.preview)
-      ? previewMedia(stored.media)
-      : stored.media
+    const transient = this._messageProjection?.resolveMedia(this._session, mediaId)
+    const stored = transient ? undefined : await this._store?.getMedia(this._session.platformSessionId, mediaId)
+    if (!transient && !stored) throw new RpcError(400, 'FILE_ID_INVALID')
+    const source = transient?.media ?? stored!.media
+    const media = location.thumbSize === 'm' && isDownloadablePreview(source.preview)
+      ? previewMedia(source)
+      : source
     let resolved: import('./platform.js').IMDirectDownload | undefined
     try {
       resolved = await this._platform.resolveMediaUrl(this._session, media)
@@ -4042,9 +3925,8 @@ export class DialogRpc {
 
   private async _projectMessages(
     items: readonly MaterializedMessage[],
-    projectedPeer?: ProjectedDialogPeer,
   ): Promise<{ messages: tl.TypeMessage[], chats: tl.TypeChat[] }> {
-    const projected = await Promise.all(items.map((item) => this._makeMessage(item, projectedPeer)))
+    const projected = await Promise.all(items.map((item) => this._makeMessage(item)))
     return {
       messages: projected.map((item) => item.message),
       chats: uniqueChats(projected.flatMap((item) => item.chats)),
@@ -4057,7 +3939,6 @@ export class DialogRpc {
 
   private async _makeMessage(
     item: MaterializedMessage,
-    projectedPeer?: ProjectedDialogPeer,
   ): Promise<import('./message-projection.js').MessageProjectionResult> {
     const source = this._blockedPeers?.filterMessageReactions(
       this._session.platformSessionId, item.source,
@@ -4069,7 +3950,7 @@ export class DialogRpc {
       chats: [] as tl.TypeChat[],
     }
     const fallback = () => {
-      const projectedSource = draft.source
+      const projectedSource = draft.source as IMMessage
       const sticker = projectedSource.content.parts.find((part) => part.type === 'sticker')
       const card = projectedSource.content.parts.find((part) => part.type === 'card')
       const reply = this._messageReplyHeader(projectedSource)
@@ -4092,9 +3973,7 @@ export class DialogRpc {
             _: 'peerUser',
             userId: projectedSource.outgoing ? this._selfId : this._userId(projectedSource.senderId),
           },
-          peerId: projectedPeer?.conversation.id === conversation.id
-            ? projectedPeer.peer
-            : this._conversationPeer(conversation),
+          peerId: this._conversationPeer(conversation),
           groupedId: item.groupedId ?? undefined,
           richMessage,
           media: richMessage ? undefined : (draft.media ?? (item.media
@@ -4121,19 +4000,16 @@ export class DialogRpc {
     if (!this._messageProjection) return fallback()
     return this._messageProjection.project({
       mode: 'history',
+      platform: this._platform,
       session: this._session,
-      conversation,
+      target: {
+        conversation,
+        peer: this._conversationPeer(conversation),
+        title: conversation.title,
+      },
       tlMessageId: tlId,
       ordinal: item.ordinal,
       draft,
-      loadConversation: async (linked) => (await this._loadHistory(linked.id, { limit: 200 }))
-        .filter((candidate) => candidate.ordinal === 0)
-        .map((candidate) => ({
-          conversationId: linked.id,
-          platformMessageId: candidate.source.id,
-          tlMessageId: candidate.tlId,
-          timestamp: candidate.source.timestamp,
-        })),
     }, fallback)
   }
 
@@ -5667,8 +5543,8 @@ export function makeTlCardPreview(
 }
 
 export function projectTlMessage(options: {
-  conversation: IMConversation
-  source: IMMessage
+  conversation?: IMConversation
+  source: IMProjectableMessage
   tlId: number
   ordinal: number
   groupedId?: string
@@ -5688,7 +5564,8 @@ export function projectTlMessage(options: {
     groupedId, fromId, peerId, media, richMessage, entities, reactions, replyToTlId, topicId,
     mentioned, unreadMention,
   } = options
-  const conversationId = stableId(`peer:${conversation.id}`)
+  if (!peerId && !conversation) throw new TypeError('message projection requires a Telegram peer target')
+  const conversationId = conversation ? stableId(`peer:${conversation.id}`) : undefined
   const replyTo: tl.RawMessageReplyHeader | undefined = topicId && topicId !== tlId
     ? {
         _: 'messageReplyHeader', forumTopic: true,
@@ -5701,9 +5578,9 @@ export function projectTlMessage(options: {
     return {
       _: 'messageService', out: source.outgoing || undefined, silent: true, id: tlId,
       fromId,
-      peerId: peerId ?? (conversation.kind === 'direct'
-        ? { _: 'peerUser', userId: conversationId }
-        : { _: 'peerChannel', channelId: conversationId }),
+      peerId: peerId ?? (conversation!.kind === 'direct'
+        ? { _: 'peerUser', userId: conversationId! }
+        : { _: 'peerChannel', channelId: conversationId! }),
       replyTo,
       date: source.timestamp,
       action: source.content.serviceAction.type === 'phone-call'
@@ -5717,9 +5594,9 @@ export function projectTlMessage(options: {
     mediaUnread: unreadMention || undefined, id: tlId,
     fromId,
     fromRank: source.senderTitle,
-    peerId: peerId ?? (conversation.kind === 'direct'
-      ? { _: 'peerUser', userId: conversationId }
-      : { _: 'peerChannel', channelId: conversationId }),
+    peerId: peerId ?? (conversation!.kind === 'direct'
+      ? { _: 'peerUser', userId: conversationId! }
+      : { _: 'peerChannel', channelId: conversationId! }),
     replyTo,
     date: source.timestamp,
     message: text,
@@ -5912,7 +5789,7 @@ export interface TlArticleProjectionOptions {
 }
 
 export function makeTlArticleMedia(
-  source: IMMessage,
+  source: IMProjectableMessage,
   mediaRows: readonly IMMediaRow[],
   dcId = 1,
   options: TlArticleProjectionOptions = {},
@@ -6087,6 +5964,35 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
       attributes,
     },
   }
+}
+
+/** Project adapter media without persisting an IM message/media row. */
+export function makeTlTransientMessageMedia(
+  media: IMMedia,
+  id: number,
+  timestamp: number,
+  dcId = 1,
+): tl.TypeMessageMedia {
+  return makeTlMessageMedia({
+    id,
+    messageId: 0,
+    ordinal: 0,
+    partIndex: 0,
+    platformMediaId: media.id,
+    kind: media.kind,
+    name: media.name ?? null,
+    mimeType: media.mimeType ?? null,
+    size: media.size ?? null,
+    width: media.width ?? null,
+    height: media.height ?? null,
+    duration: media.duration ?? null,
+    voice: media.voice,
+    preview: media.preview ? { ...media.preview, locator: media.preview.locator as JsonValue } : null,
+    strippedThumbnail: media.strippedThumbnail
+      ? Uint8Array.from(media.strippedThumbnail).buffer as ArrayBuffer
+      : null,
+    locator: null,
+  }, timestamp, dcId)
 }
 
 function previewMedia(media: IMMedia<any>): IMMedia<any> {

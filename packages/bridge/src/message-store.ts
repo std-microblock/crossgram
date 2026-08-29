@@ -1680,7 +1680,10 @@ export class MessageStore {
     const plan = this._messageProjection
       ? await this._messageProjection.plan({
           session,
-          conversation: toConversation(conversation),
+          target: {
+            conversation: toConversation(conversation),
+            title: conversation.title,
+          },
           source,
           allocation,
         }, defaultPlan)

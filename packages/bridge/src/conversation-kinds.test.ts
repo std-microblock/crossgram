@@ -1053,25 +1053,20 @@ describe('conversation kinds', () => {
       ...platform,
       async getHistory(_session, target) {
         const conversation = conversations.find((item) => item.id === target.id)
-        if (!conversation) return { messages: [{
-          id: 'virtual-merged-target', conversationId: target.id, senderId: 'alice', timestamp: 9,
-          content: { parts: [{ type: 'text', text: 'merged transcript' }] },
-        }] }
+        if (!conversation) return { messages: [] }
         return { messages: Array.from({ length: 7 }, (_, index) => ({
           ...source(conversation), id: `merge-source-${index}`, timestamp: 10 + index,
         })) }
       },
       async forwardMessages(_session, _from, _ids, to) {
-        const virtual: IMConversation = {
-          id: 'virtual-merged', kind: 'group', title: '聊天记录',
-          metadata: { conversationView: 'merged-forward', conversationViewPreview: 'Alice: one\nBob: two' },
-        }
         return [{
           id: 'merged-output', conversationId: to.id, senderId: 'self', outgoing: true, timestamp: 20,
           content: { parts: [{
-            type: 'text', text: '查看聊天记录', entities: [{
-              type: 'conversation-link', offset: 0, length: 6, conversation: virtual,
-            }],
+            type: 'message-bundle',
+            bundle: {
+              id: 'virtual-merged', title: '聊天记录', preview: 'Alice: one\nBob: two',
+              locator: { root: 'merged-output' },
+            },
           }] },
         }]
       },

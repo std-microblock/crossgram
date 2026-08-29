@@ -13,6 +13,9 @@
       "dist"
     ],
     "service": {
+      "implements": [
+        "mtprotoStatistics"
+      ],
       "required": [
         "mtproto",
         "webui"

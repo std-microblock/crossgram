@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MtprotoConnectionScope, MtprotoTrafficSample } from '@mtproto-relay/mtproto'
 import { apply } from './index.js'
+import type { MtprotoStatisticsService } from './index.js'
 import type { MtprotoStatisticsData } from './types.js'
 
 afterEach(() => {
@@ -14,9 +15,15 @@ describe('MTProto statistics Muon entry e2e', () => {
     const cleanups: Array<() => void> = []
     let files!: { routes?: string[] }
     let data!: MtprotoStatisticsData
+    let statisticsService!: MtprotoStatisticsService
     let mutations = 0
     const ctx = {
       mtproto: {},
+      provide(name: string, value: MtprotoStatisticsService) {
+        expect(name).toBe('mtprotoStatistics')
+        statisticsService = value
+        return () => undefined
+      },
       webui: {
         addEntry(entryFiles: typeof files, value: MtprotoStatisticsData) {
           files = entryFiles
@@ -174,6 +181,19 @@ describe('MTProto statistics Muon entry e2e', () => {
     expect(data.snapshot.ips[0]).toMatchObject({ address: '198.51.100.8', activeConnections: 1 })
     expect(data.series.seconds).toHaveLength(1)
 
+    const report = statisticsService.read()
+    expect(report.snapshot.rpc).toMatchObject({ count: 7, errors: 3 })
+    expect(report.series.seconds).toHaveLength(1)
+    expect('reset' in report).toBe(false)
+    report.snapshot.rpc.count = 999
+    report.series.seconds.length = 0
+    expect(statisticsService.read().snapshot.rpc.count).toBe(7)
+    expect(statisticsService.read().series.seconds).toHaveLength(1)
+    expect(statisticsService.read({ seconds: 0 }).series.seconds).toEqual([])
+    expect(() => statisticsService.read({ minutes: -1 })).toThrow(
+      /non-negative integer/,
+    )
+
     await data.reset()
     expect(data.snapshot.rpc.count).toBe(0)
     expect(data.snapshot.activeConnections).toBe(1)
@@ -185,6 +205,7 @@ describe('MTProto statistics Muon entry e2e', () => {
       directFiles: 0, relayFiles: 0, totalFiles: 0, directRate: 0, devices: [],
     })
     expect(data.series.seconds).toEqual([])
+    expect(statisticsService.read().snapshot.rpc.count).toBe(0)
     cleanups.forEach(cleanup => cleanup())
   })
 })

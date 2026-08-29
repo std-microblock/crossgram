@@ -22,7 +22,6 @@ interface AuthRow {
 interface ConversationRow {
   platformConversationId: string
   kind: string
-  metadata: string | Record<string, unknown>
 }
 
 interface RsaKeyFile {
@@ -34,16 +33,6 @@ interface StoredServerAuthKey {
 }
 
 type ProfileInputPeer = tl.RawInputPeerChannel | tl.RawInputPeerChat | tl.RawInputPeerUser
-
-function parseStoredMetadata(value: ConversationRow['metadata']): Record<string, unknown> {
-  if (value && typeof value === 'object') return value
-  if (typeof value !== 'string') return {}
-  try {
-    return JSON.parse(value || '{}') as Record<string, unknown>
-  } catch {
-    return {}
-  }
-}
 
 function inputPeer(specification: string): ProfileInputPeer {
   const match = /^(channel|chat|user):(\d+)$/.exec(specification)
@@ -72,18 +61,15 @@ function loadTarget(options: HistoryProfileOptions): {
     if (options.peer) return { auth, peer: inputPeer(options.peer) }
     if (!options.conversation) return { auth }
     const conversation = database.prepare(`
-      SELECT platformConversationId, kind, metadata
+      SELECT platformConversationId, kind
       FROM mtproto_im_conversation
       WHERE platformSessionId = ? AND platformConversationId = ?
     `).get(auth.platformSessionId, options.conversation!) as unknown as ConversationRow | undefined
     if (!conversation) throw new Error('conversation was not found for the selected auth session')
     const id = stableSyntheticId(`peer:${conversation.platformConversationId}`)
-    const metadata = parseStoredMetadata(conversation.metadata)
-    const peer = metadata.conversationView === 'merged-forward'
-      ? inputPeer(`chat:${id}`)
-      : conversation.kind === 'direct'
-        ? inputPeer(`user:${id}`)
-        : inputPeer(`channel:${id}`)
+    const peer = conversation.kind === 'direct'
+      ? inputPeer(`user:${id}`)
+      : inputPeer(`channel:${id}`)
     return { auth, peer, conversation: conversation.platformConversationId }
   } finally {
     database.close()

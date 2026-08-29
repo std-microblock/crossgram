@@ -295,6 +295,20 @@ export interface IMFlashTransferResult {
   expiresAt?: number
 }
 
+/**
+ * A finite archived message collection embedded in one message.
+ *
+ * The locator is adapter-owned data used only by `IMMessageBundleProvider`.
+ * A bundle is not a conversation and therefore has no dialog/history identity.
+ */
+export interface IMMessageBundle {
+  /** Stable identity within one platform session. */
+  id: string
+  title: string
+  preview?: string
+  locator: JsonValue
+}
+
 /** Optional platform-native bulk transfer creator used by bridge-owned tools. */
 export interface IMFlashTransferProvider {
   /**
@@ -355,6 +369,7 @@ export type IMMessagePart<TMediaLocator = unknown> =
   | { type: 'media', media: IMMedia<TMediaLocator> }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMSticker }
   | { type: 'card', card: IMMessageCard }
+  | { type: 'message-bundle', bundle: IMMessageBundle }
 
 /** Platform share metadata projected as Telegram's native WebPage preview. */
 export interface IMMessageCard {
@@ -421,6 +436,23 @@ export interface IMMessage<TMediaLocator = unknown> {
   reactionContext?: IMReactionContext
   /** Opaque platform message ID referenced by this reply. */
   replyToId?: string
+}
+
+/**
+ * One immutable item inside an archived message bundle.
+ *
+ * Unlike `IMMessage`, a snapshot deliberately has no `conversationId`: its
+ * Telegram target is supplied by the feature rendering the containing bundle.
+ */
+export interface IMMessageSnapshot<TMediaLocator = unknown>
+  extends Omit<IMMessage<TMediaLocator>, 'conversationId'> {}
+
+export interface IMMessageBundleProvider<TMediaLocator = unknown> {
+  /** Load the complete finite bundle. Callers do not paginate it as history. */
+  load(
+    session: PlatformSession,
+    locator: JsonValue,
+  ): Promise<IMMessageSnapshot<TMediaLocator>[]>
 }
 
 /** Whether a platform message explicitly mentions one platform user. */
@@ -719,6 +751,8 @@ export interface IMPlatform<TMediaLocator = unknown> {
   readonly voiceCalls?: IMVoiceCallController
   /** Optional platform-native shareable file-set creation. */
   readonly flashTransfer?: IMFlashTransferProvider
+  /** Optional expansion of finite archived message bundles embedded in messages. */
+  readonly messageBundles?: IMMessageBundleProvider<TMediaLocator>
 
   /** Resolve the platform's current user; bridge never invents profile fields. */
   getAccount?(): Promise<IMPlatformAccount<TMediaLocator>>
@@ -886,7 +920,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMDirectDownload | undefined>
 }
 
-export function messageText(message: IMMessage<unknown>): string {
+export type IMProjectableMessage<TMediaLocator = unknown> =
+  | IMMessage<TMediaLocator>
+  | IMMessageSnapshot<TMediaLocator>
+
+export function messageText(message: IMProjectableMessage<unknown>): string {
   return message.content.parts.map(messagePartText).filter(Boolean).join('\n')
 }
 
@@ -919,11 +957,11 @@ function cardKindLabel(kind: IMMessageCard['kind']): string {
   return '分享'
 }
 
-export function messageMedia<TMediaLocator>(message: IMMessage<TMediaLocator>): IMMedia<TMediaLocator>[] {
+export function messageMedia<TMediaLocator>(message: IMProjectableMessage<TMediaLocator>): IMMedia<TMediaLocator>[] {
   return message.content.parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
 }
 
-export function isArticleMessage(message: IMMessage<unknown>): boolean {
+export function isArticleMessage(message: IMProjectableMessage<unknown>): boolean {
   const media = messageMedia(message)
   return media.length >= 2
     && message.content.parts.every((part) => part.type === 'text' || part.type === 'media')

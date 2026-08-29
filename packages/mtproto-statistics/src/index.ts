@@ -4,12 +4,46 @@ import type { MtprotoClientInfo, RpcResult } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { StatisticsCollector } from './collector.js'
 import { RuntimeMonitor } from './runtime.js'
-import type { MtprotoStatisticsData, StatisticsPoint, StatisticsSeries } from './types.js'
+import type {
+  MtprotoStatisticsData,
+  MtprotoStatisticsReport,
+  StatisticsPoint,
+  StatisticsSeries,
+} from './types.js'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 
 export const name = 'mtproto-statistics'
 export const inject = ['mtproto', 'webui']
+export const provide = ['mtprotoStatistics']
+
+declare module 'cordis' {
+  interface Context {
+    mtprotoStatistics: MtprotoStatisticsService
+  }
+}
+
+export class MtprotoStatisticsService {
+  constructor(private readonly readCurrent: () => MtprotoStatisticsReport) {}
+
+  read(options: MtprotoStatisticsReadOptions = {}): MtprotoStatisticsReport {
+    const current = this.readCurrent()
+    return structuredClone({
+      snapshot: current.snapshot,
+      series: {
+        seconds: tail(current.series.seconds, options.seconds),
+        minutes: tail(current.series.minutes, options.minutes),
+        hours: tail(current.series.hours, options.hours),
+      },
+    })
+  }
+}
+
+export interface MtprotoStatisticsReadOptions {
+  seconds?: number
+  minutes?: number
+  hours?: number
+}
 
 export interface Config {
   sampleIntervalMs?: number
@@ -51,6 +85,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       })
     },
   }
+  ctx.provide('mtprotoStatistics', new MtprotoStatisticsService(() => ({
+    snapshot: data.snapshot,
+    series: data.series,
+  })))
   const entry = ctx.webui.addEntry({
     baseUrl: import.meta.url,
     source: '../client/index.ts',
@@ -139,6 +177,14 @@ export { StatisticsCollector } from './collector.js'
 export { LatencyHistogram } from './histogram.js'
 export { RuntimeMonitor } from './runtime.js'
 export type * from './types.js'
+
+function tail<T>(values: T[], limit: number | undefined): T[] {
+  if (limit === undefined) return values
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new RangeError(`Statistics series limit must be a non-negative integer: ${limit}`)
+  }
+  return limit ? values.slice(-limit) : []
+}
 
 function isRpcError(result: RpcResult | undefined): boolean {
   return (result as { _?: string } | undefined)?._ === 'mt_rpc_error'

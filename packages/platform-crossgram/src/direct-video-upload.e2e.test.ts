@@ -43,6 +43,7 @@ describe('QQNT direct playable-video upload E2E', () => {
     const video = Buffer.from([1, 2, 3, 4, 5])
     const thumbnail = Buffer.from([9, 8, 7])
     const videoMd5 = createHash('md5').update(video).digest('hex')
+    const videoSha1 = createHash('sha1').update(video).digest('hex')
     const highwayFrames: Buffer[] = []
     let preparedRequest: Record<string, any> | undefined
     let sentManifest: Record<string, any> | undefined
@@ -115,7 +116,8 @@ describe('QQNT direct playable-video upload E2E', () => {
 
     expect(preparedRequest).toMatchObject({ conversationId: '2:group', media: {
       kind: 'video', name: 'clip.mp4', mimeType: 'video/mp4', size: video.length,
-      md5: videoMd5, width: 320, height: 180, duration: 4,
+      md5: videoMd5, sha1: videoSha1, sha1Checkpoints: [videoSha1],
+      width: 320, height: 180, duration: 4,
       thumbnail: {
         size: thumbnail.length,
         md5: createHash('md5').update(thumbnail).digest('hex'),
@@ -130,7 +132,10 @@ describe('QQNT direct playable-video upload E2E', () => {
     expect(sentBody).toEqual(Buffer.alloc(0))
     expect(sentManifest).toMatchObject({
       conversationId: '2:group', text: 'caption',
-      media: [{ kind: 'video', name: 'clip.mp4', md5: videoMd5 }],
+      media: [{
+        kind: 'video', name: 'clip.mp4', md5: videoMd5,
+        sha1: videoSha1, sha1Checkpoints: [videoSha1],
+      }],
       uploadedMedia: [{ kind: 'video', fileUuid: 'video-uuid' }],
     })
   })

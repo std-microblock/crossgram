@@ -1,7 +1,7 @@
 import type { Context } from 'cordis'
 import type { tl } from '@mtcute/core'
 import type {
-  IMConversation, IMMessage, PlatformSession,
+  IMConversation, IMMedia, IMMessage, IMPlatform, IMProjectableMessage, PlatformSession,
 } from './platform.js'
 
 export interface MessageProjectionPartPlan {
@@ -16,20 +16,17 @@ export interface MessageProjectionPlan {
 
 export interface MessageProjectionPlanInput {
   session: PlatformSession
-  conversation: IMConversation
-  source: IMMessage
-  allocation: 'live' | 'history'
-}
-
-export interface LinkedConversationProjectionCandidate {
-  conversationId: string
-  platformMessageId: string
-  tlMessageId: number
-  timestamp: number
+  target: {
+    peer?: tl.TypePeer
+    conversation?: IMConversation
+    title?: string
+  }
+  source: IMProjectableMessage
+  allocation: 'live' | 'history' | 'bundle'
 }
 
 export interface MessageProjectionDraft {
-  source: IMMessage
+  source: IMProjectableMessage
   media?: tl.TypeMessageMedia
   richMessage?: tl.RawRichMessage
   entities?: tl.TypeMessageEntity[]
@@ -37,16 +34,18 @@ export interface MessageProjectionDraft {
 }
 
 export interface MessageProjectionInput {
-  mode: 'history' | 'update'
+  mode: 'history' | 'update' | 'bundle'
+  platform: IMPlatform
   session: PlatformSession
-  conversation: IMConversation
+  target: {
+    peer: tl.TypePeer
+    /** Present only for an ordinary platform conversation. */
+    conversation?: IMConversation
+    title?: string
+  }
   tlMessageId: number
   ordinal: number
   draft: MessageProjectionDraft
-  /** Loads and persists another conversation without choosing a presentation policy. */
-  loadConversation?: (
-    conversation: IMConversation,
-  ) => Promise<LinkedConversationProjectionCandidate[]>
 }
 
 export interface MessageProjectionResult {
@@ -54,8 +53,10 @@ export interface MessageProjectionResult {
   chats: tl.TypeChat[]
 }
 
-/** Stateless Cordis waterfall used by storage planning and all TL rendering paths. */
+/** Cordis projection waterfall plus a bounded non-durable media registry. */
 export class MessageProjectionPipeline {
+  private readonly _media = new Map<string, { media: IMMedia, timestamp: number }>()
+
   constructor(private readonly _ctx: Context) {}
 
   plan(
@@ -80,5 +81,25 @@ export class MessageProjectionPipeline {
       input,
       fallback,
     ))
+  }
+
+  /** Register non-durable media owned by a virtual projection. */
+  rememberMedia(
+    session: PlatformSession,
+    id: number,
+    media: IMMedia,
+    timestamp: number,
+  ): void {
+    const key = `${session.platformSessionId}\u0000${id}`
+    this._media.delete(key)
+    this._media.set(key, { media, timestamp })
+    while (this._media.size > 8_192) this._media.delete(this._media.keys().next().value!)
+  }
+
+  resolveMedia(
+    session: PlatformSession,
+    id: number,
+  ): { media: IMMedia, timestamp: number } | undefined {
+    return this._media.get(`${session.platformSessionId}\u0000${id}`)
   }
 }

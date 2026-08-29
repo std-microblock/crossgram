@@ -80,6 +80,7 @@ const MEDIA_LEASE_TOKEN_BYTES = 32
 const MAX_UNRANGED_CACHE_BYTES = 4 * 1024 * 1024 * 1024
 const MAX_UNRANGED_CACHE_ENTRIES = 8
 const DIRECT_RANGE_BLOCK_BYTES = 1024 * 1024
+const QQ_VIDEO_SHA1_CHECKPOINT_BYTES = 1024 * 1024
 const MAX_DIRECT_RANGE_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_REVALIDATED_JSON_RESPONSES = 256
 const VIDEO_THUMBNAIL_WIDTH = 320
@@ -618,7 +619,7 @@ export class QQNTClient {
         }
       }
       const [hashes, thumbnail] = await Promise.all([
-        hashMediaSource(item.source, options.signal),
+        hashMediaSource(item.source, options.signal, kind === 'video'),
         kind === 'video'
           ? this.videoThumbnail(item.source, options.signal).then(hashVideoThumbnail)
           : undefined,
@@ -630,7 +631,8 @@ export class QQNTClient {
     }, mediaIndex) => {
       const mediaSpec = {
         kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
-        md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
+        md5: hashes.md5, sha1: hashes.sha1, sha1Checkpoints: hashes.sha1Checkpoints,
+        file10MMd5: hashes.file10MMd5,
         width: item.width, height: item.height, duration: item.duration,
         ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
       }
@@ -686,7 +688,8 @@ export class QQNTClient {
       sticker,
       media: preparedMedia?.map(({ item, kind, hashes, thumbnail }) => ({
         kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
-        md5: hashes.md5, sha1: hashes.sha1, file10MMd5: hashes.file10MMd5,
+        md5: hashes.md5, sha1: hashes.sha1, sha1Checkpoints: hashes.sha1Checkpoints,
+        file10MMd5: hashes.file10MMd5,
         width: item.width, height: item.height, duration: item.duration,
         ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
       })),
@@ -1641,23 +1644,43 @@ function isClosedPipeError(error: unknown): boolean {
   return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_PREMATURE_CLOSE'
 }
 
-async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Promise<{
+async function hashMediaSource(
+  source: IMMediaSource,
+  signal?: AbortSignal,
+  cumulativeSha1 = false,
+): Promise<{
   size: number
   md5: string
   sha1: string
+  sha1Checkpoints?: string[]
   file10MMd5: string
 }> {
   const md5 = createHash('md5')
   const sha1 = createHash('sha1')
+  const sha1Checkpoints = cumulativeSha1 ? [] as string[] : undefined
   const first10M = createHash('md5')
   const first10MLimit = 10 * 1024 * 1024
   let size = 0
+  let sha1Bytes = 0
   let first10MSize = 0
   for await (const chunk of source.stream({ signal })) {
     if (signal?.aborted) throw signal.reason ?? new Error('upload aborted')
     size += chunk.length
     md5.update(chunk)
-    sha1.update(chunk)
+    if (sha1Checkpoints) {
+      for (let offset = 0; offset < chunk.length;) {
+        const length = Math.min(chunk.length - offset, QQ_VIDEO_SHA1_CHECKPOINT_BYTES - sha1Bytes)
+        sha1.update(chunk.subarray(offset, offset + length))
+        offset += length
+        sha1Bytes += length
+        if (sha1Bytes === QQ_VIDEO_SHA1_CHECKPOINT_BYTES) {
+          sha1Checkpoints.push(sha1.copy().digest('hex'))
+          sha1Bytes = 0
+        }
+      }
+    } else {
+      sha1.update(chunk)
+    }
     if (first10MSize < first10MLimit) {
       const accepted = chunk.subarray(0, Math.min(chunk.length, first10MLimit - first10MSize))
       first10M.update(accepted)
@@ -1667,7 +1690,15 @@ async function hashMediaSource(source: IMMediaSource, signal?: AbortSignal): Pro
   if (source.size !== undefined && size !== source.size) {
     throw new Error(`incomplete media source: expected ${source.size} bytes, streamed ${size}`)
   }
-  return { size, md5: md5.digest('hex'), sha1: sha1.digest('hex'), file10MMd5: first10M.digest('hex') }
+  const sha1Digest = sha1.digest('hex')
+  if (sha1Checkpoints && sha1Bytes > 0) sha1Checkpoints.push(sha1Digest)
+  return {
+    size,
+    md5: md5.digest('hex'),
+    sha1: sha1Digest,
+    ...(sha1Checkpoints ? { sha1Checkpoints } : {}),
+    file10MMd5: first10M.digest('hex'),
+  }
 }
 
 function fastUpload(source: IMMediaSource): QQFastUploadSource[typeof QQ_FAST_UPLOAD] | undefined {

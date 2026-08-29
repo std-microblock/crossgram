@@ -661,7 +661,7 @@ export class UpdateManager {
         chats: [] as tl.TypeChat[],
       }
       const fallback = () => {
-        const projectedSource = draft.source
+        const projectedSource = draft.source as IMMessage
         const projectedSticker = projectedSource.content.parts.find((item) => item.type === 'sticker')
         const projectedCard = projectedSource.content.parts.find((item) => item.type === 'card')
         const richMessage = draft.richMessage ?? makeTlArticleMedia(
@@ -711,12 +711,18 @@ export class UpdateManager {
       const rendered = this._messageProjection
         ? await this._messageProjection.project({
             mode: 'update',
+            platform,
             session,
-            conversation: displayConversation,
+            target: {
+              conversation: displayConversation,
+              peer: directPeerRow
+                ? { _: 'peerUser', userId: directPeerRow.id }
+                : { _: 'peerChannel', channelId: channelId! },
+              title: displayConversation.title,
+            },
             tlMessageId: part.tlMessageId,
             ordinal: part.ordinal,
             draft,
-            loadConversation: (linked) => this._loadProjectionCandidates(session, platform, linked),
           }, fallback)
         : fallback()
       const message = rendered.message
@@ -846,29 +852,6 @@ export class UpdateManager {
       await this._store.markUpdatePublished(eventKey)
     }
     return payload
-  }
-
-  private async _loadProjectionCandidates(
-    session: PlatformSession,
-    platform: IMPlatform,
-    conversation: IMConversation,
-  ): Promise<import('./message-projection.js').LinkedConversationProjectionCandidate[]> {
-    if (!platform.getHistory) return []
-    const history = await platform.getHistory(session, { id: conversation.id }, { limit: 200 })
-    if (!history.messages.length) return []
-    const ordered = history.messages.slice().sort((left, right) =>
-      left.timestamp - right.timestamp || left.id.localeCompare(right.id))
-    const ingested = await this._store.ingestMany(
-      session, conversation, ordered, { allocation: 'history' },
-    )
-    return ingested.flatMap((result, index) => result.projection
-      .filter((part) => part.ordinal === 0)
-      .map((part) => ({
-        conversationId: conversation.id,
-        platformMessageId: ordered[index]!.id,
-        tlMessageId: part.tlMessageId,
-        timestamp: ordered[index]!.timestamp,
-      })))
   }
 
   private _makeChat(conversation: IMConversation, forum = false): tl.TypeChat {
