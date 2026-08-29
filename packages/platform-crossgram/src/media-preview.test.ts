@@ -4,9 +4,10 @@ import { expandTelegramStrippedThumbnail, type IMMedia } from '@mtproto-relay/br
 import { QQMediaPreviewer, mediaPreviewKey } from './media-preview.js'
 import type { QQMediaLocator } from './protocol.js'
 
-function media(id = 'one'): IMMedia<QQMediaLocator> {
+function media(id = 'one', kind: IMMedia['kind'] = 'image'): IMMedia<QQMediaLocator> {
   return {
-    id, kind: 'image', name: `${id}.png`, mimeType: 'image/png', size: 123_456,
+    id, kind, name: `${id}.${kind === 'image' ? 'png' : 'mp4'}`,
+    mimeType: kind === 'image' ? 'image/png' : 'video/mp4', size: 123_456,
     width: 640, height: 360,
     locator: {
       messageId: `message-${id}`, elementId: `element-${id}`, chatType: 2,
@@ -100,5 +101,15 @@ describe('QQMediaPreviewer', () => {
     })).rejects.toThrow()
     expect(original.strippedThumbnail).toBeUndefined()
     expect(original.preview).toBeUndefined()
+  })
+
+  it('generates inline previews for videos from their native thumbnail source', async () => {
+    const input = await png()
+    const previewer = new QQMediaPreviewer({ enabled: true })
+    const original = media('video', 'file')
+    const result = await previewer.prepare(original, async function* () { yield input })
+    expect(result.strippedThumbnail).toBeDefined()
+    await expect(sharp(expandTelegramStrippedThumbnail(result.strippedThumbnail!)).metadata())
+      .resolves.toMatchObject({ format: 'jpeg', width: 40, height: 25 })
   })
 })

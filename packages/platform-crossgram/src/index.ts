@@ -1607,7 +1607,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): void {
     if (!this.mediaPreviews.enabled) return
     const keys = message.content.parts.flatMap((part) => part.type === 'media'
-      && part.media.kind === 'image' && part.media.locator && !part.media.strippedThumbnail
+      && ((part.media.kind === 'image' && part.media.locator)
+        || (part.media.mimeType?.toLowerCase().startsWith('video/')
+          && part.media.locator && part.media.preview))
+      && !part.media.strippedThumbnail
       ? [mediaPreviewKey(part.media.locator)]
       : [])
     if (!keys.length) return
@@ -1642,8 +1645,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   ): Promise<IMMessage<QQMediaLocator>> {
     let changed = false
     const parts = await Promise.all(message.content.parts.map(async (part) => {
-      if (part.type !== 'media' || part.media.kind !== 'image'
-        || !part.media.locator || part.media.strippedThumbnail) return part
+      if (part.type !== 'media' || !part.media.locator || part.media.strippedThumbnail
+        || (part.media.kind !== 'image'
+          && !part.media.mimeType?.toLowerCase().startsWith('video/'))
+        || (part.media.kind === 'file' && !part.media.preview)) return part
       try {
         const previewLocator = part.media.preview?.locator
         const sourceLocator = previewLocator?.kind === 'image' && previewLocator.originImageUrl

@@ -2486,6 +2486,57 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
+  it('generates a background inline preview for native video thumbnails', async () => {
+    const platform = new QQNTPlatform({ generatePreviews: true })
+    const jpeg = await sharp({
+      create: { width: 320, height: 180, channels: 3, background: { r: 30, g: 90, b: 180 } },
+    }).jpeg().toBuffer()
+    const wireMessage = {
+      id: 'lazy-video-preview', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'media' as const,
+        media: {
+          id: 'lazy-video-media', kind: 'file' as const, name: 'clip.mp4', mimeType: 'video/mp4',
+          size: 55_600_000, width: 1920, height: 1080, duration: 1348,
+          preview: {
+            mimeType: 'image/jpeg', size: jpeg.length, width: 320, height: 180,
+            locator: {
+              messageId: 'lazy-video-preview', elementId: 'lazy-video-media-thumb', chatType: 2 as const,
+              peerUid: 'group', kind: 'image' as const, fileName: 'thumb.jpg', md5: 'LAZY-VIDEO-THUMB',
+            },
+          },
+          locator: {
+            messageId: 'lazy-video-preview', elementId: 'lazy-video-media', chatType: 2 as const,
+            peerUid: 'group', kind: 'file' as const, fileName: 'clip.mp4', fileUuid: 'video',
+          },
+        },
+      }],
+    }
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    platform.client.downloadFile = vi.fn(async function* () { yield jpeg })
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.subscribe = vi.fn(async (_handler, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const edited = Promise.withResolvers<any>()
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      if (event.type === 'message-edit') edited.resolve(event)
+    })
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    const original = (history.messages[0].content.parts[0] as any).media as IMMedia<QQMediaLocator>
+    expect(original).toMatchObject({ kind: 'file', width: 1920, height: 1080, duration: 1348 })
+    expect(original.strippedThumbnail).toBeUndefined()
+    const update = await edited.promise
+    expect(platform.client.downloadFile).toHaveBeenCalledWith(expect.objectContaining({ kind: 'image' }), expect.anything())
+    const stripped = update.message.content.parts[0].media.strippedThumbnail as Uint8Array
+    await expect(sharp(expandTelegramStrippedThumbnail(stripped)).metadata()).resolves.toMatchObject({
+      format: 'jpeg', width: 40, height: 23,
+    })
+    await unsubscribe()
+  })
+
   it('publishes live and historical GIF images as the same untouched QQ asset', async () => {
     const platform = new QQNTPlatform()
     const gif = await sharp({

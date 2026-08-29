@@ -56,7 +56,7 @@ export class QQMediaPreviewer {
 
   /** Attach only an already-memory-resident inline preview; never perform I/O. */
   project(media: IMMedia<QQMediaLocator>): IMMedia<QQMediaLocator> {
-    if (!this.enabled || media.kind !== 'image' || !media.locator || media.strippedThumbnail) return media
+    if (!this.enabled || !isInlinePreviewMedia(media) || !media.locator || media.strippedThumbnail) return media
     const bytes = this.memory.get(mediaPreviewKey(media.locator))
     return bytes ? { ...media, strippedThumbnail: remember(this.memory, mediaPreviewKey(media.locator), bytes) } : media
   }
@@ -66,7 +66,7 @@ export class QQMediaPreviewer {
     source: (signal?: AbortSignal) => AsyncIterable<Uint8Array>,
     signal?: AbortSignal,
   ): Promise<IMMedia<QQMediaLocator>> {
-    if (!this.enabled || media.kind !== 'image' || !media.locator || media.strippedThumbnail) return media
+    if (!this.enabled || !isInlinePreviewMedia(media) || !media.locator || media.strippedThumbnail) return media
     const key = mediaPreviewKey(media.locator)
     const bytes = await this.open(key, source, signal)
     return { ...media, strippedThumbnail: bytes }
@@ -128,6 +128,11 @@ export class QQMediaPreviewer {
       this.waiters.shift()?.()
     }
   }
+}
+
+/** Images and native video thumbnails can be reduced to Telegram's inline JPEG. */
+function isInlinePreviewMedia(media: Pick<IMMedia, 'kind' | 'mimeType'>): boolean {
+  return media.kind === 'image' || media.mimeType?.toLowerCase().startsWith('video/') === true
 }
 
 export function mediaPreviewKey(locator: QQMediaLocator): string {
