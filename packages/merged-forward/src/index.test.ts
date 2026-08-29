@@ -76,6 +76,7 @@ describe('merged-forward projection', () => {
       _: 'chat', left: true, id: chatId, title: bundle.title,
     })
     expect(projection.resolveUsername(session.platformSessionId, `bridgebundle_${chatId}`)).toBe(record)
+    expect(projection.resolveUsername(session.platformSessionId, `bridgechat_${chatId}`)).toBe(record)
     expect(projection.resolveUsername(session.platformSessionId, 'bridgebundle_999')).toBeUndefined()
   })
 

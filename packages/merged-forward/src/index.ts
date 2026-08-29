@@ -59,7 +59,7 @@ export class MergedForwardProjection {
   }
 
   resolveUsername(platformSessionId: string, username: string): BundleRecord | undefined {
-    const match = /^bridgebundle_(\d+)$/.exec(username)
+    const match = /^bridge(?:bundle|chat)_(\d+)$/.exec(username)
     return match ? this.resolve(platformSessionId, Number(match[1])) : undefined
   }
 
@@ -252,7 +252,7 @@ async function routeMergedForwardRpc(
   const resolveState = () => ctx.mtprotoBridge.resolveSession(rpc)
   if (request._ === 'contacts.resolveUsername') {
     const req = request as tl.contacts.RawResolveUsernameRequest
-    if (!/^bridgebundle_\d+$/.test(req.username)) return
+    if (!/^bridge(?:bundle|chat)_\d+$/.test(req.username)) return
     const state = await resolveState()
     const record = projection.resolveUsername(state.session.platformSessionId, req.username)
     if (!record) return
