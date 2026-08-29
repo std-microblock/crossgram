@@ -1173,6 +1173,17 @@ describe('QQNTPlatform mapping', () => {
           type: 'text' as const, text: '[微笑]',
           entities: [{ type: 'qq-face' as const, offset: 0, length: 4, faceId: '14', faceType: 1 }],
         }],
+      }, {
+        id: 'inline-face-message', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
+        parts: [{
+          type: 'text' as const, text: '柚子不是说上工了/续标识',
+          entities: [{
+            type: 'qq-face' as const,
+            offset: '柚子不是说上工了'.length,
+            length: '/续标识'.length,
+            faceId: '14', faceType: 1,
+          }],
+        }],
       }],
     }))
 
@@ -1181,6 +1192,10 @@ describe('QQNTPlatform mapping', () => {
     expect(text).toMatchObject({
       type: 'text', text: '🙂',
       entities: [{ type: 'custom-emoji', offset: 0, length: 2, definition: { key: '1:14' } }],
+    })
+    expect(history.messages[1]!.content.parts[0]).toMatchObject({
+      type: 'text', text: '柚子不是说上工了🙂',
+      entities: [{ type: 'custom-emoji', offset: '柚子不是说上工了'.length, length: 2, definition: { key: '1:14' } }],
     })
 
     platform.client.sendMessage = vi.fn(async () => ({

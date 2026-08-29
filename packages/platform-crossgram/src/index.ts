@@ -2463,24 +2463,56 @@ function normalizeTextPart(
   part: Extract<WireMessage['parts'][number], { type: 'text' }>,
   reactionCatalog?: IMReactionContext,
 ): Extract<IMMessage<QQMediaLocator>['content']['parts'][number], { type: 'text' }> {
-  const face = part.entities?.find((entity) => entity.type === 'qq-face')
-  if (face && face.offset === 0 && face.length === part.text.length) {
-    const definition = reactionCatalog?.available.find((item) => item.key === `1:${face.faceId}`)
-    if (definition?.presentation.type === 'emoji') {
-      return { type: 'text', text: definition.presentation.emoticon }
+  const sourceFaces = part.entities?.filter((entity) => entity.type === 'qq-face') ?? []
+  const mentions = part.entities?.filter((entity) => entity.type === 'mention') ?? []
+  if (!sourceFaces.length) {
+    return {
+      type: 'text', text: part.text,
+      entities: mentions.length ? mentions.map((entity) => ({ ...entity })) : undefined,
     }
-    if (definition?.presentation.type === 'custom') {
-      const text = definition.presentation.alt
-      return {
-        type: 'text', text,
-        entities: [{ type: 'custom-emoji', offset: 0, length: text.length, definition }],
+  }
+
+  // QQ embeds faces in the text as placeholders (for example, `[微笑]` or
+  // `/续标识`). Replace every known placeholder, including faces occurring
+  // inline with regular text, and translate offsets to the rendered string.
+  const faces = [...sourceFaces].sort((a, b) => a.offset - b.offset)
+  const replacements: Array<{ sourceOffset: number, sourceLength: number, outputOffset: number, outputLength: number }> = []
+  const customEmojiEntities: import('@mtproto-relay/bridge').IMTextEntity[] = []
+  let output = ''
+  let cursor = 0
+  for (const face of faces) {
+    if (face.offset < cursor || face.offset < 0 || face.length <= 0 || face.offset + face.length > part.text.length) continue
+    output += part.text.slice(cursor, face.offset)
+    const outputOffset = output.length
+    const definition = reactionCatalog?.available.find((item) => item.key === `1:${face.faceId}`)
+    const sourceText = part.text.slice(face.offset, face.offset + face.length)
+    let replacement = sourceText
+    if (definition?.presentation.type === 'emoji') replacement = definition.presentation.emoticon
+    else if (definition?.presentation.type === 'custom') {
+      replacement = definition.presentation.alt
+      customEmojiEntities.push({ type: 'custom-emoji', offset: outputOffset, length: replacement.length, definition })
+    }
+    output += replacement
+    replacements.push({
+      sourceOffset: face.offset, sourceLength: face.length,
+      outputOffset, outputLength: replacement.length,
+    })
+    cursor = face.offset + face.length
+  }
+  output += part.text.slice(cursor)
+
+  const mappedMentions = mentions.map((mention) => {
+    let offset = mention.offset
+    for (const replacement of replacements) {
+      if (replacement.sourceOffset + replacement.sourceLength <= mention.offset) {
+        offset += replacement.outputLength - replacement.sourceLength
       }
     }
-  }
-  return {
-    type: 'text', text: part.text,
-    entities: part.entities?.flatMap((entity) => entity.type === 'mention' ? [{ ...entity }] : []),
-  }
+    return { ...mention, offset }
+  })
+  const entities = [...mappedMentions, ...customEmojiEntities]
+    .sort((a, b) => a.offset - b.offset)
+  return { type: 'text', text: output, entities: entities.length ? entities : undefined }
 }
 
 
