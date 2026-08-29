@@ -687,14 +687,25 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).resolves.toMatchObject({ user: { id: 'u_self' } })
   })
 
+  it('accepts bridge protocol 31 emitted by qqnt-bridge v1.0.31', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 31, ready: true, selfUin: '10001', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn(async () => ({ id: 'u_self', name: 'Platform Alice' }))
+
+    await expect(platform.getAccount()).resolves.toMatchObject({ user: { id: 'u_self' } })
+    expect(platform.client.getUser).toHaveBeenCalledWith('u_self')
+  })
+
   it('refuses to invent an account while QQNT is not ready', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({ protocolVersion: 1, ready: false }))
     await expect(platform.getAccount()).rejects.toThrow('not ready')
   })
 
-  it('rejects bridge protocols outside the supported 19-30 range', async () => {
-    for (const protocolVersion of [18, 31, 19.5, Number.NaN, '19', undefined]) {
+  it('rejects bridge protocols outside the supported 19-31 range', async () => {
+    for (const protocolVersion of [18, 32, 19.5, Number.NaN, '19', undefined]) {
       const platform = new QQNTPlatform()
       const status = {
         protocolVersion, ready: true, selfUin: '10001', selfUid: 'u_self',
@@ -702,7 +713,7 @@ describe('QQNTPlatform mapping', () => {
       platform.client.status = vi.fn(async () => status)
       platform.client.getUser = vi.fn()
 
-      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-30')
+      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-31')
       expect(platform.client.getUser).not.toHaveBeenCalled()
     }
   })

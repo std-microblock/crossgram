@@ -34,7 +34,10 @@ type QQOutboundMedia = NonNullable<Parameters<QQNTClient['sendMessage']>[2]>[num
 
 
 const MIN_PROTOCOL_VERSION = 19
-const MAX_PROTOCOL_VERSION = 30
+// qqnt-bridge v1.0.31 negotiates protocol 31. Keep the lower bound stable
+// while accepting that additive wire revision so account provisioning does
+// not fail closed before Telegram QR approval can complete.
+const MAX_PROTOCOL_VERSION = 31
 
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */

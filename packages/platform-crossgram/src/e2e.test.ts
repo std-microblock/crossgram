@@ -23,6 +23,12 @@ const session: PlatformSession = {
 }
 
 describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
+  it('provisions the current account from protocol 31 bridges', async () => {
+    const account = await platform.getAccount()
+    expect(account.user.id).toBeTruthy()
+    expect(account.user.username).toMatch(/^\d+$/)
+  }, 60_000)
+
   it('walks every recent-dialog page without duplicates', async () => {
     const ids: string[] = []
     let cursor: string | undefined
