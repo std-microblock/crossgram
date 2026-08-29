@@ -2229,6 +2229,7 @@ export class DialogRpc {
       const media = req.location.thumbSize === 'm' && isDownloadablePreview(transient.media.preview)
         ? previewMedia(transient.media)
         : transient.media
+      if (!media.locator) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
       return {
         _: 'upload.file', type: storageFileType(media.mimeType ?? 'application/octet-stream'),
         mtime: transient.timestamp,
@@ -2250,6 +2251,7 @@ export class DialogRpc {
     const media = req.location.thumbSize === 'm' && isDownloadablePreview(stored.media.preview)
       ? previewMedia(stored.media)
       : stored.media
+    if (!media.locator) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
     return {
       _: 'upload.file', type: storageFileType(media.mimeType ?? 'application/octet-stream'),
       mtime: stored.timestamp,

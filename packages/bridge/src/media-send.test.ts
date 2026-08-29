@@ -168,7 +168,7 @@ describe('media send streaming', () => {
         for await (const chunk of media.media.source.stream()) received.push(chunk)
       },
     }
-    const { rpc, uploads, inputs, peerId } = await createHarness(0, provider)
+    const { rpc, uploads, inputs, store, peerId } = await createHarness(0, provider)
     await uploads.savePart(session.platformSessionId, '314', 0, new TextEncoder().encode('flash-me'))
 
     const result = await rpc.sendMedia({
@@ -183,6 +183,25 @@ describe('media send streaming', () => {
     expect(new TextDecoder().decode(Buffer.concat(received.map((chunk) => Buffer.from(chunk))))).toBe('flash-me')
     expect(inputs).toEqual([])
     await expect(uploads.open(session.platformSessionId, '314', 1)).rejects.toThrow('part is missing')
+
+    const persisted = await store.readHistory(session.platformSessionId, conversation.id, { limit: 20 })
+    const outgoing = persisted.find((message) => message.outgoing)
+    const persistedMedia = outgoing?.content.parts.find((part) => part.type === 'media')
+    expect(persistedMedia).toMatchObject({ type: 'media', media: { kind: 'file' } })
+    if (persistedMedia?.type !== 'media') throw new Error('missing persisted system-peer media')
+    expect(persistedMedia.media.locator).toBeUndefined()
+    const update = (result as tl.RawUpdates).updates.find((item) => item._ === 'updateNewMessage') as tl.RawUpdateNewMessage
+    const document = (update.message as tl.RawMessage).media
+    if (document?._ !== 'messageMediaDocument' || document.document?._ !== 'document') {
+      throw new Error('missing persisted system-peer document')
+    }
+    await expect(rpc.getFile({
+      _: 'upload.getFile', offset: 0, limit: 1024,
+      location: {
+        _: 'inputDocumentFileLocation', id: document.document.id, accessHash: document.document.accessHash,
+        fileReference: document.document.fileReference, thumbSize: '',
+      },
+    })).rejects.toThrow('FILE_DOWNLOAD_UNAVAILABLE')
   })
 
   it('forwards existing platform media to a system peer with its reusable native origin', async () => {
