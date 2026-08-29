@@ -532,7 +532,11 @@ export class UpdateManager {
       ? `${session.platformSessionId}:edit:${event.eventId}`
       : `${session.platformSessionId}:message:${result.message.id}`
     let delivery = await this._store.getUpdateDelivery(eventKey)
-    if (!delivery && !result.created && !result.changed && !options.forceDelivery) {
+    // A live message can race with history ingestion. In that case the store
+    // quite correctly reports an unchanged row, but the live event still has
+    // to create its durable Telegram update. Only unchanged edits are safe to
+    // discard unless the caller explicitly requests recovery delivery.
+    if (!delivery && isEdit && !result.created && !result.changed && !options.forceDelivery) {
       this._onTrace?.('update publish skipped eventKey=%s reason=unchanged-message', eventKey)
       return
     }
