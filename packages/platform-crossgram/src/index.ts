@@ -308,7 +308,18 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     handler: (event: IMEvent<QQMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
     await this.cleanupLegacyDialogs(session)
-    void this.ensureReactionCatalog()
+    // Reaction events only carry native reaction keys/counts.  The bridge
+    // needs the catalog definitions while mapping the event; starting the
+    // WebSocket before the catalog finishes creates an event with an empty
+    // `available` list, which is then persisted as an apparent reaction
+    // removal.  Warm the catalog before consuming any events so the first
+    // snapshot is renderable and actor hydration can resolve its keys.
+    await this.ensureReactionCatalog().catch((error) => {
+      this.logger?.warn(
+        'QQ reaction catalog warmup failed before subscription error=%s',
+        formatError(error),
+      )
+    })
     const controller = new AbortController()
     const knownLastMessageIds = new Map<string, string | undefined>()
     const inFlightMessageKeys = new Set<string>()

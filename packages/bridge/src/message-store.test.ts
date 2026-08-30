@@ -260,6 +260,29 @@ describe('MessageStore', () => {
     await expect(ctx.database.get('mtproto_im_message_reaction', {})).resolves.toEqual([])
   })
 
+  it('retains persisted definitions when a reaction event arrives before catalog warmup', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'reaction-catalog-race', kind: 'group' as const, title: 'Group' }
+    const definition = { key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }
+    const message = {
+      id: 'reaction-catalog-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      content: { parts: [{ type: 'text' as const, text: 'hello' }] },
+      reactionContext: { available: [definition], reactions: [{ key: 'like', count: 1 }], maxSelected: 20 },
+    }
+    await store.ingest(session, conversation, message)
+
+    await store.setReactions(session, conversation, {
+      conversationId: conversation.id, messageId: message.id, targetId: message.id,
+    }, { available: [], reactions: [{ key: 'like', count: 2 }], maxSelected: 20 })
+
+    await expect(ctx.database.get('mtproto_im_message_reaction', {})).resolves.toMatchObject([{
+      nativeReactionKey: 'like', count: 2, definition,
+    }])
+    await expect(store.readHistory(session.platformSessionId, conversation.id, { limit: 1 })).resolves.toMatchObject([{
+      reactionContext: { reactions: [{ key: 'like', count: 2 }] },
+    }])
+  })
+
   it('ignores reactions for messages outside the stored history window', async () => {
     const { ctx, store } = await createStore()
     const conversation = { id: 'reaction-history-miss', kind: 'group' as const, title: 'Group' }

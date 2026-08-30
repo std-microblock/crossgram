@@ -2044,11 +2044,23 @@ export class MessageStore {
     // available definition per message creates O(messages × catalog) rows and
     // turns high-volume group traffic into a SQLite write storm. A message only
     // needs definitions for reactions that actually occur on that message.
+    const existing = await database.get('mtproto_im_message_reaction', { messageId })
     const definitions = new Map(context.available
       .filter((definition) => summaries.has(definition.key))
       .map((definition) => [definition.key, definition]))
+    // Reaction events from QQNT contain only the native state.  During
+    // startup/reconnect the account-level catalog may still be warming and
+    // the event therefore arrives with `available: []` (or without a newly
+    // observed key).  Do not turn that transiently incomplete catalog into a
+    // durable clear: retain definitions already persisted for the same
+    // native key so Telegram can continue rendering the count/selection.
+    for (const row of existing) {
+      if (!definitions.has(row.nativeReactionKey) && summaries.has(row.nativeReactionKey)
+        && row.definition && typeof row.definition === 'object' && !Array.isArray(row.definition)) {
+        definitions.set(row.nativeReactionKey, row.definition as unknown as IMReactionContext['available'][number])
+      }
+    }
     const keys = new Set(definitions.keys())
-    const existing = await database.get('mtproto_im_message_reaction', { messageId })
     for (const stale of existing.filter((reaction) => !keys.has(reaction.nativeReactionKey))) {
       await database.remove('mtproto_im_message_reaction', { id: stale.id })
     }
