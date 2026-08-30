@@ -114,6 +114,9 @@ const platform: IMPlatform = {
       timestamp: 100 + sentTargets.length,
       content: { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) },
       replyToId: content.replyToId,
+      metadata: content.replyToNativeSequence
+        ? { qqReplyToMsgSeq: content.replyToNativeSequence }
+        : undefined,
     }
   },
   async deleteMessages(_session, target, ids, options) {
@@ -125,6 +128,7 @@ const platform: IMPlatform = {
       ...source(conversations.find((item) => item.id === target.conversationId)!),
       id: target.messageId, outgoing: true, senderId: 'self',
       content: { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) },
+      replyToId: content.replyToId,
     }
   },
   async forwardMessages(_session, from, ids, to, options) {
@@ -1098,47 +1102,105 @@ describe('conversation kinds', () => {
     expect(() => roundTrip(forwarded)).not.toThrow()
   })
 
-  it('projects delete-and-resend editing as delete plus new-message updates', async () => {
+  it('preserves reply targets and mentions when delete-and-resend editing replaces a message', async () => {
     const actions = platform.capabilities.messageActions!
     const originalMode = actions.edit.mode
     actions.edit.mode = 'delete-and-resend'
     try {
+      const group = conversations.find((item) => item.id === 'group')!
+      const replyTarget: IMMessage = {
+        ...source(group), metadata: { qqMsgSeq: '571', telegramMessageId: 571 },
+      }
+      const editPlatform: IMPlatform = {
+        ...platform,
+        async getHistory(_session, target) {
+          return { messages: [target.id === group.id ? replyTarget : source(
+            conversations.find((item) => item.id === target.id)!,
+          )] }
+        },
+      }
       const { rpc, store, localEvents, localDeliveryOptions } = await createRpc(
-        platform, { publishLocalEvents: true },
+        editPlatform, { publishLocalEvents: true },
       )
       await rpc.getDialogs(dialogsRequest())
       const groupId = stableId('peer:group')
       const groupPeer = { _: 'inputPeerChannel' as const, channelId: groupId, accessHash: Long.ZERO }
       const history = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
-      const originalId = (history.messages[0] as tl.RawMessage).id
+      const replyTargetId = (history.messages[0] as tl.RawMessage).id
+      const aliceId = await rpc.userTlId('alice')
+      const original = await rpc.sendMessage({
+        _: 'messages.sendMessage', peer: groupPeer, message: 'before @Alice',
+        entities: [{
+          _: 'inputMessageEntityMentionName', offset: 7, length: 6,
+          userId: { _: 'inputUser', userId: aliceId, accessHash: Long.ZERO },
+        }],
+        replyTo: { _: 'inputReplyToMessage', replyToMsgId: replyTargetId },
+        randomId: Long.fromNumber(701),
+      }) as tl.RawUpdates
+      const originalId = (original.updates.find((update) => update._ === 'updateMessageID') as
+        tl.RawUpdateMessageID).id
+      expect(sentInputs.at(-1)).toMatchObject({
+        replyToId: replyTarget.id, replyToNativeSequence: '571',
+        parts: [{ type: 'text', text: 'before @Alice', entities: [
+          { type: 'mention', offset: 7, length: 6, userId: 'alice' },
+        ] }],
+      })
+      sentInputs.length = 0
+      localEvents.length = 0
+      localDeliveryOptions.length = 0
 
       const result = await rpc.editMessage({
-        _: 'messages.editMessage', peer: groupPeer, id: originalId, message: 'replacement body',
+        _: 'messages.editMessage', peer: groupPeer, id: originalId, message: 'after @Alice',
+        entities: [{
+          _: 'inputMessageEntityMentionName', offset: 6, length: 6,
+          userId: { _: 'inputUser', userId: aliceId, accessHash: Long.ZERO },
+        }],
       }) as tl.RawUpdatesCombined
       expect(result).toMatchObject({ _: 'updatesCombined', seqStart: 1, seq: 2 })
       expect(result.updates).toMatchObject([
         { _: 'updateDeleteChannelMessages', messages: [originalId], pts: 11, ptsCount: 1 },
         { _: 'updateNewChannelMessage', message: { _: 'messageEmpty' }, pts: 12, ptsCount: 1 },
       ])
-      expect(localDeliveryOptions).toEqual([
+      expect(localDeliveryOptions.slice(-2)).toEqual([
         { excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true },
         { excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true },
       ])
-      expect(localEvents).toMatchObject([
+      expect(localEvents.slice(-2)).toMatchObject([
         {
           type: 'message-delete', conversation: { id: 'group' },
-          messageIds: ['message-group'],
+          messageIds: ['sent-1'],
         },
         {
           type: 'message', conversation: { id: 'group' },
-          message: { id: 'sent-1', content: { parts: [{ type: 'text', text: 'replacement body' }] } },
+          message: { id: 'sent-2', replyToId: replyTarget.id, content: { parts: [{
+            type: 'text', text: 'after @Alice',
+            entities: [{ type: 'mention', offset: 6, length: 6, userId: 'alice' }],
+          }] } },
         },
       ])
-      expect(await store.readHistory(session.platformSessionId, 'group')).toMatchObject([
-        { id: 'sent-1', content: { parts: [{ type: 'text', text: 'replacement body' }] } },
-      ])
-      expect(actionCalls).toEqual(['delete:group:message-group:true'])
-      expect(sentTargets).toEqual(['group'])
+      expect(sentInputs).toMatchObject([{
+        replyToId: replyTarget.id, replyToNativeSequence: '571',
+        parts: [{ type: 'text', text: 'after @Alice', entities: [
+          { type: 'mention', offset: 6, length: 6, userId: 'alice' },
+        ] }],
+      }])
+      expect(await store.readHistory(session.platformSessionId, 'group')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'sent-2', replyToId: replyTarget.id, content: { parts: [{
+          type: 'text', text: 'after @Alice',
+          entities: [{ type: 'mention', offset: 6, length: 6, userId: 'alice' }],
+        }] } }),
+      ]))
+      const replacementId = (result.updates[1] as tl.RawUpdateNewChannelMessage).message.id
+      const replacementHistory = await rpc.getHistory(historyRequest(groupPeer)) as tl.messages.RawMessages
+      expect(replacementHistory.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          _: 'message', id: replacementId, message: 'after @Alice',
+          replyTo: { _: 'messageReplyHeader', replyToMsgId: replyTargetId },
+          entities: [{ _: 'messageEntityMentionName', offset: 6, length: 6, userId: aliceId }],
+        }),
+      ]))
+      expect(actionCalls).toEqual(['delete:group:sent-1:true'])
+      expect(sentTargets).toEqual(['group', 'group'])
     } finally {
       actions.edit.mode = originalMode
     }

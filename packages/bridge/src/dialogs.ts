@@ -1882,24 +1882,40 @@ export class DialogRpc {
       throw new RpcError(400, 'MESSAGE_EDIT_TIME_EXPIRED')
     }
     const ordinal = projected.parts.find((part) => part.tlMessageId === req.id)?.ordinal ?? 0
+    await this._hydrateMentionUsernames(req.message, req.entities)
+    const replyToNativeSequence = qqReplySequenceFromMetadata(projected.source.metadata)
+    const content: IMMessageInput = {
+      parts: [this._inputTextPart(req.message, req.entities)],
+      ...(projected.source.replyToId !== undefined
+        ? { replyToId: projected.source.replyToId }
+        : {}),
+      ...(replyToNativeSequence !== undefined
+        ? { replyToNativeSequence: String(replyToNativeSequence) }
+        : {}),
+    }
     let edited: MessageEditResult
     try {
       edited = await this._actions.edit({
         conversationId, messageId: projected.source.id,
         targetId: projected.source.sourceIds?.[ordinal] ?? projected.source.id,
-      }, { parts: [{ type: 'text', text: req.message }] })
+      }, content)
     } catch (error) {
       this._throwMessageAction(error, 'MESSAGE_EDIT_FORBIDDEN')
     }
     const conversation = this._conversation(conversationId)
-    const source: IMMessage<any> = edited!.replacedMessageId
+    const source: IMMessage<any> = {
+      ...(edited!.replacedMessageId
       ? { ...edited!.message, conversationId, outgoing: true }
       : {
           ...edited!.message,
           conversationId,
           senderId: projected.source.senderId,
           outgoing: projected.source.outgoing,
-        }
+        }),
+      ...(edited!.message.replyToId === undefined && projected.source.replyToId !== undefined
+        ? { replyToId: projected.source.replyToId }
+        : {}),
+    }
 
     const now = source.timestamp || Math.floor(Date.now() / 1000)
     if (edited!.replacedMessageId && this._onLocalEvent) {

@@ -4233,10 +4233,11 @@ describe('bridge login e2e', () => {
     }
   }, 15000)
 
-  it('returns recall-and-resend edits to the requester and pushes identical updates to observers', async () => {
+  it('preserves reply and mention context in recall-and-resend edits for requester and observers', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let sentSequence = 0
     const deletedMessageIds: string[] = []
+    const sentInputs: bridge.IMMessageInput[] = []
     const platformId = 'edit-replacement-e2e'
     const platform: bridge.IMPlatform = {
       capabilities: {
@@ -4254,6 +4255,7 @@ describe('bridge login e2e', () => {
         return () => { handler = undefined }
       },
       async sendMessage(_session, target, content) {
+        sentInputs.push(structuredClone(content))
         return {
           id: `replacement-${++sentSequence}`,
           conversationId: target.id,
@@ -4263,6 +4265,10 @@ describe('bridge login e2e', () => {
           content: {
             parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []),
           },
+          replyToId: content.replyToId,
+          metadata: content.replyToNativeSequence
+            ? { qqReplyToMsgSeq: content.replyToNativeSequence }
+            : undefined,
         }
       },
       async deleteMessages(_session, _target, ids) {
@@ -4302,11 +4308,14 @@ describe('bridge login e2e', () => {
         type: 'message', conversation,
         message: {
           id: 'seed', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_200,
+          metadata: { qqMsgSeq: '571', telegramMessageId: 571 },
           content: { parts: [{ type: 'text', text: 'seed' }] },
         },
       })
       const seedPush = await readPush(requester, requesterKey)
       const chatId = seedPush.chats[0].id
+      const seedMessageId = seedPush.updates[0].message.id
+      const aliceId = seedPush.updates[0].message.fromId.userId
       await callRpc(requester, requesterKey, requesterSid, {
         _: 'messages.getDialogs', offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' },
         limit: 100, hash: Long.ZERO,
@@ -4314,7 +4323,12 @@ describe('bridge login e2e', () => {
       const sent = await callRpc(requester, requesterKey, requesterSid, {
         _: 'messages.sendMessage',
         peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
-        message: 'before edit', randomId: Long.fromNumber(801),
+        message: 'before @Alice', randomId: Long.fromNumber(801),
+        entities: [{
+          _: 'inputMessageEntityMentionName', offset: 7, length: 6,
+          userId: { _: 'inputUser', userId: aliceId, accessHash: Long.ZERO },
+        }],
+        replyTo: { _: 'inputReplyToMessage', replyToMsgId: seedMessageId },
       }, 6)
       expect(sent).toMatchObject({
         _: 'updates',
@@ -4323,12 +4337,20 @@ describe('bridge login e2e', () => {
           {
             _: 'updateNewChannelMessage', ptsCount: 1,
             message: {
-              _: 'message', out: true, message: 'before edit',
+              _: 'message', out: true, message: 'before @Alice',
               peerId: { _: 'peerChannel', channelId: chatId },
+              replyTo: { _: 'messageReplyHeader', replyToMsgId: seedMessageId },
+              entities: [{ _: 'messageEntityMentionName', offset: 7, length: 6, userId: aliceId }],
             },
           },
         ],
       })
+      expect(sentInputs).toMatchObject([{
+        replyToId: 'seed', replyToNativeSequence: '571',
+        parts: [{ type: 'text', text: 'before @Alice', entities: [
+          { type: 'mention', offset: 7, length: 6, userId: 'alice' },
+        ] }],
+      }])
       const originalMessageId = sent.updates
         .find((update: any) => update._ === 'updateMessageID').id
 
@@ -4347,23 +4369,42 @@ describe('bridge login e2e', () => {
         _: 'messages.editMessage',
         peer: { _: 'inputPeerChannel', channelId: chatId, accessHash: Long.ZERO },
         id: originalMessageId,
-        message: 'after edit',
+        message: 'after @Alice',
+        entities: [{
+          _: 'inputMessageEntityMentionName', offset: 6, length: 6,
+          userId: { _: 'inputUser', userId: aliceId, accessHash: Long.ZERO },
+        }],
       }, 12)
       expect(editResult).toMatchObject({
         _: 'updatesCombined',
         updates: [
           { _: 'updateDeleteChannelMessages', messages: [originalMessageId], ptsCount: 1 },
-          { _: 'updateNewChannelMessage', message: { message: 'after edit', out: true }, ptsCount: 1 },
+          { _: 'updateNewChannelMessage', message: {
+            message: 'after @Alice', out: true,
+            replyTo: { _: 'messageReplyHeader', replyToMsgId: seedMessageId },
+            entities: [{ _: 'messageEntityMentionName', offset: 6, length: 6, userId: aliceId }],
+          }, ptsCount: 1 },
         ],
       })
       expect(editResult.seq).toBe(editResult.seqStart + 1)
       expect(deletedMessageIds).toEqual(['replacement-1'])
+      expect(sentInputs[1]).toMatchObject({
+        replyToId: 'seed', replyToNativeSequence: '571',
+        parts: [{ type: 'text', text: 'after @Alice', entities: [
+          { type: 'mention', offset: 6, length: 6, userId: 'alice' },
+        ] }],
+      })
 
       const deletePush = await readPush(observer, observerKey)
       const replacementPush = await readPush(observer, observerKey)
       expect(editResult.updates).toEqual([deletePush.updates[0], replacementPush.updates[0]])
       expect(replacementPush.updates[0].pts).toBe(deletePush.updates[0].pts + 1)
       expect(replacementPush.updates[0].message.id).not.toBe(originalMessageId)
+      expect(replacementPush.updates[0].message).toMatchObject({
+        message: 'after @Alice',
+        replyTo: { _: 'messageReplyHeader', replyToMsgId: seedMessageId },
+        entities: [{ _: 'messageEntityMentionName', offset: 6, length: 6, userId: aliceId }],
+      })
 
       const history = await callRpc(observer, observerKey, observerSid, {
         _: 'messages.getHistory',
@@ -4371,9 +4412,18 @@ describe('bridge login e2e', () => {
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
         maxId: 0, minId: 0, hash: Long.ZERO,
       }, 14)
-      expect(history.messages).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: replacementPush.updates[0].message.id, message: 'after edit' }),
-      ]))
+      expect(history).toMatchObject({
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            id: replacementPush.updates[0].message.id,
+            message: 'after @Alice',
+            replyTo: expect.objectContaining({ _: 'messageReplyHeader', replyToMsgId: seedMessageId }),
+            entities: expect.arrayContaining([{
+              _: 'messageEntityMentionName', offset: 6, length: 6, userId: aliceId,
+            }]),
+          }),
+        ]),
+      })
       expect(history.messages.some((message: any) => message.id === originalMessageId)).toBe(false)
     } finally {
       observer?.close()
