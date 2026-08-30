@@ -79,6 +79,15 @@ describe('API layer response writers', () => {
     expect(view.getUint32(8, true) & (1 << 30)).not.toBe(0)
   })
 
+  it('encodes the recalled bit on legacy layers that do not have flags2', () => {
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 117), {
+      ...message, recalled: true,
+    } as tl.RawMessage & { recalled: boolean })
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    expect(view.getUint32(0, true)).toBe(constructorFromLocalSchema(117, 'message'))
+    expect(view.getUint32(4, true) & (1 << 12)).not.toBe(0)
+  })
+
   it.each([227, 228])('round-trips custom service actions for Layer %i', (layer) => {
     const service: tl.RawMessageService = {
       _: 'messageService', id: 8,
