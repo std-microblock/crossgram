@@ -706,7 +706,12 @@ export class StickerRpc {
       // a moving gradient through it before either thumbnail or asset arrives.
       thumbs: [{
         _: 'photoPathSize', type: 'j',
-        bytes: sticker.outline ?? telegramStickerPlaceholder(sticker.width ?? 512, sticker.height ?? 512),
+        // Empty outlines are occasionally produced by legacy providers and
+        // persisted messages. Treat them as missing so clients still receive
+        // a drawable loading silhouette instead of an empty path.
+        bytes: sticker.outline?.byteLength
+          ? sticker.outline
+          : telegramStickerPlaceholder(sticker.width ?? 512, sticker.height ?? 512),
       }, ...(sticker.thumbnail ? [{
         _: 'photoSize' as const, type: 'm', w: sticker.thumbnail.width, h: sticker.thumbnail.height,
         size: Math.min(sticker.thumbnail.size, 0x7fffffff),

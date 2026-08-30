@@ -163,3 +163,34 @@ function favorite(id: string): WireSticker {
     },
   }
 }
+
+describe('QQStickerProvider market previews', () => {
+  it('maps animated market static previews to Telegram thumbnails', async () => {
+    const reference = {
+      kind: 'market' as const,
+      packageId: '42', stickerId: 'emoji-a', name: 'Wave', key: 'secret',
+      width: 320, height: 180, animated: true,
+      staticPath: '/cache/emoji-a.png', staticSize: 6,
+      dynamicPath: '/cache/emoji-a.gif.encrypt',
+    }
+    const client = {
+      getStickerPack: vi.fn(async () => ({
+        packId: '42', title: 'Waves', stickers: [{
+          stickerId: 'market:42:emoji-a', packId: '42', title: 'Wave',
+          format: 'animated' as const, mimeType: 'image/gif', width: 320, height: 180,
+          size: 24, reference,
+        }],
+      })),
+      stickerSource: vi.fn((value: unknown, size?: number) => ({ size, stream: async function* () { yield value } })),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
+    const pack = await provider.getPack({ session: {} as never, platformKind: 'qq' }, '42')
+    const sticker = pack!.stickers[0]!
+    expect(sticker.thumbnail).toMatchObject({ mimeType: 'image/png', size: 6, width: 320, height: 180 })
+    const thumbnail = await provider.openThumbnail({ session: {} as never, platformKind: 'qq' }, sticker)
+    expect(thumbnail).toMatchObject({ mimeType: 'image/png', size: 6, width: 320, height: 180 })
+    expect(client.stickerSource).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'market', animated: false, staticPath: reference.staticPath }), 6,
+    )
+  })
+})

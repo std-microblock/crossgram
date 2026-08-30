@@ -155,6 +155,18 @@ describe('StickerRpc', () => {
     expect(provider.openThumbnail).not.toHaveBeenCalled()
   })
 
+  it('replaces an empty persisted outline with a drawable loading silhouette', () => {
+    const { rpc, sticker } = stickerHarness()
+    sticker.outline = new Uint8Array()
+
+    const media = rpc.makeMessageMedia(sticker)
+    if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+    const [thumb] = media.document.thumbs ?? []
+    expect(thumb?._).toBe('photoPathSize')
+    if (thumb?._ !== 'photoPathSize') throw new Error('expected path thumb')
+    expect(thumb.bytes.byteLength).toBeGreaterThan(0)
+  })
+
   it('delegates document ranges to a provider-native range stream', async () => {
     const { rpc, sticker, provider } = stickerHarness()
     const asset = Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7])

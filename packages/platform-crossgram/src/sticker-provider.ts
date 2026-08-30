@@ -68,7 +68,23 @@ export class QQStickerProvider implements IMStickerProvider {
   }
 
   async openThumbnail(_context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset | null> {
-    return null
+    const reference = sticker.locator as unknown as QQStickerReference | undefined
+    if (!reference || reference.kind !== 'market' || !reference.animated || !sticker.thumbnail) return null
+    // QQ market stickers expose a static type-3 asset alongside the animated
+    // original. Serve that asset as Telegram's lowest-tier `m` thumbnail so
+    // clients can keep their normal preview/loading pipeline.
+    const thumbnailReference: QQStickerReference = {
+      ...reference,
+      animated: false,
+      mimeType: 'image/png',
+    }
+    return {
+      source: this.client.stickerSource(thumbnailReference, sticker.thumbnail.size),
+      mimeType: sticker.thumbnail.mimeType,
+      size: sticker.thumbnail.size,
+      width: sticker.thumbnail.width,
+      height: sticker.thumbnail.height,
+    }
   }
 
   async resolveAssetUrl(_context: StickerProviderContext, sticker: IMSticker) {
@@ -131,6 +147,7 @@ export class QQStickerProvider implements IMStickerProvider {
   }
 
   private async mapSticker(sticker: WireSticker): Promise<IMSticker> {
+    const reference = sticker.reference
     const mapped: IMSticker = {
       providerId: this.providerId,
       stickerId: sticker.stickerId,
@@ -142,7 +159,15 @@ export class QQStickerProvider implements IMStickerProvider {
       height: sticker.height,
       size: sticker.size,
       version: sticker.version,
-      locator: sticker.reference as unknown as JsonValue,
+      locator: reference as unknown as JsonValue,
+      thumbnail: reference.kind === 'market' && reference.animated
+        && reference.staticPath && Number.isSafeInteger(reference.staticSize) && reference.staticSize > 0
+        ? {
+            mimeType: 'image/png', size: reference.staticSize,
+            width: reference.width, height: reference.height,
+            locator: { ...reference, animated: false } as unknown as JsonValue,
+          }
+        : undefined,
     }
     return mapped
   }
