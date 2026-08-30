@@ -28,13 +28,18 @@ function constructorFromLocalSchema(layer: number, name: string): number {
   return Number.parseInt(match[1], 16)
 }
 
-const message: tl.RawMessage = {
+const message = {
   _: 'message', id: 7,
   fromId: { _: 'peerUser', userId: 42 },
   peerId: { _: 'peerUser', userId: 42 },
+  // Legacy layers (e.g. Layer 117) name the destination field `toId`.
+  // The current schema uses `peerId`; supplying both lets the historical
+  // writer exercise its real required field while newer writers ignore the
+  // legacy alias.
+  toId: { _: 'peerUser', userId: 42 },
   date: 1_800_000_000,
   message: 'legacy wire message',
-}
+} as tl.RawMessage & { toId: { _: 'peerUser', userId: number } }
 
 describe('API layer response writers', () => {
   it('keeps only the newest definition for each historical constructor ID', () => {
