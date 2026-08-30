@@ -128,6 +128,8 @@ export interface BridgeConfig {
   autoMuteGroupChats?: boolean
   /** Visibility policy for users blocked through Telegram. */
   blockedContentMode?: BlockedContentMode
+  /** Whether QQ recalled messages remain visible as marked messages or are hidden. */
+  recalledMessageMode?: 'hide' | 'show'
   /** Optional native worker; it must expose public status/material only. */
   voiceWorker?: VoiceWorkerClient
   /** Local Rust voice-worker Unix socket; an empty path leaves calls unavailable. */
@@ -180,6 +182,7 @@ export const Config = z.object({
   blockedContentMode: z.union([
     z.const('show'), z.const('hide-user'), z.const('hide-related'),
   ]).default('hide-user'),
+  recalledMessageMode: z.union([z.const('hide'), z.const('show')]).default('show'),
   voiceWorkerSocketPath: z.string().default(''),
   voiceWorkerTimeoutMs: z.natural().min(1).max(60_000).default(5_000),
   voiceDirectIce: z.boolean().default(true),
@@ -273,6 +276,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (session, message) => reactionRpcFor(registry.require(session.platformId), session)
       .registerContext(message.conversationId, message.reactionContext),
     messageProjection,
+    config.recalledMessageMode ?? 'show',
   )
   const builtInMediaProvider = createBuiltInVoiceMediaProvider({
     serverHost: config.serverHost,
@@ -364,6 +368,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     },
     eventTrace,
     ctx,
+    config.recalledMessageMode ?? 'show',
   )
   platforms.attachLocalMessageIngress(
     (session, conversation, message) => subscriptions.ingestLocalEvent(session, { type: 'message', conversation, message }),

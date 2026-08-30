@@ -7,6 +7,7 @@ groupFilesMiniApp: 用于浏览平台原生群文件的 Telegram 附件菜单小
 uploadPath: 用于存储 Telegram 客户端上传文件的目录。
 autoMuteGroupChats: 默认关闭群聊通知；可在 Telegram 中为单个群聊单独开启。
 blockedContentMode: 拉黑用户内容显示策略：show 保留 Telegram 默认群聊显示；hide-user 隐藏其消息和 reaction；hide-related 还会隐藏回复或 @ 该用户的消息。
+recalledMessageMode: QQ 撤回消息显示策略：show 保留消息并标记为已撤回；hide 直接隐藏消息。
 voiceWorkerSocketPath: Rust 语音工作进程的本地 Unix socket 路径；留空以禁用语音通话。
 voiceWorkerTimeoutMs: 单次本地语音工作进程请求允许的最长毫秒数。
 voiceDirectIce: 仅当配置的 MTProto 主机为回环地址或私有 LAN 时允许直接 ICE。

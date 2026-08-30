@@ -430,6 +430,8 @@ export interface IMMessage<TMediaLocator = unknown> {
   /** Stable lexicographically sortable native ID used to preserve message order without relying on timestamps. */
   nativeOrderKey?: string
   outgoing?: boolean
+  /** True when the upstream message was recalled but is retained as a tombstone. */
+  recalled?: boolean
   /** Opaque platform grouping key, retained for album reconciliation. */
   groupId?: string
   metadata?: JsonObject

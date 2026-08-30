@@ -2243,6 +2243,7 @@ function mapMessage(
     senderTitle: input.sender?.alias?.trim() || undefined,
     timestamp: input.timestamp,
     outgoing: input.outgoing,
+    recalled: input.recalled,
     replyToId: input.replyToId,
     metadata: input.msgSeq || input.originRequestId || input.telegramMessageId || input.telegramReplyToMessageId ? {
       ...(input.msgSeq ? { qqMsgSeq: input.msgSeq } : {}),

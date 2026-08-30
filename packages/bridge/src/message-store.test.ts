@@ -491,6 +491,21 @@ describe('MessageStore', () => {
     }])
   })
 
+  it('round-trips the recalled message marker without a schema migration', async () => {
+    const { ctx, store } = await createStore()
+    const conversation: IMConversation = { id: 'recalled-room', kind: 'group', title: 'Recalled room' }
+    const message: IMMessage = {
+      id: 'recalled-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      recalled: true, content: { parts: [{ type: 'text', text: 'gone' }] },
+    }
+    const ingested = await store.ingest(session, conversation, message)
+    const [row] = await ctx.database.get('mtproto_im_message', { id: ingested.message.id })
+    expect(row.metadata).toMatchObject({ __mtprotoRelayRecalled: true })
+    await expect(store.readHistory(session.platformSessionId, conversation.id)).resolves.toMatchObject([{
+      id: message.id, recalled: true, metadata: {},
+    }])
+  })
+
   it('rehydrates media stripped thumbnails before a stored message is ingested again', async () => {
     const { ctx, store } = await createStore()
     const conversation: IMConversation = { id: 'thumbnail-room', kind: 'group', title: 'Thumbnail room' }

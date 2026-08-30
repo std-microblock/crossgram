@@ -64,10 +64,19 @@ describe('API layer response writers', () => {
     })
   })
 
-  it('keeps the current writer map for the current layer and layers older than the local mirror', () => {
-    expect(getApiLayerWriterMap(__tlWriterMap, CURRENT_API_LAYER)).toBe(__tlWriterMap)
+  it('keeps the base writer map for layers older than the local mirror', () => {
     expect(getApiLayerWriterMap(__tlWriterMap, 1)).toBe(__tlWriterMap)
     expect(getApiLayerWriterMap(__tlWriterMap, null)).toBe(__tlWriterMap)
+  })
+
+  it('encodes recalled markers in reserved message flag bits without changing the constructor id', () => {
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, CURRENT_API_LAYER), {
+      ...message, recalled: true, recalledVisible: true,
+    } as tl.RawMessage & { recalled: boolean, recalledVisible: boolean })
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    expect(view.getUint32(0, true)).toBe(constructorFromLocalSchema(CURRENT_API_LAYER, 'message'))
+    expect(view.getUint32(4, true) & (1 << 12)).not.toBe(0)
+    expect(view.getUint32(8, true) & (1 << 30)).not.toBe(0)
   })
 
   it.each([227, 228])('round-trips custom service actions for Layer %i', (layer) => {

@@ -384,6 +384,38 @@ describe('PlatformSubscriptionManager', () => {
     await manager.stop()
   })
 
+  it('hides recalled QQ messages when configured while retaining the recalled marker', async () => {
+    const database = await createDatabase()
+    const qq = new QQPlatform()
+    const qqSession = { ...session, platformId: 'qq', platformSessionId: 'qq-hide-session' }
+    const registry = new PlatformRegistry([['qq', qq] as const])
+    const store = new MessageStore(database)
+    const sent: tl.TypeUpdates[] = []
+    await database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: qqSession.platformId,
+      platformSessionId: qqSession.platformSessionId,
+    })
+    const updates = new UpdateManager(database, registry, store, (_authKeyId, update) => {
+      sent.push(update)
+      return 1
+    }, 1, undefined, undefined, undefined, undefined, undefined, 'hide')
+    const manager = new PlatformSubscriptionManager(
+      database, registry, store, undefined,
+      (activeSession, event, options) => updates.publish(activeSession, event, options),
+      undefined, undefined, 'hide',
+    )
+    const conversation: IMConversation = { id: 'hide-room', kind: 'group', title: 'Hide room' }
+    const message = incoming('qq-hide-target', conversation.id)
+    await manager.ensure(qqSession)
+    await qq.emit({ type: 'message', conversation, message })
+    await qq.emit({ type: 'message-delete', eventId: 'qq-hide', conversation, messageIds: [message.id], timestamp: 2 })
+    expect((sent.at(-1) as tl.RawUpdates).updates[0]?._).toBe('updateDeleteChannelMessages')
+    await expect(database.get('mtproto_im_message', {})).resolves.toMatchObject([{
+      deleted: true, metadata: { __mtprotoRelayRecalled: true },
+    }])
+    await manager.stop()
+  })
+
   it('subscribes once, persists before resolving, and can stop and restart one platform', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

@@ -5572,6 +5572,8 @@ export function projectTlMessage(options: {
   richMessage?: tl.RawRichMessage
   entities?: tl.TypeMessageEntity[]
   reactions?: tl.RawMessageReactions
+  recalled?: boolean
+  recalledVisible?: boolean
   replyToTlId?: number
   topicId?: number
   mentioned?: boolean
@@ -5580,7 +5582,7 @@ export function projectTlMessage(options: {
   const {
     conversation, source, tlId, ordinal,
     groupedId, fromId, peerId, media, richMessage, entities, reactions, replyToTlId, topicId,
-    mentioned, unreadMention,
+    mentioned, unreadMention, recalled, recalledVisible,
   } = options
   if (!peerId && !conversation) throw new TypeError('message projection requires a Telegram peer target')
   const conversationId = conversation ? stableId(`peer:${conversation.id}`) : undefined
@@ -5609,6 +5611,7 @@ export function projectTlMessage(options: {
   const text = ordinal === 0 ? messageText(source) : ''
   return {
     _: 'message', out: source.outgoing || undefined, mentioned: mentioned || undefined,
+    recalled: recalled || undefined, recalledVisible: recalledVisible || undefined,
     mediaUnread: unreadMention || undefined, id: tlId,
     fromId,
     fromRank: source.senderTitle,

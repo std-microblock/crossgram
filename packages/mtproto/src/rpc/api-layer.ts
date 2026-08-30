@@ -75,7 +75,7 @@ export function resolveApiSchemaProfile(layer: number): string | null {
  * long.
  */
 export function getApiLayerWriterMap(base: TlWriterMap, layer: number | null): TlWriterMap {
-  if (layer === null || layer === CURRENT_API_LAYER) return base
+  if (layer === null) return base
   const schemaLayer = resolveApiSchemaLayer(layer)
   if (schemaLayer === null) return base
   return getApiLayerSchemaWriterMap(base, schemaLayer)
@@ -89,7 +89,9 @@ export function getApiLayerSchemaWriterMap(base: TlWriterMap, layer: number): Tl
   if (!layers) schemaWriterCache.set(base, layers = new Map())
   const cached = layers.get(schemaLayer)
   if (cached) return cached
-  const code = generateWriterCodeForTlEntries(loadSchemaEntries(schemaLayer), {
+  const entries = loadSchemaEntries(schemaLayer)
+  augmentRecalledMessageSchema(entries)
+  const code = generateWriterCodeForTlEntries(entries, {
     variableName: 'm',
     includePrelude: true,
     includeStaticSizes: true,
@@ -99,6 +101,24 @@ export function getApiLayerSchemaWriterMap(base: TlWriterMap, layer: number): Tl
   const writerMap = Object.assign(Object.create(null), base, generated) as TlWriterMap
   layers.set(schemaLayer, writerMap)
   return writerMap
+}
+
+/** Add Crossgram's wire-only recall markers without modifying mirrored official schemas. */
+function augmentRecalledMessageSchema(entries: TlEntry[]): void {
+  for (const entry of entries) {
+    if (entry.name !== 'message') continue
+    const flagsIndex = entry.arguments.findIndex((argument) => argument.type === '#')
+    if (flagsIndex < 0 || entry.arguments.some((argument) => argument.name === 'recalled')) continue
+    entry.arguments.splice(flagsIndex + 1, 0, {
+      name: 'recalled', type: 'true', typeModifiers: { predicate: 'flags.12' },
+    })
+    const flags2Index = entry.arguments.findIndex((argument) => argument.name === 'flags2' && argument.type === '#')
+    if (flags2Index >= 0) {
+      entry.arguments.splice(flags2Index + 1, 0, {
+        name: 'recalled_visible', type: 'true', typeModifiers: { predicate: 'flags2.30' },
+      })
+    }
+  }
 }
 
 /** Generate a reader map from the same local official schema (useful for layer-specific clients/tests). */

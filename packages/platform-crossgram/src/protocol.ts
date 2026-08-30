@@ -209,6 +209,7 @@ export interface WireMessage {
   senderId: string
   timestamp: number
   outgoing: boolean
+  recalled?: boolean
   sender?: {
     id: string
     numericId?: string

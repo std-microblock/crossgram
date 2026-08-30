@@ -17,6 +17,7 @@ import type { IMSticker } from './sticker-provider.js'
 import type {
   CommittedPlatformEvent, PlatformEventDeliveryOptions, PlatformEventPublishResult, PlatformRegistry,
 } from './platform-manager.js'
+import type { RecalledMessageMode } from './platform-manager.js'
 import { makeUser } from './synthetic.js'
 import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
@@ -48,6 +49,7 @@ export class UpdateManager {
     private readonly _blockedPeers?: BlockedPeerStore,
     private readonly _registerReactions?: (session: PlatformSession, message: IMMessage) => void,
     private readonly _messageProjection?: MessageProjectionPipeline,
+    private readonly _recalledMessageMode: RecalledMessageMode = 'show',
   ) {}
 
   private async _hydrateReactionUsers(
@@ -708,6 +710,8 @@ export class UpdateManager {
             replyToTlId: replied?.parts[0]?.tlMessageId ?? nativeReplyTo,
             mentioned,
             unreadMention: mentioned,
+            recalled: projectedSource.recalled,
+            recalledVisible: projectedSource.recalled && this._recalledMessageMode === 'show',
           }),
           chats: draft.chats,
         }
