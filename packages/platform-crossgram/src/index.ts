@@ -676,7 +676,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   async getDialogs(session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
     await this.cleanupLegacyDialogs(session)
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
-    await reactionWarmup
+    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     return this.prepareDialogPage(session, await this.fetchDialogsPage(session, query, undefined, reactionWarmup))
   }
 
@@ -804,7 +804,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         ? this.firstUnreadSeq.get(conversation.id)
         : undefined,
     })
-    await reactionWarmup
+    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     if (response.messages.some(wireMessageHasQQFace)) await reactionWarmup
     return {
       messages: await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
@@ -871,7 +871,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       maxTimestamp: query.maxTimestamp,
       mediaKind: query.mediaKind,
     })
-    await reactionWarmup
+    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     if (response.messages.some(wireMessageHasQQFace)) await reactionWarmup
     return {
       messages: await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
@@ -2036,7 +2036,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const messages = (await this.loadMultiForwardMessages(locator))
       .filter((message) => !this.isFilteredGrayTip(message))
     const senders = new Map<string, Promise<IMUser<QQMediaLocator> | null>>()
-    await reactionWarmup
+    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
+    if (messages.some(wireMessageHasQQFace)) await reactionWarmup
     return Promise.all(messages.map(async (message) => {
       let mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), locator)
       if (!mapped.sender) {
