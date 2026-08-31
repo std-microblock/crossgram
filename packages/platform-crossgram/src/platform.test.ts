@@ -1976,6 +1976,39 @@ describe('QQNTPlatform mapping', () => {
     await unsubscribe()
   })
 
+  it('loads the reaction catalog before forwarding an early reaction push', async () => {
+    const platform = new QQNTPlatform()
+    const getReactionCatalog = vi.fn(async () => ({
+      available: [{ key: '2:10068', presentation: { type: 'emoji' as const, emoticon: '👍' } }],
+      reactions: [], maxSelected: 20,
+    }))
+    platform.client.getReactionCatalog = getReactionCatalog
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    let wireHandler: ((event: any) => void | Promise<void>) | undefined
+    platform.client.subscribe = vi.fn(async (handler, signal) => {
+      wireHandler = handler
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    const received: unknown[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { received.push(event) })
+    await vi.waitFor(() => expect(wireHandler).toBeTypeOf('function'))
+    await wireHandler!({
+      type: 'message-reactions', eventId: 'reaction-early',
+      conversation: {
+        id: '2:group', kind: 'group', title: 'Group', peerUid: 'group', peerUin: 'group', chatType: 2,
+      },
+      target: { conversationId: '2:group', messageId: 'target', targetId: 'target' },
+      context: { reactions: [{ key: '2:10068', count: 1 }], maxSelected: 20 }, timestamp: 3,
+    })
+
+    expect(getReactionCatalog).toHaveBeenCalledOnce()
+    expect(received).toMatchObject([{
+      type: 'message-reactions',
+      context: { available: [{ key: '2:10068' }], reactions: [{ key: '2:10068', count: 1 }] },
+    }])
+    await unsubscribe()
+  })
+
   it('maps opaque QQ IDs and member roles without numeric coercion', async () => {
     const platform = new QQNTPlatform()
     const avatar = {
