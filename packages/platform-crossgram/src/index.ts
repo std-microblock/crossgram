@@ -1894,17 +1894,6 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       timestamp: input.timestamp,
     }
     const reactionContext = await this.withReactionCatalog(input.context)
-    const availableKeys = new Set(reactionContext.available.map((item) => item.key))
-    const missingKeys = [...new Set(reactionContext.reactions
-      .map((item) => item.key)
-      .filter((key) => !availableKeys.has(key)))]
-    if (missingKeys.length) {
-      this.logger?.warn(
-        'Reaction definition missing session=%s conversation=%s eventId=%s keys=%s available=%d',
-        session.platformSessionId, conversation.id, input.eventId, missingKeys.join(','),
-        reactionContext.available.length,
-      )
-    }
     return {
       type: 'message-reactions',
       eventId: input.eventId,
