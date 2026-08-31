@@ -5954,7 +5954,7 @@ function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhot
 }
 
 export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 1): tl.TypeMessageMedia {
-  if (media.kind === 'image' && !isAnimatedImageMime(media.mimeType)) {
+  if (media.kind === 'image' && !isAnimatedImageMime(media.mimeType) && !requiresImageDocument(media)) {
     return { _: 'messageMediaPhoto', photo: makeTlPhoto(media, timestamp, dcId) }
   }
   const id = Long.fromNumber(media.id)
@@ -5969,7 +5969,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   const attributes: tl.TypeDocumentAttribute[] = [
     { _: 'documentAttributeFilename', fileName: media.name ?? 'file' },
   ]
-  if (isAnimatedImageMime(media.mimeType)) attributes.push({
+  if (media.kind === 'image' && dimensions.width > 0 && dimensions.height > 0) attributes.push({
     _: 'documentAttributeImageSize', w: dimensions.width, h: dimensions.height,
   })
   if (media.voice) attributes.push({
@@ -6187,6 +6187,13 @@ function isAnimatedImageMime(mimeType: string | null | undefined): boolean {
 
 const TELEGRAM_DISPLAY_PHOTO_SIDE = 1280
 const TELEGRAM_HIGH_QUALITY_PHOTO_SIDE = 2560
+const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+
+/** Preserve very large originals as documents instead of pretending they are Telegram photos. */
+function requiresImageDocument(media: Pick<IMMediaRow, 'kind' | 'mimeType' | 'size'>): boolean {
+  return media.kind === 'image' && !isAnimatedImageMime(media.mimeType)
+    && Number.isSafeInteger(media.size) && media.size! > TELEGRAM_PHOTO_MAX_BYTES
+}
 
 function originalPhotoSizes(
   dimensions: { width: number, height: number },
