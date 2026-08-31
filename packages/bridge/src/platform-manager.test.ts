@@ -681,6 +681,27 @@ describe('PlatformDataService', () => {
     })
   })
 
+  it('deduplicates duplicate upstream dialog rows before durable upsert', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'duplicate-dialog-room', kind: 'group', title: 'Duplicate' }
+    platform.getDialogs = vi.fn(async () => ({
+      dialogs: [
+        { conversation, unreadCount: 1, lastMessage: incoming('1', conversation.id) },
+        { conversation, unreadCount: 2, lastMessage: incoming('2', conversation.id) },
+      ],
+    }))
+    const store = new MessageStore(database)
+    const data = new PlatformDataService(platform, session, store)
+
+    await expect(data.getDialogsPage({ limit: 100 })).resolves.toMatchObject({
+      dialogs: [{ conversation: { id: conversation.id }, unreadCount: 2, lastMessage: { id: '2' } }],
+    })
+    await expect(store.readDialogs(session.platformSessionId, [conversation.id]))
+      .resolves.toMatchObject([{ unreadCount: 2, lastMessage: { id: '2' } }])
+  })
+
   it('keeps dialog preview and opened history on the same recovered latest message', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

@@ -691,8 +691,14 @@ export class PlatformDataService {
       )
       return { dialogs: stored, total: stored.length }
     }
-    const upstreamDialogs = upstreamPage.dialogs.filter((dialog) =>
-      dialog.conversation.metadata?.bridgeOwned !== true)
+    // Some QQNT pages have been observed to contain the same conversation
+    // more than once (for example when pinned/unread projections overlap).
+    // PostgreSQL rejects an INSERT ... ON CONFLICT statement when the input
+    // batch contains duplicate conflict keys.  Collapse duplicate dialog
+    // rows before persistence while preserving the upstream order and the
+    // newest preview payload for each conversation.
+    const upstreamDialogs = uniqueDialogsByConversationId(upstreamPage.dialogs)
+      .filter((dialog) => dialog.conversation.metadata?.bridgeOwned !== true)
     const persistedDialogs = await this._store.readDialogs(
       this._session.platformSessionId,
       upstreamDialogs.map((dialog) => dialog.conversation.id),
@@ -997,6 +1003,47 @@ function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined
     || upstreamMessage.senderId !== storedMessage.senderId
     || JSON.stringify(upstreamMessage.content) !== JSON.stringify(storedMessage.content)
     || JSON.stringify(upstreamMessage.metadata ?? {}) !== JSON.stringify(storedMessage.metadata ?? {})
+}
+
+/**
+ * Return one authoritative row per conversation while retaining the first
+ * occurrence's position in the upstream page. Duplicate rows can be emitted
+ * by QQNT during pinned/unread reconciliation; feeding them to a single
+ * database upsert would make PostgreSQL raise "cannot affect row a second
+ * time". When duplicates differ, prefer the row with the newest preview
+ * message and merge conversation metadata so no durable fields are lost.
+ */
+function uniqueDialogsByConversationId(dialogs: readonly IMDialog[]): IMDialog[] {
+  const indexById = new Map<string, number>()
+  const unique: IMDialog[] = []
+  for (const dialog of dialogs) {
+    const id = dialog.conversation.id
+    const index = indexById.get(id)
+    if (index === undefined) {
+      indexById.set(id, unique.length)
+      unique.push(dialog)
+      continue
+    }
+    const previous = unique[index]!
+    const previousMessage = previous.lastMessage
+    const nextMessage = dialog.lastMessage
+    const preferNext = Boolean(nextMessage) && (!previousMessage
+      || nextMessage.timestamp > previousMessage.timestamp
+      || (nextMessage.timestamp === previousMessage.timestamp && nextMessage.id > previousMessage.id))
+    const selected = preferNext ? dialog : previous
+    unique[index] = {
+      ...selected,
+      conversation: {
+        ...previous.conversation,
+        ...dialog.conversation,
+        metadata: {
+          ...previous.conversation.metadata,
+          ...dialog.conversation.metadata,
+        },
+      },
+    }
+  }
+  return unique
 }
 
 function dialogRevision(dialog: IMDialog): string {
