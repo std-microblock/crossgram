@@ -404,7 +404,10 @@ export function defineModels(ctx: Context): void {
   ctx.model.extend('mtproto_im_media', {
     id: 'unsigned', messageId: 'unsigned', ordinal: 'unsigned', partIndex: 'unsigned', platformMediaId: 'text',
     kind: 'string', name: { type: 'text', nullable: true }, mimeType: { type: 'text', nullable: true },
-    size: { type: 'unsigned', nullable: true }, width: { type: 'unsigned', nullable: true },
+    // QQNT file sizes can exceed PostgreSQL int4 (for example a 2.77 GB zip).
+    // Keep the value lossless as a scale-zero numeric while retaining the
+    // number-shaped API exposed by IMMediaRow and Telegram projections.
+    size: { type: 'decimal', precision: 20, scale: 0, nullable: true }, width: { type: 'unsigned', nullable: true },
     height: { type: 'unsigned', nullable: true }, duration: { type: 'unsigned', nullable: true }, voice: 'boolean',
     preview: { type: 'json', nullable: true },
     strippedThumbnail: { type: 'binary', nullable: true }, locator: 'json',

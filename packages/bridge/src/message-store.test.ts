@@ -475,6 +475,27 @@ describe('MessageStore', () => {
     })
   })
 
+  it('persists media sizes above the PostgreSQL int4 range without loss', async () => {
+    const { ctx, store } = await createStore()
+    const conversation: IMConversation = { id: 'large-file-room', kind: 'group', title: 'Large files' }
+    const size = 2_773_412_893
+    const message: IMMessage = {
+      id: 'large-file-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_100,
+      content: {
+        parts: [{ type: 'media', media: {
+          id: 'large-file', kind: 'file', name: '1.44.1整合包.zip', mimeType: 'application/zip',
+          size, locator: { token: 'large-file-token' },
+        } }],
+      },
+    }
+
+    const ingested = await store.ingest(session, conversation, message)
+    await expect(ctx.database.get('mtproto_im_media', { messageId: ingested.message.id }))
+      .resolves.toMatchObject([{ size, platformMediaId: 'large-file' }])
+    await expect(store.readHistory(session.platformSessionId, conversation.id))
+      .resolves.toMatchObject([{ content: { parts: [{ media: { size } }] } }])
+  })
+
   it('round-trips recorded voice media metadata through persistence', async () => {
     const { ctx, store } = await createStore()
     const conversation: IMConversation = { id: 'voice-room', kind: 'direct', title: 'Voice room' }

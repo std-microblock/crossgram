@@ -12,4 +12,12 @@ describe('bridge models', () => {
       indexes: expect.arrayContaining([['platformSessionId', 'tlMessageId']]),
     })
   })
+
+  it('stores media sizes as scale-zero numeric values for large files', () => {
+    const extend = vi.fn()
+    defineModels({ model: { extend } } as never)
+
+    const definition = extend.mock.calls.find(([table]) => table === 'mtproto_im_media')
+    expect(definition?.[1]?.size).toMatchObject({ type: 'decimal', precision: 20, scale: 0, nullable: true })
+  })
 })
