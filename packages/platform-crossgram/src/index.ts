@@ -450,7 +450,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               )
               return
             }
-            const mapped = this.mapEvent(event, session)
+            const mapped = await this.mapEvent(event, session)
             this.logger?.debug(
               'WebSocket event mapped session=%s streamEventId=%s %s',
               platformSessionId, eventId ?? '<none>', event.type === 'call-signal' ? eventSummary : imEventSummary(mapped),
@@ -1842,10 +1842,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     return conversation
   }
 
-  private mapEvent(
+  private async mapEvent(
     input: Exclude<WireEvent, WireNativeAvsdkEvent>,
     session: PlatformSession,
-  ): IMEvent<QQMediaLocator> {
+  ): Promise<IMEvent<QQMediaLocator>> {
     if (input.type === 'request') return { type: 'request', request: mapRequest(input.request) }
     const wireConversation = input.type === 'call-signal'
       ? {
@@ -1893,15 +1893,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       messageIds: input.messageIds,
       timestamp: input.timestamp,
     }
+    const reactionContext = await this.withReactionCatalog(input.context)
     return {
       type: 'message-reactions',
       eventId: input.eventId,
       conversation,
       target: input.target,
       context: {
-        available: conversation.kind === 'group' ? this.reactionCatalog?.available ?? [] : [],
-        reactions: input.context.reactions,
-        maxSelected: conversation.kind === 'group' ? input.context.maxSelected : 0,
+        available: conversation.kind === 'group' ? reactionContext.available : [],
+        reactions: reactionContext.reactions,
+        maxSelected: conversation.kind === 'group' ? reactionContext.maxSelected : 0,
       },
       timestamp: input.timestamp,
     }
