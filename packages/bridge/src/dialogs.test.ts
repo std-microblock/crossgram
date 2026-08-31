@@ -156,6 +156,52 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('DialogRpc', () => {
+  it('loads senders from projected dialog sources before materializing', async () => {
+    const conversation = { id: 'room', kind: 'group' as const, title: 'Room' }
+    const upstream = {
+      id: 'upstream-message', conversationId: conversation.id, senderId: 'alice',
+      timestamp: 10, content: { parts: [{ type: 'text' as const, text: 'preview' }] },
+    }
+    const projected = {
+      id: 'stored-message', conversationId: conversation.id, senderId: 'bob',
+      timestamp: 9, content: { parts: [{ type: 'text' as const, text: 'stored' }] },
+    }
+    const rows = new Map([
+      ['alice', { id: 10, platformId: session.platformId, platformUserId: 'alice', firstName: 'Alice', lastName: null, username: null, avatar: null, metadata: {} }],
+      ['bob', { id: 11, platformId: session.platformId, platformUserId: 'bob', firstName: 'Bob', lastName: null, username: null, avatar: null, metadata: {} }],
+    ])
+    const store: any = {
+      getUser: vi.fn(async (_platformId: string, id: string) => id === session.userId ? {
+        id: 1, platformId: session.platformId, platformUserId: session.userId,
+        firstName: 'Current', lastName: null, username: null, avatar: null, metadata: {},
+      } : undefined),
+      listDialogs: vi.fn(async () => []),
+      readDialogs: vi.fn(async () => []),
+      ingestDialogs: vi.fn(async () => undefined),
+      readUsers: vi.fn(async (_platformId: string, ids: string[]) => ids.flatMap((id) => rows.get(id) ? [rows.get(id)] : [])),
+      readProjectedByPlatformIds: vi.fn(async () => [{
+        source: projected, parts: [{ tlMessageId: 1, ordinal: 0 }], media: [],
+      }]),
+      findProjectedByPlatformId: vi.fn(async () => undefined),
+      countUnreadMentionsMany: vi.fn(async () => new Map()),
+      countUnreadMentions: vi.fn(async () => 0),
+      getChannelUpdateState: vi.fn(async () => ({ pts: 0 })),
+      listUnreadMentionIds: vi.fn(async () => new Set()),
+    }
+    const platform: IMPlatform = {
+      capabilities: { history: true, send: { text: true, images: false, files: false, mixed: false, maxTextLength: 100, maxMedia: 0 }, conversations: { groups: true, channels: false, subchannels: false } },
+      subscribe: async () => () => {},
+      sendMessage: async () => upstream,
+      getDialogs: async () => ({ dialogs: [{ conversation, unreadCount: 0, lastMessage: upstream }] }),
+    }
+    const rpc = new DialogRpc(platform, session, store)
+
+    await expect(rpc.getDialogs(getDialogsRequest())).resolves.toMatchObject({
+      dialogs: [{ topMessage: 2 }],
+    })
+    expect(store.readUsers).toHaveBeenCalledWith(session.platformId, expect.arrayContaining(['bob']))
+  })
+
   it('routes history messages through the shared Cordis projection waterfall', async () => {
     const ctx = new Context()
     const pipeline = new MessageProjectionPipeline(ctx)

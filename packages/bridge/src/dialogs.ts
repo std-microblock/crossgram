@@ -361,6 +361,13 @@ export class DialogRpc {
       const projected = await this._store.readProjectedByPlatformIds(
         this._session.platformSessionId, targets,
       )
+      // A dialog preview can point at a persisted message whose sender is not
+      // the sender from the current upstream preview (for example after a
+      // recovery or duplicate dialog row was reconciled). Load every sender
+      // referenced by the actual projected source before materialization;
+      // otherwise projectTlMessage() can call _userId() for an unmapped user
+      // even though its durable row already exists.
+      await this._syncStoredUsers(projected.flatMap(({ source }) => messageReferencedUserIds(source)))
       for (const stored of projected) {
         const materialized = stored.parts.map((part): MaterializedMessage => ({
           source: stored.source,
