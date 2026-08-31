@@ -570,7 +570,7 @@ export class MessageStore {
         .orderBy('ordinal').execute()
       return {
         changed: JSON.stringify(before.map(reactionComparable)) !== JSON.stringify(after.map(reactionComparable)),
-        message: await this._hydrateMessage(row),
+        message: await this._hydrateMessage(row, database),
         tlMessageIds: parts.map((part) => part.tlMessageId),
       }
     }), 'message-reactions', true)
@@ -1984,6 +1984,7 @@ export class MessageStore {
   private async _hydrateMessages(
     rows: readonly IMMessageRow[],
     knownConversationIds: ReadonlyMap<number, string> = new Map(),
+    database: Database = this._database,
   ): Promise<IMMessage[]> {
     if (!rows.length) return []
     const messageIds = [...new Set(rows.map((row) => row.id))]
@@ -1992,11 +1993,11 @@ export class MessageStore {
       .map((row) => row.conversationId)
       .filter((id) => !knownConversationIds.has(id)))]
     const [aliases, reactions, senders, conversations] = await Promise.all([
-      this._database.get('mtproto_im_message_alias', { messageId: { $in: messageIds } }),
-      this._database.get('mtproto_im_message_reaction', { messageId: { $in: messageIds } }),
-      this._database.get('mtproto_im_user', { id: { $in: senderUserIds } }),
+      database.get('mtproto_im_message_alias', { messageId: { $in: messageIds } }),
+      database.get('mtproto_im_message_reaction', { messageId: { $in: messageIds } }),
+      database.get('mtproto_im_user', { id: { $in: senderUserIds } }),
       missingConversationRowIds.length
-        ? this._database.get('mtproto_im_conversation', { id: { $in: missingConversationRowIds } })
+        ? database.get('mtproto_im_conversation', { id: { $in: missingConversationRowIds } })
         : Promise.resolve([]),
     ])
     const aliasesByMessage = groupByMessageId(aliases, (left, right) => left.ordinal - right.ordinal)
@@ -2021,8 +2022,8 @@ export class MessageStore {
     })
   }
 
-  private async _hydrateMessage(row: IMMessageRow): Promise<IMMessage> {
-    return (await this._hydrateMessages([row]))[0]
+  private async _hydrateMessage(row: IMMessageRow, database: Database = this._database): Promise<IMMessage> {
+    return (await this._hydrateMessages([row], new Map(), database))[0]
   }
 
   private async _replaceReactions(

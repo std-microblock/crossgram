@@ -271,10 +271,13 @@ describe('MessageStore', () => {
     }
     await store.ingest(session, conversation, message)
 
-    await store.setReactions(session, conversation, {
+    const result = await store.setReactions(session, conversation, {
       conversationId: conversation.id, messageId: message.id, targetId: message.id,
     }, { available: [], reactions: [{ key: 'like', count: 2 }], maxSelected: 20 })
 
+    expect(result?.message.reactionContext).toMatchObject({
+      reactions: [{ key: 'like', count: 2 }],
+    })
     await expect(ctx.database.get('mtproto_im_message_reaction', {})).resolves.toMatchObject([{
       nativeReactionKey: 'like', count: 2, definition,
     }])
