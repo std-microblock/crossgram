@@ -1027,12 +1027,14 @@ function uniqueDialogsByConversationId(dialogs: readonly IMDialog[]): IMDialog[]
     const previous = unique[index]!
     const previousMessage = previous.lastMessage
     const nextMessage = dialog.lastMessage
-    const preferNext = Boolean(nextMessage) && (!previousMessage
-      || nextMessage.timestamp > previousMessage.timestamp
-      || (nextMessage.timestamp === previousMessage.timestamp && nextMessage.id > previousMessage.id))
+    const preferNext = isLaterDialogMessage(nextMessage, previousMessage)
     const selected = preferNext ? dialog : previous
     unique[index] = {
       ...selected,
+      lastMessage: laterDialogMessage(previous.lastMessage, dialog.lastMessage),
+      readInboxMaxMessage: laterDialogMessage(
+        previous.readInboxMaxMessage, dialog.readInboxMaxMessage,
+      ),
       conversation: {
         ...previous.conversation,
         ...dialog.conversation,
@@ -1044,6 +1046,23 @@ function uniqueDialogsByConversationId(dialogs: readonly IMDialog[]): IMDialog[]
     }
   }
   return unique
+}
+
+function isLaterDialogMessage(
+  candidate: IMMessage | undefined,
+  current: IMMessage | undefined,
+): boolean {
+  if (!candidate) return false
+  if (!current) return true
+  return candidate.timestamp > current.timestamp
+    || (candidate.timestamp === current.timestamp && candidate.id >= current.id)
+}
+
+function laterDialogMessage(
+  left: IMMessage | undefined,
+  right: IMMessage | undefined,
+): IMMessage | undefined {
+  return isLaterDialogMessage(right, left) ? right : left
 }
 
 function dialogRevision(dialog: IMDialog): string {
