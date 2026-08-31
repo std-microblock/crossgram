@@ -865,6 +865,15 @@ export class DialogRpc {
     const requestedLimit = clampLimit(req.limit)
     const start = Math.max(0, req.addOffset)
     const target = Math.max(1, requestedLimit + start)
+    // Native QQ search already applies the text query for an unfiltered
+    // request.  Requesting a fixed 200-item page in that case makes common
+    // CJK terms fan out into hundreds of durable projections before Telegram
+    // only needs the first result.  Keep the broad page for bridge-side
+    // filters, where sparse native pages are still required for correctness.
+    const upstreamPageLimit = req.filter._ === 'inputMessagesFilterEmpty' &&
+      !req.fromId && req.minDate === 0 && req.maxDate === 0
+      ? Math.min(200, target)
+      : 200
     const candidates = cursorState?.pending.slice() ?? []
     let upstreamCursor = cursorState?.upstreamCursor
     let exhausted = cursorState?.exhausted ?? false
@@ -879,7 +888,7 @@ export class DialogRpc {
         cursor: upstreamCursor,
         // Broad pages prevent sparse bridge-side filters (especially links
         // and video subtypes) from stopping at unrelated native results.
-        limit: 200,
+        limit: upstreamPageLimit,
         fromUserId,
         minTimestamp: req.minDate > 0 ? req.minDate : undefined,
         maxTimestamp,

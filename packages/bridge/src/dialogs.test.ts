@@ -935,6 +935,41 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(second)).not.toThrow()
   })
 
+  it('uses the requested page size for unfiltered text search', async () => {
+    class NarrowSearchPlatform extends DialogTestPlatform {
+      readonly queries: IMMessageSearchQuery[] = []
+
+      async searchMessages(
+        _session: PlatformSession,
+        conversation: { id: string },
+        query: IMMessageSearchQuery,
+      ) {
+        this.queries.push(query)
+        return {
+          messages: [{
+            id: 'native-1', conversationId: conversation.id, senderId: 'alice',
+            timestamp: 1_700_000_120,
+            content: { parts: [{ type: 'text' as const, text: 'needle' }] },
+          }],
+        }
+      }
+    }
+    const platform = new NarrowSearchPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+
+    const peer = { _: 'inputPeerUser' as const, userId: rpc.peerTlId('alice'), accessHash: Long.ZERO }
+    const result = await rpc.search({
+      _: 'messages.search', peer, q: 'needle', filter: { _: 'inputMessagesFilterEmpty' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 1,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+
+    expect(platform.queries[0]?.limit).toBe(1)
+    expect(result.messages).toMatchObject([{ _: 'message', message: 'needle' }])
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('hydrates messages by synthetic ID and returns messageEmpty for unknown IDs', async () => {
     const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const dialogs = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
