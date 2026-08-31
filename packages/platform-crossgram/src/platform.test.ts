@@ -11,7 +11,7 @@ import {
   type IMMedia, type PlatformSession, type VoiceWorkerClient,
 } from '@mtproto-relay/bridge'
 import { parseQQMarkdown, QQNTPlatform } from './index.js'
-import type { QQMediaLocator } from './protocol.js'
+import type { QQMediaLocator, WireReactionContext } from './protocol.js'
 import { QQStickerProvider } from './sticker-provider.js'
 
 const session: PlatformSession = {
@@ -1207,6 +1207,57 @@ describe('QQNTPlatform mapping', () => {
       type: 'text', text: '🙂',
       entities: [{ type: 'qq-face', offset: 0, length: 2, faceId: '14', faceType: 1 }],
     }])
+  })
+
+  it('waits for the reaction catalog before mapping inline QQ faces', async () => {
+    const platform = new QQNTPlatform()
+    let resolveCatalog!: (value: WireReactionContext) => void
+    const catalog = new Promise<WireReactionContext>((resolve) => { resolveCatalog = resolve })
+    platform.client.getReactionCatalog = vi.fn(() => catalog)
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'delayed-face', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        parts: [{
+          type: 'text' as const, text: '柚子不是说上工了/续标识',
+          entities: [{
+            type: 'qq-face' as const,
+            offset: '柚子不是说上工了'.length,
+            length: '/续标识'.length,
+            faceId: '424', faceType: 1,
+          }],
+        }],
+      }],
+    }))
+
+    const historyPromise = platform.getHistory(session, { id: '2:group' })
+    let settled = false
+    void historyPromise.then(() => { settled = true })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(settled).toBe(false)
+
+    resolveCatalog({
+      available: [{
+        key: '1:424', title: '/续标识',
+        presentation: {
+          type: 'custom', alt: '🙂',
+          resource: {
+            version: 1, format: 'static', mimeType: 'image/png', width: 16, height: 16,
+            locator: { reactionKey: '1:424' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    })
+    await expect(historyPromise).resolves.toMatchObject({
+      messages: [{
+        content: {
+          parts: [{
+            type: 'text', text: '柚子不是说上工了🙂',
+            entities: [{ type: 'custom-emoji', offset: '柚子不是说上工了'.length, length: 2 }],
+          }],
+        },
+      }],
+    })
   })
 
   it('round-trips QQ mention entities and opaque reply IDs', async () => {

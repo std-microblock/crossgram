@@ -675,8 +675,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
 
   async getDialogs(session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<QQMediaLocator>> {
     await this.cleanupLegacyDialogs(session)
-    await waitAtMost(this.ensureReactionCatalog().catch(() => undefined), REACTION_CATALOG_GRACE_MS)
-    return this.prepareDialogPage(session, await this.fetchDialogsPage(session, query))
+    const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
+    await reactionWarmup
+    return this.prepareDialogPage(session, await this.fetchDialogsPage(session, query, undefined, reactionWarmup))
   }
 
   async getConversation(
@@ -692,10 +693,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     session: PlatformSession,
     query: IMPageQuery = {},
     signal?: AbortSignal,
+    reactionWarmup?: Promise<unknown>,
   ): Promise<IMDialogPage<QQMediaLocator>> {
     const response = await this.client.getDialogs({
       cursor: query.cursor, afterId: query.afterId, limit: query.limit,
     }, signal)
+    if (reactionWarmup && response.conversations.some((conversation) =>
+      wireMessageHasQQFace(conversation.lastMessage) || wireMessageHasQQFace(conversation.readInboxMaxMessage))) {
+      await reactionWarmup
+    }
     const selectedSaved = this.selectSavedMessagesConversation(session, response.conversations)
     const conversations = response.conversations.filter((conversation) =>
       !isFilteredConversationId(conversation.id)
@@ -798,7 +804,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         ? this.firstUnreadSeq.get(conversation.id)
         : undefined,
     })
-    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
+    await reactionWarmup
+    if (response.messages.some(wireMessageHasQQFace)) await reactionWarmup
     return {
       messages: await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
         .filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
@@ -864,7 +871,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       maxTimestamp: query.maxTimestamp,
       mediaKind: query.mediaKind,
     })
-    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
+    await reactionWarmup
+    if (response.messages.some(wireMessageHasQQFace)) await reactionWarmup
     return {
       messages: await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
         .filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
@@ -2028,7 +2036,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const messages = (await this.loadMultiForwardMessages(locator))
       .filter((message) => !this.isFilteredGrayTip(message))
     const senders = new Map<string, Promise<IMUser<QQMediaLocator> | null>>()
-    await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
+    await reactionWarmup
     return Promise.all(messages.map(async (message) => {
       let mapped = this.rebaseMultiForwardMedia(this.mapMessage(message), locator)
       if (!mapped.sender) {
@@ -2465,6 +2473,11 @@ function isInvalidZeroPeerConversationId(value: string): boolean {
 
 function isDeviceConversation(conversation: WireConversation): boolean {
   return conversation.chatType === 8 || conversation.chatType === 134
+}
+
+function wireMessageHasQQFace(message: WireMessage | undefined): boolean {
+  return Boolean(message?.parts.some((part) =>
+    part.type === 'text' && part.entities?.some((entity) => entity.type === 'qq-face')))
 }
 
 function isFilteredConversationId(value: string): boolean {
