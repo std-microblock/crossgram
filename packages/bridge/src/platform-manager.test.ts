@@ -657,7 +657,7 @@ describe('PlatformDataService', () => {
     })
   })
 
-  it('returns a fresh dialog page while a replay backlog delays persistence', async () => {
+  it('waits for dialog persistence before returning a fresh page', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()
     platform.capabilities.history = true
@@ -670,13 +670,15 @@ describe('PlatformDataService', () => {
     }))
     const data = new PlatformDataService(platform, session, store)
 
-    const startedAt = Date.now()
-    const page = await data.getDialogsPage({ limit: 100 })
-    expect(page.dialogs[0]?.lastMessage?.id).toBe('fresh-latest')
-    expect(Date.now() - startedAt).toBeLessThan(1_000)
-
-    release.resolve()
+    let settled = false
+    const pending = data.getDialogsPage({ limit: 100 }).finally(() => { settled = true })
     await vi.waitFor(() => expect(store.ingestDialogs).toHaveBeenCalledOnce())
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    release.resolve()
+    await expect(pending).resolves.toMatchObject({
+      dialogs: [{ lastMessage: { id: 'fresh-latest' } }],
+    })
   })
 
   it('keeps dialog preview and opened history on the same recovered latest message', async () => {

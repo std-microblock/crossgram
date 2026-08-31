@@ -603,12 +603,6 @@ export type PlatformEventPublishResult = tl.RawUpdates | void
 
 /** Synchronizes optional upstream history into the canonical database before reads. */
 export class PlatformDataService {
-  // Dialog reads must not sit behind a burst of replay/history writes.  The
-  // upstream page is authoritative for this request, while persistence is a
-  // durability side effect that may continue in the background when the
-  // shared MessageStore write tail is busy (for example immediately after a
-  // QQ reconnect).  Keep a small grace period for the usual fast path.
-  private static readonly DIALOG_PERSISTENCE_GRACE_MS = 250
   private readonly _dialogPageLoads = new Map<string, Promise<IMDialogPage>>()
   private readonly _historyLoads = new Map<string, Promise<IMMessage[]>>()
   private readonly _dialogReconciliationRevisions = new Map<string, string>()
@@ -703,13 +697,11 @@ export class PlatformDataService {
       this._session.platformSessionId,
       upstreamDialogs.map((dialog) => dialog.conversation.id),
     )
-    const persist = this._persistDialogs(upstreamDialogs, persistedDialogs).catch((error) => {
-      this._onTrace?.(
-        'dialog persistence failed session=%s dialogs=%d error=%s',
-        this._session.platformSessionId, upstreamDialogs.length, formatError(error),
-      )
-    })
-    await waitAtMost(persist, PlatformDataService.DIALOG_PERSISTENCE_GRACE_MS)
+    // Dialog projections call _userId while materializing preview messages.
+    // Await the durable ingest so sender/referenced-user rows are visible
+    // before returning the authoritative page; never race persistence against
+    // projection or continue it in the background.
+    await this._persistDialogs(upstreamDialogs, persistedDialogs)
     this._scheduleDialogReconciliation(upstreamDialogs, persistedDialogs)
     const persisted = new Map(persistedDialogs.map((dialog) => [dialog.conversation.id, dialog]))
     const dialogs = upstreamDialogs.map((dialog) => {
@@ -1039,20 +1031,6 @@ function historyLoadKey(
     query.after?.id ?? null,
     query.after?.timestamp ?? null,
   ])
-}
-
-/** Wait for a best-effort side effect without delaying the authoritative read. */
-async function waitAtMost(promise: Promise<unknown>, milliseconds: number): Promise<void> {
-  if (milliseconds <= 0) return
-  let timer: ReturnType<typeof setTimeout> | undefined
-  await Promise.race([
-    promise,
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, milliseconds)
-      timer.unref?.()
-    }),
-  ])
-  if (timer) clearTimeout(timer)
 }
 
 export function sessionFromRow(row: PlatformSessionRow, virtualPhone?: string): PlatformSession {
