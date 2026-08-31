@@ -1002,24 +1002,24 @@ describe('rich-media projection', () => {
     })
   })
 
-  it('omits a zero-byte native preview even when it has distinct display dimensions', () => {
+  it('advertises a distinct zero-byte native preview with the original size as an upper bound', () => {
     const media = makeTlMessageMedia({
       id: 19_857,
       messageId: 1,
       ordinal: 0,
       partIndex: 0,
-      platformMediaId: 'wide-zero-byte-preview',
+      platformMediaId: 'large-zero-byte-preview',
       kind: 'image',
-      name: 'wide.png',
+      name: 'large.png',
       mimeType: 'image/png',
-      size: 149_806,
-      width: 1_920,
-      height: 860,
+      size: 30_498_705,
+      width: 4_070,
+      height: 3_959,
       duration: null,
       preview: {
         size: 0,
         width: 1_280,
-        height: 573,
+        height: 1_245,
         locator: { imageSpec: 720 },
       },
       strippedThumbnail: null,
@@ -1030,10 +1030,12 @@ describe('rich-media projection', () => {
     expect(media).toMatchObject({
       _: 'messageMediaPhoto',
       photo: { _: 'photo', sizes: [
-        { _: 'photoSize', type: 'y', w: 1_280, h: 573, size: 149_806 },
-        { _: 'photoSize', type: 'w', w: 1_920, h: 860, size: 149_806 },
+        { _: 'photoSize', type: 'm', w: 1_280, h: 1_245, size: 30_498_705 },
+        { _: 'photoSize', type: 'y', w: 2_560, h: 2_490, size: 30_498_705 },
+        { _: 'photoSize', type: 'w', w: 4_070, h: 3_959, size: 30_498_705 },
       ] },
     })
+    expect(() => wireRoundTrip(media)).not.toThrow()
   })
 
   it('does not advertise a zero-byte video preview as a downloadable thumbnail', () => {
@@ -1098,6 +1100,63 @@ describe('rich-media projection', () => {
     })
     expect(JSON.parse(direct.data)).toMatchObject({
       url: 'https://cdn.example.test/photo-preview', supportsRange: true,
+    })
+  })
+
+  it('serves a remote native photo preview whose QQ metadata reports zero bytes', async () => {
+    const zeroSizePreviewMessage: IMMessage = {
+      ...album,
+      id: 'zero-size-preview-message',
+      sourceIds: undefined,
+      content: { parts: [{
+        type: 'media',
+        media: {
+          id: 'large-photo', kind: 'image', name: 'large.png', mimeType: 'image/png',
+          size: 30_498_705, width: 4_070, height: 3_959,
+          locator: { remote: 'large-photo-original' },
+          preview: {
+            mimeType: 'image/png', size: 0, width: 1_280, height: 1_245,
+            locator: { remote: 'large-photo-preview' },
+          },
+        },
+      }] },
+    }
+    const zeroSizePreviewPlatform: IMPlatform = {
+      ...platform,
+      async getHistory() { return { messages: [zeroSizePreviewMessage] } },
+    }
+    const { store, peerId } = await createStore()
+    const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-zero-size-preview-'))
+    disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
+    const rpc = new DialogRpc(
+      zeroSizePreviewPlatform, session, store, new UploadManager(uploadPath),
+    )
+    const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const projected = (history.messages[0] as tl.RawMessage).media as tl.RawMessageMediaPhoto
+    if (projected.photo?._ !== 'photo') throw new Error('expected projected photo')
+    expect(projected.photo.sizes).toMatchObject([
+      { _: 'photoSize', type: 'm', w: 1_280, h: 1_245, size: 30_498_705 },
+      { _: 'photoSize', type: 'y', w: 2_560, h: 2_490, size: 30_498_705 },
+      { _: 'photoSize', type: 'w', w: 4_070, h: 3_959, size: 30_498_705 },
+    ])
+
+    const location = {
+      _: 'inputPhotoFileLocation' as const,
+      id: projected.photo.id,
+      accessHash: projected.photo.accessHash,
+      fileReference: projected.photo.fileReference,
+      thumbSize: 'm',
+    }
+    const file = await rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location, offset: 0, limit: 1024,
+    })
+    if (file._ !== 'upload.file') throw new Error('expected file')
+    expect(new TextDecoder().decode(file.bytes)).toBe('large-photo-preview')
+
+    const direct = await rpc.getFileUrl(location)
+    expect(JSON.parse(direct.data)).toMatchObject({
+      url: 'https://cdn.example.test/large-photo-preview', supportsRange: true,
     })
   })
 

@@ -2258,7 +2258,7 @@ export class DialogRpc {
       req.location.id.toNumber(),
     )
     if (transient && this._platform.downloadMedia) {
-      const media = req.location.thumbSize === 'm' && isDownloadablePreview(transient.media.preview)
+      const media = shouldServeMediaPreview(req.location, transient.media)
         ? previewMedia(transient.media)
         : transient.media
       if (!media.locator) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
@@ -2280,7 +2280,7 @@ export class DialogRpc {
     }
     const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
-    const media = req.location.thumbSize === 'm' && isDownloadablePreview(stored.media.preview)
+    const media = shouldServeMediaPreview(req.location, stored.media)
       ? previewMedia(stored.media)
       : stored.media
     if (!media.locator) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
@@ -2322,7 +2322,7 @@ export class DialogRpc {
     const stored = transient ? undefined : await this._store?.getMedia(this._session.platformSessionId, mediaId)
     if (!transient && !stored) throw new RpcError(400, 'FILE_ID_INVALID')
     const source = transient?.media ?? stored!.media
-    const media = location.thumbSize === 'm' && isDownloadablePreview(source.preview)
+    const media = shouldServeMediaPreview(location, source)
       ? previewMedia(source)
       : source
     let resolved: import('./platform.js').IMDirectDownload | undefined
@@ -5932,7 +5932,8 @@ function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhot
   // the local full-size cache entry to the preview tier first, so the final
   // photo has to be inserted and downloaded again. Keep native previews only
   // when they are a genuinely distinct rendition.
-  const nativePreview = isDownloadablePreview(media.preview) ? media.preview : undefined
+  const nativePreviewSize = projectedPhotoPreviewSize(media)
+  const nativePreview = nativePreviewSize === undefined ? undefined : media.preview!
   const preview = nativePreview
     && (!(media.width && media.height)
       || nativePreview.width !== dimensions.width
@@ -5945,7 +5946,7 @@ function makeTlPhoto(media: IMMediaRow, timestamp: number, dcId = 1): tl.RawPhot
       ...(media.strippedThumbnail?.byteLength ? [{
         _: 'photoStrippedSize' as const, type: 'i', bytes: new Uint8Array(media.strippedThumbnail),
       }] : []),
-      ...(preview ? [photoPreviewSize(preview)] : []),
+      ...(preview ? [photoPreviewSize(preview, nativePreviewSize!)] : []),
       ...originalPhotoSizes(dimensions, media.size, Boolean(preview)),
     ],
     dcId,
@@ -6038,6 +6039,33 @@ function previewMedia(media: IMMedia<any>): IMMedia<any> {
     id: `${media.id}:preview`, kind: 'image', mimeType: preview.mimeType,
     size: preview.size, width: preview.width, height: preview.height, locator: preview.locator,
   }
+}
+
+function shouldServeMediaPreview(
+  location: tl.RawInputDocumentFileLocation | tl.RawInputPhotoFileLocation,
+  media: IMMedia<any>,
+): boolean {
+  if (location.thumbSize !== 'm') return false
+  if (location._ === 'inputPhotoFileLocation') return projectedPhotoPreviewSize(media) !== undefined
+  return isDownloadablePreview(media.preview)
+}
+
+/**
+ * QQ's native 720-tier image is remotely downloadable even when QQNT reports
+ * thumbFileSize=0. Telegram refuses a zero-byte PhotoSize, so use the original
+ * byte count as a conservative upper bound until the preview stream reaches
+ * EOF. File loaders already accept an early short/empty chunk as completion.
+ */
+function projectedPhotoPreviewSize<T extends {
+  size?: number | null
+  preview?: { size: number, width: number, height: number } | null
+}>(media: T): number | undefined {
+  const preview = media.preview
+  if (!preview || !Number.isSafeInteger(preview.width) || preview.width <= 0
+    || !Number.isSafeInteger(preview.height) || preview.height <= 0) return
+  if (Number.isSafeInteger(preview.size) && preview.size > 0) return preview.size
+  const originalSize = media.size
+  if (Number.isSafeInteger(originalSize) && originalSize > 0) return originalSize
 }
 
 function isDownloadablePreview<T extends { size: number }>(
@@ -6206,11 +6234,14 @@ function originalPhotoSizes(
   ]
 }
 
-function photoPreviewSize(preview: NonNullable<IMMediaRow['preview']>): tl.RawPhotoSize {
+function photoPreviewSize(
+  preview: NonNullable<IMMediaRow['preview']>,
+  byteSize: number,
+): tl.RawPhotoSize {
   const dimensions = cappedPhotoDimensions(preview.width, preview.height, TELEGRAM_DISPLAY_PHOTO_SIDE)
   return {
     _: 'photoSize', type: 'm', w: dimensions.width, h: dimensions.height,
-    size: Math.min(preview.size, 0x7fffffff),
+    size: Math.min(byteSize, 0x7fffffff),
   }
 }
 

@@ -1397,7 +1397,7 @@ describe('QQNT remote media routing E2E', () => {
 })
 
 describe('QQNT history media without placeholder edits E2E', () => {
-  it('returns history without downloading images and exposes the original direct URL', async () => {
+  it('serves a zero-size native preview without downloading the original during history', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -1502,11 +1502,11 @@ describe('QQNT history media without placeholder edits E2E', () => {
           id: 'history-media', kind: 'image' as const, name: 'history.jpg', mimeType: 'image/jpeg',
           size: jpeg.length, width: 2832, height: 1280,
           preview: {
-            mimeType: 'image/jpeg', size: nativePreview.length, width: 1280, height: 579,
+            mimeType: 'image/jpeg', size: 0, width: 1280, height: 579,
             locator: {
               messageId: 'history-image', elementId: 'history-media', chatType: 2 as const,
               peerUid: 'history', kind: 'image' as const, fileName: 'history.jpg',
-              fileSize: String(nativePreview.length), imageSpec: 720 as const,
+              imageSpec: 720 as const,
               originImageUrl: '/download?appid=1407&fileid=history&spec=0',
             },
           },
@@ -1537,7 +1537,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     const original = await store.getMedia(session.platformSessionId, mediaId)
     expect(original?.media).toMatchObject({
       kind: 'image', size: jpeg.length, width: 2832, height: 1280,
-      preview: { size: nativePreview.length, width: 1280, height: 579 },
+      preview: { size: 0, width: 1280, height: 579 },
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
 
@@ -1547,7 +1547,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
       throw new Error('expected projected photo')
     }
     expect(projected.photo.sizes).toMatchObject([
-      { _: 'photoSize', type: 'm', w: 1280, h: 579, size: nativePreview.length },
+      { _: 'photoSize', type: 'm', w: 1280, h: 579, size: jpeg.length },
       { _: 'photoSize', type: 'y', w: 2560, h: 1157, size: jpeg.length },
       { _: 'photoSize', type: 'w', w: 2832, h: 1280, size: jpeg.length },
     ])
@@ -1595,7 +1595,7 @@ describe('QQNT history media without placeholder edits E2E', () => {
     const ready = await store.getMedia(session.platformSessionId, mediaId)
     expect(ready?.media).toMatchObject({
       kind: 'image', size: jpeg.length, width: 2832, height: 1280,
-      preview: { size: nativePreview.length, width: 1280, height: 579 },
+      preview: { size: 0, width: 1280, height: 579 },
       locator: expect.not.objectContaining({ deferred: expect.anything() }),
     })
     expect(await collect(platform.downloadMedia(session, ready!.media as any))).toEqual(jpeg)
