@@ -20,6 +20,12 @@ import type {
   MessageProjectionPlanInput,
   MessageProjectionResult,
 } from './message-projection.js'
+import type {
+  SpeechSynthesisInput,
+  SpeechSynthesisResult,
+  SpeechTranscriptionInput,
+  SpeechTranscriptionResult,
+} from './speech.js'
 
 declare module 'cordis' {
   interface Context {
@@ -29,6 +35,8 @@ declare module 'cordis' {
     systemPeer: SystemPeerService
     mtprotoBridge: MtprotoBridgeService
     bridgeManagement: BridgeManagementService
+    /** Cordis speech-to-text/text-to-speech provider waterfalls. */
+    speech: import('./speech.js').SpeechPipeline
     /** Present on one active platform-session fiber and its descendants. */
     bridgeSession: {
       platform: IMPlatform
@@ -69,5 +77,13 @@ declare module 'cordis' {
       input: MessageProjectionInput,
       next: () => MessageProjectionResult | Promise<MessageProjectionResult>,
     ): MessageProjectionResult | Promise<MessageProjectionResult>
+    'bridge/speech/transcribe'(
+      input: SpeechTranscriptionInput,
+      next: () => SpeechTranscriptionResult | undefined | Promise<SpeechTranscriptionResult | undefined>,
+    ): SpeechTranscriptionResult | undefined | Promise<SpeechTranscriptionResult | undefined>
+    'bridge/speech/synthesize'(
+      input: SpeechSynthesisInput,
+      next: () => SpeechSynthesisResult | undefined | Promise<SpeechSynthesisResult | undefined>,
+    ): SpeechSynthesisResult | undefined | Promise<SpeechSynthesisResult | undefined>
   }
 }

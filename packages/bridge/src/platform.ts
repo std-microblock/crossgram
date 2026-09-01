@@ -210,6 +210,8 @@ export interface IMMedia<TLocator = unknown> {
   duration?: number
   /** True only for recorded voice messages, not ordinary audio files. */
   voice?: boolean
+  /** Optional speech-to-text text supplied by the source platform. */
+  transcript?: string
   /** Optional adapter-generated preview, downloaded through the same media method. */
   preview?: IMMediaPreview<TLocator>
   /** Telegram-compatible inline stripped JPEG shown before any media download. */
@@ -729,6 +731,15 @@ export type IMEvent<TMediaLocator = unknown> =
       conversation: IMConversation<TMediaLocator>
       target: IMMessageTarget
       context: IMReactionContext
+      timestamp: number
+    }
+  | {
+      /** Asynchronous speech-to-text result for an existing voice message. */
+      type: 'voice-transcript'
+      eventId: string
+      conversation: IMConversation<TMediaLocator>
+      messageId: string
+      transcript: string
       timestamp: number
     }
   | {

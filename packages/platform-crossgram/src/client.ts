@@ -603,8 +603,8 @@ export class QQNTClient {
       if (this.bridgeProtocol! < 21) {
         throw new Error('QQNT bridge protocol 21 is required for voice messages')
       }
-      if (media?.length !== 1 || text || textParts?.length || sticker || replyToId || replyToSequence) {
-        throw new Error('QQNT voice messages must contain exactly one voice item without a reply')
+      if (media?.length !== 1 || text || textParts?.length || sticker || replyToSequence) {
+        throw new Error('QQNT voice messages must contain exactly one voice item')
       }
       const manifest = {
         conversationId, replyToId, replyToSequence, originRequestId,

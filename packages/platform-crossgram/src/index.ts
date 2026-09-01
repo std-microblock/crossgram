@@ -1117,8 +1117,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
     if (mediaParts.length > 9) throw new Error('QQNT supports at most nine media items per message')
     const voiceParts = mediaParts.filter((part) => part.media.voice)
-    if (voiceParts.length && (voiceParts.length !== 1 || mediaParts.length !== 1 || text || sticker || content.replyToId || content.replyToNativeSequence)) {
-      throw new Error('QQNT voice messages must contain exactly one voice item without a reply')
+    if (voiceParts.length && (voiceParts.length !== 1 || mediaParts.length !== 1 || text || sticker || content.replyToNativeSequence)) {
+      throw new Error('QQNT voice messages must contain exactly one voice item')
     }
     const media: QQOutboundMedia[] = mediaParts.map((part, index) => ({
       kind: part.media.kind,
@@ -1911,6 +1911,16 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         timestamp: input.timestamp,
       }
     }
+    if (input.type === 'voice-transcript') {
+      return {
+        type: 'voice-transcript',
+        eventId: input.eventId,
+        conversation,
+        messageId: input.messageId,
+        transcript: input.transcript,
+        timestamp: input.timestamp,
+      }
+    }
     if (input.type === 'message-delete') return {
       type: 'message-delete',
       eventId: input.eventId,
@@ -2102,6 +2112,9 @@ function wireEventSummary(event: WireEvent): string {
   if (event.type === 'call-signal') {
     return `type=call-signal version=${event.version} signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`
   }
+  if (event.type === 'voice-transcript') {
+    return `type=voice-transcript conversation=${event.conversation.id} message=${event.messageId}`
+  }
   if (event.type === 'message' || event.type === 'message-edit') {
     return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} sender=${event.message.senderId} outgoing=${Boolean(event.message.outgoing)} parts=${event.message.parts.length}`
   }
@@ -2216,6 +2229,7 @@ function mapMedia(input: WireMedia): IMMedia<QQMediaLocator> {
     height: input.height,
     duration: input.duration,
     voice: input.voice,
+    transcript: input.transcript,
     preview: input.preview,
     locator: input.locator,
   }
@@ -2379,6 +2393,8 @@ function mapParts(
     } else {
       const media = mapMedia(part.media)
       parts.push({ type: 'media', media: projectMedia?.(media) ?? media })
+      const transcript = part.media.transcript?.trim()
+      if (part.media.voice && transcript) parts.push({ type: 'text', text: `[语音] ${transcript}` })
     }
   }
   return parts

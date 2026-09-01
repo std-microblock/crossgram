@@ -47,6 +47,8 @@ export interface WireMedia {
   height?: number
   duration?: number
   voice?: boolean
+  /** QQ-native speech-to-text result, when available. */
+  transcript?: string
   preview?: {
     mimeType?: string
     size: number
@@ -355,6 +357,14 @@ export type WireEvent =
   | { type: 'message-edit', eventId: string, conversation: WireConversation, message: WireMessage }
   | { type: 'request', request: WireRequest }
   | WireCallSignalEvent
+  | {
+      type: 'voice-transcript'
+      eventId: string
+      conversation: WireConversation
+      messageId: string
+      transcript: string
+      timestamp: number
+    }
   | WireNativeAvsdkEvent
   | {
       type: 'message-delete'

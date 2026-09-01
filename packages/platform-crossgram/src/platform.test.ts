@@ -36,6 +36,29 @@ afterEach(async () => {
 })
 
 describe('QQNTPlatform mapping', () => {
+  it('projects a QQ-native voice transcript beside the playable voice media', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'voice-message', conversationId: 'friend', senderId: 'peer', timestamp: 1, outgoing: false,
+        parts: [{ type: 'media' as const, media: {
+          id: 'ptt', kind: 'file' as const, voice: true, mimeType: 'audio/ogg', duration: 3,
+          transcript: '你好，世界',
+          locator: {
+            messageId: 'voice-message', elementId: 'ptt', chatType: 1 as const,
+            peerUid: 'peer', kind: 'voice' as const, fileName: 'voice.ogg',
+          },
+        } }],
+      }],
+    }))
+
+    const [message] = (await platform.getHistory(session, { id: 'friend' })).messages
+    expect(message.content.parts).toMatchObject([
+      { type: 'media', media: { voice: true, mimeType: 'audio/ogg', duration: 3 } },
+      { type: 'text', text: '[语音] 你好，世界' },
+    ])
+  })
+
   it('maps QQNT ranged-read past EOF responses to an empty Telegram chunk', async () => {
     const platform = new QQNTPlatform()
     platform.client.downloadFile = vi.fn(async function* () {

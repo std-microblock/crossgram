@@ -51,6 +51,7 @@ import type { VoiceCallMediaProvider } from './voice/media.js'
 import { createBuiltInVoiceMediaProvider } from './voice/media-config.js'
 import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
+import { SpeechPipeline } from './speech.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 import type { BotDashboardData } from './bot-dashboard.js'
 import { RequestInboxSystemPeerProvider } from './request-inbox.js'
@@ -91,6 +92,7 @@ export * from './voice/call-registry.js'
 export * from './voice/media.js'
 export * from './voice/voice-worker-client.js'
 export * from './voice/voice-rpc.js'
+export * from './speech.js'
 export * from './system-peer.js'
 export * from './bridge-service.js'
 export * from './stripped-thumbnail.js'
@@ -105,7 +107,7 @@ export * from './message-projection.js'
 export const name = 'mtproto-bridge'
 export const inject = ['mtproto', 'database', 'model', 'server', 'webui', 'updateStore']
 export const provide = [
-  'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'mtprotoBridge', 'bridgeManagement',
+  'imPlatform', 'imSticker', 'telegramResource', 'systemPeer', 'mtprotoBridge', 'bridgeManagement', 'speech',
 ]
 
 export interface BridgeConfig {
@@ -206,6 +208,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const stickerProviders = new IMStickerService(ctx)
   const resources = new TelegramResourceService(ctx)
   const systemPeers = new SystemPeerService(ctx)
+  new SpeechPipeline(ctx)
   const management = new BridgeManagementService(ctx)
   const registry = platforms.registry
   const rpc = ctx.mtproto

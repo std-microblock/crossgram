@@ -195,6 +195,38 @@ describe('PlatformSubscriptionManager', () => {
     await manager.stop()
   })
 
+  it('turns a native voice transcript event into a durable message edit', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const committed: CommittedPlatformEvent[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store, undefined,
+      (_session, value) => { if (value) committed.push(value as never) },
+    )
+    const conversation: IMConversation = { id: 'transcript-room', kind: 'direct', title: 'Transcript' }
+    await manager.ensure(session)
+    await manager.ingestLocalEvent(session, {
+      type: 'message', conversation,
+      message: {
+        id: 'voice-1', conversationId: conversation.id, senderId: 'peer', timestamp: 1,
+        content: { parts: [{ type: 'media', media: { id: 'voice', kind: 'file', voice: true, duration: 2 } }] },
+      },
+    })
+    await manager.ingestLocalEvent(session, {
+      type: 'voice-transcript', eventId: 'transcript-1', conversation,
+      messageId: 'voice-1', transcript: '自动转写', timestamp: 2,
+    })
+    expect(committed.at(-1)).toMatchObject({
+      event: { type: 'message-edit', eventId: 'transcript-1', message: {
+        content: { parts: [
+          { type: 'media' }, { type: 'text', text: '[语音] 自动转写' },
+        ] },
+      } },
+    })
+    await manager.stop()
+  })
+
   it('turns QQ deletes into idempotent strikethrough edits while other platforms still delete', async () => {
     const database = await createDatabase()
     const qq = new QQPlatform()
