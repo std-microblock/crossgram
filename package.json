@@ -21,7 +21,7 @@
     "build": "yakumo build",
     "dev": "cross-env NODE_ENV=development NODE_OPTIONS=\"--import tsx --import @cordisjs/unyaml\" cordis run",
     "start": "cordis run",
-    "schema:sync": "node scripts/sync-telegram-schemas.mjs",
+    "schema:sync": "node scripts/sync-telegram-schemas.mjs && node scripts/generate-historical-reader-map.mjs",
     "schema:test": "node --test scripts/sync-telegram-schemas.test.mjs",
     "binary-clean:test": "node --test binary_patch/clean-materialgram.unit.test.cjs binary_patch/clean-materialgram.e2e.test.cjs",
     "skill:test": "node --test .agents/skills/inspect-relay/scripts/*.test.mjs",

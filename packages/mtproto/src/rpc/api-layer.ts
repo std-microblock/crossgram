@@ -4,6 +4,7 @@ import type { TlReaderMap, TlWriterMap } from '@mtcute/tl-runtime'
 import { generateReaderCodeForTlEntries, generateWriterCodeForTlEntries, parseTlToEntries, type TlEntry } from '@mtcute/tl-utils'
 import currentSchemaJson from '@mtcute/core/tl/api-schema.json' with { type: 'json' }
 import manifestJson from '../../schema/api/manifest.json' with { type: 'json' }
+import generatedHistoricalReaderMap from './generated-historical-reader-map.js'
 
 interface SchemaRecord {
   requestedLayer: number
@@ -146,22 +147,11 @@ export function getApiLayerReaderMap(layer: number): TlReaderMap | null {
  */
 export function getHistoricalApiLayerReaderMap(): TlReaderMap {
   if (historicalReaderMap) return historicalReaderMap
-  // Do not retain every parsed snapshot. The mirrored history currently
-  // contains more than one million entry objects across all layers, while
-  // the final reader only needs the newest definition for each constructor
-  // ID. Keeping the per-layer arrays alive made the production heap grow by
-  // hundreds of megabytes immediately at startup.
-  const uniqueEntries = collectNewestEntriesById(
-    availableLayers.map(record => record.requestedLayer),
-    loadSchemaEntries,
-  )
-  const code = generateReaderCodeForTlEntries(uniqueEntries, {
-    variableName: 'm',
-    includeMethods: true,
-    includeMethodResults: true,
-  })
-  // eslint-disable-next-line no-new-func
-  historicalReaderMap = new Function(`${code};return m`)() as TlReaderMap
+  // The historical schema union is generated offline. Parsing all 111
+  // snapshots (over a million transient entry objects) during startup caused
+  // V8/glibc to retain a large native high-water mark even after the entries
+  // were discarded. The generated map keeps startup allocation bounded.
+  historicalReaderMap = generatedHistoricalReaderMap
   return historicalReaderMap
 }
 

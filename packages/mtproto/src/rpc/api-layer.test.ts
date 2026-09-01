@@ -11,6 +11,7 @@ import {
   CURRENT_API_LAYER,
   getApiLayerReaderMap,
   getApiLayerWriterMap,
+  getHistoricalApiLayerReaderMap,
   resolveApiSchemaLayer,
   resolveApiSchemaProfile,
 } from './api-layer.js'
@@ -42,6 +43,16 @@ const message = {
 } as tl.RawMessage & { toId: { _: 'peerUser', userId: number } }
 
 describe('API layer response writers', () => {
+  it('loads the pre-generated historical reader union once', () => {
+    const first = getHistoricalApiLayerReaderMap()
+    const second = getHistoricalApiLayerReaderMap()
+    const legacyGetHistory = constructorFromLocalSchema(105, 'messages.getHistory')
+
+    expect(first).toBe(second)
+    expect(Object.keys(first)).toHaveLength(3_610)
+    expect(first[legacyGetHistory]).toBeTypeOf('function')
+  })
+
   it('keeps only the newest definition for each historical constructor ID', () => {
     const oldestOnly = { id: 1, name: 'oldest-only' }
     const replaced = { id: 2, name: 'old-definition' }
