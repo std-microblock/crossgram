@@ -1830,11 +1830,17 @@ export class DialogRpc {
       const conversation = this._conversation(conversationId)
       const policy = this._platform.capabilities.messageActions?.delete
       const now = Math.floor(Date.now() / 1000)
-      const allowed = targets.every(({ source }) => messageRuleAllows(
-        source.outgoing || source.senderId === this._session.userId ? policy?.own : policy?.others,
-        source.timestamp,
-        now,
-      ))
+      const canDeleteAny = await this._canDeleteAnyMessage(conversationId)
+      const allowed = targets.every(({ source }) => {
+        const own = source.outgoing || source.senderId === this._session.userId
+        // QQ administrators can recall older messages from other members. The
+        // adapter still controls whether deletion is supported at all, while
+        // the regular-member age limit remains in force.
+        const rule = own || !canDeleteAny ? (own ? policy?.own : policy?.others) : {
+          supported: policy?.others?.supported ?? false,
+        }
+        return messageRuleAllows(rule, source.timestamp, now)
+      })
       if (!allowed) throw new RpcError(400, 'MESSAGE_DELETE_FORBIDDEN')
       try {
         await this._actions.delete(
@@ -4578,6 +4584,17 @@ export class DialogRpc {
         )
       : (await this._allMembers(conversationId)).find((item) => item.user.id === this._session.userId)
     return member?.permissions?.editAnyMessage === true
+  }
+
+  private async _canDeleteAnyMessage(conversationId: string): Promise<boolean> {
+    const conversation = this._conversation(conversationId)
+    if (conversation.kind === 'direct') return false
+    const member = this._platform.getConversationMember
+      ? await this._platform.getConversationMember(
+          this._session, { id: conversationId }, this._session.userId,
+        )
+      : (await this._allMembers(conversationId)).find((item) => item.user.id === this._session.userId)
+    return member?.permissions?.deleteAnyMessage === true
   }
 
   private async _memberPage(

@@ -1324,6 +1324,53 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('lets administrators delete older messages while keeping regular members time-limited', async () => {
+    const limitedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        messageActions: {
+          ...platform.capabilities.messageActions!,
+          delete: {
+            own: { supported: true, maxAgeSeconds: 120 },
+            others: { supported: true, maxAgeSeconds: 120 },
+          },
+        },
+      },
+    }
+    const { rpc } = await createRpc(limitedPlatform)
+    await rpc.getDialogs(dialogsRequest())
+    const groupId = stableId('peer:group')
+    const groupChannel = { _: 'inputChannel' as const, channelId: groupId, accessHash: Long.ZERO }
+    const history = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
+    const oldIncomingId = (history.messages[0] as tl.RawMessage).id
+
+    await expect(rpc.deleteMessages({
+      _: 'channels.deleteMessages', channel: groupChannel, id: [oldIncomingId],
+    }, groupChannel)).resolves.toMatchObject({ ptsCount: 1 })
+
+    const memberPlatform: IMPlatform = {
+      ...limitedPlatform,
+      async getConversationMember(localSession, target, userId) {
+        const member = await platform.getConversationMember!(localSession, target, userId)
+        return userId === localSession.userId && member
+          ? { ...member, role: 'member', permissions: { ...member.permissions, deleteAnyMessage: false } }
+          : member
+      },
+    }
+    const { rpc: memberRpc } = await createRpc(memberPlatform)
+    await memberRpc.getDialogs(dialogsRequest())
+    const memberHistory = await memberRpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: groupId, accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
+    const memberOldIncomingId = (memberHistory.messages[0] as tl.RawMessage).id
+    await expect(memberRpc.deleteMessages({
+      _: 'channels.deleteMessages', channel: groupChannel, id: [memberOldIncomingId],
+    }, groupChannel)).rejects.toMatchObject({ text: 'MESSAGE_DELETE_FORBIDDEN' })
+  })
+
   it('serves the peer metadata RPCs required by desktop group and channel views', async () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())
@@ -1405,7 +1452,7 @@ describe('conversation kinds', () => {
 
     expect(chats.get('owner-group')).toMatchObject({ creator: true, adminRights: { addAdmins: true } })
     expect(chats.get('admin-group')).toMatchObject({
-      creator: undefined, adminRights: { changeInfo: true, addAdmins: false },
+      creator: undefined, adminRights: { changeInfo: true, banUsers: true, deleteMessages: true, addAdmins: false },
     })
     expect(chats.get('member-group')).toMatchObject({ creator: undefined, adminRights: undefined })
   })
