@@ -105,6 +105,8 @@ export const ACCOUNT_UPDATE_SCOPE = 'account'
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 const STORED_SENDER_TITLE_KEY = '__mtprotoRelaySenderTitle'
 const STORED_RECALLED_KEY = '__mtprotoRelayRecalled'
+const STORED_CONVERSATION_SELF_ROLE_KEY = '__mtprotoRelaySelfRole'
+const STORED_CONVERSATION_SELF_PERMISSIONS_KEY = '__mtprotoRelaySelfPermissions'
 
 /** Durable canonical store shared by history sync, push ingestion, and sends. */
 export class MessageStore {
@@ -302,7 +304,10 @@ export class MessageStore {
         avatar: (dialog.conversation.avatar
           ?? existingConversations.get(dialog.conversation.id)?.avatar
           ?? null) as JsonValue | null,
-        metadata: dialog.conversation.metadata ?? {},
+        metadata: conversationMetadata(
+          dialog.conversation,
+          existingConversations.get(dialog.conversation.id)?.metadata,
+        ),
         unreadCount: dialog.unreadCount,
         updatedAt: now,
       })), ['platformSessionId', 'platformConversationId'])
@@ -1628,13 +1633,14 @@ export class MessageStore {
       platformSessionId: session.platformSessionId,
       platformConversationId: conversation.id,
     })
+    const metadata = conversationMetadata(conversation, existing?.metadata)
     const peerChanged = !existing
       || existing.kind !== conversation.kind
       || existing.title !== conversation.title
       || existing.parentPlatformConversationId !== (conversation.parentId ?? null)
       || existing.spacePlatformId !== (conversation.spaceId ?? null)
       || JSON.stringify(existing.avatar) !== JSON.stringify(conversation.avatar ?? existing.avatar ?? null)
-      || JSON.stringify(existing.metadata) !== JSON.stringify(conversation.metadata ?? {})
+      || JSON.stringify(existing.metadata) !== JSON.stringify(metadata)
     const values = {
       platformSessionId: session.platformSessionId,
       platformConversationId: conversation.id,
@@ -1643,7 +1649,7 @@ export class MessageStore {
       parentPlatformConversationId: conversation.parentId ?? null,
       spacePlatformId: conversation.spaceId ?? null,
       avatar: (conversation.avatar ?? existing?.avatar ?? null) as JsonValue | null,
-      metadata: conversation.metadata ?? {},
+      metadata,
       unreadCount: unreadCount ?? existing?.unreadCount ?? 0,
       updatedAt: now,
     }
@@ -2205,6 +2211,7 @@ function requestFromRow(row: IMRequestRow): IMRequest {
 }
 
 function toConversation(row: IMConversationRow): IMConversation {
+  const hydrated = hydrateConversationMetadata(row.metadata)
   return {
     id: row.platformConversationId,
     kind: row.kind,
@@ -2212,7 +2219,91 @@ function toConversation(row: IMConversationRow): IMConversation {
     parentId: row.parentPlatformConversationId ?? undefined,
     spaceId: row.spacePlatformId ?? undefined,
     avatar: row.avatar === null ? undefined : row.avatar as unknown as IMConversation['avatar'],
-    metadata: row.metadata,
+    selfRole: hydrated.selfRole,
+    selfPermissions: hydrated.selfPermissions,
+    metadata: hydrated.metadata,
+  }
+}
+
+function conversationMetadata(
+  conversation: IMConversation,
+  existing?: JsonObject,
+): JsonObject {
+  const metadata: JsonObject = { ...conversation.metadata }
+  const legacyRole = legacyConversationRole(conversation.metadata) ?? legacyConversationRole(existing)
+  const selfRole = conversation.selfRole ?? storedConversationRole(existing) ?? legacyRole
+  const selfPermissions = conversation.selfPermissions
+    ?? (conversation.selfRole === undefined
+      ? storedConversationPermissions(existing)
+        ?? (legacyRole ? legacyQqConversationPermissions(legacyRole) : undefined)
+      : undefined)
+  if (selfRole) metadata[STORED_CONVERSATION_SELF_ROLE_KEY] = selfRole
+  if (selfPermissions) {
+    metadata[STORED_CONVERSATION_SELF_PERMISSIONS_KEY] = selfPermissions as unknown as JsonObject
+  }
+  return metadata
+}
+
+function hydrateConversationMetadata(metadata: JsonObject): {
+  selfRole?: IMConversation['selfRole']
+  selfPermissions?: IMConversation['selfPermissions']
+  metadata: JsonObject
+} {
+  const publicMetadata = { ...metadata }
+  delete publicMetadata[STORED_CONVERSATION_SELF_ROLE_KEY]
+  delete publicMetadata[STORED_CONVERSATION_SELF_PERMISSIONS_KEY]
+  const storedRole = storedConversationRole(metadata)
+  const legacyRole = legacyConversationRole(metadata)
+  return {
+    selfRole: storedRole ?? legacyRole,
+    selfPermissions: storedConversationPermissions(metadata)
+      ?? (legacyRole ? legacyQqConversationPermissions(legacyRole) : undefined),
+    metadata: publicMetadata,
+  }
+}
+
+function storedConversationRole(metadata: JsonObject | undefined): IMConversation['selfRole'] | undefined {
+  const role = metadata?.[STORED_CONVERSATION_SELF_ROLE_KEY]
+  return isConversationRole(role) ? role : undefined
+}
+
+function legacyConversationRole(metadata: JsonObject | undefined): IMConversation['selfRole'] | undefined {
+  const role = metadata?.qqSelfRole
+  return isConversationRole(role) ? role : undefined
+}
+
+function storedConversationPermissions(
+  metadata: JsonObject | undefined,
+): IMConversation['selfPermissions'] | undefined {
+  const permissions = metadata?.[STORED_CONVERSATION_SELF_PERMISSIONS_KEY]
+  if (!permissions || typeof permissions !== 'object' || Array.isArray(permissions)) return
+  const candidate = permissions as Record<string, unknown>
+  const required = [
+    'manageConversation', 'manageMembers', 'deleteAnyMessage', 'editAnyMessage',
+    'pinMessages', 'inviteMembers',
+  ] as const
+  if (required.some((key) => typeof candidate[key] !== 'boolean')) return
+  if (candidate.manageAdministrators !== undefined
+    && typeof candidate.manageAdministrators !== 'boolean') return
+  return permissions as unknown as NonNullable<IMConversation['selfPermissions']>
+}
+
+function isConversationRole(value: unknown): value is NonNullable<IMConversation['selfRole']> {
+  return value === 'owner' || value === 'administrator' || value === 'member' || value === 'guest'
+}
+
+function legacyQqConversationPermissions(
+  role: NonNullable<IMConversation['selfRole']>,
+): NonNullable<IMConversation['selfPermissions']> {
+  const administrator = role === 'owner' || role === 'administrator'
+  return {
+    manageConversation: administrator,
+    manageMembers: administrator,
+    deleteAnyMessage: administrator,
+    editAnyMessage: administrator,
+    pinMessages: administrator,
+    inviteMembers: role !== 'guest',
+    manageAdministrators: role === 'owner',
   }
 }
 

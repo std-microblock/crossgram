@@ -43,6 +43,57 @@ async function createStore(messageProjection?: MessageProjectionPipeline) {
 }
 
 describe('MessageStore', () => {
+  it('preserves conversation moderation state across durable reloads and partial updates', async () => {
+    const { ctx, store } = await createStore()
+    const selfPermissions = {
+      manageConversation: true,
+      manageMembers: true,
+      deleteAnyMessage: true,
+      editAnyMessage: true,
+      pinMessages: true,
+      inviteMembers: true,
+      manageAdministrators: false,
+    }
+    const conversation: IMConversation = {
+      id: 'moderated-group',
+      kind: 'group',
+      title: 'Moderated group',
+      selfRole: 'administrator',
+      selfPermissions,
+      metadata: { qqSelfRole: 'administrator', marker: 'initial' },
+    }
+
+    await store.upsertConversation(session, conversation)
+    await expect(store.getConversation(session.platformSessionId, conversation.id)).resolves.toEqual(conversation)
+
+    await store.upsertConversation(session, {
+      id: conversation.id,
+      kind: conversation.kind,
+      title: conversation.title,
+      metadata: { marker: 'updated' },
+    })
+    await expect(store.getConversation(session.platformSessionId, conversation.id)).resolves.toEqual({
+      ...conversation,
+      metadata: { marker: 'updated' },
+    })
+
+    const [stored] = await ctx.database.get('mtproto_im_conversation', {
+      platformSessionId: session.platformSessionId,
+      platformConversationId: conversation.id,
+    })
+    await ctx.database.set('mtproto_im_conversation', { id: stored.id }, {
+      metadata: { qqSelfRole: 'administrator', marker: 'legacy' },
+    })
+    await expect(store.getConversation(session.platformSessionId, conversation.id)).resolves.toEqual({
+      id: conversation.id,
+      kind: conversation.kind,
+      title: conversation.title,
+      selfRole: 'administrator',
+      selfPermissions,
+      metadata: { qqSelfRole: 'administrator', marker: 'legacy' },
+    })
+  })
+
   it('persists a custom Cordis projection plan and keeps allocated Telegram IDs stable', async () => {
     const projectionCtx = new Context()
     const pipeline = new MessageProjectionPipeline(projectionCtx)
