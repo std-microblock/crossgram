@@ -1260,6 +1260,22 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('uses the standard fallback emoji for slash faces missing from the catalog', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'unknown-face', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'text' as const, text: 'death battle\n/不是吧vs🙂',
+        entities: [{ type: 'qq-face' as const, offset: 'death battle\n'.length, length: '/不是吧'.length, faceId: '476', faceType: 1 }],
+      }],
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{ content: { parts: [{ type: 'text', text: 'death battle\n🙂vs🙂' }] } }],
+    })
+  })
+
   it('round-trips QQ mention entities and opaque reply IDs', async () => {
     const platform = new QQNTPlatform()
     platform.client.getUser = vi.fn(async (id) => ({ id, numericId: '12345', name: 'Alice' }))

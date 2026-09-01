@@ -2534,6 +2534,12 @@ function normalizeTextPart(
     else if (definition?.presentation.type === 'custom') {
       replacement = definition.presentation.alt
       customEmojiEntities.push({ type: 'custom-emoji', offset: outputOffset, length: replacement.length, definition })
+    } else if (sourceText.startsWith('/')) {
+      // QQ can send newer system-face labels before its local resource pack
+      // contains the corresponding asset. Keep those labels from leaking into
+      // Telegram as literal slash commands; use the same fallback emoji as
+      // catalog-backed QQ system faces until the asset becomes available.
+      replacement = '🙂'
     }
     output += replacement
     replacements.push({
