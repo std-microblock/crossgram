@@ -1710,6 +1710,10 @@ describe('conversation kinds', () => {
         id: `member-${index}`,
         firstName: index === 87 ? 'Needle User' : `Member ${index}`,
         username: String(10_000 + index),
+        // QQ members may only be addressable by their native UIN/nickname;
+        // keep those fields in metadata so Telegram mention search can match
+        // values that are not exposed as a Telegram username.
+        ...(index === 87 ? { metadata: { qq: '1000371852035', qqName: '冰雨' } } : {}),
       },
       title: index === 112 ? 'Target Alias' : undefined,
       role: 'member' as const,
@@ -1755,6 +1759,16 @@ describe('conversation kinds', () => {
       filter: { _: 'channelParticipantsMentions', q: 'needle' },
       offset: 0, limit: 100, hash: Long.ZERO,
     })
+    const qqMention = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group,
+      filter: { _: 'channelParticipantsMentions', q: '1000371852035' },
+      offset: 0, limit: 100, hash: Long.ZERO,
+    })
+    const nameMention = await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel: group,
+      filter: { _: 'channelParticipantsMentions', q: '冰雨' },
+      offset: 0, limit: 100, hash: Long.ZERO,
+    })
     const tagMention = await rpc.getChannelParticipants({
       _: 'channels.getParticipants', channel: group,
       filter: { _: 'channelParticipantsMentions', q: '@target alias' },
@@ -1786,12 +1800,18 @@ describe('conversation kinds', () => {
     expect(searchedMention).toMatchObject({
       _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Needle User' }],
     })
+    expect(qqMention).toMatchObject({
+      _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Needle User' }],
+    })
+    expect(nameMention).toMatchObject({
+      _: 'channels.channelParticipants', count: 1, users: [{ firstName: 'Needle User' }],
+    })
     expect(tagMention).toMatchObject({
       _: 'channels.channelParticipants', count: 1,
       participants: [{ _: 'channelParticipant', rank: 'Target Alias' }],
       users: [{ firstName: 'Member 112' }],
     })
-    for (const result of [first, second, mentions, searchedMention, tagMention]) {
+    for (const result of [first, second, mentions, searchedMention, qqMention, nameMention, tagMention]) {
       expect(() => roundTrip(result)).not.toThrow()
     }
   })
