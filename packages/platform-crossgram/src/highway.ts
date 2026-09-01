@@ -406,7 +406,7 @@ async function selectHighwayTcp(
   const ordered = [...plan.servers].sort((left, right) =>
     Number(highwayServerKey(right) === preferred?.server)
       - Number(highwayServerKey(left) === preferred?.server))
-  // QQNT/NapCat prefer the final server returned by HttpConn when no prior
+  // QQNT clients prefer the final server returned by HttpConn when no prior
   // successful endpoint exists. Preserve that order before staggering races.
   if (!preferred) ordered.reverse()
   const selectionController = new AbortController()
