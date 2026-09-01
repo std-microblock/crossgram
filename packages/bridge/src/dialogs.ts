@@ -229,6 +229,9 @@ export class DialogRpc {
   private readonly _pendingPlatformUsers = new Map<string, Promise<IMUser<any> | null>>()
   /** Platform user IDs from the latest authoritative contacts snapshot. */
   private readonly _contactUserIds = new Set<string>()
+  /** Whether the address book has been loaded for this RPC instance. */
+  private _contactsHydrated = false
+  private _contactsHydration?: Promise<void>
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
@@ -288,6 +291,11 @@ export class DialogRpc {
   async getDialogs(req: GetDialogsRequest): Promise<tl.messages.TypeDialogs> {
     const startedAt = performance.now()
     await this._hydrateUsers()
+    // Telegram evaluates the `contacts` flag of dialog filters from the user
+    // objects returned alongside dialogs.  Do not rely on the client calling
+    // contacts.getContacts first: Android commonly requests dialogs while
+    // constructing folders, before it has refreshed the address book.
+    await this._ensureContactsHydrated()
     const hydrateMs = performance.now() - startedAt
     const requestedOffsetPeer = req.offsetPeer._ === 'inputPeerEmpty'
       ? undefined
@@ -1169,7 +1177,13 @@ export class DialogRpc {
         .sort((left, right) => left.firstName.localeCompare(right.firstName))
       await this._persistUsers(resolvedUsers)
       this._contactUserIds.clear()
-      for (const user of resolvedUsers) this._contactUserIds.add(user.id)
+      for (const user of resolvedUsers) {
+        this._contactUserIds.add(user.id)
+        // QQ dialogs are keyed by UID, but legacy/resolved conversations can
+        // still be keyed by numeric UIN. Keep both forms contact-aware.
+        const numericId = user.metadata?.qq
+        if (typeof numericId === 'string' && numericId) this._contactUserIds.add(numericId)
+      }
       // A previous projection may have cached the same user as a non-contact,
       // or a removed friend as a contact. Rebuild it from this snapshot.
       this._peerUsers.clear()
@@ -1191,11 +1205,24 @@ export class DialogRpc {
         return this._makePeerUser(profile)
       }))
     }
+    this._contactsHydrated = true
     return {
       _: 'contacts.contacts',
       contacts: users.map((user) => ({ _: 'contact', userId: user.id, mutual: true })),
       savedCount: users.length,
       users: uniqueUsers(users),
+    }
+  }
+
+  private async _ensureContactsHydrated(): Promise<void> {
+    if (this._contactsHydrated || !this._platform.getContacts) return
+    if (this._contactsHydration) return this._contactsHydration
+    const pending = this.getContacts().then(() => undefined)
+    this._contactsHydration = pending
+    try {
+      await pending
+    } finally {
+      if (this._contactsHydration === pending) this._contactsHydration = undefined
     }
   }
 

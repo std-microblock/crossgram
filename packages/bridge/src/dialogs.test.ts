@@ -558,7 +558,9 @@ describe('DialogRpc', () => {
       { _: 'user', firstName: 'Alice', username: 'alice' },
       { _: 'user', firstName: 'Alice', username: 'alice' },
     ])
-    expect(getUser).toHaveBeenCalledTimes(1)
+    // getDialogs now hydrates the authoritative address book up front, so the
+    // subsequent users.getUsers call can serve Alice from the persisted cache.
+    expect(getUser).toHaveBeenCalledTimes(0)
   })
 
   it('paginates dialogs using limit and offset peer', async () => {
@@ -1184,7 +1186,10 @@ describe('DialogRpc', () => {
     const beforeByName = new Map(dialogsBeforeContacts.users
       .filter((user): user is tl.RawUser => user._ === 'user')
       .map((user) => [user.firstName, user]))
-    expect(beforeByName.get('Alice')).toMatchObject({ contact: undefined, mutualContact: undefined })
+    // Dialogs may be the first RPC during startup.  The bridge refreshes the
+    // authoritative address book before projecting them so folder filters can
+    // classify contacts immediately.
+    expect(beforeByName.get('Alice')).toMatchObject({ contact: true, mutualContact: true })
     expect(beforeByName.get('Bob')).toMatchObject({ contact: undefined, mutualContact: undefined })
 
     const firstSnapshot = await rpc.getContacts()

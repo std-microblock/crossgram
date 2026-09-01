@@ -145,6 +145,47 @@ function decodeRpcResult(bytes: Uint8Array): any {
 }
 
 describe('dialog folders RPC e2e', () => {
+  it('hydrates contact flags before the first dialogs response used by folder filtering', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const uid = 'u_CPrd_HXTXxFc5GsaxvzejA'
+    const numericId = '3304697814'
+    const contactPlatform: IMPlatform = {
+      ...platform,
+      platformKind: 'qq',
+      async getDialogs() {
+        return {
+          dialogs: [
+            { conversation: { id: uid, kind: 'direct', title: 'Shigma' }, unreadCount: 0 },
+            { conversation: { id: numericId, kind: 'direct', title: 'Legacy Shigma' }, unreadCount: 0 },
+          ],
+        }
+      },
+      async getContacts() {
+        return {
+          users: [{ id: uid, firstName: 'Shigma', username: numericId, metadata: { qq: numericId } }],
+        }
+      },
+    }
+    const rpcHarness = rpcHarnessFor(createDialog(
+      new DialogFolderStore(ctx.database), contactPlatform,
+    ))
+
+    const dialogs = await roundTripRpc(rpcHarness, getDialogs())
+    expect(dialogs.users).toMatchObject([
+      { _: 'user', firstName: 'Shigma', contact: true, mutualContact: true },
+      { _: 'user', firstName: 'Legacy Shigma', contact: true, mutualContact: true },
+    ])
+  })
+
   it('round-trips custom folders and archive moves through TL and SQLite restarts', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
