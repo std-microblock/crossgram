@@ -597,6 +597,65 @@ describe('conversation kinds', () => {
     }, { reactionKey: undefined, offset: 'qq-next', limit: 100 })
   })
 
+  it('keeps every actor from a successful reaction page for full-list fallback', async () => {
+    const reactionContext = {
+      available: [{
+        key: 'like',
+        presentation: { type: 'emoji' as const, emoticon: '👍' },
+      }],
+      reactions: [{ key: 'like', count: 5 }],
+      maxSelected: 1,
+    }
+    let calls = 0
+    const getMessageReactionActors = vi.fn(async () => {
+      calls++
+      if (calls > 1) throw new Error('actor page unavailable')
+      return {
+        context: reactionContext,
+        actors: ['alice', 'bob', 'carol', 'dave', 'erin'].map((userId) => ({
+          reactionKey: 'like', actor: { userId },
+        })),
+      }
+    })
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: { read: true, write: false, events: false, actorList: true, maxSelected: 1 },
+      },
+      async getDialogs() {
+        const conversation = conversations.find((item) => item.id === 'group')!
+        return { dialogs: [{
+          conversation,
+          unreadCount: 0,
+          lastMessage: { ...source(conversation), metadata: { qqMsgSeq: '571' }, reactionContext },
+        }] }
+      },
+      getMessageReactionActors,
+    }
+    const { rpc, store } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
+    const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
+
+    const first = await rpc.getMessageReactionsList({
+      _: 'messages.getMessageReactionsList', peer, id: message.id, offset: '', limit: 100,
+    })
+    expect(first.reactions).toHaveLength(5)
+    await expect(store.findProjectedByTlId(session.platformSessionId, message.id, 'group'))
+      .resolves.toMatchObject({
+        source: { reactionContext: { reactions: [{ recentActors: [
+          { userId: 'alice' }, { userId: 'bob' }, { userId: 'carol' }, { userId: 'dave' }, { userId: 'erin' },
+        ] }] } },
+      })
+
+    const second = await rpc.getMessageReactionsList({
+      _: 'messages.getMessageReactionsList', peer, id: message.id, offset: '', limit: 100,
+    })
+    expect(second.reactions).toHaveLength(5)
+    expect(getMessageReactionActors).toHaveBeenCalledTimes(2)
+  })
+
   it('falls back to the persisted actor preview when the upstream actor page fails', async () => {
     const reactionContext = {
       available: [{

@@ -2852,7 +2852,11 @@ export class DialogRpc {
         const pageActors = new Map<string, IMReactionActor[]>()
         for (const item of page.actors) {
           const actors = pageActors.get(item.reactionKey) ?? []
-          if (actors.length < 3) actors.push(item.actor)
+          // Keep every actor returned by the explicit list request. The
+          // Telegram message payload still exposes a three-user preview, but
+          // truncating this cache would make the full reaction list regress to
+          // three users whenever a later refresh falls back to stored data.
+          actors.push(item.actor)
           pageActors.set(item.reactionKey, actors)
         }
         const firstPage = !req.offset
