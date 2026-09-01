@@ -1221,6 +1221,10 @@ export class DialogRpc {
     this._contactsHydration = pending
     try {
       await pending
+    } catch (error) {
+      // Contact metadata is advisory for dialog projection.  A transient QQ
+      // buddy-list failure must not make the entire dialogs RPC unavailable.
+      this._onTrace?.('contacts hydration failed: %s', String(error))
     } finally {
       if (this._contactsHydration === pending) this._contactsHydration = undefined
     }
