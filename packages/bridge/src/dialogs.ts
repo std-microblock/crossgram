@@ -8,7 +8,7 @@ import {
   type IMMedia, type IMMediaInput, type IMMediaUploadProbe,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
   type IMReactionDefinition, type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
-  type IMProjectableMessage, type JsonValue, type PlatformSession,
+  type IMProjectableMessage, type IMConversationMemberModeration, type JsonValue, type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
 import {
@@ -1274,6 +1274,7 @@ export class DialogRpc {
     if (!this._blockedPeers) throw new RpcError(500, 'BLOCKLIST_UNAVAILABLE')
     await this._hydratePeers()
     const platformUserId = this._resolveBlockedUser(req.id)
+    if (this._platform.blockUser) await this._platform.blockUser(this._session, platformUserId, true)
     const change = await this._blockedPeers.block(this._session.platformSessionId, platformUserId)
     return { ...change, userId: this._userId(platformUserId) }
   }
@@ -1283,6 +1284,7 @@ export class DialogRpc {
     if (!this._blockedPeers) throw new RpcError(500, 'BLOCKLIST_UNAVAILABLE')
     await this._hydratePeers()
     const platformUserId = this._resolveBlockedUser(req.id)
+    if (this._platform.blockUser) await this._platform.blockUser(this._session, platformUserId, false)
     const change = await this._blockedPeers.unblock(this._session.platformSessionId, platformUserId)
     return { ...change, userId: this._userId(platformUserId) }
   }
@@ -1631,6 +1633,44 @@ export class DialogRpc {
     return {
       _: 'updates', updates: [], users: [this._makeMemberUser({ ...target, role })],
       chats: [this._makeChat(conversation)], date: Math.floor(Date.now() / 1_000), seq: 0,
+    }
+  }
+
+  async editChannelBanned(req: tl.channels.RawEditBannedRequest): Promise<tl.TypeUpdates> {
+    await this._hydratePeers()
+    const conversation = this._resolveChannel(req.channel)
+    if (!this._platform.moderateConversationMember) throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    const actor = await this._platform.getConversationMember?.(
+      this._session, { id: conversation.id }, this._session.userId,
+    )
+    if (!actor || (actor.role !== 'owner' && actor.permissions.manageMembers !== true)) {
+      throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    }
+    const targetId = req.participant._ === 'inputPeerUser'
+      || req.participant._ === 'inputUser' || req.participant._ === 'inputUserFromMessage'
+      ? this._tlToUser.get(req.participant.userId)
+      : undefined
+    if (!targetId || targetId === this._session.userId) throw new RpcError(400, 'USER_ID_INVALID')
+    const target = this._platform.getConversationMember
+      ? await this._platform.getConversationMember(this._session, { id: conversation.id }, targetId)
+      : (await this._allMembers(conversation.id)).find((member) => member.user.id === targetId)
+    if (!target) throw new RpcError(400, 'USER_NOT_PARTICIPANT')
+    if (target.role === 'owner') throw new RpcError(400, 'USER_CREATOR')
+
+    const rights = req.bannedRights
+    const now = Math.floor(Date.now() / 1000)
+    const action: IMConversationMemberModeration = rights.viewMessages
+      ? { type: 'kick', rejectAddRequest: rights.untilDate === 0 }
+      : rights.sendMessages && (rights.untilDate === 0 || rights.untilDate > now)
+        ? { type: 'mute', untilDate: rights.untilDate || 0x7fff_ffff }
+        : { type: 'unmute' }
+    await this._platform.moderateConversationMember(
+      this._session, { id: conversation.id }, targetId, action,
+    )
+    this._memberPages.delete(conversation.id)
+    return {
+      _: 'updates', updates: [], users: [this._makeMemberUser(target)],
+      chats: [this._makeChat(conversation)], date: now, seq: 0,
     }
   }
 

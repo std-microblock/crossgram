@@ -1501,6 +1501,39 @@ describe('conversation kinds', () => {
     })).rejects.toMatchObject({ text: 'CHAT_ADMIN_REQUIRED' })
   })
 
+  it('projects Telegram mute and kick requests to platform moderation actions', async () => {
+    const moderationCalls: Array<{ userId: string, action: unknown }> = []
+    const moderationPlatform: IMPlatform = {
+      ...platform,
+      async moderateConversationMember(_session, _conversation, userId, action) {
+        moderationCalls.push({ userId, action })
+      },
+    }
+    const { rpc } = await createRpc(moderationPlatform)
+    await rpc.getDialogs(dialogsRequest())
+    const channel = { _: 'inputChannel' as const, channelId: stableId('peer:group'), accessHash: Long.ZERO }
+    await rpc.getChannelParticipants({
+      _: 'channels.getParticipants', channel,
+      filter: { _: 'channelParticipantsRecent' }, offset: 0, limit: 100, hash: Long.ZERO,
+    })
+    const bob = await rpc.userTlId('bob')
+
+    await rpc.editChannelBanned({
+      _: 'channels.editBanned', channel,
+      participant: { _: 'inputPeerUser', userId: bob, accessHash: Long.ZERO },
+      bannedRights: { _: 'chatBannedRights', sendMessages: true, untilDate: 1_900_000_000 },
+    })
+    await rpc.editChannelBanned({
+      _: 'channels.editBanned', channel,
+      participant: { _: 'inputPeerUser', userId: bob, accessHash: Long.ZERO },
+      bannedRights: { _: 'chatBannedRights', viewMessages: true, untilDate: 0 },
+    })
+    expect(moderationCalls).toEqual([
+      { userId: 'bob', action: { type: 'mute', untilDate: 1_900_000_000 } },
+      { userId: 'bob', action: { type: 'kick', rejectAddRequest: true } },
+    ])
+  })
+
   it('serves channel-scoped message, chat-list, and read RPCs', async () => {
     const { rpc } = await createRpc()
     await rpc.getDialogs(dialogsRequest())

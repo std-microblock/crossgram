@@ -1075,6 +1075,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipants(req as tl.channels.RawGetParticipantsRequest))
   rpc.register('channels.editAdmin', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.editChannelAdmin(req as tl.channels.RawEditAdminRequest))
+  rpc.register('channels.editBanned', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.editChannelBanned(req as tl.channels.RawEditBannedRequest))
   rpc.register('channels.getSendAs', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getSendAs(req as tl.channels.RawGetSendAsRequest))
   rpc.register('messages.getForumTopics', async (rpc, req) =>

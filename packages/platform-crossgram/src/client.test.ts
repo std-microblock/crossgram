@@ -1622,6 +1622,24 @@ describe('QQNTClient streaming transport', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('posts member moderation and native user block operations', async () => {
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/moderate')) {
+        expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ type: 'mute', untilDate: 123 }) })
+      } else {
+        expect(url).toBe('http://bridge.invalid/v1/users/user%2Fopaque/block')
+        expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ blocked: true }) })
+      }
+      return Response.json({ ok: true })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await client.moderateMember('2:group', 'member/opaque', { type: 'mute', untilDate: 123 })
+    await client.setUserBlocked('user/opaque', true)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
   it('revalidates dialogs and history with ETag and reuses only 304 responses', async () => {
     const requests: Array<{ url: string, ifNoneMatch: string | null }> = []
     const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {

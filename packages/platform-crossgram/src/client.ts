@@ -346,6 +346,30 @@ export class QQNTClient {
     )
   }
 
+  async moderateMember(
+    conversationId: string,
+    userId: string,
+    action: { type: 'mute', untilDate: number } | { type: 'unmute' } | { type: 'kick', rejectAddRequest?: boolean },
+  ): Promise<void> {
+    await this.json(
+      `/conversations/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}/moderate`,
+      false,
+      {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify(action),
+      },
+    )
+  }
+
+  async setUserBlocked(userId: string, blocked: boolean): Promise<void> {
+    await this.json(`/users/${encodeURIComponent(userId)}/block`, false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ blocked }),
+    })
+  }
+
   getUser(id: string): Promise<{
     id: string
     numericId?: string

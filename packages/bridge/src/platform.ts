@@ -564,6 +564,11 @@ export interface IMDeleteMessagesOptions {
   forEveryone: boolean
 }
 
+export type IMConversationMemberModeration =
+  | { type: 'mute', untilDate: number }
+  | { type: 'unmute' }
+  | { type: 'kick', rejectAddRequest?: boolean }
+
 export interface IMForwardMessagesOptions {
   dropAuthor?: boolean
   replyToId?: string
@@ -859,6 +864,17 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     userId: string,
     role: 'administrator' | 'member',
+  ): Promise<void>
+  moderateConversationMember?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+    action: IMConversationMemberModeration,
+  ): Promise<void>
+  blockUser?(
+    session: PlatformSession,
+    userId: string,
+    blocked: boolean,
   ): Promise<void>
   deleteMessages?(
     session: PlatformSession,

@@ -94,6 +94,8 @@ WebSocket 握手也必须携带相同的 `Authorization` 头。未配置 token �
 | POST | `/v1/uploads/prepare` | 准备媒体上传（CDN/Highway） |
 | POST | `/v1/messages` | 发送消息（可带流式媒体体） |
 | POST | `/v1/messages/delete` | 撤回消息 |
+| POST | `/v1/conversations/:id/members/:userId/moderate` | 禁言、解除禁言或踢出群成员 |
+| POST | `/v1/users/:userId/block` | 原生拉黑或解除拉黑用户 |
 | POST | `/v1/messages/get` | 按 ID 取单条消息 |
 | POST | `/v1/messages/multi-forward` | 读取合并转发内容 |
 | POST | `/v1/messages/forward` | 转发消息 |

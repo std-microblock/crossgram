@@ -1020,6 +1020,23 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     await this.client.setMemberRole(conversation.id, userId, role)
   }
 
+  async moderateConversationMember(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    userId: string,
+    action: import('@mtproto-relay/bridge').IMConversationMemberModeration,
+  ): Promise<void> {
+    await this.client.moderateMember(conversation.id, userId, action)
+  }
+
+  async blockUser(
+    _session: PlatformSession,
+    userId: string,
+    blocked: boolean,
+  ): Promise<void> {
+    await this.client.setUserBlocked(userId, blocked)
+  }
+
   async getConversationMember(
     session: PlatformSession,
     conversation: IMConversationRef,
