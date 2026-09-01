@@ -137,9 +137,10 @@ export class QQHighwayUploadWriter {
     const blockIndex = this._blockIndex++
     const offset = this._scheduled
     this._scheduled += block.length
+    const sequence = this._plan.sequenceStart + blockIndex
     const httpFrame = encodeHighwayFrame(
       this._plan,
-      this._plan.sequenceStart + blockIndex,
+      sequence,
       offset,
       block,
     )
@@ -150,7 +151,7 @@ export class QQHighwayUploadWriter {
       ...(this._options.signal ? [this._options.signal] : []),
     ])
     if (blockIndex === 0 && shouldUseHighwayTcp(this._plan, this._fetchImpl, this._options.transport)) {
-      const tcpFrame = encodeHighwayFrame(this._plan, 0, offset, block)
+      const tcpFrame = encodeHighwayFrame(this._plan, sequence, offset, block)
       try {
         this._tcp = await selectHighwayTcp(
           this._plan,
@@ -165,7 +166,7 @@ export class QQHighwayUploadWriter {
         // HTTP is QQ's documented fallback when every persistent TCP candidate fails.
       }
     } else if (this._tcp) {
-      await this._tcp.send(encodeHighwayFrame(this._plan, 0, offset, block))
+      await this._tcp.send(encodeHighwayFrame(this._plan, sequence, offset, block))
       return
     }
     const upload = async () => {

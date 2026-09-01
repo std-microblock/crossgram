@@ -202,6 +202,7 @@ describe('QQ Highway protobuf transport', () => {
     expect(frames).toHaveLength(3)
     expect(maxActive).toBe(2)
     expect(frames.map(highwayOffset)).toEqual([0n, 4n, 8n])
+    expect(frames.map(highwaySequence)).toEqual([9, 10, 11])
     expect(frames.map(highwayBody)).toEqual([
       Buffer.from([1, 2, 3, 4]),
       Buffer.from([5, 6, 7, 8]),
@@ -291,4 +292,9 @@ function highwayBody(frame: Buffer): Buffer {
 function highwayOffset(frame: Buffer): bigint {
   const headLength = frame.readUInt32BE(1)
   return fromBinary(HighwayRequestHeadSchema, frame.subarray(9, 9 + headLength)).segment!.offset
+}
+
+function highwaySequence(frame: Buffer): number {
+  const headLength = frame.readUInt32BE(1)
+  return fromBinary(HighwayRequestHeadSchema, frame.subarray(9, 9 + headLength)).base!.sequence
 }

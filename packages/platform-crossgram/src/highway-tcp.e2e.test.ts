@@ -68,7 +68,7 @@ describe('QQ Highway persistent TCP E2E', () => {
 
     expect(connections).toBe(1)
     expect(received.map(({ offset }) => offset)).toEqual([0, 4, 8, 12])
-    expect(received.map(({ sequence }) => sequence)).toEqual([0, 0, 0, 0])
+    expect(received.map(({ sequence }) => sequence)).toEqual([9, 10, 11, 12])
     expect(Buffer.concat(received.map(({ body: block }) => block))).toEqual(body)
     expect(progress).toEqual([4, 8, 12, 16])
   })
