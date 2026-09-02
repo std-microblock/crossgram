@@ -821,21 +821,7 @@ describe('QQNT durable event checkpoint E2E', () => {
           })),
         )
         for (const { source } of messages) {
-          const parts = source.content.parts.map((part) => {
-            if (part.type !== 'text' || !part.text || part.entities?.some((entity) =>
-              entity.type === 'strikethrough' && entity.offset === 0 && entity.length === part.text.length)) {
-              return part
-            }
-            return {
-              ...part,
-              entities: [...part.entities ?? [], {
-                type: 'strikethrough' as const, offset: 0, length: part.text.length,
-              }],
-            }
-          })
-          await store.ingest(checkpointSession, event.conversation, {
-            ...source, content: { ...source.content, parts },
-          })
+          await store.ingest(checkpointSession, event.conversation, { ...source, recalled: true })
         }
       } else if (event.type === 'message') {
         await store.ingest(checkpointSession, event.conversation, event.message)
@@ -848,8 +834,8 @@ describe('QQNT durable event checkpoint E2E', () => {
         'mtproto_qqnt_event_checkpoint', { platformSessionId: checkpointSession.platformSessionId },
       )).toMatchObject([{ lastEventId: '8659' }]), { timeout: 5_000 })
       expect(connections).toBe(1)
-      await expect(store.readHistory(checkpointSession.platformSessionId, conversation.id)).resolves.toEqual(
-        expect.arrayContaining([
+      const history = await store.readHistory(checkpointSession.platformSessionId, conversation.id)
+      expect(history).toEqual(expect.arrayContaining([
           expect.objectContaining({
             id: recalled.id,
             content: { parts: [
@@ -859,13 +845,15 @@ describe('QQNT durable event checkpoint E2E', () => {
                 }),
               }),
               expect.objectContaining({
-                type: 'text', entities: [{ type: 'strikethrough', offset: 0, length: 8 }],
+                type: 'text', text: '50389251',
               }),
             ] },
+            recalled: true,
           }),
           expect.objectContaining({ id: 'message-after-recall' }),
-        ]),
-      )
+        ]))
+      const storedRecall = history.find((message) => message.id === recalled.id)!
+      expect(storedRecall.content.parts[1]).not.toHaveProperty('entities')
     } finally {
       await unsubscribe()
     }

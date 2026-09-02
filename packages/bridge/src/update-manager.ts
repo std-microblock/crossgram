@@ -23,6 +23,7 @@ import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 import { updateFromJson, updateToJson } from './update-json.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
+import { isLegacyRecallStrikethrough } from './recalled-message.js'
 
 export interface MentionReadPublishResult {
   pts: number
@@ -1071,6 +1072,7 @@ function makeMessageEntities(
   let base = 0
   for (const [index, { part, text }] of rendered.entries()) {
     for (const entity of part.type === 'text' ? part.entities ?? [] : []) {
+      if (part.type === 'text' && isLegacyRecallStrikethrough(message, part, entity)) continue
       if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > text.length) continue
       if (entity.type === 'mention') {
         entities.push({

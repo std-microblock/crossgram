@@ -12,6 +12,7 @@ import type {
   IMMessageSearchQuery, IMPlatform, PlatformSession,
   Unsubscribe,
 } from './platform.js'
+import { markMessageRecalled } from './recalled-message.js'
 
 export class PlatformRegistry {
   private readonly _platforms = new Map<string, IMPlatform>()
@@ -461,9 +462,7 @@ export class PlatformSubscriptionManager {
         for (const { source } of messages) {
           const hasText = source.content.parts.some((part) => part.type === 'text' && part.text)
           if (!hasText && this._recalledMessageMode === 'show') continue
-          const message = this._recalledMessageMode === 'show'
-            ? markRecalledForLegacyClients(source)
-            : { ...source, recalled: true }
+          const message = markMessageRecalled(source)
           const result = await this._store.ingest(session, event.conversation, message)
           const eventId = `qqnt-recall:${encodeURIComponent(event.conversation.id)}:${encodeURIComponent(source.id)}`
           if (this._recalledMessageMode === 'hide') {
@@ -982,25 +981,6 @@ export class PlatformDataService {
     return message
   }
 }
-function markRecalledForLegacyClients(source: IMMessage): IMMessage {
-  let changed = source.recalled !== true
-  const parts = source.content.parts.map((part) => {
-    if (part.type !== 'text' || !part.text) return part
-    if (part.entities?.some((entity) =>
-      entity.type === 'strikethrough' && entity.offset === 0 && entity.length === part.text.length)) {
-      return part
-    }
-    changed = true
-    return {
-      ...part,
-      entities: [...part.entities ?? [], {
-        type: 'strikethrough' as const, offset: 0, length: part.text.length,
-      }],
-    }
-  })
-  return changed ? { ...source, recalled: true, content: { ...source.content, parts } } : source
-}
-
 function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined): boolean {
   if (!stored) return true
   if (upstream.unreadCount !== stored.unreadCount) return true

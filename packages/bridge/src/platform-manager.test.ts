@@ -234,7 +234,7 @@ describe('PlatformSubscriptionManager', () => {
     await manager.stop()
   })
 
-  it('turns QQ deletes into idempotent strikethrough edits while other platforms still delete', async () => {
+  it('turns QQ deletes into idempotent recall edits without strikethrough while other platforms still delete', async () => {
     const database = await createDatabase()
     const qq = new QQPlatform()
     const other = new PushPlatform()
@@ -269,7 +269,7 @@ describe('PlatformSubscriptionManager', () => {
     const recalled: IMMessage = {
       id: 'qq-recalled', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
       content: { parts: [
-        { type: 'text', text: 'first' },
+        { type: 'text', text: 'first', entities: [{ type: 'bold', offset: 0, length: 5 }] },
         {
           type: 'media',
           media: { id: 'photo', kind: 'image', strippedThumbnail: new Uint8Array([1, 23, 40, 172]) },
@@ -290,17 +290,16 @@ describe('PlatformSubscriptionManager', () => {
     expect(edit).toMatchObject({
       id: original.id,
       message: 'first\nsecond',
-      entities: [
-        { _: 'messageEntityStrike', offset: 0, length: 5 },
-        { _: 'messageEntityStrike', offset: 6, length: 6 },
-      ],
+      recalled: true,
+      recalledVisible: true,
+      entities: [{ _: 'messageEntityBold', offset: 0, length: 5 }],
     })
     expect(await store.readHistory(qqSession.platformSessionId, conversation.id)).toMatchObject([{
       id: recalled.id,
       content: { parts: [
-        { type: 'text', entities: [{ type: 'strikethrough', offset: 0, length: 5 }] },
+        { type: 'text', entities: [{ type: 'bold', offset: 0, length: 5 }] },
         { type: 'media' },
-        { type: 'text', entities: [{ type: 'strikethrough', offset: 0, length: 6 }] },
+        { type: 'text', text: 'second' },
       ] },
     }])
 
@@ -333,8 +332,8 @@ describe('PlatformSubscriptionManager', () => {
     expect(multiEdits.map((update) => update.message.id).sort((left, right) => left - right))
       .toEqual(multiOriginalIds.sort((left, right) => left - right))
     expect(multiEdits.map((update) => (update.message as tl.RawMessage).entities)).toEqual([
-      [{ _: 'messageEntityStrike', offset: 0, length: 'first recall target'.length }],
-      [{ _: 'messageEntityStrike', offset: 0, length: 'second recall target'.length }],
+      undefined,
+      undefined,
     ])
     await qq.emit({
       type: 'message-delete', eventId: 'qq-multi-recall-duplicate', conversation,
