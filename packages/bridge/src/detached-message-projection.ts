@@ -7,7 +7,6 @@ import {
 import { cardUrl, messagePartText, type IMPlatform, type IMProjectableMessage, type IMTextEntity, type PlatformSession } from './platform.js'
 import type { MessageProjectionDraft, MessageProjectionPipeline, MessageProjectionPlan } from './message-projection.js'
 import type { StickerRpc } from './sticker-rpc.js'
-import { isLegacyRecallStrikethrough } from './recalled-message.js'
 
 export interface DetachedMessageProjectionInput {
   pipeline: MessageProjectionPipeline
@@ -79,8 +78,6 @@ export async function projectDetachedMessage(
             ? makeDetachedMessageEntities(source, input.userId)
             : undefined),
           replyToTlId: ordinal === 0 ? input.replyToMessageId : undefined,
-          recalled: source.recalled,
-          recalledVisible: source.recalled,
         }),
         chats: draft.chats,
       }
@@ -122,7 +119,6 @@ function makeDetachedMessageEntities(
   let base = 0
   for (const [index, { part, text }] of rendered.entries()) {
     for (const entity of part.type === 'text' ? part.entities ?? [] : []) {
-      if (part.type === 'text' && isLegacyRecallStrikethrough(source, part, entity)) continue
       const mapped = mapEntity(entity, base, text, userId)
       if (mapped) output.push(mapped)
     }

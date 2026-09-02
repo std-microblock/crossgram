@@ -1471,38 +1471,6 @@ describe('DialogRpc', () => {
     ])
   })
 
-  it('suppresses legacy full-span recall strikes in serialized history', async () => {
-    const platform = new DialogTestPlatform()
-    const text = 'legacy strike'
-    platform.addMessage('alice', {
-      id: 'recalled-history', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_226,
-      recalled: true,
-      content: { parts: [{ type: 'text', text, entities: [
-        { type: 'strikethrough', offset: 0, length: text.length },
-        { type: 'italic', offset: 0, length: 6 },
-        { type: 'strikethrough', offset: 7, length: 6 },
-      ] }] },
-    })
-    const rpc = new DialogRpc(platform, session)
-    await rpc.getDialogs(getDialogsRequest())
-
-    const projected = await rpc.getHistory(getHistoryRequest(rpc.peerTlId('alice'))) as tl.messages.RawMessages
-    const projectedRecall = projected.messages.find(
-      (item) => item._ === 'message' && item.message === text,
-    ) as tl.RawMessage
-    expect(projectedRecall).toMatchObject({ recalled: true, recalledVisible: true })
-
-    const history = wireRoundTrip(projected) as tl.messages.RawMessages
-    const recalled = history.messages.find(
-      (item) => item._ === 'message' && item.message === text,
-    ) as tl.RawMessage
-
-    expect(recalled.entities).toEqual([
-      { _: 'messageEntityItalic', offset: 0, length: 6 },
-      { _: 'messageEntityStrike', offset: 7, length: 6 },
-    ])
-  })
-
   it('separates adjacent links and mentions without linking filenames or dot-separated prose', async () => {
     const platform = new DialogTestPlatform()
     const prose = '我想到隔壁有人用.net写东西后aot并且导出C符号入口点给cpp乃至Java用'

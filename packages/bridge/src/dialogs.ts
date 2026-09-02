@@ -38,7 +38,6 @@ import {
   type DialogFolderStore, type StoredDialogFilter,
 } from './dialog-folders.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
-import { isLegacyRecallStrikethrough } from './recalled-message.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -4109,8 +4108,6 @@ export class DialogRpc {
           topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
           mentioned: item.ordinal === 0 && this._messageMentioned(projectedSource, reply?.replyToMsgId),
           unreadMention: item.unreadMention,
-          recalled: projectedSource.recalled,
-          recalledVisible: projectedSource.recalled,
         }),
         chats: draft.chats,
       }
@@ -4384,7 +4381,6 @@ export class DialogRpc {
     })
     for (const [index, { part, text }] of rendered.entries()) {
       for (const entity of part.type === 'text' ? part.entities ?? [] : []) {
-        if (part.type === 'text' && isLegacyRecallStrikethrough(source, part, entity)) continue
         if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > text.length) continue
         if (entity.type === 'mention') {
           output.push({

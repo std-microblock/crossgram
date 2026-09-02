@@ -692,32 +692,6 @@ describe('UpdateManager', () => {
     })
   })
 
-  it('suppresses legacy full-span recall strikes in live updates while preserving authored formatting', async () => {
-    const { store, manager, sent } = await createHarness()
-    const conversation: IMConversation = { id: 'recall-format', kind: 'group', title: 'Recall format' }
-    const text = 'legacy strike'
-    const message: IMMessage = {
-      id: 'recalled-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_002,
-      recalled: true,
-      content: { parts: [{ type: 'text', text, entities: [
-        { type: 'strikethrough', offset: 0, length: text.length },
-        { type: 'bold', offset: 0, length: 6 },
-        { type: 'strikethrough', offset: 7, length: 6 },
-      ] }] },
-    }
-    const result = await store.ingest(session, conversation, message)
-    await manager.publish(session, { event: { type: 'message-edit', eventId: 'recall', conversation, message }, result })
-
-    const update = (sent[0].update as tl.RawUpdates).updates[0] as tl.RawUpdateEditChannelMessage
-    expect(update.message).toMatchObject({
-      _: 'message', message: text, recalled: true, recalledVisible: true,
-      entities: [
-        { _: 'messageEntityBold', offset: 0, length: 6 },
-        { _: 'messageEntityStrike', offset: 7, length: 6 },
-      ],
-    })
-  })
-
   it('includes native WebPage previews in live structured-card updates', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'cards', kind: 'group', title: 'Cards' }

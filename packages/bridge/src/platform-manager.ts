@@ -12,7 +12,6 @@ import type {
   IMMessageSearchQuery, IMPlatform, PlatformSession,
   Unsubscribe,
 } from './platform.js'
-import { markMessageRecalled } from './recalled-message.js'
 
 export class PlatformRegistry {
   private readonly _platforms = new Map<string, IMPlatform>()
@@ -462,7 +461,7 @@ export class PlatformSubscriptionManager {
         for (const { source } of messages) {
           const hasText = source.content.parts.some((part) => part.type === 'text' && part.text)
           if (!hasText && this._recalledMessageMode === 'show') continue
-          const message = markMessageRecalled(source)
+          const message = markRecalledMessage(source)
           const result = await this._store.ingest(session, event.conversation, message)
           const eventId = `qqnt-recall:${encodeURIComponent(event.conversation.id)}:${encodeURIComponent(source.id)}`
           if (this._recalledMessageMode === 'hide') {
@@ -981,6 +980,11 @@ export class PlatformDataService {
     return message
   }
 }
+
+function markRecalledMessage(source: IMMessage): IMMessage {
+  return source.recalled === true ? source : { ...source, recalled: true }
+}
+
 function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined): boolean {
   if (!stored) return true
   if (upstream.unreadCount !== stored.unreadCount) return true
