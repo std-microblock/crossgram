@@ -2393,8 +2393,6 @@ function mapParts(
     } else {
       const media = mapMedia(part.media)
       parts.push({ type: 'media', media: projectMedia?.(media) ?? media })
-      const transcript = part.media.transcript?.trim()
-      if (part.media.voice && transcript) parts.push({ type: 'text', text: `[语音] ${transcript}` })
     }
   }
   return parts

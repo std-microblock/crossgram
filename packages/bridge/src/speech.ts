@@ -27,6 +27,17 @@ export interface SpeechTranscriptionResult {
   provider?: string
 }
 
+/** A source-platform transcript notification for an existing voice message. */
+export interface SpeechTranscriptEvent<TMediaLocator = unknown> {
+  platform: IMPlatform<TMediaLocator>
+  session: PlatformSession
+  conversation: IMConversation<TMediaLocator>
+  messageId: string
+  text: string
+  provider?: string
+  timestamp: number
+}
+
 /** Input passed to text-to-speech providers through the Cordis waterfall. */
 export interface SpeechSynthesisInput<TMediaLocator = unknown> {
   platform: IMPlatform<TMediaLocator>

@@ -195,14 +195,18 @@ describe('PlatformSubscriptionManager', () => {
     await manager.stop()
   })
 
-  it('turns a native voice transcript event into a durable message edit', async () => {
+  it('publishes a native voice transcript through Cordis without replacing voice media', async () => {
     const database = await createDatabase()
+    const ctx = new Context()
     const platform = new PushPlatform()
     const store = new MessageStore(database)
     const committed: CommittedPlatformEvent[] = []
+    const transcripts: unknown[] = []
+    ctx.on('bridge/speech/transcript', (event) => { transcripts.push(event) })
     const manager = new PlatformSubscriptionManager(
       database, new PlatformRegistry([['push', platform]]), store, undefined,
       (_session, value) => { if (value) committed.push(value as never) },
+      undefined, ctx,
     )
     const conversation: IMConversation = { id: 'transcript-room', kind: 'direct', title: 'Transcript' }
     await manager.ensure(session)
@@ -217,13 +221,16 @@ describe('PlatformSubscriptionManager', () => {
       type: 'voice-transcript', eventId: 'transcript-1', conversation,
       messageId: 'voice-1', transcript: '自动转写', timestamp: 2,
     })
-    expect(committed.at(-1)).toMatchObject({
-      event: { type: 'message-edit', eventId: 'transcript-1', message: {
-        content: { parts: [
-          { type: 'media' }, { type: 'text', text: '[语音] 自动转写' },
-        ] },
-      } },
-    })
+    expect(transcripts).toMatchObject([{
+      session, conversation, messageId: 'voice-1', text: '自动转写',
+      provider: 'push', timestamp: 2,
+    }])
+    expect(committed).toHaveLength(1)
+    expect((await store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, 'voice-1',
+    ))?.source.content.parts).toMatchObject([
+      { type: 'media', media: { voice: true } },
+    ])
     await manager.stop()
   })
 

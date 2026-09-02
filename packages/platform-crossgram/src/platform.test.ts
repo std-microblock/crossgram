@@ -36,7 +36,7 @@ afterEach(async () => {
 })
 
 describe('QQNTPlatform mapping', () => {
-  it('projects a QQ-native voice transcript beside the playable voice media', async () => {
+  it('keeps a QQ-native transcript attached to playable voice media without rendering text', async () => {
     const platform = new QQNTPlatform()
     platform.client.getHistory = vi.fn(async () => ({
       messages: [{
@@ -54,8 +54,9 @@ describe('QQNTPlatform mapping', () => {
 
     const [message] = (await platform.getHistory(session, { id: 'friend' })).messages
     expect(message.content.parts).toMatchObject([
-      { type: 'media', media: { voice: true, mimeType: 'audio/ogg', duration: 3 } },
-      { type: 'text', text: '[语音] 你好，世界' },
+      { type: 'media', media: {
+        voice: true, mimeType: 'audio/ogg', duration: 3, transcript: '你好，世界',
+      } },
     ])
   })
 

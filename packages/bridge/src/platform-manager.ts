@@ -488,22 +488,18 @@ export class PlatformSubscriptionManager {
       const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
       if (result) return this._publishCommitted(eventCtx, session, { event, result }, options)
     } else if (event.type === 'voice-transcript') {
-      const projected = await this._store.findProjectedByPlatformId(
-        session.platformSessionId, event.conversation.id, event.messageId,
-      )
-      if (!projected) return
       const transcript = event.transcript.trim()
       if (!transcript) return
-      const message = withVoiceTranscript(projected.source, transcript)
-      if (message === projected.source) return
-      const result = await this._store.ingest(session, event.conversation, message)
-      return this._publishCommitted(eventCtx, session, {
-        event: {
-          type: 'message-edit', eventId: event.eventId,
-          conversation: event.conversation, message,
-        },
-        result,
-      }, options)
+      await eventCtx.parallel(eventCtx, 'bridge/speech/transcript', {
+        platform: this._registry.require(session.platformId),
+        session,
+        conversation: event.conversation,
+        messageId: event.messageId,
+        text: transcript,
+        provider: session.platformId,
+        timestamp: event.timestamp,
+      })
+      return
     } else if (event.type === 'request') {
       const stored = await this._store.ingestRequest(session, event.request)
       const conversation = requestInboxConversation()
@@ -585,22 +581,6 @@ function platformEventSummary(event: IMEvent): string {
   }
   if (event.type === 'request') return `type=request request=${event.request.id} kind=${event.request.kind}`
   return `type=conversation conversation=${event.conversation.id}`
-}
-
-function withVoiceTranscript(message: import('./platform.js').IMMessage, transcript: string) {
-  const label = `[语音] ${transcript}`
-  let replaced = false
-  const parts = message.content.parts.map((part) => {
-    if (part.type !== 'text' || !/^\[语音(?:\s+\d+(?:\.\d+)?)?秒?\](?:\s|$)/.test(part.text)) return part
-    replaced = true
-    return { ...part, text: label }
-  })
-  if (!replaced) {
-    const index = parts.findIndex((part) => part.type === 'media' && part.media.voice)
-    if (index < 0) return message
-    parts.splice(index + 1, 0, { type: 'text', text: label })
-  }
-  return { ...message, content: { ...message.content, parts } }
 }
 
 function formatError(error: unknown): string {

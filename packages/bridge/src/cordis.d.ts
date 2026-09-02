@@ -25,6 +25,7 @@ import type {
   SpeechSynthesisResult,
   SpeechTranscriptionInput,
   SpeechTranscriptionResult,
+  SpeechTranscriptEvent,
 } from './speech.js'
 
 declare module 'cordis' {
@@ -85,5 +86,6 @@ declare module 'cordis' {
       input: SpeechSynthesisInput,
       next: () => SpeechSynthesisResult | undefined | Promise<SpeechSynthesisResult | undefined>,
     ): SpeechSynthesisResult | undefined | Promise<SpeechSynthesisResult | undefined>
+    'bridge/speech/transcript'(event: SpeechTranscriptEvent): void | Promise<void>
   }
 }
