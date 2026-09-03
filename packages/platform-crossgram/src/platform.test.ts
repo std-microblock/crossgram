@@ -1284,6 +1284,55 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('waits for the reaction catalog when a linked message is loaded directly', async () => {
+    const platform = new QQNTPlatform()
+    let resolveCatalog!: (value: WireReactionContext) => void
+    const catalog = new Promise<WireReactionContext>((resolve) => { resolveCatalog = resolve })
+    platform.client.getReactionCatalog = vi.fn(() => catalog)
+    platform.client.downloadReactionResource = vi.fn(async function* () {
+      yield Uint8Array.from([1, 2, 3])
+    })
+    platform.client.getMessage = vi.fn(async () => ({
+      id: 'linked-face', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      parts: [{
+        type: 'text' as const, text: '/续标识',
+        entities: [{ type: 'qq-face' as const, offset: 0, length: 4, faceId: '424', faceType: 1 }],
+      }],
+    }))
+
+    const messagePromise = platform.getMessage(session, { id: '2:group' }, 'linked-face')
+    let settled = false
+    void messagePromise.then(() => { settled = true })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(settled).toBe(false)
+
+    resolveCatalog({
+      available: [{
+        key: '1:424', title: '/续标识',
+        presentation: {
+          type: 'custom', alt: '🙂',
+          resource: {
+            version: 1, format: 'static', mimeType: 'image/png', width: 16, height: 16,
+            locator: { reactionKey: '1:424' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    })
+
+    await expect(messagePromise).resolves.toMatchObject({
+      content: {
+        parts: [{
+          type: 'text', text: '🙂',
+          entities: [{
+            type: 'custom-emoji', offset: 0, length: 2,
+            definition: { presentation: { resource: { size: 3 } } },
+          }],
+        }],
+      },
+    })
+  })
+
   it('uses the standard fallback emoji for slash faces missing from the catalog', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))

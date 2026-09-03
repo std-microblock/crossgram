@@ -69,6 +69,7 @@ const DIALOGS_POLL_INTERVAL_MS = 15_000
 const REACTION_CATALOG_GRACE_MS = 10
 const REACTION_CATALOG_RPC_GRACE_MS = 250
 const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
+const REACTION_RESOURCE_SIZE_TIMEOUT_MS = 5_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CACHE_LIMIT = 256
@@ -212,6 +213,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalog?: IMReactionContext
   private reactionCatalogPromise?: Promise<IMReactionContext>
   private reactionCatalogRetryAt = 0
+  private readonly reactionResourceSizes = new Map<string, number>()
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
   private readonly splitOutgoingMessages = new Map<string, WireMessage>()
@@ -929,9 +931,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     messageId: string,
   ): Promise<IMMessage<QQMediaLocator> | null> {
     if (isFilteredConversationId(conversation.id)) return null
+    // A message opened directly from a Telegram link bypasses getHistory().
+    // Ensure the QQ face catalog is ready before mapping its entities, or the
+    // message is permanently projected with a plain-text fallback and no
+    // custom-emoji document for this request.
+    const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
     const message = await this.client.getMessage(
       await this.wireConversationId(session, conversation.id), messageId,
     )
+    if (message && wireMessageHasQQFace(message)) await reactionWarmup
     return message && !this.isFilteredGrayTip(message)
       ? this.prepareRequestedMessage(
           session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
@@ -1630,12 +1638,82 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
     const handler = this.eventHandlers.get(session.platformSessionId)
-    const prepared = handler ? message : await this.prepareInitialMessage(message)
+    const prepared = await this.hydrateReactionResourceSizes(
+      session, handler ? message : await this.prepareInitialMessage(message),
+    )
     this.scheduleInlinePreview(session, conversation, prepared, handler)
     // Keep history metadata-only. The patched client asks getFileUrl for the
     // original and downloads it from QQ's CDN. Inline preview work is queued
     // after this return and can only publish a later message-edit event.
     return prepared
+  }
+
+  /**
+   * Runtime QQ faces are discovered from the native catalog and may not carry
+   * a byte size. Telegram uses Document.size to schedule custom-emoji loads;
+   * advertising zero makes the receiver skip the request entirely. Fetch the
+   * small, referenced assets once so the projected document can publish the
+   * exact EOF size while retaining the metadata-only path for normal media.
+   */
+  private async hydrateReactionResourceSizes(
+    session: PlatformSession,
+    message: IMMessage<QQMediaLocator>,
+  ): Promise<IMMessage<QQMediaLocator>> {
+    const pending = new Map<string, IMReactionResource>()
+    for (const part of message.content.parts) {
+      if (part.type !== 'text') continue
+      for (const entity of part.entities ?? []) {
+        if (entity.type !== 'custom-emoji' || entity.definition.presentation.type !== 'custom') continue
+        const resource = entity.definition.presentation.resource
+        if (resource.size !== undefined || !resource.locator) continue
+        const key = reactionResourceKey(resource)
+        if (key && !this.reactionResourceSizes.has(key)) pending.set(key, resource)
+      }
+    }
+    if (!pending.size) return message
+    const sizes = new Map<string, number>()
+    await Promise.all([...pending.entries()].map(async ([key, resource]) => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), REACTION_RESOURCE_SIZE_TIMEOUT_MS)
+      try {
+        let size = 0
+        for await (const chunk of this.downloadReactionResource(session, resource, { signal: controller.signal })) {
+          size += chunk.length
+        }
+        if (size > 0) {
+          sizes.set(key, size)
+          this.reactionResourceSizes.set(key, size)
+        }
+      } catch {
+        // Keep the original metadata when the CDN is temporarily unavailable;
+        // a later message refresh can retry the size hydration.
+      } finally {
+        clearTimeout(timer)
+      }
+    }))
+    if (!sizes.size) return message
+    let changed = false
+    const parts = message.content.parts.map((part) => {
+      if (part.type !== 'text' || !part.entities?.length) return part
+      const entities = part.entities.map((entity) => {
+        if (entity.type !== 'custom-emoji' || entity.definition.presentation.type !== 'custom') return entity
+        const resource = entity.definition.presentation.resource
+        if (resource.size !== undefined || !resource.locator) return entity
+        const key = reactionResourceKey(resource)
+        const size = sizes.get(key) ?? this.reactionResourceSizes.get(key)
+        if (!size) return entity
+        changed = true
+        return {
+          ...entity,
+          definition: {
+            ...entity.definition,
+            presentation: { ...entity.definition.presentation, resource: { ...resource, size } },
+          },
+        }
+      })
+      return changed ? { ...part, entities } : part
+    })
+    return changed ? { ...message, content: { ...message.content, parts } } : message
   }
 
   private scheduleInlinePreview(
@@ -2475,6 +2553,10 @@ function deferTurn(): Promise<void> {
 function isReactionResourceLocator(value: unknown): value is { reactionKey: string } {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
     && typeof (value as { reactionKey?: unknown }).reactionKey === 'string')
+}
+
+function reactionResourceKey(resource: IMReactionResource): string {
+  return `${resource.version}:${JSON.stringify(resource.locator)}`
 }
 
 function multiForwardBundleId(locator: WireMultiForwardLocator): string {
