@@ -1588,6 +1588,22 @@ describe('QQNTClient streaming transport', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('requests native voice transcription from protocol 32 bridges', async () => {
+    const locator = {
+      messageId: 'voice-message', elementId: 'voice-element', chatType: 2 as const,
+      peerUid: 'group', kind: 'voice' as const, fileName: 'voice.ogg',
+    }
+    const fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      if (String(input).endsWith('/status')) return Response.json({ protocolVersion: 32, ready: true })
+      expect(String(input)).toBe('http://bridge.invalid/v1/messages/voice/transcribe')
+      expect(init).toMatchObject({ method: 'POST', body: JSON.stringify(locator) })
+      return Response.json({ transcript: '识别成功' })
+    })
+    const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
+
+    await expect(client.transcribeVoice(locator)).resolves.toEqual({ transcript: '识别成功' })
+  })
+
   it('rejects playable-video sends against a v23 bridge before hashing or posting bytes', async () => {
     const fetch = vi.fn(async () => Response.json({ protocolVersion: 23, ready: true }))
     const stream = vi.fn(async function* () { yield Uint8Array.of(1) })

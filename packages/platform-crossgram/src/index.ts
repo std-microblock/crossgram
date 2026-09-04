@@ -34,10 +34,9 @@ type QQOutboundMedia = NonNullable<Parameters<QQNTClient['sendMessage']>[2]>[num
 
 
 const MIN_PROTOCOL_VERSION = 19
-// qqnt-bridge v1.0.31 negotiates protocol 31. Keep the lower bound stable
-// while accepting that additive wire revision so account provisioning does
+// Keep the lower bound stable while accepting additive bridge revisions so account provisioning does
 // not fail closed before Telegram QR approval can complete.
-const MAX_PROTOCOL_VERSION = 31
+const MAX_PROTOCOL_VERSION = 32
 
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
@@ -141,6 +140,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
   const platform = new QQNTPlatform(config, stickerProviderId, mediaPreviews, logger, ctx.database, voiceMedia)
   ctx.imPlatform.register(platform, id)
+  ctx.on('bridge/speech/transcribe', async (input, next) => {
+    if (input.platform !== platform || !input.media.voice || !input.media.locator) return next()
+    const result = await platform.client.transcribeVoice(
+      rawQQMediaLocator(input.media.locator as QQMediaLocator), input.signal,
+    )
+    return { text: result.transcript, provider: id }
+  })
   ctx.imSticker.register(
     new QQStickerProvider(platform.client, stickerProviderId, undefined, logger, id),
     stickerProviderId,

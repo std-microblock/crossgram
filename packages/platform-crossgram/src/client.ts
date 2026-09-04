@@ -851,6 +851,17 @@ export class QQNTClient {
     })
   }
 
+  async transcribeVoice(locator: QQMediaLocator, signal?: AbortSignal): Promise<{ transcript: string }> {
+    if (this.bridgeProtocol === undefined) await this.status()
+    if (this.bridgeProtocol! < 32) throw new Error('QQNT bridge protocol 32 is required for voice transcription')
+    return this.json('/messages/voice/transcribe', false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(locator),
+      signal,
+    })
+  }
+
   async *downloadFile(
     locator: QQMediaLocator,
     options: {

@@ -38,6 +38,7 @@ import {
   type DialogFolderStore, type StoredDialogFilter,
 } from './dialog-folders.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
+import type { SpeechPipeline } from './speech.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -2265,6 +2266,35 @@ export class DialogRpc {
       hydrateMs, resolveMs, totalMs: performance.now() - startedAt,
     })
     return result
+  }
+
+  async transcribeAudio(
+    req: tl.messages.RawTranscribeAudioRequest,
+    speech: SpeechPipeline,
+  ): Promise<tl.messages.RawTranscribedAudio> {
+    if (!this._store) throw new RpcError(400, 'VOICE_TRANSCRIPTION_FAILED')
+    await this._hydratePeers()
+    const conversationId = this._resolveMessageTarget(req.peer)
+    const projected = await this._store.findProjectedByTlId(
+      this._session.platformSessionId, req.msgId, conversationId,
+    )
+    if (!projected) throw new RpcError(400, 'MESSAGE_ID_INVALID')
+    const part = projected.source.content.parts.find((item) => item.type === 'media' && item.media.voice)
+    if (!part || part.type !== 'media') throw new RpcError(400, 'VOICE_TRANSCRIPTION_FAILED')
+    const existing = part.media.transcript?.trim()
+    const result = existing ? { text: existing } : await speech.transcribe({
+      platform: this._platform,
+      session: this._session,
+      conversation: this._conversation(conversationId),
+      message: projected.source,
+      media: part.media,
+    })
+    const text = result?.text.trim()
+    if (!text) throw new RpcError(400, 'VOICE_TRANSCRIPTION_FAILED')
+    return {
+      _: 'messages.transcribedAudio', pending: false,
+      transcriptionId: Long.fromNumber(req.msgId), text,
+    }
   }
 
   async getFile(req: tl.upload.RawGetFileRequest): Promise<tl.upload.TypeFile> {
@@ -6051,7 +6081,12 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   }
   const id = Long.fromNumber(media.id)
   const accessHash = Long.fromNumber(media.id)
-  const fileReference = new TextEncoder().encode(`bridge-media:${media.id}`)
+  // QQ voice notes have no client-reachable direct URL. Give them a distinct
+  // reference so patched clients skip crossgram.getFileUrl and immediately
+  // use the reliable upload.getFile relay path.
+  const fileReference = new TextEncoder().encode(
+    `${media.voice ? 'bridge-voice-media' : 'bridge-media'}:${media.id}`,
+  )
   const dimensions = media.width && media.height
     ? { width: media.width, height: media.height }
     : media.preview
@@ -6078,6 +6113,7 @@ export function makeTlMessageMedia(media: IMMediaRow, timestamp: number, dcId = 
   })
   return {
     _: 'messageMediaDocument',
+    voice: media.voice || undefined,
     video: media.mimeType?.startsWith('video/') ? true : undefined,
     document: {
       _: 'document', id, accessHash, fileReference, date: timestamp,

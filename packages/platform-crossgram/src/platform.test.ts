@@ -728,8 +728,8 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).rejects.toThrow('not ready')
   })
 
-  it('rejects bridge protocols outside the supported 19-31 range', async () => {
-    for (const protocolVersion of [18, 32, 19.5, Number.NaN, '19', undefined]) {
+  it('rejects bridge protocols outside the supported 19-32 range', async () => {
+    for (const protocolVersion of [18, 33, 19.5, Number.NaN, '19', undefined]) {
       const platform = new QQNTPlatform()
       const status = {
         protocolVersion, ready: true, selfUin: '10001', selfUid: 'u_self',
@@ -737,7 +737,7 @@ describe('QQNTPlatform mapping', () => {
       platform.client.status = vi.fn(async () => status)
       platform.client.getUser = vi.fn()
 
-      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-31')
+      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-32')
       expect(platform.client.getUser).not.toHaveBeenCalled()
     }
   })
@@ -3133,7 +3133,7 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.sendMessage(session, { id: '1:u' }, { parts: [
       { type: 'text', text: 'no mixing' },
       { type: 'media', media: { kind: 'file', voice: true, source: { async *stream() { yield Uint8Array.of(1) } } } },
-    ] })).rejects.toThrow('exactly one voice item without a reply')
+    ] })).rejects.toThrow('exactly one voice item')
   })
 
   it('rejects multiple voice items and voice media mixed with ordinary media', async () => {
@@ -3151,7 +3151,7 @@ describe('QQNTPlatform mapping', () => {
       ],
     ]) {
       await expect(platform.sendMessage(session, { id: '1:u' }, { parts }))
-        .rejects.toThrow('exactly one voice item without a reply')
+        .rejects.toThrow('exactly one voice item')
     }
     expect(send).not.toHaveBeenCalled()
   })

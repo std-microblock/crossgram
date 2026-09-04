@@ -933,6 +933,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   })
   rpc.register('messages.uploadMedia', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.uploadMedia(req as tl.messages.RawUploadMediaRequest))
+  rpc.register('messages.transcribeAudio', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.transcribeAudio(
+      req as tl.messages.RawTranscribeAudioRequest, ctx.speech,
+    ))
   rpc.register('upload.saveFilePart', async (rpc, req) => {
     const state = await requireBridgeSession(rpc)
     const input = req as tl.upload.RawSaveFilePartRequest
