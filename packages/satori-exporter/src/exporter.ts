@@ -102,19 +102,21 @@ export class SatoriExporter {
     this._queue = this._queue.then(async () => {
       const elements = await this._messageElements(message, conversation, platform, canonical)
       if (!this.isActive(bot, generation) || this._session !== canonical) return
+      if (!elements.length) return // system messages with no renderable text stay silent
+      const user = satoriMessageUser(message)
       bot.dispatch(bot.session({
         type: 'message-created',
         timestamp: message.timestamp * 1_000,
         channel: satoriChannel(conversation),
         ...(conversation.kind === 'direct' ? {} : { guild: satoriGuild(conversation) }),
-        user: satoriUser(message.senderId, message.sender),
+        user,
         message: {
           id: message.id,
           content: elements.join(''),
           createdAt: message.timestamp * 1_000,
           channel: satoriChannel(conversation),
           ...(conversation.kind === 'direct' ? {} : { guild: satoriGuild(conversation) }),
-          user: satoriUser(message.senderId, message.sender),
+          user,
         },
       }))
     }).catch((error) => {
@@ -222,6 +224,9 @@ export class SatoriExporter {
     if (!platform || !session) throw new Error('Satori exporter platform session is not ready')
     const output: h[] = []
     if (message.replyToId) output.push(h.quote(message.replyToId))
+    if (message.content.serviceAction?.type === 'custom' && message.content.serviceAction.text) {
+      output.push(h.text(message.content.serviceAction.text))
+    }
     for (const part of message.content.parts) {
       if (part.type === 'text') {
         output.push(...textElements(part))
@@ -589,6 +594,14 @@ function satoriGuild(conversation: IMConversation): Universal.Guild {
 
 function satoriUser(id: string, user: IMMessage['sender']): Universal.User {
   return { id, name: user ? [user.firstName, user.lastName].filter(Boolean).join(' ') || id : id }
+}
+
+/** System messages whose only sender is the platform placeholder get an explicit label. */
+function satoriMessageUser(message: IMMessage): Universal.User {
+  if (message.content.serviceAction && (!message.senderId || message.senderId === '0')) {
+    return { id: message.senderId || '0', name: '系统消息' }
+  }
+  return satoriUser(message.senderId, message.sender)
 }
 
 function satoriGuildMember(member: IMConversationMember): Universal.GuildMember {

@@ -171,6 +171,49 @@ describe('SatoriExporter', () => {
     expect(platform.subscribe).not.toHaveBeenCalled()
   })
 
+  it('exports gray-tip service messages with a system sender label', async () => {
+    const { ctx, exporter } = await createExporter()
+    const events: Session[] = []
+    ctx.on('message-created', (event) => { events.push(event) })
+    const group: IMConversation = { id: 'group:42', kind: 'group', spaceId: 'guild:7', title: 'QQ Group' }
+    const grayTip: IMMessage = {
+      ...message('gray-tip', group.id),
+      senderId: '0',
+      sender: { id: '0', firstName: '0' },
+      content: { parts: [], serviceAction: { type: 'custom', text: '小红邀请小明加入了群聊。' } },
+    }
+    const attributed: IMMessage = {
+      ...message('revoked', group.id),
+      content: { parts: [], serviceAction: { type: 'custom', text: '小红撤回了一条消息' } },
+    }
+
+    exporter.handleMessage(session, group, grayTip, { created: true })
+    exporter.handleMessage(session, group, attributed, { created: true })
+
+    await vi.waitFor(() => expect(events).toHaveLength(2))
+    expect(events.map((event) => ({ user: event.event.user, content: event.event.message?.content }))).toMatchObject([
+      { user: { id: '0', name: '系统消息' }, content: '小红邀请小明加入了群聊。' },
+      { user: { id: 'alice', name: 'Alice' }, content: '小红撤回了一条消息' },
+    ])
+  })
+
+  it('stays silent on service messages without renderable content', async () => {
+    const { ctx, exporter } = await createExporter()
+    const events: Session[] = []
+    ctx.on('message-created', (event) => { events.push(event) })
+    const group: IMConversation = { id: 'group:42', kind: 'group', spaceId: 'guild:7', title: 'QQ Group' }
+    const phoneCall: IMMessage = {
+      ...message('call', group.id),
+      senderId: '0',
+      content: { parts: [], serviceAction: { type: 'phone-call', duration: 42 } },
+    }
+
+    exporter.handleMessage(session, group, phoneCall, { created: true })
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(events).toHaveLength(0)
+  })
+
   it('returns a cached guild with its conversation title', async () => {
     const { ctx, exporter, platform } = await createExporter()
     const conversation: IMConversation = { id: 'group:42', kind: 'group', title: 'QQ Group' }
