@@ -1076,8 +1076,19 @@ export class QQNTClient {
     this.directUrls.delete(identity)
     const fresh = await this.resolveFileUrl(locator, init.signal)
     response = await request(fresh.url)
-    if (!response.ok) throw new Error(await nativeResponseError(response))
-    return response
+    if (response.ok) return response
+    if (locator.imageSpec === undefined || locator.imageSpec === 0) {
+      throw new Error(await nativeResponseError(response))
+    }
+    // QQ rejects some thumbnail specs (720) with a retryable DFS error even
+    // under a freshly signed key, while the original spec keeps working.
+    // Fall back to the original image and remember the substitution under the
+    // thumbnail identity so later requests skip the two failed round trips.
+    const original = await this.resolveFileUrl({ ...locator, imageSpec: 0 }, init.signal)
+    const fallback = await request(original.url)
+    if (!fallback.ok) throw new Error(await nativeResponseError(fallback))
+    this.rememberDirectUrl(identity, { ...original, supportsRange: fresh.supportsRange })
+    return fallback
   }
 
   async resolveFileUrlForDirectDownload(

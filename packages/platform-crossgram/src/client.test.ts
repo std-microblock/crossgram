@@ -1297,6 +1297,75 @@ describe('QQNTClient streaming transport', () => {
     )
   })
 
+  it('falls back to the original spec when QQ keeps rejecting a thumbnail-spec URL', async () => {
+    const cdnPaths: string[] = []
+    let spec720Resolutions = 0
+    let spec0Resolutions = 0
+    server = createServer(async (request, response) => {
+      const body = request.url === '/files/direct-url'
+        ? await new Promise<string>((resolve) => {
+            let data = ''
+            request.on('data', (chunk) => { data += chunk })
+            request.on('end', () => { resolve(data) })
+          })
+        : await new Promise<string>((resolve) => {
+            request.resume()
+            request.on('end', () => { resolve('') })
+          })
+      const address = server!.address()
+      if (!address || typeof address === 'string') throw new Error('missing address')
+      if (request.url === '/files/direct-url') {
+        const spec = JSON.parse(body || '{}').imageSpec ?? 0
+        const bucket = spec === 720 ? ++spec720Resolutions : ++spec0Resolutions
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/qq-cdn/spec${spec}-${bucket}`,
+          expiresAt: Date.now() + 3_600_000,
+        }))
+        return
+      }
+      cdnPaths.push(request.url ?? '')
+      if (request.url === '/qq-cdn/spec720-1' || request.url === '/qq-cdn/spec720-2') {
+        // QQ multimedia rejects the 720 thumbnail spec with a retryable DFS
+        // error even under a freshly signed key.
+        response.writeHead(400, { 'content-type': 'application/json' })
+        response.end('{"retcode":-28030,"retmsg":"download dfs error","retryflag":1}')
+        return
+      }
+      if (request.url === '/qq-cdn/spec0-1') {
+        response.writeHead(206, { 'content-range': 'bytes 0-2/3', 'content-length': '3' })
+        response.end('abc')
+        return
+      }
+      response.writeHead(500).end()
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const locator = {
+      messageId: 'thumb', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'image' as const, fileName: 'photo.jpg',
+      originImageUrl: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=thumb&rkey=rotated',
+      imageSpec: 720 as const,
+    }
+    const first = await collect(client.downloadFile(locator))
+    expect(first.toString()).toBe('abc')
+    // cached URL → rejected → fresh 720 URL → rejected → original-spec URL
+    expect(cdnPaths).toEqual(['/qq-cdn/spec720-1', '/qq-cdn/spec720-2', '/qq-cdn/spec0-1'])
+    expect(spec720Resolutions).toBe(2)
+    expect(spec0Resolutions).toBe(1)
+
+    cdnPaths.length = 0
+    const second = await collect(client.downloadFile(locator))
+    expect(second.toString()).toBe('abc')
+    // The thumbnail identity now resolves straight to the original-spec URL.
+    expect(cdnPaths).toEqual(['/qq-cdn/spec0-1'])
+    expect(spec720Resolutions).toBe(2)
+    expect(spec0Resolutions).toBe(1)
+  })
+
   it('refreshes a stale cached direct URL once after the QQ CDN rejects it with a retryable DFS error', async () => {
     const requestUrls: string[] = []
     let resolutions = 0
@@ -1335,7 +1404,7 @@ describe('QQNTClient streaming transport', () => {
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
     const locator = {
-      messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
+      messageId: 'image', elementId: 'element', chatType: 2 as const, peerUid: 'group',
       kind: 'image' as const, fileName: 'photo.jpg',
       originImageUrl: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image&rkey=rotated',
     }
