@@ -893,22 +893,21 @@ export class QQNTClient {
         directKey = directUrlIdentity(locator)
         direct = await this.resolveFileUrl(locator, options.signal)
         const cached = ranged && direct.supportsRange === false
-          ? await this.cachedUnrangedFile(directKey, direct.url)
+          ? await this.cachedUnrangedFile(locator, directKey, direct.url)
           : undefined
         if (cached) {
           yield* this.readCachedUnrangedFile(cached, offset, limit, options)
           return
         }
         if (limit !== undefined && direct.supportsRange === true) {
-          const bytes = await this.cachedDirectRange(directKey, direct.url, offset, limit, options.signal)
+          const bytes = await this.cachedDirectRange(locator, directKey, direct.url, offset, limit, options.signal)
           await options.onChunk?.(bytes.length)
           if (bytes.length) yield bytes
           return
         }
-        response = await this.fetchImpl(direct.url, {
+        response = await this.fetchDirectUrlWithRefresh(locator, directKey, direct.url, {
           headers: direct.supportsRange === false ? {} : rangeHeaders,
           signal: options.signal,
-          redirect: 'follow',
         })
         if (!response.ok) throw new Error(await nativeResponseError(response))
         if (!response.body) throw new Error('QQNT native media response has no body')
@@ -921,22 +920,21 @@ export class QQNTClient {
       direct = avatarUrl ? undefined : await this.resolveFileUrl(locator, options.signal)
       const directUrl = avatarUrl ?? direct!.url
       const cached = directKey && ranged && direct?.supportsRange === false
-        ? await this.cachedUnrangedFile(directKey, directUrl)
+        ? await this.cachedUnrangedFile(locator, directKey, directUrl)
         : undefined
       if (cached) {
         yield* this.readCachedUnrangedFile(cached, offset, limit, options)
         return
       }
       if (directKey && limit !== undefined && direct?.supportsRange === true) {
-        const bytes = await this.cachedDirectRange(directKey, directUrl, offset, limit, options.signal)
+        const bytes = await this.cachedDirectRange(locator, directKey, directUrl, offset, limit, options.signal)
         await options.onChunk?.(bytes.length)
         if (bytes.length) yield bytes
         return
       }
-      response = await this.fetchImpl(directUrl, {
+      response = await this.fetchDirectUrlWithRefresh(locator, directKey, directUrl, {
         headers: direct?.supportsRange === false ? {} : rangeHeaders,
         signal: options.signal,
-        redirect: 'follow',
       })
       if (!response.ok) throw new Error(await nativeResponseError(response))
       if (!response.body) throw new Error('QQNT native media response has no body')
@@ -1058,6 +1056,30 @@ export class QQNTClient {
     return resolved
   }
 
+  /** Fetch a cached direct URL; when QQ rejects it with a retryable stale-key
+   *  retcode, drop the cached entry, resolve a fresh URL, and retry once. */
+  private async fetchDirectUrlWithRefresh(
+    locator: QQMediaLocator,
+    identity: string | undefined,
+    url: string,
+    init: { headers?: Record<string, string>, signal?: AbortSignal },
+  ): Promise<Response> {
+    const request = (target: string) => this.fetchImpl(target, {
+      headers: init.headers, signal: init.signal, redirect: 'follow',
+    })
+    let response = await request(url)
+    if (response.ok || response.status !== 400 || !identity) return response
+    const text = await response.text()
+    if (!RETRYABLE_DIRECT_URL_RETCODE.test(text)) {
+      throw new Error(`QQNT native media ${response.status}: ${text || response.statusText}`)
+    }
+    this.directUrls.delete(identity)
+    const fresh = await this.resolveFileUrl(locator, init.signal)
+    response = await request(fresh.url)
+    if (!response.ok) throw new Error(await nativeResponseError(response))
+    return response
+  }
+
   async resolveFileUrlForDirectDownload(
     locator: QQMediaLocator,
     signal?: AbortSignal,
@@ -1110,6 +1132,7 @@ export class QQNTClient {
   }
 
   private async cachedDirectRange(
+    locator: QQMediaLocator,
     identity: string,
     url: string,
     offset: number,
@@ -1126,7 +1149,7 @@ export class QQNTClient {
       this.directRangeBlocks.set(cacheKey, block)
     } else {
       const active = this.directRangeBlockLoads.get(cacheKey)
-      const pending = active ?? this.fetchDirectRangeBlock(url, blockStart, blockSize, signal)
+      const pending = active ?? this.fetchDirectRangeBlock(locator, identity, url, blockStart, blockSize, signal)
         .finally(() => this.directRangeBlockLoads.delete(cacheKey))
       if (!active) this.directRangeBlockLoads.set(cacheKey, pending)
       block = await pending
@@ -1147,15 +1170,16 @@ export class QQNTClient {
   }
 
   private async fetchDirectRangeBlock(
+    locator: QQMediaLocator,
+    identity: string,
     url: string,
     start: number,
     size: number,
     signal?: AbortSignal,
   ): Promise<CachedDirectRangeBlock> {
-    const response = await this.fetchImpl(url, {
+    const response = await this.fetchDirectUrlWithRefresh(locator, identity, url, {
       headers: { 'accept-encoding': 'identity', range: `bytes=${start}-${start + size - 1}` },
       signal,
-      redirect: 'follow',
     })
     if (response.status === 416) {
       const contentRange = response.headers.get('content-range') ?? ''
@@ -1204,6 +1228,7 @@ export class QQNTClient {
   }
 
   private async cachedUnrangedFile(
+    locator: QQMediaLocator,
     key: string,
     url: string,
   ): Promise<CachedUnrangedFile | undefined> {
@@ -1214,7 +1239,7 @@ export class QQNTClient {
       return cached
     }
     const active = this.unrangedFileLoads.get(key)
-    const pending = active ?? this.fetchUnrangedFile(key, url)
+    const pending = active ?? this.fetchUnrangedFile(locator, key, url)
       .finally(() => this.unrangedFileLoads.delete(key))
     if (!active) this.unrangedFileLoads.set(key, pending)
     const bytes = await pending
@@ -1223,11 +1248,12 @@ export class QQNTClient {
   }
 
   private async fetchUnrangedFile(
+    locator: QQMediaLocator,
     key: string,
     url: string,
   ): Promise<CachedUnrangedFile> {
-    const response = await this.fetchImpl(url, {
-      headers: { 'accept-encoding': 'identity' }, redirect: 'follow',
+    const response = await this.fetchDirectUrlWithRefresh(locator, key, url, {
+      headers: { 'accept-encoding': 'identity' },
     })
     if (!response.ok) throw new Error(await nativeResponseError(response))
     return this.cacheUnrangedResponse(key, response)
@@ -1906,6 +1932,11 @@ function httpUrl(value: string | undefined): string | undefined {
 function hasDirectUrlIdentity(locator: QQMediaLocator): boolean {
   return Boolean(locator.originImageUrl || locator.fileUuid)
 }
+
+// QQ rotates its rich-media signing keys server-side. A URL cached under the
+// key's nominal TTL can start failing with these "retryable" retcodes long
+// before that TTL elapses; the only recovery is a freshly signed URL.
+const RETRYABLE_DIRECT_URL_RETCODE = /"retcode"\s*:\s*-28030\b/u
 
 function directUrlIdentity(locator: QQMediaLocator): string {
   return JSON.stringify([

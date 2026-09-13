@@ -1297,6 +1297,91 @@ describe('QQNTClient streaming transport', () => {
     )
   })
 
+  it('refreshes a stale cached direct URL once after the QQ CDN rejects it with a retryable DFS error', async () => {
+    const requestUrls: string[] = []
+    let resolutions = 0
+    server = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* drain body */ }
+      const address = server!.address()
+      if (!address || typeof address === 'string') throw new Error('missing address')
+      if (request.url === '/files/direct-url') {
+        resolutions += 1
+        response.setHeader('content-type', 'application/json')
+        // A long nominal expiry is exactly what makes a rotated-key URL stick
+        // in the client cache after QQ invalidates it server-side.
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/qq-cdn/${resolutions === 1 ? 'stale' : 'fresh'}`,
+          expiresAt: Date.now() + 3_600_000,
+        }))
+        return
+      }
+      requestUrls.push(request.url ?? '')
+      if (request.url === '/qq-cdn/stale') {
+        // QQ multimedia's signature for a superseded rich-media key.
+        response.writeHead(400, { 'content-type': 'application/json' })
+        response.end('{"retcode":-28030,"retmsg":"download dfs error","retryflag":1}')
+        return
+      }
+      if (request.url === '/qq-cdn/fresh') {
+        response.writeHead(206, { 'content-range': 'bytes 0-2/3', 'content-length': '3' })
+        response.end('abc')
+        return
+      }
+      response.writeHead(500).end()
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const locator = {
+      messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'image' as const, fileName: 'photo.jpg',
+      originImageUrl: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image&rkey=rotated',
+    }
+    // First download resolves and caches the URL that is about to go stale.
+    await collect(client.downloadFile(locator))
+    // The cached copy is now rejected server-side; one refresh must recover.
+    const second = await collect(client.downloadFile(locator))
+    expect(second.toString()).toBe('abc')
+    expect(requestUrls).toEqual(['/qq-cdn/stale', '/qq-cdn/fresh', '/qq-cdn/fresh'])
+    expect(resolutions).toBe(2)
+  })
+
+  it('surfaces the error when a refreshed direct URL still fails with the same DFS rejection', async () => {
+    let resolutions = 0
+    server = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* drain body */ }
+      const address = server!.address()
+      if (!address || typeof address === 'string') throw new Error('missing address')
+      if (request.url === '/files/direct-url') {
+        resolutions += 1
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/qq-cdn/rejected-${resolutions}`,
+          expiresAt: Date.now() + 3_600_000,
+        }))
+        return
+      }
+      response.writeHead(400, { 'content-type': 'application/json' })
+      response.end('{"retcode":-28030,"retmsg":"download dfs error","retryflag":1}')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing address')
+    const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
+    const download = collect(client.downloadFile({
+      messageId: 'image', elementId: 'element', chatType: 2, peerUid: 'group',
+      kind: 'image', fileName: 'photo.jpg',
+      originImageUrl: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image&rkey=rotated',
+    }))
+
+    await expect(download).rejects.toThrow('QQNT native media 400: {"retcode":-28030')
+    // Exactly one refresh attempt: no retry loop.
+    expect(resolutions).toBe(2)
+  })
+
   it('downloads an image from its packet-refreshed direct URL without leaking bridge authorization', async () => {
     const requests: Array<{ url: string, range?: string, authorization?: string }> = []
     server = createServer(async (request, response) => {
