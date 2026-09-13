@@ -211,7 +211,14 @@ export class Mtproto extends Service {
     const healthy = candidates.filter((session) =>
       session.connection.stalledForMs < STALL_TIMEOUT_MS)
     const updateSessions = healthy.filter((session) => session.acceptsUpdates)
-    const targets = updateSessions.length ? updateSessions : healthy.slice(0, 1)
+    // A client only marks a connection as accepting updates once it calls
+    // updates.getState/getDifference/getChannelDifference. Every reconnect
+    // has a window before that where no connection qualifies, and Telegram
+    // Desktop keeps parallel main/upload/download connections on one key.
+    // Picking an arbitrary one there silently drops the push; send to all
+    // healthy candidates instead. ServerSession buffers until the API layer
+    // is negotiated, and clients dedupe by pts, so extra copies are harmless.
+    const targets = updateSessions.length ? updateSessions : healthy
     for (const session of targets) {
       this._applyKnownApiLayer(session)
       session.sendUpdate(update)

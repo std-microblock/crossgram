@@ -305,6 +305,48 @@ describe('Mtproto stalled-connection handling', () => {
     }
   })
 
+  it('sendUpdateToAuthKey reaches every healthy connection before any accepts updates', async () => {
+    const { service, stop } = await makeService()
+    try {
+      // Reconnect window: Telegram Desktop keeps parallel main/upload/download
+      // connections on one key and none has called updates.getState yet.
+      // Picking just one of them would drop the push on whichever lost the race.
+      const main = fakeSession(authKeyA, fakeConnection(0), false)
+      const upload = fakeSession(authKeyA, fakeConnection(0), false)
+      const otherKey = fakeSession(authKeyB, fakeConnection(0), true)
+      sessionsOf(service).add(main)
+      sessionsOf(service).add(upload)
+      sessionsOf(service).add(otherKey)
+
+      const delivered = service.sendUpdateToAuthKey(authKeyA, { _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+
+      expect(delivered).toBe(2)
+      expect(main.sendUpdate).toHaveBeenCalledOnce()
+      expect(upload.sendUpdate).toHaveBeenCalledOnce()
+      expect(otherKey.sendUpdate).not.toHaveBeenCalled()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('sendUpdateToAuthKey targets only the connections that established an updates stream', async () => {
+    const { service, stop } = await makeService()
+    try {
+      const main = fakeSession(authKeyA, fakeConnection(0), true)
+      const upload = fakeSession(authKeyA, fakeConnection(0), false)
+      sessionsOf(service).add(main)
+      sessionsOf(service).add(upload)
+
+      const delivered = service.sendUpdateToAuthKey(authKeyA, { _: 'updateShort', update: { _: 'updateConfig' }, date: 0 })
+
+      expect(delivered).toBe(1)
+      expect(main.sendUpdate).toHaveBeenCalledOnce()
+      expect(upload.sendUpdate).not.toHaveBeenCalled()
+    } finally {
+      await stop()
+    }
+  })
+
   it('sendUpdateToAuthKey returns zero when every candidate connection is stalled', async () => {
     const { service, stop } = await makeService()
     try {

@@ -4140,6 +4140,168 @@ describe('bridge login e2e', () => {
     }
   }, 15000)
 
+  it('pushes a platform message to every parallel connection that has no updates stream yet', async () => {
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    let currentConversation: bridge.IMConversation | undefined
+    let currentMessage: bridge.IMMessage | undefined
+    const platformId = 'parallel-push-e2e'
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
+      async getDialogs() { return { dialogs: [] } },
+      async getHistory() { return { messages: [] } },
+      async sendMessage() { throw new Error('unused') },
+      async getUser(_session, id) { return { id, firstName: id === 'sender' ? 'Sender' : id } },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({
+      platform: { id: platformId, adapter: platform },
+    })
+    let main: TestClient | undefined
+    let parallel: TestClient | undefined
+    try {
+      await ctx.database.create('mtproto_platform_session', {
+        id: 'parallel-ps', platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Parallel User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'parallel-auth', virtualPhone: '88800780', totpSecret: '22'.repeat(20),
+        platformId, platformSessionId: 'parallel-ps',
+      })
+
+      main = await TestClient.connect(port)
+      const key = await doClientHandshake(main, pubKey)
+      const sid = new Long(0x3333cccc, 0x3ccc, false)
+      const code = await callRpc(main, key, sid, {
+        _: 'auth.sendCode', phoneNumber: '+88800780', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+      }, 300)
+      const authorization = await callRpc(main, key, sid, {
+        _: 'auth.signIn', phoneNumber: '88800780', phoneCodeHash: code.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode('22'.repeat(20)),
+      }, 302)
+      // Deliberately no updates.getState here. Telegram Desktop opens parallel
+      // main/upload/download connections on one auth key, and a reconnecting
+      // client has a window where none of them has declared an updates stream.
+      // Sending to an arbitrary one of them drops the push on the others.
+      parallel = await TestClient.connect(port)
+      const parallelSid = new Long(0x4444dddd, 0x4ddd, false)
+      // Any authorized RPC binds this connection to the stored auth key without
+      // marking it as accepting updates.
+      await expect(callRpc(parallel, key, parallelSid, {
+        _: 'users.getUsers',
+        id: [{ _: 'inputUser', userId: authorization.user.id, accessHash: Long.ZERO }],
+      }, 304)).resolves.toBeTruthy()
+
+      currentConversation = { id: 'parallel-group', kind: 'group', title: 'Parallel Group' }
+      currentMessage = {
+        id: 'parallel-1', conversationId: 'parallel-group', senderId: 'sender',
+        timestamp: 1_800_000_300, content: { parts: [{ type: 'text', text: 'to every connection' }] },
+      }
+      await handler!({ type: 'message', conversation: currentConversation, message: currentMessage })
+
+      const parallelPush = await readPush(parallel, key)
+      expect(parallelPush).toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateNewChannelMessage', message: { message: 'to every connection' } }],
+      })
+      const mainPush = await readPush(main, key)
+      expect(mainPush).toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateNewChannelMessage', message: { message: 'to every connection' } }],
+      })
+    } finally {
+      parallel?.close()
+      main?.close()
+      await stop()
+    }
+  }, 15000)
+
+  it('pushes a platform message to a second authorized device', async () => {
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    let currentConversation: bridge.IMConversation | undefined
+    let currentMessage: bridge.IMMessage | undefined
+    const platformId = 'second-device-e2e'
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
+      async getDialogs() { return { dialogs: [] } },
+      async getHistory() { return { messages: [] } },
+      async sendMessage() { throw new Error('unused') },
+      async getUser(_session, id) { return { id, firstName: id === 'sender' ? 'Sender' : id } },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({
+      platform: { id: platformId, adapter: platform },
+    })
+    let desktop: TestClient | undefined
+    let mobile: TestClient | undefined
+    try {
+      await ctx.database.create('mtproto_platform_session', {
+        id: 'second-ps', platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Second User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'second-auth', virtualPhone: '88800781', totpSecret: '22'.repeat(20),
+        platformId, platformSessionId: 'second-ps',
+      })
+
+      // Two sign-ins on the same account produce two distinct permanent auth
+      // keys, which is what a phone and a desktop look like to the bridge.
+      const signIn = async (client: TestClient, sid: Long, base: number) => {
+        const key = await doClientHandshake(client, pubKey)
+        const code = await callRpc(client, key, sid, {
+          _: 'auth.sendCode', phoneNumber: '+88800781', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        }, base)
+        await callRpc(client, key, sid, {
+          _: 'auth.signIn', phoneNumber: '88800781', phoneCodeHash: code.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode('22'.repeat(20)),
+        }, base + 2)
+        await expect(callRpc(client, key, sid, { _: 'updates.getState' }, base + 4))
+          .resolves.toMatchObject({ _: 'updates.state' })
+        return key
+      }
+
+      desktop = await TestClient.connect(port)
+      const desktopKey = await signIn(desktop, new Long(0x5555eeee, 0x5eee, false), 400)
+      mobile = await TestClient.connect(port)
+      const mobileKey = await signIn(mobile, new Long(0x6666ffff, 0x6fff, false), 420)
+
+      currentConversation = { id: 'second-group', kind: 'group', title: 'Second Group' }
+      currentMessage = {
+        id: 'second-1', conversationId: 'second-group', senderId: 'sender',
+        timestamp: 1_800_000_400, content: { parts: [{ type: 'text', text: 'to both devices' }] },
+      }
+      await handler!({ type: 'message', conversation: currentConversation, message: currentMessage })
+
+      const desktopPush = await readPush(desktop, desktopKey)
+      const mobilePush = await readPush(mobile, mobileKey)
+      expect(desktopPush).toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateNewChannelMessage', message: { message: 'to both devices' } }],
+      })
+      expect(mobilePush).toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateNewChannelMessage', message: { message: 'to both devices' } }],
+      })
+    } finally {
+      mobile?.close()
+      desktop?.close()
+      await stop()
+    }
+  }, 15000)
+
   it('keeps the live Telegram ID when QQ finalizes msgSeq before a recall', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     const platformId = 'qq-final-sequence-e2e'

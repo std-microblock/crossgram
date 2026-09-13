@@ -504,7 +504,7 @@ export class UpdateManager {
     await this._store.setUpdatePayload(eventKey, updateToJson(payload))
     if (await this._send(
       session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
-    ) || options.deliveredViaRpc) {
+    )) {
       await this._store.markUpdatePublished(eventKey)
     }
   }
@@ -797,7 +797,7 @@ export class UpdateManager {
     )
     if (await this._send(
       session.platformSessionId, deliveredPayload, options.excludeAuthKeyId, options.excludeConnection,
-    ) || options.deliveredViaRpc) {
+    )) {
       await this._store.markUpdatePublished(eventKey)
       this._onTrace?.('update published eventKey=%s session=%s', eventKey, session.platformSessionId)
     } else {
@@ -856,7 +856,7 @@ export class UpdateManager {
     await this._store.setUpdatePayload(eventKey, updateToJson(payload))
     if (await this._send(
       session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
-    ) || options.deliveredViaRpc) {
+    )) {
       await this._store.markUpdatePublished(eventKey)
     }
     return payload
@@ -874,6 +874,7 @@ export class UpdateManager {
   ): Promise<boolean> {
     const bindings = await this._database.get('mtproto_auth_binding', { platformSessionId })
     let delivered = 0
+    let missed = 0
     this._onTrace?.(
       'update send start session=%s bindings=%d updates=%d types=%s',
       platformSessionId, bindings.length, payload.updates.length,
@@ -882,24 +883,38 @@ export class UpdateManager {
     for (const binding of bindings) {
       if (!excludeConnection && binding.authKeyId === excludeAuthKeyId) continue
       const connections = this._sendUpdate(hexBytes(binding.authKeyId), payload, excludeConnection)
-      delivered += connections
+      if (connections > 0) {
+        delivered += connections
+      } else {
+        missed++
+      }
       this._onTrace?.(
         'update send binding session=%s authKey=%s connections=%d',
         platformSessionId, binding.authKeyId, connections,
       )
     }
     this._onTrace?.(
-      'update send complete session=%s bindings=%d connections=%d',
-      platformSessionId, bindings.length, delivered,
+      'update send complete session=%s bindings=%d connections=%d missed=%d',
+      platformSessionId, bindings.length, delivered, missed,
     )
-    return delivered > 0
+    // Only a full fan-out counts as delivered. A device that was offline while
+    // another one took the push has not seen it, and marking the row published
+    // would drop it from retryPending for good. Clients dedupe by pts, so
+    // replaying a row some device already has is harmless.
+    return missed === 0
   }
 
   async retryPending(platformSessionId: string): Promise<number> {
     let published = 0
     for (const delivery of await this._store.getPendingUpdateDeliveries(platformSessionId)) {
       if (!delivery.payload) continue
-      if (!await this._send(platformSessionId, updateFromJson(delivery.payload))) break
+      // Keep going on a partial fan-out: later rows may target a device that is
+      // online now, and the rows that just failed stay pending for the next try.
+      // ponytail: replay is per row, not per device, so a device that already
+      // has the update is resent it. Clients drop a pts they have applied, so
+      // this is only wasted bytes; a per-binding delivery ledger would avoid it
+      // if the redundancy ever shows up in traffic.
+      if (!await this._send(platformSessionId, updateFromJson(delivery.payload))) continue
       await this._store.markUpdatePublished(delivery.eventKey)
       published++
     }

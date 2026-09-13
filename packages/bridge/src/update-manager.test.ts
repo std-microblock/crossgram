@@ -606,7 +606,7 @@ describe('UpdateManager', () => {
   })
 
   it('returns RPC-delivered replacements while excluding only the requester connection', async () => {
-    const { ctx, store, manager, sent } = await createHarness(undefined, platform, undefined, 0)
+    const { ctx, store, manager, sent } = await createHarness(undefined, platform, undefined, 1)
     await ctx.database.create('mtproto_auth_binding', {
       authKeyId: '1122334455667788',
       platformId: session.platformId,
