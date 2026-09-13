@@ -49,7 +49,7 @@ describe('API layer response writers', () => {
     const legacyGetHistory = constructorFromLocalSchema(105, 'messages.getHistory')
 
     expect(first).toBe(second)
-    expect(Object.keys(first)).toHaveLength(3_610)
+    expect(Object.keys(first)).toHaveLength(3_660)
     expect(first[legacyGetHistory]).toBeTypeOf('function')
   })
 
