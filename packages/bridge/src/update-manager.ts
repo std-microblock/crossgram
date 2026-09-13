@@ -976,6 +976,15 @@ export class UpdateManager {
       if (!Number.isSafeInteger(channelId)) continue
       changedChannels.set(channelId, Math.max(changedChannels.get(channelId) ?? 0, delivery.pts))
       const payload = updateFromJson(delivery.payload)
+      for (const update of payload.updates) {
+        // A device without a local dialog for the channel cannot resolve the
+        // marker at all: Telegram Desktop parks the update until the channel
+        // is known, dialogs only load after the difference completes, and the
+        // two wait on each other forever. Mirror the official server here and
+        // let the account difference carry the channel messages themselves so
+        // the dialog exists before the marker is processed.
+        if (update._ === 'updateNewChannelMessage') newMessages.push(update.message)
+      }
       for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
       for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
     }

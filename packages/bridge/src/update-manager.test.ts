@@ -905,7 +905,13 @@ describe('UpdateManager', () => {
       _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
     })
     expect(accountDifference).toMatchObject({
-      _: 'updates.difference', newMessages: [{ message: 'direct-1' }],
+      _: 'updates.difference',
+      newMessages: [
+        { message: 'direct-1' },
+        { message: 'alpha-1' },
+        { message: 'beta-1' },
+        { message: 'alpha-2' },
+      ],
       otherUpdates: [
         { _: 'updateChannelTooLong', channelId: stableId('peer:alpha'), pts: 3 },
         { _: 'updateChannelTooLong', channelId: stableId('peer:beta'), pts: 2 },
@@ -935,7 +941,13 @@ describe('UpdateManager', () => {
       _: 'updates.getDifference', pts: before.pts, date: before.date, qts: before.qts,
     })
     expect(difference).toMatchObject({
-      _: 'updates.difference', newMessages: [],
+      _: 'updates.difference',
+      // The channel messages ride along so a device without a local dialog can
+      // resolve the channel before processing the too-long markers.
+      newMessages: [
+        { message: 'offline-alpha-message' },
+        { message: 'offline-beta-message' },
+      ],
       otherUpdates: [
         { _: 'updateChannelTooLong', channelId: stableId('peer:offline-alpha'), pts: 2 },
         { _: 'updateChannelTooLong', channelId: stableId('peer:offline-beta'), pts: 2 },
