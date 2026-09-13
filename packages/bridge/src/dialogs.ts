@@ -444,7 +444,7 @@ export class DialogRpc {
     await this._hydratePeers()
     const includesFolder = req.peers.some((peer) => peer._ === 'inputDialogPeerFolder')
     const requestedPeerIds = req.peers.flatMap((requested) => {
-      if (requested._ === 'inputDialogPeerFolder') return []
+      if (requested._ === 'inputDialogPeerFolder' || requested._ === 'inputDialogPeerCommunity') return []
       const peerId = this._resolveKnownInputPeer(requested.peer)
       return peerId === undefined ? [] : [peerId]
     })
@@ -475,6 +475,7 @@ export class DialogRpc {
         }
         continue
       }
+      if (requested._ === 'inputDialogPeerCommunity') continue
       const peerId = this._resolvePeer(requested.peer)
       const dialog = byId.get(peerId)
       if (!dialog || seen.has(peerId)) continue
@@ -5255,6 +5256,7 @@ export class DialogRpc {
     if (peer._ === 'inputNotifyUsers') return { type: 'users' }
     if (peer._ === 'inputNotifyChats') return { type: 'chats' }
     if (peer._ === 'inputNotifyBroadcasts') return { type: 'broadcasts' }
+    if (peer._ === 'inputNotifyCommunity') throw new RpcError(400, 'PEER_ID_INVALID')
     const peerId = this._resolveNotificationPeer(peer.peer)
     return peer._ === 'inputNotifyForumTopic'
       ? { type: 'topic', peerId, topMsgId: peer.topMsgId }
@@ -5772,18 +5774,23 @@ function makeTlInlineKeyboard(
   keyboard: import('./platform.js').IMInlineKeyboard | undefined,
 ): tl.RawReplyInlineMarkup | undefined {
   if (!keyboard?.rows.length) return
-  const rows = keyboard.rows.map((row): tl.RawKeyboardButtonRow => ({
-    _: 'keyboardButtonRow',
-    buttons: row.buttons.map((button): tl.TypeKeyboardButton => {
+  const rows = keyboard.rows.map((row): tl.RawKeyboardInlineButtonRow => ({
+    _: 'keyboardInlineButtonRow',
+    buttons: row.buttons.map((button): tl.RawKeyboardInlineButton => {
       const style = button.style ? {
         _: 'keyboardButtonStyle' as const,
         bgPrimary: button.style === 'primary' || undefined,
         bgDanger: button.style === 'danger' || undefined,
         bgSuccess: button.style === 'success' || undefined,
       } : undefined
-      return button.type === 'url'
-        ? { _: 'keyboardButtonUrl', text: button.text, url: button.url, style }
-        : { _: 'keyboardButtonCallback', text: button.text, data: Buffer.from(button.data), style }
+      return {
+        _: 'keyboardInlineButton',
+        text: button.text,
+        style,
+        type: button.type === 'url'
+          ? { _: 'inlineButtonTypeUrl', url: button.url }
+          : { _: 'inlineButtonTypeCallback', data: Buffer.from(button.data) },
+      }
     }),
   }))
   return { _: 'replyInlineMarkup', rows }

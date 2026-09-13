@@ -8,8 +8,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@mtcute/core": "^0.30.3",
-    "@mtcute/node": "^0.30.3",
+    "@mtcute/core": "^0.32.1",
+    "@mtcute/node": "^0.32.1",
     "tsx": "npm:@cordiverse/tsx@4.19.3-fix.3"
   },
   "devDependencies": {

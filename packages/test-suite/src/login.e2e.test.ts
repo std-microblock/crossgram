@@ -3259,7 +3259,13 @@ describe('bridge login e2e', () => {
         _: 'updates.getDifference', pts: before.pts, date: before.date, qts: before.qts,
       }, 12)
       expect(difference).toMatchObject({
-        _: 'updates.difference', newMessages: [],
+        _: 'updates.difference',
+        // Channel messages ride in the account difference so a device without
+        // a local dialog can resolve the channel before the too-long markers.
+        newMessages: [
+          { message: 'offline alpha' },
+          { message: 'offline beta' },
+        ],
         otherUpdates: [
           { _: 'updateChannelTooLong', pts: 2 },
           { _: 'updateChannelTooLong', pts: 2 },

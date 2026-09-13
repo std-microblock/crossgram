@@ -27,8 +27,8 @@
     "cordis": "^4.0.0-rc.5"
   },
   "dependencies": {
-    "@mtcute/core": "^0.30.3",
-    "@mtcute/tl-runtime": "^0.30.3",
+    "@mtcute/core": "^0.32.1",
+    "@mtcute/tl-runtime": "^0.32.0",
     "@mtproto-relay/mtproto": "workspace:*",
     "@mtproto-relay/update-store": "workspace:*",
     "@mtproto-relay/update-store-memory": "workspace:*",
@@ -40,9 +40,9 @@
   },
   "devDependencies": {
     "@cordisjs/client": "^0.8.2",
-    "@fuman/io": "^0.0.20",
-    "@fuman/utils": "^0.0.20",
-    "@mtcute/node": "^0.30.3",
+    "@fuman/io": "^0.0.21",
+    "@fuman/utils": "^0.0.21",
+    "@mtcute/node": "^0.32.1",
     "@vue/test-utils": "^2.4.11",
     "happy-dom": "^20.11.2",
     "vue": "^3.5.41"

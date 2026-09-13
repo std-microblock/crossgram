@@ -1099,9 +1099,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   rpc.register('messages.getForumTopicsByID', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getForumTopics(req as tl.messages.RawGetForumTopicsByIDRequest))
   rpc.register('channels.getForumTopics', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.getLegacyForumTopics(req as LegacyGetForumTopicsRequest))
+    (await requireBridgeSession(rpc)).dialogs.getLegacyForumTopics(req as unknown as LegacyGetForumTopicsRequest))
   rpc.register('channels.getForumTopicsByID', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.getLegacyForumTopics(req as LegacyGetForumTopicsByIdRequest))
+    (await requireBridgeSession(rpc)).dialogs.getLegacyForumTopics(req as unknown as LegacyGetForumTopicsByIdRequest))
   rpc.register('messages.getReplies', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getReplies(req as tl.messages.RawGetRepliesRequest))
   rpc.register('channels.toggleViewForumAsMessages', async () => ({

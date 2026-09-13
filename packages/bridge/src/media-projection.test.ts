@@ -219,12 +219,13 @@ it('projects platform inline keyboards as Telegram URL and callback buttons', ()
       _: 'replyInlineMarkup',
       rows: [{ buttons: [
         {
-          _: 'keyboardButtonUrl', text: 'Open', url: 'https://example.com',
+          _: 'keyboardInlineButton', text: 'Open',
+          type: { _: 'inlineButtonTypeUrl', url: 'https://example.com' },
           style: { _: 'keyboardButtonStyle', bgPrimary: true },
         },
         {
-          _: 'keyboardButtonCallback', text: 'Confirm',
-          data: Buffer.from('confirm:42'),
+          _: 'keyboardInlineButton', text: 'Confirm',
+          type: { _: 'inlineButtonTypeCallback', data: Buffer.from('confirm:42') },
           style: { _: 'keyboardButtonStyle', bgDanger: true },
         },
       ] }],

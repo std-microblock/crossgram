@@ -352,7 +352,7 @@ describe('DialogRpc', () => {
     const rpc = new DialogRpc(platform, session)
     const decoded = wireRoundTrip(await rpc.getDialogs(getDialogsRequest())) as tl.messages.RawDialogs
     const dialogs = new Map(decoded.dialogs.map((dialog) => [
-      dialog.peer._ === 'peerChannel' ? dialog.peer.channelId : 0,
+      ((dialog as tl.RawDialog).peer as tl.RawPeerChannel).channelId,
       dialog as tl.RawDialog,
     ]))
     const messages = new Map(decoded.messages.flatMap((message) =>
@@ -770,7 +770,7 @@ describe('DialogRpc', () => {
       ],
     })
 
-    expect(result.dialogs.map((dialog) => dialog.peer)).toEqual([
+    expect(result.dialogs.map((dialog) => (dialog as tl.RawDialog).peer)).toEqual([
       { _: 'peerUser', userId: bobId },
       { _: 'peerUser', userId: aliceId },
     ])

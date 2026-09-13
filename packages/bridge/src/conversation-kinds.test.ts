@@ -840,7 +840,7 @@ describe('conversation kinds', () => {
   it('materializes direct, group, and hierarchical channel dialogs with the correct peer types', async () => {
     const { ctx, rpc } = await createRpc()
     const result = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
-    expect(result.dialogs.map((dialog) => dialog.peer._)).toEqual(['peerUser', 'peerChannel', 'peerChannel'])
+    expect(result.dialogs.map((dialog) => (dialog as tl.RawDialog).peer._)).toEqual(['peerUser', 'peerChannel', 'peerChannel'])
     expect(result.chats).toMatchObject([
       { _: 'channel', title: 'QQ Group', megagroup: true, participantsCount: 23 },
       { _: 'channel', title: 'Discord / general', megagroup: true, forum: true, participantsCount: 42 },
@@ -1720,7 +1720,7 @@ describe('conversation kinds', () => {
     const groupId = stableId('peer:group')
     const group = { _: 'inputChannel' as const, channelId: groupId, accessHash: Long.ZERO }
     expect(dialogs.dialogs.find((dialog) =>
-      dialog.peer._ === 'peerChannel' && dialog.peer.channelId === groupId)).toBeDefined()
+      ((dialog as tl.RawDialog).peer as tl.RawPeerChannel).channelId === groupId)).toBeDefined()
     expect(dialogs.chats).toContainEqual(expect.objectContaining({
       _: 'channel', title: 'QQ Group', megagroup: true,
       defaultBannedRights: { _: 'chatBannedRights', untilDate: 0 },

@@ -1439,45 +1439,45 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@fuman/io@npm:0.0.20, @fuman/io@npm:^0.0.20":
-  version: 0.0.20
-  resolution: "@fuman/io@npm:0.0.20"
+"@fuman/io@npm:0.0.21, @fuman/io@npm:^0.0.21":
+  version: 0.0.21
+  resolution: "@fuman/io@npm:0.0.21"
   dependencies:
-    "@fuman/utils": "npm:^0.0.20"
-  checksum: 10c0/9acdd7ac774ef5c9e62b8ff30526d6be4aa484f5b26a7c9299532a8c6d17801a2a4e93d4fe752da56251b8a1e5b584182978ad5418b07f3b0692ec6d0cfbac82
+    "@fuman/utils": "npm:^0.0.21"
+  checksum: 10c0/79f2b620dbd45192c92831b957430d4e2ec3f063d07a54a53cf6e47faa08508ab04aa0c40c15ecdc07fae400085f17153822f64a5fc4aa1fd25a093220956366
   languageName: node
   linkType: hard
 
-"@fuman/net@npm:0.0.20, @fuman/net@npm:^0.0.20":
-  version: 0.0.20
-  resolution: "@fuman/net@npm:0.0.20"
+"@fuman/net@npm:0.0.21, @fuman/net@npm:^0.0.21":
+  version: 0.0.21
+  resolution: "@fuman/net@npm:0.0.21"
   dependencies:
-    "@fuman/io": "npm:^0.0.20"
-    "@fuman/utils": "npm:^0.0.20"
-  checksum: 10c0/e824505999c55ff6c03400d7fbeb81c7acdfdf79943a974f85edccadc37a5e294807b8fcad992209095792cbae460567e57cb3cd67a3aa281d8ce33869dab301
+    "@fuman/io": "npm:^0.0.21"
+    "@fuman/utils": "npm:^0.0.21"
+  checksum: 10c0/744b4ee40a21513ceb7d4af0d2c7b897a0b34ceed349da9b29b2a91bbce1eb96a18ff8a5ec6db5962def2423eca77f191575a3c9efde30a2c072d9f913478458
   languageName: node
   linkType: hard
 
-"@fuman/node@npm:0.0.20":
-  version: 0.0.20
-  resolution: "@fuman/node@npm:0.0.20"
+"@fuman/node@npm:0.0.21":
+  version: 0.0.21
+  resolution: "@fuman/node@npm:0.0.21"
   dependencies:
-    "@fuman/io": "npm:^0.0.20"
-    "@fuman/net": "npm:^0.0.20"
-    "@fuman/utils": "npm:^0.0.20"
+    "@fuman/io": "npm:^0.0.21"
+    "@fuman/net": "npm:^0.0.21"
+    "@fuman/utils": "npm:^0.0.21"
   peerDependencies:
     ws: ^8.18.1
   peerDependenciesMeta:
     ws:
       optional: true
-  checksum: 10c0/05f6ab69af60720bc4b622322259c670df9d1acdedff5683710cc33bdf75bab2e37e9d546c19552ae0e6f874762c8be15909be409451f2f9abe4a7a4d9473cfd
+  checksum: 10c0/985650998867b4923fdf0c61bc4558690b45800e153cb4468c265cd8c6e43badc7d4083c0000442eb6568b4fca15669d07c3040f1a6b9bac151b021741f5eaa3
   languageName: node
   linkType: hard
 
-"@fuman/utils@npm:0.0.20, @fuman/utils@npm:^0.0.20":
-  version: 0.0.20
-  resolution: "@fuman/utils@npm:0.0.20"
-  checksum: 10c0/4a8d1a2483f15c97d9323a60da2363b9551ff4406a28a7f067241ba8506a3fd2a74871451263704158976e1fec01dfa4d36a1b6a57ec4027eb6b632f6841150f
+"@fuman/utils@npm:0.0.21, @fuman/utils@npm:^0.0.21":
+  version: 0.0.21
+  resolution: "@fuman/utils@npm:0.0.21"
+  checksum: 10c0/cfa1f79a2db58a3e9f8e4582d2e4ecb33fcec18d6e47f50087bcc6c7e5e2d57e0be321322055d934394fa4b535ab54e29288a44970ac046231a390a97b50bb4a
   languageName: node
   linkType: hard
 
@@ -1825,93 +1825,93 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@mtcute/core@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/core@npm:0.30.3"
+"@mtcute/core@npm:^0.32.1":
+  version: 0.32.1
+  resolution: "@mtcute/core@npm:0.32.1"
   dependencies:
-    "@fuman/io": "npm:0.0.20"
-    "@fuman/net": "npm:0.0.20"
-    "@fuman/utils": "npm:0.0.20"
-    "@mtcute/file-id": "npm:^0.30.3"
-    "@mtcute/tl-runtime": "npm:^0.30.3"
+    "@fuman/io": "npm:0.0.21"
+    "@fuman/net": "npm:0.0.21"
+    "@fuman/utils": "npm:0.0.21"
+    "@mtcute/file-id": "npm:^0.32.0"
+    "@mtcute/tl-runtime": "npm:^0.32.0"
     "@types/events": "npm:3.0.0"
     long: "npm:^5.3.2"
-  checksum: 10c0/64adf0b6aa19b3d340e5c3fab393b9d34847d298f1f3ee67e0eabd610fd2ebf506c62bcf2e8e2082a9a451251a1b945077727267789261cd0d6d4febff50b5cf
+  checksum: 10c0/4a63e97747b267db599bc22c2575691e5b5a45f0324a5622099c7943b44e3343fd28bbf27a7fc10636594d68a41cdbdc179c2234f8f955c035cd453925639d16
   languageName: node
   linkType: hard
 
-"@mtcute/file-id@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/file-id@npm:0.30.3"
+"@mtcute/file-id@npm:^0.32.0":
+  version: 0.32.0
+  resolution: "@mtcute/file-id@npm:0.32.0"
   dependencies:
-    "@fuman/utils": "npm:0.0.20"
-    "@mtcute/tl-runtime": "npm:^0.30.3"
+    "@fuman/utils": "npm:0.0.21"
+    "@mtcute/tl-runtime": "npm:^0.32.0"
     long: "npm:^5.3.2"
-  checksum: 10c0/8f0facc50de93c69497fa4f25976725d886a1a5f4580fe1b16f740cce831059432b0737d67541cbf0b2fe613f248dd9a06f2a6a54909fecdd69816f82bbc97a6
+  checksum: 10c0/a5a5ebe9e695783b6d812d83ed088c3bdf3b611ff17444a2899d32473dd800b8fdd424beda5cc4f8ac04c474a69cf02178dccd8a9fbd8bc0f2dad89ef0938bb1
   languageName: node
   linkType: hard
 
-"@mtcute/html-parser@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/html-parser@npm:0.30.3"
+"@mtcute/html-parser@npm:^0.32.1":
+  version: 0.32.1
+  resolution: "@mtcute/html-parser@npm:0.32.1"
   dependencies:
-    "@mtcute/core": "npm:^0.30.3"
+    "@mtcute/core": "npm:^0.32.1"
     htmlparser2: "npm:^10.0.0"
     long: "npm:^5.3.2"
-  checksum: 10c0/5ed5c91da5bbe299475f06005b6fc7fdf4fbc496a17ed7a3d6ada8bf05603e6f0d002b22a141c1060a3f72482beee85cda78103ae4ff9445a2161518ac5e533f
+  checksum: 10c0/39865cb5125813d190762f95eff6f7dc054c8eadf0090902b4ae41480952393b0cca9bc9d972f3af23bd5da3e8e71c330cb0a0591db834f0f50118e2b15d6059
   languageName: node
   linkType: hard
 
-"@mtcute/markdown-parser@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/markdown-parser@npm:0.30.3"
+"@mtcute/markdown-parser@npm:^0.32.1":
+  version: 0.32.1
+  resolution: "@mtcute/markdown-parser@npm:0.32.1"
   dependencies:
-    "@mtcute/core": "npm:^0.30.3"
+    "@mtcute/core": "npm:^0.32.1"
     long: "npm:^5.3.2"
-  checksum: 10c0/581d6d73ec1868de4766f0b6024d7e23c8e1ecabf6ba5c6132c553d11d490f2dc736ad749a6c0c991287da0c6cd6a9a91e723cd0698595590fa310b44d53de21
+  checksum: 10c0/571d1d3002ff3b8f93f401107fc1e8e0c8fa08c28659c3e88c2c63a75169541112ae849e93807e2ba28bc3d5efc574237709e1190f9c904aab3724e8c869e0dd
   languageName: node
   linkType: hard
 
-"@mtcute/node@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/node@npm:0.30.3"
+"@mtcute/node@npm:^0.32.1":
+  version: 0.32.1
+  resolution: "@mtcute/node@npm:0.32.1"
   dependencies:
-    "@fuman/net": "npm:0.0.20"
-    "@fuman/node": "npm:0.0.20"
-    "@fuman/utils": "npm:0.0.20"
-    "@mtcute/core": "npm:^0.30.3"
-    "@mtcute/html-parser": "npm:^0.30.3"
-    "@mtcute/markdown-parser": "npm:^0.30.3"
-    "@mtcute/wasm": "npm:^0.30.3"
+    "@fuman/net": "npm:0.0.21"
+    "@fuman/node": "npm:0.0.21"
+    "@fuman/utils": "npm:0.0.21"
+    "@mtcute/core": "npm:^0.32.1"
+    "@mtcute/html-parser": "npm:^0.32.1"
+    "@mtcute/markdown-parser": "npm:^0.32.1"
+    "@mtcute/wasm": "npm:^0.32.0"
     better-sqlite3: "npm:^12.10.0"
-  checksum: 10c0/51d51a853002bec2128ea0d337d18df108173c58f58ff90bbad91659b7431e075fa71a0442468e0f7d9bebd00343e267a922e5ede0b31a88587aa3437814e6f5
+  checksum: 10c0/b1c858760f69c9f7f759a84f63c70d9b509b47a2d75a22c749a5748d329e35ac5e73141e5b72d9df109ab78362adc549ed26d4fb008eaca5166fb2bf0c1bda6b
   languageName: node
   linkType: hard
 
-"@mtcute/tl-runtime@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/tl-runtime@npm:0.30.3"
+"@mtcute/tl-runtime@npm:^0.32.0":
+  version: 0.32.0
+  resolution: "@mtcute/tl-runtime@npm:0.32.0"
   dependencies:
-    "@fuman/utils": "npm:0.0.20"
+    "@fuman/utils": "npm:0.0.21"
     long: "npm:^5.3.2"
-  checksum: 10c0/0ea74e5c24a3729f8e6b2965bd91f2ab7028aedcab32423d77a6d59732a91bff31eaa7c0a4dbd1285dda575d690cc59e5afdadcae8267e710e67cad747b63ee3
+  checksum: 10c0/e7688e802f60120a24ea243543dcf19c8c9ea3883211c87505f3c8a3d90e8d3f96e0ba799226d9c64d21aebcba6412d06706cdf2ba80a06f4b34dccfc3194be0
   languageName: node
   linkType: hard
 
-"@mtcute/tl-utils@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/tl-utils@npm:0.30.3"
+"@mtcute/tl-utils@npm:^0.32.0":
+  version: 0.32.0
+  resolution: "@mtcute/tl-utils@npm:0.32.0"
   dependencies:
-    "@mtcute/tl-runtime": "npm:^0.30.3"
+    "@mtcute/tl-runtime": "npm:^0.32.0"
     crc: "npm:4.3.2"
-  checksum: 10c0/e3db55b306b8c26b1d054a8adb08b1b105a48d560c73dd78741d9d2ab665a3ddc03f86ecfbe2fea8826c627c925fafbf4e005343e14ac8fcdbe5821f26629b88
+  checksum: 10c0/e4d41d3bf97c3242aaccbf497d37ab463ee3e51a7d1789beb492ac592896e355249718d04cb5181c81e9d00da846911abd0aeb043878952dc6b89b24fe17b91f
   languageName: node
   linkType: hard
 
-"@mtcute/wasm@npm:^0.30.3":
-  version: 0.30.3
-  resolution: "@mtcute/wasm@npm:0.30.3"
-  checksum: 10c0/d9f1585dca7947c3b13bc57820089ef803fa1fd687db6dc20960c4f24c5890647a369cec88af4d14cc841713ccde6e49f409153231e1eadf3aa5bb3a28a1b491
+"@mtcute/wasm@npm:^0.32.0":
+  version: 0.32.0
+  resolution: "@mtcute/wasm@npm:0.32.0"
+  checksum: 10c0/5551f73597734eafc8c7e6523cdc388089d3dbcd32d70371f7296dee9af4e0a749738724f29d6bc5b1e962cccd5a42057d012a1828f9f373a923e56d910eda15
   languageName: node
   linkType: hard
 
@@ -1920,11 +1920,11 @@ __metadata:
   resolution: "@mtproto-relay/bridge@workspace:packages/bridge"
   dependencies:
     "@cordisjs/client": "npm:^0.8.2"
-    "@fuman/io": "npm:^0.0.20"
-    "@fuman/utils": "npm:^0.0.20"
-    "@mtcute/core": "npm:^0.30.3"
-    "@mtcute/node": "npm:^0.30.3"
-    "@mtcute/tl-runtime": "npm:^0.30.3"
+    "@fuman/io": "npm:^0.0.21"
+    "@fuman/utils": "npm:^0.0.21"
+    "@mtcute/core": "npm:^0.32.1"
+    "@mtcute/node": "npm:^0.32.1"
+    "@mtcute/tl-runtime": "npm:^0.32.0"
     "@mtproto-relay/mtproto": "workspace:*"
     "@mtproto-relay/update-store": "workspace:*"
     "@mtproto-relay/update-store-memory": "workspace:*"
@@ -1961,7 +1961,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/merged-forward@workspace:packages/merged-forward"
   dependencies:
-    "@mtcute/core": "npm:^0.30.3"
+    "@mtcute/core": "npm:^0.32.1"
     "@mtproto-relay/bridge": "workspace:*"
     "@mtproto-relay/mtproto": "workspace:*"
     long: "npm:^5.3.2"
@@ -1995,8 +1995,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/mtproto-e2e-client@workspace:packages/mtproto-e2e-client"
   dependencies:
-    "@mtcute/core": "npm:^0.30.3"
-    "@mtcute/node": "npm:^0.30.3"
+    "@mtcute/core": "npm:^0.32.1"
+    "@mtcute/node": "npm:^0.32.1"
     tsx: "npm:@cordiverse/tsx@4.19.3-fix.3"
     vitest: "npm:^4.1.10"
   languageName: unknown
@@ -2023,12 +2023,12 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/mtproto@workspace:packages/mtproto"
   dependencies:
-    "@fuman/io": "npm:^0.0.20"
-    "@fuman/utils": "npm:^0.0.20"
-    "@mtcute/core": "npm:^0.30.3"
-    "@mtcute/node": "npm:^0.30.3"
-    "@mtcute/tl-runtime": "npm:^0.30.3"
-    "@mtcute/tl-utils": "npm:^0.30.3"
+    "@fuman/io": "npm:^0.0.21"
+    "@fuman/utils": "npm:^0.0.21"
+    "@mtcute/core": "npm:^0.32.1"
+    "@mtcute/node": "npm:^0.32.1"
+    "@mtcute/tl-runtime": "npm:^0.32.0"
+    "@mtcute/tl-utils": "npm:^0.32.0"
     long: "npm:^5.3.2"
     schemastery: "npm:^3.18.0"
   peerDependencies:
@@ -2192,7 +2192,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/telegram-resources@workspace:packages/telegram-resources"
   dependencies:
-    "@mtcute/core": "npm:^0.30.3"
+    "@mtcute/core": "npm:^0.32.1"
     "@mtproto-relay/bridge": "workspace:*"
     long: "npm:^5.3.2"
     schemastery: "npm:^3.18.0"
@@ -2226,11 +2226,11 @@ __metadata:
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch"
     "@cordisjs/plugin-timer": "npm:^1.1.2"
     "@cordisjs/plugin-webui": "patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch"
-    "@fuman/io": "npm:^0.0.20"
-    "@fuman/utils": "npm:^0.0.20"
-    "@mtcute/core": "npm:^0.30.3"
-    "@mtcute/node": "npm:^0.30.3"
-    "@mtcute/tl-runtime": "npm:^0.30.3"
+    "@fuman/io": "npm:^0.0.21"
+    "@fuman/utils": "npm:^0.0.21"
+    "@mtcute/core": "npm:^0.32.1"
+    "@mtcute/node": "npm:^0.32.1"
+    "@mtcute/tl-runtime": "npm:^0.32.0"
     "@mtproto-relay/bridge": "workspace:*"
     "@mtproto-relay/merged-forward": "workspace:*"
     "@mtproto-relay/mtproto": "workspace:*"
