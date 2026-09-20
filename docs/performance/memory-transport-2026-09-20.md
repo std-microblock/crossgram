@@ -75,7 +75,7 @@ uses the OS process high-water RSS where available (notably Linux).
 This exceeds the requested target in a controlled **whole-application** workload,
 not just a cache fixture. It does not establish a fixed percentage for every
 production traffic mix; idle production still has allocator retention unrelated
-to this buffer bug. No production load test or deployment was performed here.
+to this buffer bug. The benchmarks did not touch production; the approved rollout is recorded below.
 
 ## Reproduction and Linux gate
 
@@ -143,13 +143,38 @@ Linux attempt hit the previously observed independent-RPC test timeout; bounded
 phase diagnostics were added without removing or weakening concurrency assertions.
 Both subsequent Linux runs passed the complete 39-test encrypted suite.
 
-### Rollout status
+### Production rollout — approved and verified
 
-The optimization and its tests are committed and pushed, but this investigation
-has **not deployed or restarted production**. The final read-only runtime probe
-still found the old transport implementation on all nine live connections.
-The 30% target is verified under the controlled full-application Linux workload;
-applying the benefit to production requires an approved rollout/restart. No
-production percentage is claimed from the earlier intervening restart or trim.
-All temporary diagnostic probes and the local validation worktree were removed;
-unrelated in-progress bridge edits remain untouched.
+The user approved deployment and one restart. At **2026-09-21 00:27:06 CST**,
+production was fast-forwarded from 69d543c4 to **ad2ee1b** and crossgram.service was
+restarted once. The exact tested commit was delivered using a locally generated
+Git bundle with an expected-base/expected-target check and a clean-checkout guard.
+No dependencies, database schema, or systemd configuration changed; no build,
+load generation, forced GC, or further malloc trim ran on production.
+
+Rollback reference: refs/rollback/memory-20260921 points to
+69d543c4cbd630027f1fa7bae998f671264e0f4d. The uploaded bundle and deployment script
+were removed after verification; the rollback ref remains.
+
+Observed recovery and passive validation:
+
+- By the first check, 18 seconds after application startup, all **nine authorized
+  transport connections** were back and using the new _finishDecode implementation.
+- Four further snapshots over two minutes retained all nine connections, with no
+  queued sends or in-flight RPCs at the sampling instants.
+- Since restart, **51 RPCs completed with zero errors** by the final snapshot;
+  sent traffic rose from 555,900 to 1,093,348 bytes during the observation.
+- Every sampled drained obfuscation buffer had written=0, available=0, and a
+  16,384-byte allocation. Before deployment the same connection count retained
+  consumed write cursors of roughly 111–190 KiB each.
+- Crossgram stayed active/running with NRestarts=0; qqnt-bridge stayed active and
+  was not restarted. The tracked production checkout is clean at ad2ee1b.
+- RSS during the passive observation ranged from about **312 to 342 MiB**; the
+  final value was 358,744,064 bytes. These post-restart readings are health data,
+  **not** a controlled production percentage comparison. The attributed 41.03%
+  reduction remains the matched full-application Linux A/B result above.
+
+Raw rollout evidence: memory-transport-2026-09-21.production.json. The temporary
+observer and all its timers were removed; the probe runner subsequently listed
+no active probes. The local validation worktree was also removed, and unrelated
+in-progress bridge edits remain untouched.

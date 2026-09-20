@@ -1,0 +1,637 @@
+{
+  "deployedRevision": "ad2ee1b211543773ca0ecec0681b9c698705bd72",
+  "rollbackRevision": "69d543c4cbd630027f1fa7bae998f671264e0f4d",
+  "restartAt": "2026-09-21T00:27:06+08:00",
+  "before": [
+    {
+      "at": "2026-09-20T16:25:48.970Z",
+      "node": "v24.14.1",
+      "pid": 3553194,
+      "uptime": 2797.247966947,
+      "memory": {
+        "rss": 449896448,
+        "heapTotal": 202334208,
+        "heapUsed": 130899032,
+        "external": 27419263,
+        "arrayBuffers": 4384499
+      },
+      "connections": 9,
+      "authorizedConnections": 9,
+      "inFlight": 0,
+      "transports": [
+        {
+          "fixed": false,
+          "written": 111672,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 112088,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 111900,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 111893,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 112000,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 116000,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 111015,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 111964,
+          "available": 0,
+          "capacity": 131072,
+          "sendBytes": 0
+        },
+        {
+          "fixed": false,
+          "written": 190299,
+          "available": 0,
+          "capacity": 262144,
+          "sendBytes": 0
+        }
+      ],
+      "rpc": {
+        "count": 533,
+        "averageMs": 33.25,
+        "minMs": 0.36,
+        "maxMs": 2003.4,
+        "p50Ms": 4,
+        "p90Ms": 125,
+        "p95Ms": 250,
+        "p99Ms": 1000,
+        "errors": 2,
+        "errorRate": 0
+      },
+      "traffic": {
+        "receivedBytes": 1115047,
+        "sentBytes": 18709980,
+        "receivedBytesPerSecond": 0,
+        "sentBytesPerSecond": 0
+      },
+      "failures": [
+        {
+          "category": "unauthorized",
+          "errorCode": 500,
+          "count": 2,
+          "lastSeenAt": 1789918840972,
+          "rate": 0
+        }
+      ],
+      "runtime": {
+        "eventLoopDelayP99Ms": 20.77
+      }
+    }
+  ],
+  "initialAfter": [
+    {
+      "at": "2026-09-20T16:27:26.312Z",
+      "node": "v24.14.1",
+      "pid": 3566910,
+      "uptime": 18.127798364,
+      "memory": {
+        "rss": 460148736,
+        "heapTotal": 194502656,
+        "heapUsed": 93599336,
+        "external": 25137636,
+        "arrayBuffers": 2819804
+      },
+      "connections": 9,
+      "authorizedConnections": 9,
+      "inFlight": 0,
+      "transports": [
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        }
+      ],
+      "rpc": {
+        "count": 20,
+        "averageMs": 121.15,
+        "minMs": 0.51,
+        "maxMs": 1062.15,
+        "p50Ms": 16,
+        "p90Ms": 125,
+        "p95Ms": 1062.15,
+        "p99Ms": 1062.15,
+        "errors": 0,
+        "errorRate": 0
+      },
+      "traffic": {
+        "receivedBytes": 15249,
+        "sentBytes": 289668,
+        "receivedBytesPerSecond": 0,
+        "sentBytesPerSecond": 6444
+      },
+      "failures": [],
+      "runtime": {
+        "eventLoopDelayP99Ms": 22.02
+      }
+    }
+  ],
+  "observation": [
+    {
+      "at": "2026-09-20T16:28:32.542Z",
+      "node": "v24.14.1",
+      "pid": 3566910,
+      "uptime": 84.357859442,
+      "memory": {
+        "rss": 357429248,
+        "heapTotal": 125296640,
+        "heapUsed": 89041024,
+        "external": 24704414,
+        "arrayBuffers": 2396486
+      },
+      "connections": 9,
+      "authorizedConnections": 9,
+      "inFlight": 0,
+      "transports": [
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        }
+      ],
+      "rpc": {
+        "count": 35,
+        "averageMs": 73.17,
+        "minMs": 0.41,
+        "maxMs": 1062.15,
+        "p50Ms": 16,
+        "p90Ms": 64,
+        "p95Ms": 1062.15,
+        "p99Ms": 1062.15,
+        "errors": 0,
+        "errorRate": 0
+      },
+      "traffic": {
+        "receivedBytes": 40311,
+        "sentBytes": 555900,
+        "receivedBytesPerSecond": 1591,
+        "sentBytesPerSecond": 6440
+      },
+      "failures": [],
+      "runtime": {
+        "eventLoopDelayP99Ms": 34.01
+      }
+    },
+    {
+      "at": "2026-09-20T16:29:02.545Z",
+      "node": "v24.14.1",
+      "pid": 3566910,
+      "uptime": 114.360862343,
+      "memory": {
+        "rss": 327041024,
+        "heapTotal": 162603008,
+        "heapUsed": 104401088,
+        "external": 25450176,
+        "arrayBuffers": 3137057
+      },
+      "connections": 9,
+      "authorizedConnections": 9,
+      "inFlight": 0,
+      "transports": [
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        }
+      ],
+      "rpc": {
+        "count": 41,
+        "averageMs": 62.63,
+        "minMs": 0.41,
+        "maxMs": 1062.15,
+        "p50Ms": 16,
+        "p90Ms": 64,
+        "p95Ms": 125,
+        "p99Ms": 1062.15,
+        "errors": 0,
+        "errorRate": 0
+      },
+      "traffic": {
+        "receivedBytes": 49186,
+        "sentBytes": 645330,
+        "receivedBytesPerSecond": 0,
+        "sentBytesPerSecond": 0
+      },
+      "failures": [],
+      "runtime": {
+        "eventLoopDelayP99Ms": 20.59
+      }
+    },
+    {
+      "at": "2026-09-20T16:29:32.545Z",
+      "node": "v24.14.1",
+      "pid": 3566910,
+      "uptime": 144.361389675,
+      "memory": {
+        "rss": 342016000,
+        "heapTotal": 164356096,
+        "heapUsed": 113090568,
+        "external": 25443337,
+        "arrayBuffers": 3069873
+      },
+      "connections": 9,
+      "authorizedConnections": 9,
+      "inFlight": 0,
+      "transports": [
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        }
+      ],
+      "rpc": {
+        "count": 43,
+        "averageMs": 60.36,
+        "minMs": 0.41,
+        "maxMs": 1062.15,
+        "p50Ms": 16,
+        "p90Ms": 64,
+        "p95Ms": 125,
+        "p99Ms": 1062.15,
+        "errors": 0,
+        "errorRate": 0
+      },
+      "traffic": {
+        "receivedBytes": 58401,
+        "sentBytes": 783596,
+        "receivedBytesPerSecond": 0,
+        "sentBytesPerSecond": 6154
+      },
+      "failures": [],
+      "runtime": {
+        "eventLoopDelayP99Ms": 20.91
+      }
+    },
+    {
+      "at": "2026-09-20T16:30:32.545Z",
+      "node": "v24.14.1",
+      "pid": 3566910,
+      "uptime": 204.361473915,
+      "memory": {
+        "rss": 358744064,
+        "heapTotal": 179302400,
+        "heapUsed": 103195360,
+        "external": 25374534,
+        "arrayBuffers": 3001070
+      },
+      "connections": 9,
+      "authorizedConnections": 9,
+      "inFlight": 0,
+      "transports": [
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        },
+        {
+          "fixed": true,
+          "written": 0,
+          "available": 0,
+          "capacity": 16384,
+          "sendBytes": 0
+        }
+      ],
+      "rpc": {
+        "count": 51,
+        "averageMs": 52.36,
+        "minMs": 0.41,
+        "maxMs": 1062.15,
+        "p50Ms": 8,
+        "p90Ms": 64,
+        "p95Ms": 125,
+        "p99Ms": 1062.15,
+        "errors": 0,
+        "errorRate": 0
+      },
+      "traffic": {
+        "receivedBytes": 81850,
+        "sentBytes": 1093348,
+        "receivedBytesPerSecond": 0,
+        "sentBytesPerSecond": 0
+      },
+      "failures": [],
+      "runtime": {
+        "eventLoopDelayP99Ms": 20.27
+      }
+    }
+  ]
+}
