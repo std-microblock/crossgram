@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 20
     env:
       HUSKY: 0
+      # Match the observed production runtime's 1 GiB old-space ceiling in both variants.
+      NODE_OPTIONS: --max-old-space-size=1024
       PROFILE_FULL_APP: '1'
       PROFILE_DEVICES: '8'
       PROFILE_ROUNDS: '64'
@@ -29,7 +31,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 24.14.1
       - run: corepack enable
       - id: dependencies
         run: yarn install --immutable
