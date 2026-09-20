@@ -9,7 +9,8 @@
     "src/**/*.ts",
     "client/**/*.ts",
     "client/**/*.tsx",
-    "vite.config.ts"
+    "vite.config.ts",
+    "build.ts"
   ],
   "exclude": [
     "dist"

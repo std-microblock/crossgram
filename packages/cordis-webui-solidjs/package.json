@@ -7,7 +7,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./client": "./client/sdk.ts",
-    "./schema": "./client/schema.tsx"
+    "./schema": "./client/schema.tsx",
+    "./build": "./build.ts"
   },
   "cordis": {
     "service": {

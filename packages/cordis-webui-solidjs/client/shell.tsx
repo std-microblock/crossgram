@@ -1,12 +1,13 @@
 /** @jsxImportSource solid-js */
 import { createEffect, createSignal, lazy, Suspense, onCleanup, For, Show } from 'solid-js'
-import { listPages, PageOutlet } from './registry.js'
+import { listPages, PageOutlet, reconcileExtensions } from './registry.js'
 import { navigate, useConnection } from './sdk.js'
 
 const SettingsPage = lazy(() => import('./pages/settings.js'))
 
 export function App() {
   const connection = useConnection()
+  createEffect(() => reconcileExtensions(connection.state.entries))
   const [path, setPath] = createSignal(location.pathname.slice(connection.config.uiPath.length) || '/')
   const [menu, setMenu] = createSignal(false)
   const media = matchMedia('(max-width: 760px)')

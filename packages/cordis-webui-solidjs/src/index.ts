@@ -6,6 +6,7 @@ import { dirname, extname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pathToRegexp } from 'path-to-regexp'
 import z from 'schemastery'
+import { sharedModules } from './imports.js'
 import { Client, type Socket } from './client.js'
 import { Entry, safeAsset } from './entry.js'
 import { PROTOCOL_VERSION, type EntryFiles } from './protocol.js'
@@ -55,8 +56,12 @@ export default class SolidWebUI extends Service {
     }
     const html = await readFile(resolve(this.root, 'index.html'), 'utf8')
     const config = escapeScriptJSON({ ...this.config, endpoint: this.config.apiPath, version: this.version })
+    const imports = Object.fromEntries(Object.entries(sharedModules).map(([name, entry]) => {
+      if (!manifest[entry]?.file) throw new Error('Missing shared Solid runtime build: ' + name)
+      return [name, this.config.uiPath + '/' + manifest[entry].file]
+    }))
     this.shell = html.replaceAll('="./assets/', '="' + this.config.uiPath + '/assets/')
-      .replace('<!--app-config-->', '<script>window.SOLID_WEBUI_CONFIG=' + config + '</script>')
+      .replace('<!--app-config-->', '<script type="importmap">' + escapeScriptJSON({ imports }) + '</script><script>window.SOLID_WEBUI_CONFIG=' + config + '</script>')
       .replace('<title>Crossgram</title>', '<title>' + escapeHTML(this.config.title) + '</title>')
     this.ctx.server.ws(this.config.apiPath, async (req, accept) => {
       // Browser WebSockets carry cookies, so reject cross-origin handshakes by default.
