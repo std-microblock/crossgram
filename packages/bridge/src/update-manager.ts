@@ -24,6 +24,9 @@ import { customReactionDocumentId } from './reaction-rpc.js'
 import { updateFromJson, updateToJson } from './update-json.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
 
+const CHANNEL_POLL_TIMEOUT_SECONDS = 30
+const PENDING_CHANNEL_POLL_TIMEOUT_SECONDS = 1
+
 export interface MentionReadPublishResult {
   pts: number
   ptsCount: number
@@ -593,8 +596,9 @@ export class UpdateManager {
             ?? { id: displayConversation.id, firstName: displayConversation.title })
       : undefined
     const reactionUsers = await this._hydrateReactionUsers(session, visibleMessage)
-    const userIds = new Map((await this._store.listUsers(session.platformId))
+    const userIds = new Map([selfRow, senderRow, ...(directPeerRow ? [directPeerRow] : [])]
       .map((row) => [row.platformUserId, row.id]))
+    for (const [id, tlId] of reactionUsers.ids) userIds.set(id, tlId)
     let pts = delivery.pts - delivery.ptsCount
     const addedTlMessageIds = new Set(result.addedTlMessageIds)
     const updates: tl.TypeUpdate[] = []
@@ -666,8 +670,25 @@ export class UpdateManager {
         source: projected.source,
         chats: [] as tl.TypeChat[],
       }
-      const fallback = () => {
+      const fallback = async () => {
         const projectedSource = draft.source as IMMessage
+        // Hydrate only references used by this projection, including changes made
+        // by projection middleware. Never scan the platform's entire user table.
+        const referenced = new Set<string>()
+        for (const item of projectedSource.content.parts) {
+          if (item.type !== 'text') continue
+          for (const entity of item.entities ?? []) {
+            if (entity.type === 'mention' && !userIds.has(entity.userId)) referenced.add(entity.userId)
+          }
+        }
+        for (const reaction of projectedSource.reactionContext?.reactions ?? []) {
+          for (const actor of reaction.recentActors ?? []) {
+            if (!userIds.has(actor.userId)) referenced.add(actor.userId)
+          }
+        }
+        for (const row of await this._store.readUsers(session.platformId, [...referenced])) {
+          userIds.set(row.platformUserId, row.id)
+        }
         const projectedSticker = projectedSource.content.parts.find((item) => item.type === 'sticker')
         const projectedCard = projectedSource.content.parts.find((item) => item.type === 'card')
         const richMessage = draft.richMessage ?? makeTlArticleMedia(
@@ -732,7 +753,7 @@ export class UpdateManager {
             ordinal: part.ordinal,
             draft,
           }, fallback)
-        : fallback()
+        : await fallback()
       const message = rendered.message
       projectionChats.push(...rendered.chats)
       updates.push({
@@ -1028,7 +1049,10 @@ export class UpdateManager {
     const state = await this._store.getChannelUpdateState(platformSessionId, channelId)
     const deliveries = await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts, 101, channelId)
     if (!deliveries.length) {
-      return { _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts }
+      return {
+        _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts,
+        timeout: CHANNEL_POLL_TIMEOUT_SECONDS,
+      }
     }
     // Channel short-polls race live publication frequently, so never acknowledge
     // the reserved pts until the corresponding update payload is durable.
@@ -1036,7 +1060,12 @@ export class UpdateManager {
     const readyDeliveries = firstIncomplete < 0 ? deliveries : deliveries.slice(0, firstIncomplete)
     const page = readyDeliveries.slice(0, Math.max(1, Math.min(request.limit, 100)))
     if (!page.length) {
-      return { _: 'updates.channelDifferenceEmpty', final: false, pts: request.pts }
+      // Non-final makes Desktop and Android immediately request another page.
+      // Pause at the durable frontier instead of busy-looping on an unfinished payload.
+      return {
+        _: 'updates.channelDifferenceEmpty', final: true, pts: request.pts,
+        timeout: PENDING_CHANNEL_POLL_TIMEOUT_SECONDS,
+      }
     }
     const newMessages: tl.TypeMessage[] = []
     const otherUpdates: tl.TypeUpdate[] = []
@@ -1053,7 +1082,8 @@ export class UpdateManager {
     }
     for (const delivery of page) await this._store.markUpdatePublished(delivery.eventKey)
     return {
-      _: 'updates.channelDifference', final: page.length === deliveries.length,
+      _: 'updates.channelDifference', final: page.length === readyDeliveries.length,
+      timeout: firstIncomplete < 0 ? CHANNEL_POLL_TIMEOUT_SECONDS : PENDING_CHANNEL_POLL_TIMEOUT_SECONDS,
       pts: page.at(-1)?.pts ?? state.pts,
       newMessages, otherUpdates, chats: [...chats.values()], users: [...users.values()],
     }

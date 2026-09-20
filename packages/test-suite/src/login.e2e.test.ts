@@ -4000,7 +4000,7 @@ describe('bridge login e2e', () => {
         channel: { _: 'inputChannel', channelId: chatId, accessHash: Long.ZERO },
         filter: { _: 'channelMessagesFilterEmpty' }, pts: 4, limit: 100,
       }, 13)).toMatchObject({
-        _: 'updates.channelDifferenceEmpty', final: false, pts: 4,
+        _: 'updates.channelDifferenceEmpty', final: true, pts: 4, timeout: 1,
       })
       expect(await raceStore.getUpdateDelivery(raceEventKey)).toMatchObject({
         pts: 5, payload: null, published: false,
@@ -4599,6 +4599,75 @@ describe('bridge login e2e', () => {
       await stop()
     }
   }, 15000)
+
+  it('paces three concurrent devices at an unfinished channel update without losing their independent cursors', async () => {
+    const platformId = 'multi-device-poll-e2e'
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: false,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async getUser(_session, id) { return { id, firstName: id } },
+      async sendMessage() { throw new Error('unused') },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    const clients: Array<{ client: TestClient, key: ClientKey, sid: Long }> = []
+    try {
+      const platformSessionId = 'multi-device-poll-session'
+      const phone = '88800888'
+      const totpSecret = '55'.repeat(20)
+      await ctx.database.create('mtproto_platform_session', {
+        id: platformSessionId, platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Polling User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'multi-device-poll-auth', virtualPhone: phone, totpSecret, platformId, platformSessionId,
+      })
+      for (let i = 0; i < 3; i++) {
+        const client = await TestClient.connect(port)
+        const key = await doClientHandshake(client, pubKey)
+        const sid = Long.fromNumber(12000 + i)
+        clients.push({ client, key, sid })
+        const code = await callRpc(client, key, sid, {
+          _: 'auth.sendCode', phoneNumber: phone, apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        }, 2)
+        expect(await callRpc(client, key, sid, {
+          _: 'auth.signIn', phoneNumber: phone, phoneCodeHash: code.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode(totpSecret),
+        }, 4)).toMatchObject({ _: 'auth.authorization' })
+      }
+      const channelId = 12001
+      const store = new bridge.MessageStore(ctx.database, undefined, ctx.updateStore)
+      const pending = await store.prepareUpdateDelivery('multi-device-pending', platformSessionId, 1, nowSec(), channelId)
+      const poll = (pts: number, sub: number) => Promise.all(clients.map(({ client, key, sid }) => callRpc(client, key, sid, {
+        _: 'updates.getChannelDifference', force: true,
+        channel: { _: 'inputChannel', channelId, accessHash: Long.ZERO },
+        filter: { _: 'channelMessagesFilterEmpty' }, pts, limit: 100,
+      }, sub)))
+      for (const result of await poll(1, 6)) expect(result).toMatchObject({
+        _: 'updates.channelDifferenceEmpty', final: true, pts: 1, timeout: 1,
+      })
+      expect(await store.getUpdateDelivery('multi-device-pending')).toMatchObject({ payload: null, published: false })
+      await store.setUpdatePayload('multi-device-pending', updateToJson({
+        _: 'updates', users: [], chats: [], date: pending.date, seq: pending.seq,
+        updates: [{ _: 'updateNewChannelMessage', pts: pending.pts, ptsCount: 1, message: {
+          _: 'message', id: 10, peerId: { _: 'peerChannel', channelId }, date: pending.date, message: 'all three receive this',
+        } }],
+      }))
+      for (const result of await poll(1, 8)) expect(result).toMatchObject({
+        _: 'updates.channelDifference', final: true, pts: 2, timeout: 30,
+        newMessages: [{ id: 10, message: 'all three receive this' }],
+      })
+      for (const result of await poll(2, 10)) expect(result).toMatchObject({
+        _: 'updates.channelDifferenceEmpty', final: true, pts: 2, timeout: 30,
+      })
+    } finally {
+      for (const { client } of clients) client.close()
+      await stop()
+    }
+  }, 30_000)
 
   it('synchronizes local read boundaries between two authorized devices', async () => {
     const platformId = 'read-device-sync-e2e'

@@ -96,6 +96,67 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
+  it('hydrates only referenced users when broadcasting to several devices', async () => {
+    const { ctx, store, manager, sent } = await createHarness()
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: 'aabbccddeeff0011', platformId: session.platformId, platformSessionId: session.platformSessionId,
+    })
+    await store.upsertUsers(session, Array.from({ length: 1000 }, (_, i) => ({ id: 'unrelated-' + i, firstName: 'Unrelated' })))
+    const bob = await store.upsertUser(session, { id: 'bob', firstName: 'Bob' })
+    const carol = await store.upsertUser(session, { id: 'carol', firstName: 'Carol' })
+    const conversation: IMConversation = { id: 'bounded-users', kind: 'group', title: 'Bounded' }
+    const message: IMMessage = {
+      id: 'bounded', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      content: { parts: [{ type: 'text', text: '@Bob', entities: [{ type: 'mention', offset: 0, length: 4, userId: 'bob' }] }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    // Middleware may introduce a reference not present in the original event.
+    ctx.on('bridge/message/project', async (input, next) => {
+      input.draft.source = { ...input.draft.source, content: { parts: [{ type: 'text', text: '@Bob @Carol', entities: [
+        { type: 'mention', offset: 0, length: 4, userId: 'bob' },
+        { type: 'mention', offset: 5, length: 6, userId: 'carol' },
+      ] }] } }
+      return next()
+    })
+    const scan = vi.spyOn(store, 'listUsers').mockRejectedValue(new Error('full user scan'))
+    const read = vi.spyOn(store, 'readUsers')
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    expect(scan).not.toHaveBeenCalled()
+    expect(read).toHaveBeenCalledWith(session.platformId, ['bob', 'carol'])
+    expect(sent).toHaveLength(2)
+    for (const push of sent) expect(push.update).toMatchObject({ updates: [{ message: { entities: [
+      { _: 'messageEntityMentionName', userId: bob.id }, { _: 'messageEntityMentionName', userId: carol.id },
+    ] } }] })
+    expect(sent[0].update).toEqual(sent[1].update)
+  })
+
+  it('only requests immediate channel pagination while another durable page is available', async () => {
+    const { store, manager } = await createHarness()
+    const channelId = 1234
+    const request = {
+      _: 'updates.getChannelDifference' as const,
+      channel: { _: 'inputChannel' as const, channelId, accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' as const }, pts: 1, limit: 1,
+    }
+    expect(roundTrip(await manager.getChannelDifference(session.platformSessionId, request)))
+      .toMatchObject({ _: 'updates.channelDifferenceEmpty', final: true, timeout: 30, pts: 1 })
+    for (let i = 0; i < 3; i++) {
+      const key = 'pagination-' + i
+      const delivery = await store.prepareUpdateDelivery(key, session.platformSessionId, 1, 100 + i, channelId)
+      if (i < 2) await store.setUpdatePayload(key, { _: 'updates', updates: [], users: [], chats: [], date: delivery.date, seq: delivery.seq })
+    }
+    expect(await manager.getChannelDifference(session.platformSessionId, request))
+      .toMatchObject({ final: false, pts: 2 })
+    expect(roundTrip(await manager.getChannelDifference(session.platformSessionId, { ...request, pts: 2 })))
+      .toMatchObject({ final: true, pts: 3, timeout: 1 })
+    expect(roundTrip(await manager.getChannelDifference(session.platformSessionId, { ...request, pts: 3 })))
+      .toMatchObject({ final: true, pts: 3, timeout: 1 })
+    const pending = await store.getUpdateDelivery('pagination-2')
+    await store.setUpdatePayload('pagination-2', { _: 'updates', updates: [], users: [], chats: [], date: pending!.date, seq: pending!.seq })
+    expect(await manager.getChannelDifference(session.platformSessionId, { ...request, pts: 3 }))
+      .toMatchObject({ final: true, pts: 4, timeout: 30 })
+  })
+
   it('routes live messages through the shared Cordis projection waterfall', async () => {
     const { ctx, store, manager, sent } = await createHarness()
     const middleware = vi.fn(async (input, next) => {
@@ -1902,7 +1963,7 @@ describe('UpdateManager', () => {
     await store.prepareUpdateDelivery(eventKey, session.platformSessionId, 1, message.timestamp, channelId)
 
     await expect(manager.getChannelDifference(session.platformSessionId, request)).resolves.toMatchObject({
-      _: 'updates.channelDifferenceEmpty', final: false, pts: 1,
+      _: 'updates.channelDifferenceEmpty', final: true, pts: 1, timeout: 1,
     })
     await expect(store.getUpdateDelivery(eventKey)).resolves.toMatchObject({
       pts: 2, published: false, payload: null,

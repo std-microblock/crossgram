@@ -13,6 +13,17 @@ describe('bridge models', () => {
     })
   })
 
+  it('provides a native-sequence index matching allocation queries without PostgreSQL name collisions', () => {
+    const extend = vi.fn()
+    defineModels({ model: { extend } } as never)
+    const [, , options] = extend.mock.calls.find(([table]) => table === 'mtproto_tl_message_part')!
+    expect(options.indexes).toContainEqual(['conversationId', 'nativeSequence'])
+    const names = options.indexes.map((keys: string | string[]) =>
+      Buffer.from('index:mtproto_tl_message_part:' + (Array.isArray(keys) ? keys.join('+') : keys)).subarray(0, 63).toString())
+    expect(new Set(names).size).toBe(names.length)
+    expect(Buffer.byteLength('index:mtproto_tl_message_part:conversationId+nativeSequence')).toBeLessThanOrEqual(63)
+  })
+
   it('stores media sizes as scale-zero numeric values for large files', () => {
     const extend = vi.fn()
     defineModels({ model: { extend } } as never)

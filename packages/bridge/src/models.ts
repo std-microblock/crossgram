@@ -431,7 +431,9 @@ export function defineModels(ctx: Context): void {
       'messageId',
       ['platformSessionId', 'tlMessageId'],
       ['platformSessionId', 'conversationId', 'tlMessageId'],
-      ['platformSessionId', 'conversationId', 'nativeSequence'],
+      // conversationId is globally unique; this also keeps the generated index
+      // name below PostgreSQL's 63-byte limit (the longer prefix collides).
+      ['conversationId', 'nativeSequence'],
       ['scope', 'nativeOrderKey'],
     ],
   })
