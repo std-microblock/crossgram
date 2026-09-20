@@ -32,8 +32,12 @@ export function useRpc<T extends object>(id: string): { readonly data: T; readon
 export interface PageProps { entryId: string; path: string }
 export interface PageDefinition { path: string; title: string; icon: string; group?: string; component: Component<PageProps> }
 export interface ClientModule { pages: PageDefinition[] }
+const navigationGuards = new Set<() => boolean>()
+export function guardNavigation(guard: () => boolean) { navigationGuards.add(guard); onCleanup(() => navigationGuards.delete(guard)) }
+export function approveNavigation() { return ![...navigationGuards].some(guard => !guard()) }
 export function navigate(path: string) {
   if (path === location.pathname) return
+  if (!approveNavigation()) return
   history.pushState(null, '', path)
   window.dispatchEvent(new PopStateEvent('popstate'))
 }

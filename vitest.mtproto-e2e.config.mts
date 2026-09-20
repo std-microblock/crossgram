@@ -7,6 +7,7 @@ export default defineConfig({
   plugins: [unyaml(), jsToTsPlugin()],
   test: {
     include: ['packages/**/*.e2e.test.{ts,tsx}', 'packages/**/e2e.test.{ts,tsx}'],
+    exclude: ['packages/cordis-webui-solidjs/**'],
     pool: 'threads',
     testTimeout: 30_000,
   },
