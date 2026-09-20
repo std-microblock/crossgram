@@ -31,7 +31,8 @@ jobs:
         with:
           node-version: 24
       - run: corepack enable
-      - run: yarn install --immutable
+      - id: dependencies
+        run: yarn install --immutable
       - name: Build WebUI assets locally on CI
         run: yarn yakumo client
       - name: Unit regressions
@@ -39,6 +40,7 @@ jobs:
       - name: Encrypted TCP regressions
         run: yarn vitest run --config vitest.mtproto-e2e.config.mts packages/mtproto/src/session/server-session.e2e.test.ts packages/mtproto/src/transport/receive-memory.e2e.test.ts --maxWorkers=1
       - name: Compare equivalent full-application workloads
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail

@@ -889,7 +889,12 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
 
   it('answers an independent RPC while an earlier ordinary handler is blocked', async () => {
     await crypto.initialize?.()
-    const { port, pubKey, register, stop } = await startServer()
+    const events: Array<{ phase: string, direction: string, kind: string }> = []
+    const { port, pubKey, register, stop } = await startServer((event) => {
+      events.push({ phase: event.phase, direction: event.direction,
+        kind: (event.payload as { _?: string })?._ ?? 'unknown' })
+      if (events.length > 30) events.shift()
+    })
     let releaseSlow!: () => void
     const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
     let markSlowStarted!: () => void
@@ -906,7 +911,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     let client: TestClient | undefined
     try {
       client = await TestClient.connect(port)
-      const perm = await doClientHandshake(client, pubKey, false)
+      const perm = await within(doClientHandshake(client, pubKey, false), 5_000, 'independent RPC handshake')
       const sessionId = new Long(0x71717171, 0x71717171)
       const slowMessageId = makeMsgId(52)
       const fastMessageId = slowMessageId.add(4)
@@ -918,7 +923,7 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         sessionId,
         slowMessageId,
       ))
-      await slowStarted
+      await within(slowStarted, 3_000, 'slow RPC handler entry')
 
       const fast = TlBinaryWriter.serializeObject(__tlWriterMap, { _: 'help.getNearestDc' })
       await client.send(clientEncryptWithMessageId(
@@ -938,9 +943,12 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       expect(fastResult.result).toMatchObject({ _: 'nearestDc', thisDc: 1 })
 
       releaseSlow()
-      const slowResult = await readRpcResultEnvelope(client, perm)
+      const slowResult = await within(readRpcResultEnvelope(client, perm), 3_000, 'released slow RPC response')
       expect(slowResult.requestMessageId.toString()).toBe(slowMessageId.toString())
       expect(slowResult.result).toMatchObject({ _: 'help.appConfig', hash: 9 })
+    } catch (error) {
+      console.error('independent RPC protocol phases', events)
+      throw error
     } finally {
       releaseSlow()
       client?.close()
