@@ -1,0 +1,936 @@
+{
+  "baseline": [
+    {
+      "node": "v24.12.0",
+      "platform": "win32",
+      "fullApp": true,
+      "devices": 8,
+      "rounds": 64,
+      "partBytes": 524288,
+      "elapsedMs": 9695.8121,
+      "ready": {
+        "type": "ready",
+        "port": 59701,
+        "phase": "ready",
+        "memory": {
+          "rss": 253321216,
+          "heapTotal": 200306688,
+          "heapUsed": 78852440,
+          "external": 26672773,
+          "arrayBuffers": 4662986
+        },
+        "cpu": {
+          "user": 2468000,
+          "system": 1953000
+        },
+        "received": 0,
+        "bytes": 0,
+        "connections": 0,
+        "eventLoopP99Ms": 0.000511,
+        "obfuscationBuffers": []
+      },
+      "loaded": {
+        "type": "checkpoint",
+        "id": 1,
+        "phase": "loaded",
+        "memory": {
+          "rss": 625688576,
+          "heapTotal": 205099008,
+          "heapUsed": 64394832,
+          "external": 574568936,
+          "arrayBuffers": 551519724
+        },
+        "cpu": {
+          "user": 11406000,
+          "system": 4500000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 81.919999,
+        "obfuscationBuffers": [
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          }
+        ]
+      },
+      "idle": {
+        "type": "checkpoint",
+        "id": 2,
+        "phase": "idle",
+        "memory": {
+          "rss": 625692672,
+          "heapTotal": 205099008,
+          "heapUsed": 64592176,
+          "external": 574569016,
+          "arrayBuffers": 551519804
+        },
+        "cpu": {
+          "user": 11421000,
+          "system": 4500000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 81.919999,
+        "obfuscationBuffers": [
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          }
+        ]
+      },
+      "peakRss": 634474496
+    },
+    {
+      "node": "v24.12.0",
+      "platform": "win32",
+      "fullApp": true,
+      "devices": 8,
+      "rounds": 64,
+      "partBytes": 524288,
+      "elapsedMs": 9453.290999999997,
+      "ready": {
+        "type": "ready",
+        "port": 49468,
+        "phase": "ready",
+        "memory": {
+          "rss": 253292544,
+          "heapTotal": 199520256,
+          "heapUsed": 78782072,
+          "external": 26672773,
+          "arrayBuffers": 4662986
+        },
+        "cpu": {
+          "user": 2953000,
+          "system": 1562000
+        },
+        "received": 0,
+        "bytes": 0,
+        "connections": 0,
+        "eventLoopP99Ms": 0.000511,
+        "obfuscationBuffers": []
+      },
+      "loaded": {
+        "type": "checkpoint",
+        "id": 1,
+        "phase": "loaded",
+        "memory": {
+          "rss": 615124992,
+          "heapTotal": 205623296,
+          "heapUsed": 64549136,
+          "external": 574568956,
+          "arrayBuffers": 551519744
+        },
+        "cpu": {
+          "user": 13484000,
+          "system": 2796000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 85.983231,
+        "obfuscationBuffers": [
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          }
+        ]
+      },
+      "idle": {
+        "type": "checkpoint",
+        "id": 2,
+        "phase": "idle",
+        "memory": {
+          "rss": 615129088,
+          "heapTotal": 205623296,
+          "heapUsed": 64743488,
+          "external": 574569036,
+          "arrayBuffers": 551519824
+        },
+        "cpu": {
+          "user": 13484000,
+          "system": 2796000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 85.983231,
+        "obfuscationBuffers": [
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          }
+        ]
+      },
+      "peakRss": 666652672
+    },
+    {
+      "node": "v24.12.0",
+      "platform": "win32",
+      "fullApp": true,
+      "devices": 8,
+      "rounds": 64,
+      "partBytes": 524288,
+      "elapsedMs": 9501.9925,
+      "ready": {
+        "type": "ready",
+        "port": 59836,
+        "phase": "ready",
+        "memory": {
+          "rss": 253108224,
+          "heapTotal": 198995968,
+          "heapUsed": 78534656,
+          "external": 26672373,
+          "arrayBuffers": 4662586
+        },
+        "cpu": {
+          "user": 2843000,
+          "system": 1765000
+        },
+        "received": 0,
+        "bytes": 0,
+        "connections": 0,
+        "eventLoopP99Ms": 0.000511,
+        "obfuscationBuffers": []
+      },
+      "loaded": {
+        "type": "checkpoint",
+        "id": 1,
+        "phase": "loaded",
+        "memory": {
+          "rss": 648773632,
+          "heapTotal": 205099008,
+          "heapUsed": 64421840,
+          "external": 574568956,
+          "arrayBuffers": 551519744
+        },
+        "cpu": {
+          "user": 12859000,
+          "system": 3062000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 73.662463,
+        "obfuscationBuffers": [
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          }
+        ]
+      },
+      "idle": {
+        "type": "checkpoint",
+        "id": 2,
+        "phase": "idle",
+        "memory": {
+          "rss": 648777728,
+          "heapTotal": 205099008,
+          "heapUsed": 64589032,
+          "external": 574569036,
+          "arrayBuffers": 551519824
+        },
+        "cpu": {
+          "user": 12859000,
+          "system": 3062000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 73.662463,
+        "obfuscationBuffers": [
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          },
+          {
+            "capacity": 67108864,
+            "written": 33560428,
+            "available": 0
+          }
+        ]
+      },
+      "peakRss": 714006528
+    }
+  ],
+  "optimized": [
+    {
+      "node": "v24.12.0",
+      "platform": "win32",
+      "fullApp": true,
+      "devices": 8,
+      "rounds": 64,
+      "partBytes": 524288,
+      "elapsedMs": 9377.4642,
+      "ready": {
+        "type": "ready",
+        "port": 50091,
+        "phase": "ready",
+        "memory": {
+          "rss": 252698624,
+          "heapTotal": 200306688,
+          "heapUsed": 78572232,
+          "external": 26672773,
+          "arrayBuffers": 4662986
+        },
+        "cpu": {
+          "user": 3812000,
+          "system": 2203000
+        },
+        "received": 0,
+        "bytes": 0,
+        "connections": 0,
+        "eventLoopP99Ms": 0.000511,
+        "obfuscationBuffers": []
+      },
+      "loaded": {
+        "type": "checkpoint",
+        "id": 1,
+        "phase": "loaded",
+        "memory": {
+          "rss": 380469248,
+          "heapTotal": 204574720,
+          "heapUsed": 63851760,
+          "external": 45037168,
+          "arrayBuffers": 21987956
+        },
+        "cpu": {
+          "user": 13593000,
+          "system": 4484000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 83.427327,
+        "obfuscationBuffers": [
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          }
+        ]
+      },
+      "idle": {
+        "type": "checkpoint",
+        "id": 2,
+        "phase": "idle",
+        "memory": {
+          "rss": 380473344,
+          "heapTotal": 204574720,
+          "heapUsed": 64053744,
+          "external": 45037248,
+          "arrayBuffers": 21988036
+        },
+        "cpu": {
+          "user": 13593000,
+          "system": 4484000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 83.427327,
+        "obfuscationBuffers": [
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          }
+        ]
+      },
+      "peakRss": 432406528
+    },
+    {
+      "node": "v24.12.0",
+      "platform": "win32",
+      "fullApp": true,
+      "devices": 8,
+      "rounds": 64,
+      "partBytes": 524288,
+      "elapsedMs": 8875.0264,
+      "ready": {
+        "type": "ready",
+        "port": 61257,
+        "phase": "ready",
+        "memory": {
+          "rss": 246128640,
+          "heapTotal": 128741376,
+          "heapUsed": 68756864,
+          "external": 26672373,
+          "arrayBuffers": 4662586
+        },
+        "cpu": {
+          "user": 3171000,
+          "system": 2078000
+        },
+        "received": 0,
+        "bytes": 0,
+        "connections": 0,
+        "eventLoopP99Ms": 0.000511,
+        "obfuscationBuffers": []
+      },
+      "loaded": {
+        "type": "checkpoint",
+        "id": 1,
+        "phase": "loaded",
+        "memory": {
+          "rss": 350126080,
+          "heapTotal": 204050432,
+          "heapUsed": 63828680,
+          "external": 45037168,
+          "arrayBuffers": 21987956
+        },
+        "cpu": {
+          "user": 12531000,
+          "system": 4062000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 74.973183,
+        "obfuscationBuffers": [
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          }
+        ]
+      },
+      "idle": {
+        "type": "checkpoint",
+        "id": 2,
+        "phase": "idle",
+        "memory": {
+          "rss": 350130176,
+          "heapTotal": 204050432,
+          "heapUsed": 64031744,
+          "external": 45037248,
+          "arrayBuffers": 21988036
+        },
+        "cpu": {
+          "user": 12531000,
+          "system": 4062000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 74.973183,
+        "obfuscationBuffers": [
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          }
+        ]
+      },
+      "peakRss": 381939712
+    },
+    {
+      "node": "v24.12.0",
+      "platform": "win32",
+      "fullApp": true,
+      "devices": 8,
+      "rounds": 64,
+      "partBytes": 524288,
+      "elapsedMs": 8872.9089,
+      "ready": {
+        "type": "ready",
+        "port": 56949,
+        "phase": "ready",
+        "memory": {
+          "rss": 260751360,
+          "heapTotal": 206766080,
+          "heapUsed": 96520192,
+          "external": 26673611,
+          "arrayBuffers": 4663824
+        },
+        "cpu": {
+          "user": 2140000,
+          "system": 2109000
+        },
+        "received": 0,
+        "bytes": 0,
+        "connections": 0,
+        "eventLoopP99Ms": 0.000511,
+        "obfuscationBuffers": []
+      },
+      "loaded": {
+        "type": "checkpoint",
+        "id": 1,
+        "phase": "loaded",
+        "memory": {
+          "rss": 347553792,
+          "heapTotal": 205885440,
+          "heapUsed": 63825960,
+          "external": 45037168,
+          "arrayBuffers": 21987956
+        },
+        "cpu": {
+          "user": 10343000,
+          "system": 3906000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 75.759615,
+        "obfuscationBuffers": [
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          }
+        ]
+      },
+      "idle": {
+        "type": "checkpoint",
+        "id": 2,
+        "phase": "idle",
+        "memory": {
+          "rss": 347557888,
+          "heapTotal": 205885440,
+          "heapUsed": 64028312,
+          "external": 45037248,
+          "arrayBuffers": 21988036
+        },
+        "cpu": {
+          "user": 10343000,
+          "system": 3906000
+        },
+        "received": 512,
+        "bytes": 268435456,
+        "connections": 8,
+        "eventLoopP99Ms": 75.759615,
+        "obfuscationBuffers": [
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          },
+          {
+            "capacity": 1048576,
+            "written": 0,
+            "available": 0
+          }
+        ]
+      },
+      "peakRss": 420831232
+    }
+  ]
+}

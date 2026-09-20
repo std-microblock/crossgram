@@ -3,6 +3,7 @@ import type { IPacketCodec } from '@mtcute/core'
 import type { ICryptoProvider, Logger } from '@mtcute/core/utils.js'
 import { IntermediatePacketCodec, PaddedIntermediatePacketCodec } from '@mtcute/core'
 import { Bytes } from '@fuman/io'
+import { reclaimReceiveBuffer } from './receive-buffer.js'
 import { AbridgedPacketCodec, createServerObfuscation } from './server-obfuscation.js'
 
 export interface TransportTrafficSample {
@@ -358,7 +359,7 @@ export class ServerConnection {
         this._messageHandler?.(new Uint8Array(frame))
       }
 
-      this._recvBuffer.reclaim()
+      this._recvBuffer = reclaimReceiveBuffer(this._recvBuffer, 65536)
     }
   }
 

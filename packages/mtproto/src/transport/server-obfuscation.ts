@@ -2,6 +2,7 @@ import type { IPacketCodec } from '@mtcute/core'
 import type { IAesCtr, ICryptoProvider, Logger } from '@mtcute/core/utils.js'
 import { IntermediatePacketCodec, PaddedIntermediatePacketCodec } from '@mtcute/core'
 import { Bytes, read, write, type ISyncWritable } from '@fuman/io'
+import { reclaimReceiveBuffer } from './receive-buffer.js'
 import { u8 } from '@fuman/utils'
 
 /**
@@ -92,7 +93,7 @@ export class AbridgedPacketCodec implements IPacketCodec {
  * byte stream, using the keys derived from the client's init header.
  */
 export class ServerObfuscatedCodec implements IPacketCodec {
-  private readonly _decodeBuf = Bytes.alloc()
+  private _decodeBuf = Bytes.alloc()
 
   constructor(
     private readonly _encryptor: IAesCtr,
@@ -107,11 +108,25 @@ export class ServerObfuscatedCodec implements IPacketCodec {
   decode(reader: Bytes, eof: boolean): Uint8Array | Promise<Uint8Array | null> | null {
     if (eof) return null
     if (reader.available > 0) {
+      this._decodeBuf = reclaimReceiveBuffer(this._decodeBuf, 16 * 1024)
       const decrypted = this._decryptor.process(reader.readSync(reader.available))
       const into = this._decodeBuf.writeSync(decrypted.length)
       into.set(decrypted)
     }
-    return this._inner.decode(this._decodeBuf, eof)
+    const frame = this._inner.decode(this._decodeBuf, eof)
+    return frame instanceof Promise ? frame.then(value => this._finishDecode(value)) : this._finishDecode(frame)
+  }
+
+  private _finishDecode(frame: Uint8Array | null): Uint8Array | null {
+    // Standard codecs return owned frames. Preserve the IPacketCodec contract
+    // for a codec returning a view too: compaction must not overwrite its frame.
+    if (frame && frame.buffer === this._decodeBuf.result().buffer) frame = new Uint8Array(frame)
+    // Avoid repeatedly shifting the entire suffix of a batch of many frames.
+    // Compact only when the inner decoder needs more input, or the batch is empty.
+    if (frame === null || this._decodeBuf.available === 0) {
+      this._decodeBuf = reclaimReceiveBuffer(this._decodeBuf, 16 * 1024)
+    }
+    return frame
   }
 
   encode(frame: Uint8Array, into: ISyncWritable): void {
@@ -125,7 +140,7 @@ export class ServerObfuscatedCodec implements IPacketCodec {
 
   reset(): void {
     this._inner.reset()
-    this._decodeBuf.reset()
+    this._decodeBuf = Bytes.alloc()
     this._encryptor.close?.()
     this._decryptor.close?.()
   }

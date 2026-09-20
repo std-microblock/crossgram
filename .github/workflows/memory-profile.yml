@@ -1,0 +1,64 @@
+name: memory-profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Commit used for the two original receive-buffer implementations
+        required: true
+        default: cc4c03a
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  linux-memory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUSKY: 0
+      PROFILE_FULL_APP: '1'
+      PROFILE_DEVICES: '8'
+      PROFILE_ROUNDS: '64'
+      PROFILE_PART_BYTES: '524288'
+      BASELINE_REF: ${{ inputs.baseline }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: yarn install --immutable
+      - name: Build WebUI assets locally on CI
+        run: yarn yakumo client
+      - name: Unit regressions
+        run: yarn vitest run packages/mtproto/src deploy/memory-profile.test.ts --maxWorkers=2
+      - name: Encrypted TCP regressions
+        run: yarn vitest run --config vitest.mtproto-e2e.config.mts packages/mtproto/src/session/server-session.e2e.test.ts packages/mtproto/src/transport/receive-memory.e2e.test.ts --maxWorkers=1
+      - name: Compare equivalent full-application workloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/memory-profile
+          baseline=$(git rev-parse --verify "$BASELINE_REF^{commit}")
+          # This checkout is disposable. Only the two transport implementations
+          # differ; harness, dependencies, account data, workload, and runner match.
+          paths=(packages/mtproto/src/transport/server-obfuscation.ts packages/mtproto/src/transport/server-connection.ts)
+          git restore --source="$baseline" -- "${paths[@]}"
+          for run in 1 2 3; do
+            node --import tsx --import @cordisjs/unyaml scripts/profile-mtproto-memory.mts > "work/memory-profile/baseline-$run.json"
+          done
+          git restore --source="$GITHUB_SHA" -- "${paths[@]}"
+          for run in 1 2 3; do
+            node --import tsx --import @cordisjs/unyaml scripts/profile-mtproto-memory.mts > "work/memory-profile/optimized-$run.json"
+          done
+          node scripts/compare-mtproto-memory.mjs work/memory-profile | tee work/memory-profile/comparison.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-mtproto-memory
+          path: work/memory-profile/*.json
+          if-no-files-found: ignore
