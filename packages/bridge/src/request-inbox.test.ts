@@ -12,7 +12,7 @@ import { UpdateManager } from './update-manager.js'
 import type { IMEvent, IMPlatform, IMRequest, PlatformSession } from './platform.js'
 import {
   REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_INBOX_CONVERSATION_ID, REQUEST_REJECT_CALLBACK_DATA,
-  RequestInboxSystemPeerProvider, requestInboxMessage,
+  RequestInboxSystemPeerProvider, requestInboxMessage, requestTimestamp,
 } from './request-inbox.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 
@@ -556,5 +556,82 @@ describe('request inbox callbacks', () => {
 
     expect(getMessage).not.toHaveBeenCalled()
     expect(clickInlineButton).not.toHaveBeenCalled()
+  })
+})
+
+describe('request inbox creation time', () => {
+  // QQ group notifies report a zero action time, and the previous pass-through
+  // dated every inbox message at the Unix epoch, which sinks the conversation
+  // to the bottom of every client chat list.
+  it('dates an undated request at ingestion instead of the Unix epoch', async () => {
+    const { rpc, store } = await createRequestRpc(undefined, { history: true })
+    const before = Math.floor(Date.now() / 1_000) - 5
+    const { message } = await store.ingestRequest(session, {
+      id: 'undated/request', kind: 'group-join', state: 'pending', createdAt: '0',
+      requester: { id: 'alice', firstName: 'Alice' },
+      group: { id: 'group', kind: 'group', title: 'Group' },
+    })
+
+    expect(message.message.timestamp).toBeGreaterThanOrEqual(before)
+    const page = await rpc.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    }) as tl.messages.RawDialogs
+    const inboxPeerId = rpc.peerTlId(REQUEST_INBOX_CONVERSATION_ID)
+    const dialog = page.dialogs.find((item) =>
+      item.peer._ === 'peerUser' && item.peer.userId === inboxPeerId)
+    expect(dialog).toBeDefined()
+    const preview = page.messages.find((item) =>
+      item._ === 'message' && item.id === dialog!.topMessage) as tl.RawMessage
+    expect(preview.date).toBeGreaterThanOrEqual(before)
+  })
+
+  it('keeps a generated creation time stable across replays', async () => {
+    const { store } = await createRequestRpc(undefined)
+    const request: IMRequest = {
+      id: 'replayed/request', kind: 'group-join', state: 'pending', createdAt: '0',
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    await store.ingestRequest(session, request)
+    const first = await store.getRequest(session.platformSessionId, request.id)
+
+    await store.ingestRequest(session, request)
+    const second = await store.getRequest(session.platformSessionId, request.id)
+
+    expect(second?.createdAt).toBe(first?.createdAt)
+    expect(requestTimestamp(second?.createdAt)).toBeGreaterThan(0)
+  })
+
+  it('preserves the creation time a platform reported', async () => {
+    const { store } = await createRequestRpc(undefined)
+    await store.ingestRequest(session, {
+      id: 'dated/request', kind: 'friend', state: 'pending', createdAt: 1_785_167_054,
+      requester: { id: 'alice', firstName: 'Alice' },
+    })
+
+    await expect(store.getRequest(session.platformSessionId, 'dated/request'))
+      .resolves.toMatchObject({ createdAt: 1_785_167_054 })
+  })
+
+  it('repairs a persisted zero creation time on the next replay', async () => {
+    const { store, database } = await createRequestRpc(undefined)
+    const legacy: IMRequest = {
+      id: 'legacy/request', kind: 'group-join', state: 'pending', createdAt: '0',
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    await database.upsert('mtproto_im_request', [{
+      platformSessionId: session.platformSessionId,
+      platformRequestId: legacy.id,
+      kind: legacy.kind,
+      state: legacy.state,
+      request: legacy as never,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+    }], ['platformSessionId', 'platformRequestId'])
+
+    await store.ingestRequest(session, legacy)
+
+    const repaired = await store.getRequest(session.platformSessionId, legacy.id)
+    expect(requestTimestamp(repaired?.createdAt)).toBeGreaterThan(Math.floor(Date.now() / 1_000) - 60)
   })
 })

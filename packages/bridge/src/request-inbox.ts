@@ -179,7 +179,8 @@ function requestInboxText(request: IMRequest): string {
   return lines.join('\n')
 }
 
-function requestTimestamp(value: IMRequest['createdAt']): number {
+/** Unix seconds for a platform creation time, or 0 when the platform reported none. */
+export function requestTimestamp(value: IMRequest['createdAt']): number {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return Math.floor(value > 10_000_000_000 ? value / 1000 : value)
   }

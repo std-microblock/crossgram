@@ -16,7 +16,9 @@ import {
   qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata,
   TELEGRAM_MESSAGE_ID_MAX, TIMESTAMP_MESSAGE_ID_SLOTS,
 } from './message-id.js'
-import { REQUEST_INBOX_CONVERSATION_ID, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
+import {
+  REQUEST_INBOX_CONVERSATION_ID, requestInboxConversation, requestInboxMessage, requestTimestamp,
+} from './request-inbox.js'
 import type { MessageProjectionPipeline, MessageProjectionPlan } from './message-projection.js'
 
 export interface IngestResult {
@@ -1472,18 +1474,20 @@ export class MessageStore {
       platformRequestId: request.id,
     })
     const previous = existing ? requestFromRow(existing) : undefined
+    // Platforms that report an unusable creation time (QQ group notifies send
+    // zero) must not date their inbox messages at the Unix epoch, which hides
+    // the conversation from every client chat list.
+    const createdAt = [previous?.createdAt, request.createdAt]
+      .find((value) => requestTimestamp(value) > 0)
     // Terminal request states are monotonic. Cold list synchronization can
     // race a live resolve event, so a stale pending (or conflicting terminal)
     // replay must never restore buttons or replace the first terminal result.
     const canonical: IMRequest = previous && previous.state !== 'pending'
-      ? previous
+      ? { ...previous, createdAt: createdAt ?? now.getTime() }
       // The platform may omit creation time on every replay. Generate it once
       // and preserve it in the canonical payload so a restarted projection keeps
       // its original Telegram timestamp instead of drifting or falling back to 0.
-      : {
-          ...request,
-          createdAt: previous?.createdAt ?? request.createdAt ?? now.getTime(),
-        }
+      : { ...request, createdAt: createdAt ?? now.getTime() }
     const stored = canonical as unknown as JsonObject
     const changed = !existing
       || existing.kind !== canonical.kind
