@@ -57,6 +57,38 @@ cursor advance, missing-update suppression, or smaller retention limit is used.
   and request-inbox tests. No type errors were reported in this change. The scoped
   commit bypasses the pre-commit typecheck rather than changing unrelated code.
 
-Production acceptance still requires deployment followed by repeated concurrent
-client measurements and confirmation that historical push duplication and socket
-backlog disappear. The corresponding server maintenance entry records those results.
+## Production acceptance
+
+Deployed code commit 69d543c on 2026-09-20 at 23:39:10 CST. The server only
+fast-forwarded its clean checkout and restarted; there was no install, build,
+benchmark, or database migration on production. A rollback copy of the prior
+sources is retained under /var/lib/crossgram/backups/20260920-reconnect-recovery/.
+
+The same public endpoint and saved independent account authorizations used for
+the failing measurements were tested again. After the initial warm-up, bounded,
+read-only probes ran successively with one, two, and three simultaneous clients,
+then repeated the three-client run:
+
+| Concurrent clients | getDialogs | Empty channel difference | Recent history (5 messages) |
+| --- | --- | --- | --- |
+| 1 | 253 ms | 28 ms | 84 ms |
+| 2 | 300-302 ms | 24-28 ms | 107-129 ms |
+| 3, first repeat | 411-432 ms | 32-41 ms | 135-259 ms |
+| 3, second repeat | 555-567 ms | 22-26 ms | 153-248 ms |
+
+State requests in these runs took 19-127 ms. The first cold three-client run had
+one 2.04-second history read; all subsequent history reads are included above,
+not silently discarded as failures. No RPC failed. These are observed end-to-end
+measurements, not guaranteed latency limits or a controlled capacity benchmark.
+
+A metadata-only transport capture across the verification runs recorded 157
+settled replies. At the instrumented RPC/transport boundaries, maximum buffered
+bytes, stalled duration, and encode queue length were all zero. The push capture
+observed fresh live updates (age at most one second) and zero duplicates, rather
+than the thousands of old copies observed before the fix. Live fan-out is also
+covered by the real-socket regression suite.
+
+At final verification, Crossgram, QQNT bridge, and PostgreSQL were active;
+Crossgram had NRestarts=0. All temporary server probes were removed. No business
+messages were sent by the production checks, and no recurring monitoring task
+was installed. The reproduced multi-device replay congestion is resolved.
