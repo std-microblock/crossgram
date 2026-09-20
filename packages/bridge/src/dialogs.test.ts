@@ -741,13 +741,41 @@ describe('DialogRpc', () => {
     expect(() => wireRoundTrip(history)).not.toThrow()
   })
 
-  it('returns a serializable empty pinned-dialog page for folder merging', () => {
-    const result = new DialogRpc(new DialogTestPlatform(), session).getPinnedDialogs()
+  it('returns a serializable empty pinned-dialog page for folder merging', async () => {
+    const result = await new DialogRpc(new DialogTestPlatform(), session).getPinnedDialogs()
     expect(result).toMatchObject({
       _: 'messages.peerDialogs', dialogs: [], messages: [], chats: [], users: [],
       state: { _: 'updates.state', pts: 1, qts: 0, seq: 0, unreadCount: 0 },
     })
     expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
+  it('advertises QQ Archive with its newest preview and muted unread totals', async () => {
+    const platform = new DialogTestPlatform() as DialogTestPlatform & { platformKind: string }
+    platform.platformKind = 'qq'
+    platform.getDialogs = async () => ({ dialogs: [
+      { conversation: { id: 'archived-old', kind: 'group', title: 'Old', metadata: { qqGroupMsgMask: 2 } },
+        unreadCount: 3, lastMessage: { id: 'old', conversationId: 'archived-old', senderId: 'alice',
+          timestamp: 10, content: { parts: [{ type: 'text', text: 'old' }] } } },
+      { conversation: { id: 'archived-new', kind: 'group', title: 'New', metadata: { qqGroupMsgMask: 2 } },
+        unreadCount: 2, lastMessage: { id: 'new', conversationId: 'archived-new', senderId: 'bob',
+          timestamp: 20, content: { parts: [{ type: 'text', text: 'new' }] } } },
+      { conversation: { id: 'main', kind: 'group', title: 'Main', metadata: { qqGroupMsgMask: 1 } }, unreadCount: 9 },
+    ] })
+    const rpc = new DialogRpc(platform, session)
+    const result = wireRoundTrip(await rpc.getPinnedDialogs(0)) as tl.messages.RawPeerDialogs
+    expect(result.dialogs).toHaveLength(1)
+    expect(result.dialogs[0]).toMatchObject({
+      _: 'dialogFolder', pinned: true, folder: { id: 1 },
+      peer: { _: 'peerChannel', channelId: rpc.peerTlId('archived-new') },
+      unreadMutedPeersCount: 2, unreadMutedMessagesCount: 5,
+      unreadUnmutedPeersCount: 0, unreadUnmutedMessagesCount: 0,
+    })
+    expect(result.messages).toMatchObject([{ date: 20, message: 'new' }])
+    expect(result.chats).toMatchObject([{ title: 'New' }])
+    expect(result.users.some(user => user._ === 'user' && user.firstName === 'Bob')).toBe(true)
+    await expect(rpc.getPinnedDialogs(1)).resolves.toMatchObject({ dialogs: [] })
+    await expect(rpc.getPinnedDialogs(2)).rejects.toMatchObject({ text: 'FOLDER_ID_INVALID' })
   })
 
   it('acknowledges pinned-dialog housekeeping without retrying an unsupported RPC', async () => {
@@ -796,7 +824,7 @@ describe('DialogRpc', () => {
     expect(getDialogs).toHaveBeenCalledTimes(2)
   })
 
-  it('expands folder zero, ignores unsupported archived folders, and rejects unknown peers', async () => {
+  it('returns an empty Archive summary, expands folder zero, and rejects unknown peers', async () => {
     const rpc = new DialogRpc(new DialogTestPlatform(), session)
     const all = await rpc.getPeerDialogs({
       _: 'messages.getPeerDialogs',
@@ -805,7 +833,8 @@ describe('DialogRpc', () => {
         { _: 'inputDialogPeerFolder', folderId: 0 },
       ],
     })
-    expect(all.dialogs).toHaveLength(2)
+    expect(all.dialogs).toHaveLength(3)
+    expect(all.dialogs[0]).toMatchObject({ _: 'dialogFolder', folder: { id: 1 }, topMessage: 0 })
     expect(() => wireRoundTrip(all)).not.toThrow()
 
     await expect(rpc.getPeerDialogs({

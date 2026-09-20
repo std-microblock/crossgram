@@ -458,6 +458,8 @@ export class DialogRpc {
       this._peerId(dialog.conversation.id)
       return [dialog.conversation.id, dialog]
     }))
+    const archive = req.peers.some((peer) => peer._ === 'inputDialogPeerFolder' && peer.folderId === 1)
+      ? await this._archiveFolderDialog(loaded, true) : undefined
     const selected: IMDialog[] = []
     const seen = new Set<string>()
     const archivedPeerIds = await this._dialogFolders?.archivedPeerIds(
@@ -466,7 +468,7 @@ export class DialogRpc {
 
     for (const requested of req.peers) {
       if (requested._ === 'inputDialogPeerFolder') {
-        if (requested.folderId === 0 || requested.folderId === 1) {
+        if (requested.folderId === 0) {
           for (const dialog of loaded) {
             if (this._effectiveFolderId(dialog.conversation, archivedPeerIds) !== requested.folderId) continue
             if (!seen.has(dialog.conversation.id)) selected.push(dialog)
@@ -499,10 +501,10 @@ export class DialogRpc {
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return {
       _: 'messages.peerDialogs',
-      dialogs: materialized.map((item) => item.dialog),
-      messages: materialized.flatMap((item) => item.message ? [item.message] : []),
-      chats: uniqueChats(materialized.flatMap((item) => item.chat ? [item.chat] : [])),
-      users: uniqueUsers(materialized.flatMap((item) => item.users)),
+      dialogs: [...(archive ? [archive.dialog] : []), ...materialized.map((item) => item.dialog)],
+      messages: [...(archive?.messages ?? []), ...materialized.flatMap((item) => item.message ? [item.message] : [])],
+      chats: uniqueChats([...(archive?.chats ?? []), ...materialized.flatMap((item) => item.chat ? [item.chat] : [])]),
+      users: uniqueUsers([...(archive?.users ?? []), ...materialized.flatMap((item) => item.users)]),
       state: {
         _: 'updates.state', pts: state?.pts ?? this._pts, qts: state?.qts ?? 0,
         date: state?.date ?? Math.floor(Date.now() / 1000), seq: state?.seq ?? 0, unreadCount: 0,
@@ -1138,9 +1140,13 @@ export class DialogRpc {
     } as unknown as tl.messages.TypeMessages
   }
 
-  getPinnedDialogs(): tl.messages.RawPeerDialogs {
+  async getPinnedDialogs(folderId = 0): Promise<tl.messages.RawPeerDialogs> {
+    if (folderId !== 0 && folderId !== 1) throw new RpcError(400, 'FOLDER_ID_INVALID')
+    const archive = folderId === 0 ? await this._archiveFolderDialog() : undefined
     return {
-      _: 'messages.peerDialogs', dialogs: [], messages: [], chats: [], users: [],
+      _: 'messages.peerDialogs',
+      dialogs: archive ? [{ ...archive.dialog, pinned: true }] : [],
+      messages: archive?.messages ?? [], chats: archive?.chats ?? [], users: archive?.users ?? [],
       state: {
         _: 'updates.state', pts: this._pts, qts: 0,
         date: Math.floor(Date.now() / 1000), seq: 0, unreadCount: 0,
@@ -1149,7 +1155,7 @@ export class DialogRpc {
   }
 
   /**
-   * The bridge does not expose pinned dialogs, but Telegram clients send this
+   * The bridge does not expose pinned ordinary peers, but Telegram clients send this
    * housekeeping RPC during dialog synchronization. A successful no-op is
    * preferable to METHOD_NOT_IMPLEMENTED, which Android keeps retrying.
    */
@@ -3971,6 +3977,68 @@ export class DialogRpc {
         ? { nextCursor: afterId ?? selected.at(-1)?.conversation.id }
         : {}),
       ...(exhausted && !query.afterId ? { total: matching } : {}),
+    }
+  }
+
+  // Desktop discovers Archive through dialogFolder, then requests folder_id=1.
+  // Returning only its children leaves a fresh client unaware of the folder.
+  private async _archiveFolderDialog(loaded?: readonly IMDialog[], includeEmpty = false) {
+    await this._hydrateUsers()
+    const archivedPeerIds = await this._dialogFolders?.archivedPeerIds(
+      this._session.platformSessionId,
+    ) ?? new Set<string>()
+    if (!loaded && this._platform.platformKind !== 'qq' && !archivedPeerIds.size) return
+    const archived = (loaded ?? await this._loadAllDialogs()).filter((dialog) =>
+      this._effectiveFolderId(dialog.conversation, archivedPeerIds) === 1)
+    if (!archived.length) {
+      if (!includeEmpty) return
+      return {
+        dialog: {
+          _: 'dialogFolder' as const, folder: { _: 'folder' as const, id: 1, title: 'Archived Chats' },
+          peer: { _: 'peerUser' as const, userId: 0 }, topMessage: 0,
+          unreadMutedPeersCount: 0, unreadUnmutedPeersCount: 0,
+          unreadMutedMessagesCount: 0, unreadUnmutedMessagesCount: 0,
+        },
+        messages: [], chats: [], users: [],
+      }
+    }
+    const representative = archived.reduce((latest, dialog) =>
+      (dialog.lastMessage?.timestamp ?? 0) > (latest.lastMessage?.timestamp ?? 0) ? dialog : latest)
+    await this._persistUsers(archived.filter((dialog) => dialog.conversation.kind === 'direct')
+      .map((dialog) => directConversationUser(dialog.conversation)))
+    await this._syncStoredUsers(representative.lastMessage
+      ? messageReferencedUserIds(representative.lastMessage) : [])
+    let unreadMutedPeersCount = 0
+    let unreadUnmutedPeersCount = 0
+    let unreadMutedMessagesCount = 0
+    let unreadUnmutedMessagesCount = 0
+    for (const source of archived) {
+      this._conversations.set(source.conversation.id, source.conversation)
+      if (!source.unreadCount) continue
+      const settings = await this._peerNotifySettings(source.conversation.id)
+      const category = source.conversation.kind === 'direct' ? 'users'
+        : source.conversation.kind === 'channel' ? 'broadcasts' : 'chats'
+      const defaults = settings.muteUntil === undefined
+        ? await this._notificationSettings?.get(this._session.platformSessionId, { type: category })
+        : undefined
+      if ((settings.muteUntil ?? defaults?.muteUntil ?? 0) > Math.floor(Date.now() / 1000)) {
+        unreadMutedPeersCount++
+        unreadMutedMessagesCount += source.unreadCount
+      } else {
+        unreadUnmutedPeersCount++
+        unreadUnmutedMessagesCount += source.unreadCount
+      }
+    }
+    const item = await this._materializeDialog(representative, undefined, 1)
+    const dialog: tl.RawDialogFolder = {
+      _: 'dialogFolder', folder: { _: 'folder', id: 1, title: 'Archived Chats' },
+      peer: item.dialog.peer, topMessage: item.dialog.topMessage,
+      unreadMutedPeersCount, unreadUnmutedPeersCount,
+      unreadMutedMessagesCount, unreadUnmutedMessagesCount,
+    }
+    return {
+      dialog, messages: item.message ? [item.message] : [],
+      chats: item.chat ? [item.chat] : [], users: item.users,
     }
   }
 

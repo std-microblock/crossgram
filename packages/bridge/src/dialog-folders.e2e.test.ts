@@ -13,6 +13,7 @@ import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { DialogFolderStore } from './dialog-folders.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { defineModels } from './models.js'
+import { MessageStore } from './message-store.js'
 import type { IMDialog, IMPlatform, PlatformSession } from './platform.js'
 import { createCordisRpcTestHarness, type CordisRpcTestHarness } from './rpc-test-harness.js'
 
@@ -63,9 +64,9 @@ function makeContext(): ServerRpcContext {
   }
 }
 
-function createDialog(folders: DialogFolderStore, targetPlatform: IMPlatform = platform): DialogRpc {
+function createDialog(folders: DialogFolderStore, targetPlatform: IMPlatform = platform, store?: MessageStore): DialogRpc {
   return new DialogRpc(
-    targetPlatform, session, undefined, undefined, undefined, 1,
+    targetPlatform, session, store, undefined, undefined, 1,
     undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
     undefined, undefined, undefined, folders,
   )
@@ -77,6 +78,8 @@ function rpcHarnessFor(dialogs: DialogRpc): CordisRpcTestHarness {
     dialogs.getDialogs(request as tl.messages.RawGetDialogsRequest))
   rpcHarness.register('messages.getPeerDialogs', async (_context, request) =>
     dialogs.getPeerDialogs(request as tl.messages.RawGetPeerDialogsRequest))
+  rpcHarness.register('messages.getPinnedDialogs', async (_context, request) =>
+    dialogs.getPinnedDialogs((request as tl.messages.RawGetPinnedDialogsRequest).folderId))
   rpcHarness.register('messages.getDialogFilters', async () => dialogs.getDialogFilters())
   rpcHarness.register('messages.updateDialogFilter', async (_context, request) => {
     await dialogs.updateDialogFilter(request as tl.messages.RawUpdateDialogFilterRequest)
@@ -145,6 +148,89 @@ function decodeRpcResult(bytes: Uint8Array): any {
 }
 
 describe('dialog folders RPC e2e', () => {
+  it('discovers and paginates Archive from the desktop pinned-folder response without incoming updates', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+    const source: IMDialog[] = Array.from({ length: 65 }, (_, index) => {
+      const id = 'archive-discovery-' + index
+      return {
+        conversation: { id, kind: 'group', title: id, metadata: { qqGroupMsgMask: index < 45 ? 2 : 1 } },
+        unreadCount: index < 45 ? 2 : 0,
+        lastMessage: { id: 'preview-' + index, conversationId: id, senderId: 'self',
+          timestamp: 1_700_000_000 - index, content: { parts: [{ type: 'text', text: 'preview' }] } },
+      }
+    })
+    const target: IMPlatform = {
+      ...platform, platformKind: 'qq',
+      async getDialogs(_session, query) {
+        const start = query?.afterId ? source.findIndex(item => item.conversation.id === query.afterId) + 1 : 0
+        return { dialogs: source.slice(start, start + (query?.limit ?? 100)), total: source.length }
+      },
+      async getUser(_session, id) { return { id, firstName: 'Self' } },
+    }
+    const harness = rpcHarnessFor(createDialog(new DialogFolderStore(ctx.database), target, new MessageStore(ctx.database)))
+    const main = await roundTripRpc(harness, getDialogs(0, { excludePinned: true, limit: 20 }))
+    expect(main.dialogs).toHaveLength(20)
+    expect(main.dialogs.every((dialog: tl.RawDialog) => !dialog.folderId)).toBe(true)
+    const pinned = await roundTripRpc(harness, { _: 'messages.getPinnedDialogs', folderId: 0 })
+    expect(pinned.dialogs).toHaveLength(1)
+    expect(pinned.dialogs[0]).toMatchObject({
+      _: 'dialogFolder', pinned: true, folder: { _: 'folder', id: 1 },
+      unreadMutedPeersCount: 45, unreadMutedMessagesCount: 90,
+      unreadUnmutedPeersCount: 0, unreadUnmutedMessagesCount: 0,
+    })
+    expect(pinned.messages).toMatchObject([{
+      id: pinned.dialogs[0].topMessage, peerId: pinned.dialogs[0].peer, date: 1_700_000_000,
+    }])
+    expect(pinned.chats).toHaveLength(1)
+    const first = await roundTripRpc(harness, getDialogs(pinned.dialogs[0].folder.id, { excludePinned: true, limit: 20 }))
+    expect(first).toMatchObject({ _: 'messages.dialogsSlice', count: 45 })
+    expect(first.dialogs).toHaveLength(20)
+    const last = first.dialogs.at(-1) as tl.RawDialog
+    const top = first.messages.find((message: tl.RawMessage) => message.id === last.topMessage)
+    expect(top.date).toBeGreaterThan(0)
+    const rest = await roundTripRpc(harness, getDialogs(1, {
+      excludePinned: true, limit: 500, offsetId: last.topMessage, offsetDate: top.date,
+      offsetPeer: { _: 'inputPeerChannel', channelId: (last.peer as tl.RawPeerChannel).channelId, accessHash: Long.ONE },
+    }))
+    expect(rest._).toBe('messages.dialogs')
+    const ids = [...first.dialogs, ...rest.dialogs].map((dialog: tl.RawDialog) =>
+      (dialog.peer as tl.RawPeerChannel).channelId)
+    expect(new Set(ids).size).toBe(45)
+    expect(ids).toHaveLength(45)
+    expect(await roundTripRpc(harness, { _: 'messages.getPinnedDialogs', folderId: 1 }))
+      .toMatchObject({ dialogs: [], messages: [] })
+    const refreshed = await roundTripRpc(harness, {
+      _: 'messages.getPeerDialogs', peers: [
+        { _: 'inputDialogPeerFolder', folderId: 1 },
+        { _: 'inputDialogPeerFolder', folderId: 1 },
+      ],
+    })
+    expect(refreshed.dialogs).toHaveLength(1)
+    expect(refreshed.dialogs[0]).toMatchObject({ _: 'dialogFolder', folder: { id: 1 }, unreadMutedPeersCount: 45 })
+    const unscoped = await roundTripRpc(harness, getDialogs(undefined))
+    expect(unscoped.dialogs).toHaveLength(65)
+    expect(unscoped.dialogs.every((dialog: tl.TypeDialog) => dialog._ === 'dialog')).toBe(true)
+    for (const dialog of source) dialog.conversation.metadata = { qqGroupMsgMask: 1 }
+    const cleared = await roundTripRpc(harness, {
+      _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
+    })
+    expect(cleared.dialogs).toMatchObject([{
+      _: 'dialogFolder', folder: { id: 1 }, peer: { _: 'peerUser', userId: 0 }, topMessage: 0,
+      unreadMutedPeersCount: 0, unreadUnmutedPeersCount: 0,
+    }])
+    expect(cleared.messages).toEqual([])
+    expect(await roundTripRpc(harness, { _: 'messages.getPinnedDialogs', folderId: 0 }))
+      .toMatchObject({ dialogs: [] })
+  })
+
   it('hydrates contact flags before the first dialogs response used by folder filtering', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
@@ -260,6 +346,13 @@ describe('dialog folders RPC e2e', () => {
       { _: 'peerUser', userId: stableId('peer:alice') },
       { _: 'peerChannel', channelId: stableId('peer:channel-a') },
     ])
+    const pinnedArchive = await roundTripRpc(resumedHarness, { _: 'messages.getPinnedDialogs', folderId: 0 })
+    expect(pinnedArchive.dialogs).toMatchObject([{
+      _: 'dialogFolder', pinned: true, folder: { id: 1 }, topMessage: 0,
+      unreadUnmutedPeersCount: 1, unreadUnmutedMessagesCount: 2,
+      unreadMutedPeersCount: 0, unreadMutedMessagesCount: 0,
+    }])
+    expect(pinnedArchive.messages).toEqual([])
     const archive = await roundTripRpc(resumedHarness, getDialogs(1))
     expect(archive.dialogs).toMatchObject([{
       _: 'dialog', peer: { _: 'peerChannel', channelId: stableId('peer:group-a') }, folderId: 1,
@@ -268,7 +361,8 @@ describe('dialog folders RPC e2e', () => {
       _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
     })
     expect(peerArchive.dialogs).toMatchObject([{
-      _: 'dialog', peer: { _: 'peerChannel', channelId: stableId('peer:group-a') }, folderId: 1,
+      _: 'dialogFolder', folder: { _: 'folder', id: 1 },
+      peer: { _: 'peerChannel', channelId: stableId('peer:group-a') },
     }])
 
     const secondRestart = rpcHarnessFor(createDialog(new DialogFolderStore(ctx.database)))
@@ -707,8 +801,7 @@ describe('dialog folders RPC e2e', () => {
     const peerArchive = await roundTripRpc(rpcHarness, {
       _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
     })
-    expect(ids(peerArchive)).toEqual([
-      stableId('peer:mask-assistant'), stableId('peer:mask-unspecified'), stableId('peer:mask-shield'),
-    ])
+    expect(peerArchive.dialogs).toHaveLength(1)
+    expect(peerArchive.dialogs[0]).toMatchObject({ _: 'dialogFolder', folder: { id: 1 } })
   })
 })

@@ -1343,6 +1343,70 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
+  it('discovers QQ Archive through pinned dialogs over an authenticated desktop connection', async () => {
+    const conversation: bridge.IMConversation = {
+      id: 'desktop-archive', kind: 'group', title: 'Archived group', metadata: { qqGroupMsgMask: 2 },
+    }
+    const message: bridge.IMMessage = {
+      id: 'archive-preview', conversationId: conversation.id, senderId: 'self', timestamp: 1_700_000_000,
+      content: { parts: [{ type: 'text', text: 'Archived preview' }] },
+    }
+    const platform: bridge.IMPlatform = {
+      platformKind: 'qq',
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+      },
+      async getAccount() { return { credentials: {}, user: { id: 'self', firstName: 'Archive test', metadata: { qq: '123456789' } } } },
+      async subscribe() { return () => {} },
+      async getDialogs(_session, query) {
+        return { dialogs: query?.afterId ? [] : [{ conversation, unreadCount: 2, lastMessage: message }], total: 1 }
+      },
+      async getHistory() { return { messages: [message] } },
+      async getUser(_session, id) { return { id, firstName: 'Archive test' } },
+      async sendMessage() { throw new Error('unused') },
+    }
+    const platformId = 'desktop-archive-e2e'
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    let client: TestClient | undefined
+    try {
+      const login = await waitForPlatformLogin(ctx, platformId)
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x76543210, 0x4abd, false)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: '+' + login.auth.virtualPhone, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: login.auth.virtualPhone, phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(login.auth.totpSecret),
+      }, 4)
+      const pinned = await callRpc(client, key, sid, { _: 'messages.getPinnedDialogs', folderId: 0 }, 6)
+      expect(pinned.dialogs).toHaveLength(1)
+      expect(pinned.dialogs[0]).toMatchObject({
+        _: 'dialogFolder', pinned: true, folder: { id: 1 }, unreadMutedPeersCount: 1, unreadMutedMessagesCount: 2,
+      })
+      const archive = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: pinned.dialogs[0].folder.id,
+        offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 20, hash: Long.ZERO,
+      }, 8)
+      expect(archive.dialogs).toMatchObject([{
+        _: 'dialog', folderId: 1, peer: pinned.dialogs[0].peer, topMessage: pinned.dialogs[0].topMessage,
+      }])
+      expect(await callRpc(client, key, sid, { _: 'messages.getPinnedDialogs', folderId: 1 }, 10))
+        .toMatchObject({ dialogs: [] })
+      const refreshed = await callRpc(client, key, sid, {
+        _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
+      }, 12)
+      expect(refreshed.dialogs).toMatchObject([{ _: 'dialogFolder', folder: { id: 1 } }])
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('keeps users seen only in dialogs out of MTProto contacts', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let client: TestClient | undefined
