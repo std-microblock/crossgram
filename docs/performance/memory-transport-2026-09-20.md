@@ -111,7 +111,45 @@ sub-30% reduction in either memory metric, and excessive slowdown.
   assets. An earlier run without assets could not register three WebUI routes;
   after building, one authentication timeout passed on targeted rerun and the
   complete 32-test suite then passed.
-- Linux memory gate results are recorded after completion.
+- Linux CI passed all 191 focused unit tests, all 39 encrypted socket tests, and
+  the repeated whole-application 30% memory gate on Node v24.14.1.
 
 The source checkout contains unrelated in-progress bridge edits. Those were not
 changed or staged; full-app verification used a temporary clean worktree.
+
+
+## Linux verification matching the production runtime
+
+A fresh read-only probe confirmed production uses Node v24.14.1, with a
+1,174,405,120-byte V8 heap limit. CI was pinned to that Node version and used the
+same 1 GiB old-space ceiling for **both** variants; the heap setting was not an
+optimization difference. WebUI assets were built before the full-app profiles.
+
+Workflow run **35521963812**, source commit **014265c**, completed successfully.
+The raw artifact was downloaded, its six profiles inspected, and the comparison
+checker rerun locally. Matched workload: eight distinct devices on one account,
+512 successful encrypted upload RPCs and 256 MiB transferred per run; all eight
+connections remain open for the final sample. Three fresh processes per variant.
+
+| Metric (median of three Linux runs) | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Post-workload process RSS | 760.75 MiB | 448.60 MiB | **41.03%** |
+| Peak process RSS (including OS high-water mark) | 887.04 MiB | 449.34 MiB | **49.34%** |
+| Workload duration | 8.405 s | 8.152 s | 3.02% faster |
+
+Evidence: memory-transport-2026-09-20.linux.json. An additional Linux run on Node
+v24.20.0 also passed (40.81% post-workload and 44.74% peak reductions). The first
+Linux attempt hit the previously observed independent-RPC test timeout; bounded
+phase diagnostics were added without removing or weakening concurrency assertions.
+Both subsequent Linux runs passed the complete 39-test encrypted suite.
+
+### Rollout status
+
+The optimization and its tests are committed and pushed, but this investigation
+has **not deployed or restarted production**. The final read-only runtime probe
+still found the old transport implementation on all nine live connections.
+The 30% target is verified under the controlled full-application Linux workload;
+applying the benefit to production requires an approved rollout/restart. No
+production percentage is claimed from the earlier intervening restart or trim.
+All temporary diagnostic probes and the local validation worktree were removed;
+unrelated in-progress bridge edits remain untouched.
