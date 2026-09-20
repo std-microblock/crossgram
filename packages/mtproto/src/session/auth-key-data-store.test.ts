@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { AuthKeyDataStore, authKeyIdHex } from './auth-key-data-store.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AUTH_KEY_DATA_IDLE_TTL_MS, AuthKeyDataStore, authKeyIdHex } from './auth-key-data-store.js'
 
 describe('AuthKeyDataStore', () => {
   it('shares state for distinct byte arrays containing the same auth key ID', () => {
@@ -33,5 +33,47 @@ describe('AuthKeyDataStore', () => {
     expect(store.get(null)).toBeNull()
     expect(store.delete(null)).toBe(false)
     expect(() => store.set(null, {})).toThrow('without a permanent auth key')
+  })
+})
+
+
+describe('idle device cache eviction', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('retains active devices and expires only after a full disconnected grace period', () => {
+    vi.useFakeTimers()
+    const store = new AuthKeyDataStore()
+    const key = Uint8Array.of(1)
+    const active = new Set([authKeyIdHex(key)])
+    const state = { users: new Map() }
+    store.set(key, state)
+    vi.advanceTimersByTime(AUTH_KEY_DATA_IDLE_TTL_MS * 2)
+    expect(store.prune(active)).toEqual([])
+    expect(store.get(key)).toBe(state)
+    vi.advanceTimersByTime(AUTH_KEY_DATA_IDLE_TTL_MS - 1)
+    expect(store.prune(new Set())).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(store.prune(new Set())).toEqual([authKeyIdHex(key)])
+    expect(store.get(key)).toBeNull()
+  })
+
+  it('refreshes on reads and writes, isolates devices, and allows rehydration', () => {
+    vi.useFakeTimers()
+    const store = new AuthKeyDataStore()
+    const a = Uint8Array.of(1), b = Uint8Array.of(2), c = Uint8Array.of(3)
+    for (const key of [a, b, c]) store.set(key, { old: true })
+    vi.advanceTimersByTime(AUTH_KEY_DATA_IDLE_TTL_MS - 1)
+    store.get(a.slice())
+    store.set(b, { replacement: true })
+    vi.advanceTimersByTime(1)
+    expect(store.prune(new Set())).toEqual([authKeyIdHex(c)])
+    expect(store.get(a)).toEqual({ old: true })
+    expect(store.get(b)).toEqual({ replacement: true })
+    store.set(c, { rehydrated: true })
+    expect(store.get(c)).toEqual({ rehydrated: true })
+    store.clear()
+    expect(store.get(a)).toBeNull()
+    expect(store.get(c)).toBeNull()
+    expect(store.prune(new Set(), Date.now() + AUTH_KEY_DATA_IDLE_TTL_MS)).toEqual([])
   })
 })

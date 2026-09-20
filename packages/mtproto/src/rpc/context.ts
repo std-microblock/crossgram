@@ -91,9 +91,12 @@ export interface ServerRpcContext {
   afterResponse?: (task: () => void | Promise<void>) => void
   /** Register work that runs after the successful response transport settles. */
   afterResponseSettled?: (task: () => void | Promise<void>) => void
-  /** Read backend-specific data shared by all connections using this auth key. */
+  /**
+   * Read reconstructible backend state shared by this auth key's connections.
+   * May return null after the device has been disconnected and idle for five minutes.
+   */
   getPlatformData: <T>() => T
-  /** Store backend-specific data for this permanent auth key. */
+  /** Cache backend state for this auth key; persist durable state separately. */
   setPlatformData: (data: unknown) => void
 }
 

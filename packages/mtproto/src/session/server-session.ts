@@ -84,6 +84,7 @@ export class RpcDependencyRegistry {
   private readonly _replays = new Map<string, RpcReplayEntry>()
   private readonly _inFlightByAuth = new Map<string, number>()
   private readonly _startedAtSeconds = Math.floor(Date.now() / 1000)
+  private _nextReplayExpiry = Infinity
   private _replayBytes = 0
   private _inFlight = 0
   private _generation = 0
@@ -123,6 +124,7 @@ export class RpcDependencyRegistry {
     this._completed.clear()
     this._replays.clear()
     this._inFlightByAuth.clear()
+    this._nextReplayExpiry = Infinity
     this._replayBytes = 0
     this._inFlight = 0
   }
@@ -139,7 +141,7 @@ export class RpcDependencyRegistry {
     execute: () => Promise<RpcReply>,
   ): Promise<RpcReply> {
     const now = Date.now()
-    this._pruneReplays(now)
+    this.prune(now)
     const key = `${this._key(authKeyId, msgId)}:${requestFingerprint}`
     const existing = this._replays.get(key)
     if (existing) {
@@ -173,11 +175,12 @@ export class RpcDependencyRegistry {
     void promise.then((reply) => {
       if (generation !== this._generation) return
       entry.completedAt = Date.now()
+      this._nextReplayExpiry = Math.min(this._nextReplayExpiry, entry.completedAt + RPC_REPLAY_TTL_MS + 1)
       entry.bytes = reply.body.byteLength
       this._replayBytes += entry.bytes
       this._replays.delete(key)
       this._replays.set(key, entry)
-      this._pruneReplays(entry.completedAt)
+      this.prune(entry.completedAt)
     }, () => {
       if (generation !== this._generation) return
       this._deleteReplay(key, entry)
@@ -191,14 +194,29 @@ export class RpcDependencyRegistry {
     return promise
   }
 
-  private _pruneReplays(now: number): void {
+  /** Auth scopes with handlers still running, including on disconnected sockets. */
+  get inFlightAuthKeyIds(): Iterable<string> {
+    return this._inFlightByAuth.keys()
+  }
+
+  /** Also called during idle periods so completed replies do not live forever. */
+  prune(now = Date.now()): void {
+    // Hits reorder the map. Track the earliest expiry rather than assuming LRU
+    // order is time order, without scanning thousands of replies on every RPC.
+    if (now < this._nextReplayExpiry
+      && this._replays.size <= MAX_RPC_REPLAY_ENTRIES
+      && this._replayBytes <= MAX_RPC_REPLAY_BYTES) return
+    this._nextReplayExpiry = Infinity
     for (const [key, entry] of this._replays) {
       if (entry.completedAt === null) continue
       if (
         now - entry.completedAt <= RPC_REPLAY_TTL_MS
         && this._replays.size <= MAX_RPC_REPLAY_ENTRIES
         && this._replayBytes <= MAX_RPC_REPLAY_BYTES
-      ) break
+      ) {
+        this._nextReplayExpiry = Math.min(this._nextReplayExpiry, entry.completedAt + RPC_REPLAY_TTL_MS + 1)
+        continue
+      }
       this._deleteReplay(key, entry)
     }
   }

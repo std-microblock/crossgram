@@ -23,6 +23,7 @@ import { ObfuscatedPacketCodec, type tl } from '@mtcute/core'
 import Long from 'long'
 import { Context } from 'cordis'
 import { Mtproto } from '../service.js'
+import { AUTH_KEY_DATA_IDLE_TTL_MS } from './auth-key-data-store.js'
 import { CURRENT_API_LAYER } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
@@ -2020,6 +2021,47 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       expect(config).toMatchObject({ _: 'help.appConfig', hash: 2 })
       c2.close()
     } finally {
+      await stop()
+    }
+  })
+
+  it('evicts idle device state but preserves live parallel transports and stored authentication', async () => {
+    await crypto.initialize?.()
+    const { ctx, port, pubKey, stop } = await startServer()
+    const clients: TestClient[] = []
+    try {
+      const c1 = await TestClient.connect(port)
+      clients.push(c1)
+      const perm = await doClientHandshake(c1, pubKey, false)
+      const query = serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 })
+      await c1.send(clientEncrypt(perm, query, perm.salt, Long.fromInt(101), 4))
+      expect(await readRpcResult(c1, perm)).toMatchObject({ hash: 1 })
+      const c2 = await TestClient.connect(port)
+      clients.push(c2)
+      await c2.send(clientEncrypt(perm, query, perm.salt, Long.fromInt(102), 4))
+      expect(await readRpcResult(c2, perm)).toMatchObject({ hash: 2 })
+      c1.close()
+      await vi.waitFor(() => expect(ctx.mtproto.activeConnectionCount).toBe(1))
+
+      // Drive the actual service sweep with a clock spy, without disturbing TCP timers.
+      const service = ctx.mtproto as unknown as { _pruneIdleState(): void }
+      const now = Date.now()
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + AUTH_KEY_DATA_IDLE_TTL_MS + 1)
+      try { service._pruneIdleState() } finally { clock.mockRestore() }
+      await c2.send(clientEncrypt(perm, query, perm.salt, Long.fromInt(102), 8))
+      expect(await readRpcResult(c2, perm)).toMatchObject({ hash: 3 })
+      c2.close()
+      await vi.waitFor(() => expect(ctx.mtproto.activeConnectionCount).toBe(0))
+      const idleClock = vi.spyOn(Date, 'now').mockReturnValue(now + AUTH_KEY_DATA_IDLE_TTL_MS * 3)
+      try { service._pruneIdleState() } finally { idleClock.mockRestore() }
+      expect(await ctx.mtproto.hasAuthKey(perm.authKeyId)).toBe(true)
+
+      const c3 = await TestClient.connect(port)
+      clients.push(c3)
+      await c3.send(clientEncrypt(perm, query, perm.salt, Long.fromInt(103), 4))
+      expect(await readRpcResult(c3, perm)).toMatchObject({ hash: 1 })
+    } finally {
+      for (const client of clients) client.close()
       await stop()
     }
   })

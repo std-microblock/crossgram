@@ -13,7 +13,7 @@ import { PqChallengeStore } from './session/server-authorization.js'
 import {
   AuthKeyStorePublishedError, MemoryAuthKeyStore, FileAuthKeyStore, type AuthKeyStore,
 } from './session/auth-key-store.js'
-import { AuthKeyDataStore } from './session/auth-key-data-store.js'
+import { AuthKeyDataStore, authKeyIdHex } from './session/auth-key-data-store.js'
 import type { RpcHandler, RpcResult } from './rpc/protocol.js'
 import { invokeRpc, registerRpcRoute } from './rpc/router.js'
 import type { MtprotoConnectionScope, MtprotoTrafficSample, ServerRpcContext } from './rpc/context.js'
@@ -310,6 +310,7 @@ export class Mtproto extends Service {
     })
 
     const stallWatcher = setInterval(() => {
+      this._pruneIdleState()
       for (const session of this._sessions) {
         const stalled = session.connection.stalledForMs
         if (stalled < STALL_TIMEOUT_MS) continue
@@ -330,12 +331,25 @@ export class Mtproto extends Service {
       this._sockets.clear()
       this._socketRecords.clear()
       this._rpcDependencies.clear()
+      this._authKeyData.clear()
+      this._authApiLayers.clear()
       await new Promise<void>((resolve) => {
         if (!server.listening) return resolve()
         server.close(() => resolve())
       })
       this._server = null
     }
+  }
+
+  private _pruneIdleState(): void {
+    const activeKeys = new Set(this._rpcDependencies.inFlightAuthKeyIds)
+    for (const session of this._sessions) {
+      if (!session.connection.closed && session.authKeyId) {
+        activeKeys.add(authKeyIdHex(session.authKeyId))
+      }
+    }
+    for (const key of this._authKeyData.prune(activeKeys)) this._authApiLayers.delete(key)
+    this._rpcDependencies.prune()
   }
 
   private _handleConnection(socket: Socket): void {

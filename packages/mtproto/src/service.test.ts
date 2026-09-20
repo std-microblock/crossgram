@@ -9,7 +9,8 @@ import Long from 'long'
 import { Mtproto, type MtprotoConfig } from './service.js'
 import type { ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair } from './crypto/rsa-keygen.js'
-import type { ServerSession } from './session/server-session.js'
+import { RpcDependencyRegistry, type ServerSession } from './session/server-session.js'
+import { AUTH_KEY_DATA_IDLE_TTL_MS, AuthKeyDataStore, authKeyIdHex } from './session/auth-key-data-store.js'
 import { AuthKeyStorePublishedError, MemoryAuthKeyStore } from './session/auth-key-store.js'
 import type { ServerConnection } from './transport/server-connection.js'
 
@@ -664,3 +665,45 @@ describe('Mtproto connection fibers', () => {
 
 // Keep the import referenced for type stability of the fixture shape.
 void (null as unknown as ServerSession | ServerConnection | undefined)
+
+
+describe('service idle memory maintenance', () => {
+  it('sweeps without new traffic, pins in-flight handlers, and clears on shutdown', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const { service, stop } = await makeService()
+    const internals = service as unknown as {
+      _authKeyData: AuthKeyDataStore
+      _authApiLayers: Map<string, number>
+      _rpcDependencies: RpcDependencyRegistry
+    }
+    const key = Uint8Array.of(1)
+    const idleKey = Uint8Array.of(2)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    try {
+      internals._authKeyData.set(key, { active: true })
+      internals._authKeyData.set(idleKey, { idle: true })
+      internals._authApiLayers.set(authKeyIdHex(idleKey), 228)
+      const pending = internals._rpcDependencies.execute(key, Long.ONE, 'test', async () => {
+        await gate
+        return { reqMsgId: Long.ONE, body: new Uint8Array(1024), resultKind: 'test' }
+      })
+      await vi.advanceTimersByTimeAsync(AUTH_KEY_DATA_IDLE_TTL_MS + 5000)
+      expect(internals._authKeyData.get(idleKey)).toBeNull()
+      expect(internals._authApiLayers.has(authKeyIdHex(idleKey))).toBe(false)
+      expect(internals._authKeyData.get(key)).toEqual({ active: true })
+      release()
+      await pending
+      await vi.advanceTimersByTimeAsync(AUTH_KEY_DATA_IDLE_TTL_MS + 5000)
+      expect(internals._authKeyData.get(key)).toBeNull()
+      internals._authKeyData.set(key, { shutdown: true })
+      internals._authApiLayers.set(authKeyIdHex(key), 228)
+    } finally {
+      release()
+      await stop()
+    }
+    expect(internals._authKeyData.get(key)).toBeNull()
+    expect(internals._authApiLayers.size).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
