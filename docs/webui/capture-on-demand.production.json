@@ -1,0 +1,62 @@
+{
+  "checkedAt": "2026-09-20T17:11:11.404Z",
+  "pageErrors": [],
+  "initialFrames": [
+    {
+      "bytes": 275119,
+      "debugKeys": [
+        "capturing",
+        "apiPath",
+        "dropped",
+        "maxEvents"
+      ],
+      "hasHistory": false
+    },
+    {
+      "bytes": 279587,
+      "debugKeys": [
+        "capturing",
+        "apiPath",
+        "dropped",
+        "maxEvents"
+      ],
+      "hasHistory": false
+    },
+    {
+      "bytes": 282268,
+      "debugKeys": [
+        "capturing",
+        "apiPath",
+        "dropped",
+        "maxEvents"
+      ],
+      "hasHistory": false
+    }
+  ],
+  "captureRequests": 3,
+  "ordinaryPageCaptureRequests": 0,
+  "debugPageStatus": 200,
+  "summary": {
+    "status": 200,
+    "bytes": 30426,
+    "rows": 100,
+    "retained": 1988,
+    "payloads": 0,
+    "hasOlder": true
+  },
+  "olderPageLoaded": true,
+  "requestsAfterLeaving": 0,
+  "revision": "46c40355737a780fc386f05055d7a63b732bd62b",
+  "publicWebSocket": {
+    "durationMs": 15029,
+    "initialBytes": 124755,
+    "messages": 42,
+    "bytes": 442339,
+    "closeCode": 1000
+  },
+  "service": {
+    "active": true,
+    "nRestarts": 0,
+    "qqntBridgeActive": true
+  }
+}
