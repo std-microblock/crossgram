@@ -38,7 +38,10 @@
     "typecheck": "tsc --project tsconfig.test.json --pretty false",
     "prepare": "husky",
     "test:e2e:webui": "node scripts/build-mtproto-debug-client.mjs && vitest run --config vitest.mtproto-e2e.config.mts packages/mtproto-debug packages/test-suite/src/webui-backpressure.e2e.test.ts --maxWorkers=1",
-    "typecheck:webui": "tsc --project tsconfig.webui.json --pretty false"
+    "typecheck:webui": "tsc --project tsconfig.webui.json --pretty false",
+    "build:webui": "vite build --config packages/cordis-webui-solidjs/vite.config.ts",
+    "test:webui:solid": "vitest run --config vitest.webui-solid.config.mts",
+    "typecheck:webui:solid": "tsc -p packages/cordis-webui-solidjs/tsconfig.json --pretty false"
   },
   "devDependencies": {
     "@cordisjs/client": "patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch",
