@@ -3299,6 +3299,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@simplewebauthn/browser@npm:^13.1.0":
+  version: 13.3.0
+  resolution: "@simplewebauthn/browser@npm:13.3.0"
+  checksum: 10c0/23a9c14777c4ef6d15fd6c876a1035e6e597e92f96cd0ffe83b0b869f0e4db7789a591da9a39d1fe2c0529c42ecc291c4a30227fc705f0b7729c255f9ccc7c21
+  languageName: node
+  linkType: hard
+
 "@sindresorhus/merge-streams@npm:^2.1.0":
   version: 2.3.0
   resolution: "@sindresorhus/merge-streams@npm:2.3.0"
@@ -4483,8 +4490,10 @@ __metadata:
   dependencies:
     "@cordisjs/fetch-file": "npm:^1.0.3"
     "@cordisjs/muon": "npm:^0.2.2"
+    "@simplewebauthn/browser": "npm:^13.1.0"
     happy-dom: "npm:^20.11.2"
     path-to-regexp: "npm:^8.3.0"
+    prettier: "npm:3.6.2"
     schemastery: "npm:^3.18.0"
     solid-js: "npm:^1.9.9"
     vite: "npm:^7.3.2"
@@ -6917,6 +6926,15 @@ __metadata:
   bin:
     prebuild-install: bin.js
   checksum: 10c0/25919a42b52734606a4036ab492d37cfe8b601273d8dfb1fa3c84e141a0a475e7bad3ab848c741d2f810cef892fcf6059b8c7fe5b29f98d30e0c29ad009bedff
+  languageName: node
+  linkType: hard
+
+"prettier@npm:3.6.2":
+  version: 3.6.2
+  resolution: "prettier@npm:3.6.2"
+  bin:
+    prettier: bin/prettier.cjs
+  checksum: 10c0/488cb2f2b99ec13da1e50074912870217c11edaddedeadc649b1244c749d15ba94e846423d062e2c4c9ae683e2d65f754de28889ba06e697ac4f988d44f45812
   languageName: node
   linkType: hard
 

@@ -7,9 +7,17 @@ export default defineConfig({
   base: './',
   plugins: [solid()],
   build: {
-    target: 'es2022', manifest: true, sourcemap: true, chunkSizeWarningLimit: 180,
+    target: 'es2022',
+    manifest: true,
+    sourcemap: true,
+    chunkSizeWarningLimit: 180,
     rollupOptions: {
-      input: [resolve(import.meta.dirname, 'index.html'), ...Object.values(sharedModules).map(file => resolve(import.meta.dirname, file))],
+      input: [
+        resolve(import.meta.dirname, 'index.html'),
+        ...Object.values(sharedModules).map((file) =>
+          resolve(import.meta.dirname, file),
+        ),
+      ],
       preserveEntrySignatures: 'strict',
     },
   },

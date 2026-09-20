@@ -8,7 +8,9 @@
     ".": "./src/index.ts",
     "./client": "./client/sdk.ts",
     "./schema": "./client/schema.tsx",
-    "./build": "./build.ts"
+    "./build": "./build.ts",
+    "./server": "./src/server-monitor.ts",
+    "./components": "./client/components.tsx"
   },
   "cordis": {
     "service": {
@@ -23,12 +25,14 @@
   "dependencies": {
     "@cordisjs/fetch-file": "^1.0.3",
     "@cordisjs/muon": "^0.2.2",
+    "@simplewebauthn/browser": "^13.1.0",
     "path-to-regexp": "^8.3.0",
     "schemastery": "^3.18.0",
     "solid-js": "^1.9.9"
   },
   "devDependencies": {
     "happy-dom": "^20.11.2",
+    "prettier": "3.6.2",
     "vite": "^7.3.2",
     "vite-plugin-solid": "^2.11.8",
     "vitest": "^4.1.10"
@@ -36,5 +40,8 @@
   "peerDependencies": {
     "@cordisjs/plugin-server": "^1.7.0",
     "cordis": "4.0.0-rc.7"
+  },
+  "scripts": {
+    "format": "prettier --write --no-semi --single-quote --trailing-comma all \"{src,client}/**/*.{ts,tsx,css}\" build.ts vite.config.ts"
   }
 }

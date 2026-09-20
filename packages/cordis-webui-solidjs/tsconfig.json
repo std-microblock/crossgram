@@ -3,7 +3,12 @@
   "compilerOptions": {
     "jsx": "preserve",
     "jsxImportSource": "solid-js",
-    "strict": true
+    "strict": true,
+    "lib": [
+      "es2024",
+      "dom",
+      "dom.iterable"
+    ]
   },
   "include": [
     "src/**/*.ts",
