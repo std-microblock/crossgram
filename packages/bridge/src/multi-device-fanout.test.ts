@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import type { tl } from '@mtcute/core'
+import type { ServerConnection } from '@mtproto-relay/mtproto'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
@@ -76,53 +77,64 @@ async function publishIncoming(store: MessageStore, manager: UpdateManager, text
 }
 
 describe('multi-device update fan-out', () => {
-  it('leaves the row pending when one device is offline and replays it on return', async () => {
+  it('recovers an offline device independently even after another device received the live push', async () => {
     const { store, manager, sent, online } = await createHarness()
     online.delete(MOBILE_KEY)
-
     await publishIncoming(store, manager, 'to desktop only')
-
-    // The reachable device got the push; the offline one did not.
     expect(sent.map(({ authKeyId }) => authKeyId)).toEqual([DESKTOP_KEY])
-    // A partial fan-out must not be recorded as published, or the offline
-    // device could never be caught up by a replay.
-    expect(await store.getPendingUpdateDeliveries(session.platformSessionId))
-      .toHaveLength(1)
-
-    online.add(MOBILE_KEY)
-    await expect(manager.retryPending(session.platformSessionId)).resolves.toBe(1)
-    // Replay is per row, not per device, so the already-caught-up desktop gets
-    // a second copy. That is safe: the client sees a pts it has already
-    // applied and ignores it.
-    expect(sent.filter(({ authKeyId }) => authKeyId === MOBILE_KEY)).toHaveLength(1)
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toHaveLength(0)
+    const request = { _: 'updates.getDifference' as const, pts: 1, date: 0, qts: 0 }
+    const mobile = await manager.getDifference(session.platformSessionId, request)
+    expect(mobile).toMatchObject({ _: 'updates.difference', newMessages: [{ message: 'to desktop only' }] })
+    // Published does not consume the journal for other cursors.
+    expect(await manager.getDifference(session.platformSessionId, request)).toEqual(mobile)
+    expect(sent).toHaveLength(1)
   })
 
-  it('records the row as published once every device has taken the push', async () => {
+  it('still delivers a new live event once to every online device', async () => {
     const { store, manager, sent } = await createHarness()
-
     await publishIncoming(store, manager, 'to both devices')
-
     expect(sent.map(({ authKeyId }) => authKeyId).sort()).toEqual([DESKTOP_KEY, MOBILE_KEY].sort())
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toHaveLength(0)
   })
 
-  it('keeps replaying past a row that still cannot reach an offline device', async () => {
+  it('reconnects in constant work without loading or broadcasting the pending journal', async () => {
     const { store, manager, sent, online } = await createHarness()
-    online.delete(MOBILE_KEY)
-
-    await publishIncoming(store, manager, 'first')
-    await publishIncoming(store, manager, 'second')
-    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toHaveLength(2)
-
-    // The mobile device is still away: both rows stay pending and neither run
-    // should stop the other from being retried.
-    await expect(manager.retryPending(session.platformSessionId)).resolves.toBe(0)
-    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toHaveLength(2)
-
+    online.clear()
+    for (let i = 0; i < 8; i++) await publishIncoming(store, manager, 'offline-' + i)
+    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toHaveLength(8)
+    const loadPending = vi.spyOn(store, 'getPendingUpdateDeliveries').mockRejectedValue(new Error('must not replay globally'))
+    online.add(DESKTOP_KEY)
     online.add(MOBILE_KEY)
-    await expect(manager.retryPending(session.platformSessionId)).resolves.toBe(2)
-    expect(sent.filter(({ authKeyId }) => authKeyId === MOBILE_KEY)).toHaveLength(2)
-    expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toHaveLength(0)
+    const send = vi.fn()
+    const callbacks: Array<() => void | Promise<void>> = []
+    manager.requestRecovery({
+      connection: { closed: false } as ServerConnection,
+      sendUpdate: send,
+      afterResponse: callback => { callbacks.push(callback) },
+    })
+    expect(send).not.toHaveBeenCalled()
+    expect(callbacks).toHaveLength(1)
+    await callbacks[0]()
+    expect(send).toHaveBeenCalledExactlyOnceWith({ _: 'updatesTooLong' })
+    expect(loadPending).not.toHaveBeenCalled()
+    expect(sent).toEqual([])
+    const difference = await manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })
+    expect(difference).toMatchObject({ _: 'updates.difference' })
+    if (difference._ !== 'updates.difference') throw new Error('missing difference')
+    expect(difference.newMessages).toHaveLength(8)
+  })
+
+  it('does not notify a transport that closed before its first response', async () => {
+    const { manager } = await createHarness()
+    const connection = { closed: false }
+    const callbacks: Array<() => void | Promise<void>> = []
+    const send = vi.fn()
+    manager.requestRecovery({ connection: connection as ServerConnection, sendUpdate: send, afterResponse: callback => { callbacks.push(callback) } })
+    connection.closed = true
+    await callbacks[0]()
+    expect(send).not.toHaveBeenCalled()
   })
 })

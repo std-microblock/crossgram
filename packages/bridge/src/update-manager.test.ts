@@ -1866,11 +1866,15 @@ describe('UpdateManager', () => {
       published: false, pts: 2, payload: expect.objectContaining({ _: 'updates' }),
     }])
     online = true
-    await expect(manager.retryPending(session.platformSessionId)).resolves.toBe(1)
-    expect(sent).toMatchObject([{
-      _: 'updates', seq: 1,
-      updates: [{ _: 'updateNewChannelMessage', pts: 2, message: { message: 'persist before push' } }],
-    }])
+    manager.requestRecovery({ connection: { closed: false } as ServerConnection, sendUpdate: update => sent.push(update) })
+    expect(sent).toEqual([{ _: 'updatesTooLong' }])
+    await expect(manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', channel: { _: 'inputChannel', channelId: stableId('peer:offline'), accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+    })).resolves.toMatchObject({
+      _: 'updates.channelDifference', final: true, pts: 2,
+      newMessages: [{ message: 'persist before push' }],
+    })
     expect(await store.getPendingUpdateDeliveries(session.platformSessionId)).toEqual([])
   })
 

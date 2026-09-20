@@ -4600,6 +4600,111 @@ describe('bridge login e2e', () => {
     }
   }, 15000)
 
+  it('keeps reconnect traffic constant with a large offline backlog and recovers each device by cursor', async () => {
+    const platformId = 'reconnect-backlog-e2e'
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: false,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async getUser(_session, id) { return { id, firstName: id } },
+      async sendMessage() { throw new Error('unused') },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    const clients: TestClient[] = []
+    try {
+      const platformSessionId = 'reconnect-backlog-session'
+      const phone = '88800889', totpSecret = '66'.repeat(20)
+      await ctx.database.create('mtproto_platform_session', {
+        id: platformSessionId, platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Recovery User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'reconnect-backlog-auth', virtualPhone: phone, totpSecret, platformId, platformSessionId,
+      })
+      const signIn = async (sid: Long) => {
+        const client = await TestClient.connect(port)
+        clients.push(client)
+        const key = await doClientHandshake(client, pubKey)
+        const code = await callRpc(client, key, sid, {
+          _: 'auth.sendCode', phoneNumber: phone, apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        }, 2)
+        await callRpc(client, key, sid, {
+          _: 'auth.signIn', phoneNumber: phone, phoneCodeHash: code.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode(totpSecret),
+        }, 4)
+        await callRpc(client, key, sid, { _: 'updates.getState' }, 6)
+        return { client, key, sid }
+      }
+      const desktop = await signIn(Long.fromNumber(13001))
+      const mobile = await signIn(Long.fromNumber(13002))
+      mobile.client.close()
+      await vi.waitFor(() => expect(ctx.mtproto.activeConnectionCount).toBe(1))
+      const store = new bridge.MessageStore(ctx.database, undefined, ctx.updateStore)
+      // 1 MiB of deliberately pending old payloads; none should be pushed on reconnect.
+      for (let index = 0; index < 128; index++) {
+        const key = 'backlog-' + index
+        const delivery = await store.prepareUpdateDelivery(key, platformSessionId, 1, nowSec())
+        await store.setUpdatePayload(key, updateToJson({
+          _: 'updates', users: [], chats: [], date: delivery.date, seq: delivery.seq,
+          updates: [{ _: 'updateNewMessage', pts: delivery.pts, ptsCount: 1, message: {
+            _: 'message', id: index + 1, peerId: { _: 'peerUser', userId: 1 },
+            date: delivery.date, message: 'x'.repeat(8192),
+          } }],
+        }))
+      }
+      const getPending = vi.spyOn(ctx.updateStore, 'getPending')
+      const pushed: Array<{ connectionId: string, kind: string }> = []
+      let sentBytes = 0
+      ctx.on('mtproto/debug', event => {
+        const kind = (event.payload as { _?: string })?._
+        if (event.direction === 'server->client' && (kind === 'updates' || kind === 'updatesTooLong')) {
+          pushed.push({ connectionId: event.connectionId, kind })
+        }
+      })
+      ctx.on('mtproto/traffic', event => { if (event.direction === 'sent') sentBytes += event.bytes })
+      const resumed = await TestClient.connect(port)
+      clients.push(resumed)
+      const sid = Long.fromNumber(13003)
+      expect(await callRpc(resumed, mobile.key, sid, { _: 'updates.getState' }, 10)).toMatchObject({ _: 'updates.state', pts: 129 })
+      // Decode the recovery notification from the actual encrypted transport.
+      let recovered = false
+      for (let i = 0; i < 12; i++) {
+        const reader = clientDecrypt(mobile.key, await readRpcFrame(resumed, 'recovery'))
+        const object = reader.object() as { _: string }
+        if (object._ === 'updatesTooLong') { recovered = true; break }
+      }
+      expect(recovered).toBe(true)
+      await callRpc(resumed, mobile.key, sid, { _: 'updates.getState' }, 12)
+      expect(getPending).not.toHaveBeenCalled()
+      expect(pushed.map(event => event.kind)).toEqual(['updatesTooLong'])
+      expect(sentBytes).toBeLessThan(4096)
+      const request = { _: 'updates.getDifference', pts: 1, date: 0, qts: 0, ptsLimit: 20 }
+      const first = await callRpc(resumed, mobile.key, sid, request, 14)
+      expect(first).toMatchObject({ _: 'updates.differenceSlice', intermediateState: { pts: 21 } })
+      expect(first.newMessages).toHaveLength(20)
+      const independent = await callRpc(desktop.client, desktop.key, desktop.sid, request, 16)
+      expect(independent.newMessages.map((message: any) => message.id)).toEqual(first.newMessages.map((message: any) => message.id))
+      let cursor = first.intermediateState, count = first.newMessages.length
+      for (let page = 0; page < 10; page++) {
+        const difference = await callRpc(resumed, mobile.key, sid, {
+          ...request, pts: cursor.pts, date: cursor.date, qts: cursor.qts,
+        }, 20 + page * 2)
+        count += difference.newMessages.length
+        expect(difference.newMessages.length).toBeLessThanOrEqual(20)
+        if (difference._ === 'updates.difference') break
+        cursor = difference.intermediateState
+      }
+      expect(count).toBe(128)
+      expect(pushed.map(event => event.kind)).toEqual(['updatesTooLong'])
+    } finally {
+      for (const client of clients) client.close()
+      await stop()
+    }
+  }, 30_000)
+
   it('paces three concurrent devices at an unfinished channel update without losing their independent cursors', async () => {
     const platformId = 'multi-device-poll-e2e'
     const platform: bridge.IMPlatform = {

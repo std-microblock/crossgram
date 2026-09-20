@@ -414,14 +414,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     async (session, authKeyId, rpcContext) => {
       await activeSessions.touch(rpcContext, session)
       await calls.replay(session, authKeyId)
-      // A device that was offline when an event fired never took its copy, so
-      // the row is still pending. This fires once per connection before the
-      // client establishes its updates stream, which is the moment its backlog
-      // can actually reach it. Replayed pts stay contiguous with the device's
-      // own cursor, so it applies them instead of resetting through getState.
-      void updates.retryPending(session.platformSessionId).catch((error) => bridgeLogger.warn(
-        'pending update retry failed session=%s error=%s', session.platformSessionId, String(error),
-      ))
+      updates.requestRecovery(rpcContext)
     },
     messageProjection,
   )
@@ -493,9 +486,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
           () => ctx.database.upsert('mtproto_auth_binding', [{ authKeyId, ...identity }]),
           requireBridgeSession,
         )
-        void updates.retryPending(state.session.platformSessionId).catch((error) => bridgeLogger.warn(
-          'pending update retry failed session=%s error=%s', state.session.platformSessionId, String(error),
-        ))
       }
       const user = makeUser({
         id: selfRow.id,
