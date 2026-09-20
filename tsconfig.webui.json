@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.test.json",
+  "include": [
+    "packages/mtproto-debug/**/*.ts",
+    "packages/mtproto-debug/**/*.tsx",
+    "packages/mtproto/src/cordis.d.ts",
+    "packages/test-suite/src/webui-reconnect.test.ts",
+    "types/**/*.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "packages/**/dist/**"
+  ]
+}

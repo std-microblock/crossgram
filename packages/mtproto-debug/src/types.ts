@@ -13,12 +13,15 @@ export interface CapturedMtprotoEvent {
   payload?: unknown
   error?: string
   searchText: string
+  /** Lightweight list rows omit payload and searchText until expanded. */
+  payloadOmitted?: boolean
+  rpcError?: boolean
 }
 
 export interface MtprotoDebugData {
   capturing: boolean
-  /** Chunked ring buffer; see `chunks.ts` for why this is not a flat array. */
-  chunks: Record<number, CapturedMtprotoEvent[]>
+  /** Same-origin paginated capture endpoint; history is never broadcast. */
+  apiPath: string
   dropped: number
   maxEvents: number
   start(): Promise<void>

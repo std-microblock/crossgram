@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import { apply } from './index.js'
-import { flattenChunks } from './chunks.js'
 import type { MtprotoDebugData } from './types.js'
 
 describe('MTProto debug Cordis entry', () => {
@@ -67,22 +66,28 @@ describe('MTProto debug Cordis entry', () => {
     expect(response.status).toBe(400)
     expect(response.body).toEqual({ error: 'Invalid direction: sideways' })
 
+    const captured = async () => {
+      await apiRoute.callback({ query: new URLSearchParams() }, response)
+      return (response.body as { events: Array<{ name: string }> }).events
+    }
+    expect(data).not.toHaveProperty('chunks')
+    expect(data).not.toHaveProperty('events')
     await data.pause()
-    expect(flattenChunks(data.chunks).map(event => event.name)).toEqual(['second.call', 'third.call'])
+    expect((await captured()).map(event => event.name)).toEqual(['second.call', 'third.call'])
     expect(data.dropped).toBe(1)
 
     emit('paused.call')
-    expect(flattenChunks(data.chunks).map(event => event.name)).toEqual(['second.call', 'third.call'])
+    expect((await captured()).map(event => event.name)).toEqual(['second.call', 'third.call'])
     expect(data.capturing).toBe(false)
 
     await data.start()
     emit('resumed.call')
     await data.pause()
-    expect(flattenChunks(data.chunks).map(event => event.name)).toEqual(['third.call', 'resumed.call'])
+    expect((await captured()).map(event => event.name)).toEqual(['third.call', 'resumed.call'])
     expect(data.dropped).toBe(2)
 
     await data.clear()
-    expect(flattenChunks(data.chunks)).toEqual([])
+    expect(await captured()).toEqual([])
     expect(data.dropped).toBe(0)
 
     cleanups.forEach(cleanup => cleanup())
@@ -116,6 +121,7 @@ describe('MTProto debug Cordis entry', () => {
       })
     }
     expect(data.capturing).toBe(false)
-    expect(flattenChunks(data.chunks)).toEqual([])
+    expect(data).not.toHaveProperty('chunks')
+    expect(data).not.toHaveProperty('events')
   })
 })

@@ -5,8 +5,8 @@ import type { Context } from 'cordis'
 import { computed, defineComponent, nextTick, onBeforeUnmount, onMounted, ref, resolveComponent, Teleport, watch } from 'vue'
 import { useRpc } from '@cordisjs/client'
 import { useVirtualizer } from '@tanstack/vue-virtual'
-import { countGroupedEvents, filterEventGroups, getRpcResultMetrics, groupRpcEvents } from '../src/event-groups.js'
-import { flattenChunks } from '../src/chunks.js'
+import { countGroupedEvents, getRpcResultMetrics, groupRpcEvents } from '../src/event-groups.js'
+import { useCapturePages } from './capture.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
 import './style.css'
 
@@ -118,11 +118,11 @@ export const EventRow = defineComponent({
         </button>
         {props.expanded && <div class="event-detail">
           <div class="payload-label">payload</div>
-          <JsonNode value={event.payload} depth={0} />
+          {event.payloadOmitted ? <span>Loading payload…</span> : <JsonNode value={event.payload} depth={0} />}
           {event.error && <div class="event-error">{event.error}</div>}
           {props.result && <div class="rpc-result-detail">
             <div class="payload-label">result payload</div>
-            <JsonNode value={props.result.payload} depth={0} />
+            {props.result.payloadOmitted ? <span>Loading payload…</span> : <JsonNode value={props.result.payload} depth={0} />}
             {props.result.error && <div class="event-error">{props.result.error}</div>}
           </div>}
         </div>}
@@ -145,12 +145,10 @@ export const DebugPage = defineComponent({
     const autoScroll = ref(true)
     let lastScrollTop = 0
 
-    // The buffer arrives chunked so that evicting old events stays a cheap
-    // delta; flattening only copies references, so event objects (and their
-    // reactive proxies) survive across updates instead of being rebuilt.
-    const events = computed(() => flattenChunks(data.value.chunks))
+    const capture = useCapturePages(data, filter, typeFilter)
+    const events = computed(() => capture.events.value.map(event => capture.details.value.get(event.id) ?? event))
     const groups = computed(() => groupRpcEvents(events.value))
-    const visibleGroups = computed(() => filterEventGroups(groups.value, filter.value, typeFilter.value))
+    const visibleGroups = groups
     const visibleEventCount = computed(() => countGroupedEvents(visibleGroups.value))
     const virtualizer = useVirtualizer(computed(() => ({
       count: visibleGroups.value.length,
@@ -171,7 +169,14 @@ export const DebugPage = defineComponent({
     const toggle = (id: number) => {
       const next = new Set(expanded.value)
       if (next.has(id)) next.delete(id)
-      else next.add(id)
+      else {
+        next.add(id)
+        const group = groups.value.find(item => item.event.id === id)
+        if (group) {
+          void capture.loadDetails(group.event)
+          if (group.result) void capture.loadDetails(group.result)
+        }
+      }
       expanded.value = next
     }
     const closeContextMenu = () => { contextMenu.value = undefined }
@@ -232,6 +237,7 @@ export const DebugPage = defineComponent({
       try {
         await data.value[action]()
         if (action === 'clear') expanded.value = new Set()
+        await capture.load('latest')
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : String(cause)
       } finally {
@@ -308,12 +314,22 @@ export const DebugPage = defineComponent({
                 aria-label="Clear captured events"
                 onClick={() => run('clear')}
               ><Icon name="trash" /></button>
+              <button class="capture-button" type="button" aria-label="Load older events"
+                disabled={capture.loading.value || !capture.snapshot.value?.hasOlder}
+                onClick={() => capture.load('older')}>Older</button>
+              <button class="capture-button" type="button" aria-label="Load newer events"
+                disabled={capture.loading.value || !capture.snapshot.value?.hasNewer}
+                onClick={() => capture.load('newer')}>Newer</button>
+              <button class="capture-button" type="button" aria-label="Show latest events"
+                disabled={capture.loading.value} onClick={() => capture.load('latest')}>
+                {capture.live.value ? 'Live' : 'Latest'}
+              </button>
               <div class="capture-stats">
-                <span>{visibleEventCount.value} / {events.value.length}</span>
-                {data.value.dropped > 0 && <span>{data.value.dropped} dropped</span>}
+                <span>{visibleEventCount.value} / {capture.snapshot.value?.total ?? 0}</span>
+                {!!capture.snapshot.value?.dropped && <span>{capture.snapshot.value.dropped} dropped</span>}
                 <span class={['capture-state', { active: data.value.capturing }]}>{data.value.capturing ? 'capturing' : 'paused'}</span>
               </div>
-              {error.value && <span class="control-error" title={error.value}>{error.value}</span>}
+              {(error.value || capture.error.value) && <span class="control-error" title={error.value || capture.error.value}>{error.value || capture.error.value}</span>}
             </div>,
             default: () => content,
           }

@@ -1,7 +1,11 @@
+import { isRpcError } from './event-groups.js'
 import type { CapturedMtprotoEvent } from './types.js'
 
 export interface MtprotoCaptureFilters {
   limit?: number
+  summary?: boolean
+  typeName?: string
+  excludeName?: string
   since?: number
   until?: number
   afterId?: number
@@ -34,6 +38,10 @@ export interface MtprotoCaptureSnapshot {
   total: number
   matched: number
   events: CapturedMtprotoEvent[]
+  oldestId?: number
+  newestId?: number
+  hasOlder: boolean
+  hasNewer: boolean
 }
 
 export class CaptureQueryError extends Error {
@@ -45,7 +53,10 @@ export class CaptureQueryError extends Error {
 
 export function parseCaptureQuery(query: URLSearchParams, now = Date.now()): MtprotoCaptureFilters {
   return {
-    limit: parseInteger(query.get('limit'), 'limit', 1, 10_000) ?? 100,
+    limit: parseInteger(query.get('limit'), 'limit', 1, 500) ?? 100,
+    summary: query.get('summary') === 'true' || undefined,
+    typeName: optional(query.get('typeName')),
+    excludeName: optional(query.get('excludeName')),
     since: parseTime(query.get('since'), 'since', now),
     until: parseTime(query.get('until'), 'until', now),
     afterId: parseInteger(query.get('afterId'), 'afterId', 0),
@@ -68,9 +79,9 @@ export function queryCapture(data: CaptureSource, filters: MtprotoCaptureFilters
   let events = data.events
   if (filters.since !== undefined) events = events.filter(event => event.timestamp >= filters.since!)
   if (filters.until !== undefined) events = events.filter(event => event.timestamp <= filters.until!)
-  if (filters.afterId !== undefined) events = events.filter(event => event.id > filters.afterId!)
-  if (filters.beforeId !== undefined) events = events.filter(event => event.id < filters.beforeId!)
   if (filters.id !== undefined) events = events.filter(event => event.id === filters.id)
+  if (filters.typeName) events = events.filter(event => event.name === filters.typeName)
+  if (filters.excludeName) events = events.filter(event => event.name !== filters.excludeName)
   if (filters.name) events = events.filter(event => includes(event.name, filters.name!))
   if (filters.direction) events = events.filter(event => event.direction === filters.direction)
   if (filters.phase) events = events.filter(event => event.phase === filters.phase)
@@ -83,9 +94,22 @@ export function queryCapture(data: CaptureSource, filters: MtprotoCaptureFilters
   for (const field of filters.fields ?? []) {
     events = events.filter(event => scalarText(readPath(event, field.path)) === field.value)
   }
+  const filtered = events
+  if (filters.afterId !== undefined) events = events.filter(event => event.id > filters.afterId!)
+  if (filters.beforeId !== undefined) events = events.filter(event => event.id < filters.beforeId!)
   const matched = events.length
-  const limit = filters.limit ?? 100
-  events = events.slice(-limit)
+  const limit = Math.max(1, Math.min(500, filters.limit ?? 100))
+  // Forward cursors must take the first page, otherwise a burst silently skips
+  // every event except its tail. Backward/initial queries take the newest page.
+  events = filters.afterId !== undefined ? events.slice(0, limit) : events.slice(-limit)
+  const first = events[0]?.id
+  const last = events.at(-1)?.id
+  const hasOlder = first !== undefined && filtered.some(event => event.id < first)
+  const hasNewer = last !== undefined && filtered.some(event => event.id > last)
+  if (filters.summary) events = events.map(event => {
+    const { payload, searchText, error, ...metadata } = event
+    return { ...metadata, searchText: '', payloadOmitted: true, rpcError: isRpcError(event) }
+  })
   return {
     capturing: data.capturing,
     dropped: data.dropped,
@@ -93,6 +117,10 @@ export function queryCapture(data: CaptureSource, filters: MtprotoCaptureFilters
     total: data.events.length,
     matched,
     events,
+    oldestId: data.events[0]?.id,
+    newestId: data.events.at(-1)?.id,
+    hasOlder,
+    hasNewer,
   }
 }
 

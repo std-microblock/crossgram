@@ -1,0 +1,18 @@
+diff --git a/client/data.ts b/client/data.ts
+index 5831e065ed5361d5b20841f6471707a7977770c7..cd6310b783ef05ba1cd1d853c37eec95908705cd 100644
+--- a/client/data.ts
++++ b/client/data.ts
+@@ -25,10 +25,12 @@ export function connect(ctx: Context, callback: () => WebSocket) {
+   }
+ 
+   const reconnect = () => {
++    clearTimeout(sendTimer)
++    clearTimeout(closeTimer)
+     ctx.client.socket.value = undefined
+     console.log('[cordis] websocket disconnected, will retry in 1s...')
+     setTimeout(() => {
+-      connect(ctx, callback).then(location.reload, () => {
++      connect(ctx, callback).then(() => location.reload(), () => {
+         console.log('[cordis] websocket disconnected, will retry in 1s...')
+       })
+     }, 1000)

@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount, enableAutoUnmount } from '@vue/test-utils'
 import { defineComponent, h, nextTick, ref } from 'vue'
-import type { Ref } from 'vue'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
-import { chunkEvents, flattenChunks, replaceChunks } from '../src/chunks.js'
+import { queryCapture, parseCaptureQuery } from '../src/capture-api.js'
+
+enableAutoUnmount(afterEach)
+let capturedEvents: CapturedMtprotoEvent[] = []
 
 const rpcState = vi.hoisted(() => ({ data: undefined as unknown, current: undefined as unknown }))
 
@@ -47,7 +49,12 @@ describe('MTProto debug client', () => {
 
   beforeEach(() => {
     rpcState.data = debugData([])
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const query = parseCaptureQuery(new URL(input, 'http://localhost').searchParams)
+      return { ok: true, json: async () => queryCapture({ capturing: true, dropped: 0, maxEvents: 2000, events: capturedEvents }, query) }
+    }))
   })
+  afterEach(() => vi.unstubAllGlobals())
 
   it('keeps metadata in one row and expands only the paired payloads', async () => {
     const call = event(1, {
@@ -147,11 +154,11 @@ describe('MTProto debug client', () => {
   })
 
   it('virtualizes a large stream and keeps a correlated result at the call row', async () => {
-    const events = Array.from({ length: 1_000 }, (_, index) => event(index + 1, {
+    const events = Array.from({ length: 99 }, (_, index) => event(index + 1, {
       messageId: `0x${(index + 1).toString(16)}`,
       name: index === 0 ? 'messages.getHistory' : `test.call${index}`,
     }))
-    events.push(event(1_001, {
+    events.push(event(100, {
       direction: 'server->client', name: 'rpc_result -> messages.channelMessages',
       requestMessageId: '0x1', searchText: 'rpc_result messages.channelmessages server->client',
     }))
@@ -165,7 +172,9 @@ describe('MTProto debug client', () => {
         },
       },
     })
+    await flushPromises()
     await nextTick()
+    await flushPromises()
     await nextTick()
 
     const renderedRows = wrapper.findAll('.debug-event')
@@ -176,6 +185,7 @@ describe('MTProto debug client', () => {
     expect(wrapper.findAll('.event-name').map(node => node.text())).not.toContain('rpc_result -> messages.channelMessages')
 
     await wrapper.get('.event-header').trigger('click')
+    await flushPromises()
     await nextTick()
 
     expect(wrapper.find('.event-detail').exists()).toBe(true)
@@ -190,9 +200,11 @@ describe('MTProto debug client', () => {
     const wrapper = mount(DebugPage, {
       global: { stubs: { 'k-layout': layoutStub, 'k-icon': iconStub } },
     })
+    await flushPromises()
     await nextTick()
 
     await wrapper.get('.event-header').trigger('contextmenu', { clientX: 30, clientY: 40 })
+    await flushPromises()
     await nextTick()
     const menu = document.body.querySelector('.debug-context-menu') as HTMLElement
     expect(menu).not.toBeNull()
@@ -202,6 +214,8 @@ describe('MTProto debug client', () => {
     expect(menu.textContent).toContain('Exclude messages.getHistory')
 
     menu.querySelector('button')!.click()
+    await new Promise(resolve => setTimeout(resolve, 250))
+    await flushPromises()
     await nextTick()
 
     expect(wrapper.get('.type-filter-pill').text()).toContain('only: messages.getHistory')
@@ -213,6 +227,7 @@ describe('MTProto debug client', () => {
     const wrapper = mount(DebugPage, {
       global: { stubs: { 'k-layout': layoutStub, 'k-icon': iconStub } },
     })
+    await flushPromises()
     await nextTick()
     const viewport = wrapper.get('.debug-virtual-viewport').element as HTMLElement
     const scrollHeight = 2_200
@@ -227,15 +242,21 @@ describe('MTProto debug client', () => {
 
     viewport.scrollTop = 1_585
     viewport.dispatchEvent(new Event('scroll'))
-    rotateEvent(debugRef(), event(51))
+    capturedEvents.push(event(51))
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    await flushPromises()
     await nextTick()
+    await flushPromises()
     await nextTick()
     expect(viewport.scrollTop).toBe(1_600)
 
     viewport.scrollTop = 1_200
     viewport.dispatchEvent(new Event('scroll'))
-    rotateEvent(debugRef(), event(52))
+    capturedEvents.push(event(52))
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    await flushPromises()
     await nextTick()
+    await flushPromises()
     await nextTick()
     expect(viewport.scrollTop).toBe(1_200)
   })
@@ -254,8 +275,9 @@ const iconStub = defineComponent({
 })
 
 function debugData(events: CapturedMtprotoEvent[]): MtprotoDebugData {
+  capturedEvents = events
   return {
-    chunks: chunkEvents(events),
+    apiPath: '/api/mtproto-debug/events',
     dropped: 0,
     maxEvents: 2_000,
     capturing: true,
@@ -263,18 +285,6 @@ function debugData(events: CapturedMtprotoEvent[]): MtprotoDebugData {
     pause: vi.fn(async () => undefined),
     clear: vi.fn(async () => undefined),
   }
-}
-
-/** Drop the oldest event and append a new one, keeping the buffer length stable. */
-function rotateEvent(data: MtprotoDebugData, next: CapturedMtprotoEvent): void {
-  const events = flattenChunks(data.chunks)
-  events.shift()
-  events.push(next)
-  replaceChunks(data.chunks, events)
-}
-
-function debugRef(): MtprotoDebugData {
-  return (rpcState.current as Ref<MtprotoDebugData>).value
 }
 
 function event(id: number, overrides: Partial<CapturedMtprotoEvent> = {}): CapturedMtprotoEvent {

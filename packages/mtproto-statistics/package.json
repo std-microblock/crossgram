@@ -28,7 +28,7 @@
     "cordis": "^4.0.0-rc.5"
   },
   "devDependencies": {
-    "@cordisjs/client": "^0.8.2",
+    "@cordisjs/client": "patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch",
     "@vue/test-utils": "^2.4.11",
     "happy-dom": "^20.11.2",
     "vitest": "^4.1.10",

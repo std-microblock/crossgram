@@ -103,7 +103,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@cordisjs/client@npm:^0.8.2":
+"@cordisjs/client@npm:0.8.2":
   version: 0.8.2
   resolution: "@cordisjs/client@npm:0.8.2"
   dependencies:
@@ -130,6 +130,36 @@ __metadata:
   bin:
     cordis-webui: bin.js
   checksum: 10c0/cf41f29d4a12d71febf445cc5d3f068a56a0482dec9f4ee726af562d441be0991723ad0c399024222334ece0f743f9a5a659805fa1c489e2a62db1528d5c3eb7
+  languageName: node
+  linkType: hard
+
+"@cordisjs/client@patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch":
+  version: 0.8.2
+  resolution: "@cordisjs/client@patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch::version=0.8.2&hash=adad63"
+  dependencies:
+    "@cordisjs/components": "npm:0.4.0"
+    "@cordisjs/muon": "npm:^0.2.2"
+    "@cordisjs/unyaml": "npm:^2.0.3"
+    "@vitejs/plugin-vue": "npm:^6.0.6"
+    "@vueuse/core": "npm:^14.3.0"
+    cac: "npm:^6.7.14"
+    cordis: "npm:^4.0.0-rc.6"
+    cosmokit: "npm:^1.8.1"
+    element-plus: "npm:2.7.7"
+    marked-vue: "npm:^1.3.0"
+    path-to-regexp: "npm:^8.3.0"
+    sass: "npm:^1.97.3"
+    unocss: "npm:^66.6.8"
+    vite: "npm:^7.3.2"
+    vue: "npm:^3.5.33"
+  peerDependencies:
+    yakumo: ^3.2.1
+  peerDependenciesMeta:
+    yakumo:
+      optional: true
+  bin:
+    cordis-webui: bin.js
+  checksum: 10c0/edf68e0c77cc0bde22e8a7095e031a72747447fccf3720b1b02798ec036b67084082d0fcf6e3bb1018e2329fb5b8d14fe99f36cfbb87f8713f0311ba708a2a18
   languageName: node
   linkType: hard
 
@@ -704,7 +734,7 @@ __metadata:
 
 "@cordisjs/plugin-webui@patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch":
   version: 0.8.2
-  resolution: "@cordisjs/plugin-webui@patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch::version=0.8.2&hash=37286d"
+  resolution: "@cordisjs/plugin-webui@patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch::version=0.8.2&hash=298358"
   dependencies:
     "@cordisjs/fetch-file": "npm:^1.0.3"
     "@cordisjs/muon": "npm:^0.2.2"
@@ -719,7 +749,7 @@ __metadata:
   peerDependenciesMeta:
     "@cordisjs/client":
       optional: true
-  checksum: 10c0/1fb1168459501383d61f92e62a3ddf14bcb4975e0b7a9e4aea311df16b7f0c06305aa75a220f7ed9248bbf3cda45998ea26d2a07a7e247a0cbdde14005a8a25d
+  checksum: 10c0/c159bb0a778f5ca4f57b5f5529c519715b542af43116b572dbb1d2af0a9f97cfc7ed5297dd2cca64df7af7750b7555dfb7b59a81e055e1620cf384a9165f5768
   languageName: node
   linkType: hard
 
@@ -1919,7 +1949,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/bridge@workspace:packages/bridge"
   dependencies:
-    "@cordisjs/client": "npm:^0.8.2"
+    "@cordisjs/client": "patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch"
     "@fuman/io": "npm:^0.0.21"
     "@fuman/utils": "npm:^0.0.21"
     "@mtcute/core": "npm:^0.32.1"
@@ -1975,7 +2005,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/mtproto-debug@workspace:packages/mtproto-debug"
   dependencies:
-    "@cordisjs/client": "npm:^0.8.2"
+    "@cordisjs/client": "patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch"
     "@tanstack/vue-virtual": "npm:^3.13.35"
     "@vue/test-utils": "npm:^2.4.11"
     happy-dom: "npm:^20.11.2"
@@ -2006,7 +2036,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/mtproto-statistics@workspace:packages/mtproto-statistics"
   dependencies:
-    "@cordisjs/client": "npm:^0.8.2"
+    "@cordisjs/client": "patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch"
     "@vue/test-utils": "npm:^2.4.11"
     happy-dom: "npm:^20.11.2"
     schemastery: "npm:^3.18.0"
@@ -5934,7 +5964,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "mtproto-relay-cordis@workspace:."
   dependencies:
-    "@cordisjs/client": "npm:^0.8.2"
+    "@cordisjs/client": "patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch"
     "@cordisjs/plugin-cli": "npm:^1.1.2"
     "@cordisjs/plugin-cli-cordis": "npm:^1.0.5"
     "@cordisjs/plugin-database": "npm:^4.1.1"
@@ -5973,6 +6003,7 @@ __metadata:
     cross-env: "npm:^10.1.0"
     esbuild: "npm:^0.28.2"
     husky: "npm:^9.1.7"
+    playwright: "npm:^1.63.0"
     tsx: "npm:@cordiverse/tsx@4.19.3-fix.3"
     typescript: "npm:^5.9.3"
     vitest: "npm:^4.1.10"
@@ -6428,6 +6459,26 @@ __metadata:
     mlly: "npm:^1.7.4"
     pathe: "npm:^2.0.1"
   checksum: 10c0/19e6cb8b66dcc66c89f2344aecfa47f2431c988cfa3366bdfdcfb1dd6695f87dcce37fbd90fe9d1605e2f4440b77f391e83c23255347c35cf84e7fd774d7fcea
+  languageName: node
+  linkType: hard
+
+"playwright-core@npm:1.63.0":
+  version: 1.63.0
+  resolution: "playwright-core@npm:1.63.0"
+  bin:
+    playwright-core: cli.js
+  checksum: 10c0/39c1ebae4029ca2e9371e00a5588d962038e24b6e0bdb7d0d27374dde04838f349b83ae0c8b3b648653d0935cba7fb9011f1201adaab9dd0db7801ad6c75e9aa
+  languageName: node
+  linkType: hard
+
+"playwright@npm:^1.63.0":
+  version: 1.63.0
+  resolution: "playwright@npm:1.63.0"
+  dependencies:
+    playwright-core: "npm:1.63.0"
+  bin:
+    playwright: cli.js
+  checksum: 10c0/d1fd048a89be27c9aba6757dc4f70eff4a5163b49f439ad691767be8b2a482327d0dd1928b4f73c8fe0d8b33aab2c9dc2670424ab60f112d9e98e91b94e3b090
   languageName: node
   linkType: hard
 

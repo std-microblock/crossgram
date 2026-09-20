@@ -29,6 +29,7 @@ export function getRpcResultMetrics(
 }
 
 export function isRpcError(event: CapturedMtprotoEvent): boolean {
+  if (event.rpcError !== undefined) return event.rpcError
   if (!event.payload || typeof event.payload !== 'object') return false
   const payload = event.payload as Record<string, unknown>
   if (payload._ !== 'rpc_result' || !payload.result || typeof payload.result !== 'object') return false

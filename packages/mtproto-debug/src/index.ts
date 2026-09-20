@@ -2,7 +2,7 @@ import type { Context } from 'cordis'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { serializeDebugEvent } from './serialize.js'
-import { appendChunkedEvents, flattenChunks, replaceChunks, resolveChunkSize } from './chunks.js'
+import { appendChunkedEvents, flattenChunks, replaceChunks, resolveChunkSize, type EventChunks } from './chunks.js'
 import { CaptureQueryError, parseCaptureQuery, queryCapture } from './capture-api.js'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 import enUS from './locales/en-US.yml'
@@ -30,13 +30,14 @@ export function apply(ctx: Context, config: Config = {}): void {
   const maxEvents = config.maxEvents ?? 2_000
   const chunkSize = resolveChunkSize(maxEvents)
   const apiPath = normalizeApiPath(config.apiPath ?? '/api/mtproto-debug/events')
+  const chunks: EventChunks = {}
   let nextId = 0
   let pending: CapturedMtprotoEvent[] = []
   let flushTimer: ReturnType<typeof setTimeout> | undefined
 
   const data: MtprotoDebugData = {
     capturing: !(config.initiallyPaused ?? false),
-    chunks: {},
+    apiPath,
     dropped: 0,
     maxEvents,
     async start() {
@@ -53,7 +54,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       flushTimer = undefined
       pending = []
       entry.mutate((value) => {
-        replaceChunks(value.chunks, [])
+        replaceChunks(chunks, [])
         value.dropped = 0
       })
     },
@@ -70,9 +71,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (!pending.length) return
     const batch = pending
     pending = []
-    entry.mutate((value) => {
-      value.dropped += appendChunkedEvents(value.chunks, batch, maxEvents, chunkSize)
-    })
+    const dropped = appendChunkedEvents(chunks, batch, maxEvents, chunkSize)
+    // Captures stay server-side. Only infrequent control-state changes are
+    // broadcast; event history is fetched by the debug page over paged HTTP.
+    data.dropped += dropped
   }
   const scheduleFlush = () => {
     if (flushTimer) return
@@ -90,7 +92,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         capturing: data.capturing,
         dropped: data.dropped,
         maxEvents: data.maxEvents,
-        events: flattenChunks(data.chunks),
+        events: flattenChunks(chunks),
       }, parseCaptureQuery(req.query)))
     } catch (error) {
       if (!(error instanceof CaptureQueryError)) throw error
@@ -101,6 +103,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const onDebug = (event: MtprotoDebugEvent) => {
     if (!data.capturing) return
     pending.push(serializeDebugEvent(event, ++nextId))
+    if (pending.length >= chunkSize) flush()
     scheduleFlush()
   }
 
