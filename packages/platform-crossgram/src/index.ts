@@ -703,8 +703,11 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     signal?: AbortSignal,
     reactionWarmup?: Promise<unknown>,
   ): Promise<IMDialogPage<QQMediaLocator>> {
+    const afterId = query.afterId === undefined
+      ? undefined
+      : await this.wireConversationId(session, query.afterId)
     const response = await this.client.getDialogs({
-      cursor: query.cursor, afterId: query.afterId, limit: query.limit,
+      cursor: query.cursor, afterId, limit: query.limit,
     }, signal)
     if (reactionWarmup && response.conversations.some((conversation) =>
       wireMessageHasQQFace(conversation.lastMessage) || wireMessageHasQQFace(conversation.readInboxMaxMessage))) {

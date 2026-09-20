@@ -3435,6 +3435,26 @@ describe('QQNTPlatform dialogs polling', () => {
     await unsubscribe()
   })
 
+  it.each([8, 134] as const)('maps Saved Messages pagination back to its QQ device ID (chat type %i)', async (chatType) => {
+    const platform = new QQNTPlatform()
+    const physicalId = 'device:' + chatType + ':device'
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getDialogs = vi.fn(async (query) => query.afterId === physicalId
+      ? { conversations: [conversation('after-saved')] }
+      : { conversations: [{
+          id: physicalId, kind: 'direct' as const, title: 'Device', peerUid: 'device', peerUin: '', chatType,
+        }], nextCursor: 'next' })
+
+    const first = await platform.getDialogs(session, { limit: 1 })
+    expect(first.dialogs[0].conversation.id).toBe(session.userId)
+    const second = await platform.getDialogs(session, { limit: 1, afterId: first.dialogs[0].conversation.id })
+
+    expect(platform.client.getDialogs).toHaveBeenLastCalledWith({
+      cursor: undefined, afterId: physicalId, limit: 1,
+    }, undefined)
+    expect(second.dialogs.map(dialog => dialog.conversation.id)).toEqual(['after-saved'])
+  })
+
   it('forwards opaque dialog offsets to the bridge', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
