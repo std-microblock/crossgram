@@ -1,5 +1,6 @@
 import { build } from 'vite'
 import solid from 'vite-plugin-solid'
+import { publicAssets } from './build-assets.js'
 import { resolve } from 'node:path'
 import { sharedModules } from './src/imports.js'
 
@@ -15,7 +16,7 @@ export async function buildClient(options: ClientBuildOptions) {
     configFile: false,
     root: options.root,
     base: './',
-    plugins: [solid()],
+    plugins: [solid(), publicAssets()],
     build: {
       target: 'es2022',
       outDir: options.outDir ?? 'dist',

@@ -22,6 +22,37 @@ export interface RegisteredPage extends PageMeta {
   module: string
 }
 const known: Record<string, PageMeta[]> = {
+  bridge: [
+    {
+      path: '/platform-accounts',
+      title: 'Platform accounts',
+      icon: '○',
+      group: 'Workspace',
+    },
+    {
+      path: '/sticker-packs',
+      title: 'Sticker collections',
+      icon: '✦',
+      group: 'Workspace',
+    },
+    { path: '/bots', title: 'Your bots', icon: '◇', group: 'Workspace' },
+  ],
+  statistics: [
+    {
+      path: '/mtproto-statistics',
+      title: 'MTProto statistics',
+      icon: '▥',
+      group: 'Observe',
+    },
+  ],
+  debug: [
+    {
+      path: '/mtproto-debug',
+      title: 'MTProto capture',
+      icon: '⇄',
+      group: 'Observe',
+    },
+  ],
   sso: [{ path: '/sso', title: 'Your account', icon: '○', group: 'Workspace' }],
   market: [
     { path: '/market', title: 'Plugin library', icon: '◈', group: 'Manage' },
@@ -77,7 +108,14 @@ const known: Record<string, PageMeta[]> = {
   ],
   loader: [{ path: '/plugins', title: 'Plugins', icon: '◫', group: 'Manage' }],
 }
+const bridgePages: Record<string, Component<PageProps>> = {
+  '/platform-accounts': lazy(() => import('./pages/accounts.js')),
+  '/sticker-packs': lazy(() => import('./pages/stickers.js')),
+  '/bots': lazy(() => import('./pages/bots.js')),
+}
 const builtins: Record<string, Component<PageProps>> = {
+  statistics: lazy(() => import('./pages/statistics.js')),
+  debug: lazy(() => import('./pages/capture.js')),
   sso: lazy(() => import('./pages/sso.js')),
   market: lazy(() => import('./pages/market.js')),
   insight: lazy(() => import('./pages/insight.js')),
@@ -183,7 +221,9 @@ export function PageOutlet(props: { path: string }) {
     const page = selected()
     if (!page) return
     return (
-      builtins[page.module] ??
+      (page.module === 'bridge'
+        ? bridgePages[page.path]
+        : builtins[page.module]) ??
       extensionPage(
         connection.state.entries[page.entryId],
         page.path,

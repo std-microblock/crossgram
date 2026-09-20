@@ -12,17 +12,8 @@ export interface SystemPeer {
   conversation: IMConversation
 }
 
-/** A bridge-owned bot that can be opened through a Telegram `t.me` link. */
-export interface SystemBot {
-  /** The conversation ID that the provider resolves for this bot. */
-  conversationId: string
-  /** Display name exposed to the WebUI and Telegram clients. */
-  title: string
-  /** Globally unique Telegram-style username, without `@`. */
-  username: string
-  /** Cordis package which registered the bot. */
-  sourcePlugin: string
-}
+import type { SystemBot } from './dashboard-types.js'
+export type { SystemBot } from './dashboard-types.js'
 
 /** A peer resolution permanently bound to the provider that resolved it. */
 export interface SystemPeerResolution {

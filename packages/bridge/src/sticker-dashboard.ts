@@ -4,44 +4,8 @@ import type {
   IMStickerPackSummary, IMStickerProvider, StickerProviderContext, StickerProviderRegistry,
 } from './sticker-provider.js'
 
-export interface StickerDashboardAccount {
-  platformId: string
-  platformSessionId: string
-  platformKind: string
-  displayName: string
-  username?: string
-  userId: string
-}
-
-export interface StickerDashboardAssignment {
-  platformSessionId: string
-  assigned: boolean
-  automatic: boolean
-}
-
-export interface StickerDashboardPack {
-  providerId: string
-  packId: string
-  title: string
-  count?: number
-  version?: number
-  sourcePlatformId?: string
-  sourcePlatformSessionId?: string
-  assignments: StickerDashboardAssignment[]
-}
-
-export interface StickerPackDashboardData {
-  stickerAccounts: StickerDashboardAccount[]
-  stickerPacks: StickerDashboardPack[]
-  stickerUpdatedAt: number
-  refreshStickerPacks(): Promise<void>
-  setStickerPackAssigned(
-    platformSessionId: string,
-    providerId: string,
-    packId: string,
-    assigned: boolean,
-  ): Promise<void>
-}
+import type { StickerDashboardAccount, StickerDashboardPack } from './dashboard-types.js'
+export type { StickerDashboardAccount, StickerDashboardAssignment, StickerDashboardPack, StickerPackDashboardData } from './dashboard-types.js'
 
 export interface StickerDashboardSourceAccount {
   view: StickerDashboardAccount

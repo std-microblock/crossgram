@@ -36,6 +36,17 @@ Server-side rolling histories are bounded even when the legacy instrumentation p
 Verification: 49 focused tests pass, including phone Chromium workflows against real Cordis database/SQLite, logger, HTTP instrumentation, notifier, service graph, SSO password/code-factor/session/identity services, and real WebSocket echo. Package installation is tested against a controlled implementation of the inspected RPC contract so tests never install/remove real server dependencies. The package build and strict typecheck pass. A repository-wide typecheck was also run: it still reports the pre-existing bridge/projection errors, with no errors in the new package. Representative desktop/mobile screenshots were inspected; scrollable tables and logs keep pagination/actions reachable on phones.
 
 ## Remaining delivery work
-- Migrate Crossgram account/QR login, bot and sticker pages, MTProto statistics, and paged capture.
+- Package the new Crossgram Solid clients in their owning workspace plugins through the shared SDK/build helper, and remove the legacy Vue client implementations.
 - Complete final legacy-client/configuration/build replacement and migration cleanup, including selecting the new server monitor.
-- Run the expanded browser/performance/mobile regression suite after the final switch, and audit all entry points against the requested replacement scope.
+- Verify real loader/CLI startup after the switch, expression-valued configuration editing, build-update behavior, and the expanded browser/performance/mobile regression suite. Audit every entry point against the requested replacement scope.
+
+## Crossgram pages and real protocol verification
+The staged Solid clients now implement platform identities, expiring login codes, copyable connection configuration, explicit multi-account QR approval, sticker assignments, bot links, all five MTProto statistics sections, and paged capture inspection. Browser-safe dashboard contracts were extracted from the bridge without changing their runtime behavior. Account cards and statistics table rows retain their DOM identity through live snapshots.
+
+QR image scanning is lazy and uses a worker with bounded image dimensions, timeouts, cancellation, and explicit approval. Statistics charts use bounded peak/trough-preserving samples rather than a charting runtime. Capture lists fetch only 100 summaries; request/result payloads are fetched on expansion, the cache retains only the active pair, JSON trees render in batches, and hidden/unmounted pages stop polling. Nested payload expansion survives live polls.
+
+A build-generated public-asset allowlist includes workers that Vite omits from its module manifest; this applies to independently built extensions too. Arbitrary files remain inaccessible.
+
+Verification: 71 focused tests pass, plus 9 existing bridge dashboard/system-peer tests. Real mobile Chromium checks decode an actual generated QR image in the worker and approve it through the bridge token store; exercise cross-account sticker RPC arguments and bot links; inspect large captures through the real capture backend without payloads on sockets; and exercise every statistics section through real collector events and runtime samples. Package strict typecheck and production build pass. Phone/desktop screenshots were inspected, and the mobile header collision found in that review was fixed. Browser concurrency is bounded, and reconnect assertions observe DOM transitions rather than racing a short-lived banner.
+
+The old app configuration and old client folders remain until the final packaging/build/configuration replacement, so this is not yet the completed cutover.

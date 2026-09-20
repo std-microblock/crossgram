@@ -3478,6 +3478,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/qrcode@npm:^1.5.5":
+  version: 1.5.6
+  resolution: "@types/qrcode@npm:1.5.6"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/84844ca63e5f32bc47d44dda0f8a6f7cdcc7ce44e7b24f10f19d50796f31d12c058f702a8f7d352c9e82a023a9abc36fa1ad01ddf0a209dd8ed4562ea76481fc
+  languageName: node
+  linkType: hard
+
 "@types/web-bluetooth@npm:^0.0.16":
   version: 0.0.16
   resolution: "@types/web-bluetooth@npm:0.0.16"
@@ -4491,9 +4500,12 @@ __metadata:
     "@cordisjs/fetch-file": "npm:^1.0.3"
     "@cordisjs/muon": "npm:^0.2.2"
     "@simplewebauthn/browser": "npm:^13.1.0"
+    "@types/qrcode": "npm:^1.5.5"
     happy-dom: "npm:^20.11.2"
+    jsqr: "npm:^1.4.0"
     path-to-regexp: "npm:^8.3.0"
     prettier: "npm:3.6.2"
+    qrcode: "npm:^1.5.4"
     schemastery: "npm:^3.18.0"
     solid-js: "npm:^1.9.9"
     vite: "npm:^7.3.2"

@@ -3,6 +3,7 @@ import Server from '@cordisjs/plugin-server'
 import { describe, expect, it, vi } from 'vitest'
 import { chromium } from 'playwright'
 import SolidWebUI, { escapeScriptJSON, normalizePath } from './index.js'
+import { expectReconnectWithoutReload } from './browser-test-utils.js'
 import { safeAsset } from './entry.js'
 
 async function start(uiPath = '') {
@@ -179,13 +180,7 @@ describe('Solid WebUI production service', () => {
         .toContain('open')
       await page.getByRole('button', { name: 'Close navigation' }).click()
       expect(await page.evaluate(() => '__VUE__' in window)).toBe(false)
-      const timeOrigin = await page.evaluate(() => performance.timeOrigin)
-      Object.values(app.ui.clients)[0].socket.close(1012, 'test reconnect')
-      await page
-        .getByText('Reconnecting… Your place is saved.', { exact: false })
-        .waitFor()
-      await page.getByText('All connected', { exact: true }).waitFor()
-      expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin)
+      await expectReconnectWithoutReload(page, app.ui)
       expect(errors).toEqual([])
     } finally {
       await browser.close()

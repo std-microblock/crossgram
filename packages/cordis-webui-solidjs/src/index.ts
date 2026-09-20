@@ -102,6 +102,22 @@ export default class SolidWebUI extends Service {
         this.assets.set(file, await readFile(resolve(this.root, file)))
       }
     }
+    const publicFiles: unknown = JSON.parse(
+      await readFile(resolve(this.root, 'public-assets.json'), 'utf8'),
+    )
+    if (
+      !Array.isArray(publicFiles) ||
+      publicFiles.some(
+        (file) =>
+          typeof file !== 'string' ||
+          !file.startsWith('assets/') ||
+          !safeAsset(file),
+      )
+    )
+      throw new Error('Invalid public asset allowlist')
+    for (const file of publicFiles)
+      if (!this.assets.has(file))
+        this.assets.set(file, await readFile(resolve(this.root, file)))
     const html = await readFile(resolve(this.root, 'index.html'), 'utf8')
     const config = escapeScriptJSON({
       ...this.config,
@@ -150,9 +166,11 @@ export default class SolidWebUI extends Service {
         const entry = this.entries[id]
         const file = parts.join('/')
         if (entry?.manifest && safeAsset(file)) {
-          const allowed = Object.values(entry.manifest.chunks).some(
-            (chunk) => chunk.file === file || chunk.css?.includes(file),
-          )
+          const allowed =
+            entry.manifest.assets?.includes(file) ||
+            Object.values(entry.manifest.chunks).some(
+              (chunk) => chunk.file === file || chunk.css?.includes(file),
+            )
           if (allowed)
             content = await readFile(
               resolve(dirname(fileURLToPath(entry.manifest.url)), file),

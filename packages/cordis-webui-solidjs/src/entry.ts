@@ -46,7 +46,12 @@ export class Entry<T extends object = any> {
   readonly ready: Promise<void>
   readonly dispose: () => void
   module = ''
-  manifest?: { url: string; path: string; chunks: Record<string, Chunk> }
+  manifest?: {
+    url: string
+    path: string
+    chunks: Record<string, Chunk>
+    assets?: string[]
+  }
   private disposed = false
   private initialized = false
   constructor(
@@ -113,6 +118,27 @@ export class Entry<T extends object = any> {
       }
       if (this.disposed) return
       this.manifest.chunks = chunks
+      try {
+        const assets: unknown = JSON.parse(
+          await readFile(
+            new URL('./public-assets.json', this.manifest.url),
+            'utf8',
+          ),
+        )
+        if (
+          !Array.isArray(assets) ||
+          assets.some(
+            (file) =>
+              typeof file !== 'string' ||
+              !file.startsWith('assets/') ||
+              !safeAsset(file),
+          )
+        )
+          throw new Error('Unsafe extension asset allowlist')
+        this.manifest.assets = assets
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
     }
     if (broadcast && this.initialized && !this.disposed)
       this.webui.broadcast('entry:init', {

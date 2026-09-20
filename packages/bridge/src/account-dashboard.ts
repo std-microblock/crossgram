@@ -1,47 +1,8 @@
 import type { ProvisionedPlatformAccount } from './platform-account.js'
 import { getLoginCodeState } from './login-code.js'
 
-export type PlatformAccountStatus = 'ready' | 'loading' | 'error' | 'unsupported'
-
-export interface PlatformAccountView {
-  platformId: string
-  platformKind: string
-  status: PlatformAccountStatus
-  displayName?: string
-  firstName?: string
-  lastName?: string
-  username?: string
-  userId?: string
-  avatarUrl?: string
-  virtualPhone?: string
-  loginCode?: string
-  validUntil?: number
-  remainingSeconds?: number
-  error?: string
-}
-
-export interface CrossGramServerConfigDc {
-  id: number
-  ip: string
-  port: number
-}
-
-export interface CrossGramServerConfig {
-  name: 'CrossGram'
-  enable_special_config: false
-  host: string
-  port: number
-  rsa_key: string
-  dcs: CrossGramServerConfigDc[]
-}
-
-export interface PlatformAccountDashboardData {
-  accounts: PlatformAccountView[]
-  serverConfig: CrossGramServerConfig
-  loginTokenApprovalUrl: string
-  updatedAt: number
-  refresh(): Promise<void>
-}
+import type { CrossGramServerConfig, PlatformAccountStatus, PlatformAccountView } from './dashboard-types.js'
+export type { CrossGramServerConfig, CrossGramServerConfigDc, PlatformAccountDashboardData, PlatformAccountStatus, PlatformAccountView } from './dashboard-types.js'
 
 export function makeCrossGramServerConfig(
   host: string,
