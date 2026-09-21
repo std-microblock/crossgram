@@ -30,8 +30,44 @@ const requiredPlugins = [
 `,
 ]
 
+const LEGACY_WEBUI_ENGINE = '@cordisjs/plugin-webui'
+const WEBUI_ENGINE = 'cordis-webui-solidjs'
+const LEGACY_WEBUI_MONITOR = '@cordisjs/plugin-server-webui'
+const WEBUI_MONITOR = 'cordis-webui-solidjs/server'
+
+/**
+ * Point the WebUI group at the Solid implementation. The engine keeps its entry id and any
+ * configuration, and the server monitor (the successor of `plugin-server-webui`) is added
+ * once right after it. Idempotent: running it against an already migrated config is a no-op.
+ */
+export function migrateWebuiPlugin(source) {
+  let next = renameEntry(source, LEGACY_WEBUI_ENGINE, WEBUI_ENGINE)
+  next = renameEntry(next, LEGACY_WEBUI_MONITOR, WEBUI_MONITOR)
+  if (!hasEntry(next, WEBUI_ENGINE) || hasEntry(next, WEBUI_MONITOR)) return next
+  const lines = next.split('\n')
+  const engineName = lines.findIndex((line) => line.trim() === `name: '${WEBUI_ENGINE}'`)
+  if (engineName < 0) return next
+  let itemStart = engineName
+  while (itemStart > 0 && !lines[itemStart].trimStart().startsWith('- id:')) itemStart--
+  const indent = /^\s*/.exec(lines[itemStart])?.[0] ?? ''
+  lines.splice(engineName + 1, 0, `${indent}- id: webui-server-monitor`, `${indent}  name: '${WEBUI_MONITOR}'`)
+  return lines.join('\n')
+}
+
+function renameEntry(source, from, to) {
+  return source
+    .split('\n')
+    .map((line) => (line.trim() === `name: '${from}'` ? line.replace(`'${from}'`, `'${to}'`) : line))
+    .join('\n')
+}
+
+function hasEntry(source, name) {
+  return source.split('\n').some((line) => line.trim() === `name: '${name}'`)
+}
+
 export function migrateRuntimeConfig(source) {
   source = migrateDatabaseDriver(source)
+  source = migrateWebuiPlugin(source)
   const missing = requiredPlugins.filter((plugin) => {
     const name = /^\s*name:\s*(.+)$/m.exec(plugin)?.[1]
     return name && !new RegExp(`^\\s*name:\\s*${escapeRegExp(name)}\\s*$`, 'm').test(source)

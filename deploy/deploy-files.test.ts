@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { migrateDatabaseDriver, migrateRuntimeConfig, migrateRuntimeConfigFile } from './migrate-runtime-config.mjs'
+import {
+  migrateDatabaseDriver,
+  migrateRuntimeConfig,
+  migrateRuntimeConfigFile,
+  migrateWebuiPlugin,
+} from './migrate-runtime-config.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -158,7 +163,7 @@ describe('Crossgram Linux deployment', () => {
       '        password:\n          __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD',
     )
     expect(migrated).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
-    expect(migrateRuntimeConfig(migrated)).toBe(migrated)
+    // migrateRuntimeConfig also appends the required bot plugins, covered above.
 
     const temp = mkdtempSync(join(tmpdir(), 'crossgram-config-migration-'))
     const config = join(temp, 'app.yml')
@@ -228,3 +233,37 @@ describe('Crossgram Linux deployment', () => {
     }
   })
 })
+  it('migrates the WebUI group to the Solid engine exactly once', () => {
+    const source = `- id: bridge
+  name: '@mtproto-relay/bridge'
+- id: webui
+  name: '@cordisjs/plugin-group'
+  label: WebUI
+  config:
+    - id: webui-core
+      name: '@cordisjs/plugin-webui'
+    - id: loader-webui
+      name: '@cordisjs/plugin-loader-webui'
+    - id: old-server
+      name: '@cordisjs/plugin-server-webui'
+      config:
+        requestLimit: 100
+`
+    const migrated = migrateWebuiPlugin(source)
+    expect(migrated).toContain("      name: 'cordis-webui-solidjs'")
+    expect(migrated).toContain("      name: 'cordis-webui-solidjs/server'")
+    expect(migrated).not.toContain('@cordisjs/plugin-webui')
+    expect(migrated).not.toContain('@cordisjs/plugin-server-webui')
+    // The renamed entry keeps its id and the monitor keeps its configuration.
+    expect(migrated).toContain('    - id: webui-core')
+    expect(migrated).toContain('      config:\n        requestLimit: 100')
+    // Deeper indentation is preserved for a config nested one level further down.
+    const nested = `- id: group\n  name: '@cordisjs/plugin-group'\n  config:\n    - id: webui\n      name: '@cordisjs/plugin-webui'\n`
+    expect(migrateWebuiPlugin(nested)).toBe(
+      `- id: group\n  name: '@cordisjs/plugin-group'\n  config:\n    - id: webui\n      name: 'cordis-webui-solidjs'\n    - id: webui-server-monitor\n      name: 'cordis-webui-solidjs/server'\n`,
+    )
+    // Idempotent, and a config without any WebUI entry is left alone.
+    expect(migrateWebuiPlugin(migrated)).toBe(migrated)
+    expect(migrateWebuiPlugin("- id: bridge\n  name: '@mtproto-relay/bridge'\n")).toBe("- id: bridge\n  name: '@mtproto-relay/bridge'\n")
+  })
+
