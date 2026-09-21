@@ -402,6 +402,19 @@ export interface WireReactionDefinition {
       }
 }
 
+/** Size and content identity the bridge publishes for one reaction asset. */
+export interface WireReactionAssetMeta {
+  reactionKey?: string
+  size: number
+  version: number
+  mimeType?: string
+  width?: number
+  height?: number
+  /** Archive entry name inside a QQ face bundle, for diagnostics. */
+  entry?: string
+  source?: 'path' | 'bundle' | 'payload'
+}
+
 export interface WireReactionContext extends WireReactionState {
   available: WireReactionDefinition[]
 }

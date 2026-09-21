@@ -69,6 +69,8 @@ const REACTION_CATALOG_GRACE_MS = 10
 const REACTION_CATALOG_RPC_GRACE_MS = 250
 const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
 const REACTION_RESOURCE_SIZE_TIMEOUT_MS = 5_000
+/** How long a resolved reaction asset size/version stays authoritative. */
+const REACTION_RESOURCE_META_TTL_MS = 10 * 60_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CACHE_LIMIT = 256
@@ -219,7 +221,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalog?: IMReactionContext
   private reactionCatalogPromise?: Promise<IMReactionContext>
   private reactionCatalogRetryAt = 0
-  private readonly reactionResourceSizes = new Map<string, number>()
+  private readonly reactionResourceMeta = new Map<string, ResolvedReactionResourceMeta>()
+  private readonly reactionResourceMetaPending = new Map<string, Promise<ResolvedReactionResourceMeta | undefined>>()
+  private reactionResourceWarmup?: Promise<void>
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
   private readonly splitOutgoingMessages = new Map<string, WireMessage>()
@@ -1658,11 +1662,15 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   /**
-   * Runtime QQ faces are discovered from the native catalog and may not carry
-   * a byte size. Telegram uses Document.size to schedule custom-emoji loads;
-   * advertising zero makes the receiver skip the request entirely. Fetch the
-   * small, referenced assets once so the projected documents can publish the
-   * exact EOF size while retaining the metadata-only path for normal media.
+   * Publishes the exact byte length and content identity of the QQ face assets
+   * a message references.
+   *
+   * Telegram schedules custom-emoji downloads from `Document.size` and caches
+   * them by document id, which is derived from the resource version, so both
+   * have to describe the bytes the relay will actually serve. The bridge reads
+   * them from the bundle's central directory (or the local file) instead of the
+   * payload, and re-resolves after a TTL so remote changes re-key the document
+   * instead of silently serving new bytes under an old identity.
    *
    * Inline custom emoji and the reactions attached to the message both reach
    * clients as custom-emoji documents, so both definition sources are hydrated
@@ -1672,19 +1680,17 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     session: PlatformSession,
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
-    const pending = new Map<string, IMReactionResource>()
-    let missing = false
-    const consider = (resource: IMReactionResource): void => {
-      if (resource.size !== undefined || !resource.locator) return
-      missing = true
-      const key = reactionResourceKey(resource)
-      if (!this.reactionResourceSizes.has(key)) pending.set(key, resource)
+    const targets = new Map<string, IMReactionResource>()
+    const collect = (resource: IMReactionResource): void => {
+      const key = reactionResourceLocatorKey(resource)
+      if (!key || targets.has(key)) return
+      targets.set(key, resource)
     }
     for (const part of message.content.parts) {
       if (part.type !== 'text') continue
       for (const entity of part.entities ?? []) {
         if (entity.type !== 'custom-emoji' || entity.definition.presentation.type !== 'custom') continue
-        consider(entity.definition.presentation.resource)
+        collect(entity.definition.presentation.resource)
       }
     }
     const referenced = new Set((message.reactionContext?.reactions ?? []).map((reaction) => reaction.key))
@@ -1692,15 +1698,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       for (const definition of message.reactionContext?.available ?? []) {
         if (!referenced.has(definition.key)) continue
         if (definition.presentation.type !== 'custom') continue
-        consider(definition.presentation.resource)
+        collect(definition.presentation.resource)
       }
     }
-    // A definition that still advertises no size must be patched even when its
-    // asset was already measured for an earlier message.
-    if (!missing) return message
-    const sizes = pending.size
-      ? await this.downloadReactionResourceSizes(session, pending)
-      : new Map<string, number>()
+    // The shared catalog is warmed in the background; messages only need the
+    // assets they reference, but those must always be resolved.
+    this.scheduleReactionResourceWarmup(session)
+    if (!targets.size) return message
+    const resolved = await this.resolveReactionResourceMetas(session, targets)
 
     let changed = false
     const parts = message.content.parts.map((part) => {
@@ -1709,14 +1714,14 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       const entities = part.entities.map((entity) => {
         if (entity.type !== 'custom-emoji' || entity.definition.presentation.type !== 'custom') return entity
         const resource = entity.definition.presentation.resource
-        const size = this.reactionResourceSize(sizes, resource)
-        if (!size) return entity
+        const next = applyReactionResourceMeta(resource, resolved, this.reactionResourceMeta)
+        if (!next) return entity
         partChanged = true
         return {
           ...entity,
           definition: {
             ...entity.definition,
-            presentation: { ...entity.definition.presentation, resource: { ...resource, size } },
+            presentation: { ...entity.definition.presentation, resource: next },
           },
         }
       })
@@ -1724,67 +1729,147 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       changed = true
       return { ...part, entities }
     })
-    const reactionContext = this.applyReactionResourceSizes(message.reactionContext, sizes)
+    const reactionContext = this.applyReactionResourceMetas(message.reactionContext, resolved)
     if (!changed && reactionContext === message.reactionContext) return message
     const prepared: IMMessage<QQMediaLocator> = { ...message, content: { ...message.content, parts } }
     if (reactionContext !== message.reactionContext) prepared.reactionContext = reactionContext
     return prepared
   }
 
-  private async downloadReactionResourceSizes(
-    session: PlatformSession,
-    pending: ReadonlyMap<string, IMReactionResource>,
-  ): Promise<Map<string, number>> {
-    const sizes = new Map<string, number>()
-    await Promise.all([...pending.entries()].map(async ([key, resource]) => {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), REACTION_RESOURCE_SIZE_TIMEOUT_MS)
-      try {
-        let size = 0
-        for await (const chunk of this.downloadReactionResource(session, resource, { signal: controller.signal })) {
-          size += chunk.length
-        }
-        if (size > 0) {
-          sizes.set(key, size)
-          this.reactionResourceSizes.set(key, size)
-        }
-      } catch {
-        // Keep the original metadata when the CDN is temporarily unavailable;
-        // a later message refresh can retry the size hydration.
-      } finally {
-        clearTimeout(timer)
-      }
-    }))
-    return sizes
-  }
-
-  private applyReactionResourceSizes(
+  private applyReactionResourceMetas(
     context: IMReactionContext | undefined,
-    sizes: ReadonlyMap<string, number>,
+    resolved: ReadonlyMap<string, ResolvedReactionResourceMeta>,
   ): IMReactionContext | undefined {
     if (!context?.available.length) return context
     let changed = false
     const available = context.available.map((definition) => {
       if (definition.presentation.type !== 'custom') return definition
       const resource = definition.presentation.resource
-      const size = this.reactionResourceSize(sizes, resource)
-      if (!size) return definition
+      const next = applyReactionResourceMeta(resource, resolved, this.reactionResourceMeta)
+      if (!next) return definition
       changed = true
       return {
         ...definition,
-        presentation: { ...definition.presentation, resource: { ...resource, size } },
+        presentation: { ...definition.presentation, resource: next },
       }
     })
     return changed ? { ...context, available } : context
   }
 
-  private reactionResourceSize(
-    sizes: ReadonlyMap<string, number>,
+  /**
+   * Resolves the referenced assets, preferring the bridge's directory-based
+   * metadata over streaming a face. Downloads stay as a fallback when the
+   * metadata endpoint is unavailable.
+   */
+  private async resolveReactionResourceMetas(
+    session: PlatformSession,
+    targets: ReadonlyMap<string, IMReactionResource>,
+  ): Promise<Map<string, ResolvedReactionResourceMeta>> {
+    const resolved = new Map<string, ResolvedReactionResourceMeta>()
+    await Promise.all([...targets.entries()].map(async ([key, resource]) => {
+      const meta = await this.resolveReactionResourceMeta(session, key, resource).catch(() => undefined)
+      if (meta) resolved.set(key, meta)
+    }))
+    return resolved
+  }
+
+  private async resolveReactionResourceMeta(
+    session: PlatformSession,
+    reactionKey: string,
     resource: IMReactionResource,
-  ): number | undefined {
-    if (resource.size !== undefined || !resource.locator) return undefined
-    const key = reactionResourceKey(resource)
-    return sizes.get(key) ?? this.reactionResourceSizes.get(key)
+  ): Promise<ResolvedReactionResourceMeta | undefined> {
+    const cached = this.reactionResourceMeta.get(reactionKey)
+    if (cached && Date.now() - cached.resolvedAt <= REACTION_RESOURCE_META_TTL_MS) return cached
+    // Message hydration and the catalog warmup may ask for the same face at the
+    // same time; share one lookup instead of querying the bridge twice.
+    const pending = this.reactionResourceMetaPending.get(reactionKey)
+    if (pending) return pending
+    let lookup!: Promise<ResolvedReactionResourceMeta | undefined>
+    lookup = this.lookupReactionResourceMeta(session, reactionKey, resource).finally(() => {
+      if (this.reactionResourceMetaPending.get(reactionKey) === lookup) {
+        this.reactionResourceMetaPending.delete(reactionKey)
+      }
+    })
+    this.reactionResourceMetaPending.set(reactionKey, lookup)
+    return lookup
+  }
+
+  private async lookupReactionResourceMeta(
+    session: PlatformSession,
+    reactionKey: string,
+    resource: IMReactionResource,
+  ): Promise<ResolvedReactionResourceMeta | undefined> {
+    try {
+      const meta = await this.client.getReactionAssetMeta(reactionKey)
+      if (meta && meta.size > 0) {
+        const entry: ResolvedReactionResourceMeta = {
+          size: meta.size,
+          version: typeof meta.version === 'number' ? meta.version : undefined,
+          source: meta.source === 'path' ? 'path' : 'bundle',
+          resolvedAt: Date.now(),
+        }
+        this.reactionResourceMeta.set(reactionKey, entry)
+        return entry
+      }
+    } catch {
+      // Fall through to measuring the payload; the bridge may be restarted or
+      // the bridge may not expose metadata for this key yet.
+    }
+    const measured = await this.measureReactionResourceSize(session, resource)
+    if (!measured) return undefined
+    const entry: ResolvedReactionResourceMeta = { size: measured, resolvedAt: Date.now() }
+    this.reactionResourceMeta.set(reactionKey, entry)
+    return entry
+  }
+
+  private async measureReactionResourceSize(
+    session: PlatformSession,
+    resource: IMReactionResource,
+  ): Promise<number | undefined> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REACTION_RESOURCE_SIZE_TIMEOUT_MS)
+    try {
+      let size = 0
+      for await (const chunk of this.downloadReactionResource(session, resource, { signal: controller.signal })) {
+        size += chunk.length
+      }
+      return size > 0 ? size : undefined
+    } catch {
+      // Keep the original metadata when the CDN is temporarily unavailable;
+      // a later message refresh can retry the size hydration.
+      return undefined
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Resolves the published catalog once per process so reaction pickers and the
+   * emoji sticker set describe their documents correctly without waiting for a
+   * message to reference each face. Definitions are patched in place because
+   * the catalog object is shared with every consumer.
+   */
+  private scheduleReactionResourceWarmup(session: PlatformSession): void {
+    const catalog = this.reactionCatalog
+    if (!catalog || this.reactionResourceWarmup) return
+    const targets = catalog.available.filter((definition) => definition.presentation.type === 'custom'
+      && reactionResourceLocatorKey(definition.presentation.resource))
+    this.reactionResourceWarmup = mapConcurrent(targets, 4, async (definition) => {
+      if (definition.presentation.type !== 'custom') return
+      const resource = definition.presentation.resource
+      const key = reactionResourceLocatorKey(resource)
+      if (!key) return
+      try {
+        const meta = await this.resolveReactionResourceMeta(session, key, resource)
+        if (!meta) return
+        if (resource.size !== meta.size) resource.size = meta.size
+        if (meta.version !== undefined && resource.version !== meta.version) resource.version = meta.version
+      } catch {
+        // The published catalog keeps its previous values; per-message
+        // hydration retries once the bridge answers again.
+      }
+    }).then(() => undefined)
+    void this.reactionResourceWarmup.catch(() => undefined)
   }
 
   private scheduleInlinePreview(
@@ -2626,8 +2711,39 @@ function isReactionResourceLocator(value: unknown): value is { reactionKey: stri
     && typeof (value as { reactionKey?: unknown }).reactionKey === 'string')
 }
 
-function reactionResourceKey(resource: IMReactionResource): string {
-  return `${resource.version}:${JSON.stringify(resource.locator)}`
+/** Size and content identity the bridge reported for one reaction asset. */
+interface ResolvedReactionResourceMeta {
+  size: number
+  version?: number
+  source?: 'path' | 'bundle' | 'payload'
+  resolvedAt: number
+}
+
+/** Reaction key of a resource the bridge can resolve metadata for. */
+function reactionResourceLocatorKey(resource: IMReactionResource): string | undefined {
+  const locator = resource.locator
+  return isReactionResourceLocator(locator) ? locator.reactionKey : undefined
+}
+
+/**
+ * Returns a resource copy when the resolved metadata differs from what the
+ * definition advertises. Stale sizes (for example one measured while the bridge
+ * still relayed archives) and remote-side changes are corrected here instead of
+ * being trusted forever.
+ */
+function applyReactionResourceMeta(
+  resource: IMReactionResource,
+  resolved: ReadonlyMap<string, ResolvedReactionResourceMeta>,
+  cache: ReadonlyMap<string, ResolvedReactionResourceMeta>,
+): IMReactionResource | undefined {
+  if (!resource.locator) return undefined
+  const key = reactionResourceLocatorKey(resource)
+  if (!key) return undefined
+  const meta = resolved.get(key) ?? cache.get(key)
+  if (!meta) return undefined
+  const version = meta.version ?? resource.version
+  if (resource.size === meta.size && resource.version === version) return undefined
+  return { ...resource, size: meta.size, version }
 }
 
 function multiForwardBundleId(locator: WireMultiForwardLocator): string {

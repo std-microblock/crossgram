@@ -14,7 +14,7 @@ import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
   WireReactionActorPage, WireReactionContext, WireReactionState, WireRequest, WireRequestPage, WireSticker, WireStickerPack, WireStickerPackSummary,
-  WireFlashTransferManifest, WireFlashTransferResult, WireTextPart,
+  WireFlashTransferManifest, WireFlashTransferResult, WireReactionAssetMeta, WireTextPart,
 } from './protocol.js'
 import { QQHighwayUploadWriter, uploadHighway, type QQMediaUploadPlan } from './highway.js'
 
@@ -800,6 +800,19 @@ export class QQNTClient {
 
   getReactionCatalog(): Promise<WireReactionContext> {
     return this.json('/reactions/catalog')
+  }
+
+  /**
+   * Reads the exact size and content identity of a reaction asset. The bridge
+   * answers this from the archive directory (or the local file), so it is far
+   * cheaper than streaming the face itself.
+   */
+  getReactionAssetMeta(reactionKey: string): Promise<WireReactionAssetMeta | null> {
+    return this.json('/reactions/meta', true, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ reactionKey }),
+    })
   }
 
   getMessageReactions(
