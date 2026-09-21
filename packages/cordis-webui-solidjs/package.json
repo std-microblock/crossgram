@@ -10,7 +10,9 @@
     "./schema": "./client/schema.tsx",
     "./build": "./build.ts",
     "./server": "./src/server-monitor.ts",
-    "./components": "./client/components.tsx"
+    "./components": "./client/components.tsx",
+    "./utils": "./client/utils.ts",
+    "./session": "./client/session.ts"
   },
   "cordis": {
     "service": {
@@ -26,7 +28,6 @@
     "@cordisjs/fetch-file": "^1.0.3",
     "@cordisjs/muon": "^0.2.2",
     "@simplewebauthn/browser": "^13.1.0",
-    "jsqr": "^1.4.0",
     "path-to-regexp": "^8.3.0",
     "schemastery": "^3.18.0",
     "solid-js": "^1.9.9"

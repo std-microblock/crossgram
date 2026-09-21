@@ -23,7 +23,7 @@ describe('production WebUI plugin settings e2e', () => {
     host: 127.0.0.1
     port: 0
 - id: webui
-  name: '@cordisjs/plugin-webui'
+  name: 'cordis-webui-solidjs'
 - id: loader-webui
   name: '@cordisjs/plugin-loader-webui'
 - id: bridge
@@ -49,7 +49,7 @@ describe('production WebUI plugin settings e2e', () => {
       expect(managerEntry.files.routes).toContain('/plugins{/*id}')
       const page = await fetch(new URL('/plugins/bridge', ctx.server.baseUrl))
       expect(page.status).toBe(200)
-      expect(await page.text()).toContain('<title>Cordis')
+      expect(await page.text()).toContain('<title>Crossgram')
 
       const endpoint = new URL('/api', ctx.server.baseUrl)
       endpoint.protocol = 'ws:'
@@ -59,7 +59,10 @@ describe('production WebUI plugin settings e2e', () => {
       expect(serializedManager.methods).toEqual(expect.arrayContaining([
         'updateConfig', 'listConfig',
       ]))
-      expect(serializedManager.data.entries).toEqual(expect.arrayContaining([
+      const snapshotPromise = waitForSocketMessage(socket, message => message.type === 'entry:snapshot' && message.body.id === managerEntry.id)
+      socket.send(JSON.stringify({ type: 'entry:subscribe', body: { id: managerEntry.id } }))
+      const snapshot = await snapshotPromise
+      expect(snapshot.body.data.entries).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: 'bridge', name: '@mtproto-relay/bridge' }),
       ]))
 

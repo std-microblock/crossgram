@@ -10,7 +10,7 @@ import {
   Show,
 } from 'solid-js'
 import { listPages, PageOutlet, reconcileExtensions } from './registry.js'
-import { navigate, useConnection } from './sdk.js'
+import { approveNavigation, navigate, useConnection } from './sdk.js'
 
 const SettingsPage = lazy(() => import('./pages/settings.js'))
 
@@ -67,6 +67,16 @@ export function App(props: { initialNotice?: string } = {}) {
   onCleanup(() => window.removeEventListener('popstate', updatePath))
   const go = (route: string) => navigate(connection.config.uiPath + route)
   const pages = createMemo(() => listPages(connection.state.entries))
+  const navigationGroups = createMemo(() => [
+    ...new Set([
+      'Workspace',
+      'Manage',
+      'Observe',
+      'Tools',
+      'Extensions',
+      ...pages().map((page) => page.group),
+    ]),
+  ])
   const entries = () => Object.entries(connection.state.entries)
   return (
     <div class="app-shell">
@@ -115,7 +125,7 @@ export function App(props: { initialNotice?: string } = {}) {
           </span>
           Overview
         </button>
-        <For each={['Workspace', 'Manage', 'Observe', 'Tools', 'Extensions']}>
+        <For each={navigationGroups()}>
           {(group) => (
             <Show when={pages().some((page) => page.group === group)}>
               <Show when={group !== 'Workspace'}>
@@ -183,6 +193,19 @@ export function App(props: { initialNotice?: string } = {}) {
                 onClick={() => setInitialNotice(undefined)}
               >
                 Dismiss
+              </button>
+            </div>
+          </Show>
+          <Show when={connection.state.updateAvailable}>
+            <div class="notice" role="status">
+              A new version is ready.{' '}
+              <button
+                class="button filled"
+                onClick={() => {
+                  if (approveNavigation()) location.reload()
+                }}
+              >
+                Reload WebUI
               </button>
             </div>
           </Show>

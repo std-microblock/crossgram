@@ -193,6 +193,8 @@ export function validateSchema(
 ): Issue[] {
   const fail = (message: string): Issue[] => [{ path, message }]
   if (depth > 64) return fail('Configuration is nested too deeply')
+  if (isExpression(value))
+    return value.__jsExpr.trim() ? [] : fail('Enter a server-side expression')
   if (value === undefined || value === null) {
     if (schema.meta.default !== undefined) return []
     if (schema.type === 'const' && Object.is(value, schema.value)) return []
@@ -300,4 +302,37 @@ export function validateSchema(
     default:
       return []
   }
+}
+
+export function isExpression(value: unknown): value is { __jsExpr: string } {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    Object.keys(value).length === 1 &&
+    Object.hasOwn(value, '__jsExpr') &&
+    typeof (value as any).__jsExpr === 'string'
+  )
+}
+/** Preserve expression wrappers in saved YAML; evaluate only on the trusted server for validation. */
+export function configExpression(value: unknown, depth = 0): string {
+  if (depth > 64) throw new Error('Configuration is nested too deeply')
+  if (isExpression(value)) return '(' + value.__jsExpr + ')'
+  if (Array.isArray(value))
+    return (
+      '[' +
+      value.map((item) => configExpression(item, depth + 1)).join(',') +
+      ']'
+    )
+  if (value && typeof value === 'object')
+    return (
+      '({' +
+      Object.entries(value)
+        .map(
+          ([key, item]) =>
+            JSON.stringify(key) + ':' + configExpression(item, depth + 1),
+        )
+        .join(',') +
+      '})'
+    )
+  return JSON.stringify(value) ?? 'undefined'
 }

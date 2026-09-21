@@ -22,6 +22,16 @@ describe('Crossgram Linux deployment', () => {
     expect(stages.every((stage) => stage.startsWith('100755 '))).toBe(true)
   })
 
+  it('selects the Solid WebUI in both checked-in application configs', () => {
+    for (const file of ['app.yml', 'deploy/app.production.yml']) {
+      const source = readFileSync(join(root, file), 'utf8')
+      expect(source, file).toContain("name: 'cordis-webui-solidjs'")
+      expect(source, file).not.toContain("'@cordisjs/plugin-webui'")
+      expect(source, file).not.toContain('@cordisjs/plugin-server-webui')
+    }
+    expect(readFileSync(join(root, 'app.yml'), 'utf8')).toContain("name: 'cordis-webui-solidjs/server'")
+  })
+
   it('runs as an unprivileged hardened systemd service with persistent state', () => {
     const unit = readFileSync(join(root, 'deploy', 'crossgram.service'), 'utf8')
     expect(unit).toContain('User=crossgram')
@@ -47,6 +57,9 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain('verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}')
     expect(config).toContain("name: '@mtproto-relay/mtproto-statistics'")
     expect(config).toContain("name: '@mtproto-relay/update-store-database'")
+    expect(config).toContain("name: 'cordis-webui-solidjs'")
+    expect(config).not.toContain("'@cordisjs/plugin-webui'")
+    expect(config).not.toContain('@cordisjs/plugin-server-webui')
     expect(config).toContain("name: '@cordisjs/plugin-loader-webui'")
     expect(config).toContain("name: '@cordisjs/plugin-database-postgres'")
     expect(config).toContain('password:\n          __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD')

@@ -17,6 +17,7 @@ export async function buildClient(options: ClientBuildOptions) {
     root: options.root,
     base: './',
     plugins: [solid(), publicAssets()],
+    esbuild: { jsx: 'automatic', jsxImportSource: 'solid-js' },
     build: {
       target: 'es2022',
       outDir: options.outDir ?? 'dist',

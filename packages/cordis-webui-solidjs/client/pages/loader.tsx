@@ -16,6 +16,7 @@ import {
   PageHeader,
   useAction,
 } from '../components.js'
+import { configExpression } from '../schema-model.js'
 import { SchemaForm } from '../schema.js'
 
 export interface ConfigEntry {
@@ -257,7 +258,7 @@ function PluginDetail(props: {
     if (runtime()?.schema) {
       const result = await props.data.evalConfig({
         id: props.entry.id,
-        expr: '(' + JSON.stringify(config) + ')',
+        expr: configExpression(config),
         schema: runtime()!.schema,
       })
       if (result.error)

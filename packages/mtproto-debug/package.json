@@ -18,21 +18,30 @@
         "server",
         "webui"
       ]
+    },
+    "webui": {
+      "framework": "solid",
+      "entry": "client/index.ts",
+      "pages": [
+        {
+          "path": "/mtproto-debug",
+          "title": "MTProto capture",
+          "icon": "⇄",
+          "group": "Observe"
+        }
+      ]
     }
   },
   "peerDependencies": {
     "@cordisjs/plugin-server": "^1.6.2",
-    "@cordisjs/plugin-webui": "^0.8.1",
     "@mtproto-relay/mtproto": "workspace:*",
-    "cordis": "^4.0.0-rc.5"
+    "cordis": "^4.0.0-rc.5",
+    "cordis-webui-solidjs": "workspace:*"
   },
   "devDependencies": {
-    "@cordisjs/client": "patch:@cordisjs/client@npm%3A0.8.2#~/.yarn/patches/@cordisjs-client-npm-0.8.2-24971d304e.patch",
-    "@tanstack/vue-virtual": "^3.13.35",
-    "@vue/test-utils": "^2.4.11",
     "happy-dom": "^20.11.2",
-    "vitest": "^4.1.10",
-    "vue": "^3.5.41"
+    "solid-js": "^1.9.9",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "long": "^5.3.2",

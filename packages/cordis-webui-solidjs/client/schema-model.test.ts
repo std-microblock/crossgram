@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import z from 'schemastery'
 import {
   decodeSchema,
+  configExpression,
+  isExpression,
   initialValue,
   setAt,
   unionIndex,
@@ -130,5 +132,27 @@ describe('Schemastery wire model', () => {
       ),
     ).toBe('<b>Text</b>')
     expect(() => decodeSchema({ uid: 1, refs: {} })).toThrow('Invalid')
+  })
+})
+
+describe('server-side configuration expressions', () => {
+  it('serializes expression leaves without evaluating them or replacing stored wrappers', () => {
+    const config = {
+      literal: 'env.SECRET',
+      dynamic: { __jsExpr: 'env.SECRET' },
+      array: [1, { __jsExpr: '40 + 2' }],
+    }
+    expect(configExpression(config)).toBe(
+      '({"literal":"env.SECRET","dynamic":(env.SECRET),"array":[1,(40 + 2)]})',
+    )
+    expect(config.dynamic).toEqual({ __jsExpr: 'env.SECRET' })
+    expect(isExpression({ __jsExpr: 'value', extra: 1 })).toBe(false)
+  })
+  it('defers expression type validation to the server but rejects empty expressions', () => {
+    const schema = decodeSchema(z.number().min(1).required())
+    expect(validateSchema(schema, { __jsExpr: 'env.PORT' })).toEqual([])
+    expect(validateSchema(schema, { __jsExpr: ' ' })[0].message).toContain(
+      'expression',
+    )
   })
 })

@@ -9,7 +9,4 @@ export const builtinClients: Record<string, string> = {
   '@cordisjs/plugin-server-webui': 'server',
   '@cordisjs/plugin-insight': 'insight',
   '@cordisjs/plugin-webui-sso': 'sso',
-  '@mtproto-relay/bridge': 'bridge',
-  '@mtproto-relay/mtproto-debug': 'debug',
-  '@mtproto-relay/mtproto-statistics': 'statistics',
 }

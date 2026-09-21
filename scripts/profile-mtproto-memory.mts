@@ -48,7 +48,7 @@ async function server() {
     if (fullApp) {
         const [{ default: Database }, { default: SQLite }, { default: Http }, { default: WebUI }, bridge, mergedForward, resources, platform, { default: UpdateStore }] = await Promise.all([
             import('@cordisjs/plugin-database'), import('@cordisjs/plugin-database-sqlite'),
-            import('@cordisjs/plugin-server'), import('@cordisjs/plugin-webui'),
+            import('@cordisjs/plugin-server'), import('cordis-webui-solidjs'),
             import('../packages/bridge/src/index.js'), import('../packages/merged-forward/src/index.js'),
             import('../packages/telegram-resources/src/index.js'), import('../packages/platform-static/src/index.js'),
             import('../packages/update-store-database/src/index.js'),
@@ -56,7 +56,7 @@ async function server() {
         const directory = resolve('work/memory-profile');
         await mkdir(directory, { recursive: true });
         temporaryDirectory = await mkdtemp(join(directory, 'wire-app-'));
-        fibers.push(ctx.plugin(Database), ctx.plugin(SQLite, { path: ':memory:' }), ctx.plugin(Http, { host: '127.0.0.1', port: 0 }), ctx.plugin(WebUI, { devMode: false, uiPath: '', apiPath: '/api', selfUrl: '' }), ctx.plugin(UpdateStore, { retention: 10000 }), ctx.plugin(bridge, { uploadPath: join(temporaryDirectory, 'uploads') }), ctx.plugin(mergedForward), ctx.plugin(resources), ctx.plugin(platform, { eventIntervalMs: 0, historySize: 10000, mediaPath: join(temporaryDirectory, 'media') }));
+        fibers.push(ctx.plugin(Database), ctx.plugin(SQLite, { path: ':memory:' }), ctx.plugin(Http, { host: '127.0.0.1', port: 0 }), ctx.plugin(WebUI, { uiPath: '', apiPath: '/api' }), ctx.plugin(UpdateStore, { retention: 10000 }), ctx.plugin(bridge, { uploadPath: join(temporaryDirectory, 'uploads') }), ctx.plugin(mergedForward), ctx.plugin(resources), ctx.plugin(platform, { eventIntervalMs: 0, historySize: 10000, mediaPath: join(temporaryDirectory, 'media') }));
         await Promise.all(fibers);
         await sleep(100);
         let identity: any;

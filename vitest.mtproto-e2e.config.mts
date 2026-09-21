@@ -8,6 +8,7 @@ export default defineConfig({
   test: {
     include: ['packages/**/*.e2e.test.{ts,tsx}', 'packages/**/e2e.test.{ts,tsx}'],
     exclude: ['packages/cordis-webui-solidjs/**'],
+    setupFiles: ['vitest.plugins-tsx.mts'],
     pool: 'threads',
     testTimeout: 30_000,
   },

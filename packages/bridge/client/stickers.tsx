@@ -1,13 +1,13 @@
 /** @jsxImportSource solid-js */
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
-import type { StickerPackDashboardData } from '../../../bridge/src/dashboard-types.js'
-import { useRpc, type PageProps } from '../sdk.js'
+import type { StickerPackDashboardData } from '../src/dashboard-types.js'
+import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
 import {
   ActionError,
   LiveContent,
   PageHeader,
   useAction,
-} from '../components.js'
+} from 'cordis-webui-solidjs/components'
 export default function StickersPage(props: PageProps) {
   const rpc = useRpc<StickerPackDashboardData>(props.entryId),
     action = useAction()

@@ -1,21 +1,5 @@
-export function pageSlice<T>(
-  items: readonly T[],
-  page: number,
-  size = 50,
-): T[] {
-  return items.slice(Math.max(0, page) * size, (Math.max(0, page) + 1) * size)
-}
 export function stripAnsi(value = '') {
   return value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-}
-export function displayValue(value: unknown): string {
-  return value === null
-    ? 'null'
-    : value === undefined
-      ? '—'
-      : typeof value === 'object'
-        ? JSON.stringify(value)
-        : String(value)
 }
 export function parseCell(
   text: string,
@@ -81,41 +65,5 @@ export function safeHttpURL(value: string): string {
   return url.href
 }
 /** Bounded decoding prevents giant responses from freezing the interface. */
-export async function readResponse(
-  response: Response,
-  limit = 1024 * 1024,
-  progress?: (text: string) => void,
-): Promise<{ text: string; truncated: boolean }> {
-  const reader = response.body?.getReader()
-  if (!reader) return { text: '', truncated: false }
-  const decoder = new TextDecoder()
-  let text = '',
-    bytes = 0,
-    truncated = false,
-    lastProgress = 0
-  try {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      const remaining = limit - bytes
-      text += decoder.decode(value.subarray(0, Math.max(0, remaining)), {
-        stream: true,
-      })
-      bytes += value.length
-      if (progress && performance.now() - lastProgress > 100) {
-        progress(text)
-        lastProgress = performance.now()
-      }
-      if (bytes > limit) {
-        truncated = true
-        await reader.cancel()
-        break
-      }
-    }
-    text += decoder.decode()
-  } finally {
-    reader.releaseLock()
-  }
-  progress?.(text)
-  return { text, truncated }
-}
+
+export { pageSlice, displayValue, readResponse } from '../utils.js'

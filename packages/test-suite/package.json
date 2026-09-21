@@ -12,7 +12,6 @@
     "@cordisjs/plugin-loader-webui": "^0.10.1",
     "@cordisjs/plugin-server": "patch:@cordisjs/plugin-server@npm%3A1.7.0#~/.yarn/patches/@cordisjs-plugin-server-npm-1.7.0-d8ed794d31.patch",
     "@cordisjs/plugin-timer": "^1.1.2",
-    "@cordisjs/plugin-webui": "patch:@cordisjs/plugin-webui@npm%3A0.8.2#~/.yarn/patches/@cordisjs-plugin-webui-npm-0.8.2-3447c0a6ec.patch",
     "@fuman/io": "^0.0.21",
     "@fuman/utils": "^0.0.21",
     "@mtcute/core": "^0.32.1",
@@ -33,6 +32,7 @@
     "@mtproto-relay/update-store-memory": "workspace:*",
     "@satorijs/core": "^4.6.0",
     "cordis": "4.0.0-rc.7",
+    "cordis-webui-solidjs": "workspace:*",
     "long": "^5.3.2",
     "node-telegram-bot-api": "^1.2.0"
   }

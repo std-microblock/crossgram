@@ -20,7 +20,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import Server from '@cordisjs/plugin-server'
-import WebUI from '@cordisjs/plugin-webui'
+import WebUI from 'cordis-webui-solidjs'
 import {
   Mtproto, AbridgedPacketCodec, CURRENT_API_LAYER, generateRsaKeyPair, type MtprotoDebugEvent,
 } from '@mtproto-relay/mtproto'
@@ -407,7 +407,7 @@ async function startApp(options: {
     ctx.plugin(Database),
     ctx.plugin(SQLiteDriver, { path: options.databasePath ?? ':memory:' }),
     ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
-    ctx.plugin(WebUI, { devMode: false, uiPath: '', apiPath: '/api', selfUrl: '' }),
+    ctx.plugin(WebUI, { uiPath: '', apiPath: '/api' }),
     ctx.plugin(Mtproto, {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,

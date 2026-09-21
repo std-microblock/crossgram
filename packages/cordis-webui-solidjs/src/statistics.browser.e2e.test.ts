@@ -31,12 +31,12 @@ describe('Solid statistics with the real collector and runtime sampler', () => {
       await vi.waitFor(() =>
         expect(
           Object.values(ui.entries).some(
-            (entry) => entry.module === 'statistics',
+            (entry) => entry.module === '@mtproto-relay/mtproto-statistics',
           ),
         ).toBe(true),
       )
       const entry = Object.values(ui.entries).find(
-        (entry) => entry.module === 'statistics',
+        (entry) => entry.module === '@mtproto-relay/mtproto-statistics',
       )!
       const connection = {
         id: 'stats-connection',

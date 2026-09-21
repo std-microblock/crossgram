@@ -150,8 +150,8 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       }
       const entry = ui.addEntry(
         {
-          baseUrl: import.meta.url,
-          client: 'bridge',
+          baseUrl: new URL('../../bridge/src/index.ts', import.meta.url).href,
+          manifest: '../dist/manifest.json',
           routes: ['/platform-accounts', '/sticker-packs', '/bots'],
         },
         data,
@@ -244,7 +244,10 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
         .poll(() => dialog.getByLabel('Telegram login link').inputValue())
         .toBe(tokenUrl)
       expect(
-        requests.some((url) => url.includes('/console/assets/qr-worker-')),
+        requests.some(
+          (url) =>
+            url.includes('/console/-/modules/') && url.includes('/qr-worker-'),
+        ),
       ).toBe(true)
       expect(approvals).toEqual([])
       await dialog

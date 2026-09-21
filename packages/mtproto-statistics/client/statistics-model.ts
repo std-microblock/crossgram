@@ -39,14 +39,6 @@ export function sparkPath(values: readonly number[]): string {
     )
     .join(' ')
 }
-export function formatMs(value: number): string {
-  if (!Number.isFinite(value)) return '—'
-  return value < 1
-    ? Math.round(value * 1000) + ' µs'
-    : value < 1000
-      ? value.toFixed(value < 10 ? 2 : 1) + ' ms'
-      : (value / 1000).toFixed(2) + ' s'
-}
 export function formatPercent(value: number): string {
   return Number.isFinite(value) ? (value * 100).toFixed(2) + '%' : '—'
 }
@@ -75,3 +67,5 @@ export function distributionSlices(
     slices.push({ label: 'Other methods', value: total - represented })
   return slices
 }
+
+export { formatMs } from "cordis-webui-solidjs/utils"

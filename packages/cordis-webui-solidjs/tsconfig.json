@@ -8,14 +8,21 @@
       "es2024",
       "dom",
       "dom.iterable"
-    ]
+    ],
+    "outDir": "lib"
   },
   "include": [
     "src/**/*.ts",
     "client/**/*.ts",
     "client/**/*.tsx",
     "vite.config.ts",
-    "build.ts"
+    "build.ts",
+    "../bridge/client/**/*.ts",
+    "../bridge/client/**/*.tsx",
+    "../mtproto-debug/client/**/*.ts",
+    "../mtproto-debug/client/**/*.tsx",
+    "../mtproto-statistics/client/**/*.ts",
+    "../mtproto-statistics/client/**/*.tsx"
   ],
   "exclude": [
     "dist"

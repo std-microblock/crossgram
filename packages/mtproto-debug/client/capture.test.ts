@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   parseCaptureQuery,
   queryCapture,
-} from '../../mtproto-debug/src/capture-api.js'
-import type { CapturedMtprotoEvent } from '../../mtproto-debug/src/types.js'
+} from '../src/capture-api.js'
+import type { CapturedMtprotoEvent } from '../src/types.js'
 import {
   CAPTURE_POLL_MS,
   useCapturePages,

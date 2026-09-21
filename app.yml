@@ -173,7 +173,7 @@
   label: WebUI
   config:
     - id: 4430a808
-      name: '@cordisjs/plugin-webui'
+      name: 'cordis-webui-solidjs'
     - id: f64a9366
       name: '@cordisjs/plugin-database-webui'
     - id: 03ebc689
@@ -189,7 +189,7 @@
     - id: 539bc93a
       name: '@cordisjs/plugin-notifier'
     - id: 126b4c42
-      name: '@cordisjs/plugin-server-webui'
+      name: 'cordis-webui-solidjs/server'
     - id: f9c1a8b2
       name: '@cordisjs/plugin-webui-sso'
 - id: 375b963c

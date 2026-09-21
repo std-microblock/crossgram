@@ -1,13 +1,13 @@
 /** @jsxImportSource solid-js */
 import { createMemo, createSignal, For, Show } from 'solid-js'
-import type { BotDashboardData } from '../../../bridge/src/dashboard-types.js'
-import { useRpc, type PageProps } from '../sdk.js'
+import type { BotDashboardData } from '../src/dashboard-types.js'
+import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
 import {
   ActionError,
   LiveContent,
   PageHeader,
   useAction,
-} from '../components.js'
+} from 'cordis-webui-solidjs/components'
 import { botLink, copyText } from './bridge-model.js'
 export default function BotsPage(props: PageProps) {
   const rpc = useRpc<BotDashboardData>(props.entryId),

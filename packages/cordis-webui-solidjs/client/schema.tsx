@@ -17,6 +17,7 @@ import {
   description,
   getAt,
   initialValue,
+  isExpression,
   labelFor,
   safeKey,
   setAt,
@@ -498,6 +499,32 @@ export function SchemaField(props: FieldProps) {
           </label>
           <Show
             when={
+              !disabled() &&
+              schema().type !== 'const' &&
+              schema().type !== 'never'
+            }
+          >
+            <button
+              type="button"
+              class="field-reset"
+              aria-label={
+                (isExpression(value())
+                  ? 'Use literal for '
+                  : 'Use expression for ') + props.label
+              }
+              onClick={() =>
+                props.onChange(
+                  isExpression(value())
+                    ? initialValue(schema())
+                    : { __jsExpr: JSON.stringify(value()) ?? 'undefined' },
+                )
+              }
+            >
+              {isExpression(value()) ? 'Use literal' : 'Expression'}
+            </button>
+          </Show>
+          <Show
+            when={
               props.value !== undefined &&
               !schema().meta.required &&
               !disabled()
@@ -518,7 +545,22 @@ export function SchemaField(props: FieldProps) {
             {hint()}
           </p>
         </Show>
-        {render()}
+        <Show when={isExpression(value())} fallback={render()}>
+          <textarea
+            id={id}
+            aria-label={props.label + ' expression'}
+            spellcheck={false}
+            disabled={disabled()}
+            value={value().__jsExpr}
+            onInput={(event) =>
+              props.onChange({ __jsExpr: event.currentTarget.value })
+            }
+          />
+          <small>
+            Evaluated on the server in this plugin's context. Use only code you
+            trust; the expression itself is preserved when saved.
+          </small>
+        </Show>
         <Show when={issue()}>
           <small class="field-error" role="alert">
             {issue()}

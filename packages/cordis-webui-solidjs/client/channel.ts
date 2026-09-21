@@ -14,6 +14,7 @@ export type ConnectionState =
   | 'reconnecting'
   | 'offline'
 export interface ClientConfig {
+  buildId?: string
   endpoint: string
   uiPath: string
   title: string
@@ -66,6 +67,7 @@ export class Connection {
     status: ConnectionState
     entries: Record<string, EntryMeta>
     error: string
+    updateAvailable: boolean
   }
   private setState: ReturnType<typeof createStore<Connection['state']>>[1]
   private channels = new Map<string, Channel>()
@@ -86,6 +88,7 @@ export class Connection {
       status: 'offline',
       entries: {},
       error: '',
+      updateAvailable: false,
     })
   }
   start() {
@@ -133,6 +136,19 @@ export class Connection {
         this.setState(
           'error',
           'Incompatible WebUI protocol. Reload after updating.',
+        )
+        this.stop()
+        return
+      }
+      if (
+        this.config.buildId &&
+        body.buildId &&
+        this.config.buildId !== body.buildId
+      ) {
+        this.setState('updateAvailable', true)
+        this.setState(
+          'error',
+          'A new WebUI build is available. Your current page is kept open; reload before making further changes.',
         )
         this.stop()
         return

@@ -125,6 +125,20 @@ describe('fine-grained Muon channel', () => {
   })
 })
 describe('Connection lifecycle', () => {
+  it('detects a changed server build without clearing metadata or replaying RPCs', () => {
+    const { connection, socket } = setup()
+    connection.config.buildId = 'old-build'
+    socket.receive('entry:init', {
+      version: 'solid-1',
+      buildId: 'new-build',
+      reset: true,
+      entries: {},
+    })
+    expect(connection.state.updateAvailable).toBe(true)
+    expect(connection.state.status).toBe('offline')
+    expect(connection.state.entries.test).toBeDefined()
+    expect(connection.state.error).toContain('new WebUI build')
+  })
   it('reference-counts subscriptions and drops large inactive state', () => {
     const { connection, socket } = setup()
     const a = connection.acquire<any>('test'),

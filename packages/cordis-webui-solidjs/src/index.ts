@@ -1,6 +1,7 @@
 import { Service, type Context } from 'cordis'
 import type {} from '@cordisjs/plugin-server'
 import type {} from '@cordisjs/plugin-hmr'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +12,17 @@ import { Client, type Socket } from './client.js'
 import { Entry, safeAsset } from './entry.js'
 import { PROTOCOL_VERSION, type EntryFiles } from './protocol.js'
 
+declare module 'cordis' {
+  interface Context {
+    webui: SolidWebUI
+  }
+  interface EnvData {
+    clientCount?: number
+  }
+  interface Events {
+    'webui/connection'(this: SolidWebUI, client: Client): void
+  }
+}
 export { Entry, Client }
 export type { EntryFiles } from './protocol.js'
 const MIME: Record<string, string> = {
@@ -23,6 +35,7 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.json': 'application/json',
 }
+const MISSING_BUILD_SHELL = `<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Crossgram WebUI not built</title></head><body style="margin:0;font-family:system-ui;background:#f8f9f1;color:#20241c"><main style="max-width:40rem;margin:12vh auto;padding:2rem"><h1 style="font-weight:500">The WebUI bundle is missing</h1><p>This server was started without its Solid WebUI build. Run <code>yarn build:webui</code> in the Crossgram checkout and restart the service.</p><p>All relay and platform services are unaffected; only this interface is unavailable.</p></main></body></html>`
 export interface Config {
   uiPath?: string
   apiPath?: string
@@ -40,6 +53,7 @@ export default class SolidWebUI extends Service {
     heartbeatTimeout: z.natural().min(1000).default(15_000),
   })
   readonly version = PROTOCOL_VERSION
+  buildId = ''
   readonly entries: Record<string, Entry> = Object.create(null)
   readonly clients: Record<string, Client> = Object.create(null)
   readonly config: Required<Config>
@@ -78,20 +92,27 @@ export default class SolidWebUI extends Service {
     })
   }
   async [Service.init]() {
-    const manifest = JSON.parse(
-      await readFile(resolve(this.root, '.vite/manifest.json'), 'utf8'),
-    )
-    const shell = manifest['index.html']
-    if (!shell?.file)
-      throw new Error(
-        'Build cordis-webui-solidjs before starting it (yarn build:webui)',
+    // A missing build must not crash-loop the whole application: serve a diagnosable page instead.
+    let manifest: Record<
+      string,
+      { file: string; css?: string[]; assets?: string[] }
+    >
+    try {
+      manifest = JSON.parse(
+        await readFile(resolve(this.root, '.vite/manifest.json'), 'utf8'),
       )
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      this.ctx.logger.warn(
+        'WebUI assets are missing from %C; run "yarn build:webui" before starting',
+        this.root,
+      )
+      this.shell = MISSING_BUILD_SHELL
+      this.serveRoutes()
+      return
+    }
     // Only exact build-manifest assets are served. Never fall through into filesystem paths.
-    for (const chunk of Object.values(manifest) as Array<{
-      file: string
-      css?: string[]
-      assets?: string[]
-    }>) {
+    for (const chunk of Object.values(manifest)) {
       for (const file of [
         chunk.file,
         ...(chunk.css ?? []),
@@ -119,7 +140,12 @@ export default class SolidWebUI extends Service {
       if (!this.assets.has(file))
         this.assets.set(file, await readFile(resolve(this.root, file)))
     const html = await readFile(resolve(this.root, 'index.html'), 'utf8')
+    this.buildId = createHash('sha256')
+      .update(JSON.stringify(manifest))
+      .digest('hex')
+      .slice(0, 16)
     const config = escapeScriptJSON({
+      buildId: this.buildId,
       ...this.config,
       endpoint: this.config.apiPath,
       version: this.version,
@@ -145,6 +171,10 @@ export default class SolidWebUI extends Service {
         '<title>Crossgram</title>',
         '<title>' + escapeHTML(this.config.title) + '</title>',
       )
+    this.serveRoutes()
+  }
+
+  private serveRoutes() {
     this.ctx.server.ws(this.config.apiPath, async (req, accept) => {
       // Browser WebSockets carry cookies, so reject cross-origin handshakes by default.
       // Authentication/ACL remains in the existing Cordis server route middleware.
@@ -237,8 +267,8 @@ export default class SolidWebUI extends Service {
   matchPath(path: string): boolean {
     if (['/', '/settings', '/notifications'].includes(path)) return true
     return Object.values(this.entries).some((entry) =>
-      (entry.files.routes ?? []).some((pattern) =>
-        pathToRegexp(pattern).regexp.test(path),
+      (entry.files.routes ?? entry.pages?.map((page) => page.path) ?? []).some(
+        (pattern) => pathToRegexp(pattern).regexp.test(path),
       ),
     )
   }

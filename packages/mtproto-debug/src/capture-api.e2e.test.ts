@@ -1,6 +1,6 @@
 import { Context } from 'cordis'
 import Server from '@cordisjs/plugin-server'
-import WebUI from '@cordisjs/plugin-webui'
+import WebUI from 'cordis-webui-solidjs'
 import { describe, expect, it } from 'vitest'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import * as debug from './index.js'
@@ -13,7 +13,7 @@ describe('MTProto capture HTTP API e2e', () => {
     await Promise.resolve(disposeMtproto as any)
     const fibers = [
       ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
-      ctx.plugin(WebUI, { devMode: false, uiPath: '', apiPath: '/api', selfUrl: '' }),
+      ctx.plugin(WebUI, { uiPath: '', apiPath: '/api' }),
       ctx.plugin(debug, { maxEvents: 100 }),
     ]
     await Promise.all(fibers)

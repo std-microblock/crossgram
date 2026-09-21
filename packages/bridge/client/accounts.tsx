@@ -11,16 +11,16 @@ import {
 import type {
   PlatformAccountDashboardData,
   PlatformAccountView,
-} from '../../../bridge/src/dashboard-types.js'
-import { useRpc, type PageProps } from '../sdk.js'
+} from '../src/dashboard-types.js'
+import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
 import {
   ActionError,
   LiveContent,
   Modal,
   PageHeader,
   useAction,
-} from '../components.js'
-import { sessionToken } from '../session.js'
+} from 'cordis-webui-solidjs/components'
+import { sessionToken } from 'cordis-webui-solidjs/session'
 import {
   copyText,
   formatPhone,
@@ -342,7 +342,7 @@ function QrLogin(props: {
     if (!file) return
     void scan.run(async () => {
       setApproved(false)
-      const { decodeQrImage } = await import('../qr.js')
+      const { decodeQrImage } = await import('./qr.js')
       const result = await decodeQrImage(file, controller.signal)
       if (!parseTelegramLoginUrl(result))
         throw new Error('This is not a valid Telegram login QR code')

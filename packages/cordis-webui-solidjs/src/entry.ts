@@ -7,7 +7,7 @@ import type { Context } from 'cordis'
 import type WebUI from './index.js'
 import { boundHistory } from './history.js'
 import { builtinClients } from './catalogue.js'
-import type { EntryFiles, EntryMeta, Snapshot } from './protocol.js'
+import type { EntryFiles, EntryMeta, Snapshot, PageMeta } from './protocol.js'
 
 export interface Chunk {
   file: string
@@ -15,8 +15,12 @@ export interface Chunk {
   css?: string[]
   imports?: string[]
 }
-const packages = new Map<string, Promise<string>>()
-async function packageName(url: string): Promise<string> {
+interface PackageInfo {
+  name: string
+  webui?: { framework?: string; pages?: PageMeta[] }
+}
+const packages = new Map<string, Promise<PackageInfo>>()
+async function packageInfo(url: string): Promise<PackageInfo> {
   let directory = dirname(fileURLToPath(url))
   const cached = packages.get(directory)
   if (cached) return cached
@@ -26,7 +30,8 @@ async function packageName(url: string): Promise<string> {
         const pkg = JSON.parse(
           await readFile(resolve(directory, 'package.json'), 'utf8'),
         )
-        if (typeof pkg.name === 'string') return pkg.name
+        if (typeof pkg.name === 'string')
+          return { name: pkg.name, webui: pkg.cordis?.webui }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       }
@@ -46,6 +51,7 @@ export class Entry<T extends object = any> {
   readonly ready: Promise<void>
   readonly dispose: () => void
   module = ''
+  pages?: PageMeta[]
   manifest?: {
     url: string
     path: string
@@ -79,11 +85,32 @@ export class Entry<T extends object = any> {
     })
   }
   private async initialize() {
-    const name = await packageName(this.files.baseUrl)
+    const pkg = await packageInfo(this.files.baseUrl)
+    const name = pkg.name
+    this.pages =
+      this.files.pages ??
+      (pkg.webui?.framework === 'solid' ? pkg.webui.pages : undefined)
+    if (
+      this.pages &&
+      (!Array.isArray(this.pages) ||
+        this.pages.length > 128 ||
+        this.pages.some(
+          (page) =>
+            !page ||
+            typeof page.path !== 'string' ||
+            !page.path.startsWith('/') ||
+            typeof page.title !== 'string' ||
+            typeof page.icon !== 'string',
+        ))
+    )
+      throw new Error('Invalid Solid page metadata')
     this.module = this.files.client ?? builtinClients[name] ?? name
     boundHistory(this.module, this.data)
     if (!Object.values(builtinClients).includes(this.module)) {
-      if (!this.files.client || !this.files.manifest)
+      if (
+        (!this.files.client && pkg.webui?.framework !== 'solid') ||
+        !this.files.manifest
+      )
         throw new Error(
           'A third-party WebUI entry must declare a Solid client and manifest: ' +
             name,
@@ -160,7 +187,8 @@ export class Entry<T extends object = any> {
   toJSON(): EntryMeta {
     return {
       module: this.module,
-      routes: this.files.routes ?? [],
+      pages: this.pages,
+      routes: this.files.routes ?? this.pages?.map((page) => page.path) ?? [],
       files: this.webui.getEntryFiles(this),
       entryId: this.ctx.get('loader')?.locate(),
       methods: Object.keys(this.data ?? {}).filter(

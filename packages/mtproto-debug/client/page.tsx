@@ -1,371 +1,555 @@
-/** @jsxImportSource vue */
-/** @jsxRuntime automatic */
-
-import type { Context } from 'cordis'
-import { computed, defineComponent, nextTick, onBeforeUnmount, onMounted, ref, resolveComponent, Teleport, watch } from 'vue'
-import { useRpc } from '@cordisjs/client'
-import { useVirtualizer } from '@tanstack/vue-virtual'
-import { countGroupedEvents, getRpcResultMetrics, groupRpcEvents } from '../src/event-groups.js'
-import { useCapturePages } from './capture.js'
-import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
-import './style.css'
-
-const JsonNode = defineComponent({
-  name: 'MtprotoJsonNode',
-  props: {
-    name: { type: String, default: '' },
-    value: { required: false },
-    depth: { type: Number, default: 0 },
-  },
-  setup(props) {
-    const expanded = ref(props.depth === 0)
-    return () => {
-      const value = props.value as unknown
-      const prefix = props.name
-        ? <><span class="json-key">{props.name}</span><span>: </span></>
-        : null
-      if (value === null) {
-        return <div class="json-line">{prefix}<span class="json-null">null</span></div>
-      }
-      if (Array.isArray(value) || (typeof value === 'object' && value)) {
-        const entries = Object.entries(value as Record<string, unknown>)
-        const open = Array.isArray(value) ? '[' : '{'
-        const close = Array.isArray(value) ? ']' : '}'
-        return <div class="json-node">
-          <button
-            class="json-toggle"
-            type="button"
-            aria-expanded={expanded.value}
-            onClick={() => { expanded.value = !expanded.value }}
-          >
-            <span class={['json-chevron', { expanded: expanded.value }]}>{'\u203a'}</span>
-            {prefix}
-            <span class="json-bracket">{open}</span>
-            {!expanded.value && <span class="json-summary">
-              {entries.length} {Array.isArray(value) ? 'items' : 'keys'}
-            </span>}
-            {!expanded.value && <span class="json-bracket">{close}</span>}
-          </button>
-          {expanded.value && <div class="json-children">
-            {entries.map(([key, item]) => <JsonNode key={key} name={key} value={item} depth={props.depth + 1} />)}
-            <div class="json-line json-bracket">{close}</div>
-          </div>}
-        </div>
-      }
-      const type = typeof value
-      const text = type === 'string' ? JSON.stringify(value) : String(value)
-      return <div class="json-line">
-        {prefix}
-        <span class={`json-${type}`}>{text}</span>
-      </div>
+/** @jsxImportSource solid-js */
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import type {
+  CapturedMtprotoEvent,
+  MtprotoDebugData,
+} from '../src/types.js'
+import {
+  getRpcResultMetrics,
+  groupRpcEvents,
+  type EventGroup,
+} from '../src/event-groups.js'
+import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
+import {
+  ActionError,
+  ConfirmAction,
+  LiveContent,
+  PageHeader,
+  useAction,
+} from 'cordis-webui-solidjs/components'
+import { useCapturePages, type CaptureFilters } from './capture.js'
+import { copyText, sameOriginPath } from 'cordis-webui-solidjs/utils'
+import { formatMs } from 'cordis-webui-solidjs/utils'
+export default function CapturePage(props: PageProps) {
+  const rpc = useRpc<MtprotoDebugData>(props.entryId),
+    action = useAction()
+  const [filters, setFilters] = createSignal<CaptureFilters>({}),
+    [expanded, setExpanded] = createSignal<number>()
+  const capture = useCapturePages(
+    () => rpc.data.apiPath,
+    filters,
+    () => rpc.ready,
+  )
+  const groups = createMemo(
+    () =>
+      new Map(
+        groupRpcEvents(capture.events()).map((group) => [
+          group.event.id,
+          group,
+        ]),
+      ),
+  )
+  const ids = createMemo(() => [...groups().keys()].reverse())
+  createEffect(() => {
+    if (expanded() !== undefined && !groups().has(expanded()!)) {
+      setExpanded(undefined)
+      capture.keepDetails([])
     }
-  },
-})
-
-export const EventRow = defineComponent({
-  name: 'MtprotoEventRow',
-  props: {
-    event: { type: Object as () => CapturedMtprotoEvent, required: true },
-    result: { type: Object as () => CapturedMtprotoEvent, required: false },
-    expanded: { type: Boolean, default: false },
-  },
-  emits: ['toggle', 'contextmenu'],
-  setup(props, { emit }) {
-    const showContextMenu = (mouseEvent: MouseEvent, target: CapturedMtprotoEvent) => {
-      mouseEvent.preventDefault()
-      mouseEvent.stopPropagation()
-      emit('contextmenu', { mouseEvent, target })
+  })
+  const setFilter = (key: keyof CaptureFilters, value: string) =>
+    setFilters((previous) => ({ ...previous, [key]: value }))
+  const toggle = (id: number) => {
+    if (expanded() === id) {
+      setExpanded(undefined)
+      capture.keepDetails([])
+      return
     }
-    return () => {
-      const event = props.event
-      const direction = event.direction === 'client->server' ? 'C -> S' : 'S -> C'
-      const rpcMetrics = getRpcResultMetrics(event, props.result)
-      return <article class={[
-        'debug-event',
-        `direction-${event.direction.replace('->', '-')}`,
-        rpcMetrics && `rpc-${rpcMetrics.state}`,
-      ]}>
-        <button
-          type="button"
-          class="event-header"
-          aria-expanded={props.expanded}
-          onClick={() => emit('toggle')}
-          onContextmenu={mouseEvent => showContextMenu(mouseEvent, event)}
-        >
-          <span class={['event-chevron', { expanded: props.expanded }]}>{'\u203a'}</span>
-          <code class="event-name" title={event.name}>{event.name}</code>
-          <time class="event-time" title="timestamp" datetime={new Date(event.timestamp).toISOString()}>{formatTime(event.timestamp)}</time>
-          <span class="direction-label" title="direction">{direction}</span>
-          <code class="event-connection" title="connection">{event.connectionId}</code>
-          <code class="event-message" title="message id">{event.messageId ?? '\u2014'}</code>
-          <code class="event-seq" title="sequence number">{event.seqNo === undefined ? '\u2014' : `seq:${event.seqNo}`}</code>
-          <code class="event-auth" title="auth key id">{event.authKeyId ? `key:${event.authKeyId}` : '\u2014'}</code>
-          <code class="event-session" title="session id">{event.sessionId ? `sid:${event.sessionId}` : '\u2014'}</code>
-          {rpcMetrics
-            ? <code
-              class={['rpc-duration', `rpc-duration-${rpcMetrics.state}`]}
-              title={`RPC returned in ${rpcMetrics.durationMs} ms`}
-            >{formatDuration(rpcMetrics.durationMs)}</code>
-            : <span class="rpc-duration-empty" aria-hidden="true">{`\u2014`}</span>}
-          {props.result
-            ? <code
-              class={['rpc-result-summary', `rpc-result-${rpcMetrics?.state ?? 'ok'}`]}
-              title={props.result.name}
-              onContextmenu={mouseEvent => showContextMenu(mouseEvent, props.result!)}
-            >result:{props.result.name}</code>
-            : <span class="event-result-empty" aria-hidden="true">{'\u2014'}</span>}
-          <span class="event-phase">{event.phase}</span>
-        </button>
-        {props.expanded && <div class="event-detail">
-          <div class="payload-label">payload</div>
-          {event.payloadOmitted ? <span>Loading payload…</span> : <JsonNode value={event.payload} depth={0} />}
-          {event.error && <div class="event-error">{event.error}</div>}
-          {props.result && <div class="rpc-result-detail">
-            <div class="payload-label">result payload</div>
-            {props.result.payloadOmitted ? <span>Loading payload…</span> : <JsonNode value={props.result.payload} depth={0} />}
-            {props.result.error && <div class="event-error">{props.result.error}</div>}
-          </div>}
-        </div>}
-      </article>
-    }
-  },
-})
-
-export const DebugPage = defineComponent({
-  name: 'MtprotoDebugPage',
-  setup() {
-    const data = useRpc<MtprotoDebugData>()
-    const filter = ref('')
-    const busy = ref(false)
-    const error = ref('')
-    const expanded = ref(new Set<number>())
-    const scrollElement = ref<HTMLElement | null>(null)
-    const typeFilter = ref<{ mode: 'include' | 'exclude', value: string }>()
-    const contextMenu = ref<{ x: number, y: number, event: CapturedMtprotoEvent }>()
-    const autoScroll = ref(true)
-    let lastScrollTop = 0
-
-    const capture = useCapturePages(data, filter, typeFilter)
-    const events = computed(() => capture.events.value.map(event => capture.details.value.get(event.id) ?? event))
-    const groups = computed(() => groupRpcEvents(events.value))
-    const visibleGroups = groups
-    const visibleEventCount = computed(() => countGroupedEvents(visibleGroups.value))
-    const virtualizer = useVirtualizer(computed(() => ({
-      count: visibleGroups.value.length,
-      getScrollElement: () => scrollElement.value,
-      estimateSize: () => 44,
-      getItemKey: (index: number) => visibleGroups.value[index]?.event.id ?? index,
-      initialRect: { width: 1200, height: 600 },
-      overscan: 12,
-    })))
-    const virtualRows = computed(() => virtualizer.value.getVirtualItems())
-    // Stable identity: an inline ref callback changes every render, which makes
-    // Vue tear down and re-attach the ref on every patch and re-measure every
-    // visible row (a forced synchronous layout per row, per update).
-    const measureRow = (element: unknown) => {
-      virtualizer.value.measureElement(element as HTMLElement | null)
-    }
-
-    const toggle = (id: number) => {
-      const next = new Set(expanded.value)
-      if (next.has(id)) next.delete(id)
-      else {
-        next.add(id)
-        const group = groups.value.find(item => item.event.id === id)
-        if (group) {
-          void capture.loadDetails(group.event)
-          if (group.result) void capture.loadDetails(group.result)
+    const group = groups().get(id)!
+    setExpanded(id)
+    capture.keepDetails([id, ...(group.result ? [group.result.id] : [])])
+    void capture.loadDetails(group.event)
+    if (group.result) void capture.loadDetails(group.result)
+  }
+  const rawLink = (id: number) => {
+    const url = new URL(sameOriginPath(rpc.data.apiPath))
+    url.searchParams.set('id', String(id))
+    url.searchParams.set('limit', '1')
+    return url.href
+  }
+  return (
+    <>
+      <PageHeader
+        title="MTProto capture"
+        description="Follow the conversation between your clients and the relay."
+        actions={
+          <>
+            <button
+              class="button filled"
+              disabled={action.busy() || !rpc.ready}
+              onClick={() =>
+                void action.run(async () => {
+                  await (rpc.data.capturing
+                    ? rpc.data.pause()
+                    : rpc.data.start())
+                  await capture.load('latest')
+                })
+              }
+            >
+              {rpc.data.capturing ? 'Pause capture' : 'Start capture'}
+            </button>
+            <ConfirmAction
+              label="Clear capture"
+              title="Clear all captured events?"
+              description="The in-memory capture buffer will be cleared. This does not disconnect clients."
+              action={async () => {
+                await rpc.data.clear()
+                setExpanded(undefined)
+                capture.keepDetails([])
+                await capture.load('latest')
+              }}
+            />
+          </>
         }
-      }
-      expanded.value = next
-    }
-    const closeContextMenu = () => { contextMenu.value = undefined }
-    const showContextMenu = (payload: { mouseEvent: MouseEvent, target: CapturedMtprotoEvent }) => {
-      contextMenu.value = {
-        x: Math.max(8, Math.min(payload.mouseEvent.clientX, window.innerWidth - 360)),
-        y: Math.max(8, Math.min(payload.mouseEvent.clientY, window.innerHeight - 120)),
-        event: payload.target,
-      }
-    }
-    const applyTypeFilter = (mode: 'include' | 'exclude') => {
-      if (!contextMenu.value) return
-      typeFilter.value = { mode, value: contextMenu.value.event.name }
-      closeContextMenu()
-    }
-    const isAtBottom = () => {
-      const element = scrollElement.value
-      return !element || element.scrollHeight - element.scrollTop - element.clientHeight <= 24
-    }
-    const onScroll = () => {
-      const currentScrollTop = scrollElement.value?.scrollTop ?? 0
-      autoScroll.value = currentScrollTop >= lastScrollTop && isAtBottom()
-      lastScrollTop = currentScrollTop
-    }
-    const onWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) autoScroll.value = false
-    }
-    const scrollToBottom = () => {
-      const lastIndex = visibleGroups.value.length - 1
-      if (lastIndex < 0 || !autoScroll.value) return
-      virtualizer.value.scrollToIndex(lastIndex, { align: 'end' })
-      const element = scrollElement.value
-      if (element) element.scrollTop = element.scrollHeight
-    }
-
-    watch(scrollElement, (element, previous) => {
-      previous?.removeEventListener('scroll', onScroll)
-      previous?.removeEventListener('wheel', onWheel)
-      element?.addEventListener('scroll', onScroll, { passive: true })
-      element?.addEventListener('wheel', onWheel, { passive: true })
-      lastScrollTop = element?.scrollTop ?? 0
-      autoScroll.value = isAtBottom()
-    }, { flush: 'post' })
-    watch(() => events.value[events.value.length - 1]?.id, async () => {
-      await nextTick()
-      scrollToBottom()
-    }, { flush: 'post' })
-    onMounted(() => window.addEventListener('pointerdown', closeContextMenu))
-    onBeforeUnmount(() => {
-      scrollElement.value?.removeEventListener('scroll', onScroll)
-      scrollElement.value?.removeEventListener('wheel', onWheel)
-      window.removeEventListener('pointerdown', closeContextMenu)
-    })
-
-    const run = async (action: 'start' | 'pause' | 'clear') => {
-      busy.value = true
-      error.value = ''
-      try {
-        await data.value[action]()
-        if (action === 'clear') expanded.value = new Set()
-        await capture.load('latest')
-      } catch (cause) {
-        error.value = cause instanceof Error ? cause.message : String(cause)
-      } finally {
-        busy.value = false
-      }
-    }
-
-    return () => {
-      const Layout = resolveComponent('k-layout') as ReturnType<typeof defineComponent>
-      const Icon = resolveComponent('k-icon') as ReturnType<typeof defineComponent>
-      const content = visibleGroups.value.length
-        ? <main ref={scrollElement} class="debug-virtual-viewport">
-          <div class="debug-virtual-content" style={{ height: `${virtualizer.value.getTotalSize()}px` }}>
-            {virtualRows.value.map((row) => {
-              const group = visibleGroups.value[row.index]
-              return <div
-                key={String(row.key)}
-                ref={measureRow}
-                class="debug-virtual-row"
-                data-index={row.index}
-                style={{ transform: `translateY(${row.start}px)` }}
-              >
-                <EventRow
-                  event={group.event}
-                  result={group.result}
-                  expanded={expanded.value.has(group.event.id)}
-                  onToggle={() => toggle(group.event.id)}
-                  onContextmenu={showContextMenu}
-                />
-              </div>
-            })}
+      />
+      <ActionError error={action.error() || capture.error()} />
+      <LiveContent ready={rpc.ready}>
+        <section class="panel stack capture-controls">
+          <div class="toolbar">
+            <label class="field grow">
+              <span>Search captured events</span>
+              <input
+                type="search"
+                value={filters().grep ?? ''}
+                placeholder="Method, payload text, connection…"
+                onInput={(event) =>
+                  setFilter('grep', event.currentTarget.value)
+                }
+              />
+            </label>
+            <button
+              class="button tonal"
+              aria-pressed={capture.live()}
+              onClick={() => capture.setLive(!capture.live())}
+            >
+              {capture.live() ? 'Pause live view' : 'Follow latest'}
+            </button>
           </div>
-        </main>
-        : <div class="empty-state">{filter.value || typeFilter.value ? 'No matching MTProto events.' : 'No MTProto events captured.'}</div>
-
-      return <>
-        <Layout class="mtproto-debug-page">{
-          {
-            header: () => <div class="debug-toolbar">
-              <button
-                class={['capture-button', { active: data.value.capturing }]}
-                type="button"
-                disabled={busy.value}
-                title={data.value.capturing ? 'Pause capture' : 'Start capture'}
-                onClick={() => run(data.value.capturing ? 'pause' : 'start')}
-              >
-                <Icon name={data.value.capturing ? 'pause' : 'play'} />
-                <span>{data.value.capturing ? 'Pause' : 'Start'}</span>
-              </button>
-              <label class="filter-field">
-                <Icon name="search" />
+          <details>
+            <summary>Advanced filters</summary>
+            <div class="capture-filter-grid">
+              <label class="field">
+                <span>Direction</span>
+                <select
+                  aria-label="Direction"
+                  value={filters().direction ?? ''}
+                  onChange={(event) =>
+                    setFilter('direction', event.currentTarget.value)
+                  }
+                >
+                  <option value="">Both directions</option>
+                  <option value="client->server">Client to server</option>
+                  <option value="server->client">Server to client</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Phase</span>
+                <select
+                  aria-label="Phase"
+                  value={filters().phase ?? ''}
+                  onChange={(event) =>
+                    setFilter('phase', event.currentTarget.value)
+                  }
+                >
+                  <option value="">All phases</option>
+                  <option>handshake</option>
+                  <option>message</option>
+                  <option>connection</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Connection ID</span>
                 <input
-                  value={filter.value}
-                  type="search"
-                  placeholder="Filter method, direction, payload..."
-                  aria-label="Filter captured MTProto events"
-                  onInput={event => { filter.value = (event.target as HTMLInputElement).value }}
+                  value={filters().connectionId ?? ''}
+                  onInput={(event) =>
+                    setFilter('connectionId', event.currentTarget.value)
+                  }
                 />
               </label>
-              {typeFilter.value && <button
-                class="type-filter-pill"
-                type="button"
-                title="Clear type filter"
-                onClick={() => { typeFilter.value = undefined }}
-              >
-                <span>{typeFilter.value.mode === 'include' ? 'only' : 'exclude'}: {typeFilter.value.value}</span>
-                <Icon name="close" />
-              </button>}
-              <button
-                class="icon-button"
-                type="button"
-                disabled={busy.value || !events.value.length}
-                title="Clear captured events"
-                aria-label="Clear captured events"
-                onClick={() => run('clear')}
-              ><Icon name="trash" /></button>
-              <button class="capture-button" type="button" aria-label="Load older events"
-                disabled={capture.loading.value || !capture.snapshot.value?.hasOlder}
-                onClick={() => capture.load('older')}>Older</button>
-              <button class="capture-button" type="button" aria-label="Load newer events"
-                disabled={capture.loading.value || !capture.snapshot.value?.hasNewer}
-                onClick={() => capture.load('newer')}>Newer</button>
-              <button class="capture-button" type="button" aria-label="Show latest events"
-                disabled={capture.loading.value} onClick={() => capture.load('latest')}>
-                {capture.live.value ? 'Live' : 'Latest'}
-              </button>
-              <div class="capture-stats">
-                <span>{visibleEventCount.value} / {capture.snapshot.value?.total ?? 0}</span>
-                {!!capture.snapshot.value?.dropped && <span>{capture.snapshot.value.dropped} dropped</span>}
-                <span class={['capture-state', { active: data.value.capturing }]}>{data.value.capturing ? 'capturing' : 'paused'}</span>
-              </div>
-              {(error.value || capture.error.value) && <span class="control-error" title={error.value || capture.error.value}>{error.value || capture.error.value}</span>}
-            </div>,
-            default: () => content,
-          }
-        }</Layout>
-        {contextMenu.value && <Teleport to="body">
-          <div
-            class="debug-context-menu"
-            style={{ left: `${contextMenu.value.x}px`, top: `${contextMenu.value.y}px` }}
-            onPointerdown={event => event.stopPropagation()}
-          >
-            <div class="context-menu-title">{contextMenu.value.event.name}</div>
-            <button type="button" onClick={() => applyTypeFilter('include')}>Only {contextMenu.value.event.name}</button>
-            <button type="button" onClick={() => applyTypeFilter('exclude')}>Exclude {contextMenu.value.event.name}</button>
+              <label class="field">
+                <span>Since</span>
+                <input
+                  placeholder="5m, 1h, or a timestamp"
+                  value={filters().since ?? ''}
+                  onInput={(event) =>
+                    setFilter('since', event.currentTarget.value)
+                  }
+                />
+              </label>
+              <label class="field">
+                <span>Exact payload field</span>
+                <input
+                  placeholder="payload.userId=123"
+                  value={filters().field ?? ''}
+                  onInput={(event) =>
+                    setFilter('field', event.currentTarget.value)
+                  }
+                />
+              </label>
+            </div>
+          </details>
+          <Show when={filters().typeName || filters().excludeName}>
+            <button
+              class="button outlined type-filter"
+              onClick={() =>
+                setFilters((value) => ({
+                  ...value,
+                  typeName: '',
+                  excludeName: '',
+                }))
+              }
+            >
+              {filters().typeName
+                ? 'Only: ' + filters().typeName
+                : 'Exclude: ' + filters().excludeName}{' '}
+              · clear
+            </button>
+          </Show>
+          <div class="toolbar">
+            <span class="chip">
+              {rpc.data.capturing ? 'Capturing' : 'Capture paused'}
+            </span>
+            <span class="muted">
+              {capture.events().length} shown / {capture.snapshot()?.total ?? 0}{' '}
+              retained · {capture.snapshot()?.dropped ?? 0} dropped
+            </span>
+            <Show when={capture.loading()}>
+              <span class="muted" role="status">
+                Updating…
+              </span>
+            </Show>
           </div>
-        </Teleport>}
-      </>
-    }
-  },
-})
-
-export default function apply(ctx: Context): void {
-  ctx.client.router.page({
-    path: '/mtproto-debug',
-    name: 'MTProto Debug',
-    icon: 'activity:default',
-    order: 120,
-    component: DebugPage,
+        </section>
+        <section class="capture-list" aria-label="Captured MTProto events">
+          <For each={ids()}>
+            {(id) => {
+              const group = () => groups().get(id)!,
+                event = () => capture.details().get(id) ?? group().event,
+                result = () =>
+                  group().result
+                    ? (capture.details().get(group().result!.id) ??
+                      group().result)
+                    : undefined
+              return (
+                <CaptureRow
+                  event={event()}
+                  result={result()}
+                  expanded={expanded() === id}
+                  toggle={() => toggle(id)}
+                  filter={(mode, name) =>
+                    setFilters((value) => ({
+                      ...value,
+                      typeName: mode === 'include' ? name : '',
+                      excludeName: mode === 'exclude' ? name : '',
+                    }))
+                  }
+                  rawLink={rawLink}
+                />
+              )
+            }}
+          </For>
+          <Show when={!ids().length && !capture.loading()}>
+            <div class="panel empty-state">
+              <h2>No matching events</h2>
+              <p>
+                Start capture or adjust your filters. Payloads are fetched only
+                when you expand an event.
+              </p>
+            </div>
+          </Show>
+        </section>
+        <div class="panel pagination capture-pagination">
+          <button
+            class="button outlined"
+            disabled={
+              !rpc.ready || capture.loading() || !capture.snapshot()?.hasOlder
+            }
+            aria-label="Load older events"
+            onClick={() => void capture.load('older')}
+          >
+            Older
+          </button>
+          <button
+            class="button tonal"
+            disabled={!rpc.ready || capture.loading()}
+            aria-label="Show latest events"
+            onClick={() => void capture.load('latest')}
+          >
+            Latest
+          </button>
+          <button
+            class="button outlined"
+            disabled={
+              !rpc.ready || capture.loading() || !capture.snapshot()?.hasNewer
+            }
+            aria-label="Load newer events"
+            onClick={() => void capture.load('newer')}
+          >
+            Newer
+          </button>
+        </div>
+      </LiveContent>
+    </>
+  )
+}
+function CaptureRow(props: {
+  event: CapturedMtprotoEvent
+  result?: CapturedMtprotoEvent
+  expanded: boolean
+  toggle: () => void
+  filter: (mode: 'include' | 'exclude', name: string) => void
+  rawLink: (id: number) => string
+}) {
+  const metrics = () => getRpcResultMetrics(props.event, props.result)
+  return (
+    <article
+      class="capture-row"
+      classList={{
+        'rpc-error': metrics()?.state === 'error',
+        expanded: props.expanded,
+      }}
+    >
+      <button
+        class="capture-row-header"
+        aria-expanded={props.expanded}
+        onClick={props.toggle}
+      >
+        <span class="capture-direction" aria-hidden="true">
+          {props.event.direction === 'client->server' ? '↗' : '↙'}
+        </span>
+        <div class="capture-row-title">
+          <strong>{props.event.name}</strong>
+          <small>
+            {props.event.connectionId} ·{' '}
+            {props.event.direction === 'client->server'
+              ? 'Client → server'
+              : 'Server → client'}{' '}
+            · {props.event.phase}
+          </small>
+        </div>
+        <div class="capture-row-meta">
+          <time datetime={new Date(props.event.timestamp).toISOString()}>
+            {new Date(props.event.timestamp).toLocaleTimeString()}
+          </time>
+          <Show when={metrics()}>
+            <span
+              class={'chip ' + (metrics()?.state === 'error' ? 'error' : '')}
+            >
+              {formatMs(metrics()!.durationMs)} · {metrics()!.state}
+            </span>
+          </Show>
+        </div>
+        <span aria-hidden="true">{props.expanded ? '−' : '+'}</span>
+      </button>
+      <Show when={props.result}>
+        <p class="capture-result">
+          Result: <code>{props.result!.name}</code>
+        </p>
+      </Show>
+      <Show when={props.expanded}>
+        <div class="capture-detail">
+          <EventDetail
+            event={props.event}
+            filter={props.filter}
+            rawLink={props.rawLink}
+          />
+          <Show when={props.result}>
+            {(result) => (
+              <EventDetail
+                event={result()}
+                filter={props.filter}
+                rawLink={props.rawLink}
+              />
+            )}
+          </Show>
+        </div>
+      </Show>
+    </article>
+  )
+}
+function EventDetail(props: {
+  event: CapturedMtprotoEvent
+  filter: (mode: 'include' | 'exclude', name: string) => void
+  rawLink: (id: number) => string
+}) {
+  const action = useAction()
+  return (
+    <section class="stack event-detail">
+      <div class="toolbar">
+        <strong class="grow">{props.event.name}</strong>
+        <button
+          class="button outlined"
+          onClick={() => props.filter('include', props.event.name)}
+        >
+          Only this type
+        </button>
+        <button
+          class="button outlined"
+          onClick={() => props.filter('exclude', props.event.name)}
+        >
+          Exclude this type
+        </button>
+        <a
+          class="button outlined"
+          href={props.rawLink(props.event.id)}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Raw event
+        </a>
+        <button
+          class="button tonal"
+          disabled={props.event.payloadOmitted}
+          onClick={() =>
+            void action.run(() =>
+              copyText(JSON.stringify(props.event.payload, null, 2)),
+            )
+          }
+        >
+          Copy payload
+        </button>
+      </div>
+      <dl class="event-metadata">
+        <For
+          each={Object.entries({
+            'Event ID': props.event.id,
+            'Message ID': props.event.messageId,
+            'Request ID': props.event.requestMessageId,
+            Sequence: props.event.seqNo,
+            'Auth key': props.event.authKeyId,
+            Session: props.event.sessionId,
+          })}
+        >
+          {([key, value]) => (
+            <div>
+              <dt>{key}</dt>
+              <dd>
+                <code>{value ?? '—'}</code>
+              </dd>
+            </div>
+          )}
+        </For>
+      </dl>
+      <ActionError error={action.error() || props.event.error || ''} />
+      <Show
+        when={!props.event.payloadOmitted}
+        fallback={
+          <p class="muted" role="status">
+            Loading payload…
+          </p>
+        }
+      >
+        <div class="json-tree">
+          <JsonTree value={props.event.payload} />
+        </div>
+      </Show>
+    </section>
+  )
+}
+export function JsonTree(props: {
+  value: unknown
+  name?: string
+  depth?: number
+}) {
+  const data = createMemo(() => props.value)
+  const [expanded, setExpanded] = createSignal(!props.depth),
+    [limit, setLimit] = createSignal(30),
+    [stringLimit, setStringLimit] = createSignal(800)
+  const object = () => data() !== null && typeof data() === 'object'
+  const keys = createMemo(() => {
+    const value = data()
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.keys(value)
+      : []
   })
-}
-
-function formatTime(timestamp: number): string {
-  const date = new Date(timestamp)
-  return `${date.toLocaleTimeString(undefined, { hour12: false })}.${String(date.getMilliseconds()).padStart(3, '0')}`
-}
-
-export function formatDuration(durationMs: number): string {
-  if (durationMs < 1_000) return `${durationMs} ms`
-  return `${(durationMs / 1_000).toFixed(2)} s`
+  const count = () => {
+    const value = data()
+    return Array.isArray(value) ? value.length : keys().length
+  }
+  const entries = createMemo(() => {
+    const value = data()
+    if (!object()) return []
+    if (Array.isArray(value))
+      return value
+        .slice(0, limit())
+        .map((item, index) => [String(index), item] as const)
+    return keys()
+      .slice(0, limit())
+      .map((key) => [key, (value as Record<string, unknown>)[key]] as const)
+  })
+  const rawText = createMemo(() => String(data()))
+  const text = createMemo(() =>
+    typeof data() === 'string'
+      ? JSON.stringify(rawText().slice(0, stringLimit()))
+      : rawText().slice(0, stringLimit()),
+  )
+  return (
+    <Show
+      when={object()}
+      fallback={
+        <div class="json-leaf">
+          <Show when={props.name}>
+            <strong>{props.name}: </strong>
+          </Show>
+          <span>{text()}</span>
+          <Show when={rawText().length > stringLimit()}>
+            <Show
+              when={stringLimit() < 16000}
+              fallback={
+                <span class="muted">
+                  {' '}
+                  Preview limited to 16,000 characters; use the raw event link
+                  for the full value.
+                </span>
+              }
+            >
+              <button
+                class="field-reset"
+                onClick={() =>
+                  setStringLimit(Math.min(16000, stringLimit() + 2000))
+                }
+              >
+                Show more ({rawText().length} characters total)
+              </button>
+            </Show>
+          </Show>
+        </div>
+      }
+    >
+      <div class="json-branch">
+        <button
+          class="json-toggle"
+          aria-expanded={expanded()}
+          disabled={(props.depth ?? 0) > 20}
+          onClick={() => setExpanded(!expanded())}
+        >
+          <span aria-hidden="true">{expanded() ? '−' : '+'}</span>
+          <strong>{props.name ?? 'Payload'}</strong>
+          <span class="muted">
+            {count()} {Array.isArray(data()) ? 'items' : 'keys'}
+          </span>
+        </button>
+        <Show when={expanded() && (props.depth ?? 0) <= 20}>
+          <div class="json-children">
+            <For each={entries()}>
+              {([key, value]) => (
+                <JsonTree
+                  name={key}
+                  value={value}
+                  depth={(props.depth ?? 0) + 1}
+                />
+              )}
+            </For>
+            <Show when={count() > limit()}>
+              <button
+                class="button outlined"
+                onClick={() => setLimit(limit() + 30)}
+              >
+                Show 30 more ({count() - limit()} remaining)
+              </button>
+            </Show>
+          </div>
+        </Show>
+      </div>
+    </Show>
+  )
 }

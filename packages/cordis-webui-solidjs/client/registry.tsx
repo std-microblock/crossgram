@@ -22,37 +22,6 @@ export interface RegisteredPage extends PageMeta {
   module: string
 }
 const known: Record<string, PageMeta[]> = {
-  bridge: [
-    {
-      path: '/platform-accounts',
-      title: 'Platform accounts',
-      icon: '○',
-      group: 'Workspace',
-    },
-    {
-      path: '/sticker-packs',
-      title: 'Sticker collections',
-      icon: '✦',
-      group: 'Workspace',
-    },
-    { path: '/bots', title: 'Your bots', icon: '◇', group: 'Workspace' },
-  ],
-  statistics: [
-    {
-      path: '/mtproto-statistics',
-      title: 'MTProto statistics',
-      icon: '▥',
-      group: 'Observe',
-    },
-  ],
-  debug: [
-    {
-      path: '/mtproto-debug',
-      title: 'MTProto capture',
-      icon: '⇄',
-      group: 'Observe',
-    },
-  ],
   sso: [{ path: '/sso', title: 'Your account', icon: '○', group: 'Workspace' }],
   market: [
     { path: '/market', title: 'Plugin library', icon: '◈', group: 'Manage' },
@@ -108,14 +77,7 @@ const known: Record<string, PageMeta[]> = {
   ],
   loader: [{ path: '/plugins', title: 'Plugins', icon: '◫', group: 'Manage' }],
 }
-const bridgePages: Record<string, Component<PageProps>> = {
-  '/platform-accounts': lazy(() => import('./pages/accounts.js')),
-  '/sticker-packs': lazy(() => import('./pages/stickers.js')),
-  '/bots': lazy(() => import('./pages/bots.js')),
-}
 const builtins: Record<string, Component<PageProps>> = {
-  statistics: lazy(() => import('./pages/statistics.js')),
-  debug: lazy(() => import('./pages/capture.js')),
   sso: lazy(() => import('./pages/sso.js')),
   market: lazy(() => import('./pages/market.js')),
   insight: lazy(() => import('./pages/insight.js')),
@@ -131,6 +93,7 @@ export function listPages(
 ): RegisteredPage[] {
   return Object.entries(entries).flatMap(([entryId, entry]) =>
     (
+      entry.pages ??
       known[entry.module] ??
       entry.routes.map((path) => ({
         path: path.replace(/\{.*$/, ''),
@@ -138,7 +101,12 @@ export function listPages(
         icon: '◇',
         group: 'Extensions',
       }))
-    ).map((page) => ({ ...page, entryId, module: entry.module })),
+    ).map((page) => ({
+      ...page,
+      group: page.group ?? 'Extensions',
+      entryId,
+      module: entry.module,
+    })),
   )
 }
 const extensions = new Map<
@@ -221,9 +189,7 @@ export function PageOutlet(props: { path: string }) {
     const page = selected()
     if (!page) return
     return (
-      (page.module === 'bridge'
-        ? bridgePages[page.path]
-        : builtins[page.module]) ??
+      builtins[page.module] ??
       extensionPage(
         connection.state.entries[page.entryId],
         page.path,

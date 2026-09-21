@@ -47,17 +47,6 @@ export function safeImageURL(value?: string): string | undefined {
     return
   }
 }
-export function sameOriginPath(value: string): string {
-  const url = new URL(value, location.href)
-  if (
-    url.origin !== location.origin ||
-    !['http:', 'https:'].includes(url.protocol) ||
-    url.username ||
-    url.password
-  )
-    throw new Error('The server provided an unsafe API address')
-  return url.href
-}
 export function remainingSeconds(
   validUntil: number | undefined,
   now: number,
@@ -71,26 +60,5 @@ export function formatPhone(value?: string): string {
     return '+888 ' + digits.slice(3).replace(/(\d)(?=(\d{3})+$)/g, '$1 ')
   return '+' + digits.replace(/(\d)(?=(\d{3})+$)/g, '$1 ')
 }
-export async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value)
-    return
-  }
-  const previous = document.activeElement as HTMLElement | null,
-    input = document.createElement('textarea')
-  input.value = value
-  input.setAttribute('readonly', '')
-  input.style.position = 'fixed'
-  input.style.opacity = '0'
-  document.body.append(input)
-  try {
-    input.select()
-    if (!document.execCommand('copy'))
-      throw new Error(
-        'Clipboard access was denied. Select and copy the value manually.',
-      )
-  } finally {
-    input.remove()
-    previous?.focus()
-  }
-}
+
+export { sameOriginPath, copyText } from "cordis-webui-solidjs/utils"

@@ -77,7 +77,7 @@
   label: WebUI
   config:
     - id: webui-core
-      name: '@cordisjs/plugin-webui'
+      name: 'cordis-webui-solidjs'
     - id: database-webui
       name: '@cordisjs/plugin-database-webui'
     - id: http-webui

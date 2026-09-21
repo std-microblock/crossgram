@@ -26,7 +26,7 @@ describe('real loader and Schemastery browser workflow', () => {
     )
     await writeFile(
       fixture,
-      "import z from 'schemastery'; export const name='schema-fixture'; export const Config=z.object({host:z.string().required().description('Server address'),port:z.natural().min(1).max(65535).default(8080),secret:z.string().role('secret'),hidden:z.string().hidden(),enabled:z.boolean().default(true),tags:z.array(String),mode:z.union(['fast','safe'])}); export function apply() {}",
+      "import z from 'schemastery'; export const name='schema-fixture'; export const Config=z.object({host:z.string().required().description('Server address'),port:z.natural().min(1).max(65535).default(8080),secret:z.string().role('secret'),hidden:z.string().hidden(),enabled:z.boolean().default(true),tags:z.array(String),mode:z.union(['fast','safe'])}); export function apply(ctx, config) { ctx.provide('testAppliedConfig', config) }",
       'utf8',
     )
     await writeFile(
@@ -73,7 +73,7 @@ describe('real loader and Schemastery browser workflow', () => {
       await page
         .getByRole('button', { name: 'Example bridge Disabled' })
         .click()
-      const host = page.getByLabel('Host', { exact: false })
+      const host = page.getByRole('textbox', { name: /^Host/ })
       await host.fill('new.example.test')
       await page.getByLabel('Port', { exact: true }).fill('70000')
       await page
@@ -110,6 +110,18 @@ describe('real loader and Schemastery browser workflow', () => {
         expect(saved).toContain('keep-hidden')
         expect(saved).toContain('keep-secret')
       })
+      await page
+        .getByRole('button', { name: 'Use expression for Port', exact: true })
+        .click()
+      await page
+        .getByLabel('Port expression', { exact: true })
+        .fill('5000 + 443')
+      await page
+        .getByRole('button', { name: 'Save changes', exact: true })
+        .click()
+      await vi.waitFor(async () =>
+        expect(await readFile(config, 'utf8')).toContain('5000 + 443'),
+      )
       expect(requests.some((url) => /assets\/loader-/.test(url))).toBe(true)
       expect(
         await page.evaluate(

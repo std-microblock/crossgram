@@ -2,9 +2,9 @@
 import { createSignal } from 'solid-js'
 import { render } from 'solid-js/web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AccountCard } from './accounts.js'
-import { StatsTable } from './statistics.js'
-import { JsonTree } from './capture.js'
+import { AccountCard } from '../../../bridge/client/accounts.js'
+import { StatsTable } from '../../../mtproto-statistics/client/page.js'
+import { JsonTree } from '../../../mtproto-debug/client/page.js'
 const disposers: (() => void)[] = []
 function mount(component: () => any) {
   const root = document.createElement('div')

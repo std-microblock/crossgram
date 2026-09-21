@@ -7,6 +7,7 @@ export default defineConfig({
   root: import.meta.dirname,
   base: './',
   plugins: [solid(), publicAssets()],
+  esbuild: { jsx: 'automatic', jsxImportSource: 'solid-js' },
   build: {
     target: 'es2022',
     manifest: true,

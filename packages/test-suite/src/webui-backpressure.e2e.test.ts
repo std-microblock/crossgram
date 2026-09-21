@@ -1,6 +1,6 @@
 import { Context } from 'cordis'
 import Server from '@cordisjs/plugin-server'
-import WebUI from '@cordisjs/plugin-webui'
+import WebUI from 'cordis-webui-solidjs'
 import { describe, expect, it, vi } from 'vitest'
 
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024
@@ -10,7 +10,7 @@ describe('Cordis WebUI socket backpressure e2e', () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
-      ctx.plugin(WebUI, { devMode: false, uiPath: '', apiPath: '/api', selfUrl: '' }),
+      ctx.plugin(WebUI, { uiPath: '', apiPath: '/api' }),
     ]
     await Promise.all(fibers)
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -31,7 +31,8 @@ describe('Cordis WebUI socket backpressure e2e', () => {
         get: () => MAX_BUFFERED_BYTES,
       })
 
-      ctx.webui.broadcast('entry:delta', { id: 'slow-client-test', value: 'blocked' })
+      // Global broadcasts reach every client; entry deltas are subscription-scoped now.
+      ctx.webui.broadcast('entry:init', { version: ctx.webui.version, entries: { 'slow-client-test': null } })
 
       await new Promise<void>((resolve) => socket.addEventListener('close', () => resolve(), { once: true }))
       await vi.waitFor(() => expect(Object.keys(ctx.webui.clients)).toHaveLength(0))

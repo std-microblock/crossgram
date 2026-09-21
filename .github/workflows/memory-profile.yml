@@ -36,7 +36,7 @@ jobs:
       - id: dependencies
         run: yarn install --immutable
       - name: Build WebUI assets locally on CI
-        run: yarn yakumo client
+        run: yarn build:webui
       - name: Unit regressions
         run: yarn vitest run packages/mtproto/src deploy/memory-profile.test.ts --maxWorkers=2
       - name: Encrypted TCP regressions

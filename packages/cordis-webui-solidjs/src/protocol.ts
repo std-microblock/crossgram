@@ -1,6 +1,13 @@
 import type { Delta, DeltaState } from '@cordisjs/muon'
 
+export interface PageMeta {
+  path: string
+  title: string
+  icon: string
+  group?: string
+}
 export interface EntryFiles {
+  pages?: PageMeta[]
   baseUrl: string
   source?: string
   manifest?: string
@@ -10,6 +17,7 @@ export interface EntryFiles {
   routes?: string[]
 }
 export interface EntryMeta {
+  pages?: PageMeta[]
   module: string
   files: string[]
   routes: string[]

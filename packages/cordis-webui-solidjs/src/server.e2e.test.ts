@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { chromium } from 'playwright'
 import SolidWebUI, { escapeScriptJSON, normalizePath } from './index.js'
 import { expectReconnectWithoutReload } from './browser-test-utils.js'
+import { resolve } from 'node:path'
 import { safeAsset } from './entry.js'
 
 async function start(uiPath = '') {
@@ -58,6 +59,30 @@ describe('Solid WebUI production service', () => {
       expect(safeAsset(value)).toBe(false)
     expect(normalizePath('/console///')).toBe('/console')
   })
+  it('serves a diagnosable page instead of crash-looping when the bundle is absent', async () => {
+    class MissingBundle extends SolidWebUI {
+      override root = resolve(import.meta.dirname, '../dist/__missing__')
+    }
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
+      ctx.plugin(MissingBundle),
+    ]
+    try {
+      await Promise.all(fibers)
+      await vi.waitFor(() =>
+        expect(fibers.map((fiber) => fiber.state)).toEqual([2, 2]),
+      )
+      const response = await fetch(ctx.server.baseUrl + '/', {
+        headers: { accept: 'text/html' },
+      })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain('yarn build:webui')
+    } finally {
+      for (const fiber of fibers.reverse())
+        await Promise.resolve((fiber as any).dispose?.())
+    }
+  })
   it('serves exact manifests under a prefix without exposing arbitrary files', async () => {
     const app = await start('/console')
     try {
@@ -99,7 +124,7 @@ describe('Solid WebUI production service', () => {
       inject: ['webui'],
       apply(ctx: Context) {
         entry = (ctx.get('webui') as unknown as SolidWebUI).addEntry<any>(
-          { baseUrl: import.meta.url, client: 'debug', routes: ['/capture'] },
+          { baseUrl: import.meta.url, client: 'loader', routes: ['/capture'] },
           {
             count: 0,
             large: 'x'.repeat(100_000),

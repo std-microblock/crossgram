@@ -30,6 +30,7 @@ export class Client {
       type: 'entry:init',
       body: {
         version: webui.version,
+        buildId: webui.buildId,
         reset: true,
         entries: Object.fromEntries(
           Object.values(webui.entries).map((entry) => [
