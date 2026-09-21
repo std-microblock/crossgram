@@ -187,6 +187,21 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       await page
         .getByRole('heading', { name: 'Primary account', exact: true })
         .waitFor()
+
+      // Vite hoists the plugin stylesheet into a shared chunk; a regression there silently
+      // renders every card unstyled, so assert a real computed style rather than class names.
+      expect(
+        await page
+          .locator('.otp-digits > span')
+          .first()
+          .evaluate((element) => getComputedStyle(element).borderRadius),
+      ).toBe('12px')
+      expect(
+        await page
+          .locator('.identity-avatar')
+          .first()
+          .evaluate((element) => getComputedStyle(element).borderTopLeftRadius),
+      ).toBe('20px')
       expect(
         await page.evaluate(() => {
           const title = document

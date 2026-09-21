@@ -126,6 +126,14 @@ describe('Solid statistics with the real collector and runtime sampler', () => {
       await page
         .getByRole('heading', { name: 'Slowest RPC methods', exact: true })
         .waitFor()
+
+      // The plugin stylesheet is hoisted into a shared chunk; verify it actually loaded.
+      expect(
+        await page
+          .locator('.stat-spark')
+          .first()
+          .evaluate((element) => getComputedStyle(element).height),
+      ).toBe('65px')
       await page.getByRole('tab', { name: 'RPC', exact: true }).click()
       const methods = page.getByLabel('RPC methods', { exact: true })
       await expect.poll(() => methods.locator('tbody tr').count()).toBe(25)
