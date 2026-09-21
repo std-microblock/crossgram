@@ -20,7 +20,7 @@ import {
   REQUEST_INBOX_CONVERSATION_ID, requestInboxConversation, requestInboxMessage, requestTimestamp,
 } from './request-inbox.js'
 import type { MessageProjectionPipeline, MessageProjectionPlan } from './message-projection.js'
-import { jsonEquals } from './stable-json.js'
+import { jsonContains, jsonEquals } from './stable-json.js'
 
 export interface IngestResult {
   message: IMMessageRow
@@ -402,6 +402,9 @@ export class MessageStore {
     const created = !message
     const storedMetadata = messageMetadata(source)
     const storedContent = persistMessageContent(source.content)
+    // Durable rows also carry store-owned fields the ingestion path never
+    // computes, such as the reaction selection a user made on this message.
+    // Compare and merge them instead of treating them as a modification.
     const changed = !message || (!message.deleted && (
       message.senderUserId !== senderRow.id
       || message.text !== messageText(source)
@@ -409,9 +412,13 @@ export class MessageStore {
       || message.timestamp !== source.timestamp
       || message.outgoing !== (source.outgoing ?? false)
       || message.platformGroupId !== (source.groupId ?? null)
-      || !jsonEquals(message.metadata, storedMetadata)
+      || !jsonContains(message.metadata, storedMetadata)
     ))
     if (message && existingAlias && !message.deleted && !changed) {
+      // Reactions are separate durable state: the source may deliver a new
+      // summary even when the message payload itself is unchanged, and the
+      // reaction selection is stored on the message row.
+      await this._replaceReactions(database, message.id, source.reactionContext, now)
       const projection = historyPrefetch?.projectionsByMessageId.get(message.id)
         ?? await database.select('mtproto_tl_message_part', { messageId: message.id })
           .orderBy('ordinal').execute()
@@ -441,7 +448,7 @@ export class MessageStore {
         timestamp: source.timestamp,
         outgoing: source.outgoing ?? false,
         platformGroupId: source.groupId ?? null,
-        metadata: storedMetadata,
+        metadata: { ...message.metadata, ...storedMetadata },
         updatedAt: now,
       })
       ;[message] = await database.get('mtproto_im_message', { id: message.id })

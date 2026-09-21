@@ -30,3 +30,26 @@ export function jsonEquals(left: unknown, right: unknown): boolean {
   if (typeof left !== 'object' || typeof right !== 'object') return false
   return canonicalJson(left) === canonicalJson(right)
 }
+
+/**
+ * True when every field of the expected payload matches the stored payload.
+ *
+ * Durable rows also carry state that the ingestion path does not own, such as
+ * reaction selections or relay-only display fields. Those extra fields must not
+ * make an otherwise unchanged payload look modified.
+ */
+export function jsonContains(container: unknown, expected: unknown): boolean {
+  if (jsonEquals(container, expected)) return true
+  if (Array.isArray(container) && Array.isArray(expected)) {
+    return container.length === expected.length
+      && expected.every((item, index) => jsonContains(container[index], item))
+  }
+  if (!container || !expected || typeof container !== 'object' || typeof expected !== 'object') {
+    return false
+  }
+  for (const [key, value] of Object.entries(expected as Record<string, unknown>)) {
+    if (value === undefined) continue
+    if (!jsonContains((container as Record<string, unknown>)[key], value)) return false
+  }
+  return true
+}

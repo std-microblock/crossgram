@@ -7,7 +7,7 @@ import { Context, Service, type Fiber } from 'cordis'
 import type { PlatformSessionRow } from './models.js'
 import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult, type ReadResult } from './message-store.js'
 import { isLocalOnlyConversation, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
-import { jsonEquals } from './stable-json.js'
+import { jsonContains, jsonEquals } from './stable-json.js'
 import type {
   IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMMessageSearchPage,
   IMMessageSearchQuery, IMPlatform, PlatformSession,
@@ -994,7 +994,7 @@ function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined
     || upstream.conversation.title !== stored.conversation.title
     || upstream.conversation.parentId !== stored.conversation.parentId
     || upstream.conversation.spaceId !== stored.conversation.spaceId
-    || !jsonEquals(upstream.conversation.metadata ?? {}, stored.conversation.metadata ?? {})
+    || !jsonContains(stored.conversation.metadata ?? {}, upstream.conversation.metadata ?? {})
   ) return true
   const upstreamMessage = upstream.lastMessage
   const storedMessage = stored.lastMessage
@@ -1003,7 +1003,7 @@ function dialogNeedsPersistence(upstream: IMDialog, stored: IMDialog | undefined
     || upstreamMessage.timestamp !== storedMessage.timestamp
     || upstreamMessage.senderId !== storedMessage.senderId
     || !jsonEquals(upstreamMessage.content, storedMessage.content)
-    || !jsonEquals(upstreamMessage.metadata ?? {}, storedMessage.metadata ?? {})
+    || !jsonContains(storedMessage.metadata ?? {}, upstreamMessage.metadata ?? {})
 }
 
 /**

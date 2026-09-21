@@ -964,6 +964,31 @@ describe('PlatformDataService', () => {
     expect(await database.get('mtproto_tl_message_part', {})).toHaveLength(1)
   })
 
+  it('keeps dialog pages unchanged when stored previews carry store-owned fields', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = { id: 'durable-dialog', kind: 'group', title: 'Durable dialog' }
+    const preview = incoming('9', conversation.id)
+    platform.getDialogs = async () => ({
+      dialogs: [{ conversation, unreadCount: 2, lastMessage: preview }],
+    })
+    const store = new MessageStore(database)
+    const data = new PlatformDataService(platform, session, store)
+    await data.getDialogsPage()
+    const [stored] = await database.get('mtproto_im_message', { primaryPlatformMessageId: preview.id })
+    // Reaction persistence stores its own selection on the same row.
+    await database.set('mtproto_im_message', { id: stored.id }, {
+      metadata: { ...stored.metadata, reactionMaxSelected: 20 },
+    })
+    const ingestDialogs = vi.spyOn(store, 'ingestDialogs')
+
+    const page = await data.getDialogsPage()
+
+    expect(page.dialogs).toMatchObject([{ conversation: { id: conversation.id }, unreadCount: 2 }])
+    expect(ingestDialogs).not.toHaveBeenCalled()
+  })
+
   it('serves push-only history exclusively from previously ingested events', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

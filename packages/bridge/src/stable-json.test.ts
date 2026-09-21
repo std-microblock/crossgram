@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalJson, jsonEquals } from './stable-json.js'
+import { canonicalJson, jsonContains, jsonEquals } from './stable-json.js'
 
 describe('stable JSON comparisons', () => {
   it('ignores object key order, including nested payloads', () => {
@@ -49,6 +49,25 @@ describe('stable JSON comparisons', () => {
     expect(jsonEquals(null, undefined)).toBe(false)
     expect(jsonEquals({ value: null }, { value: undefined })).toBe(false)
     expect(jsonEquals([1, undefined], [1, null])).toBe(true)
+  })
+
+  it('accepts stored payloads that carry extra durable fields', () => {
+    const expected = { qqMsgSeq: '12', text: 'hello' }
+    const stored = { text: 'hello', qqMsgSeq: '12', reactionMaxSelected: 20, __mtprotoRelaySenderTitle: 'Alice' }
+
+    expect(jsonContains(stored, expected)).toBe(true)
+    expect(jsonEquals(stored, expected)).toBe(false)
+    expect(jsonContains(expected, stored)).toBe(false)
+    expect(jsonContains(stored, { qqMsgSeq: '13', text: 'hello' })).toBe(false)
+    expect(jsonContains(stored, { qqMsgSeq: '12', text: 'hello', extra: 1 })).toBe(false)
+  })
+
+  it('requires arrays to match element-wise', () => {
+    expect(jsonContains({ parts: [{ type: 'text', text: 'x', extra: 1 }] }, { parts: [{ type: 'text', text: 'x' }] })).toBe(true)
+    expect(jsonContains({ parts: [{ type: 'text', text: 'x' }] }, { parts: [{ type: 'text', text: 'x' }, { type: 'text', text: 'y' }] })).toBe(false)
+    expect(jsonContains([{ type: 'text', extra: 1 }], [{ type: 'text' }])).toBe(true)
+    expect(jsonContains([{ type: 'text' }], [{ type: 'text', extra: 1 }])).toBe(false)
+    expect(jsonContains({ parts: [] }, { parts: [] })).toBe(true)
   })
 
   it('keeps non-plain values in their JSON.stringify form', () => {

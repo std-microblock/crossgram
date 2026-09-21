@@ -1325,6 +1325,56 @@ describe('MessageStore', () => {
     expect(await ctx.database.get('mtproto_tl_message_part', {})).toHaveLength(messages.length)
   })
 
+  it('keeps store-owned metadata across a re-ingest of the same message', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'durable-metadata', kind: 'group' as const, title: 'Durable metadata' }
+    const message: IMMessage = {
+      id: 'durable-1',
+      conversationId: conversation.id,
+      senderId: 'alice',
+      timestamp: 10,
+      content: { parts: [{ type: 'text', text: 'hello' }] },
+      metadata: { qqMsgSeq: '10' },
+    }
+    const [first] = await store.ingestMany(session, conversation, [message], { allocation: 'history' })
+    // Reaction persistence and relay display enrichment own extra durable fields.
+    await ctx.database.set('mtproto_im_message', { id: first.message.id }, {
+      metadata: { ...first.message.metadata, reactionMaxSelected: 20 },
+    })
+    const upsert = vi.spyOn(ctx.database, 'upsert')
+    const set = vi.spyOn(ctx.database, 'set')
+
+    const [repeated] = await store.ingestMany(session, conversation, [message], { allocation: 'history' })
+
+    expect(repeated).toMatchObject({ created: false, changed: false })
+    expect(upsert.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
+    expect(set.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
+    const [row] = await ctx.database.get('mtproto_im_message', { id: first.message.id })
+    expect(row.metadata).toMatchObject({ qqMsgSeq: '10', reactionMaxSelected: 20 })
+  })
+
+  it('still rewrites a message whose platform metadata changed', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'platform-change', kind: 'group' as const, title: 'Platform change' }
+    const message: IMMessage = {
+      id: 'change-1',
+      conversationId: conversation.id,
+      senderId: 'alice',
+      timestamp: 10,
+      content: { parts: [{ type: 'text', text: 'hello' }] },
+      metadata: { qqMsgSeq: '10' },
+    }
+    await store.ingestMany(session, conversation, [message], { allocation: 'history' })
+
+    const [changed] = await store.ingestMany(session, conversation, [{
+      ...message, metadata: { qqMsgSeq: '11' },
+    }], { allocation: 'history' })
+
+    expect(changed).toMatchObject({ created: false, changed: true })
+    const [row] = await ctx.database.get('mtproto_im_message', { primaryPlatformMessageId: message.id })
+    expect(row.metadata).toMatchObject({ qqMsgSeq: '11' })
+  })
+
   it('serializes concurrent allocations without duplicate IDs', async () => {
     const { store } = await createStore()
     const pages = await Promise.all(Array.from({ length: 12 }, () => store.allocateIds('concurrent', 2)))
