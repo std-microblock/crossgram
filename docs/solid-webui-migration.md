@@ -48,6 +48,9 @@ Configuration expression leaves (\`{ __jsExpr: ... }\`) are preserved verbatim w
 - \`packages/test-suite/src/production-webui-config.e2e.test.ts\` (loader-driven config editing and persistence) and \`packages/test-suite/src/webui-backpressure.e2e.test.ts\` (real socket overload) run against the new transport. Config-driven e2e suites register tsx through \`vitest.plugins-tsx.mts\`, matching the runtime's \`NODE_OPTIONS\`.
 - \`deploy/deploy-files.test.ts\` asserts both application configs reference the Solid UI and no longer reference the old packages.
 
+## Development workflow
+\`yarn build:webui\` builds the shell and every Solid client, writing \`dist/\` next to the UI package and each plugin. \`yarn dev\` runs that build before starting Cordis, and \`deploy/update.sh\` runs \`yarn build\` before restarting the service. There is no Vite dev middleware in the server anymore: server-side HMR still refreshes entry manifests through \`hmr/change\`, and client changes require a rebuild plus reload. This keeps the production path identical to the development path instead of maintaining two module graphs.
+
 ## Known follow-ups
 - \`deploy/app.production.yml\` keeps the previous plugin set; the optional Logs, Notifications, Service map, Plugin library, and account pages are enabled in \`app.yml\` and can be added to production deliberately.
 - Repository-wide \`yarn vitest run\` still fails only in \`packages/bridge\` and \`packages/merged-forward\` tests that depend on the in-progress \`conversation-view\`/projection work already present in the checkout; the new package contributes no failures.
