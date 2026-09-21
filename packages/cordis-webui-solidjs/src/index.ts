@@ -256,13 +256,26 @@ export default class SolidWebUI extends Service {
   }
   getEntryFiles(entry: Entry): string[] {
     if (!entry.manifest) return []
-    return Object.values(entry.manifest.chunks)
-      .filter((chunk) => chunk.isEntry)
-      .flatMap((chunk) =>
-        [chunk.file, ...(chunk.css ?? [])].map(
-          (file) => this.config.uiPath + '/-/modules/' + entry.id + '/' + file,
-        ),
-      )
+    const chunks = entry.manifest.chunks
+    // Vite hoists shared code and its stylesheet into a separate chunk, so walk the static
+    // import graph from the entry instead of trusting the entry chunk's own css list.
+    const files: string[] = []
+    const seen = new Set<string>()
+    const visit = (key: string, includeScript: boolean) => {
+      if (seen.has(key)) return
+      seen.add(key)
+      const chunk = chunks[key]
+      if (!chunk) return
+      if (includeScript) files.push(chunk.file)
+      for (const css of chunk.css ?? [])
+        if (!files.includes(css)) files.push(css)
+      for (const imported of chunk.imports ?? []) visit(imported, false)
+    }
+    for (const [key, chunk] of Object.entries(chunks))
+      if (chunk.isEntry) visit(key, true)
+    return files.map(
+      (file) => this.config.uiPath + '/-/modules/' + entry.id + '/' + file,
+    )
   }
   matchPath(path: string): boolean {
     if (['/', '/settings', '/notifications'].includes(path)) return true

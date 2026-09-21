@@ -96,6 +96,12 @@ describe('Solid capture with the real MTProto capture backend', () => {
         .click()
       await page.locator('.capture-row').first().waitFor()
       expect(
+        await page
+          .locator('.capture-direction')
+          .first()
+          .evaluate((element) => getComputedStyle(element).width),
+      ).toBe('34px')
+      expect(
         requests.every(
           (url) => new URL(url).searchParams.get('summary') === 'true',
         ),
