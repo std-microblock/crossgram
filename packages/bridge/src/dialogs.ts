@@ -11,6 +11,7 @@ import {
   type IMProjectableMessage, type IMConversationMemberModeration, type JsonValue, type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
+import { jsonEquals } from './stable-json.js'
 import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
   type MessageEditResult,
@@ -5936,10 +5937,10 @@ function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): 
   if (!existing || existing.firstName !== incoming.firstName) return true
   if (incoming.lastName !== undefined && existing.lastName !== incoming.lastName) return true
   if (incoming.username !== undefined && existing.username !== incoming.username) return true
-  if (incoming.avatar !== undefined && JSON.stringify(existing.avatar) !== JSON.stringify(incoming.avatar)) return true
+  if (incoming.avatar !== undefined && !jsonEquals(existing.avatar, incoming.avatar)) return true
   if (incoming.metadata !== undefined) {
     for (const [key, value] of Object.entries(incoming.metadata)) {
-      if (JSON.stringify(existing.metadata?.[key]) !== JSON.stringify(value)) return true
+      if (!jsonEquals(existing.metadata?.[key], value)) return true
     }
   }
   return false

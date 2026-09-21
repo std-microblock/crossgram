@@ -42,6 +42,16 @@ async function createStore(messageProjection?: MessageProjectionPipeline) {
   return { ctx, store: new MessageStore(ctx.database, undefined, undefined, undefined, messageProjection) }
 }
 
+function reorderJsonKeys<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => reorderJsonKeys(item)) as unknown as T
+  if (!value || typeof value !== 'object') return value
+  const output: Record<string, unknown> = {}
+  for (const key of Object.keys(value as Record<string, unknown>).reverse()) {
+    output[key] = reorderJsonKeys((value as Record<string, unknown>)[key])
+  }
+  return output as T
+}
+
 describe('MessageStore', () => {
   it('preserves conversation moderation state across durable reloads and partial updates', async () => {
     const { ctx, store } = await createStore()
@@ -1277,6 +1287,42 @@ describe('MessageStore', () => {
     expect(get).toHaveBeenCalledTimes(8)
     expect(upsert).toHaveBeenCalledTimes(1)
     expect(set).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-ingests jsonb-reordered payloads without rewriting rows or projections', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'jsonb-order', kind: 'group' as const, title: 'Jsonb order' }
+    const messages = Array.from({ length: 3 }, (_, index): IMMessage => ({
+      id: `jsonb-${index}`,
+      conversationId: conversation.id,
+      senderId: 'alice',
+      timestamp: 10 + index,
+      content: {
+        parts: [{
+          type: 'text',
+          text: `hello ${index}`,
+          entities: [{ type: 'mention', offset: 0, length: 5, userId: 'self' }],
+        }],
+      },
+      metadata: { qqMsgSeq: String(10 + index) },
+    }))
+    await store.ingestMany(session, conversation, messages, { allocation: 'history' })
+    const upsert = vi.spyOn(ctx.database, 'upsert')
+    const set = vi.spyOn(ctx.database, 'set')
+
+    // PostgreSQL returns jsonb keys ordered by length and then bytewise, so the
+    // page read back from the durable column is the same payload with a
+    // different key order.
+    const repeated = await store.ingestMany(session, conversation, messages.map(reorderJsonKeys), {
+      allocation: 'history',
+    })
+
+    expect(repeated).toHaveLength(messages.length)
+    expect(repeated.every((result) => !result.created && !result.changed)).toBe(true)
+    expect(upsert.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
+    expect(set.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
+    expect(set.mock.calls.filter(([table]) => table === 'mtproto_im_media')).toEqual([])
+    expect(await ctx.database.get('mtproto_tl_message_part', {})).toHaveLength(messages.length)
   })
 
   it('serializes concurrent allocations without duplicate IDs', async () => {

@@ -20,6 +20,7 @@ import {
   REQUEST_INBOX_CONVERSATION_ID, requestInboxConversation, requestInboxMessage, requestTimestamp,
 } from './request-inbox.js'
 import type { MessageProjectionPipeline, MessageProjectionPlan } from './message-projection.js'
+import { jsonEquals } from './stable-json.js'
 
 export interface IngestResult {
   message: IMMessageRow
@@ -404,11 +405,11 @@ export class MessageStore {
     const changed = !message || (!message.deleted && (
       message.senderUserId !== senderRow.id
       || message.text !== messageText(source)
-      || JSON.stringify(message.content) !== JSON.stringify(storedContent)
+      || !jsonEquals(message.content, storedContent)
       || message.timestamp !== source.timestamp
       || message.outgoing !== (source.outgoing ?? false)
       || message.platformGroupId !== (source.groupId ?? null)
-      || JSON.stringify(message.metadata) !== JSON.stringify(storedMetadata)
+      || !jsonEquals(message.metadata, storedMetadata)
     ))
     if (message && existingAlias && !message.deleted && !changed) {
       const projection = historyPrefetch?.projectionsByMessageId.get(message.id)
@@ -576,7 +577,7 @@ export class MessageStore {
       const parts = await database.select('mtproto_tl_message_part', { messageId: row.id })
         .orderBy('ordinal').execute()
       return {
-        changed: JSON.stringify(before.map(reactionComparable)) !== JSON.stringify(after.map(reactionComparable)),
+        changed: !jsonEquals(before.map(reactionComparable), after.map(reactionComparable)),
         message: await this._hydrateMessage(row, database),
         tlMessageIds: parts.map((part) => part.tlMessageId),
       }
@@ -1492,7 +1493,7 @@ export class MessageStore {
     const changed = !existing
       || existing.kind !== canonical.kind
       || existing.state !== canonical.state
-      || JSON.stringify(existing.request) !== JSON.stringify(stored)
+      || !jsonEquals(existing.request, stored)
     if (changed) {
       await database.upsert('mtproto_im_request', [{
         platformSessionId: session.platformSessionId,
@@ -1643,8 +1644,8 @@ export class MessageStore {
       || existing.title !== conversation.title
       || existing.parentPlatformConversationId !== (conversation.parentId ?? null)
       || existing.spacePlatformId !== (conversation.spaceId ?? null)
-      || JSON.stringify(existing.avatar) !== JSON.stringify(conversation.avatar ?? existing.avatar ?? null)
-      || JSON.stringify(existing.metadata) !== JSON.stringify(metadata)
+      || !jsonEquals(existing.avatar, conversation.avatar ?? existing.avatar ?? null)
+      || !jsonEquals(existing.metadata, metadata)
     const values = {
       platformSessionId: session.platformSessionId,
       platformConversationId: conversation.id,

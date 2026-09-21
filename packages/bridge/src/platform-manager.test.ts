@@ -87,6 +87,16 @@ class QQPlatform extends PushPlatform {
   readonly platformKind = 'qq'
 }
 
+function reorderJsonKeys<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => reorderJsonKeys(item)) as unknown as T
+  if (!value || typeof value !== 'object') return value
+  const output: Record<string, unknown> = {}
+  for (const key of Object.keys(value as Record<string, unknown>).reverse()) {
+    output[key] = reorderJsonKeys((value as Record<string, unknown>)[key])
+  }
+  return output as T
+}
+
 function incoming(id: string, conversationId = 'room'): IMMessage {
   return {
     id, conversationId, senderId: 'alice', timestamp: Number(id.replace(/\D/g, '')) || 1,
@@ -899,6 +909,59 @@ describe('PlatformDataService', () => {
     await data.getHistory(conversation.id, { limit: 1, before: { id: '2', timestamp: 2 } })
     expect(historyCalls).toBe(2)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(2)
+  })
+
+  it('reuses a jsonb-round-tripped page instead of rewriting unchanged messages', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const conversation: IMConversation = {
+      id: 'jsonb-room', kind: 'group', title: 'Jsonb room',
+      metadata: { qqGroupCode: '123', muted: false },
+    }
+    const preview: IMMessage = {
+      ...incoming('5', conversation.id),
+      content: {
+        parts: [{
+          type: 'text', text: 'hello', entities: [{ type: 'mention', offset: 0, length: 5, userId: 'self' }],
+        }],
+      },
+      metadata: { qqMsgSeq: '5' },
+    }
+    // PostgreSQL returns jsonb keys ordered by length and then bytewise, so the
+    // same payload read back from the durable column has a different key order
+    // than the freshly built upstream payload.
+    let reordered = false
+    platform.getDialogs = async () => ({
+      dialogs: [{
+        conversation: reordered ? reorderJsonKeys(conversation) : conversation,
+        unreadCount: 0,
+        lastMessage: reordered ? reorderJsonKeys(preview) : preview,
+      }],
+    })
+    platform.getHistory = async () => ({ messages: [reordered ? reorderJsonKeys(preview) : preview] })
+    const store = new MessageStore(database)
+    const data = new PlatformDataService(platform, session, store)
+
+    await data.getDialogsPage()
+    await data.getHistory(conversation.id, { limit: 50 })
+    reordered = true
+    const ingestDialogs = vi.spyOn(store, 'ingestDialogs')
+    const upsert = vi.spyOn(database, 'upsert')
+    const set = vi.spyOn(database, 'set')
+
+    const secondDialogs = await data.getDialogsPage()
+    const secondHistory = await data.getHistory(conversation.id, { limit: 50 })
+
+    expect(secondDialogs.dialogs).toMatchObject([{ conversation: { id: conversation.id }, unreadCount: 0 }])
+    expect(secondHistory.messages.map((message) => message.id)).toEqual([preview.id])
+    // Rewriting the same page must not rewrite the dialog row or its messages.
+    expect(ingestDialogs).not.toHaveBeenCalled()
+    expect(upsert.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
+    expect(set.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
+    const [stored] = await database.get('mtproto_im_message', { primaryPlatformMessageId: preview.id })
+    expect(stored.text).toBe('hello')
+    expect(await database.get('mtproto_tl_message_part', {})).toHaveLength(1)
   })
 
   it('serves push-only history exclusively from previously ingested events', async () => {

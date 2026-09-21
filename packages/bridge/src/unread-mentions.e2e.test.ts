@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
@@ -33,6 +33,16 @@ const disposals: Array<() => Promise<void>> = []
 afterEach(async () => {
   await Promise.all(disposals.splice(0).map((dispose) => dispose()))
 })
+
+function reorderJsonKeys<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => reorderJsonKeys(item)) as unknown as T
+  if (!value || typeof value !== 'object') return value
+  const output: Record<string, unknown> = {}
+  for (const key of Object.keys(value as Record<string, unknown>).reverse()) {
+    output[key] = reorderJsonKeys((value as Record<string, unknown>)[key])
+  }
+  return output as T
+}
 
 function makeContext(): ServerRpcContext {
   return {
@@ -272,6 +282,90 @@ describe('unread mention navigation RPC e2e', () => {
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
       offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
     })).resolves.toMatchObject({ dialogs: [{ unreadMentionsCount: 0 }] })
+  })
+
+  it('repeats the @ button list from stored rows when the platform payloads are reordered', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const conversation: IMConversation = {
+      id: 'reordered', kind: 'group', title: 'Reordered', metadata: { qqGroupCode: '7' },
+    }
+    const own: IMMessage = {
+      id: 'own-reordered', conversationId: conversation.id, senderId: session.userId,
+      outgoing: true, timestamp: 1, content: { parts: [{ type: 'text', text: 'question' }] },
+    }
+    const mention: IMMessage = {
+      id: 'mention-reordered', conversationId: conversation.id, senderId: 'alice', timestamp: 2,
+      content: { parts: [{
+        type: 'text', text: '@Current ping', entities: [{ type: 'mention', offset: 0, length: 8, userId: session.userId }],
+      }] },
+      metadata: { qqMsgSeq: '2' },
+    }
+    // PostgreSQL returns jsonb keys ordered by length and then bytewise: the
+    // payload read back from the durable column has a different key order than
+    // the freshly built upstream payload.
+    let reordered = false
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() {
+        return { dialogs: [{
+          conversation: reordered ? reorderJsonKeys(conversation) : conversation,
+          unreadCount: 1,
+          lastMessage: reordered ? reorderJsonKeys(mention) : mention,
+          readInboxMaxMessage: reordered ? reorderJsonKeys(own) : own,
+        }] }
+      },
+      async getHistory() {
+        return { messages: [own, mention].map((message) => reordered ? reorderJsonKeys(message) : message) }
+      },
+      async getUser(_session, id) { return { id, firstName: id } },
+    }
+    const store = new MessageStore(ctx.database)
+    await store.ingest(session, conversation, own)
+    await store.ingest(session, conversation, mention)
+    const dialogs = new DialogRpc(platform, session, store)
+    const rpcHarness = rpcHarnessFor(dialogs)
+    const peer = {
+      _: 'inputPeerChannel' as const,
+      channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ONE,
+    }
+    const request: tl.messages.RawGetUnreadMentionsRequest = {
+      _: 'messages.getUnreadMentions', peer,
+      offsetId: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0,
+    }
+    // Persist the dialog row so the mention window is compared against its
+    // unread count, exactly like a client that opened the chat list first.
+    await roundTripRpc(rpcHarness, {
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    const first = await roundTripRpc(rpcHarness, request) as tl.messages.RawMessages
+    expect(first.messages).toMatchObject([{ _: 'message', message: '@Current ping', mentioned: true }])
+
+    // The durable rows already carry every message of the page, so the repeated
+    // read must answer from them instead of rewriting the same payloads.
+    reordered = true
+    const upsert = vi.spyOn(ctx.database, 'upsert')
+    const set = vi.spyOn(ctx.database, 'set')
+    const second = await roundTripRpc(rpcHarness, request) as tl.messages.RawMessages
+
+    expect(second.messages.map((message) => message.id)).toEqual(first.messages.map((message) => message.id))
+    expect(upsert.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
+    expect(set.mock.calls.filter(([table]) => table === 'mtproto_im_message')).toEqual([])
   })
 
   it('clears legacy private-chat reply mentions and keeps them out of TL history', async () => {
