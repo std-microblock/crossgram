@@ -76,3 +76,54 @@ performed for these changes.
 
 Tests were run in an isolated worktree because the main checkout contained
 unrelated unfinished edits importing a missing conversation-view module.
+
+## Root cause found after the first two fixes (2026-09-21)
+
+The first two commits did not resolve the desktop symptom. Live inspection of
+the affected client (`QQ-Cross.exe`, a patched AyuGram 6.7.8 build) showed:
+
+- `messages.getDialogs` was re-requested from offset zero every ~10 seconds and
+  never advanced to a second page.
+- The client log reported
+  `RPC Error: request NNNN got fail with code 0, error CLIENT_RESPONSE_PARSE_FAILED`,
+  and its own MTProto trace showed
+  `(could not decode type)(ERROR_SCHEME_BAD_CONS:0x19420af6)` inside the
+  `reply_markup` of the platform management bot's message, in the very
+  `messages.dialogsSlice` response carrying the chat list.
+
+`0x19420af6` is `keyboardInlineButtonRow`, a constructor that exists only in
+API layer 229. The server answered this layer-228 client with the newest
+keyboard shape because the per-layer writer map is built as
+`Object.assign(baseWriterMap, generatedFromLayerSnapshot)`: the bundled current
+schema stays authoritative for every constructor, so a newest-only constructor
+nested inside a field the older layer does define (here `replyInlineMarkup.rows`)
+is written verbatim. The client cannot decode it, drops the entire response, and
+therefore never receives the dialog list. Chats only appeared when a pushed
+update introduced them, which matches the reported symptom.
+
+Related: `Updates::stateDone` (AyuGramDesktop api_updates.cpp) calls
+`requestDialogs()` whenever the update state is re-initialized, so each
+unsuccessful cycle restarts pagination from the first page.
+
+The fix adds a layer-aware response adapter (`getApiLayerResponseAdapter`) that
+rewrites newest-only constructors into the target layer's wire form before
+serialization, on both response and pushed-update paths. Today only the inline
+keyboard family needs it: `keyboardInlineButtonRow`/`keyboardInlineButton` are
+converted into legacy `keyboardButtonRow` rows with `keyboardButtonUrl`,
+`keyboardButtonCallback`, `keyboardButtonCopy`, `keyboardButtonUserProfile` or
+`keyboardButtonSwitchInline` buttons. A button whose action the target layer
+cannot carry is dropped rather than downgraded to a working-looking but inert
+button. Clients that negotiate the current layer keep the newest form.
+
+Regression coverage:
+
+- `packages/mtproto/src/rpc/api-layer.test.ts`: the adapter rewrites the markup,
+  the layer-228 reader *throws* on the unadapted value, and parses the adapted
+  value.
+- `packages/mtproto/src/session/server-session.e2e.test.ts`: a real layer-228
+  socket client parses both the dialog response and a pushed update containing
+  the newest-only keyboard.
+- `packages/test-suite/src/login.e2e.test.ts`: a layer-228 client logs in, calls
+  `messages.getDialogs`, and receives a parseable dialog list whose preview has
+  legacy buttons. Both transport and app-level tests were confirmed to fail with
+  the adapter disabled.

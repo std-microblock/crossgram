@@ -567,6 +567,22 @@ async function startServer(
       _: 'message', id: 7, fromId: { _: 'peerUser', userId: 42 },
       peerId: { _: 'peerUser', userId: 42 }, date: nowSec(),
       message: `layer:${rpc.apiLayer ?? 0}`,
+      replyMarkup: {
+        _: 'replyInlineMarkup',
+        rows: [{
+          _: 'keyboardInlineButtonRow',
+          buttons: [
+            {
+              _: 'keyboardInlineButton', text: 'Status',
+              type: { _: 'inlineButtonTypeUrl', url: 'https://example.com/status' },
+            },
+            {
+              _: 'keyboardInlineButton', text: 'Refresh',
+              type: { _: 'inlineButtonTypeCallback', data: new Uint8Array([7]) },
+            },
+          ],
+        }],
+      },
     }],
     chats: [],
     users: [{ _: 'user', id: 42, firstName: 'Alice', contact: true, mutualContact: true }],
@@ -1779,6 +1795,93 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
       }
       expect(mediaUpdate.updates).toMatchObject([{ message: { _: 'message', id: 100, message: 'shared layer update' } }])
       media.close()
+      client.close()
+    } finally {
+      await stop()
+    }
+  })
+
+  it('downgrades newest-only inline keyboards for a client on an older layer', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, stop, broadcastUpdate } = await startServer()
+    try {
+      const client = await TestClient.connect(port)
+      const perm = await doClientHandshake(client, pubKey, false)
+      const sessionId = new Long(0x28282828, 0x28282828)
+      const legacyReader = getApiLayerReaderMap(228)
+      expect(legacyReader).not.toBeNull()
+
+      const getDialogs = {
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 20, hash: Long.ZERO,
+      }
+      await client.send(clientEncrypt(
+        perm,
+        TlBinaryWriter.serializeObject(__tlWriterMap, {
+          _: 'invokeWithLayer', layer: 228, query: getDialogs,
+        } as { _: string }),
+        perm.salt,
+        sessionId,
+        8,
+      ))
+
+      // The layer-229 keyboard must be rewritten: a client that cannot decode
+      // keyboardInlineButtonRow drops the whole messages.dialogsSlice result.
+      const result = await readRpcResult(client, perm, legacyReader!)
+      expect(result).toMatchObject({ _: 'messages.dialogs', messages: [{ message: 'layer:228' }] })
+      expect(result.messages[0].replyMarkup).toMatchObject({
+        _: 'replyInlineMarkup',
+        rows: [{
+          _: 'keyboardButtonRow',
+          buttons: [
+            { _: 'keyboardButtonUrl', text: 'Status', url: 'https://example.com/status' },
+            { _: 'keyboardButtonCallback', text: 'Refresh', data: new Uint8Array([7]) },
+          ],
+        }],
+      })
+
+      // Pushed updates are serialized for the same negotiated layer.
+      broadcastUpdate({
+        _: 'updates',
+        updates: [{
+          _: 'updateNewMessage',
+          message: {
+            _: 'message', id: 101,
+            fromId: { _: 'peerUser', userId: 42 },
+            peerId: { _: 'peerUser', userId: 42 },
+            date: nowSec(), message: 'layer update with buttons',
+            replyMarkup: {
+              _: 'replyInlineMarkup',
+              rows: [{
+                _: 'keyboardInlineButtonRow',
+                buttons: [{
+                  _: 'keyboardInlineButton', text: 'Status',
+                  type: { _: 'inlineButtonTypeUrl', url: 'https://example.com/status' },
+                }],
+              }],
+            },
+          },
+          pts: 3, ptsCount: 1,
+        }],
+        users: [], chats: [], date: nowSec(), seq: 3,
+      } as unknown as tl.TypeUpdates)
+      const pushed = await readServerObject(
+        client,
+        perm,
+        value => value._ === 'updates',
+        legacyReader!,
+      )
+      expect(pushed.value.updates).toMatchObject([{
+        message: {
+          _: 'message', id: 101, message: 'layer update with buttons',
+          replyMarkup: {
+            rows: [{
+              _: 'keyboardButtonRow',
+              buttons: [{ _: 'keyboardButtonUrl', text: 'Status', url: 'https://example.com/status' }],
+            }],
+          },
+        },
+      }])
       client.close()
     } finally {
       await stop()

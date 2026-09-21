@@ -10,6 +10,7 @@ import {
   collectNewestEntriesById,
   CURRENT_API_LAYER,
   getApiLayerReaderMap,
+  getApiLayerResponseAdapter,
   getApiLayerWriterMap,
   getHistoricalApiLayerReaderMap,
   resolveApiSchemaLayer,
@@ -216,5 +217,115 @@ describe('API layer response writers', () => {
     expect(resolveApiSchemaProfile(223)).toBe('tdlib-history')
     expect(constructor).toBe(0xa02bc13e)
     expect(constructor).toBe(constructorFromLocalSchema(223, 'userFull'))
+  })
+})
+
+describe('API layer response downgrade', () => {
+  const inlineKeyboardMessage = {
+    _: 'message', id: 11,
+    fromId: { _: 'peerUser', userId: 42 },
+    peerId: { _: 'peerUser', userId: 42 },
+    date: 1_800_000_000,
+    message: 'management bot',
+    replyMarkup: {
+      _: 'replyInlineMarkup',
+      rows: [{
+        _: 'keyboardInlineButtonRow',
+        buttons: [
+          {
+            _: 'keyboardInlineButton', text: 'Open', style: { _: 'keyboardButtonStyle', bgPrimary: true },
+            type: { _: 'inlineButtonTypeUrl', url: 'https://example.com/status' },
+          },
+          {
+            _: 'keyboardInlineButton', text: 'Refresh',
+            type: { _: 'inlineButtonTypeCallback', data: new Uint8Array([1, 2, 3]) },
+          },
+        ],
+      }],
+    },
+  } as unknown as tl.RawMessage
+
+  const slice = {
+    _: 'messages.dialogsSlice', count: 1,
+    dialogs: [{
+      _: 'dialog', peer: { _: 'peerUser', userId: 42 }, topMessage: 11,
+      readInboxMaxId: 11, readOutboxMaxId: 11, unreadCount: 0,
+      unreadMentionsCount: 0, unreadReactionsCount: 0, unreadPollVotesCount: 0,
+      notifySettings: { _: 'peerNotifySettings' },
+    }],
+    messages: [inlineKeyboardMessage],
+    chats: [],
+    users: [{ _: 'user', id: 42, firstName: 'CrossGram' }],
+  } as unknown as tl.messages.RawDialogsSlice
+
+  it('rewrites the newest inline keyboard into legacy button rows for older clients', () => {
+    const adapter = getApiLayerResponseAdapter(228)
+    expect(adapter.schemaLayer).toBe(228)
+    const adapted = adapter.adapt(slice) as any
+    const markup = adapted.messages[0].replyMarkup
+
+    expect(markup._).toBe('replyInlineMarkup')
+    expect(markup.rows).toEqual([{
+      _: 'keyboardButtonRow',
+      buttons: [
+        {
+          _: 'keyboardButtonUrl', text: 'Open', url: 'https://example.com/status',
+          style: { _: 'keyboardButtonStyle', bgPrimary: true },
+        },
+        { _: 'keyboardButtonCallback', text: 'Refresh', data: new Uint8Array([1, 2, 3]) },
+      ],
+    }])
+    // Untouched values keep their identity instead of being cloned.
+    expect(adapted.users).toBe(slice.users)
+    expect(adapted.dialogs).toBe(slice.dialogs)
+  })
+
+  it('keeps the newest inline keyboard for clients that negotiate it', () => {
+    const adapter = getApiLayerResponseAdapter(CURRENT_API_LAYER)
+    expect(adapter.schemaLayer).toBe(CURRENT_API_LAYER)
+    expect(adapter.adapt(slice)).toBe(slice)
+  })
+
+  it('drops a button whose action the legacy layer cannot represent', () => {
+    const adapter = getApiLayerResponseAdapter(228)
+    const adapted = adapter.adapt({
+      _: 'replyInlineMarkup',
+      rows: [{
+        _: 'keyboardInlineButtonRow',
+        buttons: [
+          { _: 'keyboardInlineButton', text: 'Open', type: { _: 'inlineButtonTypeUrl', url: 'https://example.com' } },
+        ],
+      }],
+    }) as any
+    expect(adapted.rows[0].buttons).toEqual([
+      { _: 'keyboardButtonUrl', text: 'Open', url: 'https://example.com' },
+    ])
+  })
+
+  it('serializes a downgraded dialog list that a layer 228 client can parse', () => {
+    const adapter = getApiLayerResponseAdapter(228)
+    const legacyReader = getApiLayerReaderMap(228)
+    expect(legacyReader).not.toBeNull()
+
+    // Without the downgrade the layer-229 constructors leak into the response
+    // and the client rejects the whole result (CLIENT_RESPONSE_PARSE_FAILED).
+    const rawBytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, 228), slice)
+    expect(() => new TlBinaryReader(legacyReader!, rawBytes).object()).toThrow()
+
+    const adaptedBytes = TlBinaryWriter.serializeObject(
+      getApiLayerWriterMap(__tlWriterMap, 228),
+      adapter.adapt(slice),
+    )
+    const decoded = new TlBinaryReader(legacyReader!, adaptedBytes).object() as any
+    expect(decoded).toMatchObject({
+      _: 'messages.dialogsSlice',
+      messages: [{ _: 'message', message: 'management bot', replyMarkup: {
+        _: 'replyInlineMarkup',
+        rows: [{ _: 'keyboardButtonRow', buttons: [
+          { _: 'keyboardButtonUrl', text: 'Open', url: 'https://example.com/status' },
+          { _: 'keyboardButtonCallback', text: 'Refresh' },
+        ] }],
+      } }],
+    })
   })
 })

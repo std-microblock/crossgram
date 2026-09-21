@@ -18,7 +18,10 @@ import { isBareVector, isRpcRequestObject, unwrapRpcRequest } from '../rpc/proto
 import type { RpcHandler, ServerRpcContext, RpcResult, BareVector } from '../rpc/protocol.js'
 import type { MtprotoPacketScope } from '../rpc/context.js'
 import type { MtprotoClientInfo } from '../rpc/context.js'
-import { getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile } from '../rpc/api-layer.js'
+import {
+  getApiLayerResponseAdapter, getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile,
+  type ApiLayerResponseAdapter,
+} from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 
 // TL constructor IDs for MTProto service messages
@@ -322,6 +325,7 @@ export class ServerSession {
   private _apiLayer: number | null = null
   private _clientInfo: MtprotoClientInfo | undefined
   private _responseWriterMap: TlWriterMap
+  private _responseAdapter: ApiLayerResponseAdapter = { schemaLayer: null, adapt: value => value }
   private _pendingUpdates: Array<{ update: tl.TypeUpdates, clientSessionId?: Long }> = []
   private _acceptsUpdates = false
   /** Session that last established an updates stream on this connection. */
@@ -440,8 +444,9 @@ export class ServerSession {
       this._log.debug('dropping server update before the client establishes an MTProto session')
       return
     }
-    const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
-    this._sendEncryptedMessage(serialized, true, update, targetSessionId)
+    const adapted = this._responseAdapter.adapt(update)
+    const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, adapted)
+    this._sendEncryptedMessage(serialized, true, adapted, targetSessionId)
   }
 
   private _clearLoginToken(): void {
@@ -476,8 +481,9 @@ export class ServerSession {
     const update: tl.TypeUpdates = {
       _: 'updateShort', update: { _: 'updateLoginToken' }, date: Math.floor(Date.now() / 1_000),
     }
-    const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, update)
-    this._sendEncryptedMessage(serialized, true, update, this._sessionId)
+    const adapted = this._responseAdapter.adapt(update)
+    const serialized = TlBinaryWriter.serializeObject(this._responseWriterMap, adapted)
+    this._sendEncryptedMessage(serialized, true, adapted, this._sessionId)
     return true
   }
 
@@ -1841,6 +1847,7 @@ export class ServerSession {
     if (layer === this._apiLayer) return
     this._apiLayer = layer
     this._responseWriterMap = getApiLayerWriterMap(this._writerMap, layer)
+    this._responseAdapter = getApiLayerResponseAdapter(layer)
     this._log.info(
       'client API layer negotiated: %d (response schema: %s layer %d)',
       layer ?? 0,
@@ -1874,7 +1881,8 @@ export class ServerSession {
     this._sendRpcReply(this._buildRpcReply(reqMsgId, result, method), clientSessionId, result)
   }
 
-  private _buildRpcReply(reqMsgId: Long, result: RpcResult, method?: string): RpcReply {
+  private _buildRpcReply(reqMsgId: Long, rawResult: RpcResult, method?: string): RpcReply {
+    const result = this._responseAdapter.adapt(rawResult)
     const kind = (result as { _: string })._
 
     let resultBytes: Uint8Array

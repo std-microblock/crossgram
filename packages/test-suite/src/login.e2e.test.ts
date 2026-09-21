@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
+import { TlBinaryReader, TlBinaryWriter, TlSerializationCounter, type TlReaderMap, type TlWriterMap } from '@mtcute/tl-runtime'
 import type { tl } from '@mtcute/core'
 import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { NodeCryptoProvider } from '@mtcute/node/utils.js'
@@ -32,6 +32,7 @@ import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
 import DatabaseUpdateStore from '@mtproto-relay/update-store-database'
 import { openE2eClient, runE2eProbe, type E2eClientEvent } from '@mtproto-relay/mtproto-e2e-client'
 import { updateToJson } from '../../bridge/src/update-json.js'
+import { getApiLayerReaderMap, getApiLayerWriterMap } from '../../mtproto/src/rpc/api-layer.js'
 
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
@@ -134,6 +135,9 @@ async function readPlainObj(client: TestClient): Promise<any> {
 
 interface ClientKey { authKey: Uint8Array, authKeyId: Uint8Array, salt: Long }
 
+/** Wire maps for a client that negotiates a historical API layer. */
+interface ClientMaps { layer: number, write: TlWriterMap, read: TlReaderMap }
+
 async function doClientHandshake(client: TestClient, pubKey: any): Promise<ClientKey> {
   const nonce = crypto.randomBytes(16)
   await sendPlain(client, { _: 'mt_req_pq_multi', nonce }, 4)
@@ -187,22 +191,22 @@ function clientEncrypt(key: ClientKey, body: Uint8Array, salt: Long, sessionId: 
   return u8.concat3(key.authKeyId, messageKey, createAesIgeForMessage(crypto, key.authKey, messageKey, true).encrypt(buf))
 }
 
-function clientDecrypt(key: ClientKey, data: Uint8Array): TlBinaryReader {
+function clientDecrypt(key: ClientKey, data: Uint8Array, readerMap: TlReaderMap = __tlReaderMap): TlBinaryReader {
   const messageKey = data.subarray(8, 24)
   let ct = data.subarray(24)
   if (ct.byteLength % 16) ct = ct.subarray(0, ct.byteLength - (ct.byteLength % 16))
   const plain = createAesIgeForMessage(crypto, key.authKey, messageKey, false).decrypt(ct)
-  const reader = new TlBinaryReader(__tlReaderMap, plain)
+  const reader = new TlBinaryReader(readerMap, plain)
   reader.seek(16); reader.long(true); reader.uint(); reader.uint()
   return reader
 }
 
 const initializedApiKeys = new Set<string>()
 
-function initializedRpc(query: object): object {
+function initializedRpc(query: object, layer: number = CURRENT_API_LAYER): object {
   return {
     _: 'invokeWithLayer',
-    layer: CURRENT_API_LAYER,
+    layer,
     query: {
       _: 'initConnection',
       apiId: 1,
@@ -223,9 +227,10 @@ async function sendRpc(
   sessionId: Long,
   obj: object,
   sub: number,
+  maps?: ClientMaps,
 ): Promise<any> {
-  const body = TlBinaryWriter.serializeObject(__tlWriterMap, obj as any)
-  return sendRawRpc(client, key, sessionId, body, sub, String((obj as any)._))
+  const body = TlBinaryWriter.serializeObject(maps?.write ?? __tlWriterMap, obj as any)
+  return sendRawRpc(client, key, sessionId, body, sub, String((obj as any)._), maps)
 }
 
 async function sendRawRpc(
@@ -235,13 +240,14 @@ async function sendRawRpc(
   body: Uint8Array,
   sub: number,
   method: string,
+  maps?: ClientMaps,
 ): Promise<any> {
   await client.send(clientEncrypt(key, body, key.salt, sessionId, sub))
   const deferred: Uint8Array[] = []
   try {
     for (let i = 0; i < 12; i++) {
       const frame = await readRpcFrame(client, method)
-      const reader = clientDecrypt(key, frame)
+      const reader = clientDecrypt(key, frame, maps?.read)
       const rpcResult = decodeRpcResult(reader)
       if (rpcResult) return rpcResult.result
       try {
@@ -362,18 +368,25 @@ async function waitForSocketClose(client: TestClient, label: string): Promise<vo
   }
 }
 
-async function callRpc(client: TestClient, key: ClientKey, sessionId: Long, obj: object, sub: number): Promise<any> {
+async function callRpc(
+  client: TestClient,
+  key: ClientKey,
+  sessionId: Long,
+  obj: object,
+  sub: number,
+  maps?: ClientMaps,
+): Promise<any> {
   const keyId = Buffer.from(key.authKeyId).toString('hex')
   if (!initializedApiKeys.has(keyId)) {
-    const result = await sendRpc(client, key, sessionId, initializedRpc(obj), sub)
+    const result = await sendRpc(client, key, sessionId, initializedRpc(obj, maps?.layer), sub, maps)
     initializedApiKeys.add(keyId)
     return result
   }
 
-  const result = await sendRpc(client, key, sessionId, obj, sub)
+  const result = await sendRpc(client, key, sessionId, obj, sub, maps)
   if (result?._ !== 'mt_rpc_error' || result.errorMessage !== 'CONNECTION_NOT_INITED') return result
 
-  const retried = await sendRpc(client, key, sessionId, initializedRpc(obj), sub + 1)
+  const retried = await sendRpc(client, key, sessionId, initializedRpc(obj, maps?.layer), sub + 1, maps)
   initializedApiKeys.add(keyId)
   return retried
 }
@@ -1401,6 +1414,88 @@ describe('bridge login e2e', () => {
         _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeerFolder', folderId: 1 }],
       }, 12)
       expect(refreshed.dialogs).toMatchObject([{ _: 'dialogFolder', folder: { id: 1 } }])
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
+  it('serves a parseable dialog list with inline keyboards to a layer 228 desktop client', async () => {
+    const conversation: bridge.IMConversation = {
+      id: 'buttons-room', kind: 'group', title: 'Buttons room',
+    }
+    const message: bridge.IMMessage = {
+      id: 'buttons-message', conversationId: conversation.id, senderId: 'alice',
+      sender: { id: 'alice', firstName: 'Alice' }, timestamp: 1_700_001_000,
+      content: {
+        parts: [{ type: 'text', text: 'CrossGram 平台管理助手\n\n查看服务器状态。' }],
+        inlineKeyboard: {
+          rows: [{
+            buttons: [
+              { type: 'url', text: 'Status', url: 'https://example.com/status', style: 'primary' },
+              { type: 'callback', text: 'Refresh', data: 'refresh' },
+            ],
+          }],
+        },
+      },
+    }
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+      },
+      async getAccount() { return { credentials: {}, user: { id: 'self', firstName: 'Buttons User' } } },
+      async subscribe() { return () => {} },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: message }], total: 1 } },
+      async getHistory() { return { messages: [message] } },
+      async getUser(_session, id) { return id === 'alice' ? { id, firstName: 'Alice' } : { id, firstName: id } },
+      async sendMessage() { throw new Error('sending is disabled for the inline keyboard e2e platform') },
+    }
+    const platformId = 'inline-keyboard-e2e'
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    let client: TestClient | undefined
+    try {
+      const login = await waitForPlatformLogin(ctx, platformId)
+      const legacyRead = getApiLayerReaderMap(228)
+      expect(legacyRead).not.toBeNull()
+      // A patched desktop build negotiates layer 228, which cannot decode the
+      // layer-229 keyboardInlineButtonRow constructor.
+      const maps = {
+        layer: 228,
+        write: getApiLayerWriterMap(__tlWriterMap, 228),
+        read: legacyRead!,
+      }
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x77889900, 0x11223344)
+      const sent = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: '+' + login.auth.virtualPhone, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2, maps)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: login.auth.virtualPhone, phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(login.auth.totpSecret),
+      }, 4, maps)
+
+      const dialogs = await callRpc(client, key, sid, {
+        _: 'messages.getDialogs', excludePinned: true, folderId: 0, offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 20, hash: Long.ZERO,
+      }, 6, maps)
+
+      expect(dialogs.chats).toMatchObject([{ _: 'channel', title: 'Buttons room' }])
+      const preview = dialogs.messages.find((item: any) => item.message?.includes('平台管理助手'))
+      expect(preview).toBeTruthy()
+      expect(preview.replyMarkup).toMatchObject({
+        _: 'replyInlineMarkup',
+        rows: [{
+          _: 'keyboardButtonRow',
+          buttons: [
+            { _: 'keyboardButtonUrl', text: 'Status', url: 'https://example.com/status' },
+            { _: 'keyboardButtonCallback', text: 'Refresh' },
+          ],
+        }],
+      })
     } finally {
       client?.close()
       await stop()

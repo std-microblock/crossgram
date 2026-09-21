@@ -186,3 +186,168 @@ function normalizeMtcuteInt53(entries: TlEntry[]): void {
     }
   }
 }
+
+/**
+ * Rewrite a response value into the wire form the negotiated client layer
+ * defines.
+ *
+ * The per-layer writer map intentionally starts from the bundled current
+ * schema, so every constructor the server knows stays serializable. That
+ * fallback is wrong for constructors that only exist in the newest schema:
+ * they would be written verbatim inside a response built for an older client,
+ * and the client drops the whole response when it cannot decode them (for
+ * example the layer-229 inline keyboard row inside messages.dialogsSlice).
+ */
+export interface ApiLayerResponseAdapter {
+  /** Resolved local schema layer, or null when no snapshot is available. */
+  readonly schemaLayer: number | null
+  adapt<T>(value: T): T
+}
+
+interface LayerConstructorNames {
+  has(name: string): boolean
+}
+
+type ResponseDowngrade = (
+  value: Record<string, unknown>,
+  names: LayerConstructorNames,
+) => Record<string, unknown> | undefined
+
+/**
+ * Constructors whose newest wire form must be replaced for older clients.
+ * Each entry produces the legacy shape; nested values are rewritten by the
+ * adapter walk, and unrepresentable values are dropped instead of corrupting
+ * the enclosing response.
+ */
+const responseDowngrades = new Map<string, ResponseDowngrade>([
+  ['keyboardInlineButtonRow', downgradeInlineKeyboardRow],
+  ['keyboardInlineButton', downgradeInlineKeyboardButton],
+])
+
+const responseAdapterCache = new Map<number, ApiLayerResponseAdapter>()
+const schemaConstructorNameCache = new Map<number, Set<string>>()
+const identityResponseAdapter: ApiLayerResponseAdapter = { schemaLayer: null, adapt: value => value }
+
+export function getApiLayerResponseAdapter(layer: number | null): ApiLayerResponseAdapter {
+  if (layer === null) return identityResponseAdapter
+  const schemaLayer = resolveApiSchemaLayer(layer)
+  if (schemaLayer === null) return identityResponseAdapter
+  const cached = responseAdapterCache.get(schemaLayer)
+  if (cached) return cached
+
+  const names = schemaConstructorNames(schemaLayer)
+  const active: Array<[string, ResponseDowngrade]> = []
+  for (const entry of responseDowngrades) {
+    if (!names.has(entry[0])) active.push(entry)
+  }
+  const adapter: ApiLayerResponseAdapter = active.length === 0
+    ? { schemaLayer, adapt: value => value }
+    : {
+        schemaLayer,
+        adapt: <T>(value: T) => adaptResponseValue(
+          value,
+          new Map(active),
+          { has: name => names.has(name) },
+        ) as T,
+      }
+  responseAdapterCache.set(schemaLayer, adapter)
+  return adapter
+}
+
+function schemaConstructorNames(schemaLayer: number): Set<string> {
+  const cached = schemaConstructorNameCache.get(schemaLayer)
+  if (cached) return cached
+  const names = new Set(loadSchemaEntries(schemaLayer).map(entry => entry.name))
+  schemaConstructorNameCache.set(schemaLayer, names)
+  return names
+}
+
+function adaptResponseValue(
+  value: unknown,
+  downgrades: ReadonlyMap<string, ResponseDowngrade>,
+  names: LayerConstructorNames,
+): unknown {
+  if (Array.isArray(value)) {
+    let changed = false
+    const adapted: unknown[] = []
+    for (const item of value) {
+      const next = adaptResponseValue(item, downgrades, names)
+      if (next !== item) changed = true
+      if (next !== undefined) adapted.push(next)
+    }
+    return changed ? adapted : value
+  }
+  if (!isPlainLayerObject(value)) return value
+  const object = value as Record<string, unknown>
+  const name = object._
+  if (typeof name === 'string') {
+    const downgrade = downgrades.get(name)
+    if (downgrade) {
+      const converted = downgrade(object, names)
+      return converted === undefined ? undefined : adaptResponseValue(converted, downgrades, names)
+    }
+  }
+  let changed = false
+  const adapted: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(object)) {
+    const next = adaptResponseValue(item, downgrades, names)
+    if (next !== item) changed = true
+    adapted[key] = next
+  }
+  return changed ? adapted : value
+}
+
+/** Leaves Long, byte buffers, dates and class instances untouched. */
+function isPlainLayerObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (ArrayBuffer.isView(value)) return false
+  const prototype = Object.getPrototypeOf(value) as unknown
+  return prototype === Object.prototype || prototype === null
+}
+
+function downgradeInlineKeyboardRow(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const buttons = Array.isArray(value.buttons) ? value.buttons : []
+  return { _: 'keyboardButtonRow', buttons }
+}
+
+function downgradeInlineKeyboardButton(
+  value: Record<string, unknown>,
+  names: LayerConstructorNames,
+): Record<string, unknown> | undefined {
+  const text = typeof value.text === 'string' ? value.text : ''
+  const type = isPlainLayerObject(value.type) ? value.type : undefined
+  const kind = typeof type?._ === 'string' ? type._ : 'inlineButtonTypeCallback'
+  const plain = (button: Record<string, unknown>): Record<string, unknown> =>
+    (value.style === undefined ? button : { ...button, style: value.style })
+
+  // Keep a button only when the legacy layer can carry its action. A label
+  // without its action would look identical to a working button, so an
+  // unrepresentable action drops the button instead.
+  if (kind === 'inlineButtonTypeUrl' && typeof type?.url === 'string' && names.has('keyboardButtonUrl')) {
+    return plain({ _: 'keyboardButtonUrl', text, url: type.url })
+  }
+  if (kind === 'inlineButtonTypeWebView' && typeof type?.url === 'string' && names.has('keyboardButtonWebView')) {
+    return plain({ _: 'keyboardButtonWebView', text, url: type.url })
+  }
+  if (kind === 'inlineButtonTypeCopy' && typeof type?.copyText === 'string' && names.has('keyboardButtonCopy')) {
+    return plain({ _: 'keyboardButtonCopy', text, copyText: type.copyText })
+  }
+  if (kind === 'inlineButtonTypeUserProfile' && names.has('keyboardButtonUserProfile')) {
+    return plain({ _: 'keyboardButtonUserProfile', text, userId: type?.userId })
+  }
+  if (kind === 'inlineButtonTypeSwitchInline' && names.has('keyboardButtonSwitchInline')) {
+    return plain({
+      _: 'keyboardButtonSwitchInline', text, query: type?.query, samePeer: type?.samePeer,
+    })
+  }
+  if (kind === 'inlineButtonTypeCallback' && names.has('keyboardButtonCallback')) {
+    return plain({
+      _: 'keyboardButtonCallback',
+      text,
+      data: type?.data instanceof Uint8Array ? type.data : new Uint8Array(),
+      requiresPassword: type?.requiresPassword,
+    })
+  }
+}
