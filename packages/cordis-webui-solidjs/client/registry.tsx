@@ -9,6 +9,7 @@ import {
 } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
 import type { EntryMeta } from '../src/protocol.js'
+import { hasIcon } from './icons.js'
 import { useConnection, type ClientModule, type PageProps } from './sdk.js'
 
 interface PageMeta {
@@ -20,32 +21,50 @@ interface PageMeta {
 export interface RegisteredPage extends PageMeta {
   entryId: string
   module: string
+  /** Human label for the plugin that contributes the page. */
+  source: string
 }
 const known: Record<string, PageMeta[]> = {
-  sso: [{ path: '/sso', title: 'Your account', icon: '○', group: 'Workspace' }],
+  loader: [
+    { path: '/plugins', title: 'Plugins', icon: 'plugins', group: 'Manage' },
+  ],
+  database: [
+    { path: '/database', title: 'Database', icon: 'database', group: 'Manage' },
+  ],
   market: [
-    { path: '/market', title: 'Plugin library', icon: '◈', group: 'Manage' },
+    {
+      path: '/market',
+      title: 'Plugin library',
+      icon: 'market',
+      group: 'Manage',
+    },
     {
       path: '/dependencies',
       title: 'Dependencies',
-      icon: '◫',
+      icon: 'layers',
       group: 'Manage',
     },
   ],
-  insight: [
-    { path: '/graph', title: 'Service map', icon: '⌬', group: 'Observe' },
+  logs: [{ path: '/logs', title: 'Logs', icon: 'logs', group: 'Observe' }],
+  notifications: [
+    {
+      path: '/notifications',
+      title: 'Notifications',
+      icon: 'notifications',
+      group: 'Workspace',
+    },
   ],
   server: [
     {
       path: '/server/routes',
       title: 'Server routes',
-      icon: '⌘',
+      icon: 'server',
       group: 'Observe',
     },
     {
       path: '/server/requests',
       title: 'Incoming requests',
-      icon: '↙',
+      icon: 'arrowDownLeft',
       group: 'Observe',
     },
   ],
@@ -53,29 +72,22 @@ const known: Record<string, PageMeta[]> = {
     {
       path: '/http/compose',
       title: 'Request studio',
-      icon: '↗',
+      icon: 'send',
       group: 'Tools',
     },
     {
       path: '/http/history',
       title: 'Outbound traffic',
-      icon: '⇄',
+      icon: 'arrowUpRight',
       group: 'Observe',
     },
   ],
-  notifications: [
-    {
-      path: '/notifications',
-      title: 'Notifications',
-      icon: '♧',
-      group: 'Workspace',
-    },
+  insight: [
+    { path: '/graph', title: 'Service map', icon: 'network', group: 'Observe' },
   ],
-  logs: [{ path: '/logs', title: 'Logs', icon: '≡', group: 'Observe' }],
-  database: [
-    { path: '/database', title: 'Database', icon: '▤', group: 'Manage' },
+  sso: [
+    { path: '/sso', title: 'Your account', icon: 'account', group: 'Accounts' },
   ],
-  loader: [{ path: '/plugins', title: 'Plugins', icon: '◫', group: 'Manage' }],
 }
 const builtins: Record<string, Component<PageProps>> = {
   sso: lazy(() => import('./pages/sso.js')),
@@ -88,27 +100,56 @@ const builtins: Record<string, Component<PageProps>> = {
   database: lazy(() => import('./pages/database.js')),
   loader: lazy(() => import('./pages/loader.js')),
 }
+/** Preferred navigation order; unknown groups follow in discovery order. */
+export const groupOrder = [
+  'Workspace',
+  'Accounts',
+  'Manage',
+  'Observe',
+  'Tools',
+  'Extensions',
+]
+
+export function orderOf(group: string): number {
+  const index = groupOrder.indexOf(group)
+  return index < 0 ? groupOrder.length : index
+}
+
 export function listPages(
   entries: Record<string, EntryMeta>,
 ): RegisteredPage[] {
-  return Object.entries(entries).flatMap(([entryId, entry]) =>
-    (
+  const seen = new Set<string>()
+  const pages: RegisteredPage[] = []
+  for (const [entryId, entry] of Object.entries(entries)) {
+    const declared = known[entry.module]
+    const candidates =
       entry.pages ??
-      known[entry.module] ??
+      declared ??
       entry.routes.map((path) => ({
         path: path.replace(/\{.*$/, ''),
         title: path.split('/').filter(Boolean).join(' · '),
-        icon: '◇',
+        icon: 'extension',
         group: 'Extensions',
       }))
-    ).map((page) => ({
-      ...page,
-      group: page.group ?? 'Extensions',
-      entryId,
-      module: entry.module,
-    })),
-  )
+    for (const page of candidates) {
+      // Two entries can expose the same route (a plugin bundled twice, or a page that is
+      // also registered elsewhere); the first registration wins so navigation has no
+      // duplicates and every path stays unique as a component key.
+      if (seen.has(page.path)) continue
+      seen.add(page.path)
+      pages.push({
+        ...page,
+        icon: hasIcon(page.icon) ? page.icon : 'extension',
+        group: page.group ?? 'Extensions',
+        entryId,
+        module: entry.module,
+        source: declared ? 'Built-in' : entry.module.replace(/^@[^/]+\//, ''),
+      })
+    }
+  }
+  return pages.sort((left, right) => orderOf(left.group) - orderOf(right.group))
 }
+
 const extensions = new Map<
   string,
   { component: Component<PageProps>; entryId: string; links: HTMLLinkElement[] }

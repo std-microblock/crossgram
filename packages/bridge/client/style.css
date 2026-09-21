@@ -4,7 +4,8 @@
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    gap: 24px;
+    gap: 20px;
+    border-color: transparent;
     background: var(--primary-container);
     color: var(--on-primary-container);
   }
@@ -35,8 +36,9 @@
   }
   .identity-card {
     display: grid;
-    gap: 24px;
+    gap: 18px;
     align-content: start;
+    padding: 18px;
   }
   .identity-card > header {
     display: flex;
@@ -45,15 +47,15 @@
   }
   .identity-avatar,
   .bot-monogram {
-    width: 54px;
-    height: 54px;
+    width: 46px;
+    height: 46px;
     flex-shrink: 0;
     display: grid;
     place-items: center;
-    border-radius: 20px;
+    border-radius: var(--radius-md);
     background: var(--secondary-container);
     color: var(--primary);
-    font-size: 20px;
+    font-size: 19px;
     font-weight: 600;
     overflow: hidden;
   }
@@ -129,8 +131,9 @@
   .otp-digits > span {
     flex: 1;
     padding: 10px 0;
+    border: 1px solid var(--outline-variant);
     background: var(--surface-bright);
-    border-radius: 12px;
+    border-radius: var(--radius-xs);
     text-align: center;
   }
   .otp-progress {
@@ -173,41 +176,53 @@
   .sticker-card {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    border: 1px solid transparent;
+    gap: 10px;
+    padding: 16px;
   }
   .sticker-card.assigned {
     border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary-container) 32%, var(--surface-container-low));
+  }
+  .sticker-card .button {
+    align-self: flex-start;
+  }
+  .sticker-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
   }
   .sticker-monogram {
     display: grid;
     place-items: center;
-    width: 64px;
-    height: 64px;
-    border-radius: 24px;
+    width: 46px;
+    height: 46px;
+    border-radius: var(--radius-md);
     background: var(--tertiary-container);
     color: var(--on-tertiary-container);
-    font-size: 24px;
+    font-size: 19px;
+    font-weight: 600;
   }
   .sticker-card h2,
   .bot-card h2 {
-    font-size: 20px;
-    font-weight: 550;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.012em;
     overflow-wrap: anywhere;
   }
   .sticker-card p,
   .sticker-card small,
   .bot-card p {
+    color: var(--on-surface-muted);
     font-size: 12px;
-    color: var(--muted);
   }
   .sticker-card code {
     font-size: 11px;
     overflow-wrap: anywhere;
   }
-  .sticker-card .button {
-    margin-top: auto;
+  .sticker-card .chip {
+    font-size: 11px;
   }
+
   .bot-card {
     display: flex;
     flex-direction: column;

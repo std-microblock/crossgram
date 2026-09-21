@@ -28,7 +28,7 @@
         {
           "path": "/mtproto-statistics",
           "title": "MTProto statistics",
-          "icon": "▥",
+          "icon": "statistics",
           "group": "Observe"
         }
       ]

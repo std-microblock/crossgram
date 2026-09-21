@@ -13,6 +13,7 @@ import type {
   TableInfo,
 } from '@cordisjs/plugin-database-webui'
 import { useConnection, useRpc, type PageProps } from '../sdk.js'
+import { Icon } from '../icons.js'
 import {
   ActionError,
   LiveContent,
@@ -217,7 +218,10 @@ export default function DatabasePage(props: PageProps) {
               )}
             </Show>
             <Show when={!snapshot()?.rows.length}>
-              <p class="empty-state">No rows in this table.</p>
+              <p class="empty-note">
+                <Icon name="database" size={16} />
+                No rows in this table.
+              </p>
             </Show>
           </Show>
           <div class="pagination">

@@ -51,6 +51,19 @@ Configuration expression leaves (\`{ __jsExpr: ... }\`) are preserved verbatim w
 ## Development workflow
 \`yarn build:webui\` builds the shell and every Solid client, writing \`dist/\` next to the UI package and each plugin. \`yarn dev\` runs that build before starting Cordis, and \`deploy/update.sh\` runs \`yarn build\` before restarting the service. There is no Vite dev middleware in the server anymore: server-side HMR still refreshes entry manifests through \`hmr/change\`, and client changes require a rebuild plus reload. This keeps the production path identical to the development path instead of maintaining two module graphs.
 
+## Interface design
+The shell was rebuilt around a small design system instead of ad-hoc styling:
+
+- **Icons.** A stroke icon set lives in `cordis-webui-solidjs/icons` (also exposed through the shared import map). Navigation, buttons, tiles, empty states, table sorters and the capture inspector all draw inline SVG in `currentColor`; no page uses a text glyph as an icon, and an unknown icon name degrades to a generic glyph instead of printing raw text.
+- **Tokens.** One place defines surfaces, containers, outlines, palettes, radii, spacing and the type scale. Plugin stylesheets reuse those tokens, and the legacy names they already reference (`--surface-low`, `--surface-bright`, `--muted`) are kept as aliases so a plugin cannot silently lose its styling.
+- **Surfaces.** Neutral container steps with hairline outlines replaced the pastel-block treatment: the accent colour now marks selection, primary actions and small highlights rather than filling whole panels.
+- **Pages.** The overview is a real dashboard: connection, extension count and running build, then every registered page grouped as Workspace / Accounts / Manage / Observe / Tools. Page cards show the owning plugin, and duplicate routes are de-duplicated so navigation never lists the same page twice.
+- **States.** Loading, empty, error and dirty states share one visual language (`EmptyState`, `.empty-note`, `.notice`, status chips), and the configuration editor reports validation through both inline messages and a counted summary.
+- **Responsive.** Phone layouts use one stat per row, a wrapping tab strip, a drawer driven by one shared test helper, safe-area padding, and horizontally scrolling tables that keep cells readable instead of squeezing them to one character per line. Every page is asserted to have no horizontal overflow at 360/390/768 px.
+- **Accessibility.** The skip link stays invisible until focused (so it never appears as stray content), the drawer traps focus and restores it on Escape, tables expose sortable headers, and reduced-motion preferences disable animation.
+
+Presentation regressions are covered by `presentation.browser.e2e.test.ts`: navigation draws SVG icons only, the drawer toggle stays hidden on desktop and appears on phones, a missing icon name still renders an icon, the skip link reveals on focus and jumps to the content, and no width overflows.
+
 ## Known follow-ups
 - \`deploy/app.production.yml\` keeps the previous plugin set; the optional Logs, Notifications, Service map, Plugin library, and account pages are enabled in \`app.yml\` and can be added to production deliberately.
 - Repository-wide \`yarn vitest run\` still fails only in \`packages/bridge\` and \`packages/merged-forward\` tests that depend on the in-progress \`conversation-view\`/projection work already present in the checkout; the new package contributes no failures.

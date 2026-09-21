@@ -211,3 +211,13 @@
     }
   }
 }
+
+@layer components {
+  .capture-row-header > .icon:last-child {
+    margin-left: auto;
+    color: var(--on-surface-muted);
+  }
+  .capture-row-header:hover > .icon:last-child {
+    color: var(--on-surface);
+  }
+}

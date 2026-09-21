@@ -1,23 +1,53 @@
 /** @jsxImportSource solid-js */
 import { createEffect, createSignal, onCleanup, Show, type JSX } from 'solid-js'
+import { Icon, type IconName } from './icons.js'
 import { useConnection } from './sdk.js'
 export function PageHeader(props: {
   eyebrow?: string
+  icon?: IconName
   title: string
   description?: string
   actions?: JSX.Element
 }) {
   return (
-    <header class="page-heading toolbar">
+    <header class="page-heading">
       <div class="page-title">
-        <span class="eyebrow">{props.eyebrow ?? 'YOUR WORKSPACE'}</span>
-        <h1>{props.title}</h1>
+        <Show when={props.eyebrow}>
+          <span class="eyebrow">{props.eyebrow}</span>
+        </Show>
+        <h1>
+          <Show when={props.icon}>
+            <Icon name={props.icon!} size={22} />
+          </Show>
+          {props.title}
+        </h1>
         <Show when={props.description}>
-          <p>{props.description}</p>
+          <p class="muted">{props.description}</p>
         </Show>
       </div>
-      <div class="toolbar">{props.actions}</div>
+      <Show when={props.actions}>
+        <div class="toolbar">{props.actions}</div>
+      </Show>
     </header>
+  )
+}
+
+/** Shared empty state so every page explains itself the same way. */
+export function EmptyState(props: {
+  icon?: IconName
+  title: string
+  description?: string
+  action?: JSX.Element
+}) {
+  return (
+    <section class="panel empty-state">
+      <Icon name={props.icon ?? 'sparkle'} size={22} />
+      <h2>{props.title}</h2>
+      <Show when={props.description}>
+        <p>{props.description}</p>
+      </Show>
+      {props.action}
+    </section>
   )
 }
 export function useAction() {
@@ -50,7 +80,8 @@ export function ActionError(props: { error: string }) {
   return (
     <Show when={props.error}>
       <div class="notice error" role="alert">
-        {props.error}
+        <Icon name="alert" />
+        <span>{props.error}</span>
       </div>
     </Show>
   )
@@ -65,6 +96,7 @@ export function LiveContent(props: { ready: boolean; children: JSX.Element }) {
       when={loaded()}
       fallback={
         <div class="loading" role="status">
+          <Icon name="refresh" size={18} />
           Loading live data…
         </div>
       }
@@ -105,7 +137,7 @@ export function Modal(props: {
             aria-label="Close dialog"
             onClick={props.onClose}
           >
-            ×
+            <Icon name="close" />
           </button>
         </header>
         {props.children}

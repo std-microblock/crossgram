@@ -32,6 +32,12 @@ describe('lightweight statistical visualization', () => {
     expect(sparkPath([])).toBe('')
     expect(sparkPath([0])).toBe('M0.0,66.0')
     expect(sparkPath([NaN, Infinity, -1])).not.toMatch(/NaN|Infinity/)
+    // A smoothed curve must stay inside the plot box and keep the endpoints.
+    const path = sparkPath(Array.from({ length: 500 }, (_, index) => Math.sin(index)))
+    expect(path.startsWith('M0.0,')).toBe(true)
+    expect(path).toContain('C')
+    const ordinates = [...path.matchAll(/,(-?\d+(?:\.\d+)?)/g)].map((match) => Number(match[1]))
+    expect(ordinates.every((value) => value >= 0 && value <= 72)).toBe(true)
     expect(downsample([1, 2, 3])).toEqual([
       { index: 0, value: 1 },
       { index: 1, value: 2 },

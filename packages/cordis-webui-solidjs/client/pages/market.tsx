@@ -10,6 +10,7 @@ import {
   PageHeader,
   useAction,
 } from '../components.js'
+import { Icon } from '../icons.js'
 import { pageSlice } from './admin-model.js'
 export default function MarketPage(props: PageProps) {
   const rpc = useRpc<Data>(props.entryId),
@@ -160,7 +161,7 @@ export default function MarketPage(props: PageProps) {
                 {(row) => (
                   <article class="market-card">
                     <header>
-                      <span class="quick-icon">◫</span>
+                      <Icon name="extension" size={20} />
                       <span class="muted">{row.package.version}</span>
                     </header>
                     <h2>{row.shortname || row.package.name}</h2>

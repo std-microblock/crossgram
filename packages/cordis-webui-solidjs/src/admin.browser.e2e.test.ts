@@ -16,6 +16,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 import { describe, expect, it, vi } from 'vitest'
+import { waitForConnection, openPage, clickNav } from './browser-test-utils.js'
 import SolidWebUI from './index.js'
 
 const root = new URL('../../../', import.meta.url)
@@ -122,7 +123,7 @@ describe('Solid administration pages against Cordis backends', () => {
       page.on('pageerror', (error) => errors.push(error.message))
       page.on('request', (request) => requests.push(request.url()))
       await page.goto(ctx.server.baseUrl)
-      await page.getByText('All connected', { exact: true }).waitFor()
+      await waitForConnection(page)
       expect(
         requests.some((url) =>
           /assets\/(database|logs|http|server|insight|notifications)-/.test(
@@ -130,13 +131,7 @@ describe('Solid administration pages against Cordis backends', () => {
           ),
         ),
       ).toBe(false)
-      const navigate = async (title: string) => {
-        await page.getByRole('button', { name: 'Open navigation' }).click()
-        await page
-          .locator('.navigation')
-          .getByRole('button', { name: title, exact: true })
-          .click()
-      }
+      const navigate = (title: string) => openPage(page, title)
       await navigate('Database')
       await page
         .getByRole('button', { name: 'Edit name in row 1', exact: true })
@@ -287,10 +282,7 @@ describe('Solid administration pages against Cordis backends', () => {
           fullPage: true,
           animations: 'disabled',
         })
-        await page
-          .locator('.navigation')
-          .getByRole('button', { name: 'Overview', exact: true })
-          .click()
+        await clickNav(page, 'Overview')
         await page.evaluate(() => {
           ;(document.activeElement as HTMLElement)?.blur()
           window.scrollTo(0, 0)

@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 import { describe, expect, it, vi } from 'vitest'
+import { waitForConnection, openPage } from './browser-test-utils.js'
 import SolidWebUI from './index.js'
 
 const root = new URL('../../../', import.meta.url)
@@ -67,9 +68,9 @@ describe('real loader and Schemastery browser workflow', () => {
       page.on('request', (request) => requests.push(request.url()))
       page.on('pageerror', (error) => errors.push(error.message))
       await page.goto(ctx.server.baseUrl)
-      await page.getByText('All connected', { exact: true }).waitFor()
+      await waitForConnection(page)
       expect(requests.some((url) => /assets\/loader-/.test(url))).toBe(false)
-      await page.getByRole('button', { name: 'Manage plugins' }).click()
+      await openPage(page, 'Plugins')
       await page
         .getByRole('button', { name: 'Example bridge Disabled' })
         .click()

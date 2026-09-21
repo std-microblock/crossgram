@@ -2,6 +2,7 @@
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { Data, HistoryEntry } from '@cordisjs/plugin-http-webui'
 import { navigate, useConnection, useRpc, type PageProps } from '../sdk.js'
+import { Icon } from '../icons.js'
 import {
   ActionError,
   ConfirmAction,
@@ -128,7 +129,10 @@ function HttpHistory(props: { data: Data }) {
         </table>
       </div>
       <Show when={!rows().length}>
-        <p class="empty-state">No outbound requests yet.</p>
+        <p class="empty-note">
+          <Icon name="traffic" size={16} />
+          No outbound requests recorded yet.
+        </p>
       </Show>
       <div class="pagination">
         <button

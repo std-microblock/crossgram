@@ -12,7 +12,8 @@
     "./server": "./src/server-monitor.ts",
     "./components": "./client/components.tsx",
     "./utils": "./client/utils.ts",
-    "./session": "./client/session.ts"
+    "./session": "./client/session.ts",
+    "./icons": "./client/icons.tsx"
   },
   "cordis": {
     "service": {

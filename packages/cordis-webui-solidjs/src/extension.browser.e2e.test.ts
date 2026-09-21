@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 import { describe, expect, it, vi } from 'vitest'
+import { waitForConnection } from './browser-test-utils.js'
 import SolidWebUI from './index.js'
 import { buildClient } from '../build.js'
 
@@ -85,7 +86,7 @@ describe('independently built Solid extensions', () => {
       page.on('pageerror', (error) => errors.push(error.message))
       page.on('request', (request) => requests.push(request.url()))
       await page.goto(ctx.server.baseUrl)
-      await page.getByText('All connected', { exact: true }).waitFor()
+      await waitForConnection(page)
       expect(requests.some((url) => url.includes('/-/modules/'))).toBe(false)
       await page
         .getByRole('button', { name: 'extension', exact: false })

@@ -5,7 +5,12 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import SolidWebUI from './index.js'
-import { expectReconnectWithoutReload } from './browser-test-utils.js'
+import {
+  expectReconnectWithoutReload,
+  waitForConnection,
+  openPage,
+  clickNav,
+} from './browser-test-utils.js'
 import type { MtprotoDebugEvent } from '../../mtproto/src/debug.js'
 describe('Solid capture with the real MTProto capture backend', () => {
   it('keeps large payloads off sockets, lazily fetches details, groups RPC results, filters/pages, reconnects and cleans up on mobile navigation', async () => {
@@ -86,14 +91,10 @@ describe('Solid capture with the real MTProto capture backend', () => {
         ),
       )
       await page.goto(ctx.server.baseUrl)
-      await page.getByText('All connected', { exact: true }).waitFor()
+      await waitForConnection(page)
       expect(requests).toEqual([])
       expect(frames.join('')).not.toContain('ON_DEMAND_ONLY_')
-      await page.getByRole('button', { name: 'Open navigation' }).click()
-      await page
-        .locator('.navigation')
-        .getByRole('button', { name: 'MTProto capture', exact: true })
-        .click()
+      await openPage(page, 'MTProto capture')
       await page.locator('.capture-row').first().waitFor()
       expect(
         await page
@@ -169,11 +170,7 @@ describe('Solid capture with the real MTProto capture backend', () => {
         .getByRole('button', { name: 'Clear capture', exact: true })
         .click()
       await page.getByRole('heading', { name: 'No matching events' }).waitFor()
-      await page.getByRole('button', { name: 'Open navigation' }).click()
-      await page
-        .locator('.navigation')
-        .getByRole('button', { name: 'Overview', exact: true })
-        .click()
+      await clickNav(page, 'Overview')
       const count = requests.length
       await page.waitForTimeout(1300)
       expect(requests).toHaveLength(count)

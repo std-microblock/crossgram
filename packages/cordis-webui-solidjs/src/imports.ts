@@ -7,5 +7,6 @@ export const sharedModules = {
   'solid-js/web': 'client/runtime/web.ts',
   'cordis-webui-solidjs/client': 'client/sdk.ts',
   'cordis-webui-solidjs/components': 'client/components.tsx',
+  'cordis-webui-solidjs/icons': 'client/icons.tsx',
   'cordis-webui-solidjs/schema': 'client/schema.tsx',
 } as const

@@ -2,8 +2,10 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type { StickerPackDashboardData } from '../src/dashboard-types.js'
 import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
+import { Icon } from 'cordis-webui-solidjs/icons'
 import {
   ActionError,
+  EmptyState,
   LiveContent,
   PageHeader,
   useAction,
@@ -121,7 +123,9 @@ export default function StickersPage(props: PageProps) {
                     data-pack={pack().packId}
                   >
                     <div class="sticker-monogram" aria-hidden="true">
-                      {pack().title.trim().slice(0, 2) || '☺'}
+                      {pack().title.trim()[0] ?? (
+                        <Icon name="smile" size={20} />
+                      )}
                     </div>
                     <h2>{pack().title}</h2>
                     <p>
@@ -129,16 +133,20 @@ export default function StickersPage(props: PageProps) {
                         ? 'Count unavailable'
                         : pack().count + ' stickers'}
                     </p>
-                    <code>
-                      {pack().providerId} / {pack().packId}
-                    </code>
-                    <Show when={source()}>
-                      <small>From {source()!.displayName}</small>
-                    </Show>
+                    <div class="sticker-meta">
+                      <span class="chip">
+                        {pack().providerId} / {pack().packId}
+                      </span>
+                      <Show when={source()}>
+                        <span class="chip">
+                          From {source()!.displayName}
+                        </span>
+                      </Show>
+                    </div>
                     <button
                       class={
                         'button ' +
-                        (assignment()?.assigned ? 'tonal' : 'filled')
+                        (assignment()?.assigned ? 'tonal' : 'outlined')
                       }
                       disabled={
                         !rpc.ready || action.busy() || assignment()?.automatic
@@ -176,7 +184,11 @@ export default function StickersPage(props: PageProps) {
             </For>
           </div>
           <Show when={!ids().length}>
-            <p class="panel empty-state">No matching sticker collections.</p>
+            <EmptyState
+              icon="search"
+              title="No matching collections"
+              description="Try a different search term."
+            />
           </Show>
           <div class="pagination">
             <button

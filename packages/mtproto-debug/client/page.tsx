@@ -10,6 +10,7 @@ import {
   type EventGroup,
 } from '../src/event-groups.js'
 import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
+import { Icon } from 'cordis-webui-solidjs/icons'
 import {
   ActionError,
   ConfirmAction,
@@ -314,7 +315,14 @@ function CaptureRow(props: {
         onClick={props.toggle}
       >
         <span class="capture-direction" aria-hidden="true">
-          {props.event.direction === 'client->server' ? '↗' : '↙'}
+          <Icon
+            name={
+              props.event.direction === 'client->server'
+                ? 'arrowUpRight'
+                : 'arrowDownLeft'
+            }
+            size={16}
+          />
         </span>
         <div class="capture-row-title">
           <strong>{props.event.name}</strong>
@@ -338,7 +346,7 @@ function CaptureRow(props: {
             </span>
           </Show>
         </div>
-        <span aria-hidden="true">{props.expanded ? '−' : '+'}</span>
+        <Icon name={props.expanded ? 'minus' : 'plus'} size={16} />
       </button>
       <Show when={props.result}>
         <p class="capture-result">
@@ -434,7 +442,7 @@ function EventDetail(props: {
         when={!props.event.payloadOmitted}
         fallback={
           <p class="muted" role="status">
-            Loading payload…
+            <Icon name="refresh" size={15} /> Loading payload…
           </p>
         }
       >
@@ -522,7 +530,7 @@ export function JsonTree(props: {
           disabled={(props.depth ?? 0) > 20}
           onClick={() => setExpanded(!expanded())}
         >
-          <span aria-hidden="true">{expanded() ? '−' : '+'}</span>
+          <Icon name={expanded() ? 'minus' : 'plus'} size={14} />
           <strong>{props.name ?? 'Payload'}</strong>
           <span class="muted">
             {count()} {Array.isArray(data()) ? 'items' : 'keys'}

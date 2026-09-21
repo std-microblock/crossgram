@@ -4,6 +4,7 @@ import { chromium } from 'playwright'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { waitForConnection } from './browser-test-utils.js'
 import SolidWebUI from './index.js'
 describe('Solid statistics with the real collector and runtime sampler', () => {
   it('renders all five sections, bounds chart/table work, receives live samples and resets through RPC on desktop/mobile', async () => {
@@ -117,7 +118,7 @@ describe('Solid statistics with the real collector and runtime sampler', () => {
         ),
       )
       await page.goto(ctx.server.baseUrl)
-      await page.getByText('All connected', { exact: true }).waitFor()
+      await waitForConnection(page)
       expect(frames.join('')).not.toContain('messages.test')
       await page
         .locator('.navigation')
@@ -133,7 +134,7 @@ describe('Solid statistics with the real collector and runtime sampler', () => {
           .locator('.stat-spark')
           .first()
           .evaluate((element) => getComputedStyle(element).height),
-      ).toBe('65px')
+      ).toBe('58px')
       await page.getByRole('tab', { name: 'RPC', exact: true }).click()
       const methods = page.getByLabel('RPC methods', { exact: true })
       await expect.poll(() => methods.locator('tbody tr').count()).toBe(25)

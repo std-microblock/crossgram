@@ -4,6 +4,7 @@ import { Dynamic } from 'solid-js/web'
 import { useConnection, useRpc, type PageProps } from '../sdk.js'
 import {
   ActionError,
+  EmptyState,
   LiveContent,
   PageHeader,
   useAction,
@@ -144,10 +145,11 @@ export default function NotificationsPage(props: PageProps) {
             )}
           </For>
           <Show when={!rpc.data.notifiers?.length}>
-            <section class="panel empty-state">
-              <h2>All caught up</h2>
-              <p>Your plugins have no active notifications.</p>
-            </section>
+            <EmptyState
+              icon="notifications"
+              title="All caught up"
+              description="Your plugins have no active notifications."
+            />
           </Show>
         </div>
       </LiveContent>

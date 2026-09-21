@@ -9,10 +9,24 @@ import {
   For,
   Show,
 } from 'solid-js'
-import { listPages, PageOutlet, reconcileExtensions } from './registry.js'
+import { Icon } from './icons.js'
+import { PageHeader } from './components.js'
+import {
+  listPages,
+  orderOf,
+  PageOutlet,
+  reconcileExtensions,
+} from './registry.js'
 import { approveNavigation, navigate, useConnection } from './sdk.js'
 
 const SettingsPage = lazy(() => import('./pages/settings.js'))
+
+const statusLabels: Record<string, string> = {
+  connecting: 'Connecting',
+  connected: 'Connected',
+  reconnecting: 'Reconnecting',
+  offline: 'Offline',
+}
 
 export function App(props: { initialNotice?: string } = {}) {
   const [initialNotice, setInitialNotice] = createSignal(props.initialNotice)
@@ -22,7 +36,7 @@ export function App(props: { initialNotice?: string } = {}) {
     location.pathname.slice(connection.config.uiPath.length) || '/',
   )
   const [menu, setMenu] = createSignal(false)
-  const media = matchMedia('(max-width: 760px)')
+  const media = matchMedia('(max-width: 820px)')
   const [mobile, setMobile] = createSignal(media.matches)
   let navigation!: HTMLElement, menuButton!: HTMLButtonElement
   const mediaChanged = () => setMobile(media.matches)
@@ -67,21 +81,35 @@ export function App(props: { initialNotice?: string } = {}) {
   onCleanup(() => window.removeEventListener('popstate', updatePath))
   const go = (route: string) => navigate(connection.config.uiPath + route)
   const pages = createMemo(() => listPages(connection.state.entries))
-  const navigationGroups = createMemo(() => [
-    ...new Set([
-      'Workspace',
-      'Manage',
-      'Observe',
-      'Tools',
-      'Extensions',
-      ...pages().map((page) => page.group),
-    ]),
-  ])
-  const entries = () => Object.entries(connection.state.entries)
+  const groups = createMemo(() =>
+    [...new Set(pages().map((page) => page.group))].sort(
+      (left, right) => orderOf(left) - orderOf(right),
+    ),
+  )
+  const entries = createMemo(() => Object.entries(connection.state.entries))
+  const status = () => connection.state.status
+  const currentTitle = createMemo(() => {
+    if (path() === '/') return 'Overview'
+    if (path() === '/settings') return 'Appearance'
+    const page = pages()
+      .filter(
+        (page) => path() === page.path || path().startsWith(page.path + '/'),
+      )
+      .sort((a, b) => b.path.length - a.path.length)[0]
+    if (page) return page.title
+    return path()
+      .replace(/^\//, '')
+      .split(/[/-]/)
+      .filter(Boolean)
+      .map((part) => part[0]?.toUpperCase() + part.slice(1))
+      .join(' ')
+  })
+  const isSelected = (target: string) =>
+    path() === target || (target !== '/' && path().startsWith(target + '/'))
   return (
     <div class="app-shell">
       <a class="skip-link" href="#main">
-        Skip to content
+        Skip to main content
       </a>
       <Show when={menu()}>
         <button
@@ -108,63 +136,62 @@ export function App(props: { initialNotice?: string } = {}) {
             go('/')
           }}
         >
-          <span class="brand-mark">C</span>
+          <span class="brand-mark" aria-hidden="true">
+            {connection.config.title.slice(0, 1).toUpperCase()}
+          </span>
           <span>
             {connection.config.title}
-            <small>YOUR CONNECTED SPACE</small>
+            <small>Relay console</small>
           </span>
         </a>
-        <div class="nav-label">Workspace</div>
-        <button
-          class="nav-item"
-          classList={{ selected: path() === '/' }}
-          onClick={() => go('/')}
-        >
-          <span class="nav-icon" aria-hidden="true">
-            ◈
-          </span>
-          Overview
-        </button>
-        <For each={navigationGroups()}>
-          {(group) => (
-            <Show when={pages().some((page) => page.group === group)}>
-              <Show when={group !== 'Workspace'}>
+        <nav aria-label="Workspace">
+          <button
+            class="nav-item"
+            classList={{ selected: isSelected('/') }}
+            aria-current={isSelected('/') ? 'page' : undefined}
+            onClick={() => go('/')}
+          >
+            <Icon name="overview" size={18} />
+            Overview
+          </button>
+          <For each={groups()}>
+            {(group) => (
+              <>
                 <div class="nav-label">{group}</div>
-              </Show>
-              <For each={pages().filter((page) => page.group === group)}>
-                {(page) => (
-                  <button
-                    class="nav-item"
-                    classList={{
-                      selected:
-                        path() === page.path ||
-                        path().startsWith(page.path + '/'),
-                    }}
-                    onClick={() => go(page.path)}
-                  >
-                    <span class="nav-icon" aria-hidden="true">
-                      {page.icon}
-                    </span>
-                    {page.title}
-                  </button>
-                )}
-              </For>
-            </Show>
-          )}
-        </For>
+                <For each={pages().filter((page) => page.group === group)}>
+                  {(page) => (
+                    <button
+                      class="nav-item"
+                      classList={{ selected: isSelected(page.path) }}
+                      aria-current={isSelected(page.path) ? 'page' : undefined}
+                      onClick={() => go(page.path)}
+                    >
+                      <Icon name={page.icon} size={18} />
+                      {page.title}
+                    </button>
+                  )}
+                </For>
+              </>
+            )}
+          </For>
+        </nav>
         <div class="nav-spacer" />
-        <button class="nav-item" onClick={() => go('/settings')}>
-          <span class="nav-icon" aria-hidden="true">
-            ☷
-          </span>
-          Appearance
-        </button>
-        <div class="connection-pill" role="status">
-          <span
-            class="status-dot"
-            classList={{ online: connection.state.status === 'connected' }}
-          />
-          {connection.state.status}
+        <div class="sidebar-footer">
+          <button
+            class="nav-item"
+            classList={{ selected: path() === '/settings' }}
+            onClick={() => go('/settings')}
+          >
+            <Icon name="settings" size={18} />
+            Appearance
+          </button>
+          <div class="connection-pill" data-status={status()} role="status">
+            <span
+              class="status-dot"
+              classList={{ online: status() === 'connected' }}
+            />
+            {statusLabels[status()] ?? status()}
+          </div>
         </div>
       </aside>
       <div class="workspace" inert={mobile() && menu()}>
@@ -176,18 +203,45 @@ export function App(props: { initialNotice?: string } = {}) {
             aria-expanded={menu()}
             onClick={() => setMenu(true)}
           >
-            ☰
+            <Icon name="menu" />
           </button>
-          <span class="breadcrumb">
-            Workspace <span>/</span>{' '}
-            {path() === '/' ? 'Overview' : path().slice(1)}
-          </span>
-          <span class="topbar-end">SOLID EDITION</span>
+          <div class="breadcrumb">
+            <button
+              class="crumb-root"
+              onClick={() => go('/')}
+              aria-label="Go to overview"
+            >
+              {connection.config.title}
+            </button>
+            <span aria-hidden="true">/</span>
+            <span class="crumb-current">{currentTitle()}</span>
+          </div>
+          <div class="topbar-actions">
+            <span
+              class="topbar-status"
+              data-status={status()}
+              title="Live connection state"
+            >
+              <span
+                class="status-dot"
+                classList={{ online: status() === 'connected' }}
+              />
+              {statusLabels[status()] ?? status()}
+            </span>
+            <button
+              class="icon-button"
+              aria-label="Appearance settings"
+              onClick={() => go('/settings')}
+            >
+              <Icon name="palette" />
+            </button>
+          </div>
         </header>
         <main id="main" tabindex="-1">
           <Show when={initialNotice()}>
             <div class="notice error" role="alert">
-              {initialNotice()}{' '}
+              <Icon name="alert" />
+              <span>{initialNotice()}</span>
               <button
                 class="button outlined"
                 onClick={() => setInitialNotice(undefined)}
@@ -198,26 +252,31 @@ export function App(props: { initialNotice?: string } = {}) {
           </Show>
           <Show when={connection.state.updateAvailable}>
             <div class="notice" role="status">
-              A new version is ready.{' '}
+              <Icon name="info" />
+              <span>A new WebUI build is ready to load.</span>
               <button
                 class="button filled"
                 onClick={() => {
                   if (approveNavigation()) location.reload()
                 }}
               >
-                Reload WebUI
+                Reload
               </button>
             </div>
           </Show>
           <Show when={connection.state.error}>
             <div class="notice error" role="alert">
-              {connection.state.error}
+              <Icon name="alert" />
+              <span>{connection.state.error}</span>
             </div>
           </Show>
-          <Show when={connection.state.status === 'reconnecting'}>
+          <Show when={status() === 'reconnecting'}>
             <div class="notice" role="status">
-              Reconnecting… Your place is saved. Actions will return when
-              connected.
+              <Icon name="refresh" />
+              <span>
+                Reconnecting. Your position is saved and actions resume
+                automatically.
+              </span>
             </div>
           </Show>
           <Show
@@ -235,94 +294,101 @@ export function App(props: { initialNotice?: string } = {}) {
               </Show>
             }
           >
-            <section class="hero">
-              <div>
-                <span class="eyebrow">A LITTLE MORE CONNECTED</span>
-                <h1>
-                  Your space.
-                  <br />
-                  <em>In sync.</em>
-                </h1>
-                <p>
-                  A calmer place to manage your bridges, watch your services,
-                  and keep conversations flowing.
-                </p>
-                <button class="button filled" onClick={() => go('/plugins')}>
-                  Manage plugins <span aria-hidden="true">↗</span>
-                </button>
-              </div>
-              <div class="hero-art" aria-hidden="true">
-                <div class="orbit orbit-one" />
-                <div class="orbit orbit-two" />
-                <div class="orbit-core">C</div>
-                <span class="orbit-satellite one">↗</span>
-                <span class="orbit-satellite two">✦</span>
-              </div>
-            </section>
-            <section class="metric-grid" aria-label="Workspace summary">
-              <article class="panel metric">
-                <span class="eyebrow">CONNECTION</span>
-                <strong class="metric-text">
-                  {connection.state.status === 'connected'
-                    ? 'All connected'
-                    : 'Getting ready'}
-                </strong>
-                <p>One lightweight, live connection</p>
+            <PageHeader
+              title="Overview"
+              description="Everything this relay is running, and every page it exposes."
+            />
+            <section class="stat-row" aria-label="Workspace summary">
+              <article class="panel stat-tile">
+                <Icon name="plug" />
+                <div class="stat-tile-body">
+                  <span class="eyebrow">Connection</span>
+                  <strong>{statusLabels[status()] ?? status()}</strong>
+                  <span>Live Muon channel</span>
+                </div>
               </article>
-              <article class="panel metric">
-                <span class="eyebrow">EXTENSIONS</span>
-                <strong>{entries().length}</strong>
-                <p>Available in your workspace</p>
+              <article class="panel stat-tile">
+                <Icon name="layers" />
+                <div class="stat-tile-body">
+                  <span class="eyebrow">Extensions</span>
+                  <strong>{entries().length}</strong>
+                  <span>
+                    {pages().length} {pages().length === 1 ? 'page' : 'pages'}{' '}
+                    available
+                  </span>
+                </div>
               </article>
-              <article class="panel metric">
-                <span class="eyebrow">DESIGNED TO BREATHE</span>
-                <strong class="metric-text">
-                  Less work.
-                  <br />
-                  More flow.
-                </strong>
-                <p>Pages load only when you need them</p>
+              <article class="panel stat-tile">
+                <Icon name="cpu" />
+                <div class="stat-tile-body">
+                  <span class="eyebrow">Build</span>
+                  <strong>{connection.config.buildId ?? 'development'}</strong>
+                  <span>Reload prompt when it changes</span>
+                </div>
               </article>
             </section>
-            <div class="section-heading">
-              <div>
-                <span class="eyebrow">AT YOUR FINGERTIPS</span>
-                <h2>Your workspace</h2>
-              </div>
-              <span class="muted">Live, without the noise</span>
-            </div>
-            <div class="quick-grid">
-              <For each={entries()}>
-                {([id, entry]) => (
-                  <button
-                    class="panel quick-card"
-                    onClick={() =>
-                      go(
-                        entry.routes[0]?.replace(/\{.*$/, '') ||
-                          '/notifications',
-                      )
-                    }
-                  >
-                    <span class="quick-icon">◇</span>
-                    <h3>{entry.module}</h3>
-                    <p>{entry.methods.length} available actions</p>
-                    <span class="quick-arrow" aria-hidden="true">
-                      ↗
-                    </span>
+            <Show
+              when={pages().length}
+              fallback={
+                <section class="panel empty-state">
+                  <Icon name="plugins" size={22} />
+                  <h2>No pages yet</h2>
+                  <p>
+                    Enabled plugins register their pages here automatically.
+                  </p>
+                  <button class="button filled" onClick={() => go('/plugins')}>
+                    Open plugin manager
                   </button>
+                </section>
+              }
+            >
+              <For each={groups()}>
+                {(group) => (
+                  <section>
+                    <div class="section-heading">
+                      <h2>{group}</h2>
+                      <span class="muted">
+                        {pages().filter((page) => page.group === group).length}{' '}
+                        {pages().filter((page) => page.group === group)
+                          .length === 1
+                          ? 'page'
+                          : 'pages'}
+                      </span>
+                    </div>
+                    <div class="page-grid">
+                      <For
+                        each={pages().filter((page) => page.group === group)}
+                      >
+                        {(page) => (
+                          <button
+                            class="page-card"
+                            onClick={() => go(page.path)}
+                          >
+                            <span class="page-card-icon">
+                              <Icon name={page.icon} size={18} />
+                            </span>
+                            <span class="page-card-body">
+                              <strong>{page.title}</strong>
+                              <small>{page.source}</small>
+                            </span>
+                            <Icon name="chevronRight" size={16} />
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </section>
                 )}
               </For>
-              <Show when={!entries().length}>
-                <div class="panel empty-state">
-                  <h3>Your workspace is getting ready</h3>
-                  <p>Enabled plugin pages will appear here automatically.</p>
-                </div>
-              </Show>
-            </div>
+            </Show>
           </Show>
         </main>
-        <footer>
-          Crossgram <span>•</span> Less friction. More connection.
+        <footer class="footer">
+          <span>{connection.config.title}</span>
+          <span aria-hidden="true">·</span>
+          <span>
+            WebUI build{' '}
+            <code>{connection.config.buildId ?? 'development'}</code>
+          </span>
         </footer>
       </div>
     </div>

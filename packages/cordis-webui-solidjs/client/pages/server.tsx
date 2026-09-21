@@ -2,6 +2,7 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import type { Data } from '../../src/server-monitor.js'
 import { navigate, useConnection, useRpc, type PageProps } from '../sdk.js'
+import { Icon } from '../icons.js'
 import {
   ConfirmAction,
   formatBytes,
@@ -139,7 +140,10 @@ export default function ServerPage(props: PageProps) {
             </table>
           </div>
           <Show when={!rows().length}>
-            <p class="empty-state">No matching records.</p>
+            <p class="empty-note">
+              <Icon name="search" size={16} />
+              No matching records.
+            </p>
           </Show>
           <div class="pagination">
             <button

@@ -26,20 +26,20 @@
         {
           "path": "/platform-accounts",
           "title": "Platform accounts",
-          "icon": "○",
-          "group": "Workspace"
+          "icon": "account",
+          "group": "Accounts"
         },
         {
           "path": "/sticker-packs",
           "title": "Sticker collections",
-          "icon": "✦",
-          "group": "Workspace"
+          "icon": "smile",
+          "group": "Accounts"
         },
         {
           "path": "/bots",
           "title": "Your bots",
-          "icon": "◇",
-          "group": "Workspace"
+          "icon": "bot",
+          "group": "Accounts"
         }
       ]
     }

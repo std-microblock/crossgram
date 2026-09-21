@@ -5,6 +5,7 @@ import QRCode from 'qrcode'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { waitForConnection, openPage } from './browser-test-utils.js'
 import type { BridgeDashboardData } from '../../bridge/src/dashboard-types.js'
 import {
   LoginTokenStore,
@@ -170,19 +171,13 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       page.on('request', (request) => requests.push(request.url()))
       page.on('pageerror', (error) => errors.push(error.message))
       await page.goto(ctx.server.baseUrl + '/console/')
-      await page.getByText('All connected', { exact: true }).waitFor()
+      await waitForConnection(page)
       expect(
         requests.some((url) =>
           /assets\/(accounts|stickers|bots|qr|jsQR)-/.test(url),
         ),
       ).toBe(false)
-      const go = async (name: string) => {
-        await page.getByRole('button', { name: 'Open navigation' }).click()
-        await page
-          .locator('.navigation')
-          .getByRole('button', { name, exact: true })
-          .click()
-      }
+      const go = (name: string) => openPage(page, name)
       await go('Platform accounts')
       await page
         .getByRole('heading', { name: 'Primary account', exact: true })
@@ -195,13 +190,13 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
           .locator('.otp-digits > span')
           .first()
           .evaluate((element) => getComputedStyle(element).borderRadius),
-      ).toBe('12px')
+      ).toBe('8px')
       expect(
         await page
           .locator('.identity-avatar')
           .first()
           .evaluate((element) => getComputedStyle(element).borderTopLeftRadius),
-      ).toBe('20px')
+      ).toBe('14px')
       expect(
         await page.evaluate(() => {
           const title = document

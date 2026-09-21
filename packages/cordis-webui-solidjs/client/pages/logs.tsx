@@ -3,6 +3,7 @@ import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import type { Data } from '@cordisjs/plugin-logger-webui'
 import type { Message } from 'cordis'
 import { useRpc, type PageProps } from '../sdk.js'
+import { Icon } from '../icons.js'
 import { ActionError, LiveContent, PageHeader } from '../components.js'
 import { stripAnsi } from './admin-model.js'
 export default function LogsPage(props: PageProps) {
@@ -156,7 +157,10 @@ export default function LogsPage(props: PageProps) {
                 )}
               </For>
               <Show when={!filtered().length}>
-                <p class="empty-state">No matching logs in this window.</p>
+                <p class="empty-note">
+                  <Icon name="search" size={16} />
+                  No matching logs in this window.
+                </p>
               </Show>
             </div>
           </Show>

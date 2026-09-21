@@ -26,18 +26,54 @@ export function downsample(
   result.push(clean(values.length - 1))
   return result
 }
-export function sparkPath(values: readonly number[]): string {
-  const points = downsample(values),
-    maximum = Math.max(1, ...points.map((point) => point.value))
-  return points
-    .map(
-      (point, index) =>
-        (index ? 'L' : 'M') +
-        ((point.index / Math.max(1, values.length - 1)) * 300).toFixed(1) +
-        ',' +
-        (66 - (point.value / maximum) * 60).toFixed(1),
-    )
-    .join(' ')
+/**
+ * Bounds the sample count, then connects the points with a cardinal spline. Raw peaks are
+ * kept (see downsample) while the curve stays readable instead of turning into a sawtooth.
+ */
+export function sparkPath(values: readonly number[], samples = 64): string {
+  const points = downsample(values, samples)
+  const peak = Math.max(1, ...points.map((point) => point.value))
+  const span = Math.max(1, values.length - 1)
+  const coordinates = points.map((point) => ({
+    x: (point.index / span) * 300,
+    y: 66 - (point.value / peak) * 60,
+  }))
+  if (coordinates.length < 2)
+    return coordinates.length
+      ? 'M' + coordinates[0]!.x.toFixed(1) + ',' + coordinates[0]!.y.toFixed(1)
+      : ''
+  const tension = 0.35
+  const clamp = (value: number, minimum: number, maximum: number) =>
+    Math.min(maximum, Math.max(minimum, value))
+  let path = 'M' + coordinates[0]!.x.toFixed(1) + ',' + coordinates[0]!.y.toFixed(1)
+  for (let index = 0; index < coordinates.length - 1; index++) {
+    const previous = coordinates[index - 1] ?? coordinates[index]!
+    const current = coordinates[index]!
+    const next = coordinates[index + 1]!
+    const after = coordinates[index + 2] ?? next
+    const control1 = {
+      x: current.x + ((next.x - previous.x) / 6) * tension * 2,
+      y: current.y + ((next.y - previous.y) / 6) * tension * 2,
+    }
+    const control2 = {
+      x: next.x - ((after.x - current.x) / 6) * tension * 2,
+      y: next.y - ((after.y - current.y) / 6) * tension * 2,
+    }
+    path +=
+      'C' +
+      clamp(control1.x, 0, 300).toFixed(1) +
+      ',' +
+      clamp(control1.y, 0, 72).toFixed(1) +
+      ' ' +
+      clamp(control2.x, 0, 300).toFixed(1) +
+      ',' +
+      clamp(control2.y, 0, 72).toFixed(1) +
+      ' ' +
+      next.x.toFixed(1) +
+      ',' +
+      next.y.toFixed(1)
+  }
+  return path
 }
 export function formatPercent(value: number): string {
   return Number.isFinite(value) ? (value * 100).toFixed(2) + '%' : '—'

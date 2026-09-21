@@ -3,7 +3,10 @@ import Server from '@cordisjs/plugin-server'
 import { describe, expect, it, vi } from 'vitest'
 import { chromium } from 'playwright'
 import SolidWebUI, { escapeScriptJSON, normalizePath } from './index.js'
-import { expectReconnectWithoutReload } from './browser-test-utils.js'
+import {
+  expectReconnectWithoutReload,
+  waitForConnection,
+} from './browser-test-utils.js'
 import { resolve } from 'node:path'
 import { safeAsset } from './entry.js'
 
@@ -191,9 +194,9 @@ describe('Solid WebUI production service', () => {
       page.on('pageerror', (error) => errors.push(error.message))
       await page.goto(app.url + '/console/')
       await page
-        .getByRole('heading', { name: 'Your space. In sync.' })
+        .getByRole('heading', { name: 'Overview', exact: true })
         .waitFor()
-      await page.getByText('All connected', { exact: true }).waitFor()
+      await waitForConnection(page)
       expect(
         await page.evaluate(
           () => document.documentElement.scrollWidth <= innerWidth,
@@ -211,5 +214,5 @@ describe('Solid WebUI production service', () => {
       await browser.close()
       await app.stop()
     }
-  })
+  }, 90_000)
 })

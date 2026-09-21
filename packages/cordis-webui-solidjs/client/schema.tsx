@@ -10,6 +10,7 @@ import {
   Show,
   untrack,
 } from 'solid-js'
+import { Icon } from './icons.js'
 import { guardNavigation } from './sdk.js'
 import {
   clone,
@@ -68,6 +69,9 @@ export function SchemaField(props: FieldProps) {
       ) ?? -1
     if (index >= 0) setBranch(index)
   })
+  /** Structure groups only get a label; leaf values get expression and reset affordances. */
+  const leaf = () =>
+    !['object', 'intersect', 'array', 'tuple', 'dict'].includes(schema().type)
   const [limit, setLimit] = createSignal(20)
   const [key, setKey] = createSignal('')
   const [keyError, setKeyError] = createSignal('')
@@ -188,12 +192,17 @@ export function SchemaField(props: FieldProps) {
               )}
             </For>
           </select>
-          <Show when={!constants && active()} keyed>
+          <Show
+            when={
+              !constants && active()?.type !== 'const' ? active() : undefined
+            }
+            keyed
+          >
             {(child) => (
               <SchemaField
                 {...props}
                 schema={child as SchemaNode}
-                label={props.label + ' value'}
+                label={props.label}
                 depth={(props.depth ?? 0) + 1}
               />
             )}
@@ -500,6 +509,7 @@ export function SchemaField(props: FieldProps) {
           <Show
             when={
               !disabled() &&
+              leaf() &&
               schema().type !== 'const' &&
               schema().type !== 'never'
             }
@@ -526,6 +536,7 @@ export function SchemaField(props: FieldProps) {
           <Show
             when={
               props.value !== undefined &&
+              leaf() &&
               !schema().meta.required &&
               !disabled()
             }
@@ -722,16 +733,20 @@ export function SchemaForm(props: SchemaFormProps) {
       </Show>
       <Show when={issues().length}>
         <div class="notice error" role="alert">
-          <strong>Check your configuration</strong>
-          <ul>
-            <For each={issues().slice(0, 20)}>
-              {(issue) => (
-                <li>
-                  {issue.path.join(' › ') || 'Configuration'}: {issue.message}
-                </li>
-              )}
-            </For>
-          </ul>
+          <Icon name="alert" />
+          <div>
+            <strong>Check your configuration</strong>
+            <ul>
+              <For each={issues().slice(0, 20)}>
+                {(issue) => (
+                  <li>
+                    <code>{issue.path.join('.') || 'configuration'}</code>{' '}
+                    {issue.message}
+                  </li>
+                )}
+              </For>
+            </ul>
+          </div>
         </div>
       </Show>
       <Show when={Object.values(inputErrors()).some(Boolean)}>
