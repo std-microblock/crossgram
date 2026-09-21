@@ -1852,7 +1852,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private scheduleReactionResourceWarmup(session: PlatformSession): void {
     const catalog = this.reactionCatalog
     if (!catalog || this.reactionResourceWarmup) return
+    // Local faces already carry their on-disk size; only the CDN-backed ones
+    // need a lookup, and each process starts from the published catalog again.
     const targets = catalog.available.filter((definition) => definition.presentation.type === 'custom'
+      && definition.presentation.resource.size === undefined
       && reactionResourceLocatorKey(definition.presentation.resource))
     this.reactionResourceWarmup = mapConcurrent(targets, 4, async (definition) => {
       if (definition.presentation.type !== 'custom') return
