@@ -1333,6 +1333,93 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('hydrates sizes for the reaction documents a message advertises', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [{
+        key: '1:424', title: '/续标识',
+        presentation: {
+          type: 'custom' as const, alt: '🙂',
+          resource: {
+            version: 1, format: 'static' as const, mimeType: 'image/png' as const,
+            width: 128, height: 128, locator: { reactionKey: '1:424' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    }))
+    const downloads: string[] = []
+    platform.client.downloadReactionResource = vi.fn(async function* (reactionKey: string) {
+      downloads.push(reactionKey)
+      yield Uint8Array.from([1, 2, 3, 4, 5])
+    })
+    platform.client.getMessageReactions = vi.fn(async () => ({
+      reactions: [{ key: '1:424', count: 2, selected: true }], maxSelected: 20,
+    }))
+    // Warm the shared catalog the way a client reaction request does.
+    await platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'reacted', targetId: 'reacted',
+    })
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'reacted', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        parts: [{ type: 'text' as const, text: 'hi' }],
+        reactionContext: { reactions: [{ key: '1:424', count: 2, selected: true }], maxSelected: 20 },
+      }],
+    }))
+
+    const page = await platform.getHistory(session, { id: '2:group' })
+    expect(page.messages[0]?.reactionContext?.available[0]).toMatchObject({
+      key: '1:424', presentation: { resource: { size: 5 } },
+    })
+    expect(downloads).toEqual(['1:424'])
+
+    // Later messages reuse the measured size instead of fetching the asset again.
+    const again = await platform.getHistory(session, { id: '2:group' })
+    expect(again.messages[0]?.reactionContext?.available[0]).toMatchObject({
+      presentation: { resource: { size: 5 } },
+    })
+    expect(downloads).toEqual(['1:424'])
+  })
+
+  it('keeps reaction definitions usable when the face asset cannot be measured', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [{
+        key: '1:424', title: '/续标识',
+        presentation: {
+          type: 'custom' as const, alt: '🙂',
+          resource: {
+            version: 1, format: 'static' as const, mimeType: 'image/png' as const,
+            width: 128, height: 128, locator: { reactionKey: '1:424' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    }))
+    platform.client.downloadReactionResource = vi.fn(async function* () {
+      throw new Error('QQ CDN unavailable')
+    })
+    platform.client.getMessageReactions = vi.fn(async () => ({
+      reactions: [{ key: '1:424', count: 1 }], maxSelected: 20,
+    }))
+    await platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'reacted', targetId: 'reacted',
+    })
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'reacted', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        parts: [{ type: 'text' as const, text: 'hi' }],
+        reactionContext: { reactions: [{ key: '1:424', count: 1 }], maxSelected: 20 },
+      }],
+    }))
+
+    const page = await platform.getHistory(session, { id: '2:group' })
+    expect(page.messages[0]?.reactionContext?.reactions).toEqual([{ key: '1:424', count: 1 }])
+    const definition = page.messages[0]?.reactionContext?.available[0]?.presentation
+    expect(definition?.type === 'custom' ? definition.resource.size : 'missing').toBeUndefined()
+  })
+
   it('uses the standard fallback emoji for slash faces missing from the catalog', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))

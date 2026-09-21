@@ -1661,25 +1661,80 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
    * Runtime QQ faces are discovered from the native catalog and may not carry
    * a byte size. Telegram uses Document.size to schedule custom-emoji loads;
    * advertising zero makes the receiver skip the request entirely. Fetch the
-   * small, referenced assets once so the projected document can publish the
+   * small, referenced assets once so the projected documents can publish the
    * exact EOF size while retaining the metadata-only path for normal media.
+   *
+   * Inline custom emoji and the reactions attached to the message both reach
+   * clients as custom-emoji documents, so both definition sources are hydrated
+   * here instead of only the message text.
    */
   private async hydrateReactionResourceSizes(
     session: PlatformSession,
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
     const pending = new Map<string, IMReactionResource>()
+    let missing = false
+    const consider = (resource: IMReactionResource): void => {
+      if (resource.size !== undefined || !resource.locator) return
+      missing = true
+      const key = reactionResourceKey(resource)
+      if (!this.reactionResourceSizes.has(key)) pending.set(key, resource)
+    }
     for (const part of message.content.parts) {
       if (part.type !== 'text') continue
       for (const entity of part.entities ?? []) {
         if (entity.type !== 'custom-emoji' || entity.definition.presentation.type !== 'custom') continue
-        const resource = entity.definition.presentation.resource
-        if (resource.size !== undefined || !resource.locator) continue
-        const key = reactionResourceKey(resource)
-        if (key && !this.reactionResourceSizes.has(key)) pending.set(key, resource)
+        consider(entity.definition.presentation.resource)
       }
     }
-    if (!pending.size) return message
+    const referenced = new Set((message.reactionContext?.reactions ?? []).map((reaction) => reaction.key))
+    if (referenced.size) {
+      for (const definition of message.reactionContext?.available ?? []) {
+        if (!referenced.has(definition.key)) continue
+        if (definition.presentation.type !== 'custom') continue
+        consider(definition.presentation.resource)
+      }
+    }
+    // A definition that still advertises no size must be patched even when its
+    // asset was already measured for an earlier message.
+    if (!missing) return message
+    const sizes = pending.size
+      ? await this.downloadReactionResourceSizes(session, pending)
+      : new Map<string, number>()
+
+    let changed = false
+    const parts = message.content.parts.map((part) => {
+      if (part.type !== 'text' || !part.entities?.length) return part
+      let partChanged = false
+      const entities = part.entities.map((entity) => {
+        if (entity.type !== 'custom-emoji' || entity.definition.presentation.type !== 'custom') return entity
+        const resource = entity.definition.presentation.resource
+        const size = this.reactionResourceSize(sizes, resource)
+        if (!size) return entity
+        partChanged = true
+        return {
+          ...entity,
+          definition: {
+            ...entity.definition,
+            presentation: { ...entity.definition.presentation, resource: { ...resource, size } },
+          },
+        }
+      })
+      if (!partChanged) return part
+      changed = true
+      return { ...part, entities }
+    })
+    const reactionContext = this.applyReactionResourceSizes(message.reactionContext, sizes)
+    if (!changed && reactionContext === message.reactionContext) return message
+    const prepared: IMMessage<QQMediaLocator> = { ...message, content: { ...message.content, parts } }
+    if (reactionContext !== message.reactionContext) prepared.reactionContext = reactionContext
+    return prepared
+  }
+
+  private async downloadReactionResourceSizes(
+    session: PlatformSession,
+    pending: ReadonlyMap<string, IMReactionResource>,
+  ): Promise<Map<string, number>> {
     const sizes = new Map<string, number>()
     await Promise.all([...pending.entries()].map(async ([key, resource]) => {
       const controller = new AbortController()
@@ -1700,29 +1755,36 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         clearTimeout(timer)
       }
     }))
-    if (!sizes.size) return message
+    return sizes
+  }
+
+  private applyReactionResourceSizes(
+    context: IMReactionContext | undefined,
+    sizes: ReadonlyMap<string, number>,
+  ): IMReactionContext | undefined {
+    if (!context?.available.length) return context
     let changed = false
-    const parts = message.content.parts.map((part) => {
-      if (part.type !== 'text' || !part.entities?.length) return part
-      const entities = part.entities.map((entity) => {
-        if (entity.type !== 'custom-emoji' || entity.definition.presentation.type !== 'custom') return entity
-        const resource = entity.definition.presentation.resource
-        if (resource.size !== undefined || !resource.locator) return entity
-        const key = reactionResourceKey(resource)
-        const size = sizes.get(key) ?? this.reactionResourceSizes.get(key)
-        if (!size) return entity
-        changed = true
-        return {
-          ...entity,
-          definition: {
-            ...entity.definition,
-            presentation: { ...entity.definition.presentation, resource: { ...resource, size } },
-          },
-        }
-      })
-      return changed ? { ...part, entities } : part
+    const available = context.available.map((definition) => {
+      if (definition.presentation.type !== 'custom') return definition
+      const resource = definition.presentation.resource
+      const size = this.reactionResourceSize(sizes, resource)
+      if (!size) return definition
+      changed = true
+      return {
+        ...definition,
+        presentation: { ...definition.presentation, resource: { ...resource, size } },
+      }
     })
-    return changed ? { ...message, content: { ...message.content, parts } } : message
+    return changed ? { ...context, available } : context
+  }
+
+  private reactionResourceSize(
+    sizes: ReadonlyMap<string, number>,
+    resource: IMReactionResource,
+  ): number | undefined {
+    if (resource.size !== undefined || !resource.locator) return undefined
+    const key = reactionResourceKey(resource)
+    return sizes.get(key) ?? this.reactionResourceSizes.get(key)
   }
 
   private scheduleInlinePreview(
