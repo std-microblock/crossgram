@@ -107,8 +107,6 @@ describe('crossgram feature advertisement', () => {
     const rpc = new DialogRpc(platform, session)
     await materialize(rpc)
 
-    expect(parseFeatures(await rpc.getFeatures()))
-      .toEqual({ poke: { maxCount: 10 } })
     expect(parseFeatures(await rpc.getFeatures({
       peer: { _: 'inputPeerUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO },
     }))).toEqual({ poke: { maxCount: 10 } })
@@ -128,7 +126,6 @@ describe('crossgram feature advertisement', () => {
     const withoutPoke = new PokePlatform()
     const plainRpc = new DialogRpc(withoutPoke, session)
     await materialize(plainRpc)
-    expect(parseFeatures(await plainRpc.getFeatures())).toEqual({})
     expect(parseFeatures(await plainRpc.getFeatures({
       peer: { _: 'inputPeerUser', userId: plainRpc.peerTlId('alice'), accessHash: Long.ZERO },
     }))).toEqual({})

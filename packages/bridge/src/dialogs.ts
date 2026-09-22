@@ -192,9 +192,9 @@ export interface BlockedPeerRpcChange extends BlockedPeerChange {
   userId: number
 }
 
-/** `crossgram.getFeatures` request. The peer narrows the answer to one chat. */
+/** `crossgram.getFeatures` request for one conversation. */
 export interface GetFeaturesRequest {
-  peer?: tl.TypeInputPeer
+  peer: tl.TypeInputPeer
 }
 
 /** `crossgram.sendPoke` request. */
@@ -2501,17 +2501,14 @@ export class DialogRpc {
    * Telegram server rejects the unknown method, so the caller keeps the action
    * hidden instead of sending one that cannot work.
    */
-  async getFeatures(req: GetFeaturesRequest = {}): Promise<tl.RawDataJSON> {
+  async getFeatures(req: GetFeaturesRequest): Promise<tl.RawDataJSON> {
     const features: CrossgramFeatures = {}
     const poke = this._platform.capabilities.poke
-    if (poke && poke.maxCount > 0) {
-      let supported = true
-      if (req.peer) {
-        await this._hydratePeers()
-        const conversationId = this._resolvePeer(req.peer)
-        supported = this._conversation(conversationId).kind !== 'channel'
-          && !(await this._systemPeers?.resolve(this._session, conversationId))
-      }
+    if (poke && poke.maxCount > 0 && req.peer) {
+      await this._hydratePeers()
+      const conversationId = this._resolvePeer(req.peer)
+      const supported = this._conversation(conversationId).kind !== 'channel'
+        && !(await this._systemPeers?.resolve(this._session, conversationId))
       if (supported) features.poke = { maxCount: poke.maxCount }
     }
     return featuresJSON(features)

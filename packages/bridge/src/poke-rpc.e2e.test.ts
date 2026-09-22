@@ -106,9 +106,8 @@ describe('poke RPC wire contract', () => {
     const peer = encodePeer({
       _: 'inputPeerUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO,
     })
-    const request = TlBinaryWriter.manual(8 + peer.length)
+    const request = TlBinaryWriter.manual(4 + peer.length)
     request.uint(GET_FEATURES_CONSTRUCTOR)
-    request.int(1)
     request.raw(peer)
 
     const decoded = decodeRequest(request.result())
@@ -122,7 +121,7 @@ describe('poke RPC wire contract', () => {
     )
     for (const layer of [228, 223, 180]) {
       const roundTripped = roundTripResponse(response, layer) as { _: string, data: string }
-      expect(roundTripped._, layer).toBe('dataJSON')
+      expect(roundTripped._, String(layer)).toBe('dataJSON')
       expect(JSON.parse(roundTripped.data), String(layer)).toEqual({ poke: { maxCount: 10 } })
     }
   })
