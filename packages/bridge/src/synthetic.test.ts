@@ -64,6 +64,18 @@ describe('bridge MTProto config', () => {
 })
 
 describe('bridge synthetic peers', () => {
+  it('always reports a userpic state so clients stop refreshing the full user', () => {
+    const withoutPhoto = roundTrip(makeUser({ id: 7, firstName: 'NoPhoto', bot: true })) as tl.RawUser
+    const withPhoto = roundTrip(makeUser({
+      id: 8,
+      firstName: 'WithPhoto',
+      photo: { _: 'userProfilePhoto', photoId: Long.fromNumber(5), dcId: 1 },
+    })) as tl.RawUser
+
+    expect(withoutPhoto.photo).toEqual({ _: 'userProfilePhotoEmpty' })
+    expect(withPhoto.photo).toMatchObject({ _: 'userProfilePhoto', photoId: Long.fromNumber(5) })
+  })
+
   it('gives users a non-zero access hash that survives TL serialization', () => {
     const user = makeUser({ id: 42, firstName: 'Alice' })
     const decoded = roundTrip(user) as tl.RawUser

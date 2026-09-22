@@ -5250,7 +5250,7 @@ export class DialogRpc {
 
   async getNotifySettings(req: tl.account.RawGetNotifySettingsRequest): Promise<tl.RawPeerNotifySettings> {
     await this._hydratePeers()
-    return this._effectiveNotifySettings(this._notificationTarget(req.peer))
+    return this._effectiveNotifySettings(await this._notificationTarget(req.peer))
   }
 
   async updateNotifySettings(req: tl.account.RawUpdateNotifySettingsRequest): Promise<{
@@ -5258,7 +5258,7 @@ export class DialogRpc {
     peer: tl.TypeNotifyPeer
   }> {
     await this._hydratePeers()
-    const target = this._notificationTarget(req.peer)
+    const target = await this._notificationTarget(req.peer)
     await this._notificationSettings?.update(
       this._session.platformSessionId, target, req.settings,
     )
@@ -5294,7 +5294,7 @@ export class DialogRpc {
 
   async getNotifyExceptions(req: tl.account.RawGetNotifyExceptionsRequest): Promise<tl.RawUpdates> {
     await this._hydratePeers()
-    const requested = req.peer ? this._notificationTarget(req.peer) : undefined
+    const requested = req.peer ? await this._notificationTarget(req.peer) : undefined
     const overrides = await this._notificationSettings?.listOverrides(this._session.platformSessionId) ?? []
     const selected = overrides.filter(({ target, settings }) => {
       if (requested && !this._notificationTargetMatches(target, requested)) return false
@@ -5341,12 +5341,12 @@ export class DialogRpc {
     })))
   }
 
-  private _notificationTarget(peer: tl.TypeInputNotifyPeer): NotificationTarget {
+  private async _notificationTarget(peer: tl.TypeInputNotifyPeer): Promise<NotificationTarget> {
     if (peer._ === 'inputNotifyUsers') return { type: 'users' }
     if (peer._ === 'inputNotifyChats') return { type: 'chats' }
     if (peer._ === 'inputNotifyBroadcasts') return { type: 'broadcasts' }
     if (peer._ === 'inputNotifyCommunity') throw new RpcError(400, 'PEER_ID_INVALID')
-    const peerId = this._resolveNotificationPeer(peer.peer)
+    const peerId = await this._resolveNotificationPeer(peer.peer)
     return peer._ === 'inputNotifyForumTopic'
       ? { type: 'topic', peerId, topMsgId: peer.topMsgId }
       : { type: 'peer', peerId }
@@ -5368,9 +5368,32 @@ export class DialogRpc {
     return requested.type === 'broadcasts' ? broadcast : conversation.kind !== 'direct' && !broadcast
   }
 
-  private _resolveNotificationPeer(peer: tl.TypeInputPeer): string {
+  /**
+   * Notification settings are muteable for every peer a client knows, not only
+   * for peers with a materialized conversation: Telegram clients mute group
+   * members, message senders and bot contacts that never became dialogs.
+   * Resolve those from the persisted user rows instead of rejecting them.
+   */
+  private async _resolveNotificationPeer(peer: tl.TypeInputPeer): Promise<string> {
     if (peer._ === 'inputPeerSelf') return this._session.userId
-    return this._resolvePeer(peer)
+    if (peer._ !== 'inputPeerUser') return this._resolvePeer(peer)
+    const tlUserId = inputPeerId(peer)
+    const known = this._tlToUser.get(tlUserId)
+    if (known !== undefined) {
+      if (this._conversation(known).kind !== 'direct') throw new RpcError(400, 'PEER_ID_INVALID')
+      return known
+    }
+    const row = await this._store?.getUserByTlId(this._session.platformId, tlUserId)
+    if (!row) throw new RpcError(400, 'PEER_ID_INVALID')
+    this._registerUser(row)
+    return row.platformUserId
+  }
+
+  /** Category defaults a peer or topic inherits when it has no full override. */
+  private _defaultNotifyTarget(peerId: string): NotificationTarget {
+    const conversation = this._conversation(peerId)
+    if (conversation.kind === 'direct') return { type: 'users' }
+    return conversation.metadata?.broadcast === true ? { type: 'broadcasts' } : { type: 'chats' }
   }
 
   private _notifyPeer(target: NotificationTarget): tl.TypeNotifyPeer {
@@ -5391,7 +5414,16 @@ export class DialogRpc {
     const policy = target.type === 'peer'
       ? qqGroupMsgMaskPolicy(this._conversations.get(target.peerId))
       : undefined
-    return policy ? { ...persisted, muteUntil: policy.muteUntil } : persisted
+    const merged = policy ? { ...persisted, muteUntil: policy.muteUntil } : persisted
+    if (target.type !== 'peer' || !this._notificationSettings) return merged
+    // Telegram answers with the *effective* settings of a peer. Clients treat
+    // fields that are missing from the answer as unknown: they then re-request
+    // the settings, drop locally cached mute state or defer notifications, so
+    // fill the inherited category defaults before returning the override.
+    const defaults = await this._notificationSettings.get(
+      this._session.platformSessionId, this._defaultNotifyTarget(target.peerId),
+    )
+    return { ...defaults, ...merged }
   }
 
   private _peerNotifySettings(peerId: string): Promise<tl.RawPeerNotifySettings> {

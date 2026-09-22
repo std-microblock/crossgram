@@ -1673,6 +1673,63 @@ describe('DialogRpc', () => {
       code: 400, text: 'HISTORY_UNAVAILABLE',
     } satisfies Partial<RpcError>)
   })
+
+  it('mutes persisted users that never materialized a conversation', async () => {
+    const ghost = {
+      id: 4242, platformId: session.platformId, platformUserId: 'ghost-user',
+      firstName: 'Ghost', lastName: null, username: null, avatar: null, metadata: {},
+    }
+    let nextId = 9000
+    const store: any = {
+      peerRevision: 7,
+      listConversations: vi.fn(async () => []),
+      listDialogs: vi.fn(async () => []),
+      readDialogs: vi.fn(async () => []),
+      ingestDialogs: vi.fn(async () => undefined),
+      getUser: vi.fn(async (_platformId: string, id: string) => id === session.userId ? {
+        id: 1, platformId: session.platformId, platformUserId: session.userId,
+        firstName: 'Current', lastName: null, username: null, avatar: null, metadata: {},
+      } : undefined),
+      readUsers: vi.fn(async (_platformId: string, ids: string[]) => ids.map((id) => ({
+        ...ghost, id: nextId++, platformUserId: id, firstName: id,
+      }))),
+      upsertUsers: vi.fn(async (_session: PlatformSession, users: IMUser[]) => users.map((user) => ({
+        ...ghost, id: nextId++, platformUserId: user.id, firstName: user.firstName,
+      }))),
+      getUserByTlId: vi.fn(async (_platformId: string, id: number) => id === ghost.id ? ghost : undefined),
+      readProjectedByPlatformIds: vi.fn(async () => []),
+      findProjectedByPlatformId: vi.fn(async () => undefined),
+      countUnreadMentionsMany: vi.fn(async () => new Map()),
+      countUnreadMentions: vi.fn(async () => 0),
+      listUnreadMentionIds: vi.fn(async () => new Set()),
+    }
+    const rpc = new DialogRpc(new DialogTestPlatform(), session, store)
+    const peer = {
+      _: 'inputNotifyPeer' as const,
+      peer: { _: 'inputPeerUser' as const, userId: ghost.id, accessHash: Long.ONE },
+    }
+
+    await expect(rpc.getNotifySettings({ _: 'account.getNotifySettings', peer }))
+      .resolves.toMatchObject({ _: 'peerNotifySettings' })
+    expect(store.getUserByTlId).toHaveBeenCalledWith(session.platformId, ghost.id)
+    await expect(rpc.updateNotifySettings({
+      _: 'account.updateNotifySettings', peer,
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
+    })).resolves.toMatchObject({
+      peer: { _: 'notifyPeer', peer: { _: 'peerUser', userId: ghost.id } },
+    })
+  })
+
+  it('rejects notification settings for peers that are not known users', async () => {
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
+    await expect(rpc.getNotifySettings({
+      _: 'account.getNotifySettings',
+      peer: {
+        _: 'inputNotifyPeer',
+        peer: { _: 'inputPeerUser', userId: 987654321, accessHash: Long.ONE },
+      },
+    })).rejects.toMatchObject({ code: 400, text: 'PEER_ID_INVALID' } satisfies Partial<RpcError>)
+  })
 })
 
 describe('stableId', () => {

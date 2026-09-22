@@ -82,7 +82,10 @@ export function makeUser(opts: {
     lastName: opts.lastName ?? undefined,
     username: opts.username ?? undefined,
     phone: opts.phone ?? undefined,
-    photo: opts.photo,
+    // Telegram always reports this slot: a missing `photo` flag leaves the
+    // client's userpic state unknown, and desktop clients then re-request the
+    // full user in a loop while any userpic button is on screen.
+    photo: opts.photo ?? { _: 'userProfilePhotoEmpty' },
     status: { _: 'userStatusRecently' },
   } as unknown as tl.RawUser
 }

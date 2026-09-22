@@ -11,6 +11,7 @@ import {
 } from '@mtproto-relay/mtproto'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
 import { DialogRpc, stableId } from './dialogs.js'
+import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { MUTE_FOREVER, NotificationSettingsStore } from './notification-settings.js'
 import type { IMConversation, IMMessage, IMPlatform, PlatformSession } from './platform.js'
@@ -293,9 +294,13 @@ describe('notification settings RPC e2e', () => {
     await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-unspecified'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 123 })
+    // Shield leaves the Telegram-local override untouched, so the peer
+    // inherits the muted group default instead of an unknown state.
     await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-shield'),
-    })).resolves.toEqual({ _: 'peerNotifySettings' })
+    })).resolves.toMatchObject({
+      _: 'peerNotifySettings', muteUntil: MUTE_FOREVER, showPreviews: true, silent: false,
+    })
 
     const page = await dialogs.getDialogs({
       _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
@@ -317,7 +322,7 @@ describe('notification settings RPC e2e', () => {
     expect(muteUntilByPeer.get(stableId('peer:mask-assistant'))).toBe(MUTE_FOREVER)
     expect(muteUntilByPeer.get(stableId('peer:mask-receive'))).toBe(MUTE_FOREVER)
     expect(muteUntilByPeer.get(stableId('peer:mask-unspecified'))).toBe(123)
-    expect(muteUntilByPeer.get(stableId('peer:mask-shield'))).toBeUndefined()
+    expect(muteUntilByPeer.get(stableId('peer:mask-shield'))).toBe(MUTE_FOREVER)
   })
 
   it('round-trips group defaults and durable per-chat overrides through TL and SQLite', async () => {
@@ -388,15 +393,18 @@ describe('notification settings RPC e2e', () => {
         peer: { _: 'notifyChats' },
         notifySettings: expect.objectContaining({ muteUntil: MUTE_FOREVER }),
       }),
+      // resetting drops the override and re-inherits the group defaults
       {
         _: 'updateNotifySettings',
         peer: { _: 'notifyPeer', peer: { _: 'peerChannel', channelId: stableId('peer:group-1') } },
-        notifySettings: { _: 'peerNotifySettings' },
+        notifySettings: expect.objectContaining({
+          _: 'peerNotifySettings', muteUntil: MUTE_FOREVER,
+        }),
       },
     ]))
     await expect(roundTripRpc(resumedHarness, {
       _: 'account.getNotifySettings', peer,
-    })).resolves.toEqual({ _: 'peerNotifySettings' })
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
     await expect(roundTripRpc(resumedHarness, {
       _: 'account.getNotifySettings', peer: { _: 'inputNotifyChats' },
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
@@ -507,5 +515,78 @@ describe('notification settings RPC e2e', () => {
       _: 'account.getNotifySettings', peer: peer('qq-group'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
     maskFailure = undefined
+  })
+
+  it('keeps peers muteable when they never materialized a conversation', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise(resolve => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const store = new MessageStore(ctx.database)
+    const ghost = await store.upsertUser(session, { id: 'ghost-user', firstName: 'Ghost' })
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: [] } },
+      async getHistory() { return { messages: [] } },
+    }
+    const dialogs = new DialogRpc(
+      targetPlatform, session, store, undefined, undefined, 1,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      new NotificationSettingsStore(ctx.database, true),
+    )
+    const rpcHarness = rpcHarnessFor(dialogs)
+    const peer = {
+      _: 'inputNotifyPeer' as const,
+      peer: { _: 'inputPeerUser' as const, userId: ghost.id, accessHash: Long.ONE },
+    }
+
+    // Telegram clients mute group members, message senders and bot contacts
+    // that never became dialogs, so the bridge resolves them from user rows.
+    await expect(roundTripRpc(rpcHarness, { _: 'account.getNotifySettings', peer }))
+      .resolves.toMatchObject({
+        _: 'peerNotifySettings', muteUntil: 0, showPreviews: true, silent: false,
+      })
+
+    await expect(roundTripRpc(rpcHarness, {
+      _: 'account.updateNotifySettings', peer,
+      settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    await expect(roundTripRpc(rpcHarness, { _: 'account.getNotifySettings', peer }))
+      .resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+
+    const resumedDialogs = new DialogRpc(
+      targetPlatform, session, store, undefined, undefined, 1,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      new NotificationSettingsStore(ctx.database, true),
+    )
+    await expect(roundTripRpc(rpcHarnessFor(resumedDialogs), {
+      _: 'account.getNotifySettings', peer,
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
+
+    const full = await resumedDialogs.getFullUser({
+      _: 'users.getFullUser',
+      id: { _: 'inputUser', userId: ghost.id, accessHash: Long.ONE },
+    })
+    expect(full.fullUser).toMatchObject({
+      _: 'userFull', id: ghost.id,
+      notifySettings: { _: 'peerNotifySettings', muteUntil: MUTE_FOREVER },
+    })
+
+    // Peers the bridge never persisted stay invalid.
+    await expect(roundTripRpc(rpcHarness, {
+      _: 'account.getNotifySettings',
+      peer: {
+        _: 'inputNotifyPeer',
+        peer: { _: 'inputPeerUser', userId: 987654321, accessHash: Long.ONE },
+      },
+    })).resolves.toMatchObject({
+      _: 'mt_rpc_error', errorCode: 400, errorMessage: 'PEER_ID_INVALID',
+    })
   })
 })
