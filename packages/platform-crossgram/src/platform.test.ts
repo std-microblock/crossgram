@@ -1499,6 +1499,68 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('publishes the exact size and version of a relayed QQ face sticker', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.resolveStickerAssetMeta = vi.fn(async () => ({
+      size: 19_787, version: 3_437_369_837, mimeType: 'image/png',
+      width: 240, height: 240, source: 'bundle' as const,
+    }))
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'face', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        parts: [{
+          type: 'sticker' as const,
+          sticker: {
+            stickerId: 'sysface:506', packId: '4', title: '/????', format: 'animated' as const,
+            mimeType: 'image/apng', width: 240, height: 240, version: 1,
+            reference: { kind: 'sysface', faceId: '506', faceType: 3, name: '/????', animated: true },
+          },
+        }],
+      }],
+    }))
+
+    const page = await platform.getHistory(session, { id: '2:group' })
+    expect(page.messages[0]?.content.parts[0]).toMatchObject({
+      type: 'sticker',
+      sticker: {
+        stickerId: 'sysface:506', size: 19_787, version: 3_437_369_837,
+        mimeType: 'image/png', format: 'static',
+      },
+    })
+    expect(platform.client.resolveStickerAssetMeta).toHaveBeenCalledWith(
+      expect.objectContaining({ faceId: '506' }),
+    )
+  })
+
+  it('leaves a face sticker untouched when the bridge reports no metadata', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.resolveStickerAssetMeta = vi.fn(async () => null)
+    platform.client.stickerSource = vi.fn(() => {
+      throw new Error('projection must not open sticker bytes')
+    })
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'face', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        parts: [{
+          type: 'sticker' as const,
+          sticker: {
+            stickerId: 'sysface:476', packId: '3', title: '/???', format: 'animated' as const,
+            mimeType: 'image/apng', width: 240, height: 240,
+            reference: { kind: 'sysface', faceId: '476', faceType: 3, name: '/???', animated: true },
+          },
+        }],
+      }],
+    }))
+
+    const page = await platform.getHistory(session, { id: '2:group' })
+    const part = page.messages[0]?.content.parts[0]
+    expect(part).toMatchObject({ type: 'sticker', sticker: { stickerId: 'sysface:476' } })
+    expect(part?.type === 'sticker' ? part.sticker.size : 'missing').toBeUndefined()
+    expect(platform.client.stickerSource).not.toHaveBeenCalled()
+  })
+
   it('registers native sticker plans and maps QQ stickers back to the provider', async () => {
     const platform = new QQNTPlatform({}, 'qq-provider')
     const reference = {

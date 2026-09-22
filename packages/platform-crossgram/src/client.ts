@@ -14,7 +14,7 @@ import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
   WireReactionActorPage, WireReactionContext, WireReactionState, WireRequest, WireRequestPage, WireSticker, WireStickerPack, WireStickerPackSummary,
-  WireFlashTransferManifest, WireFlashTransferResult, WireReactionAssetMeta, WireTextPart,
+  WireFlashTransferManifest, WireFlashTransferResult, WireReactionAssetMeta, WireStickerAssetMeta, WireTextPart,
 } from './protocol.js'
 import { QQHighwayUploadWriter, uploadHighway, type QQMediaUploadPlan } from './highway.js'
 
@@ -812,6 +812,15 @@ export class QQNTClient {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ reactionKey }),
+    })
+  }
+
+  /** Size and content identity of the image one QQ sticker reference serves. */
+  resolveStickerAssetMeta(reference: QQStickerReference): Promise<WireStickerAssetMeta | null> {
+    return this.json('/stickers/meta', true, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(reference),
     })
   }
 

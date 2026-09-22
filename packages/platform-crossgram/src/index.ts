@@ -12,7 +12,7 @@ import {
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
   type IMMediaInput, type IMMediaUploadPreparation, type IMMediaUploadProbe,
   type IMMessageBundle, type IMMessageSnapshot, type JsonValue,
-  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMTransferOptions,
+  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMSticker, type IMTransferOptions,
   type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
   type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
 } from '@mtproto-relay/bridge'
@@ -71,6 +71,7 @@ const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
 const REACTION_RESOURCE_SIZE_TIMEOUT_MS = 5_000
 /** How long a resolved reaction asset size/version stays authoritative. */
 const REACTION_RESOURCE_META_TTL_MS = 10 * 60_000
+const STICKER_ASSET_META_TTL_MS = 10 * 60_000
 const WEBSOCKET_RECONNECT_BASE_DELAY_MS = 1_000
 const WEBSOCKET_RECONNECT_MAX_DELAY_MS = 60_000
 const MULTI_FORWARD_CACHE_LIMIT = 256
@@ -223,6 +224,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionCatalogRetryAt = 0
   private readonly reactionResourceMeta = new Map<string, ResolvedReactionResourceMeta>()
   private readonly reactionResourceMetaPending = new Map<string, Promise<ResolvedReactionResourceMeta | undefined>>()
+  private readonly stickerAssetMeta = new Map<string, ResolvedStickerAssetMeta>()
+  private readonly stickerAssetMetaPending = new Map<string, Promise<ResolvedStickerAssetMeta | undefined>>()
   private reactionResourceWarmup?: Promise<void>
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
@@ -1651,9 +1654,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     message: IMMessage<QQMediaLocator>,
   ): Promise<IMMessage<QQMediaLocator>> {
     const handler = this.eventHandlers.get(session.platformSessionId)
-    const prepared = await this.hydrateReactionResourceSizes(
+    const withFaceSizes = await this.hydrateReactionResourceSizes(
       session, handler ? message : await this.prepareInitialMessage(message),
     )
+    const prepared = await this.hydrateStickerAssetSizes(session, withFaceSizes)
     this.scheduleInlinePreview(session, conversation, prepared, handler)
     // Keep history metadata-only. The patched client asks getFileUrl for the
     // original and downloads it from QQ's CDN. Inline preview work is queued
@@ -1849,6 +1853,101 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
    * message to reference each face. Definitions are patched in place because
    * the catalog object is shared with every consumer.
    */
+  /**
+   * Publishes the exact byte length and content identity of the QQ face image a
+   * relayed sticker serves.
+   *
+   * Telegram schedules sticker downloads from `Document.size` and caches the
+   * bytes by document identity, so a message must describe the image the relay
+   * will serve. QQ hands system faces out as ZIP bundles and only lists its
+   * newest faces in the runtime panel catalog, which is why the bridge resolves
+   * the wrapped image and reports its length, version, and MIME type here.
+   */
+  private async hydrateStickerAssetSizes(
+    _session: PlatformSession,
+    message: IMMessage<QQMediaLocator>,
+  ): Promise<IMMessage<QQMediaLocator>> {
+    const targets = new Map<string, IMSticker>()
+    for (const part of message.content.parts) {
+      if (part.type !== 'sticker') continue
+      if (!isQQFaceSticker(part.sticker)) continue
+      if (!targets.has(part.sticker.stickerId)) targets.set(part.sticker.stickerId, part.sticker)
+    }
+    if (!targets.size) return message
+    const resolved = await this.resolveStickerAssetMetas(targets)
+    if (!resolved.size) return message
+    let changed = false
+    const parts = message.content.parts.map((part) => {
+      if (part.type !== 'sticker') return part
+      const meta = resolved.get(part.sticker.stickerId)
+      if (!meta) return part
+      const next = applyStickerAssetMeta(part.sticker, meta)
+      if (!next) return part
+      changed = true
+      return { ...part, sticker: next }
+    })
+    return changed ? { ...message, content: { ...message.content, parts } } : message
+  }
+
+  private async resolveStickerAssetMetas(
+    targets: ReadonlyMap<string, IMSticker>,
+  ): Promise<Map<string, ResolvedStickerAssetMeta>> {
+    const resolved = new Map<string, ResolvedStickerAssetMeta>()
+    await Promise.all([...targets.entries()].map(async ([stickerId, sticker]) => {
+      const meta = await this.resolveStickerAssetMeta(stickerId, sticker).catch(() => undefined)
+      if (meta) resolved.set(stickerId, meta)
+    }))
+    return resolved
+  }
+
+  private async resolveStickerAssetMeta(
+    stickerId: string,
+    sticker: IMSticker,
+  ): Promise<ResolvedStickerAssetMeta | undefined> {
+    const cached = this.stickerAssetMeta.get(stickerId)
+    if (cached && Date.now() - cached.resolvedAt <= STICKER_ASSET_META_TTL_MS) return cached
+    // One message can repeat the same face; share a single lookup per sticker.
+    const pending = this.stickerAssetMetaPending.get(stickerId)
+    if (pending) return pending
+    let lookup!: Promise<ResolvedStickerAssetMeta | undefined>
+    lookup = this.lookupStickerAssetMeta(sticker).finally(() => {
+      if (this.stickerAssetMetaPending.get(stickerId) === lookup) {
+        this.stickerAssetMetaPending.delete(stickerId)
+      }
+    })
+    this.stickerAssetMetaPending.set(stickerId, lookup)
+    return lookup
+  }
+
+  /**
+   * Asks the bridge for the size of the image a face sticker serves. A bridge
+   * without the metadata endpoint reports nothing and the sticker keeps the
+   * metadata the message already carried; bytes are never opened during
+   * projection, because the patched client downloads them itself.
+   */
+  private async lookupStickerAssetMeta(sticker: IMSticker): Promise<ResolvedStickerAssetMeta | undefined> {
+    try {
+      const meta = await this.client.resolveStickerAssetMeta(sticker.locator as QQStickerReference)
+      if (meta && meta.size > 0) {
+        const entry: ResolvedStickerAssetMeta = {
+          size: meta.size,
+          version: typeof meta.version === 'number' ? meta.version : undefined,
+          mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : undefined,
+          ...(meta.width === undefined ? {} : { width: meta.width }),
+          ...(meta.height === undefined ? {} : { height: meta.height }),
+          source: meta.source === 'path' ? 'path' : 'bundle',
+          resolvedAt: Date.now(),
+        }
+        this.stickerAssetMeta.set(sticker.stickerId, entry)
+        return entry
+      }
+    } catch {
+      // The bridge may be restarting or older than this endpoint; a failed
+      // lookup must not hide or delay the sticker itself.
+    }
+    return undefined
+  }
+
   private scheduleReactionResourceWarmup(session: PlatformSession): void {
     const catalog = this.reactionCatalog
     if (!catalog || this.reactionResourceWarmup) return
@@ -2715,6 +2814,58 @@ function isReactionResourceLocator(value: unknown): value is { reactionKey: stri
 }
 
 /** Size and content identity the bridge reported for one reaction asset. */
+interface ResolvedStickerAssetMeta {
+  size: number
+  version?: number
+  mimeType?: string
+  width?: number
+  height?: number
+  source?: 'path' | 'bundle'
+  resolvedAt: number
+}
+
+/** True for the QQ system-face stickers whose bytes the bridge has to resolve. */
+function isQQFaceSticker(sticker: IMSticker): boolean {
+  const locator = sticker.locator as { kind?: unknown } | undefined
+  return Boolean(locator && typeof locator === 'object' && locator.kind === 'sysface')
+}
+
+/**
+ * Rewrites a sticker with the metadata of the image it will serve, or returns
+ * undefined when the message already describes those bytes.
+ */
+function applyStickerAssetMeta(
+  sticker: IMSticker,
+  meta: ResolvedStickerAssetMeta,
+): IMSticker | undefined {
+  const mimeType = isStickerImageMimeType(meta.mimeType) ? meta.mimeType : sticker.mimeType
+  const format: IMSticker['format'] = mimeType === 'image/apng' || mimeType === 'image/gif'
+    ? 'animated'
+    : 'static'
+  const width = meta.width ?? sticker.width
+  const height = meta.height ?? sticker.height
+  if (sticker.size === meta.size
+    && (meta.version === undefined || sticker.version === meta.version)
+    && sticker.mimeType === mimeType
+    && sticker.format === format
+    && sticker.width === width
+    && sticker.height === height) return undefined
+  return {
+    ...sticker,
+    size: meta.size,
+    ...(meta.version === undefined ? {} : { version: meta.version }),
+    mimeType,
+    format,
+    ...(width === undefined ? {} : { width }),
+    ...(height === undefined ? {} : { height }),
+  }
+}
+
+function isStickerImageMimeType(value: string | undefined): boolean {
+  return value === 'image/png' || value === 'image/apng'
+    || value === 'image/gif' || value === 'image/webp'
+}
+
 interface ResolvedReactionResourceMeta {
   size: number
   version?: number

@@ -415,6 +415,16 @@ export interface WireReactionAssetMeta {
   source?: 'path' | 'bundle' | 'payload'
 }
 
+/** Size and content identity the bridge publishes for one sticker asset. */
+export interface WireStickerAssetMeta {
+  size: number
+  version: number
+  mimeType?: string
+  width?: number
+  height?: number
+  source?: 'path' | 'bundle'
+}
+
 export interface WireReactionContext extends WireReactionState {
   available: WireReactionDefinition[]
 }
