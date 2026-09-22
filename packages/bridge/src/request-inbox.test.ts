@@ -9,10 +9,10 @@ import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry, PlatformSubscriptionManager } from './platform-manager.js'
 import { UpdateManager } from './update-manager.js'
-import type { IMEvent, IMPlatform, IMRequest, PlatformSession } from './platform.js'
+import type { IMEvent, IMPlatform, IMRequest, IMRequestAction, PlatformSession } from './platform.js'
 import {
-  REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_INBOX_CONVERSATION_ID, REQUEST_REJECT_CALLBACK_DATA,
-  RequestInboxSystemPeerProvider, requestInboxMessage, requestTimestamp,
+  createRequestResolver, REQUEST_ACCEPT_CALLBACK_DATA, REQUEST_INBOX_CONVERSATION_ID, REQUEST_REJECT_CALLBACK_DATA,
+  RequestInboxSystemPeerProvider, requestInboxConversation, requestInboxMessage, requestTimestamp,
 } from './request-inbox.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 
@@ -79,12 +79,10 @@ async function createRequestRpc(
   }
   const localEvents: IMEvent[] = []
   peers.attach(deliver)
+  const registry = new PlatformRegistry([[session.platformId, platform]])
   peers.register(new RequestInboxSystemPeerProvider(
     store,
-    async (requestSession, requestId, action) => {
-      if (!resolveRequest) throw new SystemPeerCallbackError('REQUEST_RESOLVE_UNAVAILABLE')
-      return resolveRequest(requestSession, requestId, action)
-    },
+    createRequestResolver(registry),
     async (requestSession, request) => { await peers.emit(requestSession, { type: 'request', request, delivery: 'recovery' }) },
     options.onError,
   ))
@@ -399,6 +397,39 @@ describe('request inbox callbacks', () => {
     expect((error as Error).message).toBe('resolver exploded')
   })
 
+  it('invokes the platform resolver with its original receiver', async () => {
+    const accepted: IMRequest = {
+      id: 'opaque/request id', kind: 'friend', state: 'accepted', createdAt: 100,
+      requester: { id: 'alice', firstName: 'Alice' },
+    }
+    // A class-style implementation reads state through `this`, so a detached
+    // method would crash before returning the resolved request.
+    let receivedThis: unknown = 'unset'
+    const platform = {
+      capabilities: undefined,
+      async resolveRequest(this: unknown, _requestSession: PlatformSession, _requestId: string, action: IMRequestAction) {
+        receivedThis = this
+        expect(action).toBe('accept')
+        return accepted
+      },
+    } as unknown as IMPlatform
+    const registry = new PlatformRegistry([[session.platformId, platform]])
+    const provider = new RequestInboxSystemPeerProvider(
+      {
+        getRequest: vi.fn(async () => ({ ...accepted, state: 'pending' })),
+        ingestRequest: vi.fn(async () => ({ request: accepted })),
+      } as any,
+      createRequestResolver(registry),
+      async () => {},
+    )
+    const answer = await provider.callback(session, { id: REQUEST_INBOX_CONVERSATION_ID, conversation: requestInboxConversation() }, {
+      message: requestInboxMessage({ ...accepted, state: 'pending' }),
+      data: REQUEST_ACCEPT_CALLBACK_DATA,
+    })
+    expect(answer).toMatchObject({ message: '请求已处理' })
+    expect(receivedThis).toBe(platform)
+  })
+
   it('retries terminal recovery after local delivery fails without resolving again', async () => {
     const accepted: IMRequest = {
       id: 'opaque/request id', kind: 'friend', state: 'accepted', createdAt: 100,
@@ -456,10 +487,7 @@ describe('request inbox callbacks', () => {
     )
     peers.register(new RequestInboxSystemPeerProvider(
       store,
-      async (requestSession, requestId, action) => {
-        if (!resolveRequest) throw new SystemPeerCallbackError('REQUEST_RESOLVE_UNAVAILABLE')
-        return resolveRequest(requestSession, requestId, action)
-      },
+      createRequestResolver(registry),
       async (requestSession, request) => { await peers.emit(requestSession, { type: 'request', request, delivery: 'recovery' }) },
     ))
     const rpc = new DialogRpc(

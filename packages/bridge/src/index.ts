@@ -54,7 +54,7 @@ import { VoiceRpc } from './voice/voice-rpc.js'
 import { SpeechPipeline } from './speech.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
 import type { BotDashboardData } from './bot-dashboard.js'
-import { RequestInboxSystemPeerProvider } from './request-inbox.js'
+import { createRequestResolver, RequestInboxSystemPeerProvider } from './request-inbox.js'
 import {
   ActiveSessionStore, createAuthorizationReservationQueue, registerActiveSessionRpc,
 } from './active-sessions.js'
@@ -381,11 +381,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   )
   const unregisterRequestInbox = systemPeers.register(new RequestInboxSystemPeerProvider(
     store,
-    async (session, requestId, action) => {
-      const resolveRequest = registry.require(session.platformId).resolveRequest
-      if (!resolveRequest) throw new SystemPeerCallbackError('REQUEST_RESOLVE_UNAVAILABLE')
-      return resolveRequest(session, requestId, action)
-    },
+    createRequestResolver(registry),
     async (session, request) => {
       await subscriptions.ingestLocalEvent(session, { type: 'request', request, delivery: 'recovery' })
     },

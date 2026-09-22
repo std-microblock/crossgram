@@ -1,5 +1,6 @@
-import type { IMConversation, IMMessage, IMRequest, IMRequestAction, IMUser, PlatformSession } from './platform.js'
+import type { IMConversation, IMMessage, IMPlatform, IMRequest, IMRequestAction, IMUser, PlatformSession } from './platform.js'
 import type { MessageStore } from './message-store.js'
+import type { PlatformRegistry } from './platform-manager.js'
 import {
   type SystemPeer, type SystemPeerCallbackInput, type SystemPeerCallbackResult, SystemPeerCallbackError, type SystemPeerProvider,
   type SystemPeerService,
@@ -64,6 +65,19 @@ export function isRequestInboxConversation(conversation: IMConversation | undefi
   return conversation?.id === REQUEST_INBOX_CONVERSATION_ID
     && conversation.metadata?.bridgeOwned === true
     && conversation.metadata?.requestInbox === true
+}
+
+/**
+ * Builds the request resolver wired into the request-inbox system peer.
+ * The platform method must be invoked on its instance: detaching it would
+ * drop the receiver and crash implementations that read `this.client`.
+ */
+export function createRequestResolver(registry: PlatformRegistry) {
+  return async (session: PlatformSession, requestId: string, action: IMRequestAction): Promise<IMRequest> => {
+    const platform = registry.require(session.platformId)
+    if (!platform.resolveRequest) throw new SystemPeerCallbackError('REQUEST_RESOLVE_UNAVAILABLE')
+    return platform.resolveRequest(session, requestId, action)
+  }
 }
 
 /**
