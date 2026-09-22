@@ -80,6 +80,40 @@ describe('merged-forward projection', () => {
     expect(projection.resolveUsername(session.platformSessionId, 'bridgebundle_999')).toBeUndefined()
   })
 
+  it('anchors the deep link at the first bundle message instead of the newest one', async () => {
+    const projection = makeMergedForwardProvider()
+    const adapter = platform(vi.fn(async () => [{
+      id: 'middle', senderId: 'bob', timestamp: 200,
+      content: { parts: [{ type: 'text' as const, text: 'middle' }] },
+    }, {
+      id: 'latest', senderId: 'bob', timestamp: 300,
+      content: { parts: [{ type: 'text' as const, text: 'latest' }] },
+    }, {
+      id: 'first', senderId: 'alice', timestamp: 100,
+      content: { parts: [{ type: 'text' as const, text: 'first' }] },
+    }]))
+    const value = input(adapter)
+    await projection.project(value, async () => ({
+      message: {
+        _: 'message', id: value.tlMessageId, peerId: value.target.peer,
+        date: 1, message: '查看聊天记录', entities: [],
+      },
+      chats: value.draft.chats,
+    }))
+
+    const chatId = stableId(`merged-forward-chat:${bundle.id}`)
+    const firstId = stableId(`merged-forward-message:${bundle.id}:first:0`)
+    const newestId = stableId(`merged-forward-message:${bundle.id}:latest:0`)
+    expect(firstId).not.toBe(newestId)
+    expect(value.draft.source.content.parts[0]).toMatchObject({
+      type: 'text',
+      entities: [{ type: 'text-link', url: `https://t.me/bridgebundle_${chatId}/${firstId}` }],
+    })
+    expect(value.draft.media).toMatchObject({
+      webpage: { url: `https://t.me/bridgebundle_${chatId}/${firstId}` },
+    })
+  })
+
   it('projects bundle parts through the message waterfall and deduplicates complete bundle loading', async () => {
     const projection = makeMergedForwardProvider()
     let release!: () => void

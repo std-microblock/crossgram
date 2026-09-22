@@ -77,8 +77,8 @@ export class MergedForwardProjection {
     for (const part of bundles) {
       const record = this.remember(input.session.platformSessionId, part.bundle)
       const snapshots = await this.loadSnapshots(input, record)
-      const latest = newestSnapshot(snapshots)
-      const target = latest ? bundleMessageId(part.bundle, latest, 0) : undefined
+      const first = firstSnapshot(part.bundle, snapshots)
+      const target = first ? bundleMessageId(part.bundle, first, 0) : undefined
       if (target) targets.set(part.bundle.id, target)
       links.set(part.bundle.id, this.makeLink(
         record,
@@ -373,9 +373,23 @@ async function routeMergedForwardRpc(
   }
 }
 
-function newestSnapshot(snapshots: readonly IMMessageSnapshot[]): IMMessageSnapshot | undefined {
+/**
+ * Picks the message a merged-forward deep link anchors to.
+ *
+ * Native Telegram forwards link to the first message of the transcript, so
+ * opening the link shows the bundle from its beginning.  The picker mirrors
+ * the projection order of the bundle (oldest first, ties by projected message
+ * id) so the anchor is exactly the message clients display at the top.
+ */
+function firstSnapshot(
+  bundle: IMMessageBundle,
+  snapshots: readonly IMMessageSnapshot[],
+): IMMessageSnapshot | undefined {
   return snapshots.map((snapshot, index) => ({ snapshot, index }))
-    .sort((left, right) => right.snapshot.timestamp - left.snapshot.timestamp || right.index - left.index)[0]
+    .sort((left, right) =>
+      left.snapshot.timestamp - right.snapshot.timestamp
+      || bundleMessageId(bundle, left.snapshot, 0) - bundleMessageId(bundle, right.snapshot, 0)
+      || left.index - right.index)[0]
     ?.snapshot
 }
 

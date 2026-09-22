@@ -3878,6 +3878,32 @@ describe('bridge login e2e', () => {
         } },
       })
       expect(bundleLoads).toEqual(['outer', 'inner'])
+      // The deep link opens the transcript from its first message, so a
+      // desktop client that loads history around the anchor must receive the
+      // anchor itself with the rest of the bundle below it.
+      const outerAnchor = Number(new URL(preview.entities[0].url).pathname.split('/').at(-1))
+      expect(nestedPreview.id).toBe(outerAnchor)
+      await expect(callRpc(fresh, key, freshSid, {
+        _: 'messages.getHistory', peer,
+        offsetId: outerAnchor, offsetDate: 0, addOffset: -25, limit: 50,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 40)).resolves.toMatchObject({
+        messages: [
+          { _: 'message', message: 'outer last message' },
+          { _: 'message', id: outerAnchor, message: '查看聊天记录' },
+        ],
+      })
+      const innerAnchor = Number(new URL(nestedPreview.media.webpage.url).pathname.split('/').at(-1))
+      await expect(callRpc(fresh, key, freshSid, {
+        _: 'messages.getHistory', peer: { _: 'inputPeerChat', chatId: innerChat.id },
+        offsetId: innerAnchor, offsetDate: 0, addOffset: -25, limit: 50,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 41)).resolves.toMatchObject({
+        messages: [
+          { _: 'message', message: 'inner last message' },
+          { _: 'message', id: innerAnchor, message: 'inner first message' },
+        ],
+      })
       await expect(callRpc(fresh, key, freshSid, {
         _: 'messages.readHistory', peer, maxId: outerHistory.messages[0].id,
       }, 12)).resolves.toMatchObject({ _: 'messages.affectedMessages' })

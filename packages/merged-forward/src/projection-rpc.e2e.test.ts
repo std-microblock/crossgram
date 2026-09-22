@@ -34,7 +34,12 @@ const bundle: IMMessageBundle = {
 }
 const innerMessages: IMMessageSnapshot[] = [
   {
-    id: 'inner-media', senderId: 'alice', timestamp: 99,
+    id: 'inner-first', senderId: 'alice', timestamp: 99,
+    sender: { id: 'alice', firstName: 'Alice' },
+    content: { parts: [{ type: 'text', text: 'first' }] },
+  },
+  {
+    id: 'inner-media', senderId: 'alice', timestamp: 100,
     sender: { id: 'alice', firstName: 'Alice' },
     content: { parts: [{
       type: 'media',
@@ -43,11 +48,6 @@ const innerMessages: IMMessageSnapshot[] = [
         locator: { id: 'archived-file' },
       },
     }] },
-  },
-  {
-    id: 'inner-first', senderId: 'alice', timestamp: 100,
-    sender: { id: 'alice', firstName: 'Alice' },
-    content: { parts: [{ type: 'text', text: 'first' }] },
   },
   {
     id: 'inner-latest', senderId: 'bob', timestamp: 101,
@@ -143,7 +143,13 @@ describe('merged-forward projection and RPC e2e', () => {
     const chatId = stableId(`merged-forward-chat:${bundle.id}`)
     const targetId = Number(new URL(entity.url).pathname.split('/').at(-1))
     expect(entity.url).toBe(`https://t.me/bridgebundle_${chatId}/${targetId}`)
-    expect(projectedOuter.media).toMatchObject({ _: 'messageMediaWebPage' })
+    // The link opens the transcript from its beginning: the anchor is the
+    // oldest inner message, never the newest one.
+    expect(targetId).toBe(stableId(`merged-forward-message:${bundle.id}:inner-first:0`))
+    expect(projectedOuter.media).toMatchObject({
+      _: 'messageMediaWebPage',
+      webpage: { url: `https://t.me/bridgebundle_${chatId}/${targetId}` },
+    })
 
     const rpc = { connection: { remoteAddress: '127.0.0.1' } } as never
     const resolvedUsername = await ctx.mtproto.dispatch(rpc, {
@@ -162,8 +168,22 @@ describe('merged-forward projection and RPC e2e', () => {
     } as never)).resolves.toMatchObject({
       messages: [
         { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'latest' },
-        { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'first' },
         { _: 'message', peerId: { _: 'peerChat', chatId }, media: { _: 'messageMediaDocument' } },
+        { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'first' },
+      ],
+    })
+    // A desktop client opens the deep link by loading history around the
+    // anchor with a negative offset; the first message must come back so the
+    // jump target exists on the client.
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'messages.getHistory', peer,
+      offsetId: targetId, offsetDate: 0, addOffset: -25, limit: 50,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    } as never)).resolves.toMatchObject({
+      messages: [
+        { _: 'message', message: 'latest' },
+        { _: 'message', media: { _: 'messageMediaDocument' } },
+        { _: 'message', id: targetId, message: 'first' },
       ],
     })
     const projectedHistory = await ctx.mtproto.dispatch(rpc, {
@@ -195,7 +215,7 @@ describe('merged-forward projection and RPC e2e', () => {
     await expect(ctx.mtproto.dispatch(rpc, {
       _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: targetId }],
     } as never)).resolves.toMatchObject({
-      messages: [{ _: 'message', id: targetId, peerId: { _: 'peerChat', chatId }, message: 'latest' }],
+      messages: [{ _: 'message', id: targetId, peerId: { _: 'peerChat', chatId }, message: 'first' }],
     })
     await expect(ctx.mtproto.dispatch(rpc, {
       _: 'messages.getPeerDialogs', peers: [{ _: 'inputDialogPeer', peer }],
