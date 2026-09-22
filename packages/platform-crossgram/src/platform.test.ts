@@ -711,6 +711,16 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).resolves.toMatchObject({ user: { id: 'u_self' } })
   })
 
+  it('accepts bridge protocol 33 emitted by qqnt-bridge v1.0.41', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.status = vi.fn(async () => ({
+      protocolVersion: 33, ready: true, selfUin: '10001', selfUid: 'u_self',
+    }))
+    platform.client.getUser = vi.fn(async () => ({ id: 'u_self', name: 'Platform Alice' }))
+
+    await expect(platform.getAccount()).resolves.toMatchObject({ user: { id: 'u_self' } })
+  })
+
   it('accepts bridge protocol 31 emitted by qqnt-bridge v1.0.31', async () => {
     const platform = new QQNTPlatform()
     platform.client.status = vi.fn(async () => ({
