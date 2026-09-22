@@ -390,8 +390,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       await subscriptions.ingestLocalEvent(session, { type: 'request', request, delivery: 'recovery' })
     },
     (message, error) => {
-      if (error === undefined) bridgeLogger.warn(message)
-      else bridgeLogger.warn('%s\n%s', message, error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error))
+      // Cordis drops warn lines under the default INFO level, so use error to keep these visible.
+      if (error === undefined) bridgeLogger.error(message)
+      else bridgeLogger.error('%s\n%s', message, error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error))
     },
   ))
   ctx.effect(() => unregisterRequestInbox, 'mtproto-bridge.request-inbox')
