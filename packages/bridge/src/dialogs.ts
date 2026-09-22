@@ -192,6 +192,31 @@ export interface BlockedPeerRpcChange extends BlockedPeerChange {
   userId: number
 }
 
+/** `crossgram.getFeatures` request. The peer narrows the answer to one chat. */
+export interface GetFeaturesRequest {
+  peer?: tl.TypeInputPeer
+}
+
+/** `crossgram.sendPoke` request. */
+export interface SendPokeRequest {
+  peer: tl.TypeInputPeer
+  userId: tl.TypeInputUser
+  count: number
+}
+
+/** Feature payload of `crossgram.getFeatures`, serialized as a `dataJSON` string. */
+export interface CrossgramFeatures {
+  /**
+   * Native poke support for the requested peer. Absent on official Telegram
+   * servers, on platforms without pokes, and for peers that cannot be poked,
+   * which is exactly what keeps the client entry hidden there.
+   */
+  poke?: {
+    /** Largest burst one `crossgram.sendPoke` call may send. */
+    maxCount: number
+  }
+}
+
 /**
  * Per-authorized-session bridge for dialog/history RPCs. Telegram's numeric
  * peer/message IDs are allocated here and reverse-mapped to opaque platform IDs.
@@ -2467,6 +2492,68 @@ export class DialogRpc {
       throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
     }
     return directDownloadJSON(resolved)
+  }
+
+  /**
+   * Advertise what this account's platform supports for one peer.
+   *
+   * Clients ask before rendering a platform-specific action. An official
+   * Telegram server rejects the unknown method, so the caller keeps the action
+   * hidden instead of sending one that cannot work.
+   */
+  async getFeatures(req: GetFeaturesRequest = {}): Promise<tl.RawDataJSON> {
+    const features: CrossgramFeatures = {}
+    const poke = this._platform.capabilities.poke
+    if (poke && poke.maxCount > 0) {
+      let supported = true
+      if (req.peer) {
+        await this._hydratePeers()
+        const conversationId = this._resolvePeer(req.peer)
+        supported = this._conversation(conversationId).kind !== 'channel'
+          && !(await this._systemPeers?.resolve(this._session, conversationId))
+      }
+      if (supported) features.poke = { maxCount: poke.maxCount }
+    }
+    return featuresJSON(features)
+  }
+
+  /**
+   * Send a native poke (nudge) notice through the platform.
+   *
+   * The poke is a platform action, so the notice it produces is published to
+   * every session instead of being an optimistic local message.
+   */
+  async sendPoke(req: SendPokeRequest): Promise<tl.TlObject> {
+    const poke = this._platform.capabilities.poke
+    if (!poke || poke.maxCount <= 0 || !this._platform.sendPoke) {
+      throw new RpcError(400, 'POKE_NOT_SUPPORTED')
+    }
+    const count = Math.trunc(Number(req.count))
+    if (!Number.isInteger(count) || count < 1 || count > poke.maxCount) {
+      throw new RpcError(400, 'POKE_COUNT_INVALID')
+    }
+    await this._hydratePeers()
+    const conversationId = this._resolvePeer(req.peer)
+    const conversation = this._conversation(conversationId)
+    if (conversation.kind === 'channel') throw new RpcError(400, 'POKE_TARGET_INVALID')
+    const targetUserId = this._resolveInputUser(req.userId)
+    if (conversation.kind === 'direct' && targetUserId !== conversationId) {
+      throw new RpcError(400, 'POKE_TARGET_INVALID')
+    }
+    if (await this._systemPeers?.resolve(this._session, conversationId)) {
+      throw new RpcError(400, 'POKE_TARGET_INVALID')
+    }
+    const notice = await this._platform.sendPoke(
+      this._session, { id: conversationId }, { userId: targetUserId }, count,
+    )
+    if (notice) {
+      await this._publishLocalMessage(conversationId, {
+        ...notice,
+        conversationId,
+        outgoing: true,
+      })
+    }
+    return boolObject(true)
   }
 
   async prepareMediaUpload(req: PrepareMediaUploadRequest): Promise<tl.TlObject> {
@@ -5017,6 +5104,16 @@ export class DialogRpc {
     return platformUserId
   }
 
+  private _resolveInputUser(user: tl.TypeInputUser): string {
+    if (user._ === 'inputUserSelf') return this._session.userId
+    if (user._ !== 'inputUser' && user._ !== 'inputUserFromMessage') {
+      throw new RpcError(400, 'USER_ID_INVALID')
+    }
+    const platformUserId = this._tlToUser.get(user.userId)
+    if (!platformUserId) throw new RpcError(400, 'USER_ID_INVALID')
+    return platformUserId
+  }
+
   private _resolveChannel(channel: tl.TypeInputChannel): import('./platform.js').IMConversation {
     if (channel._ !== 'inputChannel') throw new RpcError(400, 'CHANNEL_INVALID')
     const peerId = this._tlToPeer.get(channel.channelId)
@@ -6357,6 +6454,11 @@ function decodeFileReference(bytes: Uint8Array): string | undefined {
   } catch {
     return
   }
+}
+
+/** Serialize the feature payload the patched clients parse. */
+function featuresJSON(features: CrossgramFeatures): tl.RawDataJSON {
+  return { _: 'dataJSON', data: JSON.stringify(features) }
 }
 
 function directDownloadJSON(

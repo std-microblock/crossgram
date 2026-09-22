@@ -36,7 +36,9 @@ type QQOutboundMedia = NonNullable<Parameters<QQNTClient['sendMessage']>[2]>[num
 const MIN_PROTOCOL_VERSION = 19
 // Keep the lower bound stable while accepting additive bridge revisions so account provisioning does
 // not fail closed before Telegram QR approval can complete.
-const MAX_PROTOCOL_VERSION = 32
+const MAX_PROTOCOL_VERSION = 33
+/** Poke bursts a single request may send; QQ treats longer bursts as flooding. */
+const QQ_POKE_MAX_COUNT = 10
 
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
@@ -182,6 +184,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       forward: { mode: 'native', preservesAuthor: true },
     },
     reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
+    poke: { maxCount: QQ_POKE_MAX_COUNT },
     stickers: { native: true, upload: false, formats: ['static', 'animated', 'video'] },
   }
 
@@ -1033,6 +1036,25 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       total: page.total,
       nextCursor: page.nextCursor,
     }
+  }
+
+  /**
+   * Send QQ poke (nudge) notices. QQ records a notice message for each poke, so
+   * the newest confirmed notice travels back with the request.
+   */
+  async sendPoke(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    target: { userId: string },
+    count: number,
+  ): Promise<IMMessage<QQMediaLocator> | undefined> {
+    const response = await this.client.sendPoke(
+      await this.wireConversationId(session, conversation.id),
+      target.userId,
+      count,
+    )
+    const notice = response?.message
+    return notice ? this.mapMessage(notice, conversation.id) : undefined
   }
 
   async setConversationMemberRole(

@@ -958,6 +958,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.prepareMediaUpload(
       req as unknown as import('./dialogs.js').PrepareMediaUploadRequest,
     ))
+  rpc.register('crossgram.getFeatures', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getFeatures(
+      req as unknown as import('./dialogs.js').GetFeaturesRequest,
+    ))
+  rpc.register('crossgram.sendPoke', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.sendPoke(
+      req as unknown as import('./dialogs.js').SendPokeRequest,
+    ))
   rpc.register('upload.getFileHashes', async () => bareVector([]))
 
   rpc.register('messages.getAllStickers', async (rpc, req) =>

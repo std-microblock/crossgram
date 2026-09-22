@@ -347,6 +347,19 @@ export interface WireRequest {
   reason?: string
 }
 
+/** Body of `POST /v1/conversations/:id/pokes` (bridge protocol v33). */
+export interface WirePokeRequest {
+  /** QQ user id (UID) that is poked. */
+  userId: string
+  /** Poke notices to send, 1..10. */
+  count: number
+}
+
+/** Poke notice QQ appended to the conversation; absent when unconfirmed. */
+export interface WirePokeResult {
+  message?: WireMessage
+}
+
 export interface WireRequestPage {
   requests: WireRequest[]
   nextCursor?: string

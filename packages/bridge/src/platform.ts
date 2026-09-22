@@ -72,6 +72,14 @@ export interface PlatformCapabilities {
     actorList: boolean
     maxSelected: number
   }
+  /**
+   * Native nudge ("poke") notices. Absent when the platform has no poke at all,
+   * which is what hides the client entry on unsupported servers.
+   */
+  poke?: {
+    /** Largest burst a single request may send. */
+    maxCount: number
+  }
 }
 
 export interface IMMessageDeleteRule {
@@ -849,6 +857,18 @@ export interface IMPlatform<TMediaLocator = unknown> {
     session: PlatformSession,
     target: IMReadTarget,
   ): Promise<void>
+  /**
+   * Send the platform's native poke (nudge) notice. The returned message is the
+   * notice the platform recorded, and it is optional: platforms may accept the
+   * poke without exposing a confirmed notice yet.
+   */
+  sendPoke?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    target: { userId: string },
+    count: number,
+  ): Promise<IMMessage<TMediaLocator> | undefined>
+
   /**
    * Reverse-sync a conversation notification mask (e.g. QQ group message mask).
    * Platforms that lack this concept leave it undefined; the bridge only calls

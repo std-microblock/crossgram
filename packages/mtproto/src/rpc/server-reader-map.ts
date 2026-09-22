@@ -47,6 +47,8 @@ crossgram.getFileUrl#7520f6ea location:InputFileLocation = DataJSON;
 crossgram.prepareMediaUpload#f75adc0e peer:InputPeer file_id:long name:string size:long kind:string mime_type:string md5:bytes sha1:bytes file10m_md5:bytes width:int height:int duration:double = Bool;
 crossgram.prepareMediaUploadV2#f75adc0f peer:InputPeer file_id:long name:string size:long kind:string mime_type:string md5:bytes sha1:bytes sha1_checkpoints:bytes file10m_md5:bytes width:int height:int duration:double = Bool;
 crossgram.prepareMediaUploadV3#f75adc10 peer:InputPeer file_id:long name:string size:long kind:string mime_type:string md5:bytes sha1:bytes sha1_checkpoints:bytes file10m_md5:bytes width:int height:int duration:double thumbnail:bytes thumbnail_width:int thumbnail_height:int = Bool;
+crossgram.getFeatures#c3e6b915 flags:# peer:flags.0?InputPeer = DataJSON;
+crossgram.sendPoke#9a2d47f0 peer:InputPeer user_id:InputUser count:int = Bool;
 `
 
 /**

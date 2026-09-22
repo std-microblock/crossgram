@@ -13,6 +13,7 @@ import type {
 import WebSocket, { type RawData } from 'ws'
 import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
+  WirePokeResult,
   WireReactionActorPage, WireReactionContext, WireReactionState, WireRequest, WireRequestPage, WireSticker, WireStickerPack, WireStickerPackSummary,
   WireFlashTransferManifest, WireFlashTransferResult, WireReactionAssetMeta, WireStickerAssetMeta, WireTextPart,
 } from './protocol.js'
@@ -344,6 +345,22 @@ export class QQNTClient {
         body: JSON.stringify({ role }),
       },
     )
+  }
+
+  /**
+   * Send poke notices. QQ appends its own notice message per poke; the bridge
+   * returns the newest one when it confirmed it before answering.
+   */
+  async sendPoke(conversationId: string, userId: string, count: number): Promise<WirePokeResult> {
+    if (this.bridgeProtocol === undefined) await this.status()
+    if (this.bridgeProtocol! < 33) {
+      throw new Error('QQNT bridge protocol 33 is required for pokes')
+    }
+    return await this.json(`/conversations/${encodeURIComponent(conversationId)}/pokes`, false, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ userId, count }),
+    })
   }
 
   async moderateMember(

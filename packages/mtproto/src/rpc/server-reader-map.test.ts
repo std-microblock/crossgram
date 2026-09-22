@@ -169,6 +169,53 @@ describe('historical server reader map', () => {
       thumbnail, thumbnailWidth: 320, thumbnailHeight: 180,
     })
   })
+
+  it('decodes the stable Crossgram feature query constructor', () => {
+    const peer = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'inputPeerUser', userId: 42, accessHash: Long.ZERO,
+    } as any)
+    const withPeer = TlBinaryWriter.manual(8 + peer.length)
+    withPeer.uint(0xc3e6b915)
+    withPeer.int(1)
+    withPeer.raw(peer)
+
+    expect(new TlBinaryReader(getServerReaderMap(), withPeer.result()).object()).toMatchObject({
+      _: 'crossgram.getFeatures',
+      peer: { _: 'inputPeerUser', userId: 42 },
+    })
+
+    const accountWide = TlBinaryWriter.manual(8)
+    accountWide.uint(0xc3e6b915)
+    accountWide.int(0)
+
+    const decoded = new TlBinaryReader(getServerReaderMap(), accountWide.result()).object() as {
+      _: string
+      peer?: unknown
+    }
+    expect(decoded._).toBe('crossgram.getFeatures')
+    expect(decoded.peer).toBeUndefined()
+  })
+
+  it('decodes the stable Crossgram poke request constructor', () => {
+    const peer = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'inputPeerUser', userId: 42, accessHash: Long.ZERO,
+    } as any)
+    const user = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'inputUser', userId: 43, accessHash: Long.ONE,
+    } as any)
+    const request = TlBinaryWriter.manual(4 + peer.length + user.length + 4)
+    request.uint(0x9a2d47f0)
+    request.raw(peer)
+    request.raw(user)
+    request.int(5)
+
+    expect(new TlBinaryReader(getServerReaderMap(), request.result()).object()).toMatchObject({
+      _: 'crossgram.sendPoke',
+      peer: { _: 'inputPeerUser', userId: 42 },
+      userId: { _: 'inputUser', userId: 43 },
+      count: 5,
+    })
+  })
 })
 
 function tlString(value: string): Uint8Array {

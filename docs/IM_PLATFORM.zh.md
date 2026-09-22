@@ -313,6 +313,25 @@ adapter 必须准确声明 `send.text/images/files/mixed/maxTextLength/maxMedia`
 
 以下情况不得返回伪成功：缺上传 part、已取消、平台未确认 message ID、媒体读取不完整、history cursor 无效或 session 已失效。
 
+### 8.1 戳一戳（poke）能力
+
+平台有原生提醒动作（QQ 的“戳一戳”）时声明 `capabilities.poke = { maxCount }`，并实现：
+
+```ts
+sendPoke(
+  session,
+  conversation,          // 目标 chat：私聊或群
+  { userId },            // 被戳的平台用户 ID
+  count,                 // 1..maxCount
+): Promise<IMMessage | undefined>   // 平台确认的提醒消息，未确认时返回 undefined
+```
+
+未声明 `poke` 的平台不会向客户端暴露该动作：`crossgram.getFeatures` 只返回
+`{ "poke": { "maxCount": n } }`，客户端据此决定头像菜单里是否出现入口。
+poke 本身是平台侧动作，产生的提醒消息由 bridge 作为普通消息事件投影，因而 history、未读和多端
+同步与其他消息完全一致；`sendPoke` 同时返回的提醒消息只是一次“本地回显”，bridge 会按 platform
+message ID 幂等入库，不会和随后的事件重复。
+
 ## 9. Sticker Provider
 
 Sticker catalog 不属于 `IMPlatform`。bridge 通过 `ctx.imSticker` 聚合平台原生 Provider 和独立贴纸插件：
@@ -465,6 +484,7 @@ bridge 将 context 独立入库，通过进程内 delivery journal 发布 `updat
 14. Unicode/custom-emoji reaction 均可从 reaction pack 映射、发送、写入历史并通过 push update 发布。
 15. owner/admin/member、权限、成员分页和管理员筛选与平台数据一致。
 16. 用户/群头像通过带类型 locator 的 `IMMedia` range 下载；原生编辑、撤回重发、限时/不限时撤回及转发策略均有覆盖。
+17. 原生 poke 声明 `capabilities.poke` 后，`crossgram.getFeatures` 返回 `maxCount`，`crossgram.sendPoke` 按 count 触发一次批量提醒且不产生重复消息。
 
 bridge 内部行为测试位于 `packages/bridge/src`，包括 `message-store.test.ts`、`platform-manager.test.ts`、`media-projection.test.ts`、`media-send.test.ts` 和 `conversation-kinds.test.ts`。
 
