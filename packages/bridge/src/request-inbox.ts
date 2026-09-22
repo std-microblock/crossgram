@@ -82,6 +82,7 @@ export class RequestInboxSystemPeerProvider implements SystemPeerProvider {
       action: IMRequestAction,
     ) => Promise<IMRequest>,
     private readonly _deliverRecovery: (session: PlatformSession, request: IMRequest) => Promise<void>,
+    private readonly _onError: (message: string, error: unknown) => void = () => {},
   ) {}
 
   async bootstrap(session: PlatformSession, peers: SystemPeerService): Promise<void> {
@@ -123,6 +124,10 @@ export class RequestInboxSystemPeerProvider implements SystemPeerProvider {
         resolved = await this._resolveRequest(session, request.id, action)
       } catch (error) {
         if (error instanceof SystemPeerCallbackError) throw error
+        this._onError(
+          `request resolver failed platform=${session.platformId} session=${session.platformSessionId} request=${request.id} action=${action}`,
+          error,
+        )
         throw new SystemPeerCallbackError('REQUEST_RESOLVE_FAILED')
       }
       if (resolved.id !== request.id
@@ -130,6 +135,10 @@ export class RequestInboxSystemPeerProvider implements SystemPeerProvider {
         || resolved.state === 'pending'
         || (action === 'accept' && resolved.state !== 'accepted')
         || (action === 'reject' && resolved.state !== 'rejected')) {
+        this._onError(
+          `request resolver returned an inconsistent result platform=${session.platformId} session=${session.platformSessionId} request=${request.id} action=${action} resolvedId=${resolved.id} resolvedKind=${resolved.kind} resolvedState=${resolved.state}`,
+          undefined,
+        )
         throw new SystemPeerCallbackError('REQUEST_RESOLVE_FAILED')
       }
       const stored = await this._store.ingestRequest(session, resolved)
@@ -141,7 +150,11 @@ export class RequestInboxSystemPeerProvider implements SystemPeerProvider {
   private async _recover(session: PlatformSession, request: IMRequest): Promise<void> {
     try {
       await this._deliverRecovery(session, request)
-    } catch {
+    } catch (error) {
+      this._onError(
+        `request recovery delivery failed platform=${session.platformId} session=${session.platformSessionId} request=${request.id} state=${request.state}`,
+        error,
+      )
       throw new SystemPeerCallbackError('REQUEST_RESOLVE_FAILED')
     }
   }

@@ -389,6 +389,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     async (session, request) => {
       await subscriptions.ingestLocalEvent(session, { type: 'request', request, delivery: 'recovery' })
     },
+    (message, error) => {
+      if (error === undefined) bridgeLogger.warn(message)
+      else bridgeLogger.warn('%s\n%s', message, error instanceof Error ? error.stack ?? `${error.name}: ${error.message}` : String(error))
+    },
   ))
   ctx.effect(() => unregisterRequestInbox, 'mtproto-bridge.request-inbox')
   platforms.onSessionChange((event, binding) => {

@@ -28,7 +28,7 @@ afterEach(async () => {
 
 async function createRequestRpc(
   resolveRequest: IMPlatform['resolveRequest'],
-  options: { history?: boolean, drafts?: boolean, failLocalDeliveryOnce?: boolean } = {},
+  options: { history?: boolean, drafts?: boolean, failLocalDeliveryOnce?: boolean, onError?: (message: string, error: unknown) => void } = {},
 ) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
@@ -86,6 +86,7 @@ async function createRequestRpc(
       return resolveRequest(requestSession, requestId, action)
     },
     async (requestSession, request) => { await peers.emit(requestSession, { type: 'request', request, delivery: 'recovery' }) },
+    options.onError,
   ))
   const createRpc = (localEvents: IMEvent[]) => new DialogRpc(
     platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
@@ -377,6 +378,25 @@ describe('request inbox callbacks', () => {
       _: 'messages.getBotCallbackAnswer', ...retryTarget, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
     })).resolves.toMatchObject({ message: '请求已处理' })
     expect(resolveRequest).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports the underlying resolver error before failing with REQUEST_RESOLVE_FAILED', async () => {
+    const resolveRequest = vi.fn<NonNullable<IMPlatform['resolveRequest']>>()
+      .mockRejectedValueOnce(new Error('resolver exploded'))
+    const onError = vi.fn()
+    const { rpc, store } = await createRequestRpc(resolveRequest, { onError })
+    await seedPendingRequest(store)
+    const target = await inboxCallbackTarget(rpc, store)
+
+    await expect(rpc.getBotCallbackAnswer({
+      _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
+    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    expect(onError).toHaveBeenCalledTimes(1)
+    const [message, error] = onError.mock.calls[0]
+    expect(message).toContain('request resolver failed')
+    expect(message).toContain('opaque/request id')
+    expect(message).toContain('action=accept')
+    expect((error as Error).message).toBe('resolver exploded')
   })
 
   it('retries terminal recovery after local delivery fails without resolving again', async () => {
