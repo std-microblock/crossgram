@@ -16,7 +16,7 @@ import {
   MessageActionUnavailableError, PlatformMessageActions, messageRuleAllows,
   type MessageEditResult,
 } from './message-actions.js'
-import { isLocalOnlyConversation } from './request-inbox.js'
+import { isLocalOnlyConversation, isRequestInboxConversation } from './request-inbox.js'
 import { RecentPromiseCache } from './recent-promise-cache.js'
 import { makeUser } from './synthetic.js'
 import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
@@ -1770,7 +1770,27 @@ export class DialogRpc {
           }
         }
       } catch (error) {
-        if (error instanceof SystemPeerCallbackError) throw new RpcError(400, error.code)
+        if (error instanceof SystemPeerCallbackError) {
+          if (isRequestInboxConversation(systemPeer.peer.conversation)) {
+            let message: string | undefined
+            switch (error.code) {
+              case 'REQUEST_RESOLVE_FAILED':
+                message = '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。'
+                break
+              case 'REQUEST_RESOLVE_UNAVAILABLE':
+                message = '暂时无法处理请求，请稍后重试或在 QQ 中处理。'
+                break
+              case 'REQUEST_STATE_CONFLICT':
+                message = '请求状态已变更，请刷新收件箱后重试。'
+                break
+              case 'REQUEST_ID_INVALID':
+                message = '请求已不存在，请刷新收件箱。'
+                break
+            }
+            if (message) return { _: 'messages.botCallbackAnswer', alert: true, message, cacheTime: 0 }
+          }
+          throw new RpcError(400, error.code)
+        }
         throw error
       }
     }

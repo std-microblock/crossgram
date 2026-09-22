@@ -97,7 +97,7 @@ async function createRequestRpc(
     const localEvents: IMEvent[] = []
     return { rpc: createRpc(localEvents), localEvents }
   }
-  return { rpc, createSiblingRpc, platform, database: ctx.database, store, resolveRequest, localEvents, getMessage, getHistory, getUser, getConversation, searchMessages, clickInlineButton, mutations }
+  return { rpc, createSiblingRpc, peers, platform, database: ctx.database, store, resolveRequest, localEvents, getMessage, getHistory, getUser, getConversation, searchMessages, clickInlineButton, mutations }
 }
 
 async function seedPendingRequest(store: MessageStore): Promise<IMRequest> {
@@ -286,6 +286,76 @@ describe('request inbox read-only boundary', () => {
 })
 
 describe('request inbox callbacks', () => {
+  it('alerts when request resolution is unavailable without changing pending buttons', async () => {
+    const { rpc, store } = await createRequestRpc(undefined)
+    const pending = await seedPendingRequest(store)
+    const target = await inboxCallbackTarget(rpc, store)
+    await expect(rpc.getBotCallbackAnswer({
+      _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA),
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '暂时无法处理请求，请稍后重试或在 QQ 中处理。', cacheTime: 0 })
+    await expect(store.getRequest(session.platformSessionId, pending.id)).resolves.toMatchObject({ state: 'pending' })
+    expect((await store.readHistory(session.platformSessionId, REQUEST_INBOX_CONVERSATION_ID))[0]?.content.inlineKeyboard)
+      .toEqual(requestInboxMessage(pending).content.inlineKeyboard)
+  })
+
+  it('alerts when the persisted projection no longer has a request', async () => {
+    const resolveRequest = vi.fn()
+    const { rpc, store, database } = await createRequestRpc(resolveRequest)
+    const pending = await seedPendingRequest(store)
+    const target = await inboxCallbackTarget(rpc, store)
+    await database.remove('mtproto_im_request', { platformSessionId: session.platformSessionId, platformRequestId: pending.id })
+    await expect(rpc.getBotCallbackAnswer({
+      _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA),
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求已不存在，请刷新收件箱。', cacheTime: 0 })
+    expect(resolveRequest).not.toHaveBeenCalled()
+  })
+
+  it.each(['pending', 'accepted'] as const)('keeps invalid callback data as an RPC error for %s requests', async (state) => {
+    const resolveRequest = vi.fn()
+    const { rpc, store } = await createRequestRpc(resolveRequest)
+    const pending = await seedPendingRequest(store)
+    if (state !== 'pending') await store.ingestRequest(session, { ...pending, state })
+    const target = await inboxCallbackTarget(rpc, store)
+    await expect(rpc.getBotCallbackAnswer({
+      _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from('invalid'),
+    })).rejects.toMatchObject({ text: 'DATA_INVALID' })
+    expect(resolveRequest).not.toHaveBeenCalled()
+  })
+
+  it.each(['DATA_INVALID', 'CHAT_WRITE_FORBIDDEN', 'REQUEST_UNKNOWN', 'toString', '__proto__'])(
+    'keeps non-allowlisted provider error %s as an RPC error', async (code) => {
+      const resolveRequest = vi.fn().mockRejectedValue(new SystemPeerCallbackError(code))
+      const { rpc, store } = await createRequestRpc(resolveRequest)
+      await seedPendingRequest(store)
+      const target = await inboxCallbackTarget(rpc, store)
+      await expect(rpc.getBotCallbackAnswer({
+        _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA),
+      })).rejects.toMatchObject({ text: code })
+    },
+  )
+
+  it.each(['REQUEST_RESOLVE_FAILED', 'REQUEST_RESOLVE_UNAVAILABLE', 'REQUEST_STATE_CONFLICT', 'REQUEST_ID_INVALID'])(
+    'keeps %s as an RPC error for other system peers', async (code) => {
+      const { rpc, store, peers } = await createRequestRpc(undefined)
+      const id = 'bridge:other-system-peer'
+      const conversation = { id, kind: 'direct' as const, title: 'Other', metadata: { bridgeOwned: true, localOnly: true } }
+      peers.register({
+        async bootstrap() {},
+        async resolve(_session, conversationId) { return conversationId === id ? { id, conversation } : undefined },
+        async callback() { throw new SystemPeerCallbackError(code) },
+      })
+      const pending = await seedPendingRequest(store)
+      await store.ingest(session, conversation, { ...requestInboxMessage(pending), conversationId: id, senderId: id })
+      await inboxCallbackTarget(rpc, store)
+      const [projected] = await store.readProjectedHistory(session.platformSessionId, id)
+      await expect(rpc.getBotCallbackAnswer({
+        _: 'messages.getBotCallbackAnswer',
+        peer: { _: 'inputPeerUser', userId: rpc.peerTlId(id), accessHash: Long.ZERO },
+        msgId: projected!.parts[0]!.tlMessageId, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA),
+      })).rejects.toMatchObject({ text: code })
+    },
+  )
+
   it('accepts a pending request through a local request event without using platform message actions', async () => {
     const accepted: IMRequest = {
       id: 'opaque/request id', kind: 'friend', state: 'accepted', createdAt: 100,
@@ -328,7 +398,7 @@ describe('request inbox callbacks', () => {
     resolution.resolve({ ...pending, state: 'accepted' })
 
     await expect(accept).resolves.toMatchObject({ message: '请求已处理' })
-    await expect(reject).rejects.toMatchObject({ text: 'REQUEST_STATE_CONFLICT' })
+    await expect(reject).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求状态已变更，请刷新收件箱后重试。', cacheTime: 0 })
     expect(resolveRequest).toHaveBeenCalledTimes(1)
   })
 
@@ -371,16 +441,20 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...firstTarget, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。', cacheTime: 0 })
+    await expect(store.getRequest(session.platformSessionId, accepted.id)).resolves.toMatchObject({ state: 'pending' })
+    expect((await store.readHistory(session.platformSessionId, REQUEST_INBOX_CONVERSATION_ID))[0]?.content.inlineKeyboard)
+      .toEqual(requestInboxMessage({ ...accepted, state: 'pending' }).content.inlineKeyboard)
     await expect(sibling.rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...retryTarget, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
     })).resolves.toMatchObject({ message: '请求已处理' })
     expect(resolveRequest).toHaveBeenCalledTimes(2)
   })
 
-  it('reports the underlying resolver error before failing with REQUEST_RESOLVE_FAILED', async () => {
+  it('keeps the original resolver error in logs but returns only a safe alert', async () => {
+    const originalError = new Error('resolver exploded token=secret')
     const resolveRequest = vi.fn<NonNullable<IMPlatform['resolveRequest']>>()
-      .mockRejectedValueOnce(new Error('resolver exploded'))
+      .mockRejectedValueOnce(originalError)
     const onError = vi.fn()
     const { rpc, store } = await createRequestRpc(resolveRequest, { onError })
     await seedPendingRequest(store)
@@ -388,13 +462,13 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。', cacheTime: 0 })
     expect(onError).toHaveBeenCalledTimes(1)
     const [message, error] = onError.mock.calls[0]
     expect(message).toContain('request resolver failed')
     expect(message).toContain('opaque/request id')
     expect(message).toContain('action=accept')
-    expect((error as Error).message).toBe('resolver exploded')
+    expect(error).toBe(originalError)
   })
 
   it('invokes the platform resolver with its original receiver', async () => {
@@ -442,7 +516,7 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。', cacheTime: 0 })
     expect(resolveRequest).toHaveBeenCalledTimes(1)
     await expect(store.getRequest(session.platformSessionId, accepted.id)).resolves.toMatchObject({ state: 'accepted' })
     expect((await store.readHistory(session.platformSessionId, 'bridge:request-inbox'))[0]?.content.inlineKeyboard)
@@ -500,7 +574,7 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。', cacheTime: 0 })
     expect(resolveRequest).toHaveBeenCalledTimes(1)
     expect((await store.readHistory(session.platformSessionId, 'bridge:request-inbox'))[0]?.content.inlineKeyboard)
       .toBeUndefined()
@@ -535,7 +609,7 @@ describe('request inbox callbacks', () => {
     expect(clickInlineButton).not.toHaveBeenCalled()
   })
 
-  it('rejects a callback action that conflicts with the resolved request state', async () => {
+  it('alerts for a callback action that conflicts with the resolved request state', async () => {
     const resolveRequest = vi.fn()
     const { rpc, store, getMessage, clickInlineButton } = await createRequestRpc(resolveRequest)
     const pending = await seedPendingRequest(store)
@@ -544,7 +618,7 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_REJECT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_STATE_CONFLICT' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求状态已变更，请刷新收件箱后重试。', cacheTime: 0 })
 
     expect(resolveRequest).not.toHaveBeenCalled()
     expect(getMessage).not.toHaveBeenCalled()
@@ -562,7 +636,7 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。', cacheTime: 0 })
   })
 
   it.each<[string, IMRequest]>([
@@ -582,7 +656,7 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_ACCEPT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。', cacheTime: 0 })
 
     await expect(store.getRequest(session.platformSessionId, 'opaque/request id'))
       .resolves.toMatchObject({ id: 'opaque/request id', kind: 'friend', state: 'pending' })
@@ -600,7 +674,7 @@ describe('request inbox callbacks', () => {
 
     await expect(rpc.getBotCallbackAnswer({
       _: 'messages.getBotCallbackAnswer', ...target, data: Buffer.from(REQUEST_REJECT_CALLBACK_DATA), game: false,
-    })).rejects.toMatchObject({ text: 'REQUEST_RESOLVE_FAILED' })
+    })).resolves.toEqual({ _: 'messages.botCallbackAnswer', alert: true, message: '请求处理或状态同步失败，请稍后重试或在 QQ 中确认。', cacheTime: 0 })
 
     expect(getMessage).not.toHaveBeenCalled()
     expect(clickInlineButton).not.toHaveBeenCalled()
