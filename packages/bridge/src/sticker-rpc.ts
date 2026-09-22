@@ -108,7 +108,8 @@ export class StickerRpc {
     const pack = await this._getPack(ref.providerId, provider, ref.packId)
     if (!pack) throw new RpcError(400, 'STICKERSET_INVALID')
     const normalized = pack
-    const hash = catalogHash(normalized.stickers.map((sticker) => `${sticker.stickerId}:${sticker.version ?? 0}`))
+    const hash = catalogHash(normalized.stickers.map((sticker) =>
+      `v${STICKER_PROJECTION_VERSION}:${sticker.stickerId}:${sticker.version ?? 0}`))
     if (hashMatches(req.hash, hash)) return { _: 'messages.stickerSetNotModified' }
     const installed = (await this._installedPacks()).get(packKey(ref.providerId, ref.packId))
     const automatic = isAutomaticallyAssociated(provider, normalized, this._session.platformId)
@@ -666,9 +667,13 @@ export class StickerRpc {
       thumbDocumentId: cover
         ? Long.fromNumber(this._documentId(pack.providerId, cover.stickerId))
         : undefined,
+      // The hash describes the projected set, not only the upstream version:
+      // clients compare it with their cached copy, so a projection change has
+      // to make them refetch the set and its documents.
       hash: stickers.length
-        ? catalogHash(stickers.map((sticker) => `${sticker.stickerId}:${sticker.version ?? 0}`))
-        : catalogHash([`${pack.providerId}:${pack.packId}:${pack.version ?? 0}`]),
+        ? catalogHash(stickers.map((sticker) =>
+            `v${STICKER_PROJECTION_VERSION}:${sticker.stickerId}:${sticker.version ?? 0}`))
+        : catalogHash([`v${STICKER_PROJECTION_VERSION}:${pack.providerId}:${pack.packId}:${pack.version ?? 0}`]),
     }
   }
 

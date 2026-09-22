@@ -94,6 +94,27 @@ describe('StickerRpc', () => {
     })
   })
 
+  it('rotates set hashes so clients refetch rotated sticker documents', async () => {
+    const { rpc, sticker } = stickerHarness()
+
+    const all = await rpc.getAllStickers({ _: 'messages.getAllStickers', hash: Long.ZERO })
+    if (all._ !== 'messages.allStickers') throw new Error('expected complete sticker catalog')
+    const [set] = all.sets
+    if (!set) throw new Error('expected a sticker set')
+    const material = `${sticker.providerId}:${sticker.packId}:7`
+    expect(Number(set.hash)).toBe(testCatalogHash([`v10:${material}`]))
+    expect(Number(set.hash)).not.toBe(testCatalogHash([`v9:${material}`]))
+
+    // Clients hash the set hashes they cached, so the previous projection must
+    // receive the full list instead of `allStickersNotModified`.
+    await expect(rpc.getAllStickers({
+      _: 'messages.getAllStickers', hash: Long.fromNumber(testCatalogHash([`v9:${material}`])),
+    })).resolves.toMatchObject({ _: 'messages.allStickers' })
+    await expect(rpc.getAllStickers({
+      _: 'messages.getAllStickers', hash: all.hash,
+    })).resolves.toMatchObject({ _: 'messages.allStickersNotModified' })
+  })
+
   it('rejects unsupported built-in sets instead of claiming an initial request was not modified', async () => {
     const { rpc } = stickerHarness()
 
@@ -953,6 +974,16 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     cacheTtlMs,
   )
   return { rpc, provider, sticker, query, database, touch: () => { revision++ } }
+}
+
+function testCatalogHash(values: string[]): number {
+  const value = values.join('\u0000')
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0) % 0x7ffffffe + 1
 }
 
 function pathBounds(bytes: Uint8Array): { left: number, top: number, right: number, bottom: number } {

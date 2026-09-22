@@ -60,6 +60,10 @@ Every path was dropped, which is why no sticker had a loading frame.
   sets together with their documents, and `updateThumbnails()` never replaces
   already stored inline bytes, so rotated set/document ids are what makes
   clients discard the unusable paths they cached.
+- Sticker set hashes now include the projection version. Telegram Desktop
+  hashes the set hashes it cached (`Api::CountStickersHash`) instead of the set
+  ids, so without that tag a client holding the previous projection would keep
+  receiving `allStickersNotModified` and never refetch the rotated sets.
 - Frame geometry continues to come from the document image size: Desktop reads
   `DocumentData::dimensions`, Android reads `documentAttributeImageSize` (or
   `documentAttributeVideo`) in `DocumentObject.getSvgThumb` and scales the path
