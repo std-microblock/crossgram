@@ -5,6 +5,9 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { StickerRpc } from './sticker-rpc.js'
+import {
+  decodeTelegramStickerPath, encodeTelegramStickerPath, telegramStickerPlaceholder,
+} from './sticker-outline.js'
 import { StickerProviderRegistry, type IMSticker, type IMStickerProvider } from './sticker-provider.js'
 import type { IMPlatform, PlatformSession } from './platform.js'
 
@@ -78,13 +81,13 @@ describe('StickerRpc', () => {
       || stickerAttribute.stickerset._ !== 'inputStickerSetID') throw new Error('expected sticker set ID')
 
     expect(media.document.id.toNumber()).toBe(testStickerProjectionId(
-      `sticker-document:v9:${sticker.providerId}:${sticker.stickerId}`,
+      `sticker-document:v10:${sticker.providerId}:${sticker.stickerId}`,
     ))
     expect(media.document.id.toNumber()).not.toBe(testStickerProjectionId(
-      `sticker-document:v8:${sticker.providerId}:${sticker.stickerId}`,
+      `sticker-document:v9:${sticker.providerId}:${sticker.stickerId}`,
     ))
     expect(stickerAttribute.stickerset.id.toNumber()).toBe(testStickerProjectionId(
-      `sticker-set:v9:${sticker.providerId}:${sticker.packId}`,
+      `sticker-set:v10:${sticker.providerId}:${sticker.packId}`,
     ))
     expect(media.document.attributes).toContainEqual({
       _: 'documentAttributeImageSize', w: 512, h: 286,
@@ -140,8 +143,10 @@ describe('StickerRpc', () => {
     expect(provider.openAsset).not.toHaveBeenCalled()
   })
 
-  it('always projects an inline loading silhouette before any sticker download', () => {
+  it('always projects an inline loading frame sized by the document image size', () => {
     const { rpc, sticker, provider } = stickerHarness()
+    sticker.width = 200
+    sticker.height = 100
 
     const media = rpc.makeMessageMedia(sticker)
     if (!media.document || media.document._ !== 'document') throw new Error('expected document')
@@ -149,22 +154,55 @@ describe('StickerRpc', () => {
     expect(media.document.thumbs).toEqual([{
       _: 'photoPathSize', type: 'j', bytes: expect.any(Uint8Array),
     }])
-    expect(media.document.thumbs![0]!._ === 'photoPathSize'
-      && media.document.thumbs![0]!.bytes.byteLength).toBeGreaterThan(0)
+    expect(media.document.attributes).toContainEqual({
+      _: 'documentAttributeImageSize', w: 200, h: 100,
+    })
+    const thumb = media.document.thumbs![0]!
+    if (thumb._ !== 'photoPathSize') throw new Error('expected path thumb')
+    // Clients paint the thumbnail path through their own reduced SVG parser and
+    // scale it by the image size attribute, so the frame must decode and cover
+    // exactly the advertised document box.
+    expect(pathBounds(thumb.bytes)).toEqual({ left: 0, top: 0, right: 200, bottom: 100 })
     expect(provider.openAsset).not.toHaveBeenCalled()
     expect(provider.openThumbnail).not.toHaveBeenCalled()
   })
 
-  it('replaces an empty persisted outline with a drawable loading silhouette', () => {
+  it('replaces persisted outlines clients cannot decode with a drawable loading frame', () => {
     const { rpc, sticker } = stickerHarness()
-    sticker.outline = new Uint8Array()
+    sticker.width = 512
+    sticker.height = 512
+    // Quadratic curves are valid SVG, but Telegram Desktop's sticker-path
+    // parser rejects the whole path and leaves the sticker blank while loading.
+    const quadratic = encodeTelegramStickerPath(
+      '61,0H451Q512,0,512,61V451Q512,512,451,512H61Q0,512,0,451V61Q0,0,61,0',
+    )
+    expect(decodeTelegramStickerPath(quadratic)).toBeUndefined()
+
+    for (const outline of [new Uint8Array(), quadratic, Uint8Array.from([0xff, 0x00, 0x7f])]) {
+      sticker.outline = outline
+
+      const media = rpc.makeMessageMedia(sticker)
+      if (!media.document || media.document._ !== 'document') throw new Error('expected document')
+      const [thumb] = media.document.thumbs ?? []
+      expect(thumb?._).toBe('photoPathSize')
+      if (thumb?._ !== 'photoPathSize') throw new Error('expected path thumb')
+      expect(thumb.bytes).toEqual(telegramStickerPlaceholder(512, 512))
+      expect(pathBounds(thumb.bytes)).toEqual({ left: 0, top: 0, right: 512, bottom: 512 })
+    }
+  })
+
+  it('forwards persisted outlines that every client parser accepts', () => {
+    const { rpc, sticker } = stickerHarness()
+    sticker.width = 120
+    sticker.height = 60
+    const outline = telegramStickerPlaceholder(60, 60)
+    sticker.outline = outline
 
     const media = rpc.makeMessageMedia(sticker)
     if (!media.document || media.document._ !== 'document') throw new Error('expected document')
     const [thumb] = media.document.thumbs ?? []
-    expect(thumb?._).toBe('photoPathSize')
     if (thumb?._ !== 'photoPathSize') throw new Error('expected path thumb')
-    expect(thumb.bytes.byteLength).toBeGreaterThan(0)
+    expect(thumb.bytes).toEqual(outline)
   })
 
   it('delegates document ranges to a provider-native range stream', async () => {
@@ -915,6 +953,29 @@ function stickerHarness(cacheTtlMs = 5 * 60_000) {
     cacheTtlMs,
   )
   return { rpc, provider, sticker, query, database, touch: () => { revision++ } }
+}
+
+function pathBounds(bytes: Uint8Array): { left: number, top: number, right: number, bottom: number } {
+  const commands = decodeTelegramStickerPath(bytes)
+  if (!commands) throw new Error('sticker path is not drawable by Telegram clients')
+  let left = Number.POSITIVE_INFINITY
+  let top = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  const include = (x: number, y: number) => {
+    left = Math.min(left, x)
+    top = Math.min(top, y)
+    right = Math.max(right, x)
+    bottom = Math.max(bottom, y)
+  }
+  for (const command of commands) {
+    if (command._ === 'cubic') {
+      include(command.x1, command.y1)
+      include(command.x2, command.y2)
+    }
+    include(command.x, command.y)
+  }
+  return { left, top, right, bottom }
 }
 
 function testStickerProjectionId(value: string): number {

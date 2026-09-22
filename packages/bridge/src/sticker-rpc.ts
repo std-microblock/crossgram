@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
 import { stableId } from './dialogs.js'
-import { telegramStickerPlaceholder } from './sticker-outline.js'
+import { decodeTelegramStickerPath, telegramStickerPlaceholder } from './sticker-outline.js'
 import { isAutomaticallyAssociated, providerBelongsToAccount } from './sticker-dashboard.js'
 import type { IMDirectDownload, IMPlatform, PlatformSession } from './platform.js'
 import type {
@@ -21,7 +21,10 @@ interface ResolvedSticker {
 // v8 replaced the old 31-bit projection IDs with wide deterministic IDs.
 // v9 invalidates documents whose dimensions were cached before QQ favorites
 // started exposing their intrinsic aspect ratio.
-const STICKER_PROJECTION_VERSION = 9
+// v10 invalidates documents and sets whose path thumbnail used quadratic
+// curves only Telegram Desktop's reduced parser rejects, leaving the cached
+// sticker without any loading frame.
+const STICKER_PROJECTION_VERSION = 10
 const STICKER_PROVIDER_CACHE_TTL_MS = 5 * 60_000
 // Telegram Desktop ignores every document field when date is zero, leaving a
 // zero-byte generic file. Keep synthetic sticker documents on a stable,
@@ -706,10 +709,12 @@ export class StickerRpc {
       // a moving gradient through it before either thumbnail or asset arrives.
       thumbs: [{
         _: 'photoPathSize', type: 'j',
-        // Empty outlines are occasionally produced by legacy providers and
-        // persisted messages. Treat them as missing so clients still receive
-        // a drawable loading silhouette instead of an empty path.
-        bytes: sticker.outline?.byteLength
+        // Empty or undecodable outlines are produced by legacy providers and
+        // persisted messages. Clients drop the entire path when it carries a
+        // command their reduced SVG parser does not implement, so only paths
+        // that survive a client decode are forwarded; everything else gets a
+        // drawable placeholder frame instead of staying blank while loading.
+        bytes: sticker.outline?.byteLength && decodeTelegramStickerPath(sticker.outline)
           ? sticker.outline
           : telegramStickerPlaceholder(sticker.width ?? 512, sticker.height ?? 512),
       }, ...(sticker.thumbnail ? [{

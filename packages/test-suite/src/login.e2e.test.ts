@@ -34,6 +34,29 @@ import { openE2eClient, runE2eProbe, type E2eClientEvent } from '@mtproto-relay/
 import { updateToJson } from '../../bridge/src/update-json.js'
 import { getApiLayerReaderMap, getApiLayerWriterMap } from '../../mtproto/src/rpc/api-layer.js'
 
+function stickerPathBounds(
+  commands: NonNullable<ReturnType<typeof bridge.decodeTelegramStickerPath>>,
+): { left: number, top: number, right: number, bottom: number } {
+  let left = Number.POSITIVE_INFINITY
+  let top = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  const include = (x: number, y: number) => {
+    left = Math.min(left, x)
+    top = Math.min(top, y)
+    right = Math.max(right, x)
+    bottom = Math.max(bottom, y)
+  }
+  for (const command of commands) {
+    if (command._ === 'cubic') {
+      include(command.x1, command.y1)
+      include(command.x2, command.y2)
+    }
+    include(command.x, command.y)
+  }
+  return { left, top, right, bottom }
+}
+
 /** Full bridge login e2e: db + server + mtproto + bridge, real socket client. */
 
 const crypto = new NodeCryptoProvider()
@@ -3262,6 +3285,17 @@ describe('bridge login e2e', () => {
         })]))
         const outline = document.thumbs.find((thumb: any) => thumb._ === 'photoPathSize')
         expect(outline.bytes.byteLength).toBeGreaterThan(0)
+        // Clients parse these bytes with a reduced SVG parser of their own and
+        // scale the result by the document image size. A sticker whose path
+        // does not decode stays blank instead of showing its loading frame.
+        const commands = bridge.decodeTelegramStickerPath(outline.bytes)
+        expect(commands).toBeDefined()
+        const size = document.attributes.find((attribute: any) =>
+          attribute._ === 'documentAttributeImageSize' || attribute._ === 'documentAttributeVideo')
+        expect(size).toBeDefined()
+        expect(stickerPathBounds(commands!)).toEqual({
+          left: 0, top: 0, right: size.w, bottom: size.h,
+        })
       }
       expect(labStickerDocuments[3].attributes)
         .toEqual(expect.arrayContaining([expect.objectContaining({ _: 'documentAttributeVideo' })]))

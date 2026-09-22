@@ -8,7 +8,8 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import {
-  StickerProviderRegistry, StickerRpc, type PlatformSession, type StickerProviderContext,
+  StickerProviderRegistry, StickerRpc, decodeTelegramStickerPath,
+  type PlatformSession, type StickerProviderContext,
 } from '@mtproto-relay/bridge'
 import { defineModels } from '../../bridge/src/models.js'
 import { QQStickerProvider } from './sticker-provider.js'
@@ -67,8 +68,8 @@ describe('QQ store animated sticker object contract E2E', () => {
     if (all._ !== 'messages.allStickers') throw new Error('expected complete sticker catalog')
     expect(all.sets).toHaveLength(1)
     const set = all.sets[0]!
-    expect(set.id.toNumber()).toBe(testStickerProjectionId('sticker-set:v9:qqnt:stickers:11690'))
-    expect(set.id.toNumber()).not.toBe(testStickerProjectionId('sticker-set:v8:qqnt:stickers:11690'))
+    expect(set.id.toNumber()).toBe(testStickerProjectionId('sticker-set:v10:qqnt:stickers:11690'))
+    expect(set.id.toNumber()).not.toBe(testStickerProjectionId('sticker-set:v9:qqnt:stickers:11690'))
     const pack = await rpc.getStickerSet({
       _: 'messages.getStickerSet',
       stickerset: { _: 'inputStickerSetID', id: set.id, accessHash: set.accessHash },
@@ -84,7 +85,7 @@ describe('QQ store animated sticker object contract E2E', () => {
       const packDocument = pack.documents[index]
       if (!packDocument || packDocument._ !== 'document') throw new Error('expected pack document')
       expect(packDocument.id.toNumber()).toBe(testStickerProjectionId(
-        `sticker-document:v9:qqnt:stickers:${sticker.stickerId}`,
+        `sticker-document:v10:qqnt:stickers:${sticker.stickerId}`,
       ))
       assertStickerDocument(wireRoundTrip(packDocument), expectedMime, set.id)
 
@@ -182,6 +183,13 @@ describe('QQ store animated sticker object contract E2E', () => {
 
 function assertStickerDocument(document: tl.RawDocument, mimeType: string, setId: Long): void {
   expect(document.mimeType).toBe(mimeType)
+  const pathThumb = (document.thumbs ?? []).find((thumb) => thumb._ === 'photoPathSize')
+  if (!pathThumb || pathThumb._ !== 'photoPathSize') throw new Error('expected path thumbnail')
+  const commands = decodeTelegramStickerPath(pathThumb.bytes)
+  // Clients scale the silhouette by the image size attribute, so the loading
+  // frame has to decode and cover the whole 320x180 document box.
+  expect(commands).toBeDefined()
+  expect(pathBounds(commands!)).toEqual({ left: 0, top: 0, right: 320, bottom: 180 })
   expect(document.attributes).toEqual(expect.arrayContaining([
     expect.objectContaining({
       _: 'documentAttributeSticker',
@@ -213,6 +221,27 @@ function marketSticker(
       dynamicPath: `https://cdn.example.test/${id}.${mimeType === 'image/gif' ? 'gif' : 'apng'}`,
     },
   }
+}
+
+function pathBounds(commands: NonNullable<ReturnType<typeof decodeTelegramStickerPath>>) {
+  let left = Number.POSITIVE_INFINITY
+  let top = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  const include = (x: number, y: number) => {
+    left = Math.min(left, x)
+    top = Math.min(top, y)
+    right = Math.max(right, x)
+    bottom = Math.max(bottom, y)
+  }
+  for (const command of commands) {
+    if (command._ === 'cubic') {
+      include(command.x1, command.y1)
+      include(command.x2, command.y2)
+    }
+    include(command.x, command.y)
+  }
+  return { left, top, right, bottom }
 }
 
 function wireRoundTrip<T>(object: T): T {

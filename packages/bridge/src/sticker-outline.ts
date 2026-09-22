@@ -1,32 +1,225 @@
 const COMPACT_PATH_CHARACTERS
   = 'AACAAAAHAAALMAAAQASTAVAAAZaacaaaahaaalmaaaqastava.az0123456789-,'
 
+// Clients do not run a general SVG engine over a `photoPathSize` thumbnail.
+// Telegram Desktop's `Images::PathFromInlineBytes` implements M/L/H/V/C/S/Z
+// only and throws the whole path away as soon as it meets any other command,
+// which silently removes the loading frame. Everything we encode therefore has
+// to stay inside that subset.
+const CUBIC_CORNER_RATIO = 0.5522847498307936
+
 interface Point {
   x: number
   y: number
 }
 
+export type TelegramStickerPathCommand =
+  | { _: 'move', x: number, y: number }
+  | { _: 'line', x: number, y: number }
+  | { _: 'cubic', x1: number, y1: number, x2: number, y2: number, x: number, y: number }
+  | { _: 'close', x: number, y: number }
+
 /**
  * Builds Telegram's compact SVG-path placeholder for an uncached sticker.
  *
- * Telegram Desktop scales this path with the sticker dimensions and paints a
- * moving gradient through it until the sticker has loaded.
+ * The frame spans the whole document box. Clients scale it with
+ * `documentAttributeImageSize` — Telegram Desktop through
+ * `DocumentData::dimensions`, Android through the attribute lookup in
+ * `DocumentObject.getSvgThumb` — and Desktop additionally clips it to the
+ * rounded sticker rect, so a rounded rectangle here matches what a real
+ * silhouette looks like before either thumbnail or asset arrives.
  */
 export function telegramStickerPlaceholder(width: number, height: number): Uint8Array {
   const w = positiveDimension(width)
   const h = positiveDimension(height)
   const radius = Math.max(1, Math.round(Math.min(w, h) * 0.12))
+  const control = Math.round(radius * CUBIC_CORNER_RATIO)
   return compactPath([
     `${radius},0`,
     `H${w - radius}`,
-    `Q${w},0,${w},${radius}`,
+    `C${w - radius + control},0,${w},${radius - control},${w},${radius}`,
     `V${h - radius}`,
-    `Q${w},${h},${w - radius},${h}`,
+    `C${w},${h - radius + control},${w - radius + control},${h},${w - radius},${h}`,
     `H${radius}`,
-    `Q0,${h},0,${h - radius}`,
+    `C${radius - control},${h},0,${h - radius + control},0,${h - radius}`,
     `V${radius}`,
-    `Q0,0,${radius},0`,
+    `C0,${radius - control},${radius - control},0,${radius},0`,
   ].join(''))
+}
+
+/**
+ * Encodes an SVG path into Telegram's compact sticker-path bytes.
+ *
+ * Clients prepend the implicit leading move-to and append the closing command
+ * themselves, so the text must start with the first coordinate pair and must
+ * not carry a trailing `z`.
+ */
+export function encodeTelegramStickerPath(path: string): Uint8Array {
+  return compactPath(path)
+}
+
+/**
+ * Decodes compact sticker-path bytes exactly the way clients do: they prepend
+ * the implicit move-to, append the closing command, and then run a reduced SVG
+ * parser that only knows the commands Telegram's own sticker encoder emits.
+ *
+ * Returns `undefined` when a client would drop the whole path, which happens
+ * for unknown commands, malformed numbers, unclosed subpaths, and paths that
+ * carry no drawing segment at all. Callers fall back to a drawable placeholder
+ * so a sticker never stays blank instead of showing a loading frame.
+ */
+export function decodeTelegramStickerPath(bytes: Uint8Array): TelegramStickerPathCommand[] | undefined {
+  const source = `${expandCompactPath(bytes)}z\0`
+  const commands: TelegramStickerPathCommand[] = []
+  let position = 0
+  let x = 0
+  let y = 0
+  let draws = false
+
+  const current = () => source[position] ?? '\0'
+  const skipCommas = () => { while (current() === ',') position++ }
+  const number = (): number | undefined => {
+    skipCommas()
+    let sign = 1
+    if (current() === '-') {
+      sign = -1
+      position++
+    }
+    let digits = 0
+    let value = 0
+    while (isDigit(current())) {
+      value = value * 10 + Number(current())
+      position++
+      digits++
+    }
+    if (current() === '.') {
+      position++
+      let scale = 0.1
+      while (isDigit(current())) {
+        value += Number(current()) * scale
+        scale *= 0.1
+        position++
+        digits++
+      }
+    }
+    return digits ? sign * value : undefined
+  }
+
+  while (current() !== '\0') {
+    skipCommas()
+    if (current() === '\0') break
+
+    // The encoder drops the leading move-to and clients add it back, so every
+    // path starts with one. Consecutive move-tos keep the last coordinate pair,
+    // matching how the client parser consumes them.
+    while (current() === 'm' || current() === 'M') {
+      const relative = current() === 'm'
+      position++
+      let next: Point | undefined
+      do {
+        const nextX = number()
+        const nextY = number()
+        if (nextX === undefined || nextY === undefined) return undefined
+        next = relative ? { x: x + nextX, y: y + nextY } : { x: nextX, y: nextY }
+        skipCommas()
+      } while (current() !== '\0' && !isAlpha(current()))
+      x = next!.x
+      y = next!.y
+      commands.push({ _: 'move', x, y })
+    }
+    const start: Point = { x, y }
+
+    let closed = false
+    let command = '-'
+    let lastControl: Point | undefined
+    while (!closed) {
+      skipCommas()
+      // The client logs "Receive unclosed path" and drops the path.
+      if (current() === '\0') return undefined
+      if (isAlpha(current())) {
+        command = current()
+        position++
+      }
+      switch (command) {
+        case 'l':
+        case 'L': {
+          const nextX = number()
+          const nextY = number()
+          if (nextX === undefined || nextY === undefined) return undefined
+          x = command === 'l' ? x + nextX : nextX
+          y = command === 'l' ? y + nextY : nextY
+          commands.push({ _: 'line', x, y })
+          draws = true
+          lastControl = undefined
+          break
+        }
+        case 'h':
+        case 'H': {
+          const nextX = number()
+          if (nextX === undefined) return undefined
+          x = command === 'h' ? x + nextX : nextX
+          commands.push({ _: 'line', x, y })
+          draws = true
+          lastControl = undefined
+          break
+        }
+        case 'v':
+        case 'V': {
+          const nextY = number()
+          if (nextY === undefined) return undefined
+          y = command === 'v' ? y + nextY : nextY
+          commands.push({ _: 'line', x, y })
+          draws = true
+          lastControl = undefined
+          break
+        }
+        case 'c':
+        case 'C':
+        case 's':
+        case 'S': {
+          const relative = command === 'c' || command === 's'
+          const smooth = command === 's' || command === 'S'
+          const values = smooth
+            ? [number(), number(), number(), number()]
+            : [number(), number(), number(), number(), number(), number()]
+          if (values.some((value) => value === undefined)) return undefined
+          const x1 = smooth ? (lastControl ? 2 * x - lastControl.x : x) : (relative ? x : 0) + values[0]!
+          const y1 = smooth ? (lastControl ? 2 * y - lastControl.y : y) : (relative ? y : 0) + values[1]!
+          const x2 = (relative ? x : 0) + values[smooth ? 0 : 2]!
+          const y2 = (relative ? y : 0) + values[smooth ? 1 : 3]!
+          const endX = (relative ? x : 0) + values[smooth ? 2 : 4]!
+          const endY = (relative ? y : 0) + values[smooth ? 3 : 5]!
+          commands.push({ _: 'cubic', x1, y1, x2, y2, x: endX, y: endY })
+          x = endX
+          y = endY
+          draws = true
+          lastControl = { x: x2, y: y2 }
+          break
+        }
+        case 'm':
+        case 'M':
+        case 'z':
+        case 'Z': {
+          // The client parser rewinds over a move-to so its outer loop reads it
+          // as a new subpath; only `z`/`Z` close the current one.
+          if (command === 'z' || command === 'Z') {
+            commands.push({ _: 'close', x: start.x, y: start.y })
+            x = start.x
+            y = start.y
+          } else {
+            position--
+          }
+          closed = true
+          break
+        }
+        default:
+          // Clients discard the entire path on an unsupported command.
+          return undefined
+      }
+    }
+  }
+
+  return draws ? commands : undefined
 }
 
 /**
@@ -122,6 +315,20 @@ function pointPath(points: Point[]): string {
   return `${first!.x},${first!.y}${rest.map((point) => `L${point.x},${point.y}`).join('')}`
 }
 
+function expandCompactPath(bytes: Uint8Array): string {
+  let path = 'M'
+  for (const byte of bytes) {
+    if (byte >= 128 + 64) {
+      path += COMPACT_PATH_CHARACTERS.charAt(byte - 128 - 64)
+    } else {
+      if (byte >= 128) path += ','
+      else if (byte >= 64) path += '-'
+      path += String(byte & 63)
+    }
+  }
+  return path
+}
+
 function compactPath(path: string): Uint8Array {
   const output = new Uint8Array(path.length)
   for (let index = 0; index < path.length; index++) {
@@ -130,6 +337,15 @@ function compactPath(path: string): Uint8Array {
     output[index] = 192 + compact
   }
   return output
+}
+
+function isAlpha(char: string): boolean {
+  const lower = char.toLowerCase()
+  return lower >= 'a' && lower <= 'z'
+}
+
+function isDigit(char: string): boolean {
+  return char >= '0' && char <= '9'
 }
 
 function positiveDimension(value: number): number {
