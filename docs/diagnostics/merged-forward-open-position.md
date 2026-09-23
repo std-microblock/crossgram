@@ -54,19 +54,16 @@ returns the stored item for an id it already has, so a card fetched before the
 relay anchored links at the first message keeps its newest anchor and opens at
 the end of the transcript no matter what the relay serves afterwards.
 
-The patched desktop client therefore asks the relay where the transcript starts
-instead of trusting the link.  Once the synthetic peer resolves it calls
-`crossgram.getMergedForwardAnchor` (`peer:InputPeer = DataJSON`, constructor id
-`f4a571c7`, the same value the desktop patcher writes into
-`mtproto/scheme/api.tl`) and opens the history at the returned `messageId`.  An
-older relay answers an unknown method with an error, an unknown peer answers
-`0`, and both keep the anchor stored in the deep link, so the client degrades to
-the previous behaviour.
-
-The relay also answers a `messages.getHistory` request anchored at offset id 1
-(`kFirstMessageOffsetId`, a value synthetic hashed message ids never take) with
-the oldest messages of the bundle, which keeps the beginning reachable for
-clients that can only send standard requests.
+The patched desktop client therefore asks the relay for the beginning instead
+of trusting the link: a `messages.getHistory` request anchored at offset id 1
+(`kFirstMessageOffsetId`, a value synthetic hashed message ids never take) is
+answered with the oldest page of the bundle, and the client opens the history at
+the first message of that page.  An older relay answers the same request with
+the newest page, and a failed request keeps the anchor stored in the deep link,
+so both cases degrade to the previous behaviour.  Keeping the client on a
+standard RPC matters: generated Crossgram method types are named differently by
+the upstream codegen versions, and their constructor ids are rejected unless
+they match the TL signature hash.
 
 ## Verification
 
@@ -97,14 +94,13 @@ Desktop:
 - The same fixture is patched against pristine upstream sources from every
   supported repository by `.github/workflows/check.yml`, which passed for all
   28 target/brand combinations of this commit (run 271).
-- The new method is covered by the wire-contract decode test
-  (`packages/mtproto/src/rpc/server-reader-map.test.ts`), by the RPC e2e
-  (known, unknown and non-chat peers) and by the lifecycle e2e, which asserts
-  the route belongs to the plugin fiber.
-- The desktop patch e2e asserts the injected TL line, the request, the guarded
-  callbacks, both `showPeerHistory` endings and the Qt JSON helper, and the
-  patch still applies twice, byte-identically, to pristine upstream sources
-  (checked locally against the reference checkout and by `check.yml`).
+- The relay-side sentinel is covered by the RPC e2e (the oldest page comes
+  back for offset id 1) and by the login e2e over a real socket.
+- The desktop patch e2e asserts the sentinel request, the upstream
+  `MTPmessages_Messages` match idiom, the guarded callbacks and both
+  `showPeerHistory` endings, and the patch still applies twice,
+  byte-identically, to pristine upstream sources (checked locally against the
+  reference checkout and by `check.yml`).
 - Live relay: the `inspect-relay` probe
 `work/probes/merged-forward-anchor.ts` projected a bundle through the running
 production plugin and compared the link anchor with the id computed from the
