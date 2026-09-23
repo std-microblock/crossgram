@@ -792,8 +792,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   ctx.effect(async () => {
     await ctx.database.prepared()
     await legacyPhoneMigration
-    // Delivery rows from pre-memory-journal versions are no longer used.
-    await ctx.database.remove('mtproto_update_delivery', {})
+    // Retained delivery rows are the durable difference journal. They must
+    // survive a restart so reconnecting devices can still recover the updates
+    // they missed; the store prunes them per scope on write instead.
     await Promise.all(registry.ids.map(platformId => provision(platformId)))
     await publishStickerPacks()
     await subscriptions.startActiveSessions()

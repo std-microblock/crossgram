@@ -5025,6 +5025,37 @@ describe('bridge login e2e', () => {
     }
   }, 30_000)
 
+  it('keeps the durable delivery journal across application restarts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mtproto-bridge-journal-'))
+    const databasePath = pathToFileURL(join(directory, 'journal.sqlite')).href
+    const payload = {
+      _: 'updates', updates: [], users: [], chats: [], date: 1_800_000_000, seq: 1,
+    }
+    const first = await startApp({ databasePath })
+    await vi.waitFor(() => expect(first.ctx.updateStore).toBeDefined())
+    try {
+      await first.ctx.updateStore.create({
+        eventKey: 'journal-restart', platformSessionId: 'journal-session', scope: 'account',
+        pts: 2, ptsCount: 1, seq: 1, date: 1_800_000_000, published: true,
+        claimedAt: null, payload,
+      })
+      expect(await first.ctx.updateStore.get('journal-restart')).toMatchObject({ pts: 2, payload })
+    } finally {
+      await first.stop()
+    }
+
+    const second = await startApp({ databasePath })
+    await vi.waitFor(() => expect(second.ctx.updateStore).toBeDefined())
+    try {
+      // A restart used to run a stale migration that cleared every retained
+      // row, which left reconnecting devices without a difference journal.
+      expect(await second.ctx.updateStore.get('journal-restart')).toMatchObject({ pts: 2, payload })
+    } finally {
+      await second.stop()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('synchronizes local read boundaries between two authorized devices', async () => {
     const platformId = 'read-device-sync-e2e'
     const direct: bridge.IMConversation = { id: 'read-direct', kind: 'direct', title: 'Direct Peer' }
