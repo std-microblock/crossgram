@@ -83,16 +83,27 @@ geometry.
 - `platform-qqnt`: `platform.test.ts` passes 113 tests, including
   `adopts the inline icon geometry the bridge reports for a wide face`, which
   fails without the geometry adoption.
-- Production (after the rollout below): `POST /v1/reactions/meta` for `1:416`
-  must report the icon size (16477) with `width: 128`, `height: 128`, and
-  `POST /v1/reactions/asset` must stream the same bytes.
+- Production, 2026-09-23 15:40 CST (bridge `v1.0.42`, relay `0a9118e`):
+
+  | request | result |
+  | --- | --- |
+  | `POST /v1/reactions/meta {"reactionKey":"1:416"}` | `16477`, `width: 128`, `height: 128`, `entry: "416/png/416.png"` |
+  | `POST /v1/reactions/asset {"reactionKey":"1:416"}` | `200`, `content-length: 16477`, `84d4e1d2…` — the icon `1:415` already served |
+  | `POST /v1/reactions/meta {"reactionKey":"1:419"}` | `15324`, `entry: "419/png/419.png"` |
+
+  The relay restarted with the new bridge and its background catalog warmup
+  re-resolved every CDN-backed definition; the bridge log shows
+  `reaction meta key=1:416 size=16477 version=3301497631 source=payload` for
+  that pass, so the published reaction document now carries the icon geometry.
+  Clients only need to re-read the message: the document identity is derived
+  from the key and the icon CRC-32, so the canvas document is left behind.
 
 ## Rollout
 
-- `qqnt-bridge` `v1.0.42` (tagged from `face-asset-stickers` lineage on
-  `master`) installed on the bridge host with the maintenance
-  `update-qqnt-bridge.ps1` script.
-- `platform-qqnt` fast-forwarded on `/opt/crossgram` and
+- `qqnt-bridge` `v1.0.42` was built by GitHub Actions, installed on the bridge
+  host with the maintenance `update-qqnt-bridge.ps1` script, and QQ returned
+  `ready=true` / `authenticated` without a QR scan.
+- `platform-qqnt` was fast-forwarded on `/opt/crossgram` (commit `0a9118e`) and
   `crossgram.service` restarted; no build runs on the production host.
 - Client documents are re-keyed automatically: the icon bytes carry a different
   CRC-32 than the canvas, so every cached reaction document is replaced once the
