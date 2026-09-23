@@ -5003,6 +5003,22 @@ describe('bridge login e2e', () => {
       for (const result of await poll(2, 10)) expect(result).toMatchObject({
         _: 'updates.channelDifferenceEmpty', final: true, pts: 2, timeout: 30,
       })
+
+      // A reservation whose publisher is gone — the production stall, where a
+      // publish died before it could store its payload — used to pin every
+      // device at the previous pts, so they replayed the same channel messages
+      // forever. Readers release it and leave the durable cursor where it is.
+      const abandonedKey = 'multi-device-abandoned'
+      const abandoned = await ctx.updateStore.create({
+        eventKey: abandonedKey, platformSessionId, scope: `channel:${channelId}`,
+        pts: pending.pts + 1, ptsCount: 1, seq: pending.seq + 1, date: nowSec(),
+        published: false, claimedAt: null, payload: null,
+      })
+      expect(abandoned.pts).toBe(pending.pts + 1)
+      for (const result of await poll(2, 12)) expect(result).toMatchObject({
+        _: 'updates.channelDifferenceEmpty', final: true, pts: 2, timeout: 30,
+      })
+      expect(await ctx.updateStore.get(abandonedKey)).toBeUndefined()
     } finally {
       for (const { client } of clients) client.close()
       await stop()

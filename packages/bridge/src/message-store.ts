@@ -105,6 +105,13 @@ export interface StoredHistoryQuery {
 const TIMESTAMP_ALLOCATION_VERSION = 1
 export const UPDATE_DELIVERY_RETENTION = 1_000
 export const ACCOUNT_UPDATE_SCOPE = 'account'
+
+/**
+ * How long a publisher may hold a payload-less reservation before readers treat
+ * it as stuck. Unclaimed reservations are released immediately; this window
+ * covers a publisher that hangs without ever finishing or unwinding.
+ */
+const CLAIMED_DELIVERY_GRACE_SECONDS = 30
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
 const STORED_SENDER_TITLE_KEY = '__mtprotoRelaySenderTitle'
 const STORED_RECALLED_KEY = '__mtprotoRelayRecalled'
@@ -1364,8 +1371,14 @@ export class MessageStore {
     channelId?: number,
   ) {
     return this._write(async () => {
+      const claimedAt = Math.floor(Date.now() / 1000)
       const existing = await this._updateStore.get(eventKey)
-      if (existing) return existing
+      if (existing) {
+        // A publisher may revive a reservation an earlier attempt left behind:
+        // record the new claim so readers know to wait for its payload.
+        await this._updateStore.claim(eventKey, claimedAt)
+        return { ...existing, claimedAt }
+      }
 
       const allocated = await this._database.withTransaction(async (database) => {
         const [current] = await database.get('mtproto_update_state', { platformSessionId })
@@ -1396,8 +1409,7 @@ export class MessageStore {
       })
       return this._updateStore.create({
         eventKey, platformSessionId, scope: allocated.scope, pts: allocated.state.pts, ptsCount,
-        seq: allocated.seq, date: allocated.date, published: false,
-        payload: null,
+        seq: allocated.seq, date: allocated.date, published: false, claimedAt, payload: null,
       })
     })
   }
@@ -1412,6 +1424,38 @@ export class MessageStore {
 
   async setUpdatePayload(eventKey: string, payload: UpdateJson): Promise<void> {
     await this._write(() => this._updateStore.setPayload(eventKey, payload))
+  }
+
+  /** Release a reservation whose publisher failed before its payload was durable. */
+  async discardPendingUpdateDelivery(eventKey: string): Promise<boolean> {
+    return this._discardUpdateDelivery(eventKey, false)
+  }
+
+  /**
+   * Release a reservation that no live publisher can complete.
+   *
+   * A payload-less delivery can never be replayed, and both difference paths stop
+   * at the first one they meet, so one abandoned reservation would pin every
+   * device at the previous pts and make it replay the same channel messages
+   * forever. Dropping it lets clients skip the lost pts value instead. A
+   * reservation claimed recently by a publisher is left alone; an unclaimed
+   * one, or one whose claim outlived the grace window, has no live builder and
+   * may be released. The read and the removal share the store's write queue so
+   * a payload committed in the meantime is never dropped.
+   */
+  async discardAbandonedUpdateDelivery(eventKey: string): Promise<boolean> {
+    return this._discardUpdateDelivery(eventKey, true)
+  }
+
+  private async _discardUpdateDelivery(eventKey: string, onlyIfAbandoned: boolean): Promise<boolean> {
+    return this._write(async () => {
+      const delivery = await this._updateStore.get(eventKey)
+      if (!delivery || delivery.payload) return false
+      if (onlyIfAbandoned && delivery.claimedAt !== null
+        && Math.floor(Date.now() / 1000) - delivery.claimedAt < CLAIMED_DELIVERY_GRACE_SECONDS) return false
+      await this._updateStore.remove(eventKey)
+      return true
+    })
   }
 
   async getPendingUpdateDeliveries(platformSessionId: string) {

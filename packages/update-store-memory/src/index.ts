@@ -56,9 +56,26 @@ export class MemoryUpdateStoreBackend implements UpdateStoreBackend {
     if (row) row.published = true
   }
 
+  async claim(eventKey: string, claimedAt: number): Promise<void> {
+    const row = this._byEventKey.get(eventKey)
+    if (row) row.claimedAt = claimedAt
+  }
+
   async setPayload(eventKey: string, payload: UpdateJson): Promise<void> {
     const row = this._byEventKey.get(eventKey)
     if (row) row.payload = clonePayload(payload)
+  }
+
+  async remove(eventKey: string): Promise<void> {
+    const row = this._byEventKey.get(eventKey)
+    if (!row) return
+    this._byEventKey.delete(eventKey)
+    const scopeKey = this._scopeKey(row.platformSessionId, row.scope)
+    const eventKeys = this._eventKeysByScope.get(scopeKey)
+    if (!eventKeys) return
+    const index = eventKeys.indexOf(eventKey)
+    if (index >= 0) eventKeys.splice(index, 1)
+    if (!eventKeys.length) this._eventKeysByScope.delete(scopeKey)
   }
 
   async getPending(platformSessionId: string): Promise<UpdateDelivery[]> {
@@ -121,7 +138,9 @@ export class MemoryUpdateStore extends UpdateStore {
   get(eventKey: string) { return this._backend.get(eventKey) }
   create(delivery: NewUpdateDelivery) { return this._backend.create(delivery) }
   markPublished(eventKey: string) { return this._backend.markPublished(eventKey) }
+  claim(eventKey: string, claimedAt: number) { return this._backend.claim(eventKey, claimedAt) }
   setPayload(eventKey: string, payload: UpdateJson) { return this._backend.setPayload(eventKey, payload) }
+  remove(eventKey: string) { return this._backend.remove(eventKey) }
   getPending(platformSessionId: string) { return this._backend.getPending(platformSessionId) }
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number) {
     return this._backend.getAfter(platformSessionId, scope, pts, limit)

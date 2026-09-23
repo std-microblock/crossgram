@@ -15,6 +15,7 @@ import type { IMConversation, IMMessage, IMPlatform, IMRequest, PlatformSession 
 import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { ReactionRpc } from './reaction-rpc.js'
+import { MemoryUpdateStoreBackend } from '@mtproto-relay/update-store-memory'
 import { requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 import { MessageProjectionPipeline } from './message-projection.js'
 
@@ -72,8 +73,11 @@ async function createHarness(
     excludeConnection?: ServerConnection
   }> = []
   const messageProjection = new MessageProjectionPipeline(ctx)
+  // Share the update store with the test so cases can plant deliveries that no
+  // publisher of this process owns, the way a restart leaves them behind.
+  const updateStore = new MemoryUpdateStoreBackend({ retention: updateDeliveryRetention })
   const store = new MessageStore(
-    ctx.database, updateDeliveryRetention, undefined, undefined, messageProjection,
+    ctx.database, updateDeliveryRetention, updateStore, undefined, messageProjection,
   )
   const blockedPeers = blockedMode ? new BlockedPeerStore(ctx.database, blockedMode) : undefined
   const manager = new UpdateManager(
@@ -87,7 +91,7 @@ async function createHarness(
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
   })
-  return { ctx, store, manager, sent, blockedPeers, messageProjection }
+  return { ctx, store, manager, sent, blockedPeers, messageProjection, updateStore }
 }
 
 function roundTrip<T>(object: T): T {
@@ -1941,6 +1945,92 @@ describe('UpdateManager', () => {
       _: 'updates.difference', newMessages: [{ message: 'payload commits later' }],
       state: { pts: 2, seq: 1 },
     })
+  })
+
+  it('releases the reserved pts when a publish fails before its payload is durable', async () => {
+    const failingPlatform: IMPlatform = {
+      ...platform,
+      async getUser() { throw new Error('QQNT bridge 503: QQNT kernel is not ready') },
+    }
+    const { store, manager } = await createHarness(undefined, failingPlatform)
+    const conversation: IMConversation = { id: 'failed-direct', kind: 'direct', title: 'Failed' }
+    const message: IMMessage = {
+      id: 'failed-message', conversationId: conversation.id, senderId: 'alice', timestamp: 54,
+      content: { parts: [{ type: 'text', text: 'never published' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    const eventKey = `${session.platformSessionId}:message:${result.message.id}`
+
+    await expect(manager.publish(session, { event: { type: 'message', conversation, message }, result }))
+      .rejects.toThrow('QQNT kernel is not ready')
+    // The reservation is gone, so the next difference cannot stall on it.
+    await expect(store.getUpdateDelivery(eventKey)).resolves.toBeUndefined()
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toMatchObject({
+      _: 'updates.difference', newMessages: [], otherUpdates: [],
+      state: { pts: 2 },
+    })
+  })
+
+  it('skips a reservation that no live publisher can complete', async () => {
+    const { store, manager, updateStore } = await createHarness()
+    const conversation: IMConversation = { id: 'abandoned-direct', kind: 'direct', title: 'Abandoned' }
+    const message: IMMessage = {
+      id: 'abandoned-later-message', conversationId: conversation.id, senderId: 'alice', timestamp: 53,
+      content: { parts: [{ type: 'text', text: 'after the abandoned reservation' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    // A publisher that fails normally releases its reservation. One that died
+    // before cleanup ran first — the production stall — leaves an unclaimed row
+    // in front of every later delivery, so clients replay the same difference
+    // forever until a reader releases it.
+    const stalled = `${session.platformSessionId}:message:stalled`
+    await store.advanceUpdateState(session.platformSessionId, 1, 1)
+    await updateStore.create({
+      eventKey: stalled, platformSessionId: session.platformSessionId, scope: 'account',
+      pts: 2, ptsCount: 1, seq: 1, date: 1, published: false, claimedAt: null, payload: null,
+    })
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    await expect(manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
+    })).resolves.toMatchObject({
+      _: 'updates.difference',
+      newMessages: [{ message: 'after the abandoned reservation' }],
+      state: { pts: 3, seq: 2 },
+    })
+    await expect(updateStore.get(stalled)).resolves.toBeUndefined()
+  })
+
+  it('skips a channel reservation whose publisher hung', async () => {
+    const { store, manager, updateStore } = await createHarness()
+    const conversation: IMConversation = { id: 'abandoned-channel', kind: 'group', title: 'Abandoned channel' }
+    const channelId = stableId(`peer:${conversation.id}`)
+    const message: IMMessage = {
+      id: 'abandoned-channel-message', conversationId: conversation.id, senderId: 'alice', timestamp: 52,
+      content: { parts: [{ type: 'text', text: 'channel payload follows' }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    // A claimed reservation blocks readers only while the claim is fresh: a
+    // publisher that hangs past the grace window must not freeze the channel.
+    const stalled = `${session.platformSessionId}:message:stalled-channel`
+    await store.prepareUpdateDelivery(stalled, session.platformSessionId, 1, 1, channelId)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    vi.setSystemTime(Date.now() + 31_000)
+    try {
+      await expect(manager.getChannelDifference(session.platformSessionId, {
+        _: 'updates.getChannelDifference', force: true,
+        channel: { _: 'inputChannel', channelId, accessHash: Long.ZERO },
+        filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+      })).resolves.toMatchObject({
+        _: 'updates.channelDifference', final: true, pts: 3,
+        newMessages: [{ message: 'channel payload follows' }],
+      })
+      await expect(updateStore.get(stalled)).resolves.toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does not advance channel difference past a delivery whose payload is still being prepared', async () => {

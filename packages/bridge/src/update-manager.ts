@@ -1,5 +1,6 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
+import type { UpdateDelivery } from '@mtproto-relay/update-store'
 import type { ServerConnection, ServerRpcContext } from '@mtproto-relay/mtproto'
 import Long from 'long'
 import { RpcError } from '@mtproto-relay/mtproto'
@@ -26,6 +27,10 @@ import type { MessageProjectionPipeline } from './message-projection.js'
 
 const CHANNEL_POLL_TIMEOUT_SECONDS = 30
 const PENDING_CHANNEL_POLL_TIMEOUT_SECONDS = 1
+
+/** Bounded wait for a reservation whose payload is still being published. */
+const PENDING_DELIVERY_WAIT_MS = 1_500
+const PENDING_DELIVERY_POLL_MS = 50
 
 export interface MentionReadPublishResult {
   pts: number
@@ -364,35 +369,58 @@ export class UpdateManager {
       session.platformId, session.platformSessionId, committedEventSummary(committed),
     )
     if (committed.event.type === 'voice-call') return
-    if (committed.event.type === 'message-delete') {
-      return this._publishDelete(
+    // A reservation that never received its payload is invisible to clients and
+    // pins its whole scope's difference cursor, so release it whenever the
+    // publisher cannot finish. A later replay then reserves a fresh pts.
+    const eventKey = platformEventUpdateKey(session, committed)
+    try {
+      if (committed.event.type === 'message-delete') {
+        return await this._publishDelete(
+          session,
+          committed as Extract<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+          options,
+        )
+      }
+      if (committed.event.type === 'message-reactions') {
+        await this._publishReactions(
+          session,
+          committed as Extract<CommittedPlatformEvent, { event: { type: 'message-reactions' } }>,
+        )
+        return
+      }
+      if (committed.event.type === 'read') {
+        await this._publishRead(
+          session,
+          committed as Extract<CommittedPlatformEvent, { event: { type: 'read' } }>,
+          options,
+        )
+        return
+      }
+      return await this._publishMessage(
         session,
-        committed as Extract<CommittedPlatformEvent, { event: { type: 'message-delete' } }>,
+        committed as Exclude<CommittedPlatformEvent, {
+          event: { type: 'message-delete' | 'message-reactions' | 'read' | 'voice-call' }
+        }>,
         options,
       )
+    } catch (error) {
+      if (eventKey) await this._releaseAbandonedDelivery(eventKey, session)
+      throw error
     }
-    if (committed.event.type === 'message-reactions') {
-      await this._publishReactions(
-        session,
-        committed as Extract<CommittedPlatformEvent, { event: { type: 'message-reactions' } }>,
+  }
+
+  /** Drop a reservation whose publisher failed before its payload was durable. */
+  private async _releaseAbandonedDelivery(eventKey: string, session: PlatformSession): Promise<void> {
+    try {
+      if (!await this._store.discardPendingUpdateDelivery(eventKey)) return
+      this._onTrace?.(
+        'abandoned update delivery released session=%s eventKey=%s',
+        session.platformSessionId, eventKey,
       )
-      return
+    } catch (error) {
+      // Never mask the publish failure that triggered the cleanup.
+      this._onTrace?.('abandoned update delivery release failed eventKey=%s error=%s', eventKey, String(error))
     }
-    if (committed.event.type === 'read') {
-      await this._publishRead(
-        session,
-        committed as Extract<CommittedPlatformEvent, { event: { type: 'read' } }>,
-        options,
-      )
-      return
-    }
-    return this._publishMessage(
-      session,
-      committed as Exclude<CommittedPlatformEvent, {
-        event: { type: 'message-delete' | 'message-reactions' | 'read' | 'voice-call' }
-      }>,
-      options,
-    )
   }
 
   private async _publishReactions(
@@ -402,7 +430,7 @@ export class UpdateManager {
     const { event, result } = committed
     await this._blockedPeers?.ensureLoaded(session.platformSessionId)
     if (await this._blockedPeers?.hidesMessage(session.platformSessionId, result.message, this._store)) return
-    const eventKey = `${session.platformSessionId}:reaction:${event.eventId}`
+    const eventKey = platformEventUpdateKey(session, committed)!
     let delivery = await this._store.getUpdateDelivery(eventKey)
     if (!delivery && !result.changed) return
     const platform = this._registry.require(session.platformId)
@@ -468,7 +496,7 @@ export class UpdateManager {
     const channelId = displayConversation.kind === 'direct'
       ? undefined
       : stableId(`peer:${displayConversation.id}`)
-    const eventKey = `${session.platformSessionId}:read:${event.conversationId}:${event.upToMessageId}`
+    const eventKey = platformEventUpdateKey(session, committed)!
     let delivery = await this._store.getUpdateDelivery(eventKey)
     delivery ??= await this._store.prepareUpdateDelivery(
       // Telegram clients apply updateReadChannelInbox as read state, but do
@@ -533,9 +561,7 @@ export class UpdateManager {
     ) ?? event.message
     this._registerReactions?.(session, visibleMessage)
     const isEdit = event.type === 'message-edit'
-    const eventKey = isEdit
-      ? `${session.platformSessionId}:edit:${event.eventId}`
-      : `${session.platformSessionId}:message:${result.message.id}`
+    const eventKey = platformEventUpdateKey(session, committed)!
     let delivery = await this._store.getUpdateDelivery(eventKey)
     // A live message can race with history ingestion. In that case the store
     // quite correctly reports an unchanged row, but the live event still has
@@ -777,6 +803,10 @@ export class UpdateManager {
           })
     }
     if (!updates.length) {
+      // The pts is already reserved, but this projection produced nothing to
+      // send: release it instead of leaving a delivery that can never be
+      // replayed and would block the account's difference cursor.
+      await this._releaseAbandonedDelivery(eventKey, session)
       this._onTrace?.('update publish skipped eventKey=%s reason=no-projected-updates', eventKey)
       return
     }
@@ -836,7 +866,7 @@ export class UpdateManager {
     options: PlatformEventDeliveryOptions,
   ): Promise<PlatformEventPublishResult> {
     const { event, result } = committed
-    const eventKey = `${session.platformSessionId}:delete:${event.eventId}`
+    const eventKey = platformEventUpdateKey(session, committed)!
     let delivery = await this._store.getUpdateDelivery(eventKey)
     if (!delivery && !result.changed) return
     if (!result.tlMessageIds.length) return
@@ -885,6 +915,59 @@ export class UpdateManager {
 
   private _makeChat(conversation: IMConversation, forum = false): tl.TypeChat {
     return makeUpdateChat(conversation, forum, this._dcId)
+  }
+
+  /**
+   * Drop reservations whose publisher never made its payload durable.
+   *
+   * `prepareUpdateDelivery` reserves a pts before the publisher can know whether
+   * the update is even buildable, and that builder lives only in memory. A
+   * publish that throws half-way (an upstream error) or a process restart
+   * therefore leaves a delivery that can never carry its update. Both difference
+   * paths must stop at the first incomplete delivery they see, so a single
+   * abandoned reservation pins every device at the previous pts: the client
+   * re-requests the same difference immediately and replays the channel messages
+   * that ride along with it. Release the ones the store reports as unowned so
+   * clients skip the lost pts value instead.
+   */
+  private async _withoutAbandonedDeliveries(
+    deliveries: readonly UpdateDelivery[],
+  ): Promise<UpdateDelivery[]> {
+    if (!deliveries.some((delivery) => !delivery.payload)) return [...deliveries]
+    const kept: UpdateDelivery[] = []
+    for (const delivery of deliveries) {
+      if (delivery.payload) {
+        kept.push(delivery)
+        continue
+      }
+      if (await this._store.discardAbandonedUpdateDelivery(delivery.eventKey)) {
+        this._onTrace?.(
+          'abandoned update delivery dropped session=%s scope=%s pts=%d',
+          delivery.platformSessionId, delivery.scope, delivery.pts,
+        )
+        continue
+      }
+      // Either a publisher is still building the payload or it became durable
+      // between the read and the cleanup: keep the fresh row when there is one.
+      const settled = await this._store.getUpdateDelivery(delivery.eventKey)
+      if (settled) kept.push(settled)
+    }
+    return kept
+  }
+
+  /**
+   * Wait, within a bounded window, for a delivery whose payload is being built.
+   * A client that receives a difference slice asks again immediately, so this
+   * wait is what keeps a slow publish from becoming a difference loop.
+   */
+  private async _awaitPendingDelivery(delivery: UpdateDelivery): Promise<void> {
+    const deadline = Date.now() + PENDING_DELIVERY_WAIT_MS
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, PENDING_DELIVERY_POLL_MS))
+      const current = await this._store.getUpdateDelivery(delivery.eventKey)
+      // A missing row means another reader already dropped it as abandoned.
+      if (!current || current.payload) return
+    }
   }
 
   private async _send(
@@ -948,7 +1031,18 @@ export class UpdateManager {
     request: tl.updates.RawGetDifferenceRequest,
   ): Promise<tl.updates.TypeDifference> {
     const state = await this.getState(platformSessionId)
-    const deliveries = await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts)
+    let deliveries = await this._withoutAbandonedDeliveries(
+      await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts),
+    )
+    // Clients answer a slice by asking again at once, so waiting here for a
+    // publisher that is still building its payload keeps a slow publish from
+    // turning into a difference loop that replays the same channel messages.
+    if (deliveries.length && !deliveries[0].payload) {
+      await this._awaitPendingDelivery(deliveries[0])
+      deliveries = await this._withoutAbandonedDeliveries(
+        await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts),
+      )
+    }
     const channelDeliveries = await this._store.getChannelUpdateDeliveriesSince(
       platformSessionId, request.date,
     )
@@ -1040,7 +1134,9 @@ export class UpdateManager {
     if (request.channel._ !== 'inputChannel') throw new RpcError(400, 'CHANNEL_INVALID')
     const channelId = request.channel.channelId
     const state = await this._store.getChannelUpdateState(platformSessionId, channelId)
-    const deliveries = await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts, 101, channelId)
+    const deliveries = await this._withoutAbandonedDeliveries(
+      await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts, 101, channelId),
+    )
     if (!deliveries.length) {
       return {
         _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts,
@@ -1080,6 +1176,36 @@ export class UpdateManager {
       pts: page.at(-1)?.pts ?? state.pts,
       newMessages, otherUpdates, chats: [...chats.values()], users: [...users.values()],
     }
+  }
+}
+
+type CommittedMessageEvent = Extract<CommittedPlatformEvent, { event: { type: 'message' } }>
+
+/**
+ * Durable journal key of a committed platform event. Publishers reserve the pts
+ * with it and `publish` releases the reservation under the same key when the
+ * payload never became durable.
+ */
+function platformEventUpdateKey(
+  session: PlatformSession,
+  committed: CommittedPlatformEvent,
+): string | undefined {
+  const prefix = session.platformSessionId
+  switch (committed.event.type) {
+    case 'message':
+      // TypeScript cannot narrow the union through the nested event type, and
+      // the only member without an ingestion result is voice-call.
+      return `${prefix}:message:${(committed as CommittedMessageEvent).result.message.id}`
+    case 'message-edit':
+      return `${prefix}:edit:${committed.event.eventId}`
+    case 'message-delete':
+      return `${prefix}:delete:${committed.event.eventId}`
+    case 'message-reactions':
+      return `${prefix}:reaction:${committed.event.eventId}`
+    case 'read':
+      return `${prefix}:read:${committed.event.conversationId}:${committed.event.upToMessageId}`
+    default:
+      return undefined
   }
 }
 

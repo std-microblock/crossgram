@@ -14,6 +14,13 @@ export interface UpdateDelivery {
   seq: number
   date: number
   published: boolean
+  /**
+   * Wall-clock second when a publisher last claimed responsibility for this
+   * delivery's payload, or null when no publisher of the current process has
+   * taken it. Readers keep waiting for a claimed reservation but may release
+   * an unclaimed one, which can never be completed.
+   */
+  claimedAt: number | null
   payload: UpdateJson | null
 }
 
@@ -23,7 +30,10 @@ export interface UpdateStoreBackend {
   get(eventKey: string): Promise<UpdateDelivery | undefined>
   create(delivery: NewUpdateDelivery): Promise<UpdateDelivery>
   markPublished(eventKey: string): Promise<void>
+  claim(eventKey: string, claimedAt: number): Promise<void>
   setPayload(eventKey: string, payload: UpdateJson): Promise<void>
+  /** Drop a reserved delivery whose payload never became durable. */
+  remove(eventKey: string): Promise<void>
   getPending(platformSessionId: string): Promise<UpdateDelivery[]>
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number): Promise<UpdateDelivery[]>
   getSince(platformSessionId: string, date: number): Promise<UpdateDelivery[]>
@@ -39,7 +49,9 @@ export abstract class UpdateStore extends Service implements UpdateStoreBackend 
   abstract get(eventKey: string): Promise<UpdateDelivery | undefined>
   abstract create(delivery: NewUpdateDelivery): Promise<UpdateDelivery>
   abstract markPublished(eventKey: string): Promise<void>
+  abstract claim(eventKey: string, claimedAt: number): Promise<void>
   abstract setPayload(eventKey: string, payload: UpdateJson): Promise<void>
+  abstract remove(eventKey: string): Promise<void>
   abstract getPending(platformSessionId: string): Promise<UpdateDelivery[]>
   abstract getAfter(
     platformSessionId: string,

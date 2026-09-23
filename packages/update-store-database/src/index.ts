@@ -20,6 +20,8 @@ interface UpdateDeliveryRecord {
   seq: number
   date: number
   published: boolean
+  /** Wall-clock second of the last publisher claim; null when unclaimed. */
+  claimedAt: number | null
   /** MessagePack-encoded UpdateJson. Null while the publisher is constructing the update. */
   payload: ArrayBuffer | null
 }
@@ -70,8 +72,16 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
     await this._database.set('mtproto_update_delivery', { eventKey }, { published: true })
   }
 
+  async claim(eventKey: string, claimedAt: number): Promise<void> {
+    await this._database.set('mtproto_update_delivery', { eventKey }, { claimedAt })
+  }
+
   async setPayload(eventKey: string, payload: UpdateJson): Promise<void> {
     await this._database.set('mtproto_update_delivery', { eventKey }, { payload: encodePayload(payload) })
+  }
+
+  async remove(eventKey: string): Promise<void> {
+    await this._database.remove('mtproto_update_delivery', { eventKey })
   }
 
   async getPending(platformSessionId: string): Promise<UpdateDelivery[]> {
@@ -132,7 +142,9 @@ export class DatabaseUpdateStore extends UpdateStore {
   get(eventKey: string) { return this._backend.get(eventKey) }
   create(delivery: NewUpdateDelivery) { return this._backend.create(delivery) }
   markPublished(eventKey: string) { return this._backend.markPublished(eventKey) }
+  claim(eventKey: string, claimedAt: number) { return this._backend.claim(eventKey, claimedAt) }
   setPayload(eventKey: string, payload: UpdateJson) { return this._backend.setPayload(eventKey, payload) }
+  remove(eventKey: string) { return this._backend.remove(eventKey) }
   getPending(platformSessionId: string) { return this._backend.getPending(platformSessionId) }
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number) {
     return this._backend.getAfter(platformSessionId, scope, pts, limit)
@@ -145,6 +157,9 @@ export function defineModel(ctx: Context): void {
   ctx.model.extend('mtproto_update_delivery', {
     messageId: 'unsigned', eventKey: 'text', platformSessionId: 'string', scope: 'string',
     pts: 'unsigned', ptsCount: 'unsigned', seq: 'unsigned', date: 'unsigned', published: 'boolean',
+    // Null for reservations created before claims were tracked and for rows
+    // written without a publisher, so readers can release them on sight.
+    claimedAt: { type: 'unsigned', nullable: true },
     payload: { type: 'binary', nullable: true },
   }, {
     primary: 'messageId', autoInc: true,

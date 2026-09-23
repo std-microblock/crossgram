@@ -18,7 +18,7 @@ afterEach(async () => {
 function delivery(eventKey: string, platformSessionId: string, pts: number, scope = 'account') {
   return {
     eventKey, platformSessionId, scope, pts, ptsCount: 1, seq: pts - 1, date: 100 + pts,
-    published: false, payload: null,
+    published: false, claimedAt: null, payload: null,
   }
 }
 
@@ -89,5 +89,13 @@ describe('DatabaseUpdateStore', () => {
       .toEqual(['a-channel'])
     expect((await second.updateStore.getPending('a')).map((row) => row.eventKey))
       .toEqual(['a-channel', 'a-2'])
+
+    await second.updateStore.claim('a-3', 1_700_000_000)
+    expect(await second.updateStore.get('a-3')).toMatchObject({ claimedAt: 1_700_000_000 })
+
+    await second.updateStore.remove('a-2')
+    expect(await second.updateStore.get('a-2')).toBeUndefined()
+    expect((await second.updateStore.getAfter('a', 'account', 1, 10)).map((row) => row.eventKey))
+      .toEqual(['a-3'])
   })
 })

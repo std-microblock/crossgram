@@ -226,6 +226,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     if (format.startsWith('slow local event profile')) bridgeLogger.info(format, ...args)
     else bridgeLogger.debug(format, ...args)
   }
+  // Dropping or releasing a reservation breaks a client's pts cursor on
+  // purpose, so it must stay visible outside verbose tracing.
+  const updateTrace = (format: string, ...args: unknown[]) => {
+    if (format.startsWith('abandoned update delivery')) bridgeLogger.warn(format, ...args)
+    else bridgeLogger.debug(format, ...args)
+  }
   const authTransfers = new AuthTransferStore()
   const loginTokens = new LoginTokenStore()
   const messageProjection = new MessageProjectionPipeline(ctx)
@@ -272,7 +278,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (authKeyId, update, excludeConnection) =>
       ctx.mtproto.sendUpdateToAuthKey(authKeyId, update, excludeConnection),
     dcId,
-    (format, ...args) => bridgeLogger.debug(format, ...args),
+    updateTrace,
     (session, sticker) => stickerRpcFor(registry.require(session.platformId), session)
       .makeMessageMedia(sticker),
     blockedPeers,
