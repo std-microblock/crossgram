@@ -7,7 +7,9 @@ import { defineModels } from './models.js'
 import type {
   IMPlatform, IMReactionContext, IMReactionDefinition, IMReactionResource, PlatformSession,
 } from './platform.js'
-import { ReactionRpc } from './reaction-rpc.js'
+import {
+  customReactionDocumentId, legacyInlineCustomEmojiDocumentId, ReactionRpc,
+} from './reaction-rpc.js'
 
 const session: PlatformSession = {
   platformSessionId: 'reaction-session', platformId: 'test', userId: 'self', credentials: {}, metadata: {},
@@ -63,6 +65,45 @@ function fixture(format: 'static' | 'video') {
 }
 
 describe('ReactionRpc', () => {
+  it('resolves an inline custom emoji document under its legacy per-conversation id', async () => {
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47])
+    const resource: IMReactionResource = {
+      version: 7, format: 'static', mimeType: 'image/png', width: 128, height: 128,
+      size: bytes.length, locator: { faceId: '14' },
+    }
+    const definition: IMReactionDefinition = {
+      key: '1:14', title: 'QQ 微笑',
+      presentation: { type: 'custom', alt: '🙂', resource },
+    }
+    const platform = {
+      capabilities: {},
+      async *downloadReactionResource(
+        _session: PlatformSession,
+        _resource: IMReactionResource,
+        options: { offset?: number, limit?: number } = {},
+      ) {
+        const start = options.offset ?? 0
+        yield bytes.subarray(start, start + (options.limit ?? bytes.length))
+      },
+    } as unknown as IMPlatform
+    const rpc = new ReactionRpc(platform, session)
+
+    const documentId = rpc.registerInlineCustomEmoji('group', definition)
+    expect(documentId).toBe(customReactionDocumentId(session.platformSessionId, definition))
+    const legacyId = legacyInlineCustomEmojiDocumentId(session.platformSessionId, 'group', definition)
+    expect(legacyId).not.toBe(documentId)
+
+    const [document] = rpc.getCustomEmojiDocuments([Long.fromNumber(legacyId)])
+    expect(document).toMatchObject({
+      id: Long.fromNumber(legacyId), size: bytes.length, mimeType: 'image/png',
+    })
+    const file = await rpc.getFile(legacyId, 0, bytes.length)
+    expect(file?.bytes).toEqual(bytes)
+    expect(rpc.resolveCustomEmoji(legacyId)).toMatchObject({ key: '1:14' })
+    // The retired id is an alias of the face, not a second emoji in the set.
+    expect(rpc.getEmojiStickers().sets[0]).toMatchObject({ count: 1 })
+  })
+
   it('orders top and recent reactions by the latest successful selection and persists the order', async () => {
     const database = await createDatabase()
     const platform = { capabilities: {} } as IMPlatform

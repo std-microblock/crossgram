@@ -6,7 +6,7 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import { DialogRpc, stableId } from './dialogs.js'
-import { ReactionRpc } from './reaction-rpc.js'
+import { legacyInlineCustomEmojiDocumentId, ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
 import type { SystemPeerService } from './system-peer.js'
 import type {
@@ -1568,6 +1568,16 @@ describe('DialogRpc', () => {
     expect(document.attributes).toContainEqual(expect.objectContaining({
       _: 'documentAttributeCustomEmoji', alt: '🙂',
     }))
+
+    // The history path keeps the retired per-conversation identity resolvable
+    // so a client that cached this message under it still gets the document.
+    const legacyDocumentId = legacyInlineCustomEmojiDocumentId(
+      session.platformSessionId, 'alice', definition,
+    )
+    expect(legacyDocumentId).not.toBe(documentId.toNumber())
+    expect(rpc.getCustomEmojiDocuments({
+      _: 'messages.getCustomEmojiDocuments', documentId: [Long.fromNumber(legacyDocumentId)],
+    })).toMatchObject([{ size: definition.presentation.resource.size }])
 
     await rpc.sendMessage(sendMessageRequest(aliceId, {
       message: '🙂', randomId: Long.fromNumber(999),

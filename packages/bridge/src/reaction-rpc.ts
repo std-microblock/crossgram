@@ -22,6 +22,15 @@ interface RecentReaction {
 
 export class ReactionRpc {
   private readonly _custom = new Map<number, CustomEntry>()
+  /**
+   * Documents published under a retired identity.
+   *
+   * The live update path keyed an inline custom emoji document by the
+   * conversation as well, so every cached message carried a per-conversation
+   * id. Keep those ids resolvable next to the canonical one, otherwise a client
+   * that already rendered such a message can never fetch its document or bytes.
+   */
+  private readonly _aliases = new Map<number, CustomEntry>()
   private readonly _memoryRecent = new Map<string, RecentReaction>()
   private _recentWrite = Promise.resolve()
 
@@ -109,6 +118,34 @@ export class ReactionRpc {
     }
   }
 
+  /**
+   * Register the document an inline custom emoji entity points at and return
+   * its canonical id.
+   *
+   * Both identities stay resolvable: the canonical id is what every projection
+   * and lookup uses, and the legacy per-conversation id keeps messages a client
+   * cached while the update path still emitted it renderable.
+   */
+  registerInlineCustomEmoji(
+    conversationId: string,
+    definition: IMReactionDefinition,
+  ): number | undefined {
+    if (definition.presentation.type !== 'custom') return undefined
+    const entry: CustomEntry = { definition: definition as CustomEntry['definition'] }
+    const id = this.customDocumentId(entry.definition)
+    this._custom.set(id, entry)
+    this._aliases.set(
+      legacyInlineCustomEmojiDocumentId(this._session.platformSessionId, conversationId, entry.definition),
+      entry,
+    )
+    return id
+  }
+
+  /** A document this session published, by canonical or retired id. */
+  private _entry(id: number): CustomEntry | undefined {
+    return this._custom.get(id) ?? this._aliases.get(id)
+  }
+
   chatReactions(conversationId: string, context?: IMReactionContext): tl.TypeChatReactions {
     this.registerContext(conversationId, context)
     if (!context?.available.length) return { _: 'chatReactionsNone' }
@@ -190,7 +227,7 @@ export class ReactionRpc {
     // retired id into the key it belonged to and use the current definition,
     // so a recent reaction keeps working instead of failing as invalid.
     if (reaction._ === 'reactionCustomEmoji') {
-      const retired = this._custom.get(reaction.documentId.toNumber())?.definition
+      const retired = this._entry(reaction.documentId.toNumber())?.definition
       const current = retired && context.available.find((definition) => definition.key === retired.key)
       if (current) return current
     }
@@ -202,12 +239,12 @@ export class ReactionRpc {
   }
 
   resolveCustomEmoji(documentId: number): IMReactionDefinition | undefined {
-    return this._custom.get(documentId)?.definition
+    return this._entry(documentId)?.definition
   }
 
   getCustomEmojiDocuments(ids: readonly Long[]): tl.RawDocument[] {
     return ids.flatMap((id) => {
-      const entry = this._custom.get(id.toNumber())
+      const entry = this._entry(id.toNumber())
       return entry ? [this._customDocument(id.toNumber(), entry)] : []
     })
   }
@@ -247,7 +284,7 @@ export class ReactionRpc {
     offset: number,
     limit: number,
   ): Promise<{ bytes: Uint8Array, mimeType: IMReactionResource['mimeType'] } | undefined> {
-    const custom = this._custom.get(documentId)
+    const custom = this._entry(documentId)
     if (!custom || !this._platform.downloadReactionResource) return
     const chunks: Uint8Array[] = []
     let size = 0
@@ -271,7 +308,7 @@ export class ReactionRpc {
   }
 
   async getFileUrl(documentId: number): Promise<IMDirectDownload | undefined> {
-    const custom = this._custom.get(documentId)
+    const custom = this._entry(documentId)
     if (!custom || !this._platform.resolveReactionResourceUrl) return
     return this._platform.resolveReactionResourceUrl(
       this._session,
@@ -320,6 +357,24 @@ export function customReactionDocumentId(
   if (definition.presentation.type !== 'custom') throw new Error('not a custom reaction')
   return stableId([
     'reaction-resource', CATALOG_VERSION, platformSessionId,
+    definition.key, definition.presentation.resource.version,
+  ].join(':'))
+}
+
+/**
+ * Document id the live update path used to publish for an inline custom emoji
+ * before it shared the canonical identity with the history path: it mixed the
+ * conversation id into the key and used the first catalog version. Clients keep
+ * asking for it for messages they cached back then.
+ */
+export function legacyInlineCustomEmojiDocumentId(
+  platformSessionId: string,
+  conversationId: string,
+  definition: IMReactionDefinition,
+): number {
+  if (definition.presentation.type !== 'custom') throw new Error('not a custom reaction')
+  return stableId([
+    'reaction-resource', 1, platformSessionId, conversationId,
     definition.key, definition.presentation.resource.version,
   ].join(':'))
 }

@@ -4617,10 +4617,15 @@ export class DialogRpc {
           output.push({ _: 'messageEntityBlockquote', offset: base + entity.offset, length: entity.length })
         } else if (entity.type === 'custom-emoji'
           && entity.definition.presentation.type === 'custom' && this._reactions) {
-          const reaction = this._reactions.toTlReaction(source.conversationId, entity.definition)
-          if (reaction._ === 'reactionCustomEmoji') output.push({
+          // Resolve through the shared identity and keep the legacy
+          // per-conversation id resolvable for clients that cached this
+          // message while the update path still published it.
+          const documentId = this._reactions.registerInlineCustomEmoji(
+            source.conversationId, entity.definition,
+          )
+          if (documentId !== undefined) output.push({
             _: 'messageEntityCustomEmoji', offset: base + entity.offset, length: entity.length,
-            documentId: reaction.documentId,
+            documentId: Long.fromNumber(documentId),
           })
         }
       }

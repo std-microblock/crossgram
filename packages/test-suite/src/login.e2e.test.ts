@@ -4463,6 +4463,133 @@ describe('bridge login e2e', () => {
     }
   }, 15000)
 
+  it('serves the inline custom emoji document its live update advertises', async () => {
+    const asset = Uint8Array.from({ length: 160 }, (_, index) => (index * 7 + 3) & 0xff)
+    const definition: bridge.IMReactionDefinition = {
+      key: '1:14', title: 'QQ 微笑',
+      presentation: {
+        type: 'custom', alt: '🙂',
+        resource: {
+          version: 7, format: 'static', mimeType: 'image/png',
+          width: 128, height: 128, size: asset.length, locator: { asset: 'inline-emoji' },
+        },
+      },
+    }
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    const platformId = 'inline-emoji-e2e'
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
+      async getDialogs() { return { dialogs: [] } },
+      async getHistory() { return { messages: [] } },
+      async sendMessage() { throw new Error('unused') },
+      async getUser(_session, id) { return { id, firstName: id } },
+      async *downloadReactionResource(_session, _resource, options = {}) {
+        const offset = Math.max(0, options.offset ?? 0)
+        yield asset.subarray(offset, offset + (options.limit ?? asset.length))
+      },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({
+      platform: { id: platformId, adapter: platform },
+    })
+    let client: TestClient | undefined
+    try {
+      await ctx.database.create('mtproto_platform_session', {
+        id: 'inline-emoji-ps', platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Inline Emoji User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'inline-emoji-auth', virtualPhone: '88800781', totpSecret: '33'.repeat(20),
+        platformId, platformSessionId: 'inline-emoji-ps',
+      })
+
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x5555eeee, 0x5eee, false)
+      const code = await callRpc(client, key, sid, {
+        _: 'auth.sendCode', phoneNumber: '+88800781', apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 400)
+      await callRpc(client, key, sid, {
+        _: 'auth.signIn', phoneNumber: '88800781', phoneCodeHash: code.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode('33'.repeat(20)),
+      }, 401)
+      await callRpc(client, key, sid, { _: 'updates.getState' }, 402)
+
+      const conversation: bridge.IMConversation = {
+        id: 'inline-emoji-group', kind: 'group', title: 'Inline Emoji Group',
+      }
+      const message: bridge.IMMessage = {
+        id: 'inline-emoji-1', conversationId: conversation.id, senderId: 'sender',
+        timestamp: 1_800_000_400,
+        content: { parts: [{
+          type: 'text', text: '🙂',
+          entities: [{ type: 'custom-emoji', offset: 0, length: 2, definition }],
+        }] },
+      }
+      await handler!({ type: 'message', conversation, message })
+
+      const push = await readPush(client, key)
+      const pushed = push.updates
+        .find((update: any) => update._ === 'updateNewChannelMessage').message
+      const entity = pushed.entities
+        .find((item: any) => item._ === 'messageEntityCustomEmoji')
+      // The entity must name the document every lookup resolves, otherwise the
+      // client asks for an id the relay cannot answer and renders nothing.
+      expect(entity.documentId.toNumber())
+        .toBe(bridge.customReactionDocumentId('inline-emoji-ps', definition))
+
+      const documents = await callRpc(client, key, sid, {
+        _: 'messages.getCustomEmojiDocuments', documentId: [entity.documentId],
+      }, 403)
+      expect(documents).toMatchObject([{
+        _: 'document', mimeType: 'image/png', size: asset.length,
+      }])
+      expect(documents[0].id.toString()).toBe(entity.documentId.toString())
+      const file = await callRpc(client, key, sid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputDocumentFileLocation',
+          id: entity.documentId, accessHash: entity.documentId,
+          fileReference: documents[0].fileReference, thumbSize: '',
+        },
+      }, 404)
+      expect(file.bytes).toEqual(asset)
+
+      // A client that cached this message while the update path still keyed the
+      // document per conversation keeps rendering it through the retired id.
+      const legacyId = bridge.legacyInlineCustomEmojiDocumentId(
+        'inline-emoji-ps', conversation.id, definition,
+      )
+      const legacyDocuments = await callRpc(client, key, sid, {
+        _: 'messages.getCustomEmojiDocuments', documentId: [Long.fromNumber(legacyId)],
+      }, 405)
+      expect(legacyDocuments).toMatchObject([{
+        _: 'document', mimeType: 'image/png', size: asset.length,
+      }])
+      expect(legacyDocuments[0].id.toString()).toBe(String(legacyId))
+      const legacyFile = await callRpc(client, key, sid, {
+        _: 'upload.getFile', offset: 0, limit: 1024,
+        location: {
+          _: 'inputDocumentFileLocation',
+          id: Long.fromNumber(legacyId), accessHash: Long.fromNumber(legacyId),
+          fileReference: legacyDocuments[0].fileReference, thumbSize: '',
+        },
+      }, 406)
+      expect(legacyFile.bytes).toEqual(asset)
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 15000)
+
   it('pushes a platform message to a second authorized device', async () => {
     let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
     let currentConversation: bridge.IMConversation | undefined

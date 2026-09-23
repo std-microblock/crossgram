@@ -286,6 +286,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       .registerContext(message.conversationId, message.reactionContext),
     messageProjection,
     config.recalledMessageMode ?? 'show',
+    (session, conversationId, definition) => reactionRpcFor(registry.require(session.platformId), session)
+      .registerInlineCustomEmoji(conversationId, definition),
   )
   const builtInMediaProvider = createBuiltInVoiceMediaProvider({
     serverHost: config.serverHost,

@@ -14,7 +14,9 @@ import { PlatformRegistry } from './platform-manager.js'
 import type { IMConversation, IMMessage, IMPlatform, IMRequest, PlatformSession } from './platform.js'
 import { UpdateManager } from './update-manager.js'
 import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
-import { ReactionRpc } from './reaction-rpc.js'
+import {
+  customReactionDocumentId, legacyInlineCustomEmojiDocumentId, ReactionRpc,
+} from './reaction-rpc.js'
 import { MemoryUpdateStoreBackend } from '@mtproto-relay/update-store-memory'
 import { requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 import { MessageProjectionPipeline } from './message-projection.js'
@@ -54,6 +56,7 @@ async function createHarness(
   deliveredConnections = 1,
   blockedMode?: BlockedContentMode,
   registerReactions?: ConstructorParameters<typeof UpdateManager>[8],
+  registerCustomEmoji?: ConstructorParameters<typeof UpdateManager>[11],
 ) {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
@@ -87,6 +90,7 @@ async function createHarness(
       return deliveredConnections
     },
     1, undefined, projectSticker, blockedPeers, registerReactions, messageProjection,
+    undefined, registerCustomEmoji,
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -836,6 +840,65 @@ describe('UpdateManager', () => {
     ]))
     const emoji = text.texts.find((item): item is tl.RawTextCustomEmoji => item._ === 'textCustomEmoji')
     expect(reactions.getCustomEmojiDocuments([emoji!.documentId])).toHaveLength(1)
+  })
+
+  it('publishes the canonical inline custom emoji document and keeps the retired id resolvable', async () => {
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])
+    const definition = {
+      key: '1:14', title: 'QQ 微笑',
+      presentation: {
+        type: 'custom' as const, alt: '🙂',
+        resource: {
+          version: 7, format: 'static' as const, mimeType: 'image/png' as const,
+          width: 128, height: 128, size: bytes.length, locator: { faceId: '14' },
+        },
+      },
+    }
+    const emojiPlatform: IMPlatform = {
+      ...platform,
+      async *downloadReactionResource(
+        _session: PlatformSession,
+        _resource: import('./platform.js').IMReactionResource,
+        options: { offset?: number, limit?: number } = {},
+      ) {
+        const start = options.offset ?? 0
+        yield bytes.subarray(start, start + (options.limit ?? bytes.length))
+      },
+    }
+    const reactions = new ReactionRpc(emojiPlatform, session)
+    const { store, manager, sent } = await createHarness(
+      undefined, emojiPlatform, undefined, 1, undefined, undefined,
+      (_session, conversationId, item) => reactions.registerInlineCustomEmoji(conversationId, item),
+    )
+    const conversation: IMConversation = { id: 'live-face', kind: 'group', title: 'Live Face' }
+    const message: IMMessage = {
+      id: 'live-face-message', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_004,
+      content: { parts: [{
+        type: 'text', text: '🙂',
+        entities: [{ type: 'custom-emoji', offset: 0, length: 2, definition }],
+      }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = roundTrip(sent[0]!.update) as tl.RawUpdates
+    const published = (payload.updates[0] as tl.RawUpdateNewChannelMessage).message as tl.RawMessage
+    const entity = published.entities![0] as tl.RawMessageEntityCustomEmoji
+    // The update path must share the identity every lookup uses, otherwise the
+    // client receives a document id the relay itself cannot answer.
+    expect(entity.documentId.toNumber())
+      .toBe(customReactionDocumentId(session.platformSessionId, definition))
+    expect(reactions.getCustomEmojiDocuments([entity.documentId])).toMatchObject([
+      { size: bytes.length, mimeType: 'image/png' },
+    ])
+
+    const legacyId = legacyInlineCustomEmojiDocumentId(session.platformSessionId, conversation.id, definition)
+    expect(reactions.getCustomEmojiDocuments([Long.fromNumber(legacyId)])).toMatchObject([
+      { id: Long.fromNumber(legacyId), size: bytes.length },
+    ])
+    await expect(reactions.getFile(legacyId, 0, bytes.length)).resolves.toMatchObject({
+      mimeType: 'image/png',
+    })
   })
 
   it('journals forwarded messages and pushes them to a different authorized device', async () => {

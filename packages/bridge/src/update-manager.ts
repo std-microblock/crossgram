@@ -11,7 +11,8 @@ import {
 import { toUser, type MessageStore } from './message-store.js'
 import {
   cardUrl, messageMentionsUser, messagePartText, telegramReplyToMessageId,
-  type IMConversation, type IMMessage, type IMPlatform, type PlatformSession,
+  type IMConversation, type IMMessage, type IMPlatform, type IMReactionDefinition,
+  type PlatformSession,
 } from './platform.js'
 import { qqReplySequenceFromMetadata } from './message-id.js'
 import type { IMSticker } from './sticker-provider.js'
@@ -58,7 +59,25 @@ export class UpdateManager {
     private readonly _registerReactions?: (session: PlatformSession, message: IMMessage) => void,
     private readonly _messageProjection?: MessageProjectionPipeline,
     private readonly _recalledMessageMode: RecalledMessageMode = 'show',
+    private readonly _registerCustomEmoji?: (
+      session: PlatformSession,
+      conversationId: string,
+      definition: IMReactionDefinition,
+    ) => number | undefined,
   ) {}
+
+  /**
+   * Canonical document id of an inline custom emoji, registering the document
+   * so the client that renders the message can resolve it.
+   */
+  private _inlineDocumentId(
+    session: PlatformSession,
+    conversationId: string,
+    definition: IMReactionDefinition,
+  ): number | undefined {
+    return this._registerCustomEmoji?.(session, conversationId, definition)
+      ?? customReactionDocumentId(session.platformSessionId, definition)
+  }
 
   private async _hydrateReactionUsers(
     session: PlatformSession,
@@ -720,7 +739,9 @@ export class UpdateManager {
         const richMessage = draft.richMessage ?? makeTlArticleMedia(
           projectedSource, projected.media, this._dcId, {
             userId: (platformUserId) => requiredUserId(userIds, platformUserId),
-            customEmojiId: (definition) => customReactionDocumentId(session.platformSessionId, definition),
+            customEmojiId: (definition) => this._inlineDocumentId(
+              session, projectedSource.conversationId, definition,
+            ),
           },
         )
         return {
@@ -741,7 +762,8 @@ export class UpdateManager {
                   ? makeTlCardPreview(projectedCard.card, this._dcId)
                   : undefined)),
             entities: draft.entities ?? makeMessageEntities(
-              projectedSource, session.platformSessionId, userIds,
+              projectedSource, userIds,
+              (definition) => this._inlineDocumentId(session, projectedSource.conversationId, definition),
             ),
             reactions: projectedSource.reactionContext?.reactions.length
               ? makeMessageReactions(
@@ -1233,8 +1255,8 @@ function committedEventSummary(committed: CommittedPlatformEvent): string {
 
 function makeMessageEntities(
   message: IMMessage,
-  platformSessionId: string,
   userIds: ReadonlyMap<string, number>,
+  resolveDocumentId: (definition: IMReactionDefinition) => number | undefined,
 ): tl.TypeMessageEntity[] | undefined {
   const entities: tl.TypeMessageEntity[] = []
   const rendered = message.content.parts.flatMap((part) => {
@@ -1273,12 +1295,10 @@ function makeMessageEntities(
       } else if (entity.type === 'blockquote') {
         entities.push({ _: 'messageEntityBlockquote', offset: base + entity.offset, length: entity.length })
       } else if (entity.type === 'custom-emoji' && entity.definition.presentation.type === 'custom') {
-        entities.push({
+        const documentId = resolveDocumentId(entity.definition)
+        if (documentId !== undefined) entities.push({
           _: 'messageEntityCustomEmoji', offset: base + entity.offset, length: entity.length,
-          documentId: Long.fromNumber(stableId([
-            'reaction-resource', 1, platformSessionId, message.conversationId,
-            entity.definition.key, entity.definition.presentation.resource.version,
-          ].join(':'))),
+          documentId: Long.fromNumber(documentId),
         })
       }
     }
