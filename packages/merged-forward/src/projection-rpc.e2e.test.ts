@@ -172,6 +172,29 @@ describe('merged-forward projection and RPC e2e', () => {
         { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'first' },
       ],
     })
+    // The desktop client asks the relay which message the transcript starts
+    // with, so a link cached before the relay anchored links at the first
+    // message still opens at the beginning.
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'crossgram.getMergedForwardAnchor', peer,
+    } as never)).resolves.toMatchObject({
+      _: 'dataJSON',
+      data: JSON.stringify({ messageId: targetId }),
+    })
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'crossgram.getMergedForwardAnchor',
+      peer: { _: 'inputPeerChat', chatId: chatId + 1 },
+    } as never)).resolves.toMatchObject({
+      _: 'dataJSON',
+      data: JSON.stringify({ messageId: 0 }),
+    })
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'crossgram.getMergedForwardAnchor',
+      peer: { _: 'inputPeerUser', userId: 1, accessHash: Long.ZERO },
+    } as never)).resolves.toMatchObject({
+      _: 'dataJSON',
+      data: JSON.stringify({ messageId: 0 }),
+    })
     // A desktop client that still carries an older deep link asks the relay
     // for the beginning of the transcript with the documented sentinel
     // (offset id 1) instead of trusting the anchor stored in its cache.

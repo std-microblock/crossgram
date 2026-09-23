@@ -240,6 +240,28 @@ export function apply(ctx: Context): void {
     if (result === undefined) return next()
     return result
   } as never, { prepend: true })
+  ctx.mtproto.register('crossgram.getMergedForwardAnchor', async function (
+    rpc: ServerRpcContext,
+    request: tl.RpcMethod,
+  ) {
+    // The desktop client asks which message a synthetic transcript starts with
+    // because the deep link it stored earlier may still anchor at the newest
+    // message of the bundle.  Unknown peers answer with 0 so the client keeps
+    // the anchor from the link instead of failing the open.
+    const req = request as unknown as { peer?: tl.TypeInputPeer }
+    if (req.peer?._ !== 'inputPeerChat') return { _: 'dataJSON', data: JSON.stringify({ messageId: 0 }) }
+    const state = await ctx.mtprotoBridge.resolveSession(rpc)
+    const record = projection.resolve(state.session.platformSessionId, req.peer.chatId)
+    if (!record) return { _: 'dataJSON', data: JSON.stringify({ messageId: 0 }) }
+    const snapshots = await projection.loadSnapshots(state, record)
+    const first = firstSnapshot(record.bundle, snapshots)
+    return {
+      _: 'dataJSON',
+      data: JSON.stringify({
+        messageId: first ? bundleMessageId(record.bundle, first, 0) : 0,
+      }),
+    }
+  } as never)
   ctx.effect(() => () => projection.clear(), 'mergedForward.clear')
 }
 

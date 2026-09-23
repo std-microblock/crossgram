@@ -82,6 +82,20 @@ describe('historical server reader map', () => {
     })
   })
 
+  it('decodes the stable Crossgram merged-forward anchor request constructor', () => {
+    const peer = TlBinaryWriter.serializeObject(__tlWriterMap, {
+      _: 'inputPeerChat', chatId: Long.fromNumber(77),
+    } as any)
+    const request = TlBinaryWriter.manual(4 + peer.length)
+    request.uint(0xf4a571c7)
+    request.raw(peer)
+
+    expect(new TlBinaryReader(getServerReaderMap(), request.result()).object()).toEqual({
+      _: 'crossgram.getMergedForwardAnchor',
+      peer: { _: 'inputPeerChat', chatId: 77 },
+    })
+  })
+
   it('decodes the stable Crossgram hash-first upload request constructor', () => {
     const peer = TlBinaryWriter.serializeObject(__tlWriterMap, {
       _: 'inputPeerUser', userId: 42, accessHash: Long.ZERO,

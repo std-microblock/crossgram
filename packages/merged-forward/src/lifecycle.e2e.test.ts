@@ -72,6 +72,8 @@ describe('merged-forward Cordis lifecycle e2e', () => {
     await Promise.all([services, mtproto])
     const fallbackRoute = vi.fn(async () => ({ _: 'boolTrue' as const }))
     ctx.mtproto.register('contacts.resolveUsername', fallbackRoute as never)
+    const anchorFallback = vi.fn(async () => ({ _: 'boolTrue' as const }))
+    ctx.mtproto.register('crossgram.getMergedForwardAnchor', anchorFallback as never)
     const plugin = ctx.plugin(mergedForward)
     await plugin
     try {
@@ -106,6 +108,13 @@ describe('merged-forward Cordis lifecycle e2e', () => {
         messages: [{ _: 'message', id: targetId, message: 'hello' }],
       })
       expect(load).toHaveBeenCalledOnce()
+      await expect(ctx.mtproto.dispatch(rpc, {
+        _: 'crossgram.getMergedForwardAnchor',
+        peer: { _: 'inputPeerChat', chatId },
+      } as never)).resolves.toMatchObject({
+        _: 'dataJSON',
+      })
+      expect(anchorFallback).not.toHaveBeenCalled()
 
       await plugin.dispose()
 
@@ -118,6 +127,11 @@ describe('merged-forward Cordis lifecycle e2e', () => {
         chats: afterDispose.draft.chats,
       }))
       expect(afterDispose.draft.source.content.parts[0]).toMatchObject({ type: 'message-bundle' })
+      await expect(ctx.mtproto.dispatch(rpc, {
+        _: 'crossgram.getMergedForwardAnchor',
+        peer: { _: 'inputPeerChat', chatId },
+      } as never)).resolves.toEqual({ _: 'boolTrue' })
+      expect(anchorFallback).toHaveBeenCalledOnce()
       await expect(ctx.mtproto.dispatch(rpc, request)).resolves.toEqual({ _: 'boolTrue' })
       expect(fallbackRoute).toHaveBeenCalledOnce()
     } finally {
