@@ -76,6 +76,16 @@ Desktop:
 - The same fixture is patched against pristine upstream sources from every
   supported repository by `.github/workflows/check.yml`, which passed for all
   28 target/brand combinations of this commit (run 271).
+Live relay: the `inspect-relay` probe
+`work/probes/merged-forward-anchor.ts` projected a bundle through the running
+production plugin and compared the link anchor with the id computed from the
+documented key format: `anchorIsFirstMessage: true`,
+`anchorIsNewestMessage: false` (`https://t.me/bridgebundle_1006709955/1558156099`).
+The same probe also tries a real archived bundle first; that path returned
+`QQNT bridge 503: QQNT kernel is not ready` because the QQ kernel was waiting
+for a login scan at the time, so the production check used the synthetic bundle
+and the real-data path stays available for a later run.
+
 - `crossgram-desktop` release run 242 published `crossgram-242`
   ("Crossgram Desktop #242") from patcher commit `a0dd42a`: every runtime
   package for the four targets and three platforms was rebuilt, including
