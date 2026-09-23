@@ -76,6 +76,10 @@ Desktop:
 - The same fixture is patched against pristine upstream sources from every
   supported repository by `.github/workflows/check.yml`, which passed for all
   28 target/brand combinations of this commit (run 271).
-- `crossgram-desktop` release run 242 rebuilt and republished the desktop
-  packages; see the release notes for the package that replaces the previously
-  downloaded binary.
+- `crossgram-desktop` release run 242 published `crossgram-242`
+  ("Crossgram Desktop #242") from patcher commit `a0dd42a`: every runtime
+  package for the four targets and three platforms was rebuilt, including
+  `crossgram-ayugram-runtime-windows-v7.0.9.zip` (sha256
+  `cee1d9d136a0d9e983e36f26c302a847f3f4e408d0c259abd1ba2fdd4b14f2f7`, binary
+  sha256 `d8c579ac4b724ec9f8950519c2cba879a75c6ea27631d5b41fabc8113566984a`),
+  which replaced the client binary used for the reports.
