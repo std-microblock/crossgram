@@ -172,6 +172,26 @@ describe('merged-forward projection and RPC e2e', () => {
         { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'first' },
       ],
     })
+    // A desktop client that still carries an older deep link asks the relay
+    // for the beginning of the transcript with the documented sentinel
+    // (offset id 1) instead of trusting the anchor stored in its cache.
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'messages.getHistory', peer,
+      offsetId: 1, offsetDate: 0, addOffset: 0, limit: 1,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    } as never)).resolves.toMatchObject({
+      messages: [{ _: 'message', id: targetId, message: 'first' }],
+    })
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'messages.getHistory', peer,
+      offsetId: 1, offsetDate: 0, addOffset: 0, limit: 2,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    } as never)).resolves.toMatchObject({
+      messages: [
+        { _: 'message', media: { _: 'messageMediaDocument' } },
+        { _: 'message', id: targetId, message: 'first' },
+      ],
+    })
     // A desktop client opens the deep link by loading history around the
     // anchor with a negative offset; the first message must come back so the
     // jump target exists on the client.

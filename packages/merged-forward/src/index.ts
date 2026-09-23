@@ -301,7 +301,15 @@ async function routeMergedForwardRpc(
       }
     }
     const bundle = await projection.materialize(state, record)
-    const page = selectHistory(bundle.messages, request as tl.messages.RawGetHistoryRequest)
+    const history = request as tl.messages.RawGetHistoryRequest
+    // A client that still carries a deep link generated before the relay
+    // anchored links at the first message has no way to learn the transcript
+    // order from the link, so it asks for the beginning explicitly.  Synthetic
+    // message ids are hashes and never equal 1, so the sentinel cannot collide
+    // with a real message of the bundle.
+    const page = history.offsetId === kFirstMessageOffsetId
+      ? firstPage(bundle.messages, history.limit)
+      : selectHistory(bundle.messages, history)
     return {
       _: 'messages.messagesSlice', count: bundle.messages.length,
       messages: page, topics: [], chats: bundle.chats, users: bundle.users,
@@ -415,6 +423,18 @@ function makeBundleUser(state: BridgeSessionState, snapshot: IMMessageSnapshot):
     username: source?.username,
     photo: { _: 'userProfilePhotoEmpty' },
   }
+}
+
+/** Offset id a patched client sends to ask for the beginning of a transcript. */
+const kFirstMessageOffsetId = 1
+
+/** Oldest `limit` messages of a newest-first slice, keeping that order. */
+function firstPage(
+  messages: readonly tl.TypeMessage[],
+  limit: number,
+): tl.TypeMessage[] {
+  const count = Math.max(0, limit)
+  return messages.slice(Math.max(0, messages.length - count))
 }
 
 function selectHistory(

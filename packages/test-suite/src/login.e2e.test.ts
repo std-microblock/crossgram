@@ -3927,7 +3927,23 @@ describe('bridge login e2e', () => {
           { _: 'message', id: outerAnchor, message: '查看聊天记录' },
         ],
       })
+      // A client whose cached deep link still points at the newest message asks
+      // for the beginning of the transcript with the documented sentinel.
+      await expect(callRpc(fresh, key, freshSid, {
+        _: 'messages.getHistory', peer,
+        offsetId: 1, offsetDate: 0, addOffset: 0, limit: 1,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 42)).resolves.toMatchObject({
+        messages: [{ _: 'message', id: outerAnchor, message: '查看聊天记录' }],
+      })
       const innerAnchor = Number(new URL(nestedPreview.media.webpage.url).pathname.split('/').at(-1))
+      await expect(callRpc(fresh, key, freshSid, {
+        _: 'messages.getHistory', peer: { _: 'inputPeerChat', chatId: innerChat.id },
+        offsetId: 1, offsetDate: 0, addOffset: 0, limit: 1,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 43)).resolves.toMatchObject({
+        messages: [{ _: 'message', id: innerAnchor, message: 'inner first message' }],
+      })
       await expect(callRpc(fresh, key, freshSid, {
         _: 'messages.getHistory', peer: { _: 'inputPeerChat', chatId: innerChat.id },
         offsetId: innerAnchor, offsetDate: 0, addOffset: -25, limit: 50,
