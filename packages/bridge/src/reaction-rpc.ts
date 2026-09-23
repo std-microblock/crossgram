@@ -184,8 +184,17 @@ export class ReactionRpc {
       }
       return false
     })
-    if (!found) throw new RpcError(400, 'REACTION_INVALID')
-    return found
+    if (found) return found
+    // A client keeps handing back the document id of a definition it cached
+    // before the relay re-keyed it (a changed asset version). Translate that
+    // retired id into the key it belonged to and use the current definition,
+    // so a recent reaction keeps working instead of failing as invalid.
+    if (reaction._ === 'reactionCustomEmoji') {
+      const retired = this._custom.get(reaction.documentId.toNumber())?.definition
+      const current = retired && context.available.find((definition) => definition.key === retired.key)
+      if (current) return current
+    }
+    throw new RpcError(400, 'REACTION_INVALID')
   }
 
   customDocumentId(definition: IMReactionDefinition): number {

@@ -228,6 +228,28 @@ describe('ReactionRpc', () => {
     expect(pack).toMatchObject({ _: 'messages.stickerSet', documents: { length: 1 } })
   })
 
+  it('resolves a retired document id to the current definition of the same key', () => {
+    const platform = { capabilities: {} } as IMPlatform
+    const rpc = new ReactionRpc(platform, session)
+    const definition = (version: number): IMReactionDefinition => ({
+      key: '1:416',
+      presentation: {
+        type: 'custom', alt: '🙂',
+        resource: { version, format: 'static', mimeType: 'image/png', width: 128, height: 128, size: 16_477 },
+      },
+    })
+    const current = definition(3_301_497_631)
+    const context: IMReactionContext = { available: [current], reactions: [], maxSelected: 20 }
+    // The client still holds the document id of the version the relay replaced.
+    const retired = rpc.toTlReaction('group', definition(3_342_178_892))
+    if (retired._ !== 'reactionCustomEmoji') throw new Error('expected custom reaction')
+    expect(rpc.resolveInput('group', retired, context)).toBe(current)
+
+    expect(() => rpc.resolveInput('group', {
+      _: 'reactionCustomEmoji', documentId: Long.fromNumber(123),
+    }, context)).toThrowError(/REACTION_INVALID/)
+  })
+
   it('keeps distinct platform reaction keys and resource versions separate', () => {
     const platform = { capabilities: {} } as IMPlatform
     const rpc = new ReactionRpc(platform, session)
