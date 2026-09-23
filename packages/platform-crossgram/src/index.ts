@@ -1831,6 +1831,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         const entry: ResolvedReactionResourceMeta = {
           size: meta.size,
           version: typeof meta.version === 'number' ? meta.version : undefined,
+          width: positiveDimension(meta.width),
+          height: positiveDimension(meta.height),
           source: meta.source === 'path' ? 'path' : 'bundle',
           resolvedAt: Date.now(),
         }
@@ -1988,6 +1990,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         if (!meta) return
         if (resource.size !== meta.size) resource.size = meta.size
         if (meta.version !== undefined && resource.version !== meta.version) resource.version = meta.version
+        if (meta.width !== undefined && resource.width !== meta.width) resource.width = meta.width
+        if (meta.height !== undefined && resource.height !== meta.height) resource.height = meta.height
       } catch {
         // The published catalog keeps its previous values; per-message
         // hydration retries once the bridge answers again.
@@ -2891,6 +2895,8 @@ function isStickerImageMimeType(value: string | undefined): boolean {
 interface ResolvedReactionResourceMeta {
   size: number
   version?: number
+  width?: number
+  height?: number
   source?: 'path' | 'bundle' | 'payload'
   resolvedAt: number
 }
@@ -2899,6 +2905,11 @@ interface ResolvedReactionResourceMeta {
 function reactionResourceLocatorKey(resource: IMReactionResource): string | undefined {
   const locator = resource.locator
   return isReactionResourceLocator(locator) ? locator.reactionKey : undefined
+}
+
+/** Keeps a reported image dimension, dropping the zeroes a bridge may send. */
+function positiveDimension(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined
 }
 
 /**
@@ -2918,8 +2929,13 @@ function applyReactionResourceMeta(
   const meta = resolved.get(key) ?? cache.get(key)
   if (!meta) return undefined
   const version = meta.version ?? resource.version
-  if (resource.size === meta.size && resource.version === version) return undefined
-  return { ...resource, size: meta.size, version }
+  // The bytes decide the geometry too: a wide face resolves its canvas entry
+  // while an inline one resolves the square icon of the same bundle.
+  const width = meta.width ?? resource.width
+  const height = meta.height ?? resource.height
+  if (resource.size === meta.size && resource.version === version
+    && resource.width === width && resource.height === height) return undefined
+  return { ...resource, size: meta.size, version, width, height }
 }
 
 function multiForwardBundleId(locator: WireMultiForwardLocator): string {

@@ -1453,6 +1453,47 @@ describe('QQNTPlatform mapping', () => {
     }
   })
 
+  it('adopts the inline icon geometry the bridge reports for a wide face', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({
+      available: [{
+        key: '1:416', title: '/中龙舟',
+        presentation: {
+          type: 'custom' as const, alt: '🙂',
+          resource: {
+            // The catalog geometry describes the wide 大表情 canvas QQ ships
+            // for this face, which a reaction cell never renders.
+            version: 1, format: 'static' as const, mimeType: 'image/png' as const,
+            width: 192, height: 76, locator: { reactionKey: '1:416' },
+          },
+        },
+      }],
+      reactions: [], maxSelected: 20,
+    }))
+    platform.client.getReactionAssetMeta = vi.fn(async () => ({
+      reactionKey: '1:416', size: 16_477, version: 3_342_178_892, mimeType: 'image/png',
+      width: 128, height: 128, source: 'payload' as const,
+    }))
+    platform.client.getMessageReactions = vi.fn(async () => ({
+      reactions: [{ key: '1:416', count: 1, selected: true }], maxSelected: 20,
+    }))
+    await platform.getMessageReactions(session, {
+      conversationId: '2:group', messageId: 'reacted', targetId: 'reacted',
+    })
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'reacted', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        parts: [{ type: 'text' as const, text: 'hi' }],
+        reactionContext: { reactions: [{ key: '1:416', count: 1, selected: true }], maxSelected: 20 },
+      }],
+    }))
+
+    const page = await platform.getHistory(session, { id: '2:group' })
+    const definition = page.messages[0]?.reactionContext?.available[0]?.presentation
+    expect(definition?.type === 'custom' ? definition.resource : undefined).toMatchObject({
+      size: 16_477, version: 3_342_178_892, width: 128, height: 128,
+    })
+  })
   it('uses the standard fallback emoji for slash faces missing from the catalog', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
