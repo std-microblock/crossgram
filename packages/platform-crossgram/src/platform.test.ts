@@ -129,6 +129,32 @@ describe('QQNTPlatform mapping', () => {
     expect(platform.client.getUser).toHaveBeenCalledWith('opaque-user')
   })
 
+  it('uses an archived merged-forward avatar URL without refreshing the peer', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getUser = vi.fn(async () => {
+      throw new Error('archived avatars must not refresh the placeholder peer')
+    })
+    platform.client.downloadFile = vi.fn(async function* (locator) {
+      expect(locator).toMatchObject({ avatarUrl: 'https://thirdqq.qlogo.cn/avatar/alice/100' })
+      yield new TextEncoder().encode('archived-avatar-bytes')
+    })
+    const media: IMMedia<QQMediaLocator> = {
+      id: 'avatar:user:qqnt-multi-forward-participant:abc:original-v1', kind: 'image',
+      mimeType: 'image/jpeg',
+      locator: {
+        messageId: 'avatar:user:qqnt-multi-forward-participant:abc',
+        elementId: 'avatar:user:qqnt-multi-forward-participant:abc',
+        chatType: 1, peerUid: 'qqnt-multi-forward-participant:abc', kind: 'image',
+        fileName: 'alice.jpg', avatarUrl: 'https://thirdqq.qlogo.cn/avatar/alice/100',
+      },
+    }
+
+    await expect(collect(platform.downloadMedia(session, media))).resolves.toEqual([
+      new TextEncoder().encode('archived-avatar-bytes'),
+    ])
+    expect(platform.client.getUser).not.toHaveBeenCalled()
+  })
+
   it('marks expired QQ media locators for Telegram file-reference refresh', async () => {
     const platform = new QQNTPlatform()
     platform.client.downloadFile = vi.fn(async function* () {

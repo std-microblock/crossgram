@@ -3128,6 +3128,9 @@ function isQQNTMediaUnavailable(error: unknown): boolean {
 function needsUserAvatarRefresh(media: IMMedia<QQMediaLocator>, locator: QQMediaLocator): boolean {
   return media.id.startsWith('avatar:')
     && locator.chatType === 1
+    // An archived merged-forward author carries the avatar URL itself; asking
+    // the bridge for the placeholder peer would only waste a round trip.
+    && !locator.avatarUrl
     && !locator.filePath
     && !locator.fileUuid
     && !locator.originImageUrl
