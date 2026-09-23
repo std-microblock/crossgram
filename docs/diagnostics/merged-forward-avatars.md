@@ -101,6 +101,30 @@ and resolves the username with the prefix it matched.
 - `crossgram-android` `tests/merged-forward.test.ts` compiles both link shapes
   and the prefix-preserving username resolution.
 
+## Live verification (2026-09-23)
+
+The relay was fast-forwarded to `0a7fc43` and `crossgram.service` restarted
+(`NRestarts=0`, MTProto 41003 and WebUI 3140 listening, no error-priority
+journal). A real mtcute client (`yarn mtproto:e2e run
+work/mtproto-e2e/merged-forward-avatars.ts --profile production`) then read the
+reported pair: it opened the card message `1116310583` in the group
+`1670195612` ("橘橘橘子汁 | MicroBlock"), which anchors
+`https://t.me/bridgebundle_1357462542/528646252`, and asked the relay for the
+transcript.
+
+- `contacts.resolveUsername` answered `contacts.resolvedPeer` with
+  `photo: chatPhoto`, and `messages.getHistory` returned 58 messages, 4
+  senders, all 4 carrying `userProfilePhoto`, with the anchor message present
+  and the transcript chat carrying `chatPhoto`.
+- `upload.getFile` over the real socket returned the chat avatar
+  (8192 bytes, JPEG), the sender avatar (971 bytes, PNG — the default avatar
+  QQ keeps for the archive) and the card thumbnail (8192 bytes, JPEG) through
+  `inputPeerPhotoFileLocation` / `inputPhotoFileLocation`.
+
+Both avatar payloads arrive from the adapter, so the storage type is sniffed
+from the first chunk: QQ serves the archived default avatar as PNG even while
+the media claims `image/jpeg`.
+
 ## Follow-ups
 
 - The placeholder avatars come from the bridge, which maps every archived
