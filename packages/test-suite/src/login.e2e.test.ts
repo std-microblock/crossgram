@@ -3754,9 +3754,25 @@ describe('bridge login e2e', () => {
       sender: { id: 'alice', firstName: 'Alice' },
       content: { parts: [{ type: 'message-bundle', bundle: outerBundle }] },
     }
+    const avatarPayloads = new Map<string, string>([
+      ['avatar:user:bob:original-v1', 'bob-avatar-bytes'],
+      ['avatar:user:carol:original-v1', 'carol-avatar-bytes'],
+    ])
+    const bundleAvatar = {
+      id: 'avatar:group:parent-room:original-v1',
+      kind: 'image' as const,
+      mimeType: 'image/jpeg',
+      locator: { avatar: 'parent-room' },
+    }
     const outerFirst: bridge.IMMessageSnapshot = {
       id: 'outer-first', senderId: 'bob', timestamp: 1_700_000_997,
-      sender: { id: 'bob', firstName: 'Bob' },
+      sender: {
+        id: 'bob', firstName: 'Bob',
+        avatar: {
+          id: 'avatar:user:bob:original-v1', kind: 'image', mimeType: 'image/jpeg',
+          locator: { avatar: 'bob' },
+        },
+      },
       content: { parts: [{ type: 'message-bundle', bundle: innerBundle }] },
     }
     const outerLast: bridge.IMMessageSnapshot = {
@@ -3766,7 +3782,13 @@ describe('bridge login e2e', () => {
     }
     const innerFirst: bridge.IMMessageSnapshot = {
       id: 'inner-first', senderId: 'carol', timestamp: 1_700_000_995,
-      sender: { id: 'carol', firstName: 'Carol' },
+      sender: {
+        id: 'carol', firstName: 'Carol',
+        avatar: {
+          id: 'avatar:user:carol:original-v1', kind: 'image', mimeType: 'image/jpeg',
+          locator: { avatar: 'carol' },
+        },
+      },
       content: { parts: [{ type: 'text', text: 'inner first message' }] },
     }
     const innerLast: bridge.IMMessageSnapshot = {
@@ -3795,6 +3817,15 @@ describe('bridge login e2e', () => {
           bundleLoads.push(id)
           return id === 'outer' ? [outerFirst, outerLast] : [innerFirst, innerLast]
         },
+        async avatar() {
+          return bundleAvatar
+        },
+      },
+      async *downloadMedia(_session, media) {
+        const id = (media.locator as { avatar?: string }).avatar
+        yield new TextEncoder().encode(
+          id ? (avatarPayloads.get(media.id) ?? 'bundle-avatar-bytes') : 'bundle-media',
+        )
       },
       async getAccount() {
         return { credentials: {}, user: { id: 'self', firstName: 'Virtual Test User' } }
@@ -3898,6 +3929,47 @@ describe('bridge login e2e', () => {
         _: 'messages.getHistory', peer,
         offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
       }, 11)
+      // Both the transcript senders and the archive's own chat carry the
+      // avatars the adapter reported, and the file route serves their bytes.
+      const transcriptChat = (outerHistory.chats as any[])
+        .find((chat) => chat.id === outerChat.id)
+      const outerChatPhoto = transcriptChat?.photo
+      expect(outerChatPhoto?._).toBe('chatPhoto')
+      const bobUser = (outerHistory.users as any[]).find((user) => user.firstName === 'Bob')
+      expect(bobUser?.photo).toMatchObject({
+        _: 'userProfilePhoto',
+        photoId: Long.fromNumber(bridge.stableId('avatar:avatar:user:bob:original-v1')),
+      })
+      const transcriptUserAvatar = await callRpc(fresh, key, freshSid, {
+        _: 'upload.getFile', precise: false, cdnSupported: false, offset: 0, limit: 64,
+        location: {
+          _: 'inputPeerPhotoFileLocation', big: false,
+          peer: { _: 'inputPeerUser', userId: bobUser.id, accessHash: bobUser.accessHash },
+          photoId: bobUser.photo.photoId,
+        },
+      }, 60)
+      expect(transcriptUserAvatar._).toBe('upload.file')
+      expect(new TextDecoder().decode(transcriptUserAvatar.bytes)).toBe('bob-avatar-bytes')
+      const transcriptChatAvatar = await callRpc(fresh, key, freshSid, {
+        _: 'upload.getFile', precise: false, cdnSupported: false, offset: 0, limit: 64,
+        location: {
+          _: 'inputPeerPhotoFileLocation', big: true,
+          peer: { _: 'inputPeerChat', chatId: outerChat.id },
+          photoId: outerChatPhoto.photoId,
+        },
+      }, 61)
+      expect(new TextDecoder().decode(transcriptChatAvatar.bytes)).toBe('bundle-avatar-bytes')
+      const outerCardPhoto = preview.media?.webpage?.photo
+      expect(outerCardPhoto?._).toBe('photo')
+      const cardThumbnail = await callRpc(fresh, key, freshSid, {
+        _: 'upload.getFile', precise: false, cdnSupported: false, offset: 0, limit: 64,
+        location: {
+          _: 'inputPhotoFileLocation', id: outerCardPhoto.id,
+          accessHash: outerCardPhoto.accessHash,
+          fileReference: outerCardPhoto.fileReference, thumbSize: 'x',
+        },
+      }, 62)
+      expect(new TextDecoder().decode(cardThumbnail.bytes)).toBe('bundle-avatar-bytes')
       const nestedPreview = outerHistory.messages.find((message: any) => message.message === '查看聊天记录')
       const innerChat = outerHistory.chats.find((chat: any) => chat.title === innerBundle.title)
       const innerUrl = new RegExp('^https://t\\.me/bridgebundle_' + innerChat.id + '/[1-9][0-9]*$')
@@ -3973,8 +4045,11 @@ describe('bridge login e2e', () => {
         _: 'messages.getFullChat', chatId: outerChat.id,
       }, 17)).toMatchObject({
         _: 'messages.chatFull',
-        fullChat: { _: 'chatFull', id: outerChat.id },
-        chats: [{ _: 'chat', left: true, id: outerChat.id }],
+        fullChat: {
+          _: 'chatFull', id: outerChat.id,
+          chatPhoto: { _: 'photo', id: outerChatPhoto.photoId },
+        },
+        chats: [{ _: 'chat', left: true, id: outerChat.id, photo: { _: 'chatPhoto' } }],
       })
       expect(await callRpc(fresh, key, freshSid, {
         _: 'messages.getScheduledHistory', peer, hash: Long.ZERO,

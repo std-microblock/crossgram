@@ -465,6 +465,15 @@ export interface IMMessageBundleProvider<TMediaLocator = unknown> {
     session: PlatformSession,
     locator: JsonValue,
   ): Promise<IMMessageSnapshot<TMediaLocator>[]>
+  /**
+   * Avatar of the chat the bundle was archived from, when the adapter can
+   * resolve one.  The relay renders a bundle as a synthetic transcript chat,
+   * so this image is its peer photo.
+   */
+  avatar?(
+    session: PlatformSession,
+    locator: JsonValue,
+  ): Promise<IMMedia<TMediaLocator> | undefined>
 }
 
 /** Whether a platform message explicitly mentions one platform user. */

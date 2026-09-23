@@ -32,15 +32,27 @@ const bundle: IMMessageBundle = {
   id: 'bundle:rpc-e2e', title: 'Alice 和 Bob 的聊天记录',
   preview: 'Alice: first\nBob: latest', locator: { root: 'rpc-e2e' },
 }
+const aliceAvatar = {
+  id: 'avatar:user:alice:original-v1', kind: 'image' as const, mimeType: 'image/jpeg',
+  width: 640, height: 640, locator: { id: 'alice-avatar', bytes: 'alice-avatar-bytes' },
+}
+const bobAvatar = {
+  id: 'avatar:user:bob:original-v1', kind: 'image' as const, mimeType: 'image/jpeg',
+  locator: { id: 'bob-avatar', bytes: 'bob-avatar-bytes' },
+}
+const bundleAvatar = {
+  id: 'avatar:group:outer:original-v1', kind: 'image' as const, mimeType: 'image/jpeg',
+  locator: { id: 'bundle-avatar', bytes: 'bundle-avatar-bytes' },
+}
 const innerMessages: IMMessageSnapshot[] = [
   {
     id: 'inner-first', senderId: 'alice', timestamp: 99,
-    sender: { id: 'alice', firstName: 'Alice' },
+    sender: { id: 'alice', firstName: 'Alice', avatar: aliceAvatar },
     content: { parts: [{ type: 'text', text: 'first' }] },
   },
   {
     id: 'inner-media', senderId: 'alice', timestamp: 100,
-    sender: { id: 'alice', firstName: 'Alice' },
+    sender: { id: 'alice', firstName: 'Alice', avatar: aliceAvatar },
     content: { parts: [{
       type: 'media',
       media: {
@@ -51,7 +63,7 @@ const innerMessages: IMMessageSnapshot[] = [
   },
   {
     id: 'inner-latest', senderId: 'bob', timestamp: 101,
-    sender: { id: 'bob', firstName: 'Bob' },
+    sender: { id: 'bob', firstName: 'Bob', avatar: bobAvatar },
     content: { parts: [{ type: 'text', text: 'latest' }] },
   },
 ]
@@ -68,7 +80,12 @@ const platform: IMPlatform = {
     send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
     conversations: { groups: true, channels: false, subchannels: false },
   },
-  messageBundles: { async load() { return innerMessages } },
+  messageBundles: {
+    async load() { return innerMessages },
+    async avatar(_session, locator) {
+      return (locator as { root?: string }).root === bundle.locator.root ? bundleAvatar : undefined
+    },
+  },
   async subscribe() { return () => {} },
   async sendMessage() { throw new Error('unused') },
   async getDialogs() {
@@ -79,7 +96,13 @@ const platform: IMPlatform = {
     return { messages: [] }
   },
   async getUser(_session, id) { return { id, firstName: id } },
-  async *downloadMedia() { yield new TextEncoder().encode('bundle') },
+  async *downloadMedia(_session, media, options = {}) {
+    const payload = new TextEncoder().encode(
+      (media.locator as { bytes?: string } | undefined)?.bytes ?? 'bundle',
+    )
+    const offset = options.offset ?? 0
+    yield payload.subarray(offset, offset + (options.limit ?? payload.length))
+  },
   async resolveMediaUrl() {
     return { url: 'https://cdn.example.test/bundle', expiresAt: Date.now() + 60_000, supportsRange: true }
   },
@@ -172,6 +195,24 @@ describe('merged-forward projection and RPC e2e', () => {
         { _: 'message', peerId: { _: 'peerChat', chatId }, message: 'first' },
       ],
     })
+    // Every synthetic peer carries the avatar the archive kept for it, so
+    // clients can draw the transcript without falling back to initials.
+    const userPhotos = new Map(
+      (await ctx.mtproto.dispatch(rpc, {
+        _: 'messages.getHistory', peer,
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      } as never) as tl.messages.RawMessagesSlice).users.map((user) => [
+        user._ === 'user' ? user.firstName : '',
+        user._ === 'user' ? user.photo : undefined,
+      ]),
+    )
+    expect(userPhotos.get('Alice')).toMatchObject({
+      _: 'userProfilePhoto', dcId: 1, photoId: Long.fromNumber(stableId(`avatar:${aliceAvatar.id}`)),
+    })
+    expect(userPhotos.get('Bob')).toMatchObject({
+      _: 'userProfilePhoto', dcId: 1, photoId: Long.fromNumber(stableId(`avatar:${bobAvatar.id}`)),
+    })
     // A desktop client that still carries an older deep link asks the relay
     // for the beginning of the transcript with the documented sentinel
     // (offset id 1) instead of trusting the anchor stored in its cache.
@@ -232,6 +273,69 @@ describe('merged-forward projection and RPC e2e', () => {
       _: 'dataJSON', data: expect.stringContaining('https://cdn.example.test/bundle'),
     })
     await expect(ctx.database.get('mtproto_im_media', {})).resolves.toEqual([])
+    const projectedChat = projectedHistory.chats.find(
+      (chat): chat is tl.RawChat => chat._ === 'chat' && chat.id === chatId,
+    )
+    const chatPhotoId = Long.fromNumber(stableId(`avatar:${bundleAvatar.id}`))
+    expect(projectedChat?.photo).toMatchObject({ _: 'chatPhoto', dcId: 1, photoId: chatPhotoId })
+    const projectedUser = projectedHistory.users.find(
+      (user): user is tl.RawUser => user._ === 'user' && user.firstName === 'Alice',
+    )
+    if (!projectedUser) throw new Error('bundle sender was not projected')
+
+    // Avatars reach clients through the file routes only, so the transcript
+    // and the card thumbnail have to serve the adapter bytes themselves.
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'upload.getFile', precise: false, cdnSupported: false, offset: 0, limit: 64,
+      location: {
+        _: 'inputPeerPhotoFileLocation', big: false,
+        peer: { _: 'inputPeerUser', userId: projectedUser.id, accessHash: projectedUser.accessHash },
+        photoId: Long.fromNumber(stableId(`avatar:${aliceAvatar.id}`)),
+      },
+    } as never)).resolves.toMatchObject({
+      _: 'upload.file', bytes: new TextEncoder().encode('alice-avatar-bytes'),
+    })
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'upload.getFile', precise: false, cdnSupported: false, offset: 7, limit: 5,
+      location: {
+        _: 'inputPeerPhotoFileLocation', big: true,
+        peer: { _: 'inputPeerChat', chatId },
+        photoId: chatPhotoId,
+      },
+    } as never)).resolves.toMatchObject({
+      _: 'upload.file', bytes: new TextEncoder().encode('avata'),
+    })
+    const cardPhoto = projectedOuter.media?._ === 'messageMediaWebPage'
+      ? projectedOuter.media.webpage.photo
+      : undefined
+    if (!cardPhoto || cardPhoto._ !== 'photo') throw new Error('card thumbnail was not projected')
+    expect(cardPhoto.id.toString()).toBe(chatPhotoId.toString())
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'upload.getFile', precise: false, cdnSupported: false, offset: 0, limit: 64,
+      location: {
+        _: 'inputPhotoFileLocation', id: cardPhoto.id, accessHash: cardPhoto.accessHash,
+        fileReference: cardPhoto.fileReference, thumbSize: 'x',
+      },
+    } as never)).resolves.toMatchObject({
+      _: 'upload.file', bytes: new TextEncoder().encode('bundle-avatar-bytes'),
+    })
+    // Locations this feature does not own must keep reaching the ordinary
+    // bridge file routes instead of being swallowed.
+    const fallthrough: tl.RpcMethod[] = []
+    ctx.mtproto.register('upload.getFile', async (_rpc, request) => {
+      fallthrough.push(request)
+      return { _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: 0, bytes: new Uint8Array() }
+    })
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'upload.getFile', precise: false, cdnSupported: false, offset: 0, limit: 64,
+      location: {
+        _: 'inputPeerPhotoFileLocation', big: false,
+        peer: { _: 'inputPeerUser', userId: projectedUser.id, accessHash: projectedUser.accessHash },
+        photoId: Long.fromNumber(chatPhotoId.toNumber() + 1),
+      },
+    } as never)).resolves.toMatchObject({ _: 'upload.file' })
+    expect(fallthrough).toHaveLength(1)
+
     await expect(ctx.mtproto.dispatch(rpc, {
       _: 'messages.getMessages', id: [{ _: 'inputMessageID', id: targetId }],
     } as never)).resolves.toMatchObject({
@@ -251,7 +355,11 @@ describe('merged-forward projection and RPC e2e', () => {
       _: 'messages.getFullChat', chatId,
     } as never)).resolves.toMatchObject({
       _: 'messages.chatFull',
-      fullChat: { _: 'chatFull', id: chatId, participants: { _: 'chatParticipantsForbidden', chatId } },
+      fullChat: {
+        _: 'chatFull', id: chatId, participants: { _: 'chatParticipantsForbidden', chatId },
+        chatPhoto: { _: 'photo', id: chatPhotoId, dcId: 1 },
+      },
+      chats: [{ _: 'chat', id: chatId, photo: { _: 'chatPhoto', photoId: chatPhotoId } }],
     })
     await expect(ctx.mtproto.dispatch(rpc, {
       _: 'messages.getPeerSettings', peer,

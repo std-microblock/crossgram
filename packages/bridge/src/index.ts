@@ -427,7 +427,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     },
     messageProjection,
   )
-  new MtprotoBridgeService(ctx, requireBridgeSession)
+  new MtprotoBridgeService(ctx, requireBridgeSession, dcId)
   registerGroupFilesMiniApp(ctx, platforms, requireBridgeSession, config.groupFilesMiniApp)
 
   const reserveAuthorization = createAuthorizationReservationQueue()

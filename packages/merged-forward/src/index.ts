@@ -5,6 +5,7 @@ import {
   projectDetachedMessage,
   stableId,
   type BridgeSessionState,
+  type IMMedia,
   type IMMessageBundle,
   type IMMessageSnapshot,
   type MessageProjectionInput,
@@ -20,7 +21,27 @@ interface BundleRecord {
   chatId: number
   bundle: IMMessageBundle
   snapshots?: Promise<IMMessageSnapshot[]>
+  /** Adapter-owned avatar of the chat the bundle was archived from. */
+  avatar?: Promise<IMMedia<any> | undefined>
   projection?: Promise<ProjectedBundle>
+}
+
+/** One synthetic peer photo, addressable by Telegram file locations. */
+interface AvatarEntry {
+  media: IMMedia<any>
+  peer: AvatarPeer
+}
+
+interface AvatarPeer { kind: 'user' | 'chat', id: number }
+
+/**
+ * Photos of one platform session.  Peer locations are keyed by peer and photo,
+ * because unrelated transcripts can share one avatar; photo locations carry no
+ * peer, so the first registration of an image answers them.
+ */
+interface SessionAvatars {
+  peers: Map<string, AvatarEntry>
+  photos: Map<string, AvatarEntry>
 }
 
 interface ProjectedBundle {
@@ -35,6 +56,34 @@ interface ProjectedBundle {
  */
 export class MergedForwardProjection {
   private readonly _records = new Map<string, Map<number, BundleRecord>>()
+  /** Synthetic peer photos this feature registered, scoped per session. */
+  private readonly _avatars = new Map<string, SessionAvatars>()
+  /** Every photo id this feature handed out, checked before resolving a session. */
+  private readonly _photoIds = new Set<string>()
+
+  constructor(private readonly _dcId = 1) {}
+
+  /**
+   * One sender of a bundle rendered as a temporary Telegram user.  The avatar
+   * comes from the archived record: a transcript can only show what QQ kept
+   * for the forwarded message, and archives without sender identity stay on
+   * the empty photo so clients draw their own initial placeholder.
+   */
+  makeBundleUser(state: BridgeSessionState, snapshot: IMMessageSnapshot): tl.RawUser {
+    const id = bundleUserId(state, snapshot.senderId)
+    const source = snapshot.sender
+    return {
+      _: 'user', id, accessHash: Long.fromNumber(id),
+      firstName: source?.firstName || snapshot.senderId,
+      lastName: source?.lastName,
+      username: source?.username,
+      photo: source?.avatar
+        ? this.registerAvatar(
+            state.session.platformSessionId, { kind: 'user', id }, source.avatar,
+          ).photo
+        : { _: 'userProfilePhotoEmpty' },
+    }
+  }
 
   remember(platformSessionId: string, bundle: IMMessageBundle): BundleRecord {
     const chatId = bundleChatId(bundle)
@@ -84,7 +133,7 @@ export class MergedForwardProjection {
         record,
         target,
       ))
-      input.draft.chats.push(this.makeChat(record, snapshots))
+      input.draft.chats.push(this.makeChat(record, snapshots, await this.loadAvatar(input, record)))
     }
 
     const source = input.draft.source
@@ -111,7 +160,13 @@ export class MergedForwardProjection {
     if (!source.content.parts.some((part) =>
       part.type === 'media' || part.type === 'sticker' || part.type === 'card')) {
       const record = this.resolve(input.session.platformSessionId, bundleChatId(bundles[0].bundle))
-      if (record) input.draft.media = this.makePreview(record, targets.get(bundles[0].bundle.id))
+      if (record) {
+        input.draft.media = this.makePreview(
+          record,
+          targets.get(bundles[0].bundle.id),
+          await this.loadAvatar(input, record),
+        )
+      }
     }
     return next()
   }
@@ -120,16 +175,26 @@ export class MergedForwardProjection {
     return `https://t.me/bridgebundle_${record.chatId}${messageId ? `/${messageId}` : ''}`
   }
 
-  makeChat(record: BundleRecord, snapshots: readonly IMMessageSnapshot[] = []): tl.RawChat {
+  makeChat(
+    record: BundleRecord,
+    snapshots: readonly IMMessageSnapshot[] = [],
+    avatar?: IMMedia<any>,
+  ): tl.RawChat {
     return {
       _: 'chat', left: true, id: record.chatId, title: record.bundle.title,
-      photo: { _: 'chatPhotoEmpty' },
+      photo: avatar
+        ? this.registerAvatar(record.platformSessionId, { kind: 'chat', id: record.chatId }, avatar).photo
+        : { _: 'chatPhotoEmpty' },
       participantsCount: Math.max(1, new Set(snapshots.map((item) => item.senderId)).size),
       date: 0, version: 1,
     }
   }
 
-  makePreview(record: BundleRecord, messageId?: number): tl.RawMessageMediaWebPage {
+  makePreview(
+    record: BundleRecord,
+    messageId?: number,
+    avatar?: IMMedia<any>,
+  ): tl.RawMessageMediaWebPage {
     const url = this.makeLink(record, messageId)
     return {
       _: 'messageMediaWebPage', manual: true, safe: true,
@@ -139,21 +204,155 @@ export class MergedForwardProjection {
         url, displayUrl: record.bundle.title, hash: 0,
         type: 'telegram_message', title: record.bundle.title,
         description: record.bundle.preview?.trim() || '点击查看合并转发消息',
+        // Telegram clients render a webpage photo beside the title, which is
+        // where the merged forward shows the avatar of the chat it came from.
+        photo: avatar
+          ? this.makeBundlePhoto(record.platformSessionId, record.chatId, avatar)
+          : undefined,
       },
     }
   }
 
-  makeFullChat(record: BundleRecord, snapshots: readonly IMMessageSnapshot[]): tl.messages.RawChatFull {
-    const chat = this.makeChat(record, snapshots)
+  makeFullChat(
+    record: BundleRecord,
+    snapshots: readonly IMMessageSnapshot[],
+    avatar?: IMMedia<any>,
+  ): tl.messages.RawChatFull {
+    const chat = this.makeChat(record, snapshots, avatar)
     return {
       _: 'messages.chatFull',
       fullChat: {
         _: 'chatFull', id: record.chatId, about: '',
         participants: { _: 'chatParticipantsForbidden', chatId: record.chatId },
-        chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
+        // Clients read the profile photo of a basic chat from the full chat
+        // as well, so the transcript header must not fall back to an empty
+        // photo that the chat entity already knows better.
+        chatPhoto: avatar
+          ? this.makeBundlePhoto(record.platformSessionId, record.chatId, avatar)
+          : { _: 'photoEmpty', id: Long.ZERO },
         notifySettings: { _: 'peerNotifySettings' }, botInfo: [],
       },
       chats: [chat], users: [],
+    }
+  }
+
+  /**
+   * Resolves the peer photo of the chat a bundle was archived from.  The
+   * platform supplies it through the optional bundle-avatar hook; archives
+   * without one keep the empty photo.
+   */
+  loadAvatar(input: Pick<MessageProjectionInput, 'platform' | 'session'>, record: BundleRecord) {
+    if (record.avatar) return record.avatar
+    const pending: Promise<IMMedia<any> | undefined> = readBundleAvatar(input, record)
+    record.avatar = pending
+    pending.catch(() => {
+      // An unavailable adapter must not turn into a cached "no avatar": keep
+      // the transcript renderable and retry with the next request.
+      if (record.avatar === pending) record.avatar = undefined
+    })
+    return pending.catch(() => undefined)
+  }
+
+  /**
+   * Telegram photo that addresses the same bytes as a registered peer photo.
+   * Webpage thumbnails and full-chat profiles are fetched through
+   * `inputPhotoFileLocation`, so both views share this identity.
+   */
+  private makeBundlePhoto(
+    platformSessionId: string,
+    chatId: number,
+    media: IMMedia<any>,
+  ): tl.RawPhoto {
+    const { photoId } = this.registerAvatar(platformSessionId, { kind: 'chat', id: chatId }, media)
+    const width = media.width ?? BUNDLE_PHOTO_SIZE
+    const height = media.height ?? BUNDLE_PHOTO_SIZE
+    return {
+      _: 'photo',
+      id: photoId,
+      accessHash: Long.fromNumber(stableId(`merged-forward-photo:${media.id}`)),
+      fileReference: BUNDLE_PHOTO_FILE_REFERENCE,
+      date: 0,
+      sizes: [
+        { _: 'photoSize', type: 'm', w: width, h: height, size: 0 },
+        { _: 'photoSize', type: 'x', w: width, h: height, size: media.size ?? 0 },
+      ],
+      dcId: this._dcId,
+    }
+  }
+
+  private registerAvatar(
+    platformSessionId: string,
+    peer: { kind: 'user', id: number },
+    media: IMMedia<any>,
+  ): { photoId: Long, photo: tl.RawUserProfilePhoto }
+  private registerAvatar(
+    platformSessionId: string,
+    peer: { kind: 'chat', id: number },
+    media: IMMedia<any>,
+  ): { photoId: Long, photo: tl.RawChatPhoto }
+  private registerAvatar(
+    platformSessionId: string,
+    peer: AvatarPeer,
+    media: IMMedia<any>,
+  ): { photoId: Long, photo: tl.RawUserProfilePhoto | tl.RawChatPhoto } {
+    const photoId = Long.fromNumber(stableId(`avatar:${media.id}`))
+    const session = this.avatarSession(platformSessionId)
+    const entry: AvatarEntry = { media, peer }
+    this._photoIds.add(photoId.toString())
+    session.peers.set(peerKey(peer, photoId), entry)
+    // Several transcripts may render the same archived image, so the first
+    // registration keeps the photo location stable.
+    const photoKey = photoId.toString()
+    if (!session.photos.has(photoKey)) session.photos.set(photoKey, entry)
+    return {
+      photoId,
+      photo: peer.kind === 'user'
+        ? { _: 'userProfilePhoto', photoId, dcId: this._dcId }
+        : { _: 'chatPhoto', photoId, dcId: this._dcId },
+    }
+  }
+
+  private avatarSession(platformSessionId: string): SessionAvatars {
+    let session = this._avatars.get(platformSessionId)
+    if (!session) {
+      session = { peers: new Map(), photos: new Map() }
+      this._avatars.set(platformSessionId, session)
+    }
+    return session
+  }
+
+  /**
+   * Cheap test for a file location this feature could own.  It runs before the
+   * RPC resolves a platform session, so ordinary media downloads never pay for
+   * the merged-forward lookup.
+   */
+  mightServeLocation(location: tl.TypeInputFileLocation): boolean {
+    if (!this._photoIds.size) return false
+    if (location._ === 'inputPeerPhotoFileLocation') {
+      return this._photoIds.has(location.photoId.toString())
+    }
+    if (location._ === 'inputPhotoFileLocation') {
+      return sameBytes(location.fileReference, BUNDLE_PHOTO_FILE_REFERENCE)
+        && this._photoIds.has(location.id.toString())
+    }
+    return false
+  }
+
+  /**
+   * Resolves one Telegram file location against the photos this feature
+   * handed out.  Requests that do not belong to a synthetic bundle peer stay
+   * unanswered so the ordinary bridge file routes keep serving them.
+   */
+  resolveAvatarLocation(platformSessionId: string, location: tl.TypeInputFileLocation): AvatarEntry | undefined {
+    const session = this._avatars.get(platformSessionId)
+    if (!session) return
+    if (location._ === 'inputPeerPhotoFileLocation') {
+      const peer = inputPeerKey(location.peer)
+      return peer ? session.peers.get(`${peer}:${location.photoId}`) : undefined
+    }
+    if (location._ === 'inputPhotoFileLocation') {
+      if (!sameBytes(location.fileReference, BUNDLE_PHOTO_FILE_REFERENCE)) return
+      return session.photos.get(location.id.toString())
     }
   }
 
@@ -180,6 +379,8 @@ export class MergedForwardProjection {
 
   clear(): void {
     this._records.clear()
+    this._avatars.clear()
+    this._photoIds.clear()
   }
 
   private async buildProjection(state: BridgeSessionState, record: BundleRecord): Promise<ProjectedBundle> {
@@ -190,11 +391,11 @@ export class MergedForwardProjection {
       bundleMessageId(record.bundle, snapshot, 0),
     ]))
     const messages: tl.TypeMessage[] = []
-    const chats: tl.TypeChat[] = [this.makeChat(record, snapshots)]
+    const chats: tl.TypeChat[] = [this.makeChat(record, snapshots, await this.loadAvatar(state, record))]
     const users = new Map<number, tl.TypeUser>()
 
     for (const snapshot of snapshots) {
-      users.set(bundleUserId(state, snapshot.senderId), makeBundleUser(state, snapshot))
+      users.set(bundleUserId(state, snapshot.senderId), this.makeBundleUser(state, snapshot))
       const rendered = await projectDetachedMessage({
         pipeline: state.projection,
         platform: state.platform,
@@ -224,12 +425,12 @@ export class MergedForwardProjection {
   }
 }
 
-export function makeMergedForwardProvider(): MergedForwardProjection {
-  return new MergedForwardProjection()
+export function makeMergedForwardProvider(dcId = 1): MergedForwardProjection {
+  return new MergedForwardProjection(dcId)
 }
 
 export function apply(ctx: Context): void {
-  const projection = new MergedForwardProjection()
+  const projection = new MergedForwardProjection(ctx.mtprotoBridge.dcId)
   ctx.on('bridge/message/project', (input, next) => projection.project(input, next))
   ctx.on('mtproto/rpc', async function (
     this: ServerRpcContext,
@@ -250,6 +451,38 @@ async function routeMergedForwardRpc(
   request: tl.RpcMethod,
 ): Promise<unknown | undefined> {
   const resolveState = () => ctx.mtprotoBridge.resolveSession(rpc)
+  if (request._ === 'upload.getFile') {
+    const req = request as tl.upload.RawGetFileRequest
+    if (!projection.mightServeLocation(req.location)) return
+    const offset = Number(req.offset)
+    if (!Number.isFinite(offset) || offset < 0 || req.limit <= 0) return
+    const state = await resolveState()
+    const entry = projection.resolveAvatarLocation(state.session.platformSessionId, req.location)
+    if (!entry || !state.platform.downloadMedia) return
+    const chunks: Uint8Array[] = []
+    let size = 0
+    for await (const chunk of state.platform.downloadMedia(state.session, entry.media, {
+      offset, limit: req.limit,
+    })) {
+      const remaining = req.limit - size
+      if (remaining <= 0) break
+      const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk
+      chunks.push(accepted)
+      size += accepted.length
+    }
+    const bytes = new Uint8Array(size)
+    let cursor = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, cursor)
+      cursor += chunk.length
+    }
+    return {
+      _: 'upload.file',
+      type: offset === 0 ? avatarStorageFileType(bytes) : { _: 'storage.fileUnknown' as const },
+      mtime: Math.floor(Date.now() / 1000),
+      bytes,
+    }
+  }
   if (request._ === 'contacts.resolveUsername') {
     const req = request as tl.contacts.RawResolveUsernameRequest
     if (!/^bridge(?:bundle|chat)_\d+$/.test(req.username)) return
@@ -259,7 +492,8 @@ async function routeMergedForwardRpc(
     const snapshots = await projection.loadSnapshots(state, record)
     return {
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: record.chatId },
-      chats: [projection.makeChat(record, snapshots)], users: [],
+      chats: [projection.makeChat(record, snapshots, await projection.loadAvatar(state, record))],
+      users: [],
     }
   }
   if (request._ === 'messages.getFullChat') {
@@ -267,7 +501,11 @@ async function routeMergedForwardRpc(
     const state = await resolveState()
     const record = projection.resolve(state.session.platformSessionId, req.chatId)
     if (!record) return
-    return projection.makeFullChat(record, await projection.loadSnapshots(state, record))
+    return projection.makeFullChat(
+      record,
+      await projection.loadSnapshots(state, record),
+      await projection.loadAvatar(state, record),
+    )
   }
   if (
     request._ === 'messages.getHistory'
@@ -290,14 +528,16 @@ async function routeMergedForwardRpc(
       const snapshots = await projection.loadSnapshots(state, record)
       return {
         _: 'messages.messages', messages: [], topics: [],
-        chats: [projection.makeChat(record, snapshots)], users: [],
+        chats: [projection.makeChat(record, snapshots, await projection.loadAvatar(state, record))],
+        users: [],
       }
     }
     if (request._ === 'messages.getPeerSettings') {
       const snapshots = await projection.loadSnapshots(state, record)
       return {
         _: 'messages.peerSettings', settings: { _: 'peerSettings' },
-        chats: [projection.makeChat(record, snapshots)], users: [],
+        chats: [projection.makeChat(record, snapshots, await projection.loadAvatar(state, record))],
+        users: [],
       }
     }
     const bundle = await projection.materialize(state, record)
@@ -333,7 +573,7 @@ async function routeMergedForwardRpc(
     // but deliberately leave the dialog and message vectors untouched.
     const projectedChats = await Promise.all(records.map(async ({ record }) => {
       const snapshots = await projection.loadSnapshots(state, record)
-      return projection.makeChat(record, snapshots)
+      return projection.makeChat(record, snapshots, await projection.loadAvatar(state, record))
     }))
     const ordinary = ordinaryPeers.length
       ? await state.dialogs.getPeerDialogs({ ...req, peers: ordinaryPeers })
@@ -401,6 +641,14 @@ function firstSnapshot(
     ?.snapshot
 }
 
+/** Reads the optional avatar of the chat a bundle was archived from. */
+async function readBundleAvatar(
+  input: Pick<MessageProjectionInput, 'platform' | 'session'>,
+  record: BundleRecord,
+): Promise<IMMedia<any> | undefined> {
+  return await input.platform.messageBundles?.avatar?.(input.session, record.bundle.locator)
+}
+
 function bundleChatId(bundle: IMMessageBundle): number {
   return stableId(`merged-forward-chat:${bundle.id}`)
 }
@@ -413,16 +661,51 @@ function bundleUserId(state: BridgeSessionState, platformUserId: string): number
   return stableId(`merged-forward-user:${state.session.platformSessionId}:${platformUserId}`)
 }
 
-function makeBundleUser(state: BridgeSessionState, snapshot: IMMessageSnapshot): tl.RawUser {
-  const id = bundleUserId(state, snapshot.senderId)
-  const source = snapshot.sender
-  return {
-    _: 'user', id, accessHash: Long.fromNumber(id),
-    firstName: source?.firstName || snapshot.senderId,
-    lastName: source?.lastName,
-    username: source?.username,
-    photo: { _: 'userProfilePhotoEmpty' },
+/**
+ * Telegram `photo` size declared for bundle avatars when the adapter does not
+ * report the real dimensions.  QQ avatars are square, so one value covers both
+ * axes and clients only use it as a scaling hint.
+ */
+const BUNDLE_PHOTO_SIZE = 640
+
+/**
+ * File reference of the photos this feature serves through
+ * `inputPhotoFileLocation`.  It keeps bundle photos addressable without
+ * reading or persisting anything: the bytes are still fetched from the adapter
+ * on every request.
+ */
+const BUNDLE_PHOTO_FILE_REFERENCE = new TextEncoder().encode('crossgram-merged-forward-avatar:v1')
+
+/** Registry key of one synthetic peer photo. */
+function peerKey(peer: AvatarPeer, photoId: Long): string {
+  return `${peer.kind}:${peer.id}:${photoId.toString()}`
+}
+
+/** Registry peer of a Telegram file location, when it addresses a chat peer. */
+function inputPeerKey(location: tl.TypeInputPeer): string | undefined {
+  if (location._ === 'inputPeerUser') return `user:${location.userId}`
+  if (location._ === 'inputPeerChat') return `chat:${location.chatId}`
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])
+}
+
+/** Storage type of one avatar payload, sniffed from the bytes themselves. */
+function avatarStorageFileType(bytes: Uint8Array): tl.storage.TypeFileType {
+  if (bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return { _: 'storage.filePng' }
   }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { _: 'storage.fileJpeg' }
+  }
+  if (bytes.length >= 12
+    && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return { _: 'storage.fileWebp' }
+  }
+  return { _: 'storage.fileUnknown' }
 }
 
 /** Offset id a patched client sends to ask for the beginning of a transcript. */

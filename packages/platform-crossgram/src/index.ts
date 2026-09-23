@@ -216,6 +216,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   readonly messageBundles = {
     load: (session: PlatformSession, locator: JsonValue) =>
       this.loadMessageBundle(session, parseMultiForwardLocator(locator)),
+    avatar: (session: PlatformSession, locator: JsonValue) =>
+      this.loadMessageBundleAvatar(session, parseMultiForwardLocator(locator)),
   }
   private readonly database?: Database
   private readonly qqVoiceMedia?: QQVoiceMedia
@@ -2400,6 +2402,27 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       })
     this.multiForwardPreviewJobs.set(bundle.id, pending)
     return pending
+  }
+
+  /**
+   * Avatar of the chat a merged forward was archived from.
+   *
+   * QQ keeps multi-forward records without sender identities, so the only
+   * avatar the relay can offer for such a transcript is the peer photo of the
+   * conversation the bundle belongs to: the group a group history came from,
+   * or the contact of a private-chat history.
+   */
+  private async loadMessageBundleAvatar(
+    session: PlatformSession,
+    locator: WireMultiForwardLocator,
+  ): Promise<IMMedia<QQMediaLocator> | undefined> {
+    const known = [...this.conversations.values()].find((conversation) =>
+      conversation.id === locator.conversationId
+      || conversation.metadata?.qqConversationId === locator.conversationId)
+    if (known?.avatar) return known.avatar
+    const conversation = await this.getConversation(session, locator.conversationId)
+      .catch(() => null)
+    return conversation?.avatar ?? known?.avatar
   }
 
   private loadMultiForwardMessages(locator: WireMultiForwardLocator): Promise<WireMessage[]> {

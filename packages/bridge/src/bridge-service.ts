@@ -23,7 +23,12 @@ export type BridgeSessionResolver = (
 
 /** Public Cordis seam for feature plugins that extend authorized Bridge RPCs. */
 export class MtprotoBridgeService extends Service {
-  constructor(ctx: Context, private readonly _resolveSession: BridgeSessionResolver) {
+  constructor(
+    ctx: Context,
+    private readonly _resolveSession: BridgeSessionResolver,
+    /** Data centre this bridge advertises for its own synthetic media locations. */
+    readonly dcId = 1,
+  ) {
     super(ctx, 'mtprotoBridge')
   }
 
