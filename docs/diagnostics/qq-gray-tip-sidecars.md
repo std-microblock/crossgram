@@ -88,5 +88,29 @@ well). `yarn typecheck` reports the same 22 pre-existing errors as before this
 change, all in files this commit does not touch plus two line-shifted
 `dialogs.ts` `inputPeer` narrowings.
 
-Production is still on `0bc2498`; main also now carries the parallel
-`platform-qqnt` store-face favourite work, so the next fast-forward ships both.
+## Production
+
+`/opt/crossgram` was fast-forwarded `e7430e5` → `e6e7122` on 2026-09-24 19:16 CST and
+`crossgram.service` restarted: active, `NRestarts=0`, MTProto `41003` and WebUI
+`3140` listening, no error-priority journal entries in the window. The rollback
+bundles (`crossgram-e7430e5.bundle`, `crossgram-e6e7122.bundle`) and the pre-deploy
+runtime config are in `/var/lib/crossgram/backups/20260924-gray-tip-sidecars/`.
+
+A read-only probe through the production debug-scripts runner
+(`work/probes/qq-gray-tip-sidecar.ts`, removed afterwards) read the reported reply
+row out of the live database and resolved it with the running store:
+
+```json
+{
+  "storedReplyToId": "7763267369130659866",
+  "storedReplySequence": "46513",
+  "notice":  { "id": "7763267369130659866", "tlMessageId": 1117849207 },
+  "content": { "id": "7689041730164989900", "tlMessageId": 1117817143 },
+  "resolved": { "id": "7689041730164989900", "tlMessageId": 1117817143, "service": false }
+}
+```
+
+`t.me/c/1322274431/1117851207` therefore reports the target the user named, without
+any data migration: the redirect happens at resolution time. The deletion path was
+not triggered against live QQ (a still-broken path would recall a real message),
+so it stays covered by the unit and WebSocket e2e tests.
