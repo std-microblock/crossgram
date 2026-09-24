@@ -118,7 +118,9 @@ entire message -- stayed empty.
 - Unrelated but observed while following this link: the clients only treat
   `t.me`, `telegram.me` and `telegram.dog` hosts as internal links (Telegram
   Desktop `Core::TryConvertUrlToLocal`, Android `LinkManager.handleHttp`),
-  while the relay advertises `me_url_prefix: https://my.telegram.org/` and the
+  while the relay advertised `me_url_prefix: https://my.telegram.org/` and the
   clients build "copy link" URLs from it. A `my.telegram.org/c/…` link therefore
-  opens in a browser instead of resolving to the message. Fixing that needs a
-  client patch (accept the configured prefix) or a different `me_url_prefix`.
+  opened in a browser instead of resolving to the message. The relay now
+  advertises `https://t.me/` (`0bc2498`); see
+  [message links](message-links.md). Links copied before that change stay dead
+  until the clients are patched to accept the configured prefix.
