@@ -9,16 +9,17 @@ and no `joined the group` semantics that a Telegram client understands.
 
 ## What the production data says
 
-A read-only probe over the newest 20 000 rows of `mtproto_im_message` (18 join
-notices, 185 service messages) showed the QQ wording is
+A read-only probe over the newest 8 000 rows of `mtproto_im_message` found
+185 service messages (11 join notices); a second pass over 20 000 rows listed 18
+join notices, with QQ's wording split as
 
-- `<name>加入了群聊。` — 13 of 18, QQ's plain `otherAdd` member-add notice
+- `<name>加入了群聊。` — 14 of 18, QQ's plain `otherAdd` member-add notice
 - `<inviter>邀请<name>加入了群聊。` — 3 of 18, QQ's `otherInviteOther` notice
-- `<inviter>邀请<name>加入了群聊，并附带了30条聊天记录。` — 2 of 18, the
+- `<inviter>邀请<name>加入了群聊，并附带了30条聊天记录。` — 1 of 18, the
   “share with chat history” notice
 
-Member names resolved to QQ nicknames ("Weirdo", "小猪鸭", "时汜"…), never to UINs,
-so the wording comes from the structured `grayTipElement.groupElement`
+Member names resolved to QQ nicknames (CJK and latin), never to UINs, so the
+wording comes from the structured `grayTipElement.groupElement`
 (`groupElement.memberAdd`, QQ's `MemberAddShowType` variants) rather than from
 the `genericGrayTipText` fallback or the legacy XML element path.
 
@@ -92,7 +93,7 @@ Two bugs sat underneath that:
 
 ## Not covered
 
-The “share with chat history” variant (`并附带了30条聊天记录`, 2 of 18 samples)
+The “share with chat history” variant (`并附带了30条聊天记录`, 1 of 18 samples)
 keeps QQ's wording as `messageActionCustomAction`: it announces a share rather
 than a plain join, and Telegram's join action cannot express the attached
 history.
