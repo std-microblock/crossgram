@@ -78,6 +78,48 @@ describe('QQStickerProvider raw saved-sticker pipeline', () => {
   })
 })
 
+describe('QQStickerProvider market favorites', () => {
+  it('streams a store-face favorite through the expression CDN the bridge can answer', async () => {
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 9, 9])
+    const opened: QQStickerReference[] = []
+    const client = {
+      getStickerPack: vi.fn(async () => ({
+        packId: 'qq-favorites', title: 'QQ 收藏表情', count: 1, version: 12,
+        stickers: [marketFavorite('1715311957_0_0_1_B4D485DFB3DB20FE0F054B260BB76F0A_238274_490c04c6a1f7e807648971001edc02ec')],
+      })),
+      probeRemoteSticker: vi.fn(async () => ({ size: bytes.length, mimeType: 'image/png' })),
+      stickerSource: vi.fn((reference: QQStickerReference, size?: number) => {
+        opened.push(reference)
+        return source(bytes, () => undefined, size)
+      }),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
+
+    const pack = await provider.getPack(context, 'qq-favorites')
+    const sticker = pack!.stickers[0]!
+    expect(sticker).toMatchObject({
+      stickerId: 'market:238274:490c04c6a1f7e807648971001edc02ec',
+      size: bytes.length,
+      mimeType: 'image/png',
+      locator: {
+        kind: 'favorite',
+        resId: '1715311957_0_0_1_B4D485DFB3DB20FE0F054B260BB76F0A_238274_490c04c6a1f7e807648971001edc02ec',
+        url: 'https://p.qpic.cn/qq_expression/1715311957/1715311957_0_0_1_B4D485DFB3DB20FE0F054B260BB76F0A_238274_490c04c6a1f7e807648971001edc02ec/0',
+      },
+    })
+    expect(client.probeRemoteSticker).toHaveBeenCalledOnce()
+
+    const asset = await provider.openAsset(context, sticker)
+    expect(asset.size).toBe(bytes.length)
+    expect(await collect(asset.source.stream())).toEqual(Buffer.from(bytes))
+    expect(opened).toEqual([sticker.locator])
+
+    // A repeated pack read reuses the measurement instead of re-probing QQ.
+    await provider.getPack(context, 'qq-favorites')
+    expect(client.probeRemoteSticker).toHaveBeenCalledOnce()
+  })
+})
+
 function favorite(id: string): WireSticker {
   return {
     stickerId: `favorite:${id}`, packId: 'qq-favorites', title: id,
@@ -88,12 +130,26 @@ function favorite(id: string): WireSticker {
   }
 }
 
-function source(bytes: Uint8Array, opened: () => void): IMMediaSource {
-  return { size: bytes.length, async *stream() { opened(); yield bytes } }
+function source(bytes: Uint8Array, opened: () => void, size = bytes.length): IMMediaSource {
+  return { size, async *stream() { opened(); yield bytes } }
 }
 
 async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of source) chunks.push(Buffer.from(chunk))
   return Buffer.concat(chunks)
+}
+
+function marketFavorite(favoriteResId: string): WireSticker {
+  return {
+    stickerId: 'market:238274:490c04c6a1f7e807648971001edc02ec', packId: '238274', title: '抱头蹲防',
+    format: 'static', mimeType: 'image/gif', width: 200, height: 200,
+    reference: {
+      kind: 'market', packageId: '238274', stickerId: '490c04c6a1f7e807648971001edc02ec',
+      name: '抱头蹲防', key: '605609562fca772e', width: 200, height: 200, animated: false,
+      staticPath: '/qq/Thumb/B4D485DFB3DB20FE0F054B260BB76F0A.png',
+      dynamicPath: '/qq/Ori/B4D485DFB3DB20FE0F054B260BB76F0A.jpg',
+      favoriteResId,
+    },
+  }
 }

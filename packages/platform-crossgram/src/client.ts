@@ -1142,6 +1142,36 @@ export class QQNTClient {
     return inspected
   }
 
+  /**
+   * Measures a QQ expression-CDN asset without downloading it.
+   *
+   * The expression CDN answers a two-byte range with the total length in
+   * `content-range`, which is how the relay publishes a document size for a
+   * sticker the bridge can only describe. Clients schedule sticker downloads
+   * from that size, so a zero keeps the cell empty forever.
+   */
+  async probeRemoteSticker(
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<{ size: number, mimeType?: string } | undefined> {
+    try {
+      const response = await this.fetchImpl(url, {
+        headers: { 'accept-encoding': 'identity', range: 'bytes=0-1' },
+        redirect: 'follow',
+        signal,
+      })
+      const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim() || undefined
+      const range = /^bytes\s+\d+-\d+\/(\d+)$/i.exec(response.headers.get('content-range') ?? '')
+      const length = response.headers.get('content-length')
+      const size = range ? Number(range[1]) : length ? Number.parseInt(length, 10) : undefined
+      await discardResponseBody(response)
+      if (size === undefined || !Number.isSafeInteger(size) || size <= 0) return undefined
+      return { size, ...(mimeType ? { mimeType } : {}) }
+    } catch {
+      return undefined
+    }
+  }
+
   async inspectDirectUrl(
     url: string,
     expiresAt: number,

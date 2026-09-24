@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { PlatformSession, StickerProviderContext } from '@mtproto-relay/bridge'
 import type { WireSticker } from './protocol.js'
-import { QQStickerProvider } from './sticker-provider.js'
+import { QQStickerProvider, favoriteStickerUrl } from './sticker-provider.js'
 
 const context: StickerProviderContext = {
   platformKind: 'qq',
@@ -9,6 +9,63 @@ const context: StickerProviderContext = {
     platformSessionId: 'qq-session', platformId: 'qqnt', userId: 'self', credentials: {}, metadata: {},
   } satisfies PlatformSession,
 }
+
+describe('QQStickerProvider store-face favorites', () => {
+  const favoriteResId = '1715311957_0_0_1_B4D485DFB3DB20FE0F054B260BB76F0A_238274_490c04c6a1f7e807648971001edc02ec'
+  const favoriteUrl = `https://p.qpic.cn/qq_expression/1715311957/${favoriteResId}/0`
+
+  it('publishes the favorite copy of a store face with the size clients schedule from', async () => {
+    const client = {
+      getStickerPack: vi.fn(async () => ({
+        packId: 'qq-favorites', title: 'QQ 收藏表情', count: 1, version: 3,
+        stickers: [marketFavorite(favoriteResId)],
+      })),
+      probeRemoteSticker: vi.fn(async () => ({ size: 23235, mimeType: 'image/png' })),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
+
+    const pack = await provider.getPack(context, 'qq-favorites')
+
+    expect(client.probeRemoteSticker).toHaveBeenCalledWith(favoriteUrl)
+    expect(pack!.stickers[0]).toMatchObject({
+      stickerId: 'market:238274:490c04c6a1f7e807648971001edc02ec',
+      size: 23235,
+      mimeType: 'image/png',
+      locator: { kind: 'favorite', resId: favoriteResId, url: favoriteUrl, path: '' },
+    })
+    // The native send plan still names the face, so QQ sends the real market face.
+    await expect(provider.prepareSend(context, pack!.stickers[0]!)).resolves.toMatchObject({
+      type: 'native',
+      reference: { kind: 'favorite', resId: favoriteResId, url: favoriteUrl },
+    })
+  })
+
+  it('keeps the market reference when the expression CDN has nothing to measure', async () => {
+    const client = {
+      getStickerPack: vi.fn(async () => ({
+        packId: 'qq-favorites', title: 'QQ 收藏表情', count: 1, version: 4,
+        stickers: [marketFavorite(favoriteResId)],
+      })),
+      probeRemoteSticker: vi.fn(async () => undefined),
+    }
+    const provider = new QQStickerProvider(client as never, 'qq:stickers')
+
+    const pack = await provider.getPack(context, 'qq-favorites')
+
+    expect(pack!.stickers[0]).toMatchObject({
+      size: undefined,
+      mimeType: 'image/gif',
+      locator: { kind: 'market', favoriteResId },
+    })
+  })
+
+  it('builds URLs only for account-scoped res ids', () => {
+    expect(favoriteStickerUrl('1715311957_0_0_1_2_3')).toBe('https://p.qpic.cn/qq_expression/1715311957/1715311957_0_0_1_2_3/0')
+    expect(favoriteStickerUrl('user_0_0')).toBeUndefined()
+    expect(favoriteStickerUrl('1715311957_0_0/../x')).toBeUndefined()
+    expect(favoriteStickerUrl('')).toBeUndefined()
+  })
+})
 
 describe('QQStickerProvider saved stickers', () => {
   it('declares the synthetic QQ favorites pack as owned by its QQNT account', async () => {
@@ -194,3 +251,17 @@ describe('QQStickerProvider market previews', () => {
     )
   })
 })
+
+function marketFavorite(favoriteResId: string): WireSticker {
+  return {
+    stickerId: 'market:238274:490c04c6a1f7e807648971001edc02ec', packId: '238274', title: '抱头蹲防',
+    format: 'static', mimeType: 'image/gif', width: 200, height: 200,
+    reference: {
+      kind: 'market', packageId: '238274', stickerId: '490c04c6a1f7e807648971001edc02ec',
+      name: '抱头蹲防', key: '605609562fca772e', width: 200, height: 200, animated: false,
+      staticPath: '/qq/Thumb/B4D485DFB3DB20FE0F054B260BB76F0A.png',
+      dynamicPath: '/qq/Ori/B4D485DFB3DB20FE0F054B260BB76F0A.jpg',
+      favoriteResId,
+    },
+  }
+}

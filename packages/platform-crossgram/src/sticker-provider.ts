@@ -19,6 +19,13 @@ export class QQStickerProvider implements IMStickerProvider {
     this.capabilities = { platformKinds: ['qq'], sessionScoped: true, ownerPlatformId }
   }
 
+  /**
+   * Expression-CDN measurements for store faces the account also favorited,
+   * keyed by favorite res id. QQ publishes the size of an asset only through
+   * this probe, and clients need it to schedule the download at all.
+   */
+  private readonly favoriteAssets = new Map<string, { url: string, size: number, mimeType?: string }>()
+
   async listPacks(_context: StickerProviderContext, query: StickerPageQuery = {}) {
     const page = await this.client.getStickerPacks(query)
     return {
@@ -148,18 +155,19 @@ export class QQStickerProvider implements IMStickerProvider {
 
   private async mapSticker(sticker: WireSticker): Promise<IMSticker> {
     const reference = sticker.reference
+    const favorite = await this.servableFavoriteAsset(sticker)
     const mapped: IMSticker = {
       providerId: this.providerId,
       stickerId: sticker.stickerId,
       packId: sticker.packId,
       title: sticker.title,
       format: sticker.format,
-      mimeType: sticker.mimeType,
+      mimeType: favorite?.mimeType ?? sticker.mimeType,
       width: sticker.width,
       height: sticker.height,
-      size: sticker.size,
+      size: favorite?.size ?? sticker.size,
       version: sticker.version,
-      locator: reference as unknown as JsonValue,
+      locator: (favorite?.reference ?? reference) as unknown as JsonValue,
       thumbnail: reference.kind === 'market' && reference.animated
         && reference.staticPath && Number.isSafeInteger(reference.staticSize) && reference.staticSize > 0
         ? {
@@ -172,6 +180,53 @@ export class QQStickerProvider implements IMStickerProvider {
     return mapped
   }
 
+  /**
+   * Store face the account favorited: QQ keeps it as a market reference, but
+   * the market path needs a native download slot (tens of seconds) and answers
+   * "file is missing" in this headless environment, so every client cell stayed
+   * empty. The same face is still on QQ's expression CDN under the favorite res
+   * id — the URL shape plain favorites already carry — and the bridge streams a
+   * favorite reference from that URL, so publish the favorite copy instead.
+   */
+  private async servableFavoriteAsset(
+    sticker: WireSticker,
+  ): Promise<{ reference: QQStickerReference, size: number, mimeType?: string } | undefined> {
+    const reference = sticker.reference
+    if (reference.kind !== 'market') return undefined
+    const resId = reference.favoriteResId
+    if (!resId) return undefined
+    const url = favoriteStickerUrl(resId)
+    if (!url) return undefined
+    const cached = this.favoriteAssets.get(resId)
+    const measured = cached ?? await this.measureFavoriteAsset(resId, url)
+    if (!measured) return undefined
+    return {
+      reference: {
+        kind: 'favorite', resId, url, path: '',
+        name: reference.name, animated: reference.animated,
+        mimeType: stickerImageMimeType(measured.mimeType) ?? reference.mimeType,
+        width: reference.width, height: reference.height,
+        size: measured.size,
+      },
+      size: measured.size,
+      mimeType: measured.mimeType ?? reference.mimeType,
+    }
+  }
+
+  private async measureFavoriteAsset(
+    resId: string,
+    url: string,
+  ): Promise<{ url: string, size: number, mimeType?: string } | undefined> {
+    const measured = await this.client.probeRemoteSticker(url).catch(() => undefined)
+    if (!measured) return undefined
+    const entry = { url, ...measured }
+    this.favoriteAssets.set(resId, entry)
+    while (this.favoriteAssets.size > 512) {
+      this.favoriteAssets.delete(this.favoriteAssets.keys().next().value!)
+    }
+    return entry
+  }
+
   private originalAsset(sticker: IMSticker, reference: QQStickerReference): IMStickerAsset {
     return {
       source: this.client.stickerSource(reference, sticker.size),
@@ -181,6 +236,35 @@ export class QQStickerProvider implements IMStickerProvider {
       height: sticker.height,
     }
   }
+}
+
+/** Image MIME types a favorite reference may carry. */
+function stickerImageMimeType(
+  value: string | undefined,
+): 'image/gif' | 'image/apng' | 'image/png' | 'image/jpeg' | 'image/webp' | 'image/bmp' | undefined {
+  switch (value) {
+    case 'image/gif':
+    case 'image/apng':
+    case 'image/png':
+    case 'image/jpeg':
+    case 'image/webp':
+    case 'image/bmp':
+      return value
+    default:
+      return undefined
+  }
+}
+
+/**
+ * QQ's expression CDN address of a favorite, the same URL the bridge reports for
+ * plain favorites: `<uin>_...` res ids are account scoped, and the CDN serves
+ * the file at index 0.
+ */
+export function favoriteStickerUrl(resId: string): string | undefined {
+  const [uin] = resId.split('_')
+  if (!uin || !/^\d+$/.test(uin)) return undefined
+  if (!/^[\w-]+$/.test(resId)) return undefined
+  return `https://p.qpic.cn/qq_expression/${uin}/${resId}/0`
 }
 
 function isHttpUrl(value: string | undefined): value is string {
