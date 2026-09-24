@@ -179,6 +179,11 @@ sendMessage(session, conversation, {
 `{ type: 'custom', text }`，bridge 将其投影为 Telegram `messageService` / `messageActionCustomAction`，
 因此历史和实时 update 都由客户端按灰字系统消息渲染。系统消息的 `parts` 可以为空。
 
+QQ 的灰条是它伴随的那条消息的 sidecar：QQ 会给灰条分配同一条 `msgSeq`，并把对灰条的回复和
+撤回都按该序号解析到那条内容消息。因此 bridge 需要把落在灰条上的回复目标改指到同序号的内容
+消息（`MessageStore.preferContentReplyTarget`），并且绝不能把灰条的删除转发给平台——QQ 会把
+它当成对同序号内容消息的撤回。灰条只在本 relay 内删除。
+
 一条逻辑消息有多个媒体时，bridge 为每个媒体生成一条连续 Telegram message，共享持久化 `groupedId`；第一条携带文本 caption，其余文本为空。
 
 ## 5. History 分页
