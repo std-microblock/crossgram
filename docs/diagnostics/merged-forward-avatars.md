@@ -169,7 +169,9 @@ through `upload.getFile`; each one is a distinct real JPEG:
 | 。 | 34423 | `2be0e646561f` |
 | AAA伤感酷头子 | 47371 | `9fa16f6362c9` |
 
-Before the bridge release all four downloads were the same 971-byte default
+Every probe download asks for the first 128 KiB of the file, so the sizes above
+are that first chunk (the whole avatar is at least as large).  Before the
+bridge release all four downloads were the same complete 971-byte default
 avatar.  The archived face URL is also part of the participant fingerprint
 now, so a transcript that gained real avatars hands out new photo ids and
 clients do not keep showing the placeholder they cached earlier.
