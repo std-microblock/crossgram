@@ -24,18 +24,18 @@ reported bundle through the live adapter:
 
 - all 58 snapshots carry a sender avatar media
   (`avatar:user:qqnt-multi-forward-participant:<hash>:original-v1`);
-- every one of them resolves to the placeholder UIN `1094950020`, and the
-  three distinct senders it downloaded produced byte-identical payloads
-  (971 bytes, sha256 `f4da77884bee3c5c…`) — the QQ default avatar;
+- the record's own account is a placeholder: every snapshot repeats
+  `senderUin` `1094950020`, so the bridge's qlogo fallback produced one
+  byte-identical 971-byte default avatar (sha256 `f4da77884bee3c5c…`) for
+  every author;
 - the conversation the bundle belongs to ("橘橘橘子汁 | MicroBlock") and the
   relay account have real, distinct avatars (109114 / 59057 byte JPEGs).
 
-So QQ's archived records do not retain a usable per-author identity: unlike
-live messages, merged-forward records repeat a placeholder account and only
-keep the author's name and an opaque `avatarMeta` (see
-`resolveMultiForwardParticipants`). A transcript cannot invent an image the
-archive never had, and the relay now shows exactly what the adapter reports —
-the default avatar today — instead of replacing it with an empty one.
+QQ keeps the archived author elsewhere: `MsgRecord.multiTransInfo.fromFaceUrl`
+carries the avatar of the author of that record ("发送者的头像"), which is the
+per-author image the QQ client itself draws in a merged forward.  The bridge
+had never read that field, because the identity helper deliberately ignored
+the record's own sender account.
 
 The chat an archive was taken from is a different story: the adapter can
 resolve it (group avatar for a group history, contact avatar for a private
@@ -63,6 +63,23 @@ Relay (`packages/merged-forward`, `packages/bridge`,
   this feature does not own keep falling through to the ordinary bridge file
   routes, and an unavailable adapter avatar is retried on the next request
   instead of being cached as "no avatar".
+
+Bridge (`qqnt-bridge` 1.0.43, `multi-forward: show the avatar QQ archived
+beside each record`):
+
+- `MsgRecord.multiTransInfo` is now part of the kernel types, and
+  `resolveMultiForwardParticipants` reads `fromFaceUrl` from it: the archived
+  face URL joins the name and `avatarMeta` as the per-author identity
+  evidence, so the same author keeps one participant while a namesake with
+  another archived avatar becomes a separate one.
+- `getMultiForwardMessages` attaches that URL as the participant avatar
+  (`directAvatarMedia`, which the relay resolves without touching the bridge),
+  falling back to the placeholder account's qlogo avatar only when a record
+  carries no usable archived face URL.  A log line reports how many records of
+  one transcript had an archived avatar.
+- `packages/platform-crossgram` skips its legacy peer-avatar refresh for
+  locators that already carry `avatarUrl`, so an archived avatar no longer
+  costs a bridge round trip for the placeholder account.
 
 Android patcher: `CrossgramMergedForward` only knew the pre-rewrite
 `t.me/bridgechat_<id>` link, so `bridgebundle_<id>` links from the current
@@ -94,7 +111,12 @@ and resolves the username with the prefix it matched.
   user photo, a ranged chat photo and the card photo, while a location this
   feature does not own still reaches the following route.
 - `packages/platform-crossgram/src/bundle-avatar.test.ts` covers the adapter
-  lookup, its cache and its failure modes.
+  lookup, its cache and its failure modes, and `platform.test.ts` covers both
+  the legacy avatar refresh and the archived URL that skips it.
+- `qqnt-bridge` `src/qq-kernel.test.ts` covers the archived avatar path: records
+  that share a face URL stay one participant, a namesake with another archived
+  avatar becomes its own, and a record without a usable URL keeps the
+  placeholder avatar.
 - `packages/test-suite/src/login.e2e.test.ts` repeats the avatar assertions
   over a real MTProto socket, including the card thumbnail served through
   `inputPhotoFileLocation`.
@@ -117,19 +139,45 @@ transcript.
   senders, all 4 carrying `userProfilePhoto`, with the anchor message present
   and the transcript chat carrying `chatPhoto`.
 - `upload.getFile` over the real socket returned the chat avatar
-  (8192 bytes, JPEG), the sender avatar (971 bytes, PNG — the default avatar
-  QQ keeps for the archive) and the card thumbnail (8192 bytes, JPEG) through
-  `inputPeerPhotoFileLocation` / `inputPhotoFileLocation`.
+  (8192 bytes, JPEG), the card thumbnail (8192 bytes, JPEG) and a sender
+  avatar (971 bytes, PNG — the bridge's placeholder fallback at the time).
 
 Both avatar payloads arrive from the adapter, so the storage type is sniffed
-from the first chunk: QQ serves the archived default avatar as PNG even while
-the media claims `image/jpeg`.
+from the first chunk: the placeholder avatar came back as PNG even while the
+media claimed `image/jpeg`.
+
+## Archived avatars after the bridge fix (2026-09-24)
+
+`qqnt-bridge` v1.0.43 was released through GitHub Actions (Linux and Windows
+packaging passed) and installed on the bridge host with
+`update-qqnt-bridge.ps1 -Tag v1.0.43` (release asset SHA-256
+`48dec705c338a7e8dbe69758d9ee7d8d8de7b0b0c2c7205ad32d2560745243f9`).  QQ came
+back `ready=true` / `authenticated` on protocol 33 without a new scan, and the
+bridge reported the new evidence for the reported bundle:
+
+```text
+native API merged-forward avatars conversation=479613101 root=7688695746422337380 records=58 archivedAvatars=58
+```
+
+The same mtcute probe then downloaded every sender avatar of that transcript
+through `upload.getFile`; each one is a distinct real JPEG:
+
+| sender | bytes | sha256 (first 12) |
+| --- | --- | --- |
+| Kokoni | 109118 | `11073ba6e1d2` |
+| Velvet | 105669 | `7ca42e094978` |
+| 。 | 34423 | `2be0e646561f` |
+| AAA伤感酷头子 | 47371 | `9fa16f6362c9` |
+
+Before the bridge release all four downloads were the same 971-byte default
+avatar.  The archived face URL is also part of the participant fingerprint
+now, so a transcript that gained real avatars hands out new photo ids and
+clients do not keep showing the placeholder they cached earlier.
 
 ## Follow-ups
 
-- The placeholder avatars come from the bridge, which maps every archived
-  author to `senderUin`/qlogo. If QQ ever retains a per-author `senderUid` for
-  a bundle, the bridge should resolve that avatar through the kernel avatar
-  service instead; the relay needs no change to pick it up.
+- QQ can still answer a record without `multiTransInfo.fromFaceUrl`
+  (imported transcripts in some formats).  Those records keep the placeholder
+  account avatar, which is the only identity their archive holds.
 - Telegram Desktop still cannot draw per-sender avatars in a group history
   without a client patch; the relay already serves the photos it would need.
