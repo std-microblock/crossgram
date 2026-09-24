@@ -132,6 +132,24 @@ describe('request inbox dialog identity', () => {
       user._ === 'user' && user.id === rpc.peerTlId(REQUEST_INBOX_CONVERSATION_ID))
 
     expect(inboxUser?.bot).toBe(true)
+
+    // Clients only consider a bot's info loaded once `user_full.bot_info`
+    // arrives: Telegram Desktop's `HistoryInner::refreshAboutView` re-requests
+    // the whole full user on every `FullInfo` update while `BotInfo::inited` is
+    // false, which loops at round-trip speed for as long as a bot chat stays
+    // open. Every one of those replies also re-applies
+    // `user_full.notify_settings`, so the loop reverts a mute the client has not
+    // flushed yet and bot chats can never hold one.
+    const full = await rpc.getFullUser({
+      _: 'users.getFullUser',
+      id: {
+        _: 'inputUser', userId: rpc.peerTlId(REQUEST_INBOX_CONVERSATION_ID), accessHash: Long.ZERO,
+      },
+    })
+    expect(full.fullUser).toMatchObject({ _: 'userFull', botInfo: { _: 'botInfo' } })
+    expect(full.users).toEqual([
+      expect.objectContaining({ _: 'user', bot: true, botInfoVersion: 0 }),
+    ])
   })
 })
 

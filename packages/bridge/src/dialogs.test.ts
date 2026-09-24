@@ -1098,6 +1098,7 @@ describe('DialogRpc', () => {
       },
       users: [{ _: 'user', firstName: 'Alice' }],
     })
+    expect(full.fullUser).not.toHaveProperty('botInfo')
     const self = await rpc.getFullUser({
       _: 'users.getFullUser', id: { _: 'inputUserSelf' },
     })

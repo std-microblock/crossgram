@@ -90,6 +90,18 @@ describe('bridge synthetic peers', () => {
     expect(withPhoto.photo).toMatchObject({ _: 'userProfilePhoto', photoId: Long.fromNumber(5) })
   })
 
+  it('reports a non-negative bot info version for bots so clients allocate bot state', () => {
+    const bot = roundTrip(makeUser({ id: 9, firstName: 'Helper', bot: true })) as tl.RawUser
+    const human = roundTrip(makeUser({ id: 10, firstName: 'Alice' })) as tl.RawUser
+
+    // `bot` and `bot_info_version` share bit 14, which carries an int on the
+    // wire; clients treat the peer as a bot only for a non-negative version.
+    expect(bot.bot).toBe(true)
+    expect(bot.botInfoVersion).toBe(0)
+    expect(human.bot).toBe(false)
+    expect(human.botInfoVersion).toBeUndefined()
+  })
+
   it('gives users a non-zero access hash that survives TL serialization', () => {
     const user = makeUser({ id: 42, firstName: 'Alice' })
     const decoded = roundTrip(user) as tl.RawUser

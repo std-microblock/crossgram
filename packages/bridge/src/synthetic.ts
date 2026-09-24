@@ -74,6 +74,7 @@ export function makeUser(opts: {
   id: number
   self?: boolean
   bot?: boolean
+  botInfoVersion?: number
   contact?: boolean
   mutualContact?: boolean
   firstName: string
@@ -88,6 +89,12 @@ export function makeUser(opts: {
     flags: 0,
     self: opts.self,
     bot: opts.bot,
+    // `bot` and `bot_info_version` share bit 14 of `user.flags`: the bit always
+    // carries an int on the wire, and clients only allocate their bot info (and
+    // therefore show bot UI and stop treating the peer as a plain user) when
+    // that value is non-negative. Report version 0 like Telegram does for a bot
+    // whose info the client has not cached yet.
+    botInfoVersion: opts.bot ? (opts.botInfoVersion ?? 0) : undefined,
     premium: opts.premium,
     contact: opts.contact,
     mutualContact: opts.mutualContact,

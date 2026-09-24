@@ -1435,6 +1435,16 @@ export class DialogRpc {
         ...(about !== undefined ? { about } : {}),
         settings: { _: 'peerSettings' },
         notifySettings: await this._peerNotifySettings(peerId ?? this._session.userId),
+        // Bots share the `bot_info_version` flag slot with `bot` in the `user`
+        // object, and clients only treat a bot's info as loaded once
+        // `userFull.bot_info` arrives: Telegram Desktop's
+        // `HistoryInner::refreshAboutView` re-requests the whole full user on
+        // every `FullInfo` update while `BotInfo::inited` is false, which loops
+        // at round-trip speed for as long as the bot chat stays open. Each of
+        // those replies also re-applies `userFull.notify_settings`, so a mute
+        // the client has not flushed yet is reverted before
+        // `account.updateNotifySettings` is sent.
+        ...(user._ === 'user' && user.bot === true ? { botInfo: makeBotInfo(about) } : {}),
         commonChatsCount: 0,
       },
       chats: [],
@@ -6064,6 +6074,20 @@ function uniqueUsers(users: tl.RawUser[]): tl.RawUser[] {
 
 function uniqueProjectedMessages(messages: ProjectedMessage[]): ProjectedMessage[] {
   return [...new Map(messages.map((message) => [message.source.id, message])).values()]
+}
+
+/**
+ * The `userFull.bot_info` payload for a bot peer.
+ *
+ * Telegram always reports a description slot for bots (empty when the bot has
+ * none) and omits `user_id` unless the bot is managed by another user; the
+ * bridge only ever has a description to report.
+ */
+function makeBotInfo(description: string | undefined): tl.RawBotInfo {
+  return {
+    _: 'botInfo',
+    ...(description ? { description } : {}),
+  }
 }
 
 function uniqueChats(chats: tl.TypeChat[]): tl.TypeChat[] {
