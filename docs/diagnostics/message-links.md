@@ -25,7 +25,8 @@ hard-codes:
 - Telegram Android builds the same URL from `MessagesController.linkPrefix`
   (the same config field with the scheme stripped) and only treats
   `telegram.dog`, `telegram.me` and `t.me` hosts as internal in
-  `Browser.isInternalUri`; every other host goes to the browser.
+  `LinkManager.handleHttp` and `Browser.isInternalUri`; every other host goes to
+  the browser.
 
 So each "copy link" URL the advertised prefix produced was guaranteed to leave
 the client, while the rest of the relay had always hard-coded `t.me` for the
