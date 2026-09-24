@@ -1,7 +1,7 @@
 import { Bot, h, type Universal } from '@satorijs/core'
 import type { Context } from 'cordis'
 import {
-  probeImageDimensions, providerBelongsToAccount,
+  probeImageDimensions, providerBelongsToAccount, serviceActionText,
   type IMConversation, type IMConversationMember, type IMMediaInput, type IMMessage, type IMMessageInput, type IMMessagePart,
   type IMPlatform, type IMSticker, type IMStickerProvider, type IMStickerSendPlan, type IMTextEntity,
   type IngestResult, type JsonValue, type PlatformSession, type StickerProviderContext,
@@ -224,9 +224,8 @@ export class SatoriExporter {
     if (!platform || !session) throw new Error('Satori exporter platform session is not ready')
     const output: h[] = []
     if (message.replyToId) output.push(h.quote(message.replyToId))
-    if (message.content.serviceAction?.type === 'custom' && message.content.serviceAction.text) {
-      output.push(h.text(message.content.serviceAction.text))
-    }
+    const serviceText = serviceActionText(message.content.serviceAction)
+    if (serviceText) output.push(h.text(serviceText))
     for (const part of message.content.parts) {
       if (part.type === 'text') {
         output.push(...textElements(part))

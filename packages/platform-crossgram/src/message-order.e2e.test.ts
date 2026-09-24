@@ -2289,6 +2289,144 @@ describe('QQNT animated system-face E2E', () => {
   }, 30_000)
 })
 
+describe('QQNT join notice E2E', () => {
+  it('renders a QQ group join gray tip as a Telegram join service message', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    defineQQNTEventCheckpointModel(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const joinSession = { ...session, platformSessionId: 'qqnt-join-notice-e2e' }
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: joinSession.platformId,
+      platformSessionId: joinSession.platformSessionId,
+    })
+    const conversation = {
+      id: 'join-notice-group', kind: 'group' as const, title: 'Join notice group',
+      peerUid: 'join-notice-group', peerUin: '42', chatType: 2 as const,
+    }
+    const wireMessage = {
+      id: 'join-notice-1', conversationId: conversation.id, senderId: 'alice',
+      timestamp: 1_800_000_200, outgoing: false, msgSeq: '490200',
+      sender: { id: 'alice', name: 'Alice' },
+      serviceAction: {
+        type: 'members-joined' as const, text: 'Alice邀请Bob加入了群聊。',
+        members: [{ id: 'bob', name: 'Bob' }], actor: { id: 'alice', name: 'Alice' },
+      },
+      parts: [],
+    }
+
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    const server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    webSocketServer.on('connection', (webSocket) => {
+      webSocket.send(JSON.stringify({
+        id: '1', event: { type: 'message', conversation, message: wireMessage },
+      }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing join notice E2E address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    })
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [wireMessage] }))
+    // The joined member never sent a message in this session, so the relay has
+    // to resolve the profile the notice names before it can project the join.
+    vi.spyOn(platform, 'getUser').mockImplementation(async (_session, id) => ({
+      id, firstName: `Profile ${id}`,
+    }))
+    const store = new MessageStore(ctx.database)
+    const sent: tl.TypeUpdates[] = []
+    const manager = new UpdateManager(
+      ctx.database, new PlatformRegistry([[joinSession.platformId, platform]]), store,
+      (_authKeyId, update) => {
+        sent.push(update)
+        return 1
+      },
+    )
+    const complete = Promise.withResolvers<void>()
+    const unsubscribe = await platform.subscribe(joinSession, async (event) => {
+      if (event.type !== 'message') return
+      const result = await store.ingest(joinSession, event.conversation, event.message)
+      await manager.publish(joinSession, { event, result })
+      complete.resolve()
+    })
+    try {
+      await Promise.race([
+        complete.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('QQNT join notice E2E timed out')), 5_000)),
+      ])
+    } finally {
+      await unsubscribe()
+    }
+
+    const alice = await store.getUser(joinSession.platformId, 'alice')
+    const bob = await store.getUser(joinSession.platformId, 'bob')
+    expect(alice).toBeDefined()
+    expect(bob).toBeDefined()
+    // The notice's own sender keeps the profile it arrived with; only the member
+    // the notice names is resolved through the platform.
+    expect(alice).toMatchObject({ firstName: 'Alice' })
+    expect(bob).toMatchObject({ firstName: 'Profile bob' })
+    const payload = sent[0] as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
+    expect(update.message).toMatchObject({
+      _: 'messageService',
+      fromId: { _: 'peerUser', userId: alice!.id },
+      action: { _: 'messageActionChatAddUser', users: [bob!.id] },
+    })
+    // Telegram clients resolve the linked name from the payload users, so the
+    // invited member has to travel with the update.
+    expect(payload.users.map((user) => user.id)).toEqual(
+      expect.arrayContaining([alice!.id, bob!.id]),
+    )
+
+    const rpc = new DialogRpc(platform, joinSession, store)
+    const history = await rpc.getHistory({
+      _: 'messages.getHistory',
+      peer: {
+        _: 'inputPeerChannel', channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ZERO,
+      },
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    expect(history.messages).toMatchObject([{
+      _: 'messageService', action: { _: 'messageActionChatAddUser', users: [bob!.id] },
+    }])
+    expect(history.users.map((user) => user.id)).toEqual(
+      expect.arrayContaining([alice!.id, bob!.id]),
+    )
+  })
+})
+
 async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of source) chunks.push(Buffer.from(chunk))

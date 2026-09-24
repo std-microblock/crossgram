@@ -2242,6 +2242,51 @@ describe('UpdateManager', () => {
     expect(() => roundTrip(difference)).not.toThrow()
   })
 
+  it('publishes group join notices as native join service messages', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'join-group', kind: 'group', title: 'Join Group' }
+    const message: IMMessage = {
+      id: 'join-1', conversationId: conversation.id, senderId: 'alice', timestamp: 60,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: {
+        parts: [],
+        serviceAction: {
+          type: 'members-joined', text: 'Alice邀请Bob加入了群聊。',
+          members: [{ id: 'bob', name: 'Bob' }], actor: { id: 'alice', name: 'Alice' },
+        },
+      },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = sent[0].update as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
+    const alice = await store.getUser(session.platformId, 'alice')
+    const bob = await store.getUser(session.platformId, 'bob')
+    expect(update.message).toMatchObject({
+      _: 'messageService',
+      fromId: { _: 'peerUser', userId: alice!.id },
+      action: { _: 'messageActionChatAddUser', users: [bob!.id] },
+    })
+    // The joined member is not the notice's sender, so the payload has to carry
+    // the member itself for clients to resolve the linked name.
+    expect(payload.users.map((user) => user.id)).toEqual(expect.arrayContaining([alice!.id, bob!.id]))
+    expect(() => roundTrip(payload)).not.toThrow()
+
+    const difference = await manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference', force: true,
+      channel: { _: 'inputChannel', channelId: stableId('peer:join-group'), accessHash: Long.ZERO },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 1, limit: 100,
+    })
+    expect(difference).toMatchObject({
+      _: 'updates.channelDifference',
+      newMessages: [{
+        _: 'messageService', action: { _: 'messageActionChatAddUser', users: [bob!.id] },
+      }],
+    })
+    expect(() => roundTrip(difference)).not.toThrow()
+  })
+
   it('recovers retained updates without returning unsupported differenceTooLong across a pruned pts gap', async () => {
     const { ctx, store } = await createHarness(3)
     const manager = new UpdateManager(

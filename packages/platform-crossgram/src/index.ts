@@ -7,7 +7,7 @@ import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import {
   IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
-  messagePartText, resolvePlatformPluginId, stableId,
+  messagePartText, resolvePlatformPluginId, serviceActionText, stableId,
   type IMConversation, type IMConversationMember, type IMConversationMemberPage, type IMConversationRef, type IMDialogPage, type IMGroupFilePage,
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
   type IMMediaInput, type IMMediaUploadPreparation, type IMMediaUploadProbe,
@@ -36,7 +36,7 @@ type QQOutboundMedia = NonNullable<Parameters<QQNTClient['sendMessage']>[2]>[num
 const MIN_PROTOCOL_VERSION = 19
 // Keep the lower bound stable while accepting additive bridge revisions so account provisioning does
 // not fail closed before Telegram QR approval can complete.
-const MAX_PROTOCOL_VERSION = 33
+const MAX_PROTOCOL_VERSION = 34
 /** Poke bursts a single request may send; QQ treats longer bursts as flooding. */
 const QQ_POKE_MAX_COUNT = 10
 
@@ -457,7 +457,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
               this.logger?.debug(
                 'WebSocket event filtered session=%s reason=gray-tip streamEventId=%s message=%s text=%s',
                 platformSessionId, eventId ?? '<none>', event.message.id,
-                event.message.serviceAction?.text ?? '',
+                serviceActionText(event.message.serviceAction),
               )
               return
             }
@@ -2307,7 +2307,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   private isFilteredGrayTip(message: WireMessage): boolean {
-    const text = message.serviceAction?.text
+    const text = serviceActionText(message.serviceAction)
     return Boolean(text && this.grayTipFilters.some((filter) => filter && text.includes(filter)))
   }
 

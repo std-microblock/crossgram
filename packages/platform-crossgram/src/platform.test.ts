@@ -591,6 +591,33 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('maps a QQ join notice into a structured join service action', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: [{
+      id: 'join-tip', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+      sender: { id: 'alice', name: 'Alice' },
+      serviceAction: {
+        type: 'members-joined' as const, text: 'Alice邀请Bob加入了群聊。',
+        members: [{ id: 'bob', name: 'Bob' }], actor: { id: 'alice', name: 'Alice' },
+      },
+      parts: [],
+    }] }))
+
+    await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
+      messages: [{
+        id: 'join-tip',
+        content: {
+          serviceAction: {
+            type: 'members-joined', text: 'Alice邀请Bob加入了群聊。',
+            members: [{ id: 'bob', name: 'Bob' }], actor: { id: 'alice', name: 'Alice' },
+          },
+          parts: [],
+        },
+      }],
+    })
+  })
+
   it('preserves structured mini-app and share-card metadata instead of flattening it to text', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 0 }))
@@ -764,8 +791,8 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getAccount()).rejects.toThrow('not ready')
   })
 
-  it('rejects bridge protocols outside the supported 19-33 range', async () => {
-    for (const protocolVersion of [18, 34, 19.5, Number.NaN, '19', undefined]) {
+  it('rejects bridge protocols outside the supported 19-34 range', async () => {
+    for (const protocolVersion of [18, 35, 19.5, Number.NaN, '19', undefined]) {
       const platform = new QQNTPlatform()
       const status = {
         protocolVersion, ready: true, selfUin: '10001', selfUid: 'u_self',
@@ -773,7 +800,7 @@ describe('QQNTPlatform mapping', () => {
       platform.client.status = vi.fn(async () => status)
       platform.client.getUser = vi.fn()
 
-      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-33')
+      await expect(platform.getAccount()).rejects.toThrow('supported range is 19-34')
       expect(platform.client.getUser).not.toHaveBeenCalled()
     }
   })

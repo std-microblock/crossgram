@@ -205,6 +205,30 @@ export interface WireStickerPack extends WireStickerPackSummary {
   stickers: WireSticker[]
 }
 
+/** Member named by a QQ service notice, such as a group member joining. */
+export interface WireServiceMember {
+  /** Relay-side QQ user id (UID) of the member. */
+  id: string
+  /** Display name carried by the notice, used until the profile is resolved. */
+  name?: string
+}
+
+/**
+ * QQ wording is kept beside the structured join details: the relay renders
+ * Telegram's native join action when it can name every member, and falls back
+ * to the wording otherwise.
+ */
+export type WireServiceAction =
+  | { type: 'custom', text: string }
+  | { type: 'phone-call' }
+  | {
+      type: 'members-joined'
+      text: string
+      members: WireServiceMember[]
+      actor?: WireServiceMember
+      viaInviteLink?: true
+    }
+
 export interface WireMessage {
   id: string
   sourceIds?: string[]
@@ -226,7 +250,7 @@ export interface WireMessage {
   /** Correlates a local HTTP send with its QQ listener echo. */
   originRequestId?: string
   replyToId?: string
-  serviceAction?: { type: 'custom', text: string }
+  serviceAction?: WireServiceAction
   parts: Array<
     | WireTextPart
     | { type: 'markdown', content: string }

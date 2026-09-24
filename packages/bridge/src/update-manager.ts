@@ -10,7 +10,7 @@ import {
 } from './dialogs.js'
 import { toUser, type MessageStore } from './message-store.js'
 import {
-  cardUrl, messageMentionsUser, messagePartText, telegramReplyToMessageId,
+  cardUrl, messageMentionsUser, messagePartText, serviceActionMembers, telegramReplyToMessageId,
   type IMConversation, type IMMessage, type IMPlatform, type IMReactionDefinition,
   type PlatformSession,
 } from './platform.js'
@@ -113,6 +113,55 @@ export class UpdateManager {
           lastName: user.lastName,
           username: user.username,
           phone: row.platformUserId === session.userId ? session.virtualPhone : undefined,
+          photo: user.avatar ? makeUpdateAvatar(user.avatar.id, this._dcId, 'user') : undefined,
+        })
+      }),
+    }
+  }
+
+  /**
+   * Materialize the members a service notice names.
+   *
+   * A join notice can reference a member that has never produced a message, so
+   * the notice is unusable until the profile is persisted and the Telegram
+   * user id exists. Profile lookup failures fall back to the name QQ attached
+   * to the notice so the notice still renders instead of dropping the update.
+   */
+  private async _hydrateServiceActionMembers(
+    session: PlatformSession,
+    message: IMMessage,
+    covered: Iterable<string> = [],
+  ): Promise<{ ids: Map<string, number>, users: tl.RawUser[] }> {
+    const known = new Set(covered)
+    const members = new Map(serviceActionMembers(message.content.serviceAction)
+      .filter((member) => member.id && member.id !== session.userId && !known.has(member.id))
+      .map((member) => [member.id, member]))
+    if (!members.size) return { ids: new Map(), users: [] }
+    const platform = this._registry.require(session.platformId)
+    const profiles = await Promise.all([...members.values()].map(async (member) => {
+      try {
+        const profile = await platform.getUser?.(session, member.id)
+        if (profile) return profile
+      } catch (error) {
+        this._onTrace?.(
+          'service notice member profile lookup failed platform=%s session=%s user=%s error=%s',
+          session.platformId, session.platformSessionId, member.id, String(error),
+        )
+      }
+      const stored = await this._store.getUser(session.platformId, member.id)
+      if (stored) return toUser(stored)
+      return { id: member.id, firstName: member.name ?? member.id }
+    }))
+    const rows = await this._store.upsertUsers(session, profiles)
+    return {
+      ids: new Map(rows.map((row) => [row.platformUserId, row.id])),
+      users: rows.map((row) => {
+        const user = toUser(row)
+        return makeUser({
+          id: row.id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          username: user.username,
           photo: user.avatar ? makeUpdateAvatar(user.avatar.id, this._dcId, 'user') : undefined,
         })
       }),
@@ -644,6 +693,10 @@ export class UpdateManager {
     const userIds = new Map([selfRow, senderRow, ...(directPeerRow ? [directPeerRow] : [])]
       .map((row) => [row.platformUserId, row.id]))
     for (const [id, tlId] of reactionUsers.ids) userIds.set(id, tlId)
+    // Members the notice names may already be covered by the sender or a
+    // reaction actor; those rows keep the profile they were sent with.
+    const noticeUsers = await this._hydrateServiceActionMembers(session, visibleMessage, userIds.keys())
+    for (const [id, tlId] of noticeUsers.ids) userIds.set(id, tlId)
     let pts = delivery.pts - delivery.ptsCount
     const addedTlMessageIds = new Set(result.addedTlMessageIds)
     const updates: tl.TypeUpdate[] = []
@@ -785,6 +838,7 @@ export class UpdateManager {
             unreadMention: mentioned,
             recalled: projectedSource.recalled,
             recalledVisible: projectedSource.recalled && this._recalledMessageMode === 'show',
+            userId: (platformUserId) => userIds.get(platformUserId),
           }),
           chats: draft.chats,
         }
@@ -846,7 +900,7 @@ export class UpdateManager {
       photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
     })
     const users = uniqueUpdateUsers(senderRow.id === selfRow.id
-      ? [selfUser, ...reactionUsers.users]
+      ? [selfUser, ...reactionUsers.users, ...noticeUsers.users]
       : [selfUser, makeUser({
           id: senderRow.id,
           bot: sender.metadata?.bot === true || undefined,
@@ -854,7 +908,7 @@ export class UpdateManager {
           lastName: sender.lastName,
           username: sender.username,
           photo: sender.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
-        }), ...reactionUsers.users])
+        }), ...reactionUsers.users, ...noticeUsers.users])
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []

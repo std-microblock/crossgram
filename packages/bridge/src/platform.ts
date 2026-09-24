@@ -396,11 +396,41 @@ export type IMMessageInputPart =
   | { type: 'media', media: IMMediaInput }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMStickerSendPlan }
 
+/** Member named by a platform service notice, such as a group member joining. */
+export interface IMServiceMember {
+  /** Platform user id of the member. */
+  id: string
+  /** Display name carried by the notice, used until the profile resolves. */
+  name?: string
+}
+
+/**
+ * Service notice projected as a Telegram `MessageService`.
+ *
+ * `members-joined` keeps both the platform wording and the members it names so
+ * the relay can render Telegram's native join action and still fall back to the
+ * wording when the platform cannot name every member.
+ */
+export type IMMessageServiceAction =
+  | { type: 'custom', text: string }
+  | { type: 'phone-call', duration?: number }
+  | {
+      type: 'members-joined'
+      /** Platform wording, used when the join action cannot be projected. */
+      text: string
+      /** Members the notice says joined. */
+      members: IMServiceMember[]
+      /** Member that invited or added them; absent when the platform names nobody. */
+      actor?: IMServiceMember
+      /** The members joined through a shared invite link or QR code. */
+      viaInviteLink?: boolean
+    }
+
 export interface IMMessageContent<TMediaLocator = unknown> {
   parts: IMMessagePart<TMediaLocator>[]
   inlineKeyboard?: IMInlineKeyboard
   /** Platform service/system message rendered by Telegram as a MessageService. */
-  serviceAction?: { type: 'custom', text: string } | { type: 'phone-call', duration?: number }
+  serviceAction?: IMMessageServiceAction
 }
 
 export interface IMInlineKeyboard {
@@ -1006,6 +1036,21 @@ export function isServiceMessage(
   message: Pick<IMProjectableMessage<unknown>, 'content'>,
 ): boolean {
   return message.content.serviceAction !== undefined && message.content.serviceAction !== null
+}
+
+/** Every platform user a service notice names, the actor first. */
+export function serviceActionMembers(
+  action: IMMessageServiceAction | undefined | null,
+): IMServiceMember[] {
+  if (action?.type !== 'members-joined') return []
+  return [...(action.actor ? [action.actor] : []), ...action.members]
+}
+
+/** Wording a service notice carries; empty for notices that only act. */
+export function serviceActionText(
+  action: IMMessageServiceAction | undefined | null,
+): string {
+  return action && 'text' in action ? action.text : ''
 }
 
 export function cardUrl(card: IMMessageCard): string | undefined {

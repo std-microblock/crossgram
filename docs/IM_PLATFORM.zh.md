@@ -175,9 +175,28 @@ sendMessage(session, conversation, {
 
 `parts` 有序，允许纯文字、单图、图文、多图和文件混合。adapter 返回的 `IMMessage` 必须包含平台最终确认的 message/media ID，不应复用客户端临时 ID。
 
-平台系统提示使用 `content.serviceAction`，不得伪装成普通 text part。当前通用表达为
+平台系统提示使用 `content.serviceAction`，不得伪装成普通 text part。通用表达为
 `{ type: 'custom', text }`，bridge 将其投影为 Telegram `messageService` / `messageActionCustomAction`，
 因此历史和实时 update 都由客户端按灰字系统消息渲染。系统消息的 `parts` 可以为空。
+`{ type: 'phone-call' }` 投影为 `messageActionPhoneCall`。
+
+平台能点名成员的入群提示应改用结构化表达，让 Telegram 客户端渲染原生入群服务消息
+（成员名字可点击、可打开资料）：
+
+```ts
+{
+  type: 'members-joined'
+  text: string        // 平台原文，无法投影原生动作时回退成 custom
+  members: Array<{ id: string, name?: string }>   // 入群成员
+  actor?: { id: string, name?: string }           // 邀请/拉人者，平台未点名时省略
+  viaInviteLink?: boolean                         // 通过分享的二维码或邀请链接入群
+}
+```
+
+bridge 把 `members-joined` 投影为 `messageActionChatAddUser`（`viaInviteLink` 时为
+`messageActionChatJoinedByLink`），并保证 `members`/`actor` 里的用户在这一条 update 与历史
+响应中都能被客户端解析；成员资料缺失时按 `name` 建一条占位用户，连 `name` 都没有才退回
+`custom` 文案。
 
 QQ 的灰条是它伴随的那条消息的 sidecar：QQ 会给灰条分配同一条 `msgSeq`，并把对灰条的回复和
 撤回都按该序号解析到那条内容消息。因此 bridge 需要把落在灰条上的回复目标改指到同序号的内容

@@ -152,6 +152,30 @@ interface WireConversation {
 ### 3.2 消息 `message`
 
 ```ts
+/** 服务通知点名的成员，例如入群提示里的新成员。 */
+interface WireServiceMember {
+  /** 转发侧 QQ 用户 id（UID）。 */
+  id: string
+  /** 通知携带的显示名，在资料解析出来前使用。 */
+  name?: string
+}
+
+type WireServiceAction =
+  | { type: 'custom', text: string }
+  | { type: 'phone-call' }
+  | {
+      /** QQ 群成员入群（`groupElement.memberAdd`），对应 Telegram 原生入群服务消息。 */
+      type: 'members-joined'
+      /** QQ 原文，用于无法投影成原生入群动作时回退。 */
+      text: string
+      /** 通知里声明的入群成员。 */
+      members: WireServiceMember[]
+      /** 邀请或拉人者；QQ 未点名时省略。 */
+      actor?: WireServiceMember
+      /** 成员通过分享的二维码/邀请链接入群。 */
+      viaInviteLink?: boolean
+    }
+
 interface WireMessage {
   id: string
   sourceIds?: string[]
@@ -171,7 +195,7 @@ interface WireMessage {
   telegramReplyToMessageId?: number
   originRequestId?: string
   replyToId?: string
-  serviceAction?: { type: 'custom', text: string }
+  serviceAction?: WireServiceAction
   parts: Array<
     | WireTextPart
     | { type: 'markdown', content: string }

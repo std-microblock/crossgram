@@ -5,7 +5,7 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
-import { DialogRpc, stableId } from './dialogs.js'
+import { DialogRpc, projectTlMessage, stableId } from './dialogs.js'
 import { legacyInlineCustomEmojiDocumentId, ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
 import type { SystemPeerService } from './system-peer.js'
@@ -467,6 +467,116 @@ describe('DialogRpc', () => {
       _: 'messageService', action: { _: 'messageActionCustomAction', message: 'Alice joined the group' },
     }])
     expect(() => wireRoundTrip(history)).not.toThrow()
+  })
+
+  it('projects group join notices as native join service messages', async () => {
+    const conversation = { id: 'join-group', kind: 'group' as const, title: 'Join Group' }
+    const joined: IMMessage = {
+      id: 'join-joined', conversationId: conversation.id, senderId: 'bob', timestamp: 1_700_000_000,
+      sender: { id: 'bob', firstName: 'Bob' },
+      content: {
+        parts: [],
+        serviceAction: {
+          type: 'members-joined', text: 'Bob加入了群聊。', members: [{ id: 'bob', name: 'Bob' }],
+        },
+      },
+    }
+    const invited: IMMessage = {
+      id: 'join-invited', conversationId: conversation.id, senderId: 'alice', timestamp: 1_700_000_010,
+      sender: { id: 'alice', firstName: 'Alice' },
+      content: {
+        parts: [],
+        serviceAction: {
+          type: 'members-joined', text: 'Alice邀请Carol加入了群聊。',
+          members: [{ id: 'carol', name: 'Carol' }], actor: { id: 'alice', name: 'Alice' },
+        },
+      },
+    }
+    const linked: IMMessage = {
+      id: 'join-linked', conversationId: conversation.id, senderId: 'carol', timestamp: 1_700_000_020,
+      sender: { id: 'carol', firstName: 'Carol' },
+      content: {
+        parts: [],
+        serviceAction: {
+          type: 'members-joined', text: 'Carol通过扫描你分享的二维码加入了群聊。',
+          members: [{ id: 'carol', name: 'Carol' }], actor: { id: 'me' }, viaInviteLink: true,
+        },
+      },
+    }
+    const names: Record<string, string> = { alice: 'Alice', bob: 'Bob', carol: 'Carol', me: 'Current' }
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0, lastMessage: linked }] } },
+      async getHistory() { return { messages: [linked, invited, joined] } },
+      async getUser(_session, id) {
+        const name = names[id]
+        return name ? { id, firstName: name } : null
+      },
+    }
+    const rpc = new DialogRpc(platform, session)
+    const userId = async (id: string) => await rpc.userTlId(id)
+    // The session's own user is projected from the session identity, not from a lookup.
+    const selfId = stableId(`self:${session.platformSessionId}`)
+    const history = await rpc.getHistory({
+      _: 'messages.getHistory',
+      peer: {
+        _: 'inputPeerChannel', channelId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO,
+      },
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+
+    expect(history.messages).toMatchObject([
+      {
+        _: 'messageService',
+        fromId: { _: 'peerUser', userId: await userId('carol') },
+        action: { _: 'messageActionChatJoinedByLink', inviterId: selfId },
+      },
+      {
+        _: 'messageService',
+        fromId: { _: 'peerUser', userId: await userId('alice') },
+        action: { _: 'messageActionChatAddUser', users: [await userId('carol')] },
+      },
+      {
+        _: 'messageService',
+        fromId: { _: 'peerUser', userId: await userId('bob') },
+        action: { _: 'messageActionChatAddUser', users: [await userId('bob')] },
+      },
+    ])
+    // Clients resolve the linked names from the response users, so every
+    // member the notices name has to be part of it.
+    const userIds = new Set(history.users.map((user) => user.id))
+    for (const id of ['alice', 'bob', 'carol']) {
+      expect(userIds.has(await userId(id)), id).toBe(true)
+    }
+    expect(userIds.has(selfId)).toBe(true)
+    expect(() => wireRoundTrip(history)).not.toThrow()
+  })
+
+  it('falls back to the QQ wording when a join notice cannot name its members', () => {
+    const message = projectTlMessage({
+      conversation: { id: 'group', kind: 'group', title: 'Group' },
+      source: {
+        id: 'join', conversationId: 'group', senderId: 'bob', timestamp: 1_700_000_000,
+        content: {
+          parts: [],
+          serviceAction: {
+            type: 'members-joined', text: 'Bob加入了群聊。', members: [{ id: 'bob', name: 'Bob' }],
+          },
+        },
+      },
+      tlId: 42, ordinal: 0,
+      fromId: { _: 'peerUser', userId: 7 },
+    })
+    expect(message).toMatchObject({
+      _: 'messageService',
+      action: { _: 'messageActionCustomAction', message: 'Bob加入了群聊。' },
+    })
   })
 
   it('projects empty default banned rights through channel discovery and full-info RPCs', async () => {

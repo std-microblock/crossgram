@@ -3,12 +3,12 @@ import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import {
   cardUrl, IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
-  isArticleMessage, isServiceMessage, messageMentionsUser, messagePartText, messageText, telegramMessageId,
-  telegramReplyToMessageId,
+  isArticleMessage, isServiceMessage, messageMentionsUser, messagePartText, messageText, serviceActionMembers,
+  serviceActionText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput, type IMMediaUploadProbe,
-  type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
-  type IMReactionDefinition, type IMReactionSummary, type IMTextEntity, type IMTransferProgress, type IMUser,
+  type IMEvent, type IMMessage, type IMMessageInput, type IMMessageServiceAction, type IMPlatform, type IMReactionActor, type IMReactionContext,
+  type IMReactionDefinition, type IMReactionSummary, type IMServiceMember, type IMTextEntity, type IMTransferProgress, type IMUser,
   type IMProjectableMessage, type IMConversationMemberModeration, type JsonValue, type PlatformSession,
 } from './platform.js'
 import { qqMessageSequenceFromMetadata, qqReplySequenceFromMetadata } from './message-id.js'
@@ -3668,7 +3668,12 @@ export class DialogRpc {
               avatar: source.conversation.avatar,
             })]
       : source.lastMessage
-        ? [await this._getMessageSender(source.lastMessage)]
+        ? [
+            await this._getMessageSender(source.lastMessage),
+            ...await Promise.all(this._serviceMemberUsers(
+              source.lastMessage, [source.lastMessage.senderId],
+            ).map((member) => this._getPeerUser(member.id, member.name))),
+          ]
         : []
     const chat = source.conversation.kind === 'direct' ? undefined : this._makeChat(source.conversation)
     const unpersistedReadInboxMaxId = source.unreadCount > 0 && source.readInboxMaxMessage && !this._store
@@ -4313,6 +4318,9 @@ export class DialogRpc {
       source,
       chats: [] as tl.TypeChat[],
     }
+    // A join service message names members the conversation may never have
+    // seen. Persist them first so the Telegram projection can reference them.
+    await this._resolveServiceMembers(source)
     const fallback = () => {
       const projectedSource = draft.source as IMMessage
       const sticker = projectedSource.content.parts.find((part) => part.type === 'sticker')
@@ -4357,6 +4365,9 @@ export class DialogRpc {
           topicId: this._topicReplyHeader(conversation, tlId)?.replyToTopId,
           mentioned: item.ordinal === 0 && this._messageMentioned(projectedSource, reply?.replyToMsgId),
           unreadMention: item.unreadMention,
+          userId: (platformUserId) => platformUserId === this._session.userId
+            ? this._selfId
+            : this._userToTl.get(platformUserId),
         }),
         chats: draft.chats,
       }
@@ -4888,18 +4899,58 @@ export class DialogRpc {
   private async _messageSenders(messages: readonly IMMessage<any>[]): Promise<tl.RawUser[]> {
     const senders = new Map<string, IMMessage<any>>()
     for (const message of messages) senders.set(message.senderId, message)
-    return Promise.all([...senders.values()].map((message) => this._getMessageSender(message)))
+    const resolved = await Promise.all([...senders.values()].map((message) => this._getMessageSender(message)))
+    const referenced = new Map<string, IMServiceMember>()
+    for (const message of messages) {
+      for (const member of this._serviceMemberUsers(message, senders.keys())) {
+        if (!referenced.has(member.id)) referenced.set(member.id, member)
+      }
+    }
+    return [
+      ...resolved,
+      ...await Promise.all([...referenced.values()].map(
+        (member) => this._getPeerUser(member.id, member.name),
+      )),
+    ]
+  }
+
+  /** Members a service notice names, excluding ids already covered elsewhere. */
+  private _serviceMemberUsers(
+    message: IMMessage<any>,
+    exclude: Iterable<string> = [],
+  ): IMServiceMember[] {
+    const covered = new Set(exclude)
+    const members = new Map<string, IMServiceMember>()
+    for (const member of serviceActionMembers(message.content.serviceAction)) {
+      if (!member.id || member.id === this._session.userId || covered.has(member.id)) continue
+      if (!members.has(member.id)) members.set(member.id, member)
+    }
+    return [...members.values()]
+  }
+
+  /**
+   * Persist every member a service notice names.
+   *
+   * Join notices reference members who may never have sent a message, so the
+   * projection cannot allocate their Telegram ids until a profile row exists.
+   */
+  private async _resolveServiceMembers(message: IMMessage<any>): Promise<void> {
+    const members = this._serviceMemberUsers(message)
+    if (!members.length) return
+    await Promise.all(members.map((member) => this._getPeerUser(member.id, member.name)))
   }
 
   private async _messageUsers(message: IMMessage<any>): Promise<tl.RawUser[]> {
     const users = new Map<number, tl.RawUser>()
     const sender = await this._getMessageSender(message)
     users.set(sender.id, sender)
+    const noticeNames = new Map(serviceActionMembers(message.content.serviceAction)
+      .map((member) => [member.id, member.name]))
     for (const platformUserId of messageReferencedUserIds(message)) {
       if (platformUserId === message.senderId) continue
       const user = platformUserId === this._session.userId
         ? this._makeSelfUser()
-        : await this._getPeerUser(platformUserId)
+        : await this._getPeerUser(platformUserId, noticeNames.get(platformUserId))
       users.set(user.id, user)
     }
     return [...users.values()]
@@ -5990,6 +6041,8 @@ export function projectTlMessage(options: {
   topicId?: number
   mentioned?: boolean
   unreadMention?: boolean
+  /** Maps a platform user id to its Telegram id for service notices. */
+  userId?: (platformUserId: string) => number | undefined
 }): tl.TypeMessage {
   const {
     conversation, source, tlId, ordinal,
@@ -6015,9 +6068,9 @@ export function projectTlMessage(options: {
         : { _: 'peerChannel', channelId: conversationId! }),
       replyTo,
       date: source.timestamp,
-      action: source.content.serviceAction.type === 'phone-call'
-        ? { _: 'messageActionPhoneCall', callId: Long.fromNumber(stableId('phone-call:' + source.id)) }
-        : { _: 'messageActionCustomAction', message: source.content.serviceAction.text ?? '' },
+      action: makeTlServiceAction(
+        source.content.serviceAction, source.id, options.userId,
+      ),
     } as tl.RawMessageService
   }
   const text = ordinal === 0 ? messageText(source) : ''
@@ -6040,6 +6093,34 @@ export function projectTlMessage(options: {
     reactions,
     replyMarkup: ordinal === 0 ? makeTlInlineKeyboard(source.content.inlineKeyboard) : undefined,
   } as tl.RawMessage
+}
+
+/**
+ * Telegram action a platform service notice maps to.
+ *
+ * A join notice becomes Telegram's own join service message so clients link the
+ * joined member; anything the notice cannot name keeps platform's wording as a
+ * custom action instead of losing the notice.
+ */
+function makeTlServiceAction(
+  service: IMMessageServiceAction,
+  messageId: string,
+  userId?: (platformUserId: string) => number | undefined,
+): tl.TypeMessageAction {
+  if (service.type === 'phone-call') {
+    return { _: 'messageActionPhoneCall', callId: Long.fromNumber(stableId('phone-call:' + messageId)) }
+  }
+  if (service.type === 'members-joined') {
+    const members = service.members.map((member) => userId?.(member.id))
+    const actor = service.actor ? userId?.(service.actor.id) : undefined
+    if (members.length > 0 && members.every((id): id is number => id !== undefined)
+      && (!service.actor || actor !== undefined)) {
+      return service.viaInviteLink
+        ? { _: 'messageActionChatJoinedByLink', inviterId: actor ?? 0 }
+        : { _: 'messageActionChatAddUser', users: members }
+    }
+  }
+  return { _: 'messageActionCustomAction', message: service.text ?? '' }
 }
 
 function makeTlInlineKeyboard(
@@ -6199,6 +6280,7 @@ function selectHistoryWindow(
 function messageReferencedUserIds(message: IMMessage): string[] {
   const ids = new Set([message.senderId])
   if (message.sender) ids.add(message.sender.id)
+  for (const member of serviceActionMembers(message.content.serviceAction)) ids.add(member.id)
   for (const part of message.content.parts) {
     if (part.type !== 'text') continue
     for (const entity of part.entities ?? []) {
