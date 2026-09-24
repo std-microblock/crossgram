@@ -11,6 +11,20 @@ function roundTrip(object: tl.TlObject): tl.TlObject {
 }
 
 describe('bridge MTProto config', () => {
+  it('advertises an internal-links prefix the clients resolve on their own', () => {
+    const prefix = (makeConfig(1) as tl.RawConfig).meUrlPrefix
+
+    // Clients build "copy link", share, and public link URLs from
+    // `me_url_prefix`, but only keep the URLs their own internal-link grammar
+    // knows inside themselves: Telegram Desktop's `Core::TryConvertUrlToLocal`
+    // and Telegram Android's `Browser.isInternalUri` accept `t.me`,
+    // `telegram.me` and `telegram.dog` alone, and Telegram Desktop also
+    // requires the trailing slash. Every other domain sends the click to a
+    // browser, where a Crossgram link cannot resolve.
+    expect(prefix).toMatch(/^https:\/\/(?:t\.me|telegram\.me|telegram\.dog)\/$/u)
+    expect(prefix).toBe('https://t.me/')
+  })
+
   it('publishes only the configured DC at the default bridge endpoint', () => {
     const config = makeConfig(1) as tl.RawConfig
 

@@ -19,6 +19,21 @@ export function parseEndpoint(endpoint: string): Endpoint {
   return { host, port }
 }
 
+/**
+ * `me_url_prefix`: the domain clients build "copy link", share, and public
+ * link URLs from.
+ *
+ * This value only decides how a client *writes* a link: whether the client
+ * keeps the resulting URL inside itself is decided by the internal-link grammar
+ * each client hard-codes (`t.me`, `telegram.me` and `telegram.dog` in
+ * Telegram Desktop's `Core::TryConvertUrlToLocal` and Telegram Android's
+ * `Browser.isInternalUri`; Telegram Desktop also requires the trailing slash).
+ * For any other domain — `https://my.telegram.org/`, as this bridge used to
+ * advertise — every "copy link" URL opens in a browser instead of resolving to
+ * the linked message through this relay.
+ */
+export const meUrlPrefix = 'https://t.me/'
+
 /** Synthesized `config` advertising this bridge's configured DC endpoints. */
 export function makeConfig(
   dcId: number,
@@ -41,8 +56,8 @@ export function makeConfig(
     pushChatPeriodMs: 60000, pushChatLimit: 2, editTimeLimit: 172800, revokeTimeLimit: 172800,
     revokePmTimeLimit: 172800, ratingEDecay: 1000, stickersRecentLimit: 200, channelsReadMediaPeriod: 86400,
     tmpSessions: 0, callReceiveTimeoutMs: 30000, callRingTimeoutMs: 90000, callConnectTimeoutMs: 30000,
-    callPacketTimeoutMs: 10000, meUrlPrefix: 'https://my.telegram.org/', captionLengthMax: 1024,
-    messageLengthMax: 4096, webfileDcId: dcId, suggestedLangCode: '', langPackVersion: 0,
+    callPacketTimeoutMs: 10000, meUrlPrefix, captionLengthMax: 1024, messageLengthMax: 4096,
+    webfileDcId: dcId, suggestedLangCode: '', langPackVersion: 0,
     baseLangPackVersion: 0, reactionsDefault: { _: 'reactionEmpty' }, autologinToken: '',
   } as unknown as tl.TlObject
 }
