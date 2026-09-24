@@ -282,6 +282,133 @@ describe('conversation kinds', () => {
     expect(actionCalls).toEqual(['delete:group:message-group:true'])
   })
 
+  it('removes a QQ gray tip locally instead of recalling the message sharing its sequence', async () => {
+    const limitedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        messageActions: {
+          ...platform.capabilities.messageActions!,
+          delete: {
+            own: { supported: true, maxAgeSeconds: 120 },
+            others: { supported: true, maxAgeSeconds: 120 },
+          },
+        },
+      },
+    }
+    const memberPlatform: IMPlatform = {
+      ...limitedPlatform,
+      async getConversationMember(localSession, target, userId) {
+        const member = await platform.getConversationMember!(localSession, target, userId)
+        return userId === localSession.userId && member
+          ? { ...member, role: 'member' as const, permissions: { ...member.permissions, deleteAnyMessage: false } }
+          : member
+      },
+    }
+    const { store, rpc, localEvents, localDeliveryOptions } = await createRpc(
+      memberPlatform, { publishLocalEvents: true },
+    )
+    await rpc.getDialogs(dialogsRequest())
+    const conversation = conversations.find((item) => item.id === 'group')!
+    const channel = {
+      _: 'inputChannel' as const, channelId: stableId('peer:group'), accessHash: Long.ZERO,
+    }
+    const content: IMMessage = {
+      id: 'shared-sequence-content', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      metadata: { qqMsgSeq: '900' },
+      content: { parts: [{ type: 'text', text: 'neighbour' }] },
+    }
+    const notice: IMMessage = {
+      id: 'shared-sequence-poke', conversationId: conversation.id, senderId: 'alice', timestamp: 2,
+      metadata: { qqMsgSeq: '900' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Alice poked you' } },
+    }
+    const contentResult = await store.ingest(session, conversation, content)
+    const noticeResult = await store.ingest(session, conversation, notice)
+
+    await expect(rpc.deleteMessages({
+      _: 'channels.deleteMessages', channel, id: [noticeResult.projection[0].tlMessageId],
+    }, channel)).resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
+
+    // QQ keeps the gray tip on the neighbour's msgSeq and resolves a recall of a
+    // sidecar to that content message, so the relay never forwards the notice.
+    // Notices are also removable at any age, unlike third-party messages.
+    expect(actionCalls).toEqual([])
+    expect(localEvents.filter((event) => event.type === 'message-delete')).toMatchObject([{
+      type: 'message-delete', messageIds: [notice.id], conversation: { id: conversation.id },
+    }])
+    expect(localDeliveryOptions.at(-1)).toMatchObject({ deliveredViaRpc: true })
+    await expect(store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, notice.id,
+    )).resolves.toBeUndefined()
+    await expect(store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, content.id,
+    )).resolves.toMatchObject({ parts: [{ tlMessageId: contentResult.projection[0].tlMessageId }] })
+  })
+
+  it('deletes a gray tip durably when no local event publisher is wired', async () => {
+    const { store, rpc, localEvents } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const conversation = conversations.find((item) => item.id === 'group')!
+    const channel = {
+      _: 'inputChannel' as const, channelId: stableId('peer:group'), accessHash: Long.ZERO,
+    }
+    const notice: IMMessage = {
+      id: 'publisherless-poke', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      metadata: { qqMsgSeq: '901' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Alice poked you' } },
+    }
+    const noticeResult = await store.ingest(session, conversation, notice)
+
+    await expect(rpc.deleteMessages({
+      _: 'channels.deleteMessages', channel, id: [noticeResult.projection[0].tlMessageId],
+    }, channel)).resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
+
+    expect(actionCalls).toEqual([])
+    expect(localEvents).toEqual([])
+    await expect(store.findProjectedByPlatformId(
+      session.platformSessionId, conversation.id, notice.id,
+    )).resolves.toBeUndefined()
+  })
+
+  it('renders a gray-tip reply against the content message that owns the QQ sequence', async () => {
+    const { store, rpc } = await createRpc()
+    const conversation = conversations.find((item) => item.id === 'group')!
+    const content: IMMessage = {
+      id: 'render-content', conversationId: conversation.id, senderId: 'alice', timestamp: 1,
+      metadata: { qqMsgSeq: '902' },
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    }
+    const notice: IMMessage = {
+      id: 'render-poke', conversationId: conversation.id, senderId: 'alice', timestamp: 2,
+      metadata: { qqMsgSeq: '902' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Alice poked you' } },
+    }
+    const reply: IMMessage = {
+      id: 'render-reply', conversationId: conversation.id, senderId: 'bob', timestamp: 3,
+      replyToId: notice.id,
+      metadata: { qqMsgSeq: '903', qqReplyToMsgSeq: '902' },
+      content: { parts: [{ type: 'text', text: 'sidecar reply' }] },
+    }
+    const contentResult = await store.ingest(session, conversation, content)
+    const noticeResult = await store.ingest(session, conversation, notice)
+    await store.ingest(session, conversation, reply)
+    await rpc.getDialogs(dialogsRequest())
+
+    const history = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: stableId('peer:group'), accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
+    const rendered = history.messages.find((message) => message._ === 'message'
+      && (message as tl.RawMessage).message === 'sidecar reply') as tl.RawMessage
+
+    expect(rendered.replyTo).toMatchObject({
+      _: 'messageReplyHeader', replyToMsgId: contentResult.projection[0].tlMessageId,
+    })
+    expect(rendered.replyTo).not.toMatchObject({
+      replyToMsgId: noticeResult.projection[0].tlMessageId,
+    })
+  })
+
   it('promotes newly selected reactions without treating removals as recent usage', async () => {
     const group = conversations.find((item) => item.id === 'group')!
     const available = [

@@ -1530,6 +1530,42 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('publishes a gray-tip reply target as the content message owning the QQ sequence', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'qq-sidecar-reply', kind: 'group', title: 'QQ Sidecar Reply' }
+    const target: IMMessage = {
+      id: 'content-46513', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      metadata: { qqMsgSeq: '46513' },
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    }
+    const grayTip: IMMessage = {
+      id: 'poke-46513', conversationId: conversation.id, senderId: 'system', timestamp: 104,
+      metadata: { qqMsgSeq: '46513' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Alice poked you' } },
+    }
+    const reply: IMMessage = {
+      id: 'reply-46514', conversationId: conversation.id, senderId: 'bob', timestamp: 105,
+      replyToId: grayTip.id,
+      metadata: { qqMsgSeq: '46514', qqReplyToMsgSeq: '46513' },
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const targetResult = await store.ingest(session, conversation, target)
+    const grayTipResult = await store.ingest(session, conversation, grayTip)
+    const replyResult = await store.ingest(session, conversation, reply)
+
+    await manager.publish(session, {
+      event: { type: 'message', conversation, message: reply }, result: replyResult,
+    })
+
+    const update = (sent[0].update as tl.RawUpdates).updates[0] as tl.RawUpdateNewChannelMessage
+    expect((update.message as tl.RawMessage).replyTo).toMatchObject({
+      _: 'messageReplyHeader', replyToMsgId: targetResult.projection[0].tlMessageId,
+    })
+    expect((update.message as tl.RawMessage).replyTo).not.toMatchObject({
+      replyToMsgId: grayTipResult.projection[0].tlMessageId,
+    })
+  })
+
   it('sets the Telegram mentioned flag for live self mentions and replies to outgoing messages only', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'muted-group', kind: 'group', title: 'Muted Group' }

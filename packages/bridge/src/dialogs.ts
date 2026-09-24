@@ -3,7 +3,8 @@ import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
 import {
   cardUrl, IMMediaUnavailableError, IMMessageSendRejectedError, IMMessageTargetUnavailableError,
-  isArticleMessage, messageMentionsUser, messagePartText, messageText, telegramMessageId, telegramReplyToMessageId,
+  isArticleMessage, isServiceMessage, messageMentionsUser, messagePartText, messageText, telegramMessageId,
+  telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput, type IMMediaUploadProbe,
   type IMEvent, type IMMessage, type IMMessageInput, type IMPlatform, type IMReactionActor, type IMReactionContext,
@@ -96,6 +97,8 @@ interface MessageRef {
   platformMessageId: string
   ordinal: number
   nativeSequence?: string
+  /** True for service notices: reply targets that QQ resolves through the message they accompany. */
+  service?: boolean
 }
 
 interface MaterializedMessage {
@@ -1955,8 +1958,16 @@ export class DialogRpc {
       const conversation = this._conversation(conversationId)
       const policy = this._platform.capabilities.messageActions?.delete
       const now = Math.floor(Date.now() / 1000)
-      const canDeleteAny = await this._canDeleteAnyMessage(conversationId)
-      const allowed = targets.every(({ source }) => {
+      // A service notice is a relay-side rendering of an upstream sidecar: QQ
+      // keeps it on the msgSeq of the message it accompanies and resolves a
+      // recall that names the sidecar to that content message, so forwarding one
+      // upstream would delete an unrelated message. Notices are therefore removed
+      // from this relay only, and they are always removable because they are not
+      // the platform's messages.
+      const notices = targets.filter(({ source }) => isServiceMessage(source))
+      const messages = targets.filter(({ source }) => !isServiceMessage(source))
+      const canDeleteAny = messages.length ? await this._canDeleteAnyMessage(conversationId) : false
+      const allowed = messages.every(({ source }) => {
         const own = source.outgoing || source.senderId === this._session.userId
         // QQ administrators can recall older messages from other members. The
         // adapter still controls whether deletion is supported at all, while
@@ -1967,19 +1978,43 @@ export class DialogRpc {
         return messageRuleAllows(rule, source.timestamp, now)
       })
       if (!allowed) throw new RpcError(400, 'MESSAGE_DELETE_FORBIDDEN')
-      try {
-        await this._actions.delete(
-          conversation,
-          [...new Set(targets.map((target) => target.targetId))],
-          req._ === 'channels.deleteMessages' || !!req.revoke,
+      if (messages.length) {
+        try {
+          await this._actions.delete(
+            conversation,
+            [...new Set(messages.map((target) => target.targetId))],
+            req._ === 'channels.deleteMessages' || !!req.revoke,
+          )
+        } catch (error) {
+          this._throwMessageAction(error, 'MESSAGE_DELETE_FORBIDDEN')
+        }
+        const deleted = await this._store.deleteMessages(
+          this._session, conversation, [...new Set(messages.map((target) => target.source.id))],
         )
-      } catch (error) {
-        this._throwMessageAction(error, 'MESSAGE_DELETE_FORBIDDEN')
+        deleted.tlMessageIds.forEach((id) => affected.add(id))
       }
-      const result = await this._store.deleteMessages(
-        this._session, conversation, [...new Set(targets.map((target) => target.source.id))],
-      )
-      result.tlMessageIds.forEach((id) => affected.add(id))
+      if (notices.length) {
+        const messageIds = [...new Set(notices.map((target) => target.source.id))]
+        // Publishing through the durable update pipeline removes the notices for
+        // every session and journals the deletion, which a relay-local removal
+        // could not do on its own.
+        const published = this._onLocalEvent
+          ? await this._onLocalEvent(this._session, {
+              type: 'message-delete',
+              eventId: `relay-notice-delete:${conversationId}:${messageIds.join(',')}:${Date.now()}`,
+              conversation,
+              messageIds,
+              timestamp: now,
+            }, this._localDelivery())
+          : undefined
+        const publishedIds = publishedDeletedTlMessageIds(published)
+        if (publishedIds.length) {
+          publishedIds.forEach((id) => affected.add(id))
+        } else if (!this._onLocalEvent) {
+          const deleted = await this._store.deleteMessages(this._session, conversation, messageIds)
+          deleted.tlMessageIds.forEach((id) => affected.add(id))
+        }
+      }
     }
     const ptsCount = affected.size
     // Deleting stale or already-deleted Telegram ids is idempotent. No rows
@@ -4348,6 +4383,7 @@ export class DialogRpc {
       ...(nativeSequence !== undefined && item.ordinal === 0
         ? { nativeSequence: String(nativeSequence) }
         : {}),
+      ...(isServiceMessage(item.source) ? { service: true } : {}),
     })
     this._messageOutgoingByTl.set(item.tlId, item.source.outgoing === true)
   }
@@ -4357,73 +4393,79 @@ export class DialogRpc {
     loadMissing = true,
   ): Promise<void> {
     if (!this._store) return
-    const targets = new Map<string, { conversationId: string, targetId: string }>()
+    const targets = new Map<string, { conversationId: string, key: string, message: IMMessage }>()
+    // QQ reports a reply to a gray-tip sidecar with the sidecar's own id while
+    // the sidecar shares its QQ sequence with the content message it accompanies.
+    // The reply still belongs to that content message, so a target that resolves
+    // to a service notice is re-resolved instead of being trusted.
+    const sidecars: Array<{ key: string, message: IMMessage }> = []
     for (const message of messages) {
       if (message.replyToId) {
         const key = `${message.conversationId}\u0000${message.replyToId}\u00000`
-        if (!this._messageToTl.has(key)) targets.set(key, {
-          conversationId: message.conversationId, targetId: message.replyToId,
-        })
+        const known = this._messageToTl.get(key)
+        if (known === undefined) {
+          targets.set(key, { conversationId: message.conversationId, key, message })
+        } else if (this._tlToMessage.get(known)?.service) {
+          sidecars.push({ key, message })
+        }
       }
       const qqReplySequence = qqReplySequenceFromMetadata(message.metadata)
       if (qqReplySequence !== undefined) {
         const key = qqSequenceKey(message.conversationId, qqReplySequence)
-        if (!this._messageToTl.has(key)) {
+        const known = this._messageToTl.get(key)
+        if (known === undefined) {
           const projected = await this._store.findProjectedByNativeSequence(
             this._session.platformSessionId, message.conversationId, qqReplySequence,
           )
-          if (projected) {
-            for (const part of projected.parts) this._rememberMessage({
-              source: projected.source,
-              tlId: part.tlMessageId,
-              ordinal: part.ordinal,
-              groupedId: part.groupedId ?? undefined,
-              media: projected.media.find((entry) => entry.id === part.mediaId),
-              mediaRows: projected.media,
-            })
-          }
+          if (projected) this._rememberProjection(projected)
+        } else if (this._tlToMessage.get(known)?.service) {
+          sidecars.push({ key, message })
         }
-        if (this._messageToTl.has(key)) continue
-      } else if (telegramReplyToMessageId(message)) {
+        continue
+      }
+      if (telegramReplyToMessageId(message)) {
         const replyToTlId = telegramReplyToMessageId(message)!
         if (!this._messageOutgoingByTl.has(replyToTlId)) {
           const projected = await this._store.findProjectedByTlId(
             this._session.platformSessionId, replyToTlId, message.conversationId,
           )
-          if (projected) {
-            for (const part of projected.parts) this._rememberMessage({
-              source: projected.source,
-              tlId: part.tlMessageId,
-              ordinal: part.ordinal,
-              groupedId: part.groupedId ?? undefined,
-              media: projected.media.find((entry) => entry.id === part.mediaId),
-              mediaRows: projected.media,
-            })
-          }
+          if (projected) this._rememberProjection(projected)
         }
         continue
       }
     }
-    await Promise.all([...targets.values()].map(async ({ conversationId, targetId }) => {
-      let projected = await this._store!.findProjectedByPlatformId(
-        this._session.platformSessionId, conversationId, targetId,
-      )
-      if (!projected && loadMissing && this._data) {
-        await this._data.getMessage(conversationId, targetId).catch(() => null)
-        projected = await this._store!.findProjectedByPlatformId(
-          this._session.platformSessionId, conversationId, targetId,
-        )
+    await Promise.all([...targets.values()].map(async ({ conversationId, key, message }) => {
+      let projected = await this._store!.findReplyTarget(this._session.platformSessionId, message)
+      if (!projected && loadMissing && this._data && message.replyToId) {
+        await this._data.getMessage(conversationId, message.replyToId).catch(() => null)
+        projected = await this._store!.findReplyTarget(this._session.platformSessionId, message)
       }
-      if (!projected) return
-      for (const part of projected.parts) this._rememberMessage({
-        source: projected.source,
-        tlId: part.tlMessageId,
-        ordinal: part.ordinal,
-        groupedId: part.groupedId ?? undefined,
-        media: projected.media.find((entry) => entry.id === part.mediaId),
-        mediaRows: projected.media,
-      })
+      if (projected) this._rememberProjection(projected, key)
     }))
+    await Promise.all(sidecars.map(async ({ key, message }) => {
+      const projected = await this._store!.findReplyTarget(this._session.platformSessionId, message)
+      if (projected) this._rememberProjection(projected, key)
+    }))
+  }
+
+  /**
+   * Remember a resolved projection, optionally pinning the reply key that
+   * referenced it. A gray-tip target resolves to the content message that owns
+   * the same QQ sequence, so the reply key must point at that message even
+   * though the reply named the sidecar.
+   */
+  private _rememberProjection(projected: ProjectedMessage, key?: string): void {
+    for (const part of projected.parts) this._rememberMessage({
+      source: projected.source,
+      tlId: part.tlMessageId,
+      ordinal: part.ordinal,
+      groupedId: part.groupedId ?? undefined,
+      media: projected.media.find((entry) => entry.id === part.mediaId),
+      mediaRows: projected.media,
+    })
+    if (key === undefined) return
+    const primary = projected.parts.find((part) => part.ordinal === 0) ?? projected.parts[0]
+    if (primary) this._messageToTl.set(key, primary.tlMessageId)
   }
 
   private _messageReplyHeader(source: IMMessage): tl.RawMessageReplyHeader | undefined {
@@ -6629,6 +6671,13 @@ function cappedPhotoDimensions(
 
 function qqSequenceKey(conversationId: string, sequence: number): string {
   return `${conversationId}\u0000qq-sequence:${sequence}`
+}
+
+/** Telegram ids the published deletion update removed, so the RPC can report them. */
+function publishedDeletedTlMessageIds(payload: PlatformEventPublishResult): number[] {
+  if (!payload || (payload._ !== 'updates' && payload._ !== 'updatesCombined')) return []
+  return payload.updates.flatMap((update) => update._ === 'updateDeleteMessages'
+    || update._ === 'updateDeleteChannelMessages' ? update.messages : [])
 }
 
 async function mapConcurrent<T, R>(

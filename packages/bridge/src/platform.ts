@@ -994,6 +994,20 @@ export function messagePartText(part: IMMessagePart<unknown>): string {
   return source ? `${label} · ${source}` : label
 }
 
+/**
+ * True when the platform delivered a service notice that the relay projects as
+ * a Telegram `MessageService` instead of a regular message.
+ *
+ * QQ gray tips are sidecars of the message they accompany: QQ keeps them on
+ * that message's `msgSeq`, and a recall that names a sidecar resolves to that
+ * content message. A sidecar therefore never identifies a message by itself.
+ */
+export function isServiceMessage(
+  message: Pick<IMProjectableMessage<unknown>, 'content'>,
+): boolean {
+  return message.content.serviceAction !== undefined && message.content.serviceAction !== null
+}
+
 export function cardUrl(card: IMMessageCard): string | undefined {
   if (!card.url) return
   try {

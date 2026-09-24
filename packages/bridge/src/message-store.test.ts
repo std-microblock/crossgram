@@ -1118,6 +1118,92 @@ describe('MessageStore', () => {
     })
   })
 
+  it('resolves an exact gray-tip reply target to the content message that owns the QQ sequence', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'qq-sidecar-exact-reply', kind: 'group' as const, title: 'QQ sidecar reply' }
+    const target: IMMessage = {
+      id: 'content-46513', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      metadata: { qqMsgSeq: '46513' },
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    }
+    const grayTip: IMMessage = {
+      id: 'poke-46513', conversationId: conversation.id, senderId: 'system', timestamp: 104,
+      metadata: { qqMsgSeq: '46513' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Alice poked you' } },
+    }
+    const reply: IMMessage = {
+      id: 'reply-46514', conversationId: conversation.id, senderId: 'bob', timestamp: 105,
+      replyToId: grayTip.id,
+      metadata: { qqMsgSeq: '46514', qqReplyToMsgSeq: '46513' },
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const targetResult = await store.ingest(session, conversation, target)
+    const grayTipResult = await store.ingest(session, conversation, grayTip)
+    const replyResult = await store.ingest(session, conversation, reply)
+
+    await expect(store.findReplyTarget(session.platformSessionId, reply)).resolves.toMatchObject({
+      source: { id: target.id },
+      parts: [{ tlMessageId: targetResult.projection[0].tlMessageId }],
+    })
+    // QQ still names the sidecar in the reply element, so the redirect happens
+    // at resolution time and the stored row keeps QQ's own value.
+    expect(replyResult.message.metadata).toMatchObject({ __mtprotoRelayReplyToId: grayTip.id })
+    expect(grayTipResult.projection[0].tlMessageId).not.toBe(targetResult.projection[0].tlMessageId)
+  })
+
+  it('keeps a service notice that owns its QQ sequence as the reply target', async () => {
+    const { store } = await createStore()
+    const conversation = { id: 'qq-own-sequence-reply', kind: 'group' as const, title: 'QQ own sequence' }
+    const notice: IMMessage = {
+      id: 'notice-46516', conversationId: conversation.id, senderId: 'system', timestamp: 100,
+      metadata: { qqMsgSeq: '46516' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Group announcement updated' } },
+    }
+    const reply: IMMessage = {
+      id: 'reply-46517', conversationId: conversation.id, senderId: 'bob', timestamp: 101,
+      replyToId: notice.id,
+      metadata: { qqMsgSeq: '46517', qqReplyToMsgSeq: '46516' },
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const noticeResult = await store.ingest(session, conversation, notice)
+    await store.ingest(session, conversation, reply)
+
+    await expect(store.findReplyTarget(session.platformSessionId, reply)).resolves.toMatchObject({
+      source: { id: notice.id },
+      parts: [{ tlMessageId: noticeResult.projection[0].tlMessageId }],
+    })
+  })
+
+  it('falls back to the gray tip when the content message sharing its sequence is gone', async () => {
+    const { ctx, store } = await createStore()
+    const conversation = { id: 'qq-sidecar-deleted-target', kind: 'group' as const, title: 'QQ deleted target' }
+    const target: IMMessage = {
+      id: 'content-46518', conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      metadata: { qqMsgSeq: '46518' },
+      content: { parts: [{ type: 'text', text: 'reply target' }] },
+    }
+    const grayTip: IMMessage = {
+      id: 'poke-46518', conversationId: conversation.id, senderId: 'system', timestamp: 101,
+      metadata: { qqMsgSeq: '46518' },
+      content: { parts: [], serviceAction: { type: 'custom', text: 'Alice poked you' } },
+    }
+    const reply: IMMessage = {
+      id: 'reply-46519', conversationId: conversation.id, senderId: 'bob', timestamp: 102,
+      replyToId: grayTip.id,
+      metadata: { qqMsgSeq: '46519', qqReplyToMsgSeq: '46518' },
+      content: { parts: [{ type: 'text', text: 'reply' }] },
+    }
+    const targetResult = await store.ingest(session, conversation, target)
+    const grayTipResult = await store.ingest(session, conversation, grayTip)
+    await store.ingest(session, conversation, reply)
+    await ctx.database.set('mtproto_im_message', { id: targetResult.message.id }, { deleted: true })
+
+    await expect(store.findReplyTarget(session.platformSessionId, reply)).resolves.toMatchObject({
+      source: { id: grayTip.id },
+      parts: [{ tlMessageId: grayTipResult.projection[0].tlMessageId }],
+    })
+  })
+
   it('prefers an exact platform reply msgId over conflicting QQ sequence metadata', async () => {
     const { store } = await createStore()
     const conversation = { id: 'qq-exact-reply', kind: 'group' as const, title: 'QQ exact reply' }

@@ -6,7 +6,7 @@ import type {
   TlMessagePartRow,
 } from './models.js'
 import {
-  isArticleMessage, messageText, telegramReplyToMessageId,
+  isArticleMessage, isServiceMessage, messageText, telegramReplyToMessageId,
   type IMConversation, type IMDialog, type IMMessage, type IMMessageContent, type IMMessageTarget, type IMRequest,
   type IMReactionActor, type IMReactionContext, type IMReactionDefinition,
   type IMUser, type JsonObject, type JsonValue, type PlatformSession,
@@ -1029,6 +1029,30 @@ export class MessageStore {
     }
   }
 
+  /**
+   * Redirect a reply that QQ attributed to a gray-tip sidecar to its content message.
+   *
+   * QQ keeps gray tips (`你戳了戳…`, essence notices, call records, revoke
+   * notices) on the `msgSeq` of the content message they accompany and reports a
+   * reply to such a tip with the tip's own id. The reply belongs to the content
+   * message: the tip is a rendering of that message's slot, and QQ resolves both
+   * replies and deletes of the slot through the same sequence. Sidecars without
+   * a content sibling, and service notices that own their sequence, stay as they
+   * are because the tip is then the only message QQ can mean.
+   */
+  async preferContentReplyTarget(
+    platformSessionId: string,
+    projected: ProjectedMessage,
+  ): Promise<ProjectedMessage> {
+    if (!isServiceMessage(projected.source)) return projected
+    const nativeSequence = qqMessageSequenceFromMetadata(projected.source.metadata)
+    if (nativeSequence === undefined) return projected
+    const sibling = await this.findProjectedByNativeSequence(
+      platformSessionId, projected.source.conversationId, nativeSequence,
+    )
+    return sibling && !isServiceMessage(sibling.source) ? sibling : projected
+  }
+
   async findReplyTarget(
     platformSessionId: string,
     source: IMMessage,
@@ -1037,7 +1061,7 @@ export class MessageStore {
       const projected = await this.findProjectedByPlatformId(
         platformSessionId, source.conversationId, source.replyToId,
       )
-      if (projected) return projected
+      if (projected) return this.preferContentReplyTarget(platformSessionId, projected)
     }
     const nativeSequence = qqReplySequenceFromMetadata(source.metadata)
     if (nativeSequence !== undefined) {

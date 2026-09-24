@@ -697,6 +697,10 @@ export class UpdateManager {
           )
         }
       }
+      // QQ names the gray-tip sidecar of a message when a reply targets that
+      // message's slot; the reply belongs to the content message, which is also
+      // what QQ renders and what a later recall of the slot deletes.
+      if (replied) replied = await this._store.preferContentReplyTarget(session.platformSessionId, replied)
       const mentioned = event.conversation.kind !== 'direct'
         && part.ordinal === 0 && projected.source.outgoing !== true && (
         messageMentionsUser(projected.source, session.userId)

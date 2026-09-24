@@ -9,12 +9,13 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import sharp from 'sharp'
+import Long from 'long'
 import type { tl } from '@mtcute/core'
 import {
   MessageStore, PlatformRegistry, StickerRpc, UpdateManager,
   type IMConversation, type IMMessage, type IngestResult, type PlatformSession, type Unsubscribe,
 } from '@mtproto-relay/bridge'
-import { DialogRpc, makeTlMessageMedia } from '../../bridge/src/dialogs.js'
+import { DialogRpc, makeTlMessageMedia, stableId } from '../../bridge/src/dialogs.js'
 import { defineModels } from '../../bridge/src/models.js'
 import { ReactionRpc } from '../../bridge/src/reaction-rpc.js'
 import { UploadManager } from '../../bridge/src/upload-manager.js'
@@ -252,6 +253,190 @@ describe('QQNT same-second message ordering E2E', () => {
     expect(replyMessage.replyTo).not.toMatchObject({
       replyToMsgId: grayTip!.parts[0].tlMessageId,
     })
+  })
+
+  it('keeps sidecar replies and sidecar deletion on the QQ content message owning the sequence', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Database),
+      ctx.plugin(SQLiteDriver, { path: ':memory:' }),
+    ]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    const replySession = { ...session, platformSessionId: 'qqnt-sidecar-delete-e2e' }
+    await ctx.database.create('mtproto_auth_binding', {
+      authKeyId: '0011223344556677', platformId: replySession.platformId,
+      platformSessionId: replySession.platformSessionId,
+    })
+    const conversation = {
+      id: 'sidecar-sequence-group', kind: 'group' as const, title: 'Sidecar sequence group',
+      peerUid: 'sidecar-sequence-group', peerUin: '550358997', chatType: 2 as const,
+    }
+    // QQ gives every poke notice the msgSeq of the content message it follows and
+    // reports a reply to that notice with the notice's own id.
+    const wireMessages = [{
+      id: 'content-46513', conversationId: conversation.id, senderId: 'alice',
+      timestamp: 1_800_000_100, outgoing: false, msgSeq: '46513', telegramMessageId: 46513,
+      parts: [{ type: 'text', text: 'reply target' }],
+    }, {
+      id: '7763258923973739795', conversationId: conversation.id, senderId: 'bob',
+      timestamp: 1_800_000_104, outgoing: false, msgSeq: '46513',
+      serviceAction: { type: 'custom', text: 'Bob poked you' }, parts: [],
+    }, {
+      id: '7763267369130659866', conversationId: conversation.id, senderId: 'carol',
+      timestamp: 1_800_000_140, outgoing: false, msgSeq: '46513',
+      serviceAction: { type: 'custom', text: 'Carol poked you' }, parts: [],
+    }, {
+      id: 'reply-46514', conversationId: conversation.id, senderId: 'dave',
+      timestamp: 1_800_000_145, outgoing: false, msgSeq: '46514',
+      replyToId: '7763267369130659866', telegramReplyToMessageId: 46513,
+      parts: [{ type: 'text', text: 'reply' }],
+    }]
+
+    const webSocketServer = new WebSocketServer({ noServer: true })
+    const server = createServer()
+    server.on('upgrade', (request, socket, head) => {
+      webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        webSocketServer.emit('connection', webSocket, request)
+      })
+    })
+    webSocketServer.on('connection', (webSocket) => {
+      for (const [index, message] of wireMessages.entries()) {
+        webSocket.send(JSON.stringify({
+          id: String(index + 1),
+          event: { type: 'message', conversation, message },
+        }))
+      }
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('missing sidecar E2E server address')
+    disposals.push(async () => {
+      for (const client of webSocketServer.clients) client.terminate()
+      webSocketServer.close()
+      if (!server.listening) return
+      const closed = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve())
+      })
+      server.closeAllConnections()
+      await closed
+    })
+
+    const platform = new QQNTPlatform({
+      endpoint: 'http://127.0.0.1:1/v1',
+      webSocketEndpoint: `ws://127.0.0.1:${address.port}/events`,
+    })
+    platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [conversation] }))
+    platform.client.getHistory = vi.fn(async () => ({ messages: wireMessages }))
+    vi.spyOn(platform, 'getUser').mockImplementation(async (_session, id) => ({
+      id, firstName: `User ${id}`,
+    }))
+    const deleteCalls: Array<{ conversationId: string, messageIds: readonly string[] }> = []
+    platform.deleteMessages = vi.fn(async (_session, target, ids) => {
+      deleteCalls.push({ conversationId: target.id, messageIds: [...ids] })
+    })
+    const store = new MessageStore(ctx.database)
+    const sent: tl.TypeUpdates[] = []
+    const manager = new UpdateManager(
+      ctx.database, new PlatformRegistry([[replySession.platformId, platform]]), store,
+      (_authKeyId, update) => {
+        sent.push(update)
+        return 1
+      },
+    )
+    const complete = Promise.withResolvers<void>()
+    let delivered = 0
+    const unsubscribe = await platform.subscribe(replySession, async (event) => {
+      if (event.type !== 'message') return
+      const result = await store.ingest(replySession, event.conversation, event.message)
+      await manager.publish(replySession, { event, result })
+      if (++delivered === wireMessages.length) complete.resolve()
+    })
+    try {
+      await Promise.race([
+        complete.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('QQNT sidecar E2E timed out')), 5_000)),
+      ])
+      const rpc = new DialogRpc(
+        platform, replySession, store,
+        undefined, undefined, 1, undefined, undefined, undefined,
+        async (_session, event, options) => {
+          if (event.type !== 'message-delete') return
+          const result = await store.deleteMessages(replySession, event.conversation, event.messageIds)
+          return await manager.publish(replySession, { event, result }, options) as tl.RawUpdates | undefined
+        },
+        '0011223344556677',
+      )
+      await rpc.getDialogs({
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      })
+
+      const content = await store.findProjectedByPlatformId(
+        replySession.platformSessionId, conversation.id, 'content-46513',
+      )
+      const sidecar = await store.findProjectedByPlatformId(
+        replySession.platformSessionId, conversation.id, '7763267369130659866',
+      )
+      expect(content).toBeDefined()
+      expect(sidecar).toBeDefined()
+
+      // Live updates: the reply QQ attributed to the sidecar is delivered as a
+      // reply to the content message that owns the shared sequence.
+      const replyUpdate = sent.at(-1) as tl.RawUpdates
+      const replyMessage = (replyUpdate.updates[0] as tl.RawUpdateNewChannelMessage).message as tl.RawMessage
+      expect(replyMessage.replyTo).toMatchObject({
+        _: 'messageReplyHeader', replyToMsgId: content!.parts[0].tlMessageId,
+      })
+      expect(replyMessage.replyTo).not.toMatchObject({
+        replyToMsgId: sidecar!.parts[0].tlMessageId,
+      })
+
+      // The same reply header comes back from the history read the clients use.
+      const channelId = stableId(`peer:${conversation.id}`)
+      const history = await rpc.getHistory({
+        _: 'messages.getHistory', peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }) as tl.messages.RawMessages
+      const rendered = history.messages.find((message) => message._ === 'message'
+        && (message as tl.RawMessage).message === 'reply') as tl.RawMessage
+      expect(rendered.replyTo).toMatchObject({
+        _: 'messageReplyHeader', replyToMsgId: content!.parts[0].tlMessageId,
+      })
+
+      // Deleting the sidecar in Telegram must stay local: QQ would resolve the
+      // recall to the content message that owns the shared msgSeq.
+      const channel = { _: 'inputChannel' as const, channelId, accessHash: Long.ZERO }
+      await expect(rpc.deleteMessages({
+        _: 'channels.deleteMessages', channel, id: [sidecar!.parts[0].tlMessageId],
+      }, channel)).resolves.toMatchObject({ _: 'messages.affectedMessages', ptsCount: 1 })
+      expect(deleteCalls).toEqual([])
+      expect(await store.findProjectedByPlatformId(
+        replySession.platformSessionId, conversation.id, '7763267369130659866',
+      )).toBeUndefined()
+      await expect(store.findProjectedByPlatformId(
+        replySession.platformSessionId, conversation.id, 'content-46513',
+      )).resolves.toMatchObject({ parts: [{ tlMessageId: content!.parts[0].tlMessageId }] })
+      const refreshed = await rpc.getHistory({
+        _: 'messages.getHistory', peer: { _: 'inputPeerChannel', channelId, accessHash: Long.ZERO },
+        offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+      }) as tl.messages.RawMessages
+      expect(refreshed.messages.map((message) => (message as tl.RawMessage).id))
+        .toEqual(expect.arrayContaining([content!.parts[0].tlMessageId]))
+      expect((refreshed.messages as tl.RawMessage[]).flatMap((message) =>
+        message.action?._ === 'messageActionCustomAction' ? [message.action.message] : []))
+        .not.toContain('Carol poked you')
+    } finally {
+      await unsubscribe()
+    }
   })
 
   it('closes a stale same-session WebSocket before replacing it and keeps the replacement subscribed', async () => {
