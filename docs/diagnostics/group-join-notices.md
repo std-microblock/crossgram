@@ -93,6 +93,10 @@ Two bugs sat underneath that:
 
 ## Not covered
 
+Leave and removal notices (`groupElement` types 3 and 10) stay custom text:
+Telegram's `messageActionChatDeleteUser` tells a self-leave from a kick by its
+`from_id`, and QQ's notice does not name the operator in every variant.
+
 The “share with chat history” variant (`并附带了30条聊天记录`, 1 of 18 samples)
 keeps QQ's wording as `messageActionCustomAction`: it announces a share rather
 than a plain join, and Telegram's join action cannot express the attached
