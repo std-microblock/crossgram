@@ -539,7 +539,7 @@ async function startServer(
     editTimeLimit: 172800, revokeTimeLimit: 172800, revokePmTimeLimit: 172800, ratingEDecay: 1000,
     stickersRecentLimit: 200, channelsReadMediaPeriod: 86400, tmpSessions: 0, callReceiveTimeoutMs: 30000,
     callRingTimeoutMs: 90000, callConnectTimeoutMs: 30000, callPacketTimeoutMs: 10000,
-    meUrlPrefix: 'https://my.telegram.org/', captionLengthMax: 1024, messageLengthMax: 4096,
+    meUrlPrefix: 'https://t.me/', captionLengthMax: 1024, messageLengthMax: 4096,
     webfileDcId: 1, suggestedLangCode: '', langPackVersion: 0, baseLangPackVersion: 0,
     reactionsDefault: { _: 'reactionEmpty' }, autologinToken: '',
   }))
