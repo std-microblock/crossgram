@@ -151,6 +151,27 @@ describe('crossgram feature advertisement', () => {
       peer: { _: 'inputPeerChannel', channelId: rpc.peerTlId('group'), accessHash: Long.ONE },
     }))).toEqual({ poke: { maxCount: 10 } })
   })
+
+  it('advertises reaction support per conversation kind', async () => {
+    const platform = new PokePlatform()
+    ;(platform as unknown as { capabilities: PlatformCapabilities }).capabilities = {
+      ...platform.capabilities,
+      reactions: {
+        read: true, write: true, events: false, actorList: false, maxSelected: 20, kinds: ['group'],
+      },
+    }
+    const rpc = new DialogRpc(platform, session)
+    await materialize(rpc)
+
+    // The catalog is account-wide, so only a per-conversation answer lets a
+    // client hide the entry in a kind the platform keeps out of it.
+    expect(parseFeatures(await rpc.getFeatures({
+      peer: { _: 'inputPeerUser', userId: rpc.peerTlId('alice'), accessHash: Long.ZERO },
+    }))).toEqual({ reactions: { supported: false } })
+    expect(parseFeatures(await rpc.getFeatures({
+      peer: { _: 'inputPeerChannel', channelId: rpc.peerTlId('group'), accessHash: Long.ONE },
+    }))).toEqual({ reactions: { supported: true } })
+  })
 })
 
 describe('crossgram sendPoke', () => {

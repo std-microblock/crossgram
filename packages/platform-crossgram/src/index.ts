@@ -183,7 +183,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       edit: { mode: 'delete-and-resend', maxAgeSeconds: 120 },
       forward: { mode: 'native', preservesAuthor: true },
     },
-    reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
+    // QQ message reactions exist in groups only: its one-to-one chats have no
+    // reaction at all, so they must never publish a reaction catalog.
+    reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20, kinds: ['group'] },
     poke: { maxCount: QQ_POKE_MAX_COUNT },
     stickers: { native: true, upload: false, formats: ['static', 'animated', 'video'] },
   }

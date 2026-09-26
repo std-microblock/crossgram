@@ -88,6 +88,16 @@ describe('QQNT poke platform mapping', () => {
     expect(platform.capabilities.poke).toEqual({ maxCount: 10 })
   })
 
+  it('advertises reactions for groups only, since QQ one-to-one chats have none', () => {
+    const platform = new QQNTPlatform()
+
+    // The catalog is account-wide, so the kind restriction is what keeps
+    // one-to-one chats from publishing a reaction list at all.
+    expect(platform.capabilities.reactions).toMatchObject({
+      read: true, write: true, maxSelected: 20, kinds: ['group'],
+    })
+  })
+
   it('reports no notice when the bridge could not confirm one', async () => {
     const platform = new QQNTPlatform()
     platform.client.sendPoke = vi.fn(async () => ({}))

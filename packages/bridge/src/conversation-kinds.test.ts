@@ -2119,4 +2119,61 @@ describe('conversation kinds', () => {
       },
     })
   })
+
+  it('keeps reactions out of the conversation kinds the platform excludes', async () => {
+    const available = [{ key: 'like', presentation: { type: 'emoji' as const, emoticon: '👍' } }]
+    const reactionContext = { available, reactions: [], maxSelected: 20 }
+    const scopedPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        reactions: {
+          read: true, write: true, events: false, actorList: false, maxSelected: 20, kinds: ['group'],
+        },
+      },
+      async getAvailableReactions() {
+        return reactionContext
+      },
+      async setMessageReactions(_session, _target, keys) {
+        return {
+          available,
+          reactions: keys.map((key) => ({ key, count: 1, selected: true })),
+          maxSelected: 20,
+        }
+      },
+    }
+    const { rpc } = await createRpc(scopedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const messageOf = (conversationId: string) => dialogs.messages.find(
+      (item): item is tl.RawMessage => item._ === 'message'
+        && item.message === conversations.find((item) => item.id === conversationId)!.title,
+    )!
+    const directPeer = { _: 'inputPeerUser' as const, userId: rpc.peerTlId('direct'), accessHash: Long.ZERO }
+    const groupPeer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
+    const features = (response: tl.RawDataJSON) => JSON.parse(response.data) as unknown
+
+    // A patched client asks before it renders the reaction entry, so a
+    // one-to-one QQ chat must answer with an explicit refusal.
+    expect(features(await rpc.getFeatures({ peer: directPeer }))).toEqual({ reactions: { supported: false } })
+    expect(features(await rpc.getFeatures({ peer: groupPeer }))).toEqual({ reactions: { supported: true } })
+
+    // The write path refuses the same conversation instead of leaving an
+    // optimistic reaction behind a platform that never accepts it.
+    await expect(rpc.sendReaction({
+      _: 'messages.sendReaction', peer: directPeer, msgId: messageOf('direct').id,
+      reaction: [{ _: 'reactionEmoji', emoticon: '👍' }],
+    })).rejects.toThrow(/REACTION_INVALID/)
+    await expect(rpc.sendReaction({
+      _: 'messages.sendReaction', peer: groupPeer, msgId: messageOf('group').id,
+      reaction: [{ _: 'reactionEmoji', emoticon: '👍' }],
+    })).resolves.toMatchObject({ _: 'updates' })
+
+    // Clients that never call getFeatures read the same decision from the
+    // full-chat payload.
+    const full = await rpc.getFullChannel({
+      _: 'channels.getFullChannel',
+      channel: { _: 'inputChannel', channelId: rpc.peerTlId('group'), accessHash: Long.ZERO },
+    })
+    expect(full.fullChat).toMatchObject({ availableReactions: { _: 'chatReactionsSome' } })
+  })
 })

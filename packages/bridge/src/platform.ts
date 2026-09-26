@@ -71,6 +71,14 @@ export interface PlatformCapabilities {
     events: boolean
     actorList: boolean
     maxSelected: number
+    /**
+     * Conversation kinds that accept reactions. Absent means every kind does.
+     *
+     * The rest of the capability is advertised account-wide, but a platform can
+     * keep some kinds out of it: QQ has no reactions in one-to-one chats, so it
+     * lists only `group`.
+     */
+    kinds?: IMConversationKind[]
   }
   /**
    * Native nudge ("poke") notices. Absent when the platform has no poke at all,
