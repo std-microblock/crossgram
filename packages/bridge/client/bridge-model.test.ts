@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CrossGramServerConfig } from '../src/dashboard-types.js'
 import {
   botLink,
   copyText,
   formatPhone,
+  formatServerConfig,
   parseTelegramLoginUrl,
   remainingSeconds,
   safeImageURL,
   sameOriginPath,
+  serializeServerConfig,
 } from './bridge-model.js'
 afterEach(() => vi.restoreAllMocks())
 describe('bridge dashboard input boundaries', () => {
@@ -51,5 +54,42 @@ describe('bridge dashboard input boundaries', () => {
       new Error('permission denied'),
     )
     await expect(copyText('credential')).rejects.toThrow('permission denied')
+  })
+})
+describe('server configuration copying', () => {
+  const config: CrossGramServerConfig = {
+    name: 'CrossGram',
+    enable_special_config: false,
+    host: 'relay.example.test',
+    port: 4430,
+    rsa_key:
+      '-----BEGIN RSA PUBLIC KEY-----\nPLACEHOLDER_KEY\n-----END RSA PUBLIC KEY-----',
+    dcs: Array.from({ length: 5 }, (_, index) => ({
+      id: index + 1,
+      ip: 'relay.example.test',
+      port: 4430,
+    })),
+  }
+  // Android clients reject the pasted configuration as invalid JSON while it contains line
+  // breaks, and import the identical document once it is a single line.
+  it('copies a single-line document without losing fields or escaping PEM newlines', () => {
+    const copied = serializeServerConfig(config)!
+    expect(copied).not.toMatch(/[\r\n\u2028\u2029]/)
+    expect(copied.trim()).toBe(copied)
+    expect(copied).toBe(JSON.stringify(config))
+    expect(copied).toContain('\\n')
+    expect(JSON.parse(copied)).toEqual(config)
+    expect(JSON.parse(copied).rsa_key).toContain('\n')
+    expect(JSON.parse(copied).dcs).toHaveLength(5)
+  })
+  it('keeps the readable multi-line form for on-page display only', () => {
+    const displayed = formatServerConfig(config)!
+    expect(displayed.split('\n').length).toBeGreaterThan(1)
+    expect(displayed.length).toBeGreaterThan(serializeServerConfig(config)!.length)
+    expect(JSON.parse(displayed)).toEqual(JSON.parse(serializeServerConfig(config)!))
+  })
+  it('treats a missing configuration as nothing to copy or display', () => {
+    expect(serializeServerConfig(undefined)).toBeUndefined()
+    expect(formatServerConfig(undefined)).toBeUndefined()
   })
 })

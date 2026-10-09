@@ -82,7 +82,8 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
           enable_special_config: false,
           host: 'example.test',
           port: 4430,
-          rsa_key: 'PUBLIC_TEST_KEY',
+          rsa_key:
+            '-----BEGIN RSA PUBLIC KEY-----\nPUBLIC_TEST_KEY\n-----END RSA PUBLIC KEY-----',
           dcs: [],
         },
         loginTokenApprovalUrl: '/bridge/login-tokens',
@@ -237,9 +238,37 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       await page
         .getByRole('button', { name: 'Copy server configuration', exact: true })
         .click()
-      expect(
-        JSON.parse(await page.evaluate(() => navigator.clipboard.readText())),
-      ).toMatchObject({ host: 'example.test', rsa_key: 'PUBLIC_TEST_KEY' })
+      const copiedConfiguration = await page.evaluate(() =>
+        navigator.clipboard.readText(),
+      )
+      // The pasted value reaches the client's single-line import path, which answers
+      // "invalid JSON" once the document carries line breaks, so the copy must stay on one line.
+      expect(copiedConfiguration).not.toMatch(/[\r\n\u2028\u2029]/)
+      expect(copiedConfiguration.trim()).toBe(copiedConfiguration)
+      expect(JSON.parse(copiedConfiguration)).toEqual(data.serverConfig)
+      expect(copiedConfiguration).toContain('PUBLIC_TEST_KEY')
+      // Phones open the console over plain http, where navigator.clipboard is missing and
+      // copyText falls back to a hidden textarea; that path must produce the same single line.
+      await page.evaluate(() =>
+        Object.defineProperty(navigator.clipboard, 'writeText', {
+          value: undefined,
+          configurable: true,
+        }),
+      )
+      await page
+        .getByRole('button', { name: 'Configuration copied', exact: true })
+        .click()
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+        copiedConfiguration,
+      )
+      // The readable, indented document is still what the page displays.
+      const displayedConfiguration = await page
+        .getByLabel('Server configuration')
+        .textContent()
+      expect(displayedConfiguration).toContain('\n')
+      expect(JSON.parse(displayedConfiguration!)).toEqual(
+        JSON.parse(copiedConfiguration),
+      )
       await page
         .getByRole('button', { name: 'Approve QR login', exact: true })
         .click()

@@ -25,10 +25,12 @@ import { sessionToken } from 'cordis-webui-solidjs/session'
 import {
   copyText,
   formatPhone,
+  formatServerConfig,
   parseTelegramLoginUrl,
   remainingSeconds,
   safeImageURL,
   sameOriginPath,
+  serializeServerConfig,
 } from './bridge-model.js'
 export default function AccountsPage(props: PageProps) {
   const rpc = useRpc<PlatformAccountDashboardData>(props.entryId),
@@ -55,8 +57,13 @@ export default function AccountsPage(props: PageProps) {
       ),
   )
   const ids = createMemo(() => [...accounts().keys()])
+  // The page shows the readable document, but the clipboard has to stay on a single
+  // line: Android clients reject a pasted pretty-printed configuration as invalid JSON.
   const configuration = createMemo(() =>
-    JSON.stringify(rpc.data.serverConfig, null, 2),
+    formatServerConfig(rpc.data.serverConfig),
+  )
+  const clipboardConfiguration = createMemo(() =>
+    serializeServerConfig(rpc.data.serverConfig),
   )
   const [search, setSearch] = createSignal(''),
     [limit, setLimit] = createSignal(24)
@@ -107,7 +114,7 @@ export default function AccountsPage(props: PageProps) {
             disabled={!rpc.ready || !rpc.data.serverConfig}
             onClick={() =>
               void action.run(async () => {
-                await copyText(configuration()!)
+                await copyText(clipboardConfiguration()!)
                 setCopied(true)
               })
             }

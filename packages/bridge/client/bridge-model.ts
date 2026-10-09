@@ -1,3 +1,4 @@
+import type { CrossGramServerConfig } from '../src/dashboard-types.js'
 export function parseTelegramLoginUrl(value: string): string | undefined {
   try {
     const url = new URL(value),
@@ -59,6 +60,23 @@ export function formatPhone(value?: string): string {
   if (digits.startsWith('888'))
     return '+888 ' + digits.slice(3).replace(/(\d)(?=(\d{3})+$)/g, '$1 ')
   return '+' + digits.replace(/(\d)(?=(\d{3})+$)/g, '$1 ')
+}
+/**
+ * Clipboard form of the server configuration. Android clients report "invalid JSON" when
+ * the configuration is pasted with line breaks and import the identical document once the
+ * line breaks are removed, so the copy button emits exactly one line, with the same fields
+ * and values as the readable form rendered on the page.
+ */
+export function serializeServerConfig(
+  config: CrossGramServerConfig | undefined,
+): string | undefined {
+  return config ? JSON.stringify(config) : undefined
+}
+/** Readable form of the server configuration, used for on-page display only. */
+export function formatServerConfig(
+  config: CrossGramServerConfig | undefined,
+): string | undefined {
+  return config ? JSON.stringify(config, null, 2) : undefined
 }
 
 export { sameOriginPath, copyText } from "cordis-webui-solidjs/utils"
