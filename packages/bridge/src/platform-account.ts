@@ -157,9 +157,24 @@ async function allocateVirtualPhone(database: Database): Promise<string> {
   throw new Error('failed to allocate a unique virtual phone')
 }
 
+/**
+ * Raised when a platform entry cannot own the virtual phone its identity maps
+ * to because another entry already serves it. The account page uses this to
+ * name the entry that owns the account and to offer deleting the duplicate.
+ */
+export class VirtualPhoneClaimedError extends Error {
+  constructor(
+    readonly virtualPhone: string,
+    readonly ownerPlatformId: string,
+  ) {
+    super(`virtual phone +${virtualPhone} is already assigned to platform entry "${ownerPlatformId}"`)
+    this.name = 'VirtualPhoneClaimedError'
+  }
+}
+
 async function ensureVirtualPhoneAvailable(database: Database, virtualPhone: string, authId?: string): Promise<void> {
   const owner = (await database.get('mtproto_auth_session', { virtualPhone })).find(auth => auth.id !== authId)
-  if (owner) throw new Error(`QQ virtual phone ${virtualPhone} is already assigned to another auth session`)
+  if (owner) throw new VirtualPhoneClaimedError(virtualPhone, owner.platformId)
 }
 
 function qqVirtualPhone(user: IMUser): string {

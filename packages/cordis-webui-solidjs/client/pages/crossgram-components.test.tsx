@@ -31,7 +31,15 @@ describe('bounded Crossgram components', () => {
         validUntil: 3000,
       })
     const root = mount(() => (
-      <AccountCard account={account()} now={now()} connected setPassword={async () => {}} />
+      <AccountCard
+        account={account()}
+        now={now()}
+        connected
+        selected={false}
+        onSelect={() => {}}
+        onDelete={() => {}}
+        setPassword={async () => {}}
+      />
     ))
     const card = root.querySelector('article')!,
       copy = root.querySelector(
@@ -46,6 +54,42 @@ describe('bounded Crossgram components', () => {
     setNow(3001)
     expect(copy.disabled).toBe(true)
     expect(copy.textContent).toBe('------')
+  })
+  it('selects and marks a duplicate card without disturbing the account card itself', () => {
+    const selected: boolean[] = []
+    const [marker, setMarker] = createSignal<string | undefined>(undefined)
+    const root = mount(() => (
+      <AccountCard
+        account={{
+          platformId: 'qqnt-2',
+          platformKind: 'QQ',
+          status: 'error',
+          error: 'virtual phone is already assigned',
+        }}
+        now={0}
+        connected
+        selected={marker() === 'selected'}
+        duplicateOf={marker() === 'duplicate' ? 'qqnt' : undefined}
+        onSelect={(value) => selected.push(value)}
+        onDelete={() => {}}
+        setPassword={async () => {}}
+      />
+    ))
+    const checkbox = root.querySelector<HTMLInputElement>(
+      '[aria-label="Select qqnt-2"]',
+    )!
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(selected).toEqual([true])
+    expect(root.querySelector('[data-duplicate-of]')).toBeNull()
+    setMarker('duplicate')
+    expect(root.querySelector('[data-duplicate-of]')?.textContent).toContain(
+      'Duplicate of qqnt',
+    )
+    expect(
+      root.querySelector<HTMLButtonElement>('[aria-label="Delete qqnt-2"]')
+        ?.textContent,
+    ).toBe('Delete account')
   })
   it('renders only one page of large statistics tables and reuses table rows across live snapshots', () => {
     const [rows, setRows] = createSignal(

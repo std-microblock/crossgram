@@ -1,12 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type {
+  CrossGramServerConfig,
+  PlatformAccountDuplicateGroup,
+} from '../src/dashboard-types.js'
 import {
   botLink,
   copyText,
+  describeDuplicateGroup,
+  duplicateOwners,
+  duplicatePlatformIds,
+  formatEndpoint,
   formatPhone,
   parseTelegramLoginUrl,
   remainingSeconds,
   safeImageURL,
   sameOriginPath,
+  withServerEndpoint,
 } from './bridge-model.js'
 afterEach(() => vi.restoreAllMocks())
 describe('bridge dashboard input boundaries', () => {
@@ -51,5 +60,89 @@ describe('bridge dashboard input boundaries', () => {
       new Error('permission denied'),
     )
     await expect(copyText('credential')).rejects.toThrow('permission denied')
+  })
+})
+describe('copied configuration endpoints', () => {
+  const config: CrossGramServerConfig = {
+    name: 'CrossGram',
+    enable_special_config: false,
+    host: '203.0.113.8',
+    port: 4430,
+    rsa_key: 'PUBLIC_KEY',
+    dcs: [
+      { id: 1, ip: '203.0.113.8', port: 4430 },
+      { id: 2, ip: '203.0.113.8', port: 4430 },
+    ],
+  }
+  it('formats endpoints the way a client configuration spells them', () => {
+    expect(formatEndpoint({ host: '203.0.113.8', port: 4430 })).toBe(
+      '203.0.113.8:4430',
+    )
+    expect(formatEndpoint({ host: '2001:db8::1', port: 8443 })).toBe(
+      '[2001:db8::1]:8443',
+    )
+  })
+  it('rewrites only the host and port of a copied document', () => {
+    const rewritten = withServerEndpoint(config, {
+      host: 'backup.example.test',
+      port: 8443,
+      primary: false,
+    })
+    expect(rewritten).toEqual({
+      ...config,
+      host: 'backup.example.test',
+      port: 8443,
+      dcs: [
+        { id: 1, ip: 'backup.example.test', port: 8443 },
+        { id: 2, ip: 'backup.example.test', port: 8443 },
+      ],
+    })
+    // The copied document keeps the page's readable layout, only the address differs.
+    expect(JSON.stringify(rewritten, null, 2)).toContain('"host": "backup.example.test"')
+    // Selecting the primary endpoint leaves the document exactly as configured.
+    expect(
+      withServerEndpoint(config, {
+        host: '203.0.113.8',
+        port: 4430,
+        primary: true,
+      }),
+    ).toEqual(config)
+  })
+})
+
+describe('duplicate account presentation', () => {
+  const groups: PlatformAccountDuplicateGroup[] = [
+    {
+      keep: 'qqnt',
+      remove: ['qqnt-2', 'qqnt-3'],
+      reason: 'virtual-phone',
+    },
+    { keep: 'matrix', remove: ['matrix-2'], reason: 'identity' },
+  ]
+  it('maps every duplicated entry to the entry that keeps the account', () => {
+    expect([...duplicateOwners(groups)]).toEqual([
+      ['qqnt-2', 'qqnt'],
+      ['qqnt-3', 'qqnt'],
+      ['matrix-2', 'matrix'],
+    ])
+    expect(duplicateOwners([]).size).toBe(0)
+  })
+  it('lists duplicated entries once, in a stable order', () => {
+    expect(duplicatePlatformIds(groups)).toEqual([
+      'matrix-2',
+      'qqnt-2',
+      'qqnt-3',
+    ])
+    expect(
+      duplicatePlatformIds([...groups, { keep: 'other', remove: ['qqnt-2'], reason: 'identity' }]),
+    ).toEqual(['matrix-2', 'qqnt-2', 'qqnt-3'])
+  })
+  it('states why a group counts as duplicated', () => {
+    expect(describeDuplicateGroup(groups[0]!)).toBe(
+      'qqnt-2, qqnt-3 duplicate qqnt (already serves the same virtual phone)',
+    )
+    expect(describeDuplicateGroup(groups[1]!)).toBe(
+      'matrix-2 duplicates matrix (resolves to the same platform user)',
+    )
   })
 })

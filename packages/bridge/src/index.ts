@@ -29,7 +29,8 @@ import { StickerRpc } from './sticker-rpc.js'
 import { ReactionRpc } from './reaction-rpc.js'
 import { TelegramResourceService } from './resource-provider.js'
 import {
-  migrateLegacyVirtualPhones, PlatformAccountProvisioner, type ProvisionedPlatformAccount,
+  migrateLegacyVirtualPhones, PlatformAccountProvisioner, VirtualPhoneClaimedError,
+  type ProvisionedPlatformAccount,
 } from './platform-account.js'
 import { verifyLoginCode } from './login-code.js'
 import {
@@ -38,9 +39,14 @@ import {
 import { DraftStore } from './draft-store.js'
 import { NotificationSettingsStore } from './notification-settings.js'
 import {
-  makeCrossGramServerConfig, makePlatformAccountView, makeUnavailableAccountView,
+  makeCrossGramServerConfig, makePlatformAccountView, makeServerEndpoints, makeUnavailableAccountView,
   type PlatformAccountDashboardData,
 } from './account-dashboard.js'
+import type { PlatformAccountRemovalTarget } from './dashboard-types.js'
+import { findDuplicateAccounts, type PlatformAccountDuplicateCandidate } from './account-duplicates.js'
+import {
+  countPlatformClientAuthorizations, isLoaderManagedEntry, removePlatformAccount, removePlatformEntry,
+} from './account-removal.js'
 import { AuthTransferStore } from './auth-transfer.js'
 import {
   LoginTokenStore, LoginTokenStoreFullError, LoginTokenSourceLimitError, parseTelegramLoginToken,
@@ -251,6 +257,18 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (authKeyId, originConnection) => ctx.mtproto.beginAuthKeyRevocation(authKeyId, originConnection),
     authKeyId => ctx.mtproto.finishAuthKeyRevocation(authKeyId),
   )
+  // Deleting a platform account signs out every client that logged in through
+  // it. Revocation is best effort after the rows are gone, so one stuck key can
+  // never keep a deleted account around.
+  const revokeBoundClients = async (authKeyIds: string[]): Promise<void> => {
+    for (const authKeyId of authKeyIds) {
+      try {
+        await ctx.mtproto.revokeAuthKey(new Uint8Array(Buffer.from(authKeyId, 'hex')))
+      } catch (error) {
+        bridgeLogger.warn('failed to revoke authorization of a deleted account (%s): %s', authKeyId, String(error))
+      }
+    }
+  }
   const store = new MessageStore(ctx.database, undefined, ctx.updateStore, historyTrace, messageProjection)
   const drafts = new DraftStore(ctx.database)
   const notificationSettings = new NotificationSettingsStore(
@@ -545,6 +563,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     serverConfig: makeCrossGramServerConfig(
       config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, ctx.mtproto.rsaKey.publicKeyPem,
     ),
+    serverEndpoints: makeServerEndpoints(
+      config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, config.altEndpoints,
+    ),
     loginTokenApprovalUrl: `${apiPrefix}/login-tokens`,
     updatedAt: Date.now(),
     stickerAccounts: [],
@@ -565,6 +586,72 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     },
     async refreshBots() {
       await publishBots()
+    },
+    async findDuplicateAccounts() {
+      await ctx.database.prepared()
+      const candidates = await Promise.all([...registry.ids].sort().map(
+        async (platformId): Promise<PlatformAccountDuplicateCandidate> => {
+          const platform = registry.get(platformId)
+          const error = accountErrors.get(platformId)
+          return {
+            platformId,
+            platformKind: platform?.platformKind ?? platformId,
+            userId: provisionedAccounts.get(platformId)?.profile.id,
+            claimedBy: error instanceof VirtualPhoneClaimedError ? error.ownerPlatformId : undefined,
+            clientAuthorizations: await countPlatformClientAuthorizations(ctx.database, platformId),
+          }
+        },
+      ))
+      return findDuplicateAccounts(candidates)
+    },
+    async describeAccountRemoval(platformIds) {
+      await ctx.database.prepared()
+      const requested = normalizePlatformIds(platformIds)
+      const targets: PlatformAccountRemovalTarget[] = []
+      for (const platformId of requested) {
+        const platform = registry.get(platformId)
+        const account = provisionedAccounts.get(platformId)
+        targets.push({
+          platformId,
+          platformKind: platform?.platformKind ?? platformId,
+          displayName: account
+            ? [account.profile.firstName, account.profile.lastName].filter(Boolean).join(' ')
+              || account.profile.username
+            : undefined,
+          clientAuthorizations: await countPlatformClientAuthorizations(ctx.database, platformId),
+          managed: isLoaderManagedEntry(ctx, platformId),
+        })
+      }
+      return {
+        targets,
+        clientAuthorizations: targets.reduce((total, target) => total + target.clientAuthorizations, 0),
+      }
+    },
+    async deleteAccounts(platformIds) {
+      await ctx.database.prepared()
+      const requested = normalizePlatformIds(platformIds)
+      if (!requested.length) throw new Error('没有选择要删除的账号。')
+      // Validate every entry before removing anything, so an unmanaged entry can
+      // never leave the configuration half deleted.
+      for (const platformId of requested) {
+        if (!registry.get(platformId)) throw new Error(`平台条目不存在：${platformId}，请刷新后重试。`)
+        if (!isLoaderManagedEntry(ctx, platformId)) {
+          throw new Error(`平台条目 ${platformId} 不是由配置文件管理的，请到插件页面手动停用它。`)
+        }
+      }
+      for (const platformId of requested) {
+        const platform = registry.require(platformId)
+        platforms.deactivateSession(platformId, platform)
+        await subscriptions.stopPlatform(platformId)
+        await removePlatformAccount(ctx.database, platformId, revokeBoundClients)
+        provisionedAccounts.delete(platformId)
+        accountErrors.delete(platformId)
+        // Removing the entry unregisters the adapter, so provisioning cannot
+        // recreate the account, and the plugin list stays in sync with app.yml.
+        removePlatformEntry(ctx, platformId)
+      }
+      publishAccounts()
+      await publishStickerPacks()
     },
     async setStickerPackAssigned(platformSessionId, providerId, packId, assigned) {
       const pack = publishedStickerPacks.find((item) =>
@@ -1456,6 +1543,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
 /** Normalize a phone to digits only — clients send '+' for sendCode but not for signIn. */
 function normPhone(p: string): string {
   return p.replace(/\D/g, '')
+}
+
+/** Deduplicate requested platform entry ids; the browser may repeat them across sections. */
+function normalizePlatformIds(platformIds: readonly string[]): string[] {
+  return [...new Set(platformIds.filter(
+    (platformId): platformId is string => typeof platformId === 'string' && platformId.length > 0,
+  ))]
 }
 
 /** Completes a new authorization only after its binding can receive transient replays. */

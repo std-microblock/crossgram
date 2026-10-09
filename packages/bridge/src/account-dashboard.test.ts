@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ProvisionedPlatformAccount } from './platform-account.js'
 import {
-  makeCrossGramServerConfig, makePlatformAccountView, makeUnavailableAccountView,
+  makeCrossGramServerConfig, makePlatformAccountView, makeServerEndpoints, makeUnavailableAccountView,
 } from './account-dashboard.js'
 
 const provisioned: ProvisionedPlatformAccount = {
@@ -59,5 +59,20 @@ describe('platform account dashboard projection', () => {
     expect(JSON.stringify(config)).not.toMatch(
       /altEndpoints|privateKey|rsaKeyPath|token|credentials|totp/i,
     )
+  })
+
+  it('offers the advertised endpoints for copying, main first and without duplicates', () => {
+    expect(makeServerEndpoints('203.0.113.8', 4430, [
+      'backup.example:8443',
+      '203.0.113.8:4430',
+      '[2001:db8::1]:4430',
+    ])).toEqual([
+      { host: '203.0.113.8', port: 4430, primary: true },
+      { host: 'backup.example', port: 8443, primary: false },
+      { host: '2001:db8::1', port: 4430, primary: false },
+    ])
+    expect(makeServerEndpoints('203.0.113.8', 4430)).toEqual([
+      { host: '203.0.113.8', port: 4430, primary: true },
+    ])
   })
 })

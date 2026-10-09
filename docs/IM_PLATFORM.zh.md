@@ -66,6 +66,8 @@ interface IMPlatform<L> {
 
 同一个 Cordis platform entry 对应一个账号和一个虚拟手机号。bridge 在 `/platform-accounts` 页面展示平台资料、手机号和每 30 秒轮换的六位 TOTP 登录码。`user.avatar` 继续使用 adapter 的 typed `IMMedia<L>`，页面头像由 bridge 调用 `downloadMedia()` 读取；TOTP secret 和 credentials 不会下发到浏览器。
 
+页面上的「删除账号」删掉的是**这一条 platform entry 和它的登录面**：平台会话、虚拟手机号、TOTP secret、两步验证密码和客户端授权一起清理，绑定在这些凭据上的客户端会被登出，最后 entry 从配置文件里移除（所以重启后不会再被 provision）。消息、会话和 `mtproto_im_user` 身份行保留：它们按 platform session 隔离，条目删掉后不再可达，用同一个 entry id 重新配置时旧消息仍属于同一个平台用户。删除只对由配置文件（loader）管理的 entry 生效，adapter 直接 `ctx.plugin()` 注册的条目会被拒绝，需要自行停用。
+
 ## 2. ID 与幂等
 
 - user、conversation、message、media 和 group ID 都是 opaque string。

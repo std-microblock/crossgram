@@ -29,6 +29,77 @@
     margin: 20px 0;
     max-width: 480px;
   }
+  .connection-config-actions {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .endpoint-picker {
+    min-width: 0;
+  }
+  .endpoint-picker select {
+    max-width: 260px;
+  }
+  .account-duplicates {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    border-color: var(--tertiary);
+  }
+  .account-duplicates strong {
+    font-size: 15px;
+  }
+  .account-duplicates p {
+    margin-top: 6px;
+    font-size: 12.5px;
+    opacity: 0.85;
+  }
+  .account-duplicates ul {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .account-selection {
+    margin-bottom: 16px;
+  }
+  .identity-card.selected {
+    outline: 2px solid var(--primary);
+    outline-offset: -1px;
+  }
+  .identity-card > header {
+    gap: 12px;
+  }
+  .account-select {
+    display: flex;
+    align-items: center;
+    flex: none;
+  }
+  .account-select input {
+    width: 18px;
+    height: 18px;
+  }
+  .identity-duplicate {
+    display: flex;
+  }
+  .chip.duplicate {
+    background: var(--tertiary-container);
+    color: var(--on-tertiary-container);
+  }
+  .identity-actions {
+    margin-top: auto;
+  }
+  .removal-targets {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 6px;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
   .platform-account-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr));

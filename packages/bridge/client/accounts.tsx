@@ -7,9 +7,13 @@ import {
   Index,
   onCleanup,
   Show,
+  untrack,
 } from 'solid-js'
 import type {
   PlatformAccountDashboardData,
+  PlatformAccountDuplicateGroup,
+  PlatformAccountRemovalPreview,
+  PlatformAccountServerEndpoint,
   PlatformAccountView,
 } from '../src/dashboard-types.js'
 import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
@@ -24,18 +28,27 @@ import {
 import { sessionToken } from 'cordis-webui-solidjs/session'
 import {
   copyText,
+  describeDuplicateGroup,
+  duplicateOwners,
+  duplicatePlatformIds,
+  formatEndpoint,
   formatPhone,
   parseTelegramLoginUrl,
   remainingSeconds,
   safeImageURL,
   sameOriginPath,
+  withServerEndpoint,
 } from './bridge-model.js'
 export default function AccountsPage(props: PageProps) {
   const rpc = useRpc<PlatformAccountDashboardData>(props.entryId),
     action = useAction()
   const [now, setNow] = createSignal(Date.now()),
     [qr, setQr] = createSignal(false),
-    [copied, setCopied] = createSignal(false)
+    [copied, setCopied] = createSignal(false),
+    [endpointKey, setEndpointKey] = createSignal(''),
+    [selected, setSelected] = createSignal<string[]>([]),
+    [deleting, setDeleting] = createSignal<string[] | null>(null),
+    [duplicates, setDuplicates] = createSignal<PlatformAccountDuplicateGroup[]>([])
   const tick = () => {
       if (!document.hidden) setNow(Date.now())
     },
@@ -55,8 +68,42 @@ export default function AccountsPage(props: PageProps) {
       ),
   )
   const ids = createMemo(() => [...accounts().keys()])
+  // Duplicate detection is a durable backend answer, so it is fetched once per
+  // connection instead of riding the per-second account snapshot.
+  const duplicateScan = useAction()
+  const scanDuplicates = async () => {
+    await duplicateScan.run(async () => {
+      setDuplicates((await rpc.data.findDuplicateAccounts()) ?? [])
+    })
+  }
+  createEffect(() => {
+    if (!rpc.ready) return
+    untrack(() => void scanDuplicates())
+  })
+  const duplicateOf = createMemo(() => duplicateOwners(duplicates()))
+  // Copying for another endpoint must not silently change the default: nothing is
+  // selected until the reader picks an endpoint, and the primary entry wins then.
+  const endpoints = createMemo<PlatformAccountServerEndpoint[]>(
+    () => rpc.data.serverEndpoints ?? [],
+  )
+  const endpoint = createMemo(() => {
+    const list = endpoints(),
+      key = endpointKey()
+    return (
+      list.find((item) => formatEndpoint(item) === key) ??
+      list.find((item) => item.primary) ??
+      list[0]
+    )
+  })
+  // The page displays and copies the same document, for the selected endpoint.
+  const configuredEndpoint = createMemo(() => {
+    const config = rpc.data.serverConfig,
+      target = endpoint()
+    // Without an advertised endpoint list the document stays exactly as configured.
+    return config && target ? withServerEndpoint(config, target) : config
+  })
   const configuration = createMemo(() =>
-    JSON.stringify(rpc.data.serverConfig, null, 2),
+    JSON.stringify(configuredEndpoint(), null, 2),
   )
   const [search, setSearch] = createSignal(''),
     [limit, setLimit] = createSignal(24)
@@ -68,6 +115,20 @@ export default function AccountsPage(props: PageProps) {
         .includes(search().toLowerCase())
     }),
   )
+  const duplicateIds = createMemo(() => duplicatePlatformIds(duplicates()))
+  const toggle = (id: string, on: boolean) =>
+    setSelected((current) =>
+      on
+        ? current.includes(id)
+          ? current
+          : [...current, id]
+        : current.filter((value) => value !== id),
+    )
+  const afterRemoval = async () => {
+    setSelected([])
+    setDeleting(null)
+    await scanDuplicates()
+  }
   return (
     <>
       <PageHeader
@@ -78,7 +139,12 @@ export default function AccountsPage(props: PageProps) {
             <button
               class="button outlined"
               disabled={action.busy() || !rpc.ready}
-              onClick={() => void action.run(() => rpc.data.refresh())}
+              onClick={() =>
+                void action.run(async () => {
+                  await rpc.data.refresh()
+                  await scanDuplicates()
+                })
+              }
             >
               Refresh accounts
             </button>
@@ -102,18 +168,39 @@ export default function AccountsPage(props: PageProps) {
               Import this server configuration into a patched Crossgram client.
             </p>
           </div>
-          <button
-            class="button tonal"
-            disabled={!rpc.ready || !rpc.data.serverConfig}
-            onClick={() =>
-              void action.run(async () => {
-                await copyText(configuration()!)
-                setCopied(true)
-              })
-            }
-          >
-            {copied() ? 'Configuration copied' : 'Copy server configuration'}
-          </button>
+          <div class="connection-config-actions">
+            <Show when={endpoints().length > 1}>
+              <label class="field endpoint-picker">
+                <span>Endpoint</span>
+                <select
+                  aria-label="Copy endpoint"
+                  value={endpoint() ? formatEndpoint(endpoint()!) : ''}
+                  onChange={(event) => setEndpointKey(event.currentTarget.value)}
+                >
+                  <For each={endpoints()}>
+                    {(item) => (
+                      <option value={formatEndpoint(item)}>
+                        {formatEndpoint(item)}
+                        {item.primary ? ' (main)' : ''}
+                      </option>
+                    )}
+                  </For>
+                </select>
+              </label>
+            </Show>
+            <button
+              class="button tonal"
+              disabled={!rpc.ready || !rpc.data.serverConfig}
+              onClick={() =>
+                void action.run(async () => {
+                  await copyText(configuration()!)
+                  setCopied(true)
+                })
+              }
+            >
+              {copied() ? 'Configuration copied' : 'Copy server configuration'}
+            </button>
+          </div>
           <details>
             <summary>View server configuration</summary>
             <pre aria-label="Server configuration">{configuration()}</pre>
@@ -123,6 +210,36 @@ export default function AccountsPage(props: PageProps) {
           <h2>Your identities</h2>
           <span class="muted">{ids().length} accounts</span>
         </div>
+        <Show when={duplicateIds().length}>
+          <section class="panel account-duplicates" data-duplicates>
+            <div>
+              <strong>
+                {duplicateIds().length} duplicate account
+                {duplicateIds().length > 1 ? 's' : ''}
+              </strong>
+              <p>
+                Entries that resolve to the same platform user, or that lost
+                their virtual phone to another entry. Nothing is deleted until
+                you confirm the list.
+              </p>
+              <ul class="muted">
+                <For each={duplicates()}>
+                  {(group) => <li>{describeDuplicateGroup(group)}</li>}
+                </For>
+              </ul>
+            </div>
+            <button
+              class="button outlined"
+              onClick={() =>
+                setSelected((current) => [
+                  ...new Set([...current, ...duplicateIds()]),
+                ])
+              }
+            >
+              Select duplicates
+            </button>
+          </section>
+        </Show>
         <label class="field account-search">
           <span class="sr-only">Find an account</span>
           <input
@@ -135,6 +252,25 @@ export default function AccountsPage(props: PageProps) {
             }}
           />
         </label>
+        <Show when={selected().length}>
+          <div
+            class="toolbar account-selection"
+            role="group"
+            aria-label="Selected accounts"
+          >
+            <span class="muted">{selected().length} selected</span>
+            <button class="button outlined" onClick={() => setSelected([])}>
+              Clear selection
+            </button>
+            <button
+              class="button danger"
+              disabled={!rpc.ready}
+              onClick={() => setDeleting(selected())}
+            >
+              Delete selected
+            </button>
+          </div>
+        </Show>
         <div class="platform-account-grid">
           <For each={filtered().slice(0, limit())}>
             {(id) => (
@@ -142,6 +278,10 @@ export default function AccountsPage(props: PageProps) {
                 account={accounts().get(id)!}
                 now={now()}
                 connected={rpc.ready}
+                selected={selected().includes(id)}
+                duplicateOf={duplicateOf().get(id)}
+                onSelect={(on) => toggle(id, on)}
+                onDelete={() => setDeleting([id])}
                 setPassword={(password) => rpc.data.setLoginPassword(id, password)}
               />
             )}
@@ -176,6 +316,14 @@ export default function AccountsPage(props: PageProps) {
           onClose={() => setQr(false)}
         />
       </Show>
+      <Show when={deleting()}>
+        <DeleteAccounts
+          data={rpc.data}
+          platformIds={deleting()!}
+          onClose={() => setDeleting(null)}
+          onDeleted={afterRemoval}
+        />
+      </Show>
     </>
   )
 }
@@ -183,6 +331,11 @@ export function AccountCard(props: {
   account: PlatformAccountView
   now: number
   connected: boolean
+  selected: boolean
+  /** Entry this account duplicates, when the backend proved it is a duplicate. */
+  duplicateOf?: string
+  onSelect: (selected: boolean) => void
+  onDelete: () => void
   setPassword: (password: string | null) => Promise<void>
 }) {
   const [failedAvatar, setFailedAvatar] = createSignal(false),
@@ -211,9 +364,18 @@ export function AccountCard(props: {
   return (
     <article
       class="panel identity-card"
+      classList={{ selected: props.selected }}
       data-platform={props.account.platformId}
     >
       <header>
+        <label class="account-select">
+          <input
+            type="checkbox"
+            checked={props.selected}
+            aria-label={'Select ' + props.account.platformId}
+            onChange={(event) => props.onSelect(event.currentTarget.checked)}
+          />
+        </label>
         <div class="identity-avatar">
           <Show
             when={avatar() && !failedAvatar()}
@@ -238,6 +400,13 @@ export function AccountCard(props: {
         </div>
         <span class="chip">{props.account.platformKind}</span>
       </header>
+      <Show when={props.duplicateOf}>
+        <div class="identity-duplicate" data-duplicate-of={props.duplicateOf}>
+          <span class="chip duplicate">
+            Duplicate of {props.duplicateOf}
+          </span>
+        </div>
+      </Show>
       <dl class="identity-meta">
         <div>
           <dt>Platform</dt>
@@ -361,8 +530,107 @@ export function AccountCard(props: {
           }}
         />
       </Show>
+      <div class="toolbar identity-actions">
+        <button
+          class="button danger"
+          aria-label={'Delete ' + props.account.platformId}
+          disabled={!props.connected}
+          onClick={props.onDelete}
+        >
+          Delete account
+        </button>
+      </div>
       <ActionError error={action.error()} />
     </article>
+  )
+}
+
+/**
+ * Confirmation for one or more platform entries. The description comes from the
+ * backend, so the dialog names the exact entries and how many Telegram clients
+ * are signed in through them before anything is removed.
+ */
+function DeleteAccounts(props: {
+  data: PlatformAccountDashboardData
+  platformIds: string[]
+  onClose: () => void
+  onDeleted: () => Promise<void>
+}) {
+  const [preview, setPreview] =
+    createSignal<PlatformAccountRemovalPreview>()
+  const load = useAction(),
+    remove = useAction()
+  void load.run(async () => {
+    setPreview(await props.data.describeAccountRemoval(props.platformIds))
+  })
+  const unmanaged = () =>
+    (preview()?.targets ?? []).filter((target) => !target.managed)
+  const accounts = () => preview()?.targets ?? []
+  return (
+    <Modal title="Delete platform accounts" onClose={props.onClose}>
+      <p>
+        The platform entries below are removed from the configuration, together
+        with their virtual phone, login code and two-step verification password.
+        Their message history stays in the database.
+      </p>
+      <Show when={load.busy() && !preview()}>
+        <p role="status">Checking what will be removed…</p>
+      </Show>
+      <ul class="removal-targets">
+        <For each={accounts()}>
+          {(target) => (
+            <li>
+              <strong>{target.displayName || target.platformId}</strong>
+              <span class="muted">
+                {' '}
+                {target.displayName ? target.platformId + ' · ' : ''}
+                {target.platformKind}
+              </span>
+            </li>
+          )}
+        </For>
+      </ul>
+      <Show when={preview()?.clientAuthorizations}>
+        <p class="notice error" role="alert">
+          {preview()!.clientAuthorizations} Telegram client
+          {preview()!.clientAuthorizations > 1 ? 's' : ''} signed in through
+          the selected entries will be signed out.
+        </p>
+      </Show>
+      <Show when={unmanaged().length}>
+        <p class="notice error" role="alert">
+          {unmanaged()
+            .map((target) => target.platformId)
+            .join(', ')}{' '}
+          {unmanaged().length > 1 ? 'are' : 'is'} not managed by the
+          configuration file. Disable the plugin entry instead.
+        </p>
+      </Show>
+      <ActionError error={load.error() || remove.error()} />
+      <div class="toolbar">
+        <button
+          class="button danger"
+          disabled={
+            remove.busy() || load.busy() || !preview() || unmanaged().length > 0
+          }
+          onClick={() =>
+            void remove.run(async () => {
+              await props.data.deleteAccounts(props.platformIds)
+              await props.onDeleted()
+            })
+          }
+        >
+          {remove.busy() ? 'Deleting…' : 'Delete accounts'}
+        </button>
+        <button
+          class="button outlined"
+          disabled={remove.busy()}
+          onClick={props.onClose}
+        >
+          Cancel
+        </button>
+      </div>
+    </Modal>
   )
 }
 

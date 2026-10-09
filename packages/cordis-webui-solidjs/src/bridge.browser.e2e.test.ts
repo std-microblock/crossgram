@@ -11,6 +11,7 @@ import {
   LoginTokenStore,
   parseTelegramLoginToken,
 } from '../../bridge/src/login-token.js'
+import { findDuplicateAccounts } from '../../bridge/src/account-duplicates.js'
 import SolidWebUI from './index.js'
 describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
   it('keeps identity cards stable, decodes QR in a worker, requires explicit account approval and manages sticker/bot pages on a phone', async () => {
@@ -32,7 +33,9 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       const tokenUrl =
           'tg://login?token=' + Buffer.from(issued).toString('base64url'),
         approvals: unknown[] = [],
-        assignments: unknown[][] = []
+        assignments: unknown[][] = [],
+        described: string[][] = [],
+        removed: string[][] = []
       ctx.server.post('/bridge/login-tokens/:platform/approve', async (req) => {
         const body = await req.json(),
           token = parseTelegramLoginToken(body.token)
@@ -76,15 +79,33 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
             status: 'error',
             error: 'Platform disconnected',
           },
+          {
+            // A second QQ entry that could not claim the virtual phone of `qq-main`
+            // carries no profile, exactly like the backend error projection.
+            platformId: 'qq-duplicate',
+            platformKind: 'QQ',
+            status: 'error',
+            userId: '12345',
+            virtualPhone: '+888123456789',
+            error: 'virtual phone is already assigned to platform entry',
+          },
         ],
         serverConfig: {
           name: 'CrossGram',
           enable_special_config: false,
           host: 'example.test',
           port: 4430,
-          rsa_key: 'PUBLIC_TEST_KEY',
-          dcs: [],
+          rsa_key:
+            '-----BEGIN RSA PUBLIC KEY-----\nPUBLIC_TEST_KEY\n-----END RSA PUBLIC KEY-----',
+          dcs: [
+            { id: 1, ip: 'example.test', port: 4430 },
+            { id: 2, ip: 'example.test', port: 4430 },
+          ],
         },
+        serverEndpoints: [
+          { host: 'example.test', port: 4430, primary: true },
+          { host: 'backup.test', port: 8443, primary: false },
+        ],
         loginTokenApprovalUrl: '/bridge/login-tokens',
         updatedAt: Date.now(),
         stickerAccounts: [
@@ -139,6 +160,52 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
         async refreshBots() {},
         async refreshStickerPacks() {},
         async setLoginPassword() {},
+        async findDuplicateAccounts() {
+          return findDuplicateAccounts(
+            data.accounts.map((account) => ({
+              platformId: account.platformId,
+              platformKind: account.platformKind,
+              userId: account.userId,
+              clientAuthorizations:
+                account.platformId === 'qq-main'
+                  ? 2
+                  : account.platformId === 'matrix-alt'
+                    ? 1
+                    : 0,
+            })),
+          )
+        },
+        async describeAccountRemoval(platformIds) {
+          described.push(platformIds)
+          return {
+            targets: platformIds.map((platformId) => ({
+              platformId,
+              platformKind:
+                data.accounts.find((account) => account.platformId === platformId)
+                  ?.platformKind ?? 'unknown',
+              displayName: data.accounts.find(
+                (account) => account.platformId === platformId,
+              )?.displayName,
+              clientAuthorizations:
+                platformId === 'qq-main' ? 2 : platformId === 'matrix-alt' ? 1 : 0,
+              managed: platformId !== 'offline',
+            })),
+            clientAuthorizations: platformIds.reduce(
+              (total, platformId) =>
+                total +
+                (platformId === 'qq-main' ? 2 : platformId === 'matrix-alt' ? 1 : 0),
+              0,
+            ),
+          }
+        },
+        async deleteAccounts(platformIds) {
+          removed.push(platformIds)
+          entry.mutate((value) => {
+            value.accounts = value.accounts.filter(
+              (account) => !platformIds.includes(account.platformId),
+            )
+          })
+        },
         async setStickerPackAssigned(account, provider, pack, assigned) {
           assignments.push([account, provider, pack, assigned])
           entry.mutate((value) => {
@@ -237,9 +304,64 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       await page
         .getByRole('button', { name: 'Copy server configuration', exact: true })
         .click()
-      expect(
-        JSON.parse(await page.evaluate(() => navigator.clipboard.readText())),
-      ).toMatchObject({ host: 'example.test', rsa_key: 'PUBLIC_TEST_KEY' })
+      const copiedConfiguration = await page.evaluate(() =>
+        navigator.clipboard.readText(),
+      )
+      expect(JSON.parse(copiedConfiguration)).toEqual(data.serverConfig)
+      expect(copiedConfiguration).toContain('PUBLIC_TEST_KEY')
+      // Phones open the console over plain http, where navigator.clipboard is missing and
+      // copyText falls back to a hidden textarea; that path must produce the same document.
+      await page.evaluate(() =>
+        Object.defineProperty(navigator.clipboard, 'writeText', {
+          value: undefined,
+          configurable: true,
+        }),
+      )
+      await page
+        .getByRole('button', { name: 'Configuration copied', exact: true })
+        .click()
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+        copiedConfiguration,
+      )
+      // The clipboard and the readable document on the page are the same configuration.
+      const displayedConfiguration = await page
+        .getByLabel('Server configuration')
+        .textContent()
+      expect(JSON.parse(displayedConfiguration!)).toEqual(
+        JSON.parse(copiedConfiguration),
+      )
+      // Copying for another endpoint only rewrites host/port, so a reader who needs
+      // the backup address does not have to edit the pasted document by hand. The
+      // mobile fallback path above is still active, so this covers it as well.
+      const endpointPicker = page.getByLabel('Copy endpoint')
+      expect(await endpointPicker.inputValue()).toBe('example.test:4430')
+      await page
+        .getByRole('button', { name: 'Configuration copied', exact: true })
+        .click()
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+        copiedConfiguration,
+      )
+      await endpointPicker.selectOption('backup.test:8443')
+      expect(await page.getByLabel('Server configuration').textContent()).toContain(
+        '"host": "backup.test"',
+      )
+      await page
+        .getByRole('button', { name: 'Configuration copied', exact: true })
+        .click()
+      const alternateConfiguration = await page.evaluate(() =>
+        navigator.clipboard.readText(),
+      )
+      expect(JSON.parse(alternateConfiguration)).toEqual({
+        ...data.serverConfig,
+        host: 'backup.test',
+        port: 8443,
+        dcs: data.serverConfig.dcs.map((dc) => ({
+          ...dc,
+          ip: 'backup.test',
+          port: 8443,
+        })),
+      })
+      await endpointPicker.selectOption('example.test:4430')
       await page
         .getByRole('button', { name: 'Approve QR login', exact: true })
         .click()
@@ -340,6 +462,95 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       await page
         .getByRole('heading', { name: 'Primary account', exact: true })
         .waitFor()
+
+      // Duplicate entries are reported by the backend with the entry that owns the
+      // account, so the reader can see what would go before selecting anything.
+      const duplicates = page.locator('[data-duplicates]')
+      await duplicates.getByText('1 duplicate account', { exact: true }).waitFor()
+      expect(await duplicates.textContent()).toContain(
+        'qq-duplicate duplicates qq-main',
+      )
+      const duplicateCard = page.locator('[data-platform="qq-duplicate"]')
+      expect(
+        await duplicateCard.locator('[data-duplicate-of]').textContent(),
+      ).toContain('Duplicate of qq-main')
+      if (process.env.WEBUI_SCREENSHOTS) {
+        await mkdir(process.env.WEBUI_SCREENSHOTS, { recursive: true })
+        await page.screenshot({
+          path: join(
+            process.env.WEBUI_SCREENSHOTS,
+            'accounts-duplicates-mobile.png',
+          ),
+          fullPage: true,
+          animations: 'disabled',
+        })
+      }
+
+      // An entry the configuration file does not own cannot be deleted, and the
+      // dialog says so instead of dropping the entry from the runtime only.
+      await page.getByRole('button', { name: 'Delete offline', exact: true }).click()
+      const unmanagedDialog = page.getByRole('dialog', {
+        name: 'Delete platform accounts',
+      })
+      await unmanagedDialog.getByText('offline is not managed by').waitFor()
+      expect(
+        await unmanagedDialog
+          .getByRole('button', { name: 'Delete accounts', exact: true })
+          .isDisabled(),
+      ).toBe(true)
+      await unmanagedDialog
+        .getByRole('button', { name: 'Cancel', exact: true })
+        .click()
+
+      // Deleting an account clients are signed in through is confirmed with the
+      // exact number of sessions that lose access.
+      await page
+        .getByRole('button', { name: 'Delete qq-main', exact: true })
+        .click()
+      const inUseDialog = page.getByRole('dialog', {
+        name: 'Delete platform accounts',
+      })
+      await inUseDialog
+        .getByText(/2 Telegram clients signed in through the selected entries will be signed out\./)
+        .waitFor()
+      await inUseDialog
+        .getByRole('button', { name: 'Cancel', exact: true })
+        .click()
+
+      await page
+        .getByRole('button', { name: 'Select duplicates', exact: true })
+        .click()
+      await page.getByText('1 selected', { exact: true }).waitFor()
+      expect(
+        await page
+          .getByRole('checkbox', { name: 'Select qq-duplicate', exact: true })
+          .isChecked(),
+      ).toBe(true)
+      await page
+        .getByRole('button', { name: 'Delete selected', exact: true })
+        .click()
+      const deleteDialog = page.getByRole('dialog', {
+        name: 'Delete platform accounts',
+      })
+      await deleteDialog.getByText('qq-duplicate', { exact: false }).first().waitFor()
+      if (process.env.WEBUI_SCREENSHOTS) {
+        await page.screenshot({
+          path: join(
+            process.env.WEBUI_SCREENSHOTS,
+            'accounts-delete-confirm-mobile.png',
+          ),
+          animations: 'disabled',
+        })
+      }
+      await deleteDialog
+        .getByRole('button', { name: 'Delete accounts', exact: true })
+        .click()
+      await page.locator('[data-platform="qq-duplicate"]').waitFor({ state: 'detached' })
+      await duplicates.waitFor({ state: 'detached' })
+      expect(removed).toEqual([['qq-duplicate']])
+      expect(described).toContainEqual(['qq-duplicate'])
+      expect(await page.locator('.identity-card').count()).toBe(3)
+
       if (process.env.WEBUI_SCREENSHOTS) {
         await mkdir(process.env.WEBUI_SCREENSHOTS, { recursive: true })
         await page.screenshot({
@@ -359,6 +570,32 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
           fullPage: true,
           animations: 'disabled',
         })
+        // A native <select> popup cannot be captured by Chromium, so the endpoint
+        // picker is documented with the main endpoint selected and then with the
+        // backup endpoint selected next to the document it produces.
+        await page.evaluate(() => scrollTo(0, 0))
+        await page
+          .locator('.connection-config')
+          .screenshot({
+            path: join(
+              process.env.WEBUI_SCREENSHOTS,
+              'accounts-endpoint-main-desktop.png',
+            ),
+            animations: 'disabled',
+          })
+        await page.getByLabel('Copy endpoint').selectOption('backup.test:8443')
+        await page
+          .locator('.connection-config details')
+          .evaluate((details) => details.setAttribute('open', 'open'))
+        await page
+          .locator('.connection-config')
+          .screenshot({
+            path: join(
+              process.env.WEBUI_SCREENSHOTS,
+              'accounts-endpoint-backup-desktop.png',
+            ),
+            animations: 'disabled',
+          })
       }
       expect(errors).toEqual([])
       entry.dispose()

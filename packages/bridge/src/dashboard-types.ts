@@ -26,6 +26,44 @@ export interface CrossGramServerConfigDc {
   port: number
 }
 
+/** One `host:port` a copied server configuration can point at. */
+export interface PlatformAccountServerEndpoint {
+  host: string
+  port: number
+  /** The endpoint the bridge advertises first; also the default selection for a copy. */
+  primary: boolean
+}
+
+/** One platform entry that describes the same platform account as another entry. */
+export interface PlatformAccountDuplicateGroup {
+  /** Entry that keeps the account. */
+  keep: string
+  /** Entries that duplicate `keep`. */
+  remove: string[]
+  /**
+   * `identity`: both entries resolve to the same platform user.
+   * `virtual-phone`: the entry lost its deterministic virtual phone to `keep`.
+   */
+  reason: 'identity' | 'virtual-phone'
+}
+
+/** What deleting one platform entry removes, resolved before the confirmation. */
+export interface PlatformAccountRemovalTarget {
+  platformId: string
+  platformKind: string
+  displayName?: string
+  /** Telegram clients signed in through the entry; deleting it signs them out. */
+  clientAuthorizations: number
+  /** Whether the Cordis loader owns the entry, so the bridge can delete it. */
+  managed: boolean
+}
+
+export interface PlatformAccountRemovalPreview {
+  targets: PlatformAccountRemovalTarget[]
+  /** Sum of `targets[].clientAuthorizations`. */
+  clientAuthorizations: number
+}
+
 export interface CrossGramServerConfig {
   name: 'CrossGram'
   enable_special_config: false
@@ -38,11 +76,21 @@ export interface CrossGramServerConfig {
 export interface PlatformAccountDashboardData {
   accounts: PlatformAccountView[]
   serverConfig: CrossGramServerConfig
+  /** Endpoints `serverConfig` can be copied for; the primary entry comes first. */
+  serverEndpoints: PlatformAccountServerEndpoint[]
   loginTokenApprovalUrl: string
   updatedAt: number
   refresh(): Promise<void>
   /** Set, replace, or clear (null/empty) the two-step verification password. */
   setLoginPassword(platformId: string, password: string | null): Promise<void>
+  /** Platform entries that describe the same platform account as another entry. */
+  findDuplicateAccounts(): Promise<PlatformAccountDuplicateGroup[]>
+  /** Resolve what deleting these entries would remove, before the confirmation. */
+  describeAccountRemoval(
+    platformIds: string[],
+  ): Promise<PlatformAccountRemovalPreview>
+  /** Delete platform entries together with every login credential they own. */
+  deleteAccounts(platformIds: string[]): Promise<void>
 }
 
 export interface StickerDashboardAccount {

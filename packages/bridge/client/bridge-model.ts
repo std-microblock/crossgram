@@ -1,3 +1,8 @@
+import type {
+  CrossGramServerConfig,
+  PlatformAccountDuplicateGroup,
+  PlatformAccountServerEndpoint,
+} from '../src/dashboard-types.js'
 export function parseTelegramLoginUrl(value: string): string | undefined {
   try {
     const url = new URL(value),
@@ -59,6 +64,62 @@ export function formatPhone(value?: string): string {
   if (digits.startsWith('888'))
     return '+888 ' + digits.slice(3).replace(/(\d)(?=(\d{3})+$)/g, '$1 ')
   return '+' + digits.replace(/(\d)(?=(\d{3})+$)/g, '$1 ')
+}
+/** `host:port`, bracketing IPv6 hosts the way a client configuration spells them. */
+export function formatEndpoint(endpoint: { host: string; port: number }): string {
+  return (
+    (endpoint.host.includes(':') ? '[' + endpoint.host + ']' : endpoint.host) +
+    ':' +
+    endpoint.port
+  )
+}
+/** Point a copy of the server configuration at one advertised endpoint. */
+export function withServerEndpoint(
+  config: CrossGramServerConfig,
+  endpoint: PlatformAccountServerEndpoint,
+): CrossGramServerConfig {
+  return {
+    ...config,
+    host: endpoint.host,
+    port: endpoint.port,
+    dcs: config.dcs.map((dc) => ({ ...dc, ip: endpoint.host, port: endpoint.port })),
+  }
+}
+/**
+ * Entry each duplicated platform entry duplicates. The backend only reports
+ * entries it can prove are duplicates, so the map is safe to render directly.
+ */
+export function duplicateOwners(
+  groups: readonly PlatformAccountDuplicateGroup[],
+): Map<string, string> {
+  const owners = new Map<string, string>()
+  for (const group of groups)
+    for (const platformId of group.remove)
+      if (!owners.has(platformId)) owners.set(platformId, group.keep)
+  return owners
+}
+/** Every entry that duplicates another one, in a stable order. */
+export function duplicatePlatformIds(
+  groups: readonly PlatformAccountDuplicateGroup[],
+): string[] {
+  return [...new Set(groups.flatMap((group) => group.remove))].sort()
+}
+/** Describe one duplicate group for the cleanup banner. */
+export function describeDuplicateGroup(
+  group: PlatformAccountDuplicateGroup,
+): string {
+  const reason =
+    group.reason === 'virtual-phone'
+      ? 'already serves the same virtual phone'
+      : 'resolves to the same platform user'
+  return (
+    group.remove.join(', ') +
+    (group.remove.length > 1 ? ' duplicate ' : ' duplicates ') +
+    group.keep +
+    ' (' +
+    reason +
+    ')'
+  )
 }
 
 export { sameOriginPath, copyText } from "cordis-webui-solidjs/utils"
