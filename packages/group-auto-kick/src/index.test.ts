@@ -176,6 +176,31 @@ async function fixture(options: FixtureOptions = {}) {
   return { ctx, runner, kicks, platforms, userIds }
 }
 
+/** Store one more relayed message, as a member speaking between two rounds would. */
+async function addMessage(
+  ctx: Context,
+  senderUserId: number,
+  id: number,
+  timestamp: number,
+): Promise<void> {
+  await ctx.database.create('mtproto_im_message', {
+    id,
+    platformSessionId: session.platformSessionId,
+    conversationId: CONVERSATION_ROW_ID,
+    primaryPlatformMessageId: `extra-${id}`,
+    senderUserId,
+    text: 'hello',
+    content: {},
+    timestamp,
+    outgoing: false,
+    deleted: false,
+    platformGroupId: null,
+    metadata: {},
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  })
+}
+
 describe('group auto kick', () => {
   it('keeps the group untouched while it is below the trigger', async () => {
     const { runner, kicks } = await fixture({
@@ -435,7 +460,10 @@ describe('group auto kick', () => {
       messages: [{ userId: 'u_b', timestamp: 1_700_000_000 }],
     })
     const select = vi.spyOn(ctx.database, 'select')
-    const aggregations = () => select.mock.calls.filter(([table]) => table === 'mtproto_im_message').length
+    // Only the ranking aggregate reads the whole conversation; the per-candidate
+    // freshness probe narrows the query to one sender.
+    const aggregations = () => select.mock.calls.filter(([table, query]) =>
+      table === 'mtproto_im_message' && !(query as { senderUserId?: number }).senderUserId).length
 
     await runner.run('first')
     const afterFirst = aggregations()
@@ -446,6 +474,54 @@ describe('group auto kick', () => {
     runner.invalidate()
     await runner.run('third')
     expect(aggregations()).toBeGreaterThan(afterFirst)
+  })
+
+  it('skips a member whose newest message postdates the cached ranking', async () => {
+    const members: MemberSpec[] = [{ id: 'u_a' }, { id: 'u_b' }]
+    const { ctx, runner, kicks, userIds } = await fixture({
+      total: 2000,
+      members,
+      config: { groups: [{ conversationId: GROUP_CODE, maxKicksPerRound: 1 }] },
+    })
+
+    // The first round removes the longest silence and caches the ranking.
+    const [first] = await runner.run('first')
+    expect(first!.kicked.map((item) => item.userId)).toEqual(['u_a'])
+    expect(kicks.map((kick) => kick.userId)).toEqual(['u_a'])
+
+    // u_a is gone, and u_b rejoins the group and says hello after the snapshot.
+    members.shift()
+    await addMessage(ctx, userIds.get('u_b')!, 1_001, 1_795_000_000)
+
+    const [second] = await runner.run('second')
+
+    // The cached ranking still calls u_b silent, so it is planned; the round has
+    // to notice the newer message and leave them alone.
+    expect(second!.planned.map((item) => item.userId)).toEqual(['u_b'])
+    expect(second!.kicked).toEqual([])
+    expect(second!.skippedStale.map((item) => [item.userId, item.lastSpokeAt])).toEqual([['u_b', 0]])
+    expect(kicks.map((kick) => kick.userId)).toEqual(['u_a'])
+  })
+
+  it('hands the round to the next-longest silence when a candidate is stale', async () => {
+    const members: MemberSpec[] = [{ id: 'u_a' }, { id: 'u_b' }, { id: 'u_c' }]
+    const { ctx, runner, kicks, userIds } = await fixture({
+      total: 2000,
+      members,
+      config: { groups: [{ conversationId: GROUP_CODE, maxKicksPerRound: 1 }] },
+    })
+
+    await runner.run('first')
+    expect(kicks.map((kick) => kick.userId)).toEqual(['u_a'])
+
+    members.shift()
+    await addMessage(ctx, userIds.get('u_b')!, 1_002, 1_795_000_001)
+
+    const [second] = await runner.run('second')
+
+    expect(second!.skippedStale.map((item) => [item.userId, item.lastSpokeAt])).toEqual([['u_b', 0]])
+    expect(second!.kicked.map((item) => item.userId)).toEqual(['u_c'])
+    expect(kicks.map((kick) => kick.userId)).toEqual(['u_a', 'u_c'])
   })
 
   it('applies rejectAddRequest when the rule asks for it', async () => {

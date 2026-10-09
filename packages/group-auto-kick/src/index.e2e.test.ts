@@ -12,7 +12,6 @@ import { GroupAutoKickRunner, telegramChannelIdFor, type Config } from './index.
 
 const GROUP_CODE = '1002974327'
 const GROUP_TITLE = '#1 明日方舟·卫戍协议丨 拉特兰'
-const GROUP_CHAT_ID = String(-1_000_000_000_000 - telegramChannelIdFor('session', GROUP_CODE))
 const CONVERSATION_ROW_ID = 4
 const PLATFORM_ID = 'qqnt'
 
@@ -23,6 +22,9 @@ const session: PlatformSession = {
   credentials: {},
   metadata: {},
 }
+
+/** The chat id the bridge exposes for this group, as a Telegram client sees it. */
+const GROUP_CHAT_ID = String(-1_000_000_000_000 - telegramChannelIdFor(session.platformSessionId, GROUP_CODE))
 
 interface WireMember {
   user: { id: string, numericId?: string, name: string }
@@ -64,7 +66,7 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
 }
 
 /** Fake QQNT bridge exposing the member page and moderation routes the adapter uses. */
-async function startBridge(): Promise<{ endpoint: string, moderations: Array<{ uid: string, body: unknown }> }> {
+async function startBridge(list: WireMember[] = members): Promise<{ endpoint: string, moderations: Array<{ uid: string, body: unknown }> }> {
   const moderations: Array<{ uid: string, body: unknown }> = []
   server = createServer(async (request, response) => {
     response.setHeader('content-type', 'application/json')
@@ -72,8 +74,8 @@ async function startBridge(): Promise<{ endpoint: string, moderations: Array<{ u
     if (/^\/v1\/conversations\/[^/]+\/members$/.test(url.pathname) && request.method === 'GET') {
       const limit = Number(url.searchParams.get('limit') ?? 100)
       const cursor = Number(url.searchParams.get('cursor') ?? 0)
-      const page = members.slice(cursor, cursor + limit)
-      const next = cursor + page.length < members.length ? String(cursor + page.length) : undefined
+      const page = list.slice(cursor, cursor + limit)
+      const next = cursor + page.length < list.length ? String(cursor + page.length) : undefined
       response.end(JSON.stringify({ members: page, total: 2000, nextCursor: next }))
       return
     }
@@ -93,7 +95,7 @@ async function startBridge(): Promise<{ endpoint: string, moderations: Array<{ u
   return { endpoint: `http://127.0.0.1:${address.port}/v1`, moderations }
 }
 
-async function openContext(): Promise<Context> {
+async function openContext(list: WireMember[] = members): Promise<Context> {
   const ctx = new Context()
   const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
   await Promise.all(fibers)
@@ -116,7 +118,7 @@ async function openContext(): Promise<Context> {
     unreadCount: 0,
     updatedAt: new Date(),
   })
-  for (const [index, entry] of members.entries()) {
+  for (const [index, entry] of list.entries()) {
     await ctx.database.create('mtproto_im_user', {
       id: index + 1,
       platformId: PLATFORM_ID,
@@ -135,7 +137,7 @@ async function openContext(): Promise<Context> {
       platformSessionId: session.platformSessionId,
       conversationId: CONVERSATION_ROW_ID,
       primaryPlatformMessageId: `m-${index}`,
-      senderUserId: members.findIndex((entry) => entry.user.id === message.userId) + 1,
+      senderUserId: list.findIndex((entry) => entry.user.id === message.userId) + 1,
       text: 'hello',
       content: {},
       timestamp: message.timestamp,
@@ -176,6 +178,49 @@ describe('group auto kick E2E', () => {
     expect(result.failures).toEqual([])
     expect(moderations.map((entry) => entry.uid)).toEqual(['u_silent', 'u_old', 'u_mid', 'u_new'])
     expect(moderations[0]!.body).toEqual({ type: 'kick' })
+  })
+
+  it('leaves a member alone once a newer message postdates the cached ranking', async () => {
+    const group = [...members]
+    const { endpoint, moderations } = await startBridge(group)
+    const ctx = await openContext(group)
+    const platforms = new IMPlatformService(ctx)
+    platforms.activateSession('qqnt', new QQNTPlatform({ endpoint }), session)
+    const runner = new GroupAutoKickRunner(ctx, {
+      kickIntervalMs: 0,
+      groups: [{ conversationId: GROUP_CHAT_ID, maxKicksPerRound: 1 }],
+    } satisfies Config)
+
+    const [first] = await runner.run('e2e')
+    expect(first!.kicked.map((item) => item.userId)).toEqual(['u_silent'])
+    expect(moderations.map((entry) => entry.uid)).toEqual(['u_silent'])
+
+    // u_silent left, and u_old — the next-longest silence — greets the group
+    // after the ranking snapshot of the first round was taken.
+    group.splice(group.findIndex((entry) => entry.user.id === 'u_silent'), 1)
+    await ctx.database.create('mtproto_im_message', {
+      id: 100,
+      platformSessionId: session.platformSessionId,
+      conversationId: CONVERSATION_ROW_ID,
+      primaryPlatformMessageId: 'm-rejoin',
+      // The user rows were created in the original member order, before the splice.
+      senderUserId: members.findIndex((entry) => entry.user.id === 'u_old') + 1,
+      text: '我回来了',
+      content: {},
+      timestamp: 1_795_000_000,
+      outgoing: false,
+      deleted: false,
+      platformGroupId: null,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+
+    const [second] = await runner.run('e2e')
+
+    expect(second!.skippedStale.map((item) => item.userId)).toEqual(['u_old'])
+    expect(second!.kicked.map((item) => item.userId)).toEqual(['u_mid'])
+    expect(moderations.map((entry) => entry.uid)).toEqual(['u_silent', 'u_mid'])
   })
 
   it('leaves the group alone while it is below the trigger', async () => {

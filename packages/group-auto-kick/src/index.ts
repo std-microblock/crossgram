@@ -108,6 +108,12 @@ export const Config: z<Config> = z.object({
     .description('回退扫描消息时的行数上限。'),
 })
 
+/**
+ * How many candidates beyond the round's plan stay eligible when the ranking
+ * snapshot turns out to be stale for the members at the front of the queue.
+ */
+const STALE_LOOKAHEAD = 20
+
 const DEFAULTS = {
   dryRun: false,
   intervalMs: 5 * 60 * 1000,
@@ -140,6 +146,11 @@ export interface GroupAutoKickResult {
   /** Members the round selected, oldest silence first. */
   planned: KickCandidate[]
   kicked: KickCandidate[]
+  /**
+   * Members dropped from the round because they spoke after the cached ranking
+   * was built: their silence was measured from stale data.
+   */
+  skippedStale: KickCandidate[]
   failures: Array<{ userId: string, error: string }>
   skipped?: 'no-session' | 'unresolved' | 'invalid' | 'below-threshold' | 'scan-failed'
   reason: string
@@ -326,36 +337,57 @@ export class GroupAutoKickRunner {
       title, total, scan.members.length, maxMembers, planned.length, context.dryRun ? '（dry-run）' : '',
     )
     const kicked: KickCandidate[] = []
+    const skippedStale: KickCandidate[] = []
     const failures: Array<{ userId: string, error: string }> = []
     const kickIntervalMs = this.config.kickIntervalMs ?? DEFAULTS.kickIntervalMs
-    for (const [index, candidate] of planned.entries()) {
+    // The ranking is reused for `rankingTtlMs`, so it can predate a member's
+    // newest message. Every candidate is therefore re-read right before the
+    // removal, and a member who spoke after the snapshot hands the round to the
+    // next-longest silence instead of being kicked right after talking (the
+    // usual shape of it: they rejoined and greeted the group).
+    const candidates = context.dryRun
+      ? planned
+      : ranked.slice(0, Math.min(ranked.length, planned.length + STALE_LOOKAHEAD))
+    for (const candidate of candidates) {
+      if (!context.dryRun && kicked.length >= planned.length) break
       const label = describeCandidate(candidate)
       const lastSpoke = describeLastSpoke(candidate.lastSpokeAt)
+      const spokeAt = await this.spokeSince(conversation.id, session.platformId, candidate)
+      if (spokeAt !== undefined) {
+        skippedStale.push(candidate)
+        this.logger.info(
+          '跳过 %s：排名快照（%s）之后又有新发言（%s）',
+          label, lastSpoke, describeLastSpoke(spokeAt),
+        )
+        continue
+      }
       if (context.dryRun) {
         this.logger.info('[dry-run] 将踢出 %s（最后发言：%s）', label, lastSpoke)
-      } else {
-        try {
-          await platform.moderateConversationMember(session, {
-            id: conversation.platformConversationId,
-          }, candidate.userId, {
-            type: 'kick',
-            ...(rule.rejectAddRequest ? { rejectAddRequest: true } : {}),
-          })
-          kicked.push(candidate)
-          this.logger.info('已踢出 %s（最后发言：%s）', label, lastSpoke)
-        } catch (error) {
-          failures.push({ userId: candidate.userId, error: errorText(error) })
-          // The production console exporter drops `warn`, so a removal that the
-          // platform rejected has to be reported at error level to be visible.
-          this.logger.error('踢出 %s 失败：%s', label, errorText(error))
-        }
+        continue
       }
-      if (kickIntervalMs > 0 && index < planned.length - 1) await delay(kickIntervalMs)
+      try {
+        await platform.moderateConversationMember(session, {
+          id: conversation.platformConversationId,
+        }, candidate.userId, {
+          type: 'kick',
+          ...(rule.rejectAddRequest ? { rejectAddRequest: true } : {}),
+        })
+        kicked.push(candidate)
+        this.logger.info('已踢出 %s（最后发言：%s）', label, lastSpoke)
+      } catch (error) {
+        failures.push({ userId: candidate.userId, error: errorText(error) })
+        // The production console exporter drops `warn`, so a removal that the
+        // platform rejected has to be reported at error level to be visible.
+        this.logger.error('踢出 %s 失败：%s', label, errorText(error))
+      }
+      if (kickIntervalMs > 0 && kicked.length < planned.length) await delay(kickIntervalMs)
     }
     if (!context.dryRun && planned.length) {
       this.logger.info(
-        '群 %s：本轮踢出 %d/%d 人%s',
-        title, kicked.length, planned.length, failures.length ? `，${failures.length} 人失败` : '',
+        '群 %s：本轮踢出 %d/%d 人%s%s',
+        title, kicked.length, planned.length,
+        skippedStale.length ? `，跳过 ${skippedStale.length} 人（排行快照后已发言）` : '',
+        failures.length ? `，${failures.length} 人失败` : '',
       )
     }
 
@@ -367,6 +399,7 @@ export class GroupAutoKickRunner {
       partial: scan.partial,
       planned,
       kicked,
+      skippedStale,
       failures,
       reason,
     }
@@ -449,6 +482,38 @@ export class GroupAutoKickRunner {
       return { members, partial: true }
     }
     return { members, partial }
+  }
+
+  /**
+   * Newest relayed message of one member in the conversation, when it is newer
+   * than the time the ranking snapshot recorded for them.
+   *
+   * The ranking is cached for `rankingTtlMs`, so a plan can be built from data
+   * that is many minutes old. Re-reading the candidate right before the removal
+   * keeps the round honest: a member who has spoken since the snapshot — most
+   * often somebody who just rejoined and greeted the group — is never removed
+   * for silence that no longer holds.
+   */
+  private async spokeSince(
+    conversationRowId: number,
+    platformId: string,
+    candidate: KickCandidate,
+  ): Promise<number | undefined> {
+    const users = await this.ctx.database.get('mtproto_im_user', {
+      platformId,
+      platformUserId: candidate.userId,
+    }, { fields: ['id'], limit: 1 })
+    const senderUserId = users.length ? Number(users[0]!.id) : NaN
+    if (!Number.isFinite(senderUserId)) return
+    const rows = await this.ctx.database.get('mtproto_im_message', {
+      conversationId: conversationRowId,
+      senderUserId,
+      deleted: false,
+      timestamp: { $gt: candidate.lastSpokeAt },
+    }, { fields: ['timestamp'], sort: { timestamp: 'desc' }, limit: 1 })
+    if (!rows.length) return
+    const newest = Number(rows[0]!.timestamp)
+    return Number.isFinite(newest) ? newest : undefined
   }
 
   /** platformUserId -> newest relayed message time, cached per conversation. */
@@ -595,6 +660,7 @@ function emptyResult(
     dryRun: false,
     planned: [],
     kicked: [],
+    skippedStale: [],
     failures: [],
     reason,
     ...extra,
