@@ -3,7 +3,7 @@ import { Service } from 'cordis'
 import z from 'schemastery'
 import { $ } from '@cordisjs/plugin-database'
 import type {
-  ActivePlatformSession, IMConversationMember, IMPlatform, PlatformSession,
+  ActivePlatformSession, IMConversationMember, IMMessageContent, IMPlatform, PlatformSession,
 } from '@mtproto-relay/bridge'
 import {
   conversationIdMatches,
@@ -325,7 +325,11 @@ export class GroupAutoKickRunner {
     }
 
     const ranking = await this.ranking(binding, conversation.id)
-    const ranked = rankSilentMembers(scan.members, ranking, {
+    // Joining counts as one act of speech: an invite notice names the members it
+    // added but is stored with the inviter as its sender, so those members would
+    // otherwise keep ranking by whatever they last said before they were removed.
+    const joins = await this.joined(conversation.id)
+    const ranked = rankSilentMembers(scan.members, mergeRanking(ranking, joins), {
       selfUserId: session.userId,
       protectAdministrators: rule.protectAdministrators ?? true,
       unknownLastSpoke: rule.unknownLastSpoke ?? DEFAULTS.unknownLastSpoke,
@@ -362,7 +366,7 @@ export class GroupAutoKickRunner {
         continue
       }
       if (context.dryRun) {
-        this.logger.info('[dry-run] 将踢出 %s（最后发言：%s）', label, lastSpoke)
+        this.logger.info('[dry-run] 将踢出 %s（最后活跃：%s）', label, lastSpoke)
         continue
       }
       try {
@@ -373,7 +377,7 @@ export class GroupAutoKickRunner {
           ...(rule.rejectAddRequest ? { rejectAddRequest: true } : {}),
         })
         kicked.push(candidate)
-        this.logger.info('已踢出 %s（最后发言：%s）', label, lastSpoke)
+        this.logger.info('已踢出 %s（最后活跃：%s）', label, lastSpoke)
       } catch (error) {
         failures.push({ userId: candidate.userId, error: errorText(error) })
         // The production console exporter drops `warn`, so a removal that the
@@ -386,7 +390,7 @@ export class GroupAutoKickRunner {
       this.logger.info(
         '群 %s：本轮踢出 %d/%d 人%s%s',
         title, kicked.length, planned.length,
-        skippedStale.length ? `，跳过 ${skippedStale.length} 人（排行快照后已发言）` : '',
+        skippedStale.length ? `，跳过 ${skippedStale.length} 人（排行快照后又有活跃）` : '',
         failures.length ? `，${failures.length} 人失败` : '',
       )
     }
@@ -485,6 +489,39 @@ export class GroupAutoKickRunner {
   }
 
   /**
+   * Newest join notice that named each member, keyed by platform user id.
+   *
+   * Joining counts as one act of speech, so a member who was removed for silence
+   * and came back is ranked by the moment they returned instead of by whatever
+   * they last said before leaving.
+   *
+   * QQ reports two shapes: a scan or invite-link join whose notice is stored with
+   * the joining member as its sender (already counted by the message ranking), and
+   * an invite (`A邀请B加入了群聊`) stored with the *inviter* as its sender, where
+   * the members the notice added have to be read out of the notice itself.
+   */
+  private async joined(conversationRowId: number): Promise<Map<string, number>> {
+    const rows = await this.ctx.database.get('mtproto_im_message', {
+      conversationId: conversationRowId,
+      deleted: false,
+      content: { serviceAction: { type: 'members-joined' } },
+    }, { fields: ['id', 'timestamp', 'content'] })
+    const joins = new Map<string, number>()
+    for (const row of rows) {
+      const action = (row.content as unknown as IMMessageContent | undefined)?.serviceAction
+      if (action?.type !== 'members-joined') continue
+      const at = Number(row.timestamp)
+      if (!Number.isFinite(at) || at <= 0) continue
+      for (const member of action.members) {
+        const id = member?.id
+        if (!id || at <= (joins.get(id) ?? 0)) continue
+        joins.set(id, at)
+      }
+    }
+    return joins
+  }
+
+  /**
    * Newest relayed message of one member in the conversation, when it is newer
    * than the time the ranking snapshot recorded for them.
    *
@@ -492,7 +529,8 @@ export class GroupAutoKickRunner {
    * that is many minutes old. Re-reading the candidate right before the removal
    * keeps the round honest: a member who has spoken since the snapshot — most
    * often somebody who just rejoined and greeted the group — is never removed
-   * for silence that no longer holds.
+   * for silence that no longer holds. Joins need no such re-check: they are read
+   * fresh for every round and folded into the ranking before it is sorted.
    */
   private async spokeSince(
     conversationRowId: number,
@@ -627,6 +665,24 @@ function ruleKey(rule: GroupRule): string {
 
 function rankKey(binding: ActivePlatformSession, conversationRowId: number): string {
   return `${binding.session.platformSessionId}\0${conversationRowId}`
+}
+
+/**
+ * The last-activity map the round ranks by: cached message times with the join
+ * notices folded in, so a member who joined is as active as their join notice.
+ *
+ * The cached map is copied, never mutated: join notices are re-read every round
+ * and must not leak into the ranking cache of a later round.
+ */
+function mergeRanking(
+  ranking: ReadonlyMap<string, number>,
+  joins: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const merged = new Map(ranking)
+  for (const [userId, at] of joins) {
+    if (at > (merged.get(userId) ?? 0)) merged.set(userId, at)
+  }
+  return merged
 }
 
 function describeRule(rule: GroupRule): string {

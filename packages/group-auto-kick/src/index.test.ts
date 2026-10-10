@@ -201,6 +201,32 @@ async function addMessage(
   })
 }
 
+/** Store a QQ join notice: `actorUserId` invited the listed members. */
+async function addJoinNotice(
+  ctx: Context,
+  actorUserId: number,
+  id: number,
+  timestamp: number,
+  members: Array<{ id: string, name?: string }>,
+): Promise<void> {
+  await ctx.database.create('mtproto_im_message', {
+    id,
+    platformSessionId: session.platformSessionId,
+    conversationId: CONVERSATION_ROW_ID,
+    primaryPlatformMessageId: `join-${id}`,
+    senderUserId: actorUserId,
+    text: '',
+    content: { parts: [], serviceAction: { type: 'members-joined', text: '加入了群聊。', members } },
+    timestamp,
+    outgoing: false,
+    deleted: false,
+    platformGroupId: null,
+    metadata: {},
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  })
+}
+
 describe('group auto kick', () => {
   it('keeps the group untouched while it is below the trigger', async () => {
     const { runner, kicks } = await fixture({
@@ -461,9 +487,12 @@ describe('group auto kick', () => {
     })
     const select = vi.spyOn(ctx.database, 'select')
     // Only the ranking aggregate reads the whole conversation; the per-candidate
-    // freshness probe narrows the query to one sender.
-    const aggregations = () => select.mock.calls.filter(([table, query]) =>
-      table === 'mtproto_im_message' && !(query as { senderUserId?: number }).senderUserId).length
+    // freshness probe narrows the query to one sender and the join scan to the
+    // notices that name joined members.
+    const aggregations = () => select.mock.calls.filter(([table, query]) => {
+      const filter = query as { senderUserId?: number, content?: unknown } | undefined
+      return table === 'mtproto_im_message' && !filter?.senderUserId && !filter?.content
+    }).length
 
     await runner.run('first')
     const afterFirst = aggregations()
@@ -522,6 +551,61 @@ describe('group auto kick', () => {
     expect(second!.skippedStale.map((item) => [item.userId, item.lastSpokeAt])).toEqual([['u_b', 0]])
     expect(second!.kicked.map((item) => item.userId)).toEqual(['u_c'])
     expect(kicks.map((kick) => kick.userId)).toEqual(['u_a', 'u_c'])
+  })
+
+  it('counts a join notice credited to the inviter as the joined member speaking', async () => {
+    const { ctx, runner, kicks, userIds } = await fixture({
+      total: 2000,
+      members: [{ id: 'u_stale' }, { id: 'u_joined' }, { id: 'u_inviter' }],
+      messages: [
+        { userId: 'u_stale', timestamp: 1_700_000_000 },
+        { userId: 'u_inviter', timestamp: 1_710_000_000 },
+      ],
+      config: { groups: [{ conversationId: GROUP_CODE, maxKicksPerRound: 1 }] },
+    })
+    // QQ stores `A邀请B加入了群聊` with A as the sender, so without reading the
+    // notice itself u_joined would look like a member who never spoke at all.
+    await addJoinNotice(ctx, userIds.get('u_inviter')!, 1_003, 1_795_000_000, [
+      { id: 'u_joined', name: 'joined' },
+    ])
+
+    const [result] = await runner.run('test')
+
+    expect(result.planned.map((item) => [item.userId, item.lastSpokeAt]))
+      .toEqual([['u_stale', 1_700_000_000]])
+    expect(kicks.map((kick) => kick.userId)).toEqual(['u_stale'])
+  })
+
+  it('lets a member who rejoined after the cached ranking hand the round on', async () => {
+    const members: MemberSpec[] = [{ id: 'u_a' }, { id: 'u_back' }, { id: 'u_inviter' }]
+    const { ctx, runner, kicks, userIds } = await fixture({
+      total: 2000,
+      members,
+      messages: [
+        { userId: 'u_a', timestamp: 1_700_000_000 },
+        { userId: 'u_inviter', timestamp: 1_710_000_000 },
+      ],
+      config: { groups: [{ conversationId: GROUP_CODE, maxKicksPerRound: 1 }] },
+    })
+
+    // u_back never spoke here, so the first round removes them — and caches the
+    // ranking that says exactly that.
+    const [first] = await runner.run('first')
+    expect(first!.kicked.map((item) => item.userId)).toEqual(['u_back'])
+
+    // They are invited back after the snapshot was taken.
+    await addJoinNotice(ctx, userIds.get('u_inviter')!, 1_004, 1_795_000_001, [
+      { id: 'u_back', name: 'back' },
+    ])
+
+    const [second] = await runner.run('second')
+
+    // Joining counted as speech, so the round takes the next-longest silence
+    // instead of removing the member who just came back.
+    expect(second!.planned.map((item) => [item.userId, item.lastSpokeAt]))
+      .toEqual([['u_a', 1_700_000_000]])
+    expect(second!.kicked.map((item) => item.userId)).toEqual(['u_a'])
+    expect(kicks.map((kick) => kick.userId)).toEqual(['u_back', 'u_a'])
   })
 
   it('applies rejectAddRequest when the rule asks for it', async () => {

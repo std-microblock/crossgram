@@ -223,6 +223,49 @@ describe('group auto kick E2E', () => {
     expect(moderations.map((entry) => entry.uid)).toEqual(['u_silent', 'u_mid'])
   })
 
+  it('treats a QQ group join notice as the joined member speaking', async () => {
+    const { endpoint, moderations } = await startBridge()
+    const ctx = await openContext()
+    const platforms = new IMPlatformService(ctx)
+    platforms.activateSession('qqnt', new QQNTPlatform({ endpoint }), session)
+    const runner = new GroupAutoKickRunner(ctx, {
+      kickIntervalMs: 0,
+      groups: [{ conversationId: GROUP_CHAT_ID, maxKicksPerRound: 1 }],
+    } satisfies Config)
+
+    // QQ credits the inviter, not the joiner, so the notice has to be read to see
+    // that u_silent — the only member without a message — just joined.
+    await ctx.database.create('mtproto_im_message', {
+      id: 100,
+      platformSessionId: session.platformSessionId,
+      conversationId: CONVERSATION_ROW_ID,
+      primaryPlatformMessageId: 'm-join',
+      senderUserId: members.findIndex((entry) => entry.user.id === 'u_admin') + 1,
+      text: '',
+      content: {
+        parts: [],
+        serviceAction: {
+          type: 'members-joined',
+          text: 'Admin邀请Silent加入了群聊。',
+          members: [{ id: 'u_silent', name: 'Silent' }],
+        },
+      },
+      timestamp: 1_795_000_000,
+      outgoing: false,
+      deleted: false,
+      platformGroupId: null,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+
+    const [result] = await runner.run('e2e')
+
+    expect(result.planned.map((item) => [item.userId, item.lastSpokeAt]))
+      .toEqual([['u_old', 1_700_000_000]])
+    expect(moderations.map((entry) => entry.uid)).toEqual(['u_old'])
+  })
+
   it('leaves the group alone while it is below the trigger', async () => {
     const { endpoint, moderations } = await startBridge()
     const ctx = await openContext()
