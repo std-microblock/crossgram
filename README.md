@@ -1,11 +1,11 @@
-# Crossgram
-
-Crossgram 是基于 [cordis](https://github.com/cordiverse/cordis) 4 和 [mtcute](https://github.com/mtcute/mtcute) 的 Telegram 服务器端实现。服务器把 QQ 等 IM 平台的账号映射为 Telegram 账号，把平台上的会话、消息和成员转换为 Telegram API 的对象。经过修改、能够连接自定义服务器的 Telegram 客户端登录该账号后，即可收发平台消息。本文说明服务器的组成、各平台的支持范围、服务器部署、客户端接入与登录方式，以及随服务器提供的扩展功能。
-
 <div align=center>
+<h1>CrossGram</h1>
+<div>Bring any chat platform to Telegram clients.</div>
+<div>使用 Telegram 客户端在任何平台上聊天</div><br/>
 <img src="https://github.com/user-attachments/assets/be1e04db-c621-4d37-9585-43c1fb6bd452" />
-</div>
+</div><br/>
 
+CrossGram 是一个基于 [cordis](https://github.com/cordiverse/cordis) 和 [mtcute](https://github.com/mtcute/mtcute) 的 Telegram 服务器端实现。它将 Telegram 桥接到其它平台，以让你在 Telegram 客户端下获得远超原生客户端的聊天体验。
 ## 系统组成
 
 Crossgram 由一组 cordis 插件组成，插件及其配置在 [app.yml](app.yml) 中声明。处理 Telegram 客户端请求的核心插件有三类：
