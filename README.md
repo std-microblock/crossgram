@@ -150,7 +150,7 @@ yarn build && yarn start  # 生产模式
     token: your-qqnt-bridge-token
 ```
 
-bridge 在 `help.getConfig` 中只公布 `dcId` 指定的一个 DC。`altEndpoints` 是该 DC 的备用地址，按配置顺序排在主地址之后公布，格式为 `host:port` 或 `[IPv6]:port`。bridge 只公布备用地址，不检查地址是否可用；主地址不可用时是否改用备用地址，由客户端决定。客户端首次连接时尚未获取服务器配置，因此使用客户端内置的地址；该地址应与 `serverHost` 和 `serverPort` 一致。
+bridge 在 `help.getConfig` 中只公布 `dcId` 指定的一个 DC。`altEndpoints` 是该 DC 的备用地址，按配置顺序排在主地址之后公布，格式为 `host:port` 或 `[IPv6]:port`。bridge 只公布备用地址，不检查地址是否可用；主地址不可用时是否改用备用地址，由客户端决定。客户端首次连接时尚未获取服务器配置，因此使用导入的服务器 JSON 中的地址（见 [连接 Telegram 客户端](#连接-telegram-客户端)）；该地址应与 `serverHost` 和 `serverPort` 一致。
 
 QQ 适配器的 `token` 是 qqnt-bridge 的访问令牌。如果配置中未提供 `token`，那么适配器读取环境变量 `QQNT_BRIDGE_TOKEN`。适配器默认通过 `${endpoint}/events/ws` 接收事件；如果事件流使用不同的地址，那么可以用 `webSocketEndpoint` 单独指定。其它适配器的配置见 [app.yml](app.yml) 和各适配器文档。
 
@@ -167,9 +167,7 @@ curl -fsSL https://raw.githubusercontent.com/std-microblock/crossgram/main/deplo
 
 ## 连接 Telegram 客户端
 
-官方 Telegram 客户端内置官方服务器的地址和 RSA 公钥，客户端只与持有对应私钥的服务器完成握手。连接 Crossgram 需要把这两项替换为 Crossgram 服务器的地址和 `rsa-key.json.pem` 中的公钥。替换方式有两种：使用从源码修改的预构建客户端并在登录页导入服务器配置，或者用二进制补丁直接改写已安装的 Telegram Desktop。
-
-### 预构建客户端
+官方 Telegram 客户端内置官方服务器的地址和 RSA 公钥，客户端只与持有对应私钥的服务器完成握手。连接 Crossgram 需要把这两项替换为 Crossgram 服务器的地址和 `rsa-key.json.pem` 中的公钥，替换通过修改客户端源码实现。
 
 [crossgram-project](https://github.com/crossgram-project) 组织下的 patcher 仓库修改上游客户端的源码，并在 GitHub Releases 发布构建产物。除服务器选择外，Android 和桌面端的修改还使客户端能够直接从平台 CDN 下载媒体、利用 QQ 秒传上传文件，并显示戳一戳、合并转发和已撤回消息。
 
@@ -197,26 +195,6 @@ Unigram、Telegram X 和 Mithka 基于 TDLib，三者共用 [crossgram-tdlib](ht
 ```
 
 `rsa_key` 是 PKCS#1 格式的服务器公钥，`dcs` 列出各 DC 的地址，缺少的 DC 1–5 由客户端按 `host` 和 `port` 补齐。`enable_special_config` 为 `false` 时，客户端不使用 Telegram 的 special config 机制获取官方备用地址。WebUI 的平台账号页面和平台管理 bot 的 `/server` 命令按 bridge 的 `serverHost` 和 `serverPort` 输出该 JSON；生产部署中也可以用 `crossgram-client-config --host <IP> --port 4430` 生成。
-
-### 二进制补丁
-
-[patch-tdesktop.cjs](binary_patch/patch-tdesktop.cjs) 直接改写 Telegram Desktop 及其分支的可执行文件，无需重新编译。脚本替换客户端内置的生产、测试和 special config RSA 公钥，把所有内置 DC 的 IPv4 和 IPv6 地址改为 `--host`，并把内置 DC 表中的端口 443 改为 `--port`。改写后，脚本检查文件中不再残留官方公钥、地址和端口；如果有残留，或者文件中找不到替换后的公钥，那么脚本报告不支持该文件并退出。
-
-```bash
-node binary_patch/patch-tdesktop.cjs /Applications/materialgram.app
-node binary_patch/patch-tdesktop.cjs --host 192.168.1.10 --no-resign Telegram.exe
-```
-
-| 参数 | 作用 | 默认行为 |
-|---|---|---|
-| `--key <file>` | 指定 PKCS#1 格式的 RSA 公钥 | 在仓库、脚本目录和工作目录的 `data/` 下查找 `rsa-key.json.pem` |
-| `--host <ip>` | 内置 DC 的目标地址，仅接受 IPv4 | `127.0.0.1` |
-| `--port <n>` | 内置 DC 的目标端口 | `4430` |
-| `--no-resign` | 不对 macOS 应用重新签名 | 重新签名并移除隔离属性 |
-| `--no-backup` | 不生成备份 | 生成 `<binary>.original`，已存在时不覆盖 |
-| `--dry-run` | 只输出修改位置，不写入文件 | 写入文件 |
-
-二进制补丁把地址固定写入客户端，`--host` 和 `--port` 应与 bridge 的 `serverHost` 和 `serverPort` 一致。
 
 ## 登录
 
