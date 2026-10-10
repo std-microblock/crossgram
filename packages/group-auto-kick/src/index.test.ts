@@ -392,15 +392,54 @@ describe('group auto kick', () => {
     expect(result).toMatchObject({ skipped: 'unresolved', planned: [] })
   })
 
-  it('drops invalid rules instead of kicking', async () => {
+  it('drops rules whose target sits above the threshold', async () => {
     const { runner, kicks } = await fixture({
       total: 2000,
       members: [{ id: 'u_a' }],
-      config: { groups: [{ conversationId: GROUP_CODE, maxMembers: 100, targetMembers: 100 }] },
+      config: { groups: [{ conversationId: GROUP_CODE, maxMembers: 100, targetMembers: 200 }] },
     })
 
     expect(await runner.run('test')).toEqual([])
     expect(kicks).toEqual([])
+  })
+
+  it('holds the group at the threshold when targetMembers equals maxMembers', async () => {
+    const { runner, kicks } = await fixture({
+      total: 1990,
+      members: [{ id: 'u_a' }, { id: 'u_b' }],
+      config: {
+        groups: [{ conversationId: GROUP_CODE, maxMembers: 1990, targetMembers: 1990 }],
+        kickIntervalMs: 0,
+      },
+    })
+
+    const [result] = await runner.run('test')
+
+    // Exactly at the floor there is nothing to trim: the round stays idle
+    // instead of pushing the group below the size it is meant to hold.
+    expect(result.total).toBe(1990)
+    expect(result.planned).toEqual([])
+    expect(result.kicked).toEqual([])
+    expect(result.skipped).toBeUndefined()
+    expect(kicks).toEqual([])
+  })
+
+  it('trims exactly what joined past the threshold when targetMembers equals maxMembers', async () => {
+    const { runner, kicks } = await fixture({
+      total: 1993,
+      members: [{ id: 'u_a' }, { id: 'u_b' }, { id: 'u_c' }],
+      config: {
+        groups: [{ conversationId: GROUP_CODE, maxMembers: 1990, targetMembers: 1990 }],
+        kickIntervalMs: 0,
+      },
+    })
+
+    const [result] = await runner.run('test')
+
+    // Three members past the floor, three removals — never a full step down.
+    expect(result.planned.map((item) => item.userId)).toEqual(['u_a', 'u_b', 'u_c'])
+    expect(result.kicked.map((item) => item.userId)).toEqual(['u_a', 'u_b', 'u_c'])
+    expect(kicks.map((kick) => kick.userId)).toEqual(['u_a', 'u_b', 'u_c'])
   })
 
   it('drops rules without a conversation id', async () => {

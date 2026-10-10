@@ -76,9 +76,9 @@ export const Config: z<Config> = z.object({
     label: z.string().description('仅用于日志的群名，默认取会话标题。'),
     platformSessionId: z.string().description('限定某个平台会话，默认对所有在线会话生效。'),
     maxMembers: z.natural().default(2000)
-      .description('达到该人数时开始踢人。'),
+      .description('达到该人数时开始踢人。与 targetMembers 配成同一数值即把群稳定在该人数。'),
     targetMembers: z.natural().default(1995)
-      .description('一轮踢人后要降到的人数。'),
+      .description('一轮踢人后要降到的人数，不得大于 maxMembers；两者相等时只踢掉超出阈值的部分。'),
     maxKicksPerRound: z.natural().default(10)
       .description('单轮最多踢出多少人。'),
     protectAdministrators: z.boolean().default(true)
@@ -301,9 +301,12 @@ export class GroupAutoKickRunner {
     const maxMembers = rule.maxMembers ?? DEFAULTS.maxMembers
     const targetMembers = rule.targetMembers ?? DEFAULTS.targetMembers
     const maxKicksPerRound = rule.maxKicksPerRound ?? DEFAULTS.maxKicksPerRound
-    if (!(targetMembers < maxMembers)) {
+    // `targetMembers == maxMembers` is the "hold the group at this size" shape:
+    // the round trims exactly what joined past the threshold instead of keeping
+    // a slack band below it that only fills up again.
+    if (targetMembers > maxMembers) {
       this.logger.error(
-        '群 %s 的配置无效：targetMembers(%d) 必须小于 maxMembers(%d)',
+        '群 %s 的配置无效：targetMembers(%d) 不得大于 maxMembers(%d)',
         title, targetMembers, maxMembers,
       )
       return emptyResult(rule, reason, { ...context, skipped: 'invalid' })
@@ -645,8 +648,8 @@ function normalizeRules(config: Config, warn: (message: string) => void): GroupR
     }
     const maxMembers = raw.maxMembers ?? DEFAULTS.maxMembers
     const targetMembers = raw.targetMembers ?? DEFAULTS.targetMembers
-    if (!(targetMembers < maxMembers)) {
-      warn(`第 ${index + 1} 条群规则 (${ruleKey(raw)}) 的 targetMembers(${targetMembers}) 必须小于 maxMembers(${maxMembers})，已忽略`)
+    if (targetMembers > maxMembers) {
+      warn(`第 ${index + 1} 条群规则 (${ruleKey(raw)}) 的 targetMembers(${targetMembers}) 不得大于 maxMembers(${maxMembers})，已忽略`)
       continue
     }
     rules.push({

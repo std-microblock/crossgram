@@ -3,6 +3,9 @@
 群满员自动踢人插件：当配置的群达到 `maxMembers`（例如满员 2000）时，踢出**最久没有发言**的成员，
 把人数据降到 `targetMembers`（例如 1995），从而继续为新人腾出位置。
 
+把 `maxMembers` 与 `targetMembers` 配成**同一个数值**（例如都是 1990）就变成「把群稳定在这个人数」：
+一到阈值就只踢掉刚超出的那几个人，而不是先掉到更低的一档再慢慢涨回来。
+
 ## 行为
 
 - 每 `intervalMs`（默认 5 分钟）巡检一次；插件启动后、以及平台会话上线后各延迟 `startupDelayMs` 触发一次。
@@ -53,7 +56,7 @@
 | `label` | 会话标题 | 仅用于日志的群名。 |
 | `platformSessionId` | 全部在线会话 | 限定只在某个平台会话上执行。 |
 | `maxMembers` | `2000` | 达到该人数时开始踢人。 |
-| `targetMembers` | `1995` | 一轮踢人后要降到的人数，必须小于 `maxMembers`。 |
+| `targetMembers` | `1995` | 一轮踢人后要降到的人数，不得大于 `maxMembers`。与 `maxMembers` 相等时只踢掉超出阈值的部分（把群稳定在该人数）。 |
 | `maxKicksPerRound` | `10` | 单轮最多踢出多少人。 |
 | `protectAdministrators` | `true` | 保护管理员；群主始终受保护。 |
 | `unknownLastSpoke` | `oldest` | relay 记录里既没发言也没进过群的成员如何排序：`oldest` 视为最久没活跃（优先踢出），`newest` 排在所有有记录的人之后，只踢“可测量的最久没活跃”。 |

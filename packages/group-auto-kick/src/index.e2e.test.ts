@@ -280,4 +280,42 @@ describe('group auto kick E2E', () => {
     expect(result.skipped).toBe('below-threshold')
     expect(moderations).toEqual([])
   })
+
+  it('holds the group when it already sits on the size it is told to keep', async () => {
+    const { endpoint, moderations } = await startBridge()
+    const ctx = await openContext()
+    const platforms = new IMPlatformService(ctx)
+    platforms.activateSession('qqnt', new QQNTPlatform({ endpoint }), session)
+    const runner = new GroupAutoKickRunner(ctx, {
+      groups: [{ conversationId: GROUP_CHAT_ID, maxMembers: 2000, targetMembers: 2000 }],
+      kickIntervalMs: 0,
+    } satisfies Config)
+
+    const [result] = await runner.run('e2e')
+
+    // The page reports the group's real 2000 members; sitting exactly on the
+    // floor means nothing to trim, not a step down to a lower band.
+    expect(result.total).toBe(2000)
+    expect(result.planned).toEqual([])
+    expect(moderations).toEqual([])
+  })
+
+  it('trims back to the size it is told to keep once the group grows past it', async () => {
+    const { endpoint, moderations } = await startBridge()
+    const ctx = await openContext()
+    const platforms = new IMPlatformService(ctx)
+    platforms.activateSession('qqnt', new QQNTPlatform({ endpoint }), session)
+    const runner = new GroupAutoKickRunner(ctx, {
+      groups: [{ conversationId: GROUP_CHAT_ID, maxMembers: 1999, targetMembers: 1999 }],
+      kickIntervalMs: 0,
+    } satisfies Config)
+
+    const [result] = await runner.run('e2e')
+
+    // One member past the floor, one removal: the group returns to 1999 rather
+    // than dropping to whatever a lower target would have been.
+    expect(result.total).toBe(2000)
+    expect(result.planned.map((item) => item.userId)).toEqual(['u_silent'])
+    expect(moderations.map((entry) => entry.uid)).toEqual(['u_silent'])
+  })
 })
