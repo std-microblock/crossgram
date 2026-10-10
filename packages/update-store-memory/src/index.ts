@@ -2,6 +2,7 @@ import type { Context } from 'cordis'
 import z from 'schemastery'
 import {
   UpdateStore,
+  type ChannelScopeUpdate,
   type NewUpdateDelivery,
   type UpdateDelivery,
   type UpdateJson,
@@ -93,11 +94,34 @@ export class MemoryUpdateStoreBackend implements UpdateStoreBackend {
       .map((delivery) => clone(delivery)!)
   }
 
-  async getSince(platformSessionId: string, date: number): Promise<UpdateDelivery[]> {
+  async getSince(platformSessionId: string, date: number, limit: number): Promise<UpdateDelivery[]> {
     return [...this._byEventKey.values()]
       .filter((delivery) => delivery.platformSessionId === platformSessionId && delivery.date >= date)
       .sort((left, right) => left.seq - right.seq || left.messageId - right.messageId)
+      .slice(0, Math.max(0, Math.trunc(limit)))
       .map((delivery) => clone(delivery)!)
+  }
+
+  async getChangedChannelScopes(
+    platformSessionId: string,
+    date: number,
+  ): Promise<ChannelScopeUpdate[]> {
+    const byScope = new Map<string, ChannelScopeUpdate>()
+    for (const delivery of this._byEventKey.values()) {
+      if (delivery.platformSessionId !== platformSessionId) continue
+      if (delivery.date < date || delivery.ptsCount <= 0 || delivery.payload === null) continue
+      if (!delivery.scope.startsWith('channel:')) continue
+      const existing = byScope.get(delivery.scope)
+      if (!existing) {
+        byScope.set(delivery.scope, {
+          scope: delivery.scope, pts: delivery.pts, firstDeliveryId: delivery.messageId,
+        })
+        continue
+      }
+      existing.pts = Math.max(existing.pts, delivery.pts)
+      existing.firstDeliveryId = Math.min(existing.firstDeliveryId, delivery.messageId)
+    }
+    return [...byScope.values()].sort((left, right) => left.firstDeliveryId - right.firstDeliveryId)
   }
 
   async prune(platformSessionId: string, scope: string): Promise<void> {
@@ -145,7 +169,12 @@ export class MemoryUpdateStore extends UpdateStore {
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number) {
     return this._backend.getAfter(platformSessionId, scope, pts, limit)
   }
-  getSince(platformSessionId: string, date: number) { return this._backend.getSince(platformSessionId, date) }
+  getSince(platformSessionId: string, date: number, limit: number) {
+    return this._backend.getSince(platformSessionId, date, limit)
+  }
+  getChangedChannelScopes(platformSessionId: string, date: number) {
+    return this._backend.getChangedChannelScopes(platformSessionId, date)
+  }
   prune(platformSessionId: string, scope: string) { return this._backend.prune(platformSessionId, scope) }
 }
 

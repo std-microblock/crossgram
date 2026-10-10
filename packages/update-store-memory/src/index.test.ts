@@ -73,4 +73,44 @@ describe('MemoryUpdateStore', () => {
     await store.create(delivery('discarded', 'session', 2))
     expect(await store.get('discarded')).toBeUndefined()
   })
+
+  it('aggregates changed channel scopes per scope and pages the date scan', async () => {
+    const store = new MemoryUpdateStore(new Context(), { retention: 100 })
+    const payload = { _: 'updates', updates: [], users: [], chats: [] }
+    await store.create(delivery('account-1', 'a', 2))
+    await store.setPayload('account-1', payload)
+    for (const [eventKey, pts] of [['alpha-1', 2], ['alpha-2', 3]] as const) {
+      await store.create(delivery(eventKey, 'a', pts, 'channel:10'))
+      await store.setPayload(eventKey, payload)
+    }
+    await store.create(delivery('beta-1', 'a', 2, 'channel:11'))
+    await store.setPayload('beta-1', payload)
+    await store.create(delivery('quiet-1', 'a', 2, 'channel:12'))
+    await store.setPayload('quiet-1', payload)
+    // A reservation whose payload is not durable yet is not announced: its
+    // marker would point at a pts the channel difference cannot surface.
+    await store.create({ ...delivery('pending', 'a', 4, 'channel:13'), date: 104 })
+    await store.create(delivery('other-session', 'b', 2, 'channel:10'))
+    await store.setPayload('other-session', payload)
+
+    // One row per changed channel, with the newest pts and the oldest retained
+    // delivery that only keeps the announcement order stable.
+    expect(await store.getChangedChannelScopes('a', 0)).toEqual([
+      { scope: 'channel:10', pts: 3, firstDeliveryId: 2 },
+      { scope: 'channel:11', pts: 2, firstDeliveryId: 4 },
+      { scope: 'channel:12', pts: 2, firstDeliveryId: 5 },
+    ])
+    expect(await store.getChangedChannelScopes('a', 102)).toEqual([
+      { scope: 'channel:10', pts: 3, firstDeliveryId: 2 },
+      { scope: 'channel:11', pts: 2, firstDeliveryId: 4 },
+      { scope: 'channel:12', pts: 2, firstDeliveryId: 5 },
+    ])
+    expect(await store.getChangedChannelScopes('a', 105)).toEqual([])
+    // The date scan is a page, so a cursor from days ago cannot load the journal.
+    expect((await store.getSince('a', 0, 2)).map((row) => row.eventKey))
+      .toEqual(['account-1', 'alpha-1'])
+    expect((await store.getSince('a', 0, 0))).toEqual([])
+    expect((await store.getSince('a', 0, 50)).map((row) => row.eventKey))
+      .toEqual(['account-1', 'alpha-1', 'beta-1', 'quiet-1', 'alpha-2', 'pending'])
+  })
 })

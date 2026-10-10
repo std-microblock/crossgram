@@ -29,6 +29,18 @@ import type { MessageProjectionPipeline } from './message-projection.js'
 const CHANNEL_POLL_TIMEOUT_SECONDS = 30
 const PENDING_CHANNEL_POLL_TIMEOUT_SECONDS = 1
 
+/**
+ * Channel messages one account difference mirrors so newly announced channels
+ * exist as dialogs before their markers are processed.
+ *
+ * The figure is a page, not a share of the journal: a client that returns after
+ * days offline may have missed tens of thousands of channel deliveries, and
+ * loading them all is what pushed the process over its memory cap. Channels the
+ * page does not cover are topped up with one message each, so the mirrored set
+ * stays proportional to the changed channels.
+ */
+const CHANNEL_MIRROR_PAGE = 100
+
 /** Bounded wait for a reservation whose payload is still being published. */
 const PENDING_DELIVERY_WAIT_MS = 1_500
 const PENDING_DELIVERY_POLL_MS = 50
@@ -1125,10 +1137,13 @@ export class UpdateManager {
         await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts),
       )
     }
-    const channelDeliveries = await this._store.getChannelUpdateDeliveriesSince(
-      platformSessionId, request.date,
-    )
-    if (!deliveries.length && !channelDeliveries.length && request.pts === state.pts) {
+    // Channel pts are intentionally independent from account pts, so a client
+    // that was disconnected cannot identify missed dialogs from its account
+    // cursor alone. The changed channels are resolved as one aggregate per
+    // scope: announcing them by walking their retained deliveries makes a
+    // days-old cursor decode the entire journal inside a single request.
+    const channelScopes = await this._store.getChangedChannelScopes(platformSessionId, request.date)
+    if (!deliveries.length && !channelScopes.length && request.pts === state.pts) {
       return { _: 'updates.differenceEmpty', date: state.date, seq: state.seq }
     }
     const requestedLimit = request.ptsLimit ?? request.ptsTotalLimit ?? 100
@@ -1153,30 +1168,51 @@ export class UpdateManager {
       for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
       for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
     }
-    // Channel pts are intentionally independent from account pts, so a client
-    // that was disconnected cannot identify missed dialogs from its account
-    // cursor alone. Surface one channel-too-long marker per changed channel;
-    // Telegram clients then compare their durable channel pts and fetch every
-    // missing channel without opening the chat first. Repeated markers are safe
-    // when multiple events share the same second because channel difference is
-    // itself pts-deduplicated.
+    // Surface one channel-too-long marker per changed channel; Telegram clients
+    // then compare their durable channel pts and fetch every missing channel
+    // without opening the chat first. Repeated markers are safe when multiple
+    // events share the same second because channel difference is itself
+    // pts-deduplicated.
     const changedChannels = new Map<number, number>()
-    for (const delivery of channelDeliveries.filter((delivery) => delivery.payload && delivery.ptsCount > 0)) {
-      const channelId = Number(delivery.scope.slice('channel:'.length))
-      if (!Number.isSafeInteger(channelId)) continue
-      changedChannels.set(channelId, Math.max(changedChannels.get(channelId) ?? 0, delivery.pts))
-      const payload = updateFromJson(delivery.payload)
+    for (const scope of channelScopes) {
+      const channelId = channelScopeId(scope.scope)
+      if (channelId === undefined) continue
+      changedChannels.set(channelId, Math.max(changedChannels.get(channelId) ?? 0, scope.pts))
+    }
+    // A device without a local dialog for the channel cannot resolve the marker
+    // at all: Telegram Desktop parks the update until the channel is known,
+    // dialogs only load after the difference completes, and the two wait on
+    // each other forever. Mirror the official server here and let the account
+    // difference carry the channel messages themselves so the dialog exists
+    // before the marker is processed. The ride-along is one bounded page, and
+    // every announced channel the page did not cover is topped up with its
+    // newest message, so the cost follows the channel count — never the number
+    // of retained deliveries.
+    const mergeChannelPayload = (delivery: UpdateDelivery) => {
+      const payload = updateFromJson(delivery.payload!)
       for (const update of payload.updates) {
-        // A device without a local dialog for the channel cannot resolve the
-        // marker at all: Telegram Desktop parks the update until the channel
-        // is known, dialogs only load after the difference completes, and the
-        // two wait on each other forever. Mirror the official server here and
-        // let the account difference carry the channel messages themselves so
-        // the dialog exists before the marker is processed.
         if (update._ === 'updateNewChannelMessage') newMessages.push(update.message)
       }
       for (const chat of payload.chats) chats.set(`${chat._}:${chat.id}`, chat)
       for (const user of payload.users) users.set(`${user._}:${user.id}`, user)
+    }
+    const mirroredChannels = new Set<string>()
+    for (const delivery of await this._store.getChannelUpdateDeliveriesSince(
+      platformSessionId, request.date, CHANNEL_MIRROR_PAGE,
+    )) {
+      if (!delivery.payload || delivery.ptsCount <= 0) continue
+      mirroredChannels.add(delivery.scope)
+      mergeChannelPayload(delivery)
+    }
+    for (const scope of channelScopes) {
+      if (mirroredChannels.has(scope.scope)) continue
+      const channelId = channelScopeId(scope.scope)
+      if (channelId === undefined) continue
+      const [delivery] = await this._store.getUpdateDeliveriesAfter(
+        platformSessionId, Math.max(0, scope.pts - 1), 1, channelId,
+      )
+      if (!delivery?.payload) continue
+      mergeChannelPayload(delivery)
     }
     otherUpdates.push(...[...changedChannels].map(([channelId, pts]): tl.RawUpdateChannelTooLong => ({
       _: 'updateChannelTooLong', channelId, pts,
@@ -1262,6 +1298,13 @@ export class UpdateManager {
 }
 
 type CommittedMessageEvent = Extract<CommittedPlatformEvent, { event: { type: 'message' } }>
+
+/** Telegram channel id carried by one per-channel update scope, when it has one. */
+function channelScopeId(scope: string): number | undefined {
+  if (!scope.startsWith('channel:')) return undefined
+  const channelId = Number(scope.slice('channel:'.length))
+  return Number.isSafeInteger(channelId) ? channelId : undefined
+}
 
 /**
  * Durable journal key of a committed platform event. Publishers reserve the pts

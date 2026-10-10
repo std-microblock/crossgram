@@ -1506,9 +1506,19 @@ export class MessageStore {
     )
   }
 
-  async getChannelUpdateDeliveriesSince(platformSessionId: string, date: number) {
-    return (await this._updateStore.getSince(platformSessionId, date))
+  async getChannelUpdateDeliveriesSince(platformSessionId: string, date: number, limit: number) {
+    return (await this._updateStore.getSince(platformSessionId, date, limit))
       .filter((delivery) => delivery.scope.startsWith('channel:'))
+  }
+
+  /**
+   * One entry per channel whose pts advanced at or after `date`.
+   *
+   * Announcing changed channels must not walk every retained delivery of every
+   * channel: the per-scope aggregate is what keeps a days-old cursor cheap.
+   */
+  async getChangedChannelScopes(platformSessionId: string, date: number) {
+    return this._updateStore.getChangedChannelScopes(platformSessionId, date)
   }
 
   async getConversation(

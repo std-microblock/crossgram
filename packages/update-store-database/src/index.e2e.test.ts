@@ -98,4 +98,34 @@ describe('DatabaseUpdateStore', () => {
     expect((await second.updateStore.getAfter('a', 'account', 1, 10)).map((row) => row.eventKey))
       .toEqual(['a-3'])
   })
+
+  it('aggregates changed channel scopes and pages the date scan', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'crossgram-update-store-'))
+    cleanups.push(() => rm(directory, { recursive: true, force: true }))
+    const { updateStore } = await start(join(directory, 'updates.sqlite'), 100)
+    const payload = { _: 'updates', updates: [], users: [], chats: [] }
+    const withPayload = async (eventKey: string, pts: number, scope: string) => {
+      await updateStore.create(delivery(eventKey, 'a', pts, scope))
+      await updateStore.setPayload(eventKey, payload)
+    }
+
+    await withPayload('account-1', 2, 'account')
+    await withPayload('alpha-1', 2, 'channel:10')
+    await withPayload('alpha-2', 3, 'channel:10')
+    await withPayload('beta-1', 2, 'channel:11')
+    // A reservation whose payload is not durable yet is not announced.
+    await updateStore.create({ ...delivery('pending', 'a', 4, 'channel:12'), date: 104 })
+
+    // One grouped row per changed channel: the row count follows the channels,
+    // never the number of deliveries they retain.
+    expect(await updateStore.getChangedChannelScopes('a', 0)).toEqual([
+      { scope: 'channel:10', pts: 3, firstDeliveryId: 2 },
+      { scope: 'channel:11', pts: 2, firstDeliveryId: 4 },
+    ])
+    expect(await updateStore.getChangedChannelScopes('a', 105)).toEqual([])
+    // The date scan is a page, so a cursor from days ago cannot load the journal.
+    expect((await updateStore.getSince('a', 0, 2)).map((row) => row.eventKey))
+      .toEqual(['account-1', 'alpha-1'])
+    expect(await updateStore.getSince('a', 0, 0)).toEqual([])
+  })
 })

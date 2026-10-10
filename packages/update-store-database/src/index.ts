@@ -1,9 +1,10 @@
-import type { Database } from '@cordisjs/plugin-database'
+import { $, type Database } from '@cordisjs/plugin-database'
 import type { Context } from 'cordis'
 import { decode, encode } from '@msgpack/msgpack'
 import z from 'schemastery'
 import {
   UpdateStore,
+  type ChannelScopeUpdate,
   type NewUpdateDelivery,
   type UpdateDelivery,
   type UpdateJson,
@@ -98,11 +99,43 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
     return rows.map(decodeRow)
   }
 
-  async getSince(platformSessionId: string, date: number): Promise<UpdateDelivery[]> {
+  async getSince(platformSessionId: string, date: number, limit: number): Promise<UpdateDelivery[]> {
     const rows = await this._database.select('mtproto_update_delivery', {
       platformSessionId, date: { $gte: date },
-    }).orderBy('seq').orderBy('messageId').execute()
+    }).orderBy('seq').orderBy('messageId').limit(Math.max(0, Math.trunc(limit))).execute()
     return rows.map(decodeRow)
+  }
+
+  /**
+   * One grouped row per changed channel scope.
+   *
+   * The aggregate runs in the database, so a client whose date cursor is days
+   * old costs one indexed pass and returns one row per channel — never the
+   * payloads of every retained delivery, which is what made a stale cursor
+   * decode tens of thousands of updates in one request.
+   */
+  async getChangedChannelScopes(
+    platformSessionId: string,
+    date: number,
+  ): Promise<ChannelScopeUpdate[]> {
+    const rows = await this._database.select('mtproto_update_delivery', {
+      platformSessionId, date: { $gte: date }, ptsCount: { $gt: 0 }, payload: { $exists: true },
+    }).groupBy('scope', (row) => ({
+      pts: $.max(row.pts),
+      firstDeliveryId: $.min(row.messageId),
+    })).execute() as unknown as Array<{
+      scope: string
+      pts: number | string
+      firstDeliveryId: number | string
+    }>
+    return rows
+      .filter((row) => row.scope.startsWith('channel:'))
+      .map((row) => ({
+        scope: row.scope,
+        pts: Number(row.pts),
+        firstDeliveryId: Number(row.firstDeliveryId),
+      }))
+      .sort((left, right) => left.firstDeliveryId - right.firstDeliveryId)
   }
 
   async prune(platformSessionId: string, scope: string): Promise<void> {
@@ -149,7 +182,12 @@ export class DatabaseUpdateStore extends UpdateStore {
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number) {
     return this._backend.getAfter(platformSessionId, scope, pts, limit)
   }
-  getSince(platformSessionId: string, date: number) { return this._backend.getSince(platformSessionId, date) }
+  getSince(platformSessionId: string, date: number, limit: number) {
+    return this._backend.getSince(platformSessionId, date, limit)
+  }
+  getChangedChannelScopes(platformSessionId: string, date: number) {
+    return this._backend.getChangedChannelScopes(platformSessionId, date)
+  }
   prune(platformSessionId: string, scope: string) { return this._backend.prune(platformSessionId, scope) }
 }
 

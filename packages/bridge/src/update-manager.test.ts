@@ -1097,6 +1097,56 @@ describe('UpdateManager', () => {
     })
   })
 
+  it('bounds the channel mirror of a difference whose cursor predates the journal', async () => {
+    const { store, manager } = await createHarness()
+    const channels: IMConversation[] = Array.from({ length: 5 }, (_, index) => ({
+      id: `stale-${index}`, kind: 'channel', title: `Stale ${index}`,
+    }))
+    const publish = async (conversation: IMConversation, id: string, timestamp: number) => {
+      const message: IMMessage = {
+        id, conversationId: conversation.id, senderId: 'alice', timestamp,
+        content: { parts: [{ type: 'text', text: id }] },
+      }
+      const result = await store.ingest(session, conversation, message)
+      await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+    }
+
+    // 300 channel deliveries across 5 channels, all newer than the cursor the
+    // client sends: exactly the shape that used to decode the whole journal.
+    const before = await manager.getState(session.platformSessionId)
+    const perChannel = 60
+    let timestamp = before.date + 1
+    for (const conversation of channels) {
+      for (let index = 0; index < perChannel; index += 1) {
+        await publish(conversation, `${conversation.id}-${index}`, timestamp)
+        timestamp += 1
+      }
+    }
+
+    const since = vi.spyOn(store, 'getChannelUpdateDeliveriesSince')
+    const response = await manager.getDifference(session.platformSessionId, {
+      _: 'updates.getDifference', pts: before.pts, date: before.date, qts: before.qts,
+    })
+
+    // The ride-along is one page, never the journal.
+    expect(since).toHaveBeenCalledTimes(1)
+    expect(since.mock.calls[0]![2]).toBe(100)
+    expect(response._).toBe('updates.difference')
+    const difference = response as tl.updates.RawDifference
+    const texts = (difference.newMessages as tl.RawMessage[]).map((message) => message.message!)
+    expect(texts).toHaveLength(100 + (channels.length - 2))
+    // Every announced channel carries a message: a marker for a channel the
+    // client never loaded is dropped by Telegram Desktop.
+    const mirrored = new Set(texts.map((text) => text.slice(0, text.lastIndexOf('-'))))
+    expect([...mirrored].sort()).toEqual(channels.map((conversation) => conversation.id).sort())
+    // Every changed channel is still announced, with its newest pts.
+    const markers = (difference.otherUpdates as tl.RawUpdateChannelTooLong[])
+      .filter((update) => update._ === 'updateChannelTooLong')
+    expect(markers.map((update) => String(update.channelId)).sort())
+      .toEqual(channels.map((conversation) => String(peerTlId(conversation.id))).sort())
+    expect(markers.every((update) => (update.pts ?? 0) > 0)).toBe(true)
+  })
+
   it('does not create a channel pts gap between a reaction update and the next message', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'reaction-pts', kind: 'group', title: 'Reaction Pts' }
@@ -1364,8 +1414,9 @@ describe('UpdateManager', () => {
     await expect(manager.getDifference(session.platformSessionId, {
       _: 'updates.getDifference', pts: 1, date: 0, qts: 0,
     })).resolves.toMatchObject({
-      _: 'updates.difference',
-      otherUpdates: [],
+      // Nothing to announce: a mention read consumes no channel pts, so the
+      // account difference is empty rather than an empty `updates.difference`.
+      _: 'updates.differenceEmpty',
     })
 
     const message: IMMessage = {

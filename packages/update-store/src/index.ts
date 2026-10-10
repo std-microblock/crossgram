@@ -26,6 +26,22 @@ export interface UpdateDelivery {
 
 export type NewUpdateDelivery = Omit<UpdateDelivery, 'messageId'>
 
+/**
+ * One channel whose update pts advanced at or after a client's date cursor.
+ *
+ * `pts` is the newest pts of that channel, which is what `updateChannelTooLong`
+ * carries. `firstDeliveryId` is the oldest retained delivery of the scope; it
+ * only keeps the announcement order stable, so a difference never reorders
+ * channels just because a backend aggregates differently. Both come from one
+ * grouped query, so announcing N changed channels costs O(N) instead of loading
+ * every retained delivery of every channel.
+ */
+export interface ChannelScopeUpdate {
+  scope: string
+  pts: number
+  firstDeliveryId: number
+}
+
 export interface UpdateStoreBackend {
   get(eventKey: string): Promise<UpdateDelivery | undefined>
   create(delivery: NewUpdateDelivery): Promise<UpdateDelivery>
@@ -36,7 +52,10 @@ export interface UpdateStoreBackend {
   remove(eventKey: string): Promise<void>
   getPending(platformSessionId: string): Promise<UpdateDelivery[]>
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number): Promise<UpdateDelivery[]>
-  getSince(platformSessionId: string, date: number): Promise<UpdateDelivery[]>
+  /** `limit` bounds the page: a stale cursor must never load the whole journal. */
+  getSince(platformSessionId: string, date: number, limit: number): Promise<UpdateDelivery[]>
+  /** Channel scopes that changed since `date`, aggregated per scope. */
+  getChangedChannelScopes(platformSessionId: string, date: number): Promise<ChannelScopeUpdate[]>
   prune(platformSessionId: string, scope: string): Promise<void>
 }
 
@@ -59,7 +78,15 @@ export abstract class UpdateStore extends Service implements UpdateStoreBackend 
     pts: number,
     limit: number,
   ): Promise<UpdateDelivery[]>
-  abstract getSince(platformSessionId: string, date: number): Promise<UpdateDelivery[]>
+  abstract getSince(
+    platformSessionId: string,
+    date: number,
+    limit: number,
+  ): Promise<UpdateDelivery[]>
+  abstract getChangedChannelScopes(
+    platformSessionId: string,
+    date: number,
+  ): Promise<ChannelScopeUpdate[]>
   abstract prune(platformSessionId: string, scope: string): Promise<void>
 }
 
