@@ -53,7 +53,7 @@ const cases = [
   ['telegram-sticker-importer', stickerImporterConfig, [
     'botToken', 'apiBase', 'maxImportsPerSession', 'importCooldownMs',
   ]],
-  ['update-store-database', databaseUpdateStoreConfig, ['retention']],
+  ['update-store-database', databaseUpdateStoreConfig, ['retention', 'retentionSeconds']],
   ['update-store-memory', memoryUpdateStoreConfig, ['retention']],
 ] as const
 
@@ -136,7 +136,7 @@ describe('plugin config schemas', () => {
       topMethods: 40,
       topIps: 100,
     })
-    expect(databaseUpdateStoreConfig({})).toEqual({ retention: 10_000 })
+    expect(databaseUpdateStoreConfig({})).toEqual({ retention: 10_000, retentionSeconds: 259_200 })
     expect(memoryUpdateStoreConfig({})).toEqual({ retention: 1_000 })
   })
 
@@ -179,6 +179,10 @@ describe('plugin config schemas', () => {
     expect(() => flashTransferConfig({ maxFiles: 101 })).toThrow(/maxFiles/)
     expect(() => stickerImporterConfig({ botToken: 'token', importCooldownMs: 60_001 })).toThrow(/importCooldownMs/)
     expect(() => databaseUpdateStoreConfig({ retention: 1_000_001 })).toThrow(/retention/)
+    expect(() => databaseUpdateStoreConfig({ retentionSeconds: 90 * 24 * 3600 + 1 }))
+      .toThrow(/retentionSeconds/)
+    // `0` disables the age cap instead of being rejected.
+    expect(databaseUpdateStoreConfig({ retentionSeconds: 0 }).retentionSeconds).toBe(0)
   })
 
   it('requires Matrix connection credentials and hides its access token', () => {

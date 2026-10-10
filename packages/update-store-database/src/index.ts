@@ -36,21 +36,49 @@ declare module '@cordisjs/plugin-database' {
 export interface Config {
   /** Maximum retained deliveries for each Telegram account and update scope. */
   retention?: number
+  /**
+   * Age limit of one delivery, in seconds. `0` keeps rows until the count cap
+   * evicts them.
+   */
+  retentionSeconds?: number
 }
 
 export const Config = z.object({
   retention: z.natural().max(1_000_000).default(10_000)
     .description('Maximum retained update deliveries for each Telegram account and update scope.'),
+  retentionSeconds: z.natural().max(90 * 24 * 3600).default(3 * 24 * 3600)
+    .description('delivery 的保留时长（秒）：更旧的会被清理，0 表示只按条数保留。'),
 })
+
+/**
+ * How often the age sweep runs.
+ *
+ * The count cap is per scope, so a busy channel keeps weeks of history on its
+ * own; only a sweep of the whole table keeps the journal's size bounded. Five
+ * minutes is frequent enough to stay near the configured window and rare enough
+ * to stay invisible next to the write traffic.
+ */
+const RETENTION_SWEEP_INTERVAL_MS = 5 * 60 * 1000
+
+const DEFAULT_RETENTION_SECONDS = 3 * 24 * 3600
 
 /** Context-free durable backend using compact MessagePack payloads and indexed account partitions. */
 export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
   private readonly _database: Database
   private readonly _retention: number
+  private readonly _retentionSeconds: number
 
   constructor(database: Database, config: Config = {}) {
     this._database = database
     this._retention = Math.max(0, Math.trunc(config.retention ?? 10_000))
+    this._retentionSeconds = Math.max(
+      0, Math.trunc(config.retentionSeconds ?? DEFAULT_RETENTION_SECONDS),
+    )
+  }
+
+  /** Configured age cap in seconds; `0` disables the sweep. */
+  get retentionSeconds(): number {
+    return this._retentionSeconds
   }
 
   async get(eventKey: string): Promise<UpdateDelivery | undefined> {
@@ -158,6 +186,24 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
       platformSessionId, scope, messageId: { $lte: oldestOverflow.messageId },
     })
   }
+
+  /**
+   * Drop every delivery older than the configured age cap.
+   *
+   * This is a sweep of the whole table rather than another step of `_prune`:
+   * the count cap is per scope, so a channel that stopped receiving updates
+   * would keep its rows forever. Nothing in the read path depends on the
+   * removed rows — a cursor older than the window starts from the oldest
+   * retained delivery, exactly as it does past the count cap today.
+   */
+  async pruneExpired(now = Date.now()): Promise<number> {
+    if (!this._retentionSeconds) return 0
+    const cutoff = Math.floor(now / 1000) - this._retentionSeconds
+    const { removed } = await this._database.remove('mtproto_update_delivery', {
+      date: { $lt: cutoff },
+    })
+    return removed ?? 0
+  }
 }
 
 /** Durable Cordis update-store provider. */
@@ -170,7 +216,24 @@ export class DatabaseUpdateStore extends UpdateStore {
     defineModel(ctx)
     super(ctx)
     this._backend = new DatabaseUpdateStoreBackend(ctx.database, config)
+    if (this._backend.retentionSeconds) {
+      const logger = ctx.logger('update-store')
+      const sweep = setInterval(() => {
+        void this._backend.pruneExpired().then((removed) => {
+          if (removed) {
+            logger.info('清理 %d 条超过 %d 秒的 delivery', removed, this._backend.retentionSeconds)
+          }
+        }).catch((error) => {
+          logger.warn('清理过期 delivery 失败：%s', error instanceof Error ? error.message : error)
+        })
+      }, RETENTION_SWEEP_INTERVAL_MS)
+      sweep.unref?.()
+      ctx.effect(() => () => clearInterval(sweep), 'update-store-database.retention-sweep')
+    }
   }
+
+  /** Drop deliveries past the configured age cap; exposed for tests and probes. */
+  pruneExpired(now = Date.now()) { return this._backend.pruneExpired(now) }
 
   get(eventKey: string) { return this._backend.get(eventKey) }
   create(delivery: NewUpdateDelivery) { return this._backend.create(delivery) }
