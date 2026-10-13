@@ -2601,7 +2601,7 @@ function formatError(error: unknown): string {
 
 function mapConversation(input: WireConversation): IMConversation<QQMediaLocator> {
   const selfPermissions = input.selfRole ? permissions(input.selfRole) : undefined
-  return {
+  return sanitizeDbStrings({
     id: input.id,
     kind: input.kind,
     title: input.title,
@@ -2616,7 +2616,7 @@ function mapConversation(input: WireConversation): IMConversation<QQMediaLocator
       ...(input.participantCount === undefined ? {} : { participantsCount: input.participantCount }),
       ...(input.selfRole ? { qqSelfRole: input.selfRole } : {}),
     },
-  }
+  })
 }
 
 function mapRequest(input: WireRequest): IMRequest<QQMediaLocator> {
@@ -2709,7 +2709,7 @@ function mapMessage(
   stickerProviderId = 'qqnt:stickers',
   projectMedia?: (media: IMMedia<QQMediaLocator>) => IMMedia<QQMediaLocator>,
 ): IMMessage<QQMediaLocator> {
-  return {
+  return sanitizeDbStrings({
     id: input.id,
     sourceIds: input.sourceIds,
     conversationId: input.conversationId,
@@ -2745,7 +2745,7 @@ function mapMessage(
       parts: mapParts(input, stickerProviderId, reactionCatalog, projectMedia),
       inlineKeyboard: mapInlineKeyboard(input),
     },
-  }
+  })
 }
 
 
@@ -2791,7 +2791,7 @@ function mapParts(
   for (const part of input.parts) {
     if (part.type === 'text') {
       if (markdownText && !part.entities?.length && markdownText.includes(compactText(part.text))) continue
-      const normalized = normalizeTextPart(part, reactionCatalog)
+      const normalized = stripNulTextPart(normalizeTextPart(part, reactionCatalog))
       const previous = parts.at(-1)
       if (previous?.type === 'text') {
         const offset = previous.text.length
@@ -2804,7 +2804,7 @@ function mapParts(
         parts.push(normalized)
       }
     } else if (part.type === 'markdown') {
-      const normalized = parseQQMarkdown(part.content)
+      const normalized = stripNulTextPart(parseQQMarkdown(part.content))
       if (normalized.text) parts.push(normalized)
     } else if (part.type === 'inline-keyboard') {
       continue
@@ -2845,6 +2845,38 @@ function mapParts(
     }
   }
   return parts
+}
+
+function stripNulTextPart(
+  part: Extract<IMMessage<QQMediaLocator>['content']['parts'][number], { type: 'text' }>,
+): typeof part {
+  const text = sanitizeDbString(part.text)
+  if (text === part.text) return part
+  const mappedOffset = (offset: number) => sanitizeDbString(part.text.slice(0, offset)).length
+  const entities = part.entities?.map((entity) => ({
+    ...entity,
+    offset: mappedOffset(entity.offset),
+    length: mappedOffset(entity.offset + entity.length) - mappedOffset(entity.offset),
+  })).filter((entity) => entity.length > 0)
+  return { ...part, text, entities }
+}
+
+function sanitizeDbString(value: string): string {
+  return value.replace(/\0|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')
+}
+
+function sanitizeDbStrings<T>(value: T): T {
+  if (typeof value === 'string') return sanitizeDbString(value) as T
+  if (Array.isArray(value)) return value.map(sanitizeDbStrings) as T
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return value
+  let changed = false
+  const output: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    const clean = sanitizeDbStrings(item)
+    output[key] = clean
+    if (clean !== item) changed = true
+  }
+  return changed ? output as T : value
 }
 
 function compactText(value: string): string {

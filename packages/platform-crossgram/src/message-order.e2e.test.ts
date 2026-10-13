@@ -677,7 +677,7 @@ describe('QQNT zero-peer quarantine E2E', () => {
 })
 
 describe('QQNT durable event checkpoint E2E', () => {
-  it('consumes a replayed message edit and immediately delivers the following reaction update', async () => {
+  it('sanitizes a replayed message edit and delivers the following reaction update', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -726,7 +726,8 @@ describe('QQNT durable event checkpoint E2E', () => {
             id: targetId, conversationId: conversation.id, senderId: checkpointSession.userId,
             timestamp: 1_787_215_084, outgoing: true,
             msgSeq: '463806', telegramMessageId: 463806,
-            parts: [{ type: 'text', text: 'after edit' }],
+            sender: { id: checkpointSession.userId, name: 'Name\uD800', alias: 'bad\0alias' },
+            parts: [{ type: 'text', text: 'after\0 edit' }],
           },
         },
       }))
@@ -773,6 +774,8 @@ describe('QQNT durable event checkpoint E2E', () => {
     const reactionDelivered = Promise.withResolvers<void>()
     const unsubscribe = await platform.subscribe(checkpointSession, async (event) => {
       if (event.type === 'message-edit') {
+        expect(event.message.senderTitle).toBe('badalias')
+        expect(event.message.sender?.firstName).toBe('Name')
         await store.ingest(checkpointSession, event.conversation, event.message)
       } else if (event.type === 'message-reactions') {
         await store.setReactions(checkpointSession, event.conversation, event.target, event.context)

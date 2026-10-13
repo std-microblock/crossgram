@@ -1747,6 +1747,29 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('removes QQ text NUL bytes while preserving mention offsets', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getHistory = vi.fn(async () => ({
+      messages: [{
+        id: 'nul-message', conversationId: '2:group', senderId: 'alice', timestamp: 1, outgoing: false,
+        sender: { id: 'alice', name: 'A\uD800', alias: 'bad\0alias' },
+        parts: [{
+          type: 'text' as const, text: '@abc\0def',
+          entities: [{ type: 'mention' as const, offset: 0, length: 8, userId: 'alice' }],
+        }],
+      }],
+    }))
+
+    const history = await platform.getHistory(session, { id: '2:group' })
+    expect(history.messages[0].content.parts).toMatchObject([{
+      type: 'text', text: '@abcdef',
+      entities: [{ type: 'mention', offset: 0, length: 7, userId: 'alice' }],
+    }])
+    expect(history.messages[0]).toMatchObject({
+      senderTitle: 'badalias', sender: { firstName: 'A', metadata: { qqName: 'A' } },
+    })
+  })
+
   it('publishes the exact size and version of a relayed QQ face sticker', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
