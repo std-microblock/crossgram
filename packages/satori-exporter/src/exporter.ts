@@ -125,10 +125,6 @@ export class SatoriExporter {
         message: {
           id: message.id,
           content: elements.join(''),
-          // Keep live h elements (not plain JSON): Session.content is a getter that
-          // re-joins `message.elements`, and only h.toString() serializes back to
-          // element markup — plain objects would join into "[object Object]".
-          elements: [...elements] as any,
           createdAt: message.timestamp * 1_000,
           channel: satoriChannel(conversation),
           ...(conversation.kind === 'direct' ? {} : { guild: satoriGuild(conversation) }),
@@ -421,7 +417,6 @@ export class SatoriExporter {
     return {
       id: message.id,
       content: elements.join(''),
-      elements: [...elements] as any,
       createdAt: message.timestamp * 1_000,
       channel: satoriChannel(conversation),
       ...(conversation.kind === 'direct' ? {} : { guild: satoriGuild(conversation) }),
