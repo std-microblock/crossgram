@@ -40,6 +40,12 @@
           "title": "Your bots",
           "icon": "bot",
           "group": "Accounts"
+        },
+        {
+          "path": "/image-storage",
+          "title": "Image storage",
+          "icon": "database",
+          "group": "Workspace"
         }
       ]
     }
