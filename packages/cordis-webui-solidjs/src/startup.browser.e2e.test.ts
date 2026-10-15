@@ -29,7 +29,7 @@ describe('actual Cordis CLI startup', () => {
         JSON.stringify(
           pathToFileURL(join(root, 'packages/bridge/src/index.ts')).href,
         ) +
-        ",manifest:'../dist/manifest.json',routes:['/platform-accounts','/sticker-packs','/bots']},{accounts:[],serverConfig:{name:'CrossGram',host:'example.test',port:4430,dcs:[],rsa_key:'PUBLIC'},stickerAccounts:[],stickerPacks:[],bots:[],refresh:async()=>{}}); await entry.ready; await writeFile(" +
+        ",manifest:'../dist/manifest.json',routes:['/platform-accounts','/sticker-packs','/bots','/image-storage']},{accounts:[],serverConfig:{name:'CrossGram',host:'example.test',port:4430,dcs:[],rsa_key:'PUBLIC'},stickerAccounts:[],stickerPacks:[],bots:[],refresh:async()=>{}}); await entry.ready; await writeFile(" +
         JSON.stringify(marker) +
         ',JSON.stringify({baseUrl:ctx.server.baseUrl,buildId:ctx.webui.buildId,module:entry.toJSON()}));}',
       'utf8',
@@ -91,6 +91,7 @@ describe('actual Cordis CLI startup', () => {
         '/platform-accounts',
         '/sticker-packs',
         '/bots',
+        '/image-storage',
       ])
       browser = await chromium.launch({
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

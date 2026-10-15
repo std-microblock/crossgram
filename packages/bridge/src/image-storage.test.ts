@@ -77,10 +77,12 @@ describe('ImageStorage', () => {
     expect(await storage.query({ groupBy: 'date', pageSize: 1, page: 2 }))
       .toMatchObject({ count: 3, bytes: bytes.length * 3, totalGroups: 2, groups: [{ date: '2026-10-15', platformSessionId: other.platformSessionId }] })
     expect((await readdir(path)).every(name => /^[a-f0-9]{64}$/.test(name))).toBe(true)
-    for (const account of await readdir(path)) {
-      expect((await stat(join(path, account))).mode & 0o777).toBe(0o700)
-      for (const file of await readdir(join(path, account))) {
-        expect((await stat(join(path, account, file))).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') {
+      for (const account of await readdir(path)) {
+        expect((await stat(join(path, account))).mode & 0o777).toBe(0o700)
+        for (const file of await readdir(join(path, account))) {
+          expect((await stat(join(path, account, file))).mode & 0o777).toBe(0o600)
+        }
       }
     }
   })
