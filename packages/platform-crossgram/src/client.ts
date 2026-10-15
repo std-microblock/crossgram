@@ -1091,9 +1091,20 @@ export class QQNTClient {
       return value
     }).finally(() => this.directUrlRefreshes.delete(key))
     if (!active) this.directUrlRefreshes.set(key, refresh)
-    const resolved = await refresh
-    if (signal?.aborted) throw signal.reason ?? new Error('download aborted')
-    return resolved
+    if (!signal) return refresh
+    let abort!: () => void
+    try {
+      const resolved = await new Promise<DirectUrl>((resolve, reject) => {
+        abort = () => reject(signal.reason ?? new Error('download aborted'))
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) abort()
+        refresh.then(resolve, reject)
+      })
+      if (signal.aborted) throw signal.reason ?? new Error('download aborted')
+      return resolved
+    } finally {
+      signal.removeEventListener('abort', abort)
+    }
   }
 
   /** 请求缓存直链；若 QQ 返回密钥过期的可重试错误码，则重新解析直链并重试一次。 */
