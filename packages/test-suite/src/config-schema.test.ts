@@ -20,7 +20,7 @@ import { Config as memoryUpdateStoreConfig } from '../../update-store-memory/src
 
 const cases = [
   ['bridge', bridgeConfig, [
-    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
+    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'groupFilesMiniApp', 'uploadPath', 'imageStorage', 'autoMuteGroupChats',
     'blockedContentMode', 'recalledMessageMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
     'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
   ]],
@@ -93,6 +93,7 @@ describe('plugin config schemas', () => {
         tokenTtlSeconds: 600,
       },
       uploadPath: 'data/bridge-uploads',
+      imageStorage: { enabled: false, path: 'data/bridge-images', adminUserIds: [] },
       autoMuteGroupChats: true,
       blockedContentMode: 'hide-user',
       recalledMessageMode: 'show',
@@ -138,6 +139,28 @@ describe('plugin config schemas', () => {
     })
     expect(databaseUpdateStoreConfig({})).toEqual({ retention: 10_000, retentionSeconds: 259_200 })
     expect(memoryUpdateStoreConfig({})).toEqual({ retention: 1_000 })
+  })
+
+  it('图片存储字段可编辑，默认关闭且支持显式启用和自定义目录', () => {
+    const json = bridgeConfig.toJSON()
+    const root = json.refs[json.uid]
+    const storage = json.refs[root.dict.imageStorage as unknown as number]
+    expect(storage.type).toBe('object')
+    expect(Object.keys(storage.dict)).toEqual(['enabled', 'path', 'adminUserIds'])
+    for (const uid of Object.values(storage.dict)) {
+      expect(json.refs[uid as unknown as number].meta.description).toBeTruthy()
+    }
+    expect(bridgeConfig({ imageStorage: {} }).imageStorage)
+      .toEqual({ enabled: false, path: 'data/bridge-images', adminUserIds: [] })
+    expect(bridgeConfig({ imageStorage: { enabled: true } }).imageStorage)
+      .toEqual({ enabled: true, path: 'data/bridge-images', adminUserIds: [] })
+    expect(bridgeConfig({ imageStorage: { path: 'data/custom-images' } }).imageStorage)
+      .toEqual({ enabled: false, path: 'data/custom-images', adminUserIds: [] })
+    expect(() => bridgeConfig({ imageStorage: { enabled: 'true' } } as any)).toThrow(/enabled/)
+    expect(() => bridgeConfig({ imageStorage: { path: 123 } } as any)).toThrow(/path/)
+    expect(bridgeConfig({ imageStorage: { adminUserIds: [1, 42] } }).imageStorage.adminUserIds).toEqual([1, 42])
+    expect(() => bridgeConfig({ imageStorage: { adminUserIds: [0] } })).toThrow(/adminUserIds/)
+    expect(() => bridgeConfig({ imageStorage: { adminUserIds: ['1'] } } as any)).toThrow(/adminUserIds/)
   })
 
   it('validates and normalizes alternate bridge endpoints', () => {

@@ -5,6 +5,10 @@ altEndpoints: Alternate MTProto endpoints for the same data center, as host:port
 apiPrefix: HTTP prefix used for platform account assets.
 groupFilesMiniApp: Telegram attachment-menu Mini App used to browse platform-native group files.
 uploadPath: Directory used to store uploads received from Telegram clients.
+imageStorage: Persistent server copies of new message images; existing copies remain readable and manageable when disabled.
+imageStorage.enabled: Save images from new group and private messages automatically; disabled by default, without historical backfill.
+imageStorage.path: Image copy directory, default data/bridge-images; back up together with the database.
+imageStorage.adminUserIds: SSO user IDs allowed to manage image copies across all accounts; empty by default, denying all management requests.
 autoMuteGroupChats: Mute group chats by default; per-chat Telegram settings can override this.
 blockedContentMode: "Blocked-user visibility: show keeps Telegram's default group behavior; hide-user hides their messages and reactions; hide-related also hides messages replying to or mentioning them."
 recalledMessageMode: "QQ recalled-message visibility: show keeps the message with a recalled marker; hide removes it from visible history."
