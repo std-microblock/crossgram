@@ -40,7 +40,6 @@ import { DraftStore } from './draft-store.js'
 import { NotificationSettingsStore } from './notification-settings.js'
 import {
   makeCrossGramServerConfig, makePlatformAccountView, makeUnavailableAccountView,
-  type PlatformAccountDashboardData,
 } from './account-dashboard.js'
 import { AuthTransferStore } from './auth-transfer.js'
 import {
@@ -50,7 +49,7 @@ import { BlockedPeerStore, type BlockedContentMode } from './blocked-peers.js'
 import { DialogFolderStore } from './dialog-folders.js'
 import {
   collectStickerDashboard, setStickerPackAssignment,
-  type StickerDashboardPack, type StickerDashboardSourceAccount, type StickerPackDashboardData,
+  type StickerDashboardPack, type StickerDashboardSourceAccount,
 } from './sticker-dashboard.js'
 import { CallRegistry, type VoiceMediaStartProvider, type VoiceWorkerClient } from './voice/call-registry.js'
 import type { VoiceCallMediaProvider } from './voice/media.js'
@@ -59,7 +58,6 @@ import { VoiceWorkerSocketClient } from './voice/voice-worker-client.js'
 import { VoiceRpc } from './voice/voice-rpc.js'
 import { SpeechPipeline } from './speech.js'
 import { SystemPeerCallbackError, SystemPeerService } from './system-peer.js'
-import type { BotDashboardData } from './bot-dashboard.js'
 import { createRequestResolver, RequestInboxSystemPeerProvider } from './request-inbox.js'
 import {
   ActiveSessionStore, createAuthorizationReservationQueue, registerActiveSessionRpc,
@@ -68,6 +66,8 @@ import { MtprotoBridgeService, type BridgeSessionState } from './bridge-service.
 import { BridgeManagementError, BridgeManagementService } from './management-service.js'
 import { registerGroupFilesMiniApp } from './group-files-miniapp.js'
 import { MessageProjectionPipeline } from './message-projection.js'
+import { ImageStorage } from './image-storage.js'
+import type { BridgeDashboardData } from './dashboard-types.js'
 
 export * from './platform.js'
 export { defineModels } from './models.js'
@@ -78,6 +78,7 @@ export {
 export * from './message-projection.js'
 export * from './detached-message-projection.js'
 export * from './message-store.js'
+export * from './image-storage.js'
 export * from './message-actions.js'
 export * from './platform-manager.js'
 export * from './upload-manager.js'
@@ -131,6 +132,8 @@ export interface BridgeConfig {
     tokenTtlSeconds?: number
   }
   uploadPath?: string
+  /** 新消息图片的持久副本；关闭后已有副本仍可读取和管理。 */
+  imageStorage?: { enabled?: boolean, path?: string, adminUserIds?: number[] }
   autoMuteGroupChats?: boolean
   blockedContentMode?: BlockedContentMode
   recalledMessageMode?: 'hide' | 'show'
@@ -179,6 +182,17 @@ export const Config = z.object({
     tokenTtlSeconds: 600,
   }),
   uploadPath: z.string().default('data/bridge-uploads'),
+  imageStorage: z.object({
+    enabled: z.boolean().default(false).i18n({
+      'en-US': enUS['imageStorage.enabled'], 'zh-CN': zhCN['imageStorage.enabled'],
+    }),
+    path: z.string().default('data/bridge-images').i18n({
+      'en-US': enUS['imageStorage.path'], 'zh-CN': zhCN['imageStorage.path'],
+    }),
+    adminUserIds: z.array(z.natural().min(1)).default([]).i18n({
+      'en-US': enUS['imageStorage.adminUserIds'], 'zh-CN': zhCN['imageStorage.adminUserIds'],
+    }),
+  }).default({ enabled: false, path: 'data/bridge-images', adminUserIds: [] }),
   autoMuteGroupChats: z.boolean().default(true),
   blockedContentMode: z.union([
     z.const('show'), z.const('hide-user'), z.const('hide-related'),
@@ -239,6 +253,19 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     authKeyId => ctx.mtproto.finishAuthKeyRevocation(authKeyId),
   )
   const store = new MessageStore(ctx.database, undefined, ctx.updateStore, historyTrace, messageProjection)
+  const imageStorage = new ImageStorage(ctx.database, config.imageStorage, error => bridgeLogger.error(
+    '图片存储操作失败：%s', String(error).replace(/https?:\/\/\S+/gi, '[已隐藏 URL]'),
+  ))
+  const stopImageStorage = platforms.onCommittedEvent((session, committed) => {
+    if (committed.event.type !== 'message' && committed.event.type !== 'message-edit') return
+    const result = committed as Extract<typeof committed, { result: import('./message-store.js').IngestResult }>
+    return imageStorage.enqueue(session, committed.event.conversation, committed.event.message, result.result.message.id)
+      .catch(error => bridgeLogger.error('图片归档排队失败：%s', String(error)))
+  })
+  ctx.effect(() => () => {
+    stopImageStorage()
+    return imageStorage.close()
+  }, 'mtproto-bridge.image-storage')
   const drafts = new DraftStore(ctx.database)
   const notificationSettings = new NotificationSettingsStore(
     ctx.database, config.autoMuteGroupChats ?? true,
@@ -416,12 +443,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   ctx.effect(() => unregisterRequestInbox, 'mtproto-bridge.request-inbox')
   platforms.onSessionChange((event, binding) => {
     if (event === 'deactivate') {
+      imageStorage.deactivate(binding.session)
       const key = `${binding.session.platformId}\u0000${binding.session.platformSessionId}`
       stickerRpcs.delete(key)
       reactionRpcs.delete(key)
       stickerProviders.releaseSession(binding.session.platformSessionId)
       return
     }
+    void imageStorage.activate(binding.session, binding.platform).catch(error => {
+      bridgeLogger.error('图片存储恢复失败：%s', String(error))
+    })
     void systemPeers.bootstrap(binding.session).catch((error) => {
       bridgeLogger.warn('system peer bootstrap failed: %s', String(error))
     })
@@ -441,6 +472,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     },
     messageProjection,
     sendEchoes,
+    imageStorage,
   )
   new MtprotoBridgeService(ctx, requireBridgeSession, dcId)
   registerGroupFilesMiniApp(ctx, platforms, requireBridgeSession, config.groupFilesMiniApp)
@@ -532,7 +564,28 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()
   let publishedStickerPacks: StickerDashboardPack[] = []
-  const dashboard: PlatformAccountDashboardData & StickerPackDashboardData & BotDashboardData = {
+  const requireImageStorageAdmin = async (token: unknown) => {
+    const adminUserIds = config.imageStorage?.adminUserIds ?? []
+    if (!adminUserIds.length) throw new Error('请先配置 imageStorage.adminUserIds，指定可管理图片存储的 SSO 用户 ID。')
+    const sso = ctx.get('sso')
+    if (!sso) throw new Error('图片存储管理需要启用 SSO 登录服务。')
+    if (typeof token !== 'string' || !token || token.length > 4096) {
+      throw new Error('请先在 Your account 页面登录后管理图片存储。')
+    }
+    const user = await sso.validateSession(token)
+    if (!user) throw new Error('登录已失效，请在 Your account 页面重新登录。')
+    if (!adminUserIds.includes(user.id)) throw new Error('当前用户没有图片存储管理权限。')
+  }
+  const dashboard: BridgeDashboardData = {
+    imageStorageEnabled: imageStorage.enabled,
+    async getImageStorage(query, token) {
+      await requireImageStorageAdmin(token)
+      return imageStorage.query(query)
+    },
+    async deleteImageStorage(filter, token) {
+      await requireImageStorageAdmin(token)
+      return imageStorage.delete(filter)
+    },
     accounts: [],
     serverConfig: makeCrossGramServerConfig(
       config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, ctx.mtproto.rsaKey.publicKeyPem,
@@ -582,7 +635,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     baseUrl: import.meta.url,
     source: '../client/index.ts',
     manifest: '../dist/manifest.json',
-    routes: ['/platform-accounts', '/sticker-packs', '/bots'],
+    routes: ['/platform-accounts', '/sticker-packs', '/bots', '/image-storage'],
   }, dashboard)
 
   const currentAccounts = (now = Date.now()) => registry.ids.sort().map((platformId) => {
@@ -1492,6 +1545,7 @@ export function createSessionResolver(
   ) => void | Promise<void>,
   messageProjection?: MessageProjectionPipeline,
   sendEchoes?: SendEchoes,
+  imageStorage?: ImageStorage,
 ) {
   const projection = messageProjection ?? new MessageProjectionPipeline(ctx)
   const loading = new Map<string, Promise<BridgeSessionState>>()
@@ -1576,6 +1630,7 @@ export function createSessionResolver(
         systemPeers,
         projection,
         sendEchoes,
+        imageStorage,
       )
       return state
     }
