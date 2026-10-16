@@ -356,9 +356,14 @@ export class DialogRpc {
       : []
     const firstPage = req.offsetPeer._ === 'inputPeerEmpty' && !req.offsetId && !req.offsetDate
     const leadingPinned = firstPage && !req.excludePinned ? folderPinned : []
+    // 没有消息库时，加载页之外的置顶会话连 getPinnedDialogs 也重建不出来，只能留在普通分页流里，
+    // 否则它会从任何一页里消失（首屏已前置返回的置顶会话仍然从流里剔除，避免重复）
+    const hiddenPinnedIds = this._store
+      ? pinnedPeerIds
+      : new Set(leadingPinned.map((dialog) => dialog.conversation.id))
     const all = [
       ...leadingPinned,
-      ...loaded.dialogs.filter((dialog) => !pinnedPeerIds.has(dialog.conversation.id)),
+      ...loaded.dialogs.filter((dialog) => !hiddenPinnedIds.has(dialog.conversation.id)),
     ]
     const usersAt = performance.now()
     await this._persistUsers(all

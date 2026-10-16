@@ -1050,4 +1050,54 @@ describe('dialog folders RPC e2e', () => {
       _: 'messages.reorderPinnedDialogs', force: true, folderId: 2, order: [],
     })).rejects.toMatchObject({ code: 400, text: 'FOLDER_ID_INVALID' })
   })
+
+  it('keeps a pinned dialog outside the loaded page reachable without a message store', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+    const source: IMDialog[] = Array.from({ length: 30 }, (_, index) => {
+      const id = 'nostore-' + String(index).padStart(2, '0')
+      return { conversation: { id, kind: 'group', title: id }, unreadCount: 0 }
+    })
+    const target: IMPlatform = {
+      ...platform,
+      async getDialogs(_session, query) {
+        const start = query?.afterId ? source.findIndex(item => item.conversation.id === query.afterId) + 1 : 0
+        return { dialogs: source.slice(start, start + (query?.limit ?? 100)), total: source.length }
+      },
+    }
+    const dialogs = createDialog(new DialogFolderStore(ctx.database), target)
+    const peer = (id: string) => ({
+      _: 'inputPeerChannel' as const, channelId: peerChannelId(id), accessHash: Long.ONE,
+    })
+    await dialogs.getDialogs(getDialogs(0, { limit: 100 }))
+    await dialogs.toggleDialogPin({
+      _: 'messages.toggleDialogPin', pinned: true, peer: { _: 'inputDialogPeer', peer: peer('nostore-25') },
+    })
+
+    // 没有消息库时 getPinnedDialogs 重建不出加载页之外的置顶会话，它必须留在普通分页流里
+    expect(await dialogs.getPinnedDialogs(0)).toMatchObject({ dialogs: [] })
+    const seen: number[] = []
+    let request = getDialogs(0, { limit: 5 })
+    for (let pageIndex = 0; pageIndex < 20; pageIndex++) {
+      const result = await dialogs.getDialogs(request)
+      const page: readonly tl.TypeDialog[] = result._ === 'messages.dialogsNotModified' ? [] : result.dialogs
+      seen.push(...page.map((dialog) => ((dialog as tl.RawDialog).peer as tl.RawPeerChannel).channelId))
+      if (page.length < 5) break
+      const last = page.at(-1) as tl.RawDialog
+      request = getDialogs(0, {
+        limit: 5, offsetId: last.topMessage,
+        offsetPeer: { _: 'inputPeerChannel', channelId: (last.peer as tl.RawPeerChannel).channelId, accessHash: Long.ONE },
+      })
+    }
+    expect(seen).toHaveLength(30)
+    expect(new Set(seen).size).toBe(30)
+    expect(seen).toContain(peerChannelId('nostore-25'))
+  })
 })
