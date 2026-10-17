@@ -8,6 +8,7 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import type { RpcResult, ServerConnection, ServerRpcContext } from '@mtproto-relay/mtproto'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
+import { ActiveSends } from './active-sends.js'
 import { DialogRpc, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
@@ -167,5 +168,72 @@ describe('sent-message observer reconciliation e2e', () => {
     })
     expect((observerPushes[0].payload.updates[0] as tl.RawUpdateMessageID).id)
       .toBe((response.updates[0] as tl.RawUpdateMessageID).id)
+  })
+
+  it('keeps a native echo of the in-flight send away from the sending auth key', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+    for (const authKeyId of [REQUESTER_AUTH_KEY, OBSERVER_AUTH_KEY]) {
+      await ctx.database.create('mtproto_auth_binding', {
+        authKeyId, platformId: session.platformId, platformSessionId: session.platformSessionId,
+      })
+    }
+
+    const activeSends = new ActiveSends()
+    const store = new MessageStore(ctx.database)
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 9 },
+        conversations: { groups: true, channels: true, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [] } },
+      async getUser(_session, id) { return { id, firstName: id === session.userId ? 'Current' : id } },
+    }
+    const pushes: Array<{ authKeyId: string, payload: tl.RawUpdates }> = []
+    const manager = new UpdateManager(
+      ctx.database, new PlatformRegistry([[session.platformId, platform]]), store,
+      (authKeyId, update) => {
+        pushes.push({
+          authKeyId: Buffer.from(authKeyId).toString('hex'),
+          payload: update as tl.RawUpdates,
+        })
+        return 1
+      },
+      1, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      activeSends,
+    )
+    const echo = async (id: string, text: string) => {
+      const message: IMMessage = {
+        id, conversationId: conversation.id, senderId: session.userId, outgoing: true,
+        timestamp: 1_800_000_000, content: { parts: [{ type: 'text', text }] },
+      }
+      const result = await store.ingest(session, conversation, message)
+      await manager.publish(session, { event: { type: 'message', conversation, message }, result }, {})
+    }
+
+    // 发送 RPC 进行中：平台对自己这条消息的回显只推给其他设备，发送端等回包。
+    const release = activeSends.begin(session.platformSessionId, REQUESTER_AUTH_KEY)
+    await echo('qq-echoed-text', 'one item for the sender')
+    expect(pushes.map((push) => push.authKeyId)).toEqual([OBSERVER_AUTH_KEY])
+    expect(pushes[0]!.payload.updates).toMatchObject([
+      { _: 'updateNewChannelMessage', message: { message: 'one item for the sender' } },
+    ])
+    release()
+
+    // 发送结束后正常回显，两个设备都应收到。
+    await echo('qq-later-text', 'delivered to every device')
+    expect(pushes.map((push) => push.authKeyId)).toEqual([
+      OBSERVER_AUTH_KEY, REQUESTER_AUTH_KEY, OBSERVER_AUTH_KEY,
+    ])
   })
 })

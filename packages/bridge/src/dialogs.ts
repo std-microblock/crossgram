@@ -41,6 +41,7 @@ import {
   type DialogFolderStore, type StoredDialogFilter,
 } from './dialog-folders.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
+import type { ActiveSends } from './active-sends.js'
 import type { SpeechPipeline } from './speech.js'
 import { convertRichMessage, markdownRichMessage, type RichMediaReference, type ResolvedRichMedia } from './rich-message.js'
 
@@ -292,6 +293,7 @@ export class DialogRpc {
     private readonly _dialogFolders?: DialogFolderStore,
     private readonly _systemPeers?: SystemPeerService,
     private readonly _messageProjection?: MessageProjectionPipeline,
+    private readonly _activeSends?: ActiveSends,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     // 有 `MessageStore` 时淘汰旧条目并由数据库兜底；无存储模式不可淘汰，避免重用已分配的 ID。
@@ -1871,7 +1873,7 @@ export class DialogRpc {
     const existing = this._sentByRandomId.get(randomId)
     if (existing) return existing
 
-    const pending = this._sendMessage(req, excludeConnection).then(async (result) => {
+    const pending = this._asSending(() => this._sendMessage(req, excludeConnection)).then(async (result) => {
       if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
       return result
     })
@@ -1983,7 +1985,7 @@ export class DialogRpc {
   }
 
   async sendMedia(req: SendMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
-    return this._sendMediaOnce(req.randomId.toString(), async () => {
+    return this._asSending(() => this._sendMediaOnce(req.randomId.toString(), async () => {
       const startedAt = performance.now()
       const resolved = await this._resolveSendMedia(req.media)
       const resolveMs = performance.now() - startedAt
@@ -2014,12 +2016,12 @@ export class DialogRpc {
         resolveMs, sendMs, totalMs: performance.now() - startedAt,
       })
       return updates
-    })
+    }))
   }
 
   async sendMultiMedia(req: SendMultiMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     const randomId = req.multiMedia.map((item) => item.randomId.toString()).join(':')
-    return this._sendMediaOnce(randomId, async () => {
+    return this._asSending(() => this._sendMediaOnce(randomId, async () => {
       if (!req.multiMedia.length) throw new RpcError(400, 'MEDIA_EMPTY')
       const resolved = await Promise.all(req.multiMedia.map((item) => this._resolveSendMedia(item.media)))
       if (resolved.some((item) => 'sticker' in item)) throw new RpcError(400, 'MEDIA_INVALID')
@@ -2038,7 +2040,7 @@ export class DialogRpc {
       )
       if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
       return updates
-    })
+    }))
   }
 
   async deleteMessages(
@@ -2304,6 +2306,13 @@ export class DialogRpc {
   }
 
   async forwardMessages(
+    req: tl.messages.RawForwardMessagesRequest,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.TypeUpdates> {
+    return this._asSending(() => this._forwardMessages(req, excludeConnection))
+  }
+
+  private async _forwardMessages(
     req: tl.messages.RawForwardMessagesRequest,
     excludeConnection?: ServerConnection,
   ): Promise<tl.TypeUpdates> {
@@ -3425,6 +3434,20 @@ export class DialogRpc {
           return id === undefined || servable.has(id)
         }),
       },
+    }
+  }
+
+  /**
+   * 发送 RPC 期间把当前 auth key 标记为「正在发送」：平台对自己这条消息的
+   * 回显不能再推给它，否则客户端会先插入服务端副本，等回包里的
+   * `updateMessageID` 到达时只能销毁其中一条。
+   */
+  private async _asSending<T>(send: () => Promise<T>): Promise<T> {
+    const release = this._activeSends?.begin(this._session.platformSessionId, this._authKeyId)
+    try {
+      return await send()
+    } finally {
+      release?.()
     }
   }
 

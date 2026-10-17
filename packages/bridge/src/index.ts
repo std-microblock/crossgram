@@ -15,6 +15,7 @@ import {
   DialogRpc,
   type LegacyGetForumTopicsByIdRequest, type LegacyGetForumTopicsRequest,
 } from './dialogs.js'
+import { ActiveSends } from './active-sends.js'
 import { startupRpcHandlers } from './startup.js'
 import { androidRpcHandlers } from './android-rpc.js'
 import { MessageStore } from './message-store.js'
@@ -265,6 +266,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     reactionRpcs.set(key, { platform, rpc })
     return rpc
   }
+  const activeSends = new ActiveSends()
   const updates = new UpdateManager(
     ctx.database, registry, store,
     (authKeyId, update, excludeConnection) =>
@@ -280,6 +282,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     config.recalledMessageMode ?? 'show',
     (session, conversationId, definition) => reactionRpcFor(registry.require(session.platformId), session)
       .registerInlineCustomEmoji(conversationId, definition),
+    activeSends,
   )
   const builtInMediaProvider = createBuiltInVoiceMediaProvider({
     serverHost: config.serverHost,
@@ -1570,6 +1573,7 @@ export function createSessionResolver(
         dialogFolders,
         systemPeers,
         projection,
+        activeSends,
       )
       return state
     }

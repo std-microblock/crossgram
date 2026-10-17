@@ -25,6 +25,7 @@ import type { BlockedPeerStore } from './blocked-peers.js'
 import { customReactionDocumentId } from './reaction-rpc.js'
 import { updateFromJson, updateToJson } from './update-json.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
+import type { ActiveSends } from './active-sends.js'
 
 const CHANNEL_POLL_TIMEOUT_SECONDS = 30
 const PENDING_CHANNEL_POLL_TIMEOUT_SECONDS = 1
@@ -67,6 +68,7 @@ export class UpdateManager {
       conversationId: string,
       definition: IMReactionDefinition,
     ) => number | undefined,
+    private readonly _activeSends?: ActiveSends,
   ) {}
 
   /** 注册行内自定义表情的 document，使渲染消息的客户端能解析对应资源。 */
@@ -452,12 +454,19 @@ export class UpdateManager {
         )
         return
       }
+      // 平台把自己刚发出的消息回显成普通事件时，发送端此刻在等 RPC 回包里的
+      // `updateMessageID`；回显再推过去会先落一份服务端副本，对账时客户端只能
+      // 销毁其中一条（桌面端的消息粉碎动画就是这么来的）。
+      const activeSender = (committed.event.type === 'message' || committed.event.type === 'message-edit')
+        && !options.excludeAuthKeyId
+        ? this._activeSends?.excludeFor(session, committed.event.message)
+        : undefined
       return await this._publishMessage(
         session,
         committed as Exclude<CommittedPlatformEvent, {
           event: { type: 'message-delete' | 'message-reactions' | 'read' | 'voice-call' }
         }>,
-        options,
+        activeSender ? { ...options, excludeAuthKeyId: activeSender } : options,
       )
     } catch (error) {
       if (eventKey) await this._releaseAbandonedDelivery(eventKey, session)
