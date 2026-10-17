@@ -68,6 +68,7 @@ export interface ProjectedMessage {
 }
 
 export interface StoredMedia {
+  messageId: number
   media: import('./platform.js').IMMedia
   timestamp: number
 }
@@ -1291,6 +1292,7 @@ export class MessageStore {
     })
     if (!message) return
     return {
+      messageId: message.id,
       media: {
         id: row.platformMediaId,
         kind: row.kind,

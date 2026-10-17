@@ -96,4 +96,44 @@ export interface BotDashboardData {
   refreshBots(): Promise<void>
 }
 
-export type BridgeDashboardData = PlatformAccountDashboardData & StickerPackDashboardData & BotDashboardData
+export interface ImageStorageFilter {
+  platformSessionId?: string
+  conversationId?: string
+  startDate?: string
+  endDate?: string
+}
+
+export interface ImageStorageQuery extends ImageStorageFilter {
+  groupBy?: 'conversation' | 'date'
+  /** 从 1 开始，默认 1。 */
+  page?: number
+  /** 默认 50，最大 100。 */
+  pageSize?: number
+}
+
+export interface ImageStorageGroup {
+  platformSessionId: string
+  conversationId?: string
+  conversationTitle?: string
+  date?: string
+  count: number
+  bytes: number
+}
+
+export interface ImageStorageResult {
+  count: number
+  bytes: number
+  pendingCount: number
+  groups: ImageStorageGroup[]
+  totalGroups: number
+  page: number
+  pageSize: number
+}
+
+export interface ImageStorageDashboardData {
+  imageStorageEnabled: boolean
+  getImageStorage(query: ImageStorageQuery, token?: string): Promise<ImageStorageResult>
+  deleteImageStorage(filter: ImageStorageFilter, token?: string): Promise<{ count: number, bytes: number }>
+}
+
+export type BridgeDashboardData = PlatformAccountDashboardData & StickerPackDashboardData & BotDashboardData & ImageStorageDashboardData

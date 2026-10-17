@@ -163,6 +163,15 @@
     font-size: 12px;
     overflow-wrap: anywhere;
   }
+  .image-storage-filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+    gap: 16px;
+  }
+  .image-storage-scope {
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
   .sticker-controls {
     margin-bottom: 24px;
   }

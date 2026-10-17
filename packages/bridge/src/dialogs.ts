@@ -292,6 +292,7 @@ export class DialogRpc {
     private readonly _dialogFolders?: DialogFolderStore,
     private readonly _systemPeers?: SystemPeerService,
     private readonly _messageProjection?: MessageProjectionPipeline,
+    private readonly _imageStorage?: import('./image-storage.js').ImageStorage,
   ) {
     this._actions = new PlatformMessageActions(_platform, _session)
     // 有 `MessageStore` 时淘汰旧条目并由数据库兜底；无存储模式不可淘汰，避免重用已分配的 ID。
@@ -2515,7 +2516,9 @@ export class DialogRpc {
 
   async getFile(req: tl.upload.RawGetFileRequest): Promise<tl.upload.TypeFile> {
     const offset = safeOffset(req.offset)
-    if (offset < 0 || req.limit <= 0) throw new RpcError(400, 'OFFSET_INVALID')
+    if (offset < 0 || !Number.isSafeInteger(req.limit) || req.limit <= 0 || req.limit > 1024 * 1024) {
+      throw new RpcError(400, 'OFFSET_INVALID')
+    }
     if (req.location._ === 'inputStickerSetThumb') {
       const bytes = await this._stickers?.getSetThumb(req.location.stickerset, offset, req.limit)
       if (!bytes) throw new RpcError(400, 'LOCATION_INVALID')
@@ -2574,6 +2577,20 @@ export class DialogRpc {
         }
       }
     }
+    const archivedSource = this._imageStorage
+      ? await this._store?.getMedia(this._session.platformSessionId, req.location.id.toNumber())
+      : undefined
+    if (archivedSource) {
+      const isPreview = shouldServeMediaPreview(req.location, archivedSource.media)
+      const media = isPreview ? previewMedia(archivedSource.media) : archivedSource.media
+      const bytes = await this._imageStorage!.read(
+        this._session, archivedSource.messageId, archivedSource.media, offset, req.limit, isPreview,
+      )
+      if (bytes) return {
+        _: 'upload.file', type: storageFileType(media.mimeType ?? 'application/octet-stream'),
+        mtime: archivedSource.timestamp, bytes,
+      }
+    }
     const transient = this._messageProjection?.resolveMedia(
       this._session,
       req.location.id.toNumber(),
@@ -2599,7 +2616,7 @@ export class DialogRpc {
         bytes: await readSourceRange(staged.media.source, offset, req.limit),
       }
     }
-    const stored = await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
+    const stored = archivedSource ?? await this._store.getMedia(this._session.platformSessionId, req.location.id.toNumber())
     if (!stored) throw new RpcError(400, 'FILE_ID_INVALID')
     const media = shouldServeMediaPreview(req.location, stored.media)
       ? previewMedia(stored.media)
@@ -2636,11 +2653,20 @@ export class DialogRpc {
     if (decodeBridgeMediaReference(location.fileReference) !== mediaId) {
       throw new RpcError(400, 'FILE_REFERENCE_INVALID')
     }
+    const archivedSource = this._imageStorage
+      ? await this._store?.getMedia(this._session.platformSessionId, mediaId)
+      : undefined
+    if (archivedSource && await this._imageStorage!.has(
+      this._session, archivedSource.messageId, archivedSource.media, shouldServeMediaPreview(location, archivedSource.media),
+    )) {
+      // 沿用 patched client 已有的直链失败回退，不暴露本地文件 URL。
+      throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
+    }
     if (!this._platform.resolveMediaUrl) {
       throw new RpcError(400, 'MEDIA_DIRECT_URL_UNAVAILABLE')
     }
     const transient = this._messageProjection?.resolveMedia(this._session, mediaId)
-    const stored = transient ? undefined : await this._store?.getMedia(this._session.platformSessionId, mediaId)
+    const stored = transient ? undefined : archivedSource ?? await this._store?.getMedia(this._session.platformSessionId, mediaId)
     if (!transient && !stored) throw new RpcError(400, 'FILE_ID_INVALID')
     const source = transient?.media ?? stored!.media
     const media = shouldServeMediaPreview(location, source)
