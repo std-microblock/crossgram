@@ -129,7 +129,7 @@ async function fixture(options: { enabled?: boolean, root?: string } = {}) {
     databasePath: pathToFileURL(join(root, 'bridge.db')).href,
     authKeyStorePath: join(root, 'auth-keys.json'),
     bridgeConfig: { uploadPath: join(root, 'uploads'), imageStorage: {
-      path: join(root, 'images'), adminUserIds: [1],
+      path: join(root, 'images'),
       ...(options.enabled === undefined ? {} : { enabled: options.enabled }),
     } },
     platform: { id: PLATFORM_ID, adapter: source.platform },

@@ -18,7 +18,6 @@
     imageStorage:
       enabled: false
       path: data/bridge-images
-      adminUserIds: []
     groupFilesMiniApp:
       enabled: true
       path: /group-files

@@ -133,7 +133,7 @@ export interface BridgeConfig {
   }
   uploadPath?: string
   /** 新消息图片的持久副本；关闭后已有副本仍可读取和管理。 */
-  imageStorage?: { enabled?: boolean, path?: string, adminUserIds?: number[] }
+  imageStorage?: { enabled?: boolean, path?: string }
   autoMuteGroupChats?: boolean
   blockedContentMode?: BlockedContentMode
   recalledMessageMode?: 'hide' | 'show'
@@ -189,10 +189,7 @@ export const Config = z.object({
     path: z.string().default('data/bridge-images').i18n({
       'en-US': enUS['imageStorage.path'], 'zh-CN': zhCN['imageStorage.path'],
     }),
-    adminUserIds: z.array(z.natural().min(1)).default([]).i18n({
-      'en-US': enUS['imageStorage.adminUserIds'], 'zh-CN': zhCN['imageStorage.adminUserIds'],
-    }),
-  }).default({ enabled: false, path: 'data/bridge-images', adminUserIds: [] }),
+  }).default({ enabled: false, path: 'data/bridge-images' }),
   autoMuteGroupChats: z.boolean().default(true),
   blockedContentMode: z.union([
     z.const('show'), z.const('hide-user'), z.const('hide-related'),
@@ -564,9 +561,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()
   let publishedStickerPacks: StickerDashboardPack[] = []
-  const requireImageStorageAdmin = async (token: unknown) => {
-    const adminUserIds = config.imageStorage?.adminUserIds ?? []
-    if (!adminUserIds.length) throw new Error('请先配置 imageStorage.adminUserIds，指定可管理图片存储的 SSO 用户 ID。')
+  const requireImageStorageSession = async (token: unknown) => {
     const sso = ctx.get('sso')
     if (!sso) throw new Error('图片存储管理需要启用 SSO 登录服务。')
     if (typeof token !== 'string' || !token || token.length > 4096) {
@@ -574,16 +569,15 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     const user = await sso.validateSession(token)
     if (!user) throw new Error('登录已失效，请在 Your account 页面重新登录。')
-    if (!adminUserIds.includes(user.id)) throw new Error('当前用户没有图片存储管理权限。')
   }
   const dashboard: BridgeDashboardData = {
     imageStorageEnabled: imageStorage.enabled,
     async getImageStorage(query, token) {
-      await requireImageStorageAdmin(token)
+      await requireImageStorageSession(token)
       return imageStorage.query(query)
     },
     async deleteImageStorage(filter, token) {
-      await requireImageStorageAdmin(token)
+      await requireImageStorageSession(token)
       return imageStorage.delete(filter)
     },
     accounts: [],

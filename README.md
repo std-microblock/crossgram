@@ -135,10 +135,9 @@ MTProto 服务的 `host`/`port` 是实际监听地址；Bridge 的 `serverHost`/
 imageStorage:
   enabled: true
   path: data/bridge-images
-  adminUserIds: []
 ```
 
-图片存储查询和删除需要现有 SSO 登录服务及显式管理员白名单。先在 WebUI 的「Your account」页面登录；通过现有 `GET /sso/me`（请求头 `Authorization: Bearer <登录令牌>`）读取自己的用户 `id`，由维护者将该数值加入 `imageStorage.adminUserIds`，例如 `[1]`。普通注册用户不会自动获得权限。未启用 SSO、未登录、令牌失效或白名单为空时一律拒绝管理请求；这不影响新图自动保存、Telegram 账号读取自己的副本及既有匿名账号发现。
+图片存储查询和删除需要先在 WebUI 的「Your account」页面登录，任何已登录会话都可以管理，无需单独配置管理员。未启用 SSO 登录服务、未登录或令牌失效时拒绝管理请求；这不影响新图自动保存、Telegram 账号读取自己的副本及匿名账号发现。
 
 原图及平台提供的独立预览图分别保存，按各自的格式和字节范围通过现有 MTProto 媒体下载读取，不公开新的 HTTP 文件地址。图片数仅计算原图，容量包含原图和预览图的实际文件字节数，删除会同时清理两种副本。关闭开关只停止新下载，已有副本仍可读取和管理。下载失败不会阻断消息接收，待处理和失败的新图任务会在账号重新连接或服务重启后重试。
 

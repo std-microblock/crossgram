@@ -67,7 +67,6 @@ describe('Image storage management in the Solid shell', () => {
         ],
         failQuery = false,
         failDelete = false,
-        adminConfigured = false,
         releaseDelete: (() => void) | undefined
       const matches = (
         row: (typeof records)[number],
@@ -83,12 +82,6 @@ describe('Image storage management in the Solid shell', () => {
         if (!token)
           throw new Error(
             'Sign in through Your account to manage image storage.',
-          )
-        if (token !== adminToken)
-          throw new Error('You do not have permission to manage image storage.')
-        if (!adminConfigured)
-          throw new Error(
-            'Configure imageStorage.adminUserIds before managing image storage.',
           )
       }
       const data: ImageStorageDashboardData & {
@@ -188,29 +181,8 @@ describe('Image storage management in the Solid shell', () => {
         localStorage.setItem('cordis:webui-sso:token', 'member-session'),
       )
       await page.getByRole('button', { name: 'Refresh', exact: true }).click()
-      await page
-        .getByRole('alert')
-        .getByText(
-          'Error: You do not have permission to manage image storage.',
-          { exact: true },
-        )
-        .waitFor()
-      await page.evaluate(
-        (token) => localStorage.setItem('cordis:webui-sso:token', token),
-        adminToken,
-      )
-      await page.getByRole('button', { name: 'Refresh', exact: true }).click()
-      await page
-        .getByRole('alert')
-        .getByText(
-          'Error: Configure imageStorage.adminUserIds before managing image storage.',
-          { exact: true },
-        )
-        .waitFor()
-      adminConfigured = true
-      await page.getByRole('button', { name: 'Refresh', exact: true }).click()
       await page.getByText('28 images · 28 KiB').waitFor()
-      expect(queryTokens.at(-1)).toBe(adminToken)
+      expect(queryTokens.at(-1)).toBe('member-session')
       expect(
         await page.getByText('Disabled (default)', { exact: true }).isVisible(),
       ).toBe(true)
@@ -240,17 +212,6 @@ describe('Image storage management in the Solid shell', () => {
       ).toBe(0)
       await otherTab.evaluate(() =>
         localStorage.setItem('cordis:webui-sso:token', 'member-session'),
-      )
-      await page
-        .getByRole('alert')
-        .getByText(
-          'Error: You do not have permission to manage image storage.',
-          { exact: true },
-        )
-        .waitFor()
-      await otherTab.evaluate(
-        (token) => localStorage.setItem('cordis:webui-sso:token', token),
-        adminToken,
       )
       await page.getByText('28 images · 28 KiB').waitFor()
       await otherTab.close()

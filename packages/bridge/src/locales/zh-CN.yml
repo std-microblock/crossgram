@@ -8,7 +8,6 @@ uploadPath: 用于存储 Telegram 客户端上传文件的目录。
 imageStorage: 新消息图片的服务端持久存储；关闭后已有副本仍可读取和管理。
 imageStorage.enabled: 主动保存群聊和私聊新消息中的图片，默认关闭，不回填历史图片。
 imageStorage.path: 图片副本目录，默认 data/bridge-images；应与数据库一起备份。
-imageStorage.adminUserIds: 允许管理所有账号图片副本的 SSO 用户 ID 白名单；默认空列表，拒绝所有管理请求。
 autoMuteGroupChats: 默认关闭群聊通知；可在 Telegram 中为单个群聊单独开启。
 blockedContentMode: 拉黑用户内容显示策略：show 保留 Telegram 默认群聊显示；hide-user 隐藏其消息和 reaction；hide-related 还会隐藏回复或 @ 该用户的消息。
 recalledMessageMode: QQ 撤回消息显示策略：show 保留消息并标记为已撤回；hide 直接隐藏消息。

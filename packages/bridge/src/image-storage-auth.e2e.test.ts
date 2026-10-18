@@ -8,11 +8,11 @@ import { startApp, waitForWebuiRoute } from '../../test-suite/src/harness.js'
 const disposals: Array<() => Promise<void>> = []
 afterEach(async () => { for (const dispose of disposals.splice(0).reverse()) await dispose() })
 
-async function fixture(adminUserIds: number[] = [1]) {
+async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'crossgram-image-auth-'))
   disposals.push(() => rm(root, { recursive: true, force: true }))
   const app = await startApp({ bridgeConfig: {
-    uploadPath: join(root, 'uploads'), imageStorage: { path: join(root, 'images'), adminUserIds },
+    uploadPath: join(root, 'uploads'), imageStorage: { path: join(root, 'images') },
   } })
   disposals.push(app.stop)
   const entry = await waitForWebuiRoute(app.ctx, '/platform-accounts')
@@ -67,20 +67,21 @@ describe('图片存储 WebSocket 管理权限 e2e', () => {
     expect(JSON.stringify(app.frames)).not.toContain('私密群')
   })
 
-  it('每次query/delete都拒绝匿名、伪造token、普通SSO用户和已撤销管理员会话', async () => {
+  it('每次query/delete都拒绝匿名、伪造token和已撤销会话，任何已登录用户均可管理', async () => {
     const app = await fixture()
     const tokens = await app.sso()
     for (const method of ['getImageStorage', 'deleteImageStorage']) {
       expect(await app.call(method)).toMatchObject({ ok: false, message: expect.stringContaining('Your account') })
       expect(await app.call(method, { id: 1 })).toMatchObject({ ok: false, message: expect.stringContaining('Your account') })
       expect(await app.call(method, 'forged-token')).toMatchObject({ ok: false, message: expect.stringContaining('登录已失效') })
-      expect(await app.call(method, tokens.member)).toMatchObject({ ok: false, message: expect.stringContaining('没有图片存储管理权限') })
       await app.pending()
     }
     expect(JSON.stringify(app.frames)).not.toContain('secret-group')
-    expect(await app.call('getImageStorage', tokens.admin)).toMatchObject({ ok: true, value: {
-      count: 0, bytes: 0, pendingCount: 1, groups: [{ conversationId: 'secret-group' }],
-    } })
+    for (const token of [tokens.member, tokens.admin]) {
+      expect(await app.call('getImageStorage', token)).toMatchObject({ ok: true, value: {
+        count: 0, bytes: 0, pendingCount: 1, groups: [{ conversationId: 'secret-group' }],
+      } })
+    }
     await app.ctx.sso.destroySession(tokens.admin)
     for (const method of ['getImageStorage', 'deleteImageStorage']) {
       expect(await app.call(method, tokens.admin)).toMatchObject({ ok: false, message: expect.stringContaining('登录已失效') })
@@ -97,14 +98,5 @@ describe('图片存储 WebSocket 管理权限 e2e', () => {
     expect(await app.call('deleteImageStorage', fresh, { conversationId: 'secret-group' }))
       .toMatchObject({ ok: true, value: { count: 0, bytes: 0 } })
     expect(await app.ctx.database.get('mtproto_image_storage', { id: app.id })).toMatchObject([{ state: 'deleted' }])
-  })
-
-  it('空管理员白名单在已登录时仍拒绝管理，不把普通注册用户当管理员', async () => {
-    const app = await fixture([])
-    const tokens = await app.sso()
-    for (const method of ['getImageStorage', 'deleteImageStorage']) {
-      expect(await app.call(method, tokens.admin)).toMatchObject({ ok: false, message: expect.stringContaining('imageStorage.adminUserIds') })
-    }
-    await app.pending()
   })
 })
