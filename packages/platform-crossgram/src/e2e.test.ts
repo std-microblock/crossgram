@@ -175,21 +175,23 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     }
   }, 180_000)
 
-  it('finds a newly sent message through native QQ search', async () => {
-    const target = await platform.client.resolveConversation('direct', directTarget)
-    const marker = `qqntsearch${Date.now()}`
+  it('reads a newly sent group message back by its msgSeq with raw coverage', async () => {
+    const target = await platform.client.resolveConversation('group', groupTargets[0])
+    const marker = `qqntseq${Date.now()}`
     const sent = await platform.sendMessage(session, { id: target.id }, {
       parts: [{ type: 'text', text: marker }],
     })
-    let found: Awaited<ReturnType<typeof platform.searchMessages>> | undefined
+    const sequence = String(sent.metadata?.qqMsgSeq ?? '')
+    expect(sequence).toMatch(/^\d+$/)
+    let page: Awaited<ReturnType<typeof platform.getHistory>> | undefined
     for (let attempt = 0; attempt < 20; attempt++) {
-      found = await platform.searchMessages(session, { id: target.id }, { query: marker, limit: 20 })
-      if (found.messages.some((message) => message.id === sent.id)) break
+      page = await platform.getHistory(session, { id: target.id }, { beforeSequence: sequence, limit: 5 })
+      if (page.messages.some((message) => message.id === sent.id)) break
       await new Promise((resolve) => setTimeout(resolve, 250))
     }
-    expect(found?.messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: sent.id, content: { parts: [{ type: 'text', text: marker }] } }),
-    ]))
+    expect(page?.messages).toEqual(expect.arrayContaining([expect.objectContaining({ id: sent.id })]))
+    expect(Number(page?.coverage?.maxSequence)).toBe(Number(sequence))
+    expect(Number(page?.coverage?.minSequence)).toBeLessThanOrEqual(Number(sequence))
   }, 60_000)
 
   it.runIf(Boolean(process.env.QQNT_BRIDGE_E2E_FILE))('uploads a private file and reads two CDN ranges through its direct URL', async () => {

@@ -9,7 +9,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import {
   StickerProviderRegistry, StickerRpc, decodeTelegramStickerPath,
-  type PlatformSession, type StickerProviderContext,
+  type IMSticker, type IMStickerProvider, type PlatformSession, type StickerProviderContext,
 } from '@mtproto-relay/bridge'
 import { defineModels } from '../../bridge/src/models.js'
 import { QQStickerProvider } from './sticker-provider.js'
@@ -178,6 +178,79 @@ describe('QQ store animated sticker object contract E2E', () => {
     await expect(rpc.getRecentStickers({
       _: 'messages.getRecentStickers', attached: false, hash: recent.hash,
     })).resolves.toEqual({ _: 'messages.recentStickersNotModified' })
+  })
+
+  it('collapses one QQ favorite reported through both id shapes into a single recent entry', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    // QQNT 报告同一条收藏时，收藏列表带 resId，消息元素只带 md5；bridge 把两者归一成内容 id。
+    const md5 = '6d08089772d24f738eb24fe80271208a'
+    const resId = '1715311957_0_0_0_6D08089772D24F738EB24FE80271208A_0_0'
+    const canonical: IMSticker = {
+      providerId: 'qqnt:stickers', stickerId: `favorite:${md5}`, packId: 'qq-favorites',
+      title: 'Saved', format: 'static', mimeType: 'image/png', width: 240, height: 240, version: 2,
+    }
+    const legacyStickerId = `favorite:${resId}`
+    const asset = Uint8Array.of(1, 2, 3, 4)
+    const provider: IMStickerProvider = {
+      capabilities: { platformKinds: ['qq'], ownerPlatformId: 'qqnt', sessionScoped: true },
+      listPacks: vi.fn(async () => ({ packs: [] })),
+      getPack: vi.fn(async () => null),
+      getSticker: vi.fn(async (_context, stickerId) =>
+        stickerId === canonical.stickerId || stickerId === legacyStickerId ? canonical : null),
+      listSavedStickers: vi.fn(async () => ({ stickers: [canonical] })),
+      openAsset: vi.fn(async () => ({
+        mimeType: canonical.mimeType, size: asset.length,
+        source: { size: asset.length, async *stream() { yield asset } },
+      })),
+    }
+    const registry = new StickerProviderRegistry()
+    registry.register('qqnt:stickers', provider)
+    const rpc = new StickerRpc(ctx.database, registry, { platformKind: 'qq' } as never, session)
+
+    await ctx.database.create('mtproto_sticker_recent', {
+      platformSessionId: session.platformSessionId, providerId: 'qqnt:stickers',
+      providerStickerId: legacyStickerId, attached: false, useCount: 9,
+      lastUsedAt: new Date('2026-10-18T13:50:00Z'),
+    })
+    await ctx.database.create('mtproto_sticker_recent', {
+      platformSessionId: session.platformSessionId, providerId: 'qqnt:stickers',
+      providerStickerId: canonical.stickerId, attached: false, useCount: 2,
+      lastUsedAt: new Date('2026-10-18T13:00:00Z'),
+    })
+
+    const recent = await rpc.getRecentStickers({
+      _: 'messages.getRecentStickers', attached: false, hash: Long.ZERO,
+    })
+    if (recent._ !== 'messages.recentStickers') throw new Error('expected complete recent stickers')
+    expect(recent.stickers).toHaveLength(1)
+    expect(recent.dates).toEqual([Math.floor(new Date('2026-10-18T13:50:00Z').getTime() / 1000)])
+    const document = recent.stickers[0]
+    if (!document || document._ !== 'document') throw new Error('expected recent document')
+    expect(document.id.toNumber()).toBe(testStickerProjectionId(
+      `sticker-document:v10:qqnt:stickers:${canonical.stickerId}`,
+    ))
+    expect(recent.packs[0]?.documents[0]?.equals(document.id)).toBe(true)
+
+    // 旧投影算出来的 document id 仍然要靠 file reference 发送成功，并归一成同一个 sticker id。
+    const staleDocumentId = testStickerProjectionId(
+      `sticker-document:v9:qqnt:stickers:${legacyStickerId}`,
+    )
+    await expect(rpc.resolveSend({
+      _: 'inputDocument', id: Long.fromNumber(staleDocumentId),
+      accessHash: Long.fromNumber(staleDocumentId),
+      fileReference: new TextEncoder().encode(`bridge-sticker:qqnt:stickers:${legacyStickerId}:2`),
+    })).resolves.toMatchObject({
+      providerId: 'qqnt:stickers', stickerId: canonical.stickerId, plan: { type: 'upload' },
+    })
   })
 })
 

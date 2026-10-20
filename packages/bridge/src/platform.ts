@@ -14,8 +14,11 @@ export interface PlatformCapabilities {
     markRead: boolean
     events: boolean
   }
-  /** 服务端消息搜索；缺省时回退到已加载的历史消息。 */
-  search?: boolean
+  /**
+   * 平台原生消息序号的连续性：`'group'` 表示群聊 msgSeq 连续，可按序号检测并回填历史空洞，
+   * 且 `getHistory` 支持 `beforeSequence`。
+   */
+  sequenceHistory?: 'group'
   send: {
     text: boolean
     images: boolean
@@ -580,6 +583,8 @@ export interface IMHistoryQuery extends IMPageQuery {
   after?: IMHistoryAnchor
   /** 未指定锚点时固定从最新消息拉取，而非平台默认的未读边界窗口。 */
   latest?: boolean
+  /** 按平台原生序号向更早方向读取（含该序号），需要 `capabilities.sequenceHistory`。 */
+  beforeSequence?: string
 }
 
 export interface IMDialogPage<TMediaLocator = unknown> {
@@ -591,20 +596,11 @@ export interface IMDialogPage<TMediaLocator = unknown> {
 export interface IMHistoryPage<TMediaLocator = unknown> {
   messages: IMMessage<TMediaLocator>[]
   nextCursor?: string
-}
-
-export interface IMMessageSearchQuery extends IMPageQuery {
-  query: string
-  fromUserId?: string
-  minTimestamp?: number
-  maxTimestamp?: number
-  mediaKind?: IMMediaKind
-}
-
-export interface IMMessageSearchPage<TMediaLocator = unknown> {
-  messages: IMMessage<TMediaLocator>[]
-  nextCursor?: string
-  total?: number
+  /**
+   * 本页原始记录（平台侧过滤撤回、灰条之前）覆盖的原生序号区间，只在按 `beforeSequence` 读取时给出。
+   * 区间内缺失的序号已确认不存在或不可见，无需再次回填。
+   */
+  coverage?: { minSequence: string, maxSequence: string }
 }
 
 export interface IMGroupFile<TMediaLocator = unknown> {
@@ -782,11 +778,6 @@ export interface IMPlatform<TMediaLocator = unknown> {
     conversation: IMConversationRef,
     query?: IMHistoryQuery,
   ): Promise<IMHistoryPage<TMediaLocator>>
-  searchMessages?(
-    session: PlatformSession,
-    conversation: IMConversationRef,
-    query: IMMessageSearchQuery,
-  ): Promise<IMMessageSearchPage<TMediaLocator>>
   listGroupFiles?(
     session: PlatformSession,
     conversation: IMConversationRef,

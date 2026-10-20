@@ -93,9 +93,6 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'messages.getSavedDialogs': () => ({
     _: 'messages.savedDialogs', dialogs: [], messages: [], chats: [], users: [],
   } as unknown as tl.TlObject),
-  'messages.getSearchResultsPositions': () => ({
-    _: 'messages.searchResultsPositions', count: 0, positions: [],
-  } as unknown as tl.TlObject),
   'messages.getSponsoredMessages': () => ({
     _: 'messages.sponsoredMessagesEmpty',
   } as unknown as tl.TlObject),

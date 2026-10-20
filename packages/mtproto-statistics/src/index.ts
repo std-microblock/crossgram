@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks'
 import type { Context } from 'cordis'
-import type {} from 'cordis-webui-solidjs'
+import type {} from 'cordis-webui-react'
 import type { MtprotoClientInfo, RpcResult } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { StatisticsCollector } from './collector.js'

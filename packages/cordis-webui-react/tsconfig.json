@@ -1,0 +1,32 @@
+{
+  "extends": "../../tsconfig.test.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "strict": true,
+    "lib": [
+      "es2024",
+      "dom",
+      "dom.iterable"
+    ],
+    "outDir": "lib"
+  },
+  "include": [
+    "src/**/*.ts",
+    "client/**/*.ts",
+    "client/**/*.tsx",
+    "vite.config.ts",
+    "build.ts",
+    "../bridge/client/**/*.ts",
+    "../bridge/client/**/*.tsx",
+    "../history-backfill/client/**/*.ts",
+    "../history-backfill/client/**/*.tsx",
+    "../mtproto-debug/client/**/*.ts",
+    "../mtproto-debug/client/**/*.tsx",
+    "../mtproto-statistics/client/**/*.ts",
+    "../mtproto-statistics/client/**/*.tsx"
+  ],
+  "exclude": [
+    "dist"
+  ]
+}

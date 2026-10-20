@@ -1,3 +1,4 @@
 platformId: Cordis registration ID of the provisioned IM platform session to export.
 platform: Satori platform name exposed by the exported Bot; defaults to the adapter platform kind.
 maxMediaBytes: Maximum bytes read for each outbound Satori media stream.
+userIdSpace: User ID space for exports; uin prefers numeric QQ numbers (default), uid always uses NT UIDs.

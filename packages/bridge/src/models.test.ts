@@ -31,4 +31,46 @@ describe('bridge models', () => {
     const definition = extend.mock.calls.find(([table]) => table === 'mtproto_im_media')
     expect(definition?.[1]?.size).toMatchObject({ type: 'decimal', precision: 20, scale: 0, nullable: true })
   })
+
+  it('leads the part uniqueness key with tlMessageId so projection writes stay append-shaped', () => {
+    const extend = vi.fn()
+    defineModels({ model: { extend } } as never)
+    const [, , options] = extend.mock.calls.find(([table]) => table === 'mtproto_tl_message_part')!
+
+    // 判重语义仍是 (scope, tlMessageId) 这一对值，只是顺序换成 tlMessageId 在前，
+    // 让按 tlMessageId 递增的投影写入近似追加。
+    expect(options.unique).toContainEqual(['tlMessageId', 'scope'])
+    expect(options.unique).not.toContainEqual(['scope', 'tlMessageId'])
+  })
+
+  it('drops indexes that no query shape uses', () => {
+    const extend = vi.fn()
+    defineModels({ model: { extend } } as never)
+    const partOptions = extend.mock.calls.find(([table]) => table === 'mtproto_tl_message_part')![2]
+    const messageOptions = extend.mock.calls.find(([table]) => table === 'mtproto_im_message')![2]
+    const mediaOptions = extend.mock.calls.find(([table]) => table === 'mtproto_im_media')![2]
+    const reactionOptions = extend.mock.calls.find(([table]) => table === 'mtproto_im_message_reaction')![2]
+
+    // messageId 查询由 unique(messageId, ordinal) 的左前缀承担。
+    expect(partOptions.indexes).not.toContainEqual('messageId')
+    // getOldestTlMessageId 已改为按 messageId 取分片后在内存比较。
+    expect(partOptions.indexes).not.toContainEqual(['platformSessionId', 'conversationId', 'tlMessageId'])
+    // senderUserId 从不是查询条件。
+    expect(messageOptions.indexes).not.toContainEqual('senderUserId')
+    // 媒体与回应的查询同样是 messageId = / IN (...)，unique 左前缀已覆盖。
+    expect(mediaOptions.indexes ?? []).not.toContainEqual('messageId')
+    expect(reactionOptions.indexes ?? []).not.toContainEqual('messageId')
+  })
+
+  it('keys platform message identity by conversation instead of repeating the session id', () => {
+    const extend = vi.fn()
+    defineModels({ model: { extend } } as never)
+    const messageOptions = extend.mock.calls.find(([table]) => table === 'mtproto_im_message')![2]
+    const aliasOptions = extend.mock.calls.find(([table]) => table === 'mtproto_im_message_alias')![2]
+
+    // conversationId 是全局唯一行号，已隐含 platformSessionId，
+    // 判重键不再重复携带 32 字节的会话 id。
+    expect(messageOptions.unique).toEqual([['conversationId', 'primaryPlatformMessageId']])
+    expect(aliasOptions.unique).toEqual([['conversationId', 'platformMessageId']])
+  })
 })

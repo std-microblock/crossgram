@@ -22,7 +22,7 @@
       ]
     },
     "webui": {
-      "framework": "solid",
+      "framework": "react",
       "entry": "client/index.ts",
       "pages": [
         {
@@ -37,14 +37,18 @@
   "peerDependencies": {
     "@mtproto-relay/mtproto": "workspace:*",
     "cordis": "^4.0.0-rc.5",
-    "cordis-webui-solidjs": "workspace:*"
+    "cordis-webui-react": "workspace:*"
   },
   "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/react-is": "^19",
     "happy-dom": "^20.11.2",
-    "solid-js": "^1.9.9",
     "vitest": "^4.1.10"
   },
   "dependencies": {
+    "react-is": "^19.3.1",
+    "recharts": "^3.10.1",
     "schemastery": "^3.18.0"
   }
 }

@@ -79,4 +79,4 @@ export function formatServerConfig(
   return config ? JSON.stringify(config, null, 2) : undefined
 }
 
-export { sameOriginPath, copyText } from "cordis-webui-solidjs/utils"
+export { sameOriginPath, copyText } from 'cordis-webui-react/utils'

@@ -49,6 +49,37 @@ describe('group files Mini App security', () => {
   })
 })
 
+describe('group files Mini App attach menu', () => {
+  it('advertises the attachment menu flags that clients filter on', async () => {
+    const rpc = new Map<string, (context: unknown, request: any) => Promise<any>>()
+    const ctx = {
+      mtproto: {
+        register(method: string, handler: (context: unknown, request: any) => Promise<any>) { rpc.set(method, handler) },
+      },
+      server: { baseUrl: 'https://relay.example/', get() {} },
+    } as unknown as Context
+    registerGroupFilesMiniApp(ctx, { sessions: [] } as never, async () => {
+      throw new Error('the attach menu must not touch a platform session')
+    }, {
+      publicUrl: 'https://relay.example/group-files', secret: 'secret', tokenTtlSeconds: 600,
+    })
+
+    const attach = await rpc.get('messages.getAttachMenuBots')!({}, {})
+    const decoded = new TlBinaryReader(
+      __tlReaderMap,
+      TlBinaryWriter.serializeObject(__tlWriterMap, attach),
+    ).object() as any
+
+    // 桌面端用 `user->botInfo->supportsAttachMenu`（Telegram/SourceFiles/inline_bots/
+    // bot_attach_web_view.cpp:178，值取自 data/data_session.cpp:698 的 `user.bot_attach_menu`）
+    // 过滤 `attachMenuBots.users`，缺这个位就把条目整条丢掉，附件菜单里就没有「群文件」。
+    expect(decoded.users[0]).toMatchObject({ botAttachMenu: true, attachMenuEnabled: true })
+    expect(decoded.bots[0]).toMatchObject({
+      showInAttachMenu: true, shortName: '群文件', peerTypes: [{ _: 'attachMenuPeerTypeChat' }],
+    })
+  })
+})
+
 describe('group files Mini App E2E', () => {
   it('opens from the Telegram attachment menu, lists folders and streams a ranged download', async () => {
     vi.setSystemTime(new Date('2026-08-19T00:00:00Z'))

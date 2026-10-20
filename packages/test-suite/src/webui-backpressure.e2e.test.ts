@@ -1,6 +1,6 @@
 import { Context } from 'cordis'
 import Server from '@cordisjs/plugin-server'
-import WebUI from 'cordis-webui-solidjs'
+import WebUI from 'cordis-webui-react'
 import { describe, expect, it, vi } from 'vitest'
 
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024

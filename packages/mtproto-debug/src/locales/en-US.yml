@@ -1,3 +1,6 @@
 maxEvents: Maximum number of decoded MTProto events retained in memory.
 initiallyPaused: Wait for the user to start capture after startup.
 apiPath: Read-only HTTP JSON endpoint for querying decoded MTProto capture events.
+recordingsPath: Directory where saved capture recordings are stored as JSON files.
+recordingsApiPath: HTTP endpoint for saving, listing, downloading and deleting capture recordings.
+maxRecordings: Maximum number of saved recordings retained on disk; the oldest are pruned.

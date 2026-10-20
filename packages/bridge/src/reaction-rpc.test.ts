@@ -147,6 +147,37 @@ describe('ReactionRpc', () => {
     })
   })
 
+  it('only appends new reactions when the client marks the use as recent', async () => {
+    const database = await createDatabase()
+    const platform = { capabilities: {} } as IMPlatform
+    const fire = { key: 'fire', presentation: { type: 'emoji' as const, emoticon: '🔥' } }
+    const laugh = { key: 'laugh', presentation: { type: 'emoji' as const, emoticon: '😂' } }
+    const rpc = new ReactionRpc(platform, session, 1, database)
+
+    // 双击快速回应不带 add_to_recent：不新增条目。
+    await expect(rpc.markUsed('group', [laugh], { append: false })).resolves.toBe(false)
+    await expect(rpc.recentReactions(10)).resolves.toMatchObject({ reactions: [] })
+
+    // 从回应面板挑选才写入并刷新顺序，后用的排在前面。
+    await expect(rpc.markUsed('group', [fire], { append: true })).resolves.toBe(true)
+    await expect(rpc.markUsed('group', [laugh], { append: true })).resolves.toBe(true)
+    await expect(rpc.recentReactions(10)).resolves.toMatchObject({
+      reactions: [
+        { _: 'reactionEmoji', emoticon: '😂' },
+        { _: 'reactionEmoji', emoticon: '🔥' },
+      ],
+    })
+
+    // 已经在列表里的回应仍然按最近使用顶到最前，但不会因为随手一点就多出条目。
+    await expect(rpc.markUsed('group', [fire], { append: false })).resolves.toBe(true)
+    await expect(rpc.recentReactions(10)).resolves.toMatchObject({
+      reactions: [
+        { _: 'reactionEmoji', emoticon: '🔥' },
+        { _: 'reactionEmoji', emoticon: '😂' },
+      ],
+    })
+  })
+
   it('isolates recent reactions per platform session and clears only the active account', async () => {
     const database = await createDatabase()
     const platform = { capabilities: {} } as IMPlatform
@@ -309,7 +340,7 @@ describe('ReactionRpc', () => {
     await writer.markUsed('group', [fire])
     await writer.markUsed('group', [oldSmile])
 
-    // A fresh process has no catalog yet: nothing can be judged stale.
+    // 还没见过任何会话目录时无从判断哪些 id 已经过期，原样返回记录里的 id。
     const cold = new ReactionRpc(platform, session, 1, database)
     await expect(cold.recentReactions(10)).resolves.toMatchObject({
       reactions: [
@@ -319,7 +350,7 @@ describe('ReactionRpc', () => {
       ],
     })
 
-    // The platform re-versioned 1:14 and dropped 1:999 from its catalog.
+    // 平台把 1:14 重新发版、并从目录里去掉 1:999：前者换成当前版本，后者整条跳过。
     const newSmile = face('1:14', 2)
     cold.chatReactions('group', { available: [newSmile, fire], reactions: [], maxSelected: 20 })
     const recent = await cold.recentReactions(10)
@@ -327,7 +358,7 @@ describe('ReactionRpc', () => {
       { _: 'reactionCustomEmoji', documentId: Long.fromNumber(cold.customDocumentId(newSmile)) },
       { _: 'reactionEmoji', emoticon: '🔥' },
     ])
-    // Every returned id resolves to a document, so Desktop never keeps a placeholder.
+    // 返回的每个 id 都能解析出 document，客户端不会留下占位。
     const ids = recent.reactions.flatMap((reaction) =>
       reaction._ === 'reactionCustomEmoji' ? [reaction.documentId] : [])
     expect(cold.getCustomEmojiDocuments(ids)).toHaveLength(ids.length)
@@ -337,6 +368,53 @@ describe('ReactionRpc', () => {
         { emoticon: '🔥' },
         { emoticon: '👍' },
       ],
+    })
+  })
+
+  it('keeps one entry per platform key when a face was used across resource versions', async () => {
+    const database = await createDatabase()
+    const platform = { capabilities: {} } as IMPlatform
+    const face = (version: number): IMReactionDefinition => ({
+      key: '1:14',
+      presentation: {
+        type: 'custom', alt: '🙂',
+        resource: { version, format: 'static', mimeType: 'image/png', width: 56, height: 56, size: 4 },
+      },
+    })
+    const writer = new ReactionRpc(platform, session, 1, database)
+    await writer.markUsed('group', [face(1)])
+    await writer.markUsed('group', [face(2)])
+
+    const cold = new ReactionRpc(platform, session, 1, database)
+    await expect(cold.recentReactions(10)).resolves.toMatchObject({
+      reactions: [{ documentId: Long.fromNumber(cold.customDocumentId(face(2))) }],
+    })
+  })
+
+  it('drops recent rows whose key left the catalog and re-keys the ones still present', async () => {
+    const database = await createDatabase()
+    const platform = { capabilities: {} } as IMPlatform
+    const face = (key: string, version: number): IMReactionDefinition => ({
+      key,
+      presentation: {
+        type: 'custom', alt: '🙂',
+        resource: { version, format: 'static', mimeType: 'image/png', width: 56, height: 56, size: 4 },
+      },
+    })
+    // 记录里只有 key + documentId；目录里还有 1:14（新版本），'removed-face' 已经下架。
+    await database.create('mtproto_reaction_recent', {
+      platformSessionId: session.platformSessionId, reactionType: 'custom',
+      reactionValue: String(legacyInlineCustomEmojiDocumentId(session.platformSessionId, 'group', face('1:14', 1))),
+      definitionKey: '1:14', lastUsedAt: new Date(2),
+    })
+    await database.create('mtproto_reaction_recent', {
+      platformSessionId: session.platformSessionId, reactionType: 'custom',
+      reactionValue: '424242', definitionKey: 'removed-face', lastUsedAt: new Date(3),
+    })
+    const rpc = new ReactionRpc(platform, session, 1, database)
+    rpc.chatReactions('group', { available: [face('1:14', 2)], reactions: [], maxSelected: 20 })
+    await expect(rpc.recentReactions(10)).resolves.toMatchObject({
+      reactions: [{ documentId: Long.fromNumber(rpc.customDocumentId(face('1:14', 2))) }],
     })
   })
 

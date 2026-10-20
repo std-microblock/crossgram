@@ -23,7 +23,7 @@ describe('production WebUI plugin settings e2e', () => {
     host: 127.0.0.1
     port: 0
 - id: webui
-  name: 'cordis-webui-solidjs'
+  name: 'cordis-webui-react'
 - id: loader-webui
   name: '@cordisjs/plugin-loader-webui'
 - id: bridge

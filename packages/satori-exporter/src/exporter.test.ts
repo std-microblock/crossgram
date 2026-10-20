@@ -256,6 +256,32 @@ describe('SatoriExporter', () => {
     expect(events[0]!.event.message?.content).toContain('<at id="10001"')
   })
 
+  it('exports user IDs in the NT uid space when configured', async () => {
+    const numericSession: PlatformSession = { ...session, metadata: { qq: '10000' } }
+    const { ctx, exporter } = await createExporter({ userIdSpace: 'uid' }, numericSession)
+    const events: Session[] = []
+    ctx.on('message-created', (event) => { events.push(event) })
+    const group: IMConversation = { id: '42', kind: 'group', title: 'QQ Group' }
+
+    exporter.handleMessage(numericSession, group, {
+      ...message('numeric-uid', group.id),
+      senderId: 'u_alice_ntid',
+      sender: { id: 'u_alice_ntid', firstName: 'Alice', username: '10001', metadata: { qq: '10001' } },
+      content: {
+        parts: [{
+          type: 'text', text: '@Alice hi',
+          entities: [{ type: 'mention', offset: 0, length: 6, userId: 'u_alice_ntid', numericId: '10001' }],
+        }],
+      },
+    }, { created: true })
+
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    expect(events[0]!.event.user).toMatchObject({ id: 'u_alice_ntid', name: 'Alice' })
+    expect(events[0]!.event.message?.content).toContain('<at id="u_alice_ntid"')
+    const bot = (exporter as unknown as { _bot: { user: Universal.User } })._bot
+    expect(bot.user).toEqual({ id: 'self', name: 'self' })
+  })
+
   it('keeps the opaque sender ID when no numeric QQ account is known', async () => {
     const { ctx, exporter } = await createExporter()
     const events: Session[] = []

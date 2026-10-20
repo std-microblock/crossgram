@@ -22,8 +22,15 @@ export interface MtprotoDebugData {
   capturing: boolean
   /** Same-origin paginated capture endpoint; history is never broadcast. */
   apiPath: string
+  /** Same-origin endpoint for saving, listing, downloading and deleting recordings. */
+  recordingsApiPath: string
   dropped: number
   maxEvents: number
+  /**
+   * Bumped whenever the retained buffer changes. The page follows this Muon
+   * field and fetches one summary page per tick, so the browser never polls.
+   */
+  revision: number
   start(): Promise<void>
   pause(): Promise<void>
   clear(): Promise<void>

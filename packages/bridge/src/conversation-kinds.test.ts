@@ -450,9 +450,16 @@ describe('conversation kinds', () => {
     const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
     const message = dialogs.messages.find((item): item is tl.RawMessage => item._ === 'message')!
     const peer = { _: 'inputPeerChannel' as const, channelId: rpc.peerTlId('group'), accessHash: Long.ZERO }
-    const send = (reaction: tl.TypeReaction[]) => rpc.sendReaction({
-      _: 'messages.sendReaction', peer, msgId: message.id, reaction,
+    const send = (reaction: tl.TypeReaction[], addToRecent = true) => rpc.sendReaction({
+      _: 'messages.sendReaction', peer, msgId: message.id, reaction, addToRecent,
     })
+
+    // 不带 add_to_recent（双击快速回应、气泡内联条）不会新增最近使用条目，也不会推送刷新。
+    await expect(send([{ _: 'reactionEmoji', emoticon: '🔥' }], false)).resolves.toMatchObject({
+      _: 'updates',
+      updates: [{ _: 'updateMessageReactions' }],
+    })
+    await expect(rpc.getRecentReactions(100)).resolves.toMatchObject({ reactions: [] })
 
     await expect(send([{ _: 'reactionEmoji', emoticon: '👍' }])).resolves.toMatchObject({
       _: 'updates',
@@ -480,7 +487,7 @@ describe('conversation kinds', () => {
       { _: 'reactionEmoji', emoticon: '🔥' },
       { _: 'reactionEmoji', emoticon: '👍' },
     ] })
-    expect(reactionTargets).toHaveLength(3)
+    expect(reactionTargets).toHaveLength(4)
     expect(reactionTargets).toEqual(reactionTargets.map((target) => ({
       ...target, nativeSequence: '571',
     })))

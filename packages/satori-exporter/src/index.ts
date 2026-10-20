@@ -11,6 +11,7 @@ export const Config = z.object({
   platformId: z.string().required(),
   platform: z.string(),
   maxMediaBytes: z.natural().min(1).max(64 * 1024 * 1024).default(8 * 1024 * 1024),
+  userIdSpace: z.union([z.const('uin'), z.const('uid')]).default('uin'),
 }).i18n({ 'en-US': enUS, 'zh-CN': zhCN })
 
 export const name = 'satori-exporter'

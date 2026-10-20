@@ -56,9 +56,15 @@ export function registerGroupFilesMiniApp(
     handler: (rpc: ServerRpcContext, request: unknown) => unknown | Promise<unknown>,
   ) => unknown
 
+  // 这两个标记缺一不可：`botAttachMenu` 对应 `user.bot_attach_menu`，客户端看到它才会
+  // 认这个 bot 有附件菜单条目（桌面端在解析 `attachMenuBots` 时直接按它过滤，缺了就丢），
+  // `attachMenuEnabled` 表示条目已经安装，和这里始终返回同一条目、`toggleBotInAttachMenu`
+  // 恒为成功的行为保持一致。
   const bot = makeUser({
     id: BOT_ID,
     bot: true,
+    botAttachMenu: true,
+    attachMenuEnabled: true,
     firstName: '群文件',
     username: BOT_USERNAME,
   })

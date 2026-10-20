@@ -10,7 +10,7 @@ import { legacyInlineCustomEmojiDocumentId, ReactionRpc } from './reaction-rpc.j
 import { IMMessageSendRejectedError } from './platform.js'
 import type { SystemPeerService } from './system-peer.js'
 import type {
-  IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMMessageSearchQuery, IMPlatform, IMUser, PlatformSession,
+  IMDialogPage, IMHistoryPage, IMMessage, IMMessageInput, IMPlatform, IMUser, PlatformSession,
 } from './platform.js'
 import { MessageProjectionPipeline } from './message-projection.js'
 import type { MessageStore } from './message-store.js'
@@ -1094,89 +1094,6 @@ describe('DialogRpc', () => {
 
     await expect(response).resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
     expect(completedBeforeUpstream).toBe(true)
-  })
-
-  it('uses platform search filters and carries its opaque cursor across Telegram pages', async () => {
-    class NativeSearchPlatform extends DialogTestPlatform {
-      readonly queries: IMMessageSearchQuery[] = []
-
-      async searchMessages(
-        _session: PlatformSession,
-        conversation: { id: string },
-        query: IMMessageSearchQuery,
-      ) {
-        this.queries.push(query)
-        const id = query.cursor ? 'native-2' : 'native-1'
-        return {
-          messages: [{
-            id, conversationId: conversation.id, senderId: 'alice',
-            timestamp: query.cursor ? 1_700_000_110 : 1_700_000_120,
-            content: { parts: [{ type: 'text' as const, text: `needle ${id}` }] },
-          }],
-          nextCursor: query.cursor ? undefined : 'qq-search-next',
-        }
-      }
-    }
-    const platform = new NativeSearchPlatform()
-    const rpc = new DialogRpc(platform, session)
-    await rpc.getDialogs(getDialogsRequest())
-    const peer = { _: 'inputPeerUser' as const, userId: rpc.peerTlId('alice'), accessHash: Long.ZERO }
-    const request: tl.messages.RawSearchRequest = {
-      _: 'messages.search', peer, fromId: peer, q: 'needle', filter: { _: 'inputMessagesFilterEmpty' },
-      minDate: 1_700_000_000, maxDate: 1_800_000_000, offsetId: 0, addOffset: 0, limit: 1,
-      maxId: 0, minId: 0, hash: Long.ZERO,
-    }
-
-    const first = await rpc.search(request) as tl.messages.RawMessagesSlice
-    expect(first).toMatchObject({
-      _: 'messages.messagesSlice', messages: [{ _: 'message', message: 'needle native-1' }],
-    })
-    expect(platform.queries[0]).toEqual({
-      query: 'needle', cursor: undefined, limit: 200, fromUserId: 'alice',
-      minTimestamp: 1_700_000_000, maxTimestamp: 1_800_000_000, mediaKind: undefined,
-    })
-
-    const firstId = (first.messages[0] as tl.RawMessage).id
-    const second = await rpc.search({ ...request, offsetId: firstId }) as tl.messages.RawMessagesSlice
-    expect(second.messages).toMatchObject([{ _: 'message', message: 'needle native-2' }])
-    expect(platform.queries[1]?.cursor).toBe('qq-search-next')
-    expect(() => wireRoundTrip(first)).not.toThrow()
-    expect(() => wireRoundTrip(second)).not.toThrow()
-  })
-
-  it('uses the requested page size for unfiltered text search', async () => {
-    class NarrowSearchPlatform extends DialogTestPlatform {
-      readonly queries: IMMessageSearchQuery[] = []
-
-      async searchMessages(
-        _session: PlatformSession,
-        conversation: { id: string },
-        query: IMMessageSearchQuery,
-      ) {
-        this.queries.push(query)
-        return {
-          messages: [{
-            id: 'native-1', conversationId: conversation.id, senderId: 'alice',
-            timestamp: 1_700_000_120,
-            content: { parts: [{ type: 'text' as const, text: 'needle' }] },
-          }],
-        }
-      }
-    }
-    const platform = new NarrowSearchPlatform()
-    const rpc = new DialogRpc(platform, session)
-    await rpc.getDialogs(getDialogsRequest())
-
-    const peer = { _: 'inputPeerUser' as const, userId: rpc.peerTlId('alice'), accessHash: Long.ZERO }
-    const result = await rpc.search({
-      _: 'messages.search', peer, q: 'needle', filter: { _: 'inputMessagesFilterEmpty' },
-      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 1,
-      maxId: 0, minId: 0, hash: Long.ZERO,
-    }) as tl.messages.RawMessages
-
-    expect(platform.queries[0]?.limit).toBe(1)
-    expect(result.messages).toMatchObject([{ _: 'message', message: 'needle' }])
-    expect(() => wireRoundTrip(result)).not.toThrow()
   })
 
   it('hydrates messages by synthetic ID and returns messageEmpty for unknown IDs', async () => {

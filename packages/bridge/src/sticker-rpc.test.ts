@@ -899,7 +899,7 @@ describe('StickerRpc', () => {
     await expect(rpc.getFile(secondMedia.document.id.toNumber(), 0, 1, secondMedia.document.fileReference)).resolves.toEqual(Uint8Array.of(2))
   })
 
-  it('rejects a sticker file reference whose document id does not match', async () => {
+  it('resolves a sticker whose document id came from an older projection version', async () => {
     const historical: IMSticker = {
       providerId: 'qq:stickers', stickerId: 'favorite:historical:ebcb350f',
       title: 'Historical favorite', format: 'static', mimeType: 'image/webp', version: 1,
@@ -911,11 +911,75 @@ describe('StickerRpc', () => {
     const resumed = stickerHarness()
     vi.mocked(resumed.provider.listPacks).mockResolvedValue({ packs: [] })
     vi.mocked(resumed.provider.listSavedStickers!).mockResolvedValue({ stickers: [] })
+    vi.mocked(resumed.provider.getSticker).mockImplementation(async (_context, stickerId) =>
+      stickerId === historical.stickerId ? historical : null)
+    const bytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4])
+    vi.mocked(resumed.provider.openAsset).mockResolvedValue({
+      mimeType: historical.mimeType, size: bytes.length,
+      source: { size: bytes.length, async *stream() { yield bytes } },
+    })
+    // 客户端本地缓存的贴纸是旧投影版本算出来的 document id；file reference 才是贴纸身份，
+    // 不能因为投影版本轮换就让它永远发不出去。
+    const staleDocumentId = testStickerProjectionId(
+      `sticker-document:v9:${historical.providerId}:${historical.stickerId}`,
+    )
 
-    await expect(resumed.rpc.getFile(
-      media.document.id.toNumber() + 1, 0, 16, media.document.fileReference,
-    )).resolves.toBeUndefined()
-    expect(resumed.provider.getSticker).not.toHaveBeenCalled()
+    await expect(resumed.rpc.getFile(staleDocumentId, 0, bytes.length, media.document.fileReference))
+      .resolves.toEqual(bytes)
+    await expect(resumed.rpc.resolveSend({
+      _: 'inputDocument', id: Long.fromNumber(staleDocumentId),
+      accessHash: Long.fromNumber(staleDocumentId), fileReference: media.document.fileReference,
+    })).resolves.toMatchObject({
+      providerId: historical.providerId, stickerId: historical.stickerId, plan: { type: 'upload' },
+    })
+  })
+
+  it('sends a favorite through a historical resId reference and records the canonical id', async () => {
+    // QQ 收藏表情的旧形态是 `favorite:<resId>`，新形态按内容（md5）取 id；provider 会把旧形态
+    // 归一到新形态，因此发送与「最近使用」记录都必须落到归一后的 id 上。
+    const canonical: IMSticker = {
+      providerId: 'qq:stickers', stickerId: 'favorite:6d08089772d24f738eb24fe80271208a',
+      packId: 'qq-favorites', title: 'Saved', format: 'static', mimeType: 'image/png', version: 2,
+    }
+    const legacyResId = 'favorite:1715311957_0_0_0_6D08089772D24F738EB24FE80271208A_0_0'
+    const provider: IMStickerProvider = {
+      listPacks: vi.fn(async () => ({ packs: [] })),
+      getPack: vi.fn(async () => null),
+      getSticker: vi.fn(async (_context, stickerId) =>
+        stickerId === legacyResId || stickerId === canonical.stickerId ? canonical : null),
+      openAsset: vi.fn(async () => ({
+        mimeType: canonical.mimeType, source: { async *stream() { yield Uint8Array.of(1) } },
+      })),
+    }
+    const registry = new StickerProviderRegistry()
+    registry.register('qq:stickers', provider)
+    const database = {
+      get: vi.fn(async () => []),
+      select: vi.fn(() => ({ orderBy: () => ({ limit: () => ({ execute: async () => [] }) }) })),
+      upsert: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+    }
+    const rpc = new StickerRpc(
+      database as never, registry, { platformKind: 'qq' } as IMPlatform,
+      { platformId: 'qq', platformSessionId: 'session' } as PlatformSession,
+    )
+    const staleDocumentId = testStickerProjectionId(
+      `sticker-document:v10:${canonical.providerId}:${legacyResId}`,
+    )
+
+    const resolved = await rpc.resolveSend({
+      _: 'inputDocument', id: Long.fromNumber(staleDocumentId),
+      accessHash: Long.fromNumber(staleDocumentId),
+      fileReference: new TextEncoder().encode(`bridge-sticker:${canonical.providerId}:${legacyResId}:2`),
+    })
+    expect(resolved).toMatchObject({
+      providerId: canonical.providerId, stickerId: canonical.stickerId, plan: { type: 'upload' },
+    })
+
+    await rpc.markUsedByRef(resolved!.providerId, resolved!.stickerId)
+    expect(database.upsert).toHaveBeenCalledWith('mtproto_sticker_recent', [
+      expect.objectContaining({ providerStickerId: canonical.stickerId }),
+    ], expect.anything())
   })
 })
 

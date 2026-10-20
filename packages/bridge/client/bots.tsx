@@ -1,27 +1,23 @@
-/** @jsxImportSource solid-js */
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { useState } from 'react'
 import type { BotDashboardData } from '../src/dashboard-types.js'
-import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
+import { useRpc, type PageProps } from 'cordis-webui-react/client'
 import {
   ActionError,
-  EmptyState,
   LiveContent,
   PageHeader,
   useAction,
-} from 'cordis-webui-solidjs/components'
+} from 'cordis-webui-react/components'
 import { botLink, copyText } from './bridge-model.js'
 export default function BotsPage(props: PageProps) {
   const rpc = useRpc<BotDashboardData>(props.entryId),
     action = useAction()
-  const [search, setSearch] = createSignal(''),
-    [page, setPage] = createSignal(0),
-    [copied, setCopied] = createSignal('')
-  const bots = createMemo(() =>
-    (rpc.data.bots ?? []).filter((bot) =>
-      (bot.title + ' ' + bot.username + ' ' + bot.sourcePlugin)
-        .toLowerCase()
-        .includes(search().toLowerCase()),
-    ),
+  const [search, setSearch] = useState(''),
+    [page, setPage] = useState(0),
+    [copied, setCopied] = useState('')
+  const bots = (rpc.data.bots ?? []).filter((bot) =>
+    (bot.title + ' ' + bot.username + ' ' + bot.sourcePlugin)
+      .toLowerCase()
+      .includes(search.toLowerCase()),
   )
   return (
     <>
@@ -30,32 +26,33 @@ export default function BotsPage(props: PageProps) {
         description="Handy companions for your connected workspace."
         actions={
           <button
-            class="button outlined"
-            disabled={action.busy() || !rpc.ready}
+            className="button outlined"
+            disabled={action.busy || !rpc.ready}
             onClick={() => void action.run(() => rpc.data.refreshBots())}
           >
             Refresh bots
           </button>
         }
       />
-      <ActionError error={action.error()} />
+      <ActionError error={action.error} />
       <LiveContent ready={rpc.ready}>
-        <label class="field account-search">
+        <label className="field account-search">
           <span>Find a bot</span>
           <input
             type="search"
-            value={search()}
-            onInput={(event) => {
+            value={search}
+            onChange={(event) => {
               setSearch(event.currentTarget.value)
               setPage(0)
             }}
           />
         </label>
-        <div class="bot-grid">
-          <For each={bots().slice(page() * 24, (page() + 1) * 24)}>
-            {(bot) => (
-              <article class="panel bot-card">
-                <span class="bot-monogram" aria-hidden="true">
+        <div className="bot-grid">
+          {bots.slice(page * 24, (page + 1) * 24).map((bot) => {
+            const link = botLink(bot.username)
+            return (
+              <article className="panel bot-card" key={bot.conversationId}>
+                <span className="bot-monogram" aria-hidden="true">
                   {bot.title.trim()[0] ?? 'B'}
                 </span>
                 <div>
@@ -63,64 +60,56 @@ export default function BotsPage(props: PageProps) {
                   <code>@{bot.username}</code>
                   <p>{bot.sourcePlugin}</p>
                 </div>
-                <Show
-                  when={botLink(bot.username)}
-                  keyed
-                  fallback={
-                    <p class="notice error">
-                      This bot has an invalid username.
-                    </p>
-                  }
-                >
-                  {(link) => (
-                    <div class="toolbar">
-                      <a
-                        class="button filled"
-                        href={link}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Open in Telegram
-                      </a>
-                      <button
-                        class="button outlined"
-                        onClick={() =>
-                          void action.run(async () => {
-                            await copyText(link)
-                            setCopied(bot.username)
-                          })
-                        }
-                      >
-                        {copied() === bot.username
-                          ? 'Link copied'
-                          : 'Copy link'}
-                      </button>
-                    </div>
-                  )}
-                </Show>
+                {link ? (
+                  <div className="toolbar">
+                    <a
+                      className="button filled"
+                      href={link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open in Telegram
+                    </a>
+                    <button
+                      className="button outlined"
+                      onClick={() =>
+                        void action.run(async () => {
+                          await copyText(link)
+                          setCopied(bot.username)
+                        })
+                      }
+                    >
+                      {copied === bot.username ? 'Link copied' : 'Copy link'}
+                    </button>
+                  </div>
+                ) : (
+                  <p className="notice error">
+                    This bot has an invalid username.
+                  </p>
+                )}
               </article>
-            )}
-          </For>
+            )
+          })}
         </div>
-        <Show when={!bots().length}>
-          <section class="panel empty-state">
+        {!bots.length ? (
+          <section className="panel empty-state">
             <h2>No matching bots</h2>
             <p>Enabled bridge bot providers will appear here automatically.</p>
           </section>
-        </Show>
-        <div class="pagination">
+        ) : null}
+        <div className="pagination">
           <button
-            class="button outlined"
-            disabled={page() === 0}
-            onClick={() => setPage(page() - 1)}
+            className="button outlined"
+            disabled={page === 0}
+            onClick={() => setPage(page - 1)}
           >
             Previous page
           </button>
-          <span>{bots().length} bots</span>
+          <span>{bots.length} bots</span>
           <button
-            class="button outlined"
-            disabled={(page() + 1) * 24 >= bots().length}
-            onClick={() => setPage(page() + 1)}
+            className="button outlined"
+            disabled={(page + 1) * 24 >= bots.length}
+            onClick={() => setPage(page + 1)}
           >
             Next page
           </button>

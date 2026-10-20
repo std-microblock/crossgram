@@ -275,7 +275,7 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('shared-media search', () => {
-  it('hydrates persisted mention users before projecting native search results', async () => {
+  it('hydrates persisted mention users before projecting local search results', async () => {
     const { store } = await createStore()
     const mention: IMMessage = {
       id: 'search-mention', conversationId: conversation.id, senderId: 'alice',
@@ -285,11 +285,8 @@ describe('shared-media search', () => {
         entities: [{ type: 'mention', offset: 0, length: 6, userId: 'carol' }],
       }] },
     }
-    const searchable: IMPlatform = {
-      ...platform,
-      async searchMessages() { return { messages: [mention] } },
-    }
-    const rpc = new DialogRpc(searchable, session, store)
+    await store.ingest(session, conversation, mention, { allocation: 'history' })
+    const rpc = new DialogRpc(platform, session, store)
     await rpc.getDialogs(dialogsRequest())
     const peer = {
       _: 'inputPeerUser' as const, userId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO,
@@ -342,22 +339,8 @@ describe('shared-media search', () => {
         content: { parts: [{ type: 'text', text: 'visit https://example.com/path' }] },
       },
     ]
-    const queries: import('./platform.js').IMMessageSearchQuery[] = []
-    const searchable: IMPlatform = {
-      ...platform,
-      async searchMessages(_session, _conversation, query) {
-        queries.push(query)
-        const coarse = searched.filter((message) => !query.mediaKind || message.content.parts.some((part) =>
-          part.type === 'media' && part.media.kind === query.mediaKind))
-        const start = Number(query.cursor ?? 0)
-        const limit = Math.min(query.limit ?? 50, 1)
-        return {
-          messages: coarse.slice(start, start + limit),
-          nextCursor: start + limit < coarse.length ? String(start + limit) : undefined,
-        }
-      },
-    }
-    const rpc = new DialogRpc(searchable, session, store)
+    await store.ingestMany(session, conversation, searched, { allocation: 'history' })
+    const rpc = new DialogRpc(platform, session, store)
     await rpc.getDialogs(dialogsRequest())
     const peer = {
       _: 'inputPeerUser' as const, userId: rpc.peerTlId(conversation.id), accessHash: Long.ZERO,
@@ -371,11 +354,13 @@ describe('shared-media search', () => {
       ? []
       : result.messages.map((message) => message._ === 'message' ? message.message : '')
 
-    expect(texts(await search({ _: 'inputMessagesFilterPhotos' }))).toEqual(['photo'])
+    // 本地搜索同样包含会话预览里已投影的相册（照片分片 + 文件分片）。
+    expect(texts(await search({ _: 'inputMessagesFilterPhotos' }))).toEqual(['photo', 'album caption'])
     expect(texts(await search({ _: 'inputMessagesFilterPhotoVideo' }))).toEqual([
-      'video album', '', 'photo',
+      // 结果按 Telegram 消息 ID 倒序，相册内后一个分片排在前面。
+      '', 'video album', 'photo', 'album caption',
     ])
-    expect(texts(await search({ _: 'inputMessagesFilterDocument' }))).toEqual(['document'])
+    expect(texts(await search({ _: 'inputMessagesFilterDocument' }))).toEqual(['document', ''])
     expect(texts(await search({ _: 'inputMessagesFilterGif' }))).toEqual(['gif'])
     expect(texts(await search({ _: 'inputMessagesFilterMusic' }))).toEqual(['music'])
     expect(texts(await search({ _: 'inputMessagesFilterVoice' }))).toEqual(['voice'])
@@ -384,12 +369,10 @@ describe('shared-media search', () => {
     ])
 
     const firstVideo = await search({ _: 'inputMessagesFilterVideo' }, 1)
-    expect(texts(firstVideo)).toEqual(['video album'])
-    expect(queries.filter((query) => query.mediaKind === 'file').slice(-2).map((query) => query.cursor))
-      .toEqual([undefined, '1'])
+    expect(texts(firstVideo)).toEqual([''])
     if (firstVideo._ === 'messages.messagesNotModified') throw new Error('expected video result')
     const firstVideoId = (firstVideo.messages[0] as tl.RawMessage).id
-    expect(texts(await search({ _: 'inputMessagesFilterVideo' }, 1, firstVideoId))).toEqual([''])
+    expect(texts(await search({ _: 'inputMessagesFilterVideo' }, 1, firstVideoId))).toEqual(['video album'])
   })
 
   it('returns non-zero counters and count-only desktop results for available media', async () => {

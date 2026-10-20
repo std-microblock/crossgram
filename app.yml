@@ -117,6 +117,15 @@
     sampleIntervalMs: 1000
     slowThresholdMs: 1000
     historySeconds: 900
+- id: history-backfill
+  name: '@mtproto-relay/history-backfill'
+  config:
+    enabled: true
+    idleAfterMs: 60000
+    intervalMs: 3000
+    pageSize: 50
+    dailyRequestCap: 3000
+    maxAgeDays: 180
 - id: fa2b056a
   name: '@cordisjs/plugin-server'
   config:
@@ -176,7 +185,7 @@
   label: WebUI
   config:
     - id: 4430a808
-      name: 'cordis-webui-solidjs'
+      name: 'cordis-webui-react'
     - id: f64a9366
       name: '@cordisjs/plugin-database-webui'
     - id: 03ebc689
@@ -192,7 +201,7 @@
     - id: 539bc93a
       name: '@cordisjs/plugin-notifier'
     - id: 126b4c42
-      name: 'cordis-webui-solidjs/server'
+      name: 'cordis-webui-react/server'
     - id: f9c1a8b2
       name: '@cordisjs/plugin-webui-sso'
 - id: 375b963c

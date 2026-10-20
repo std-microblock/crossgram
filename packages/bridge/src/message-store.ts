@@ -1,4 +1,5 @@
 import type { Database } from '@cordisjs/plugin-database'
+import { $, type Query } from '@cordisjs/plugin-database'
 import type { UpdateJson, UpdateStoreBackend } from '@mtproto-relay/update-store'
 import { MemoryUpdateStoreBackend } from '@mtproto-relay/update-store-memory'
 import type {
@@ -21,6 +22,49 @@ import {
 } from './request-inbox.js'
 import type { MessageProjectionPipeline, MessageProjectionPlan } from './message-projection.js'
 import { jsonContains, jsonEquals } from './stable-json.js'
+import {
+  escapeRegExpLiteral, messageSearchKinds, messageSearchText, partMatchesSearchKinds, SEARCH_KIND,
+  type MessageSearchContext,
+} from './message-search.js'
+
+export interface MessageSearchQuery {
+  /** 限定会话（平台会话 ID）；缺省时在整个账号内搜索。 */
+  platformConversationIds?: readonly string[]
+  /** 已归一化的查询词，全部需命中。 */
+  terms: readonly string[]
+  /** 发送者在 `mtproto_im_user` 中的行号。 */
+  senderUserId?: number
+  /** 不含端点的时间下界（Unix 秒）。 */
+  minTimestamp?: number
+  /** 不含端点的时间上界（Unix 秒）。 */
+  maxTimestamp?: number
+  /** `SEARCH_KIND` 位掩码，任一位命中即可；0 或缺省表示不过滤。 */
+  kinds?: number
+  /** 翻页锚点：只返回严格早于该消息的结果。 */
+  before?: { timestamp: number, messageId: number }
+  limit: number
+}
+
+export interface SearchedMessage extends ProjectedMessage {
+  /** `mtproto_im_message` 行号，用作翻页锚点。 */
+  messageId: number
+  /** 该消息的 `SEARCH_KIND` 位掩码，供分片级精确过滤。 */
+  searchKinds: number
+}
+
+export interface MessageSearchResult {
+  messages: SearchedMessage[]
+  hasMore: boolean
+}
+
+export interface SearchPartIndexEntry {
+  tlMessageId: number
+  timestamp: number
+  /** `mtproto_im_message` 行号。 */
+  messageId: number
+}
+
+const SEARCH_INDEX_CHUNK = 500
 
 export interface IngestResult {
   message: IMMessageRow
@@ -109,6 +153,11 @@ export const ACCOUNT_UPDATE_SCOPE = 'account'
 // 发布方持有无 payload 预留记录的最大宽限期；超时后读取侧视为卡死并直接清理。
 const CLAIMED_DELIVERY_GRACE_SECONDS = 30
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
+
+function storedReplyToId(metadata: JsonObject): string | undefined {
+  const value = metadata[STORED_REPLY_TO_KEY]
+  return typeof value === 'string' ? value : undefined
+}
 const STORED_SENDER_TITLE_KEY = '__mtprotoRelaySenderTitle'
 const STORED_RECALLED_KEY = '__mtprotoRelayRecalled'
 const STORED_CONVERSATION_SELF_ROLE_KEY = '__mtprotoRelaySelfRole'
@@ -406,6 +455,7 @@ export class MessageStore {
 
     const created = !message
     const storedMetadata = messageMetadata(source)
+    const searchKinds = messageSearchKinds(source, await this._searchContext(database, session, conversationRow, source))
     const storedContent = persistMessageContent(source.content)
     // metadata 中还包含本表维护的附加字段（如 reactionMaxSelected），需用 jsonContains 判断并在更新时合并保留。
     const changed = !message || (!message.deleted && (
@@ -418,6 +468,13 @@ export class MessageStore {
       || !jsonContains(message.metadata, storedMetadata)
     ))
     if (message && existingAlias && !message.deleted && !changed) {
+      if (message.searchKinds !== searchKinds) {
+        // 旧数据补齐搜索字段，或回复目标后到导致提及判定变化；都不视为消息变更。
+        const searchText = messageSearchText(source)
+        await database.set('mtproto_im_message', { id: message.id }, { searchText, searchKinds })
+        message = { ...message, searchText, searchKinds }
+        historyPrefetch?.messagesById.set(message.id, message)
+      }
       // 即使消息正文未变，上游也可能附带最新的回应汇总，需单独同步回应表。
       await this._replaceReactions(database, message.id, source.reactionContext, now)
       const projection = historyPrefetch?.projectionsByMessageId.get(message.id)
@@ -436,6 +493,8 @@ export class MessageStore {
         timestamp: source.timestamp,
         outgoing: source.outgoing ?? false,
         deleted: false,
+        searchText: messageSearchText(source),
+        searchKinds,
         platformGroupId: source.groupId ?? null,
         metadata: storedMetadata,
         createdAt: now,
@@ -450,6 +509,8 @@ export class MessageStore {
         outgoing: source.outgoing ?? false,
         platformGroupId: source.groupId ?? null,
         metadata: { ...message.metadata, ...storedMetadata },
+        searchText: messageSearchText(source),
+        searchKinds,
         updatedAt: now,
       })
       ;[message] = await database.get('mtproto_im_message', { id: message.id })
@@ -464,7 +525,7 @@ export class MessageStore {
       platformMessageId,
       messageId: message!.id,
       ordinal,
-    })), ['platformSessionId', 'conversationId', 'platformMessageId'])
+    })), ['conversationId', 'platformMessageId'])
 
     const media = source.content.parts.flatMap((part, partIndex) => part.type === 'media'
       ? [{ item: part.media, partIndex }]
@@ -794,6 +855,227 @@ export class MessageStore {
     const rows = await this._database.select('mtproto_im_message', {
       platformSessionId, deleted: false,
     }).orderBy('timestamp', 'desc').execute()
+    return this._hydrateProjectedRows(rows)
+  }
+
+  /**
+   * 会话内已存的原生序号（QQ msgSeq），倒序去重，沿 `(conversationId, nativeSequence)` 索引读取。
+   * 被删除的消息也算「已取过」，同样计入。
+   */
+  async readNativeSequences(
+    platformSessionId: string,
+    platformConversationId: string,
+    options: { below?: number, limit: number },
+  ): Promise<number[]> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    }, ['id'])
+    if (!conversation) return []
+    const rows = await this._database.select('mtproto_tl_message_part', {
+      conversationId: conversation.id,
+      nativeSequence: options.below !== undefined ? { $lt: options.below, $gt: 0 } : { $gt: 0 },
+    }).orderBy('nativeSequence', 'desc')
+      .limit(Math.max(1, Math.min(Math.trunc(options.limit), 10_000))).execute()
+    const output: number[] = []
+    for (const row of rows) {
+      if (row.nativeSequence !== null && row.nativeSequence !== output.at(-1)) output.push(row.nativeSequence)
+    }
+    return output
+  }
+
+  /** 按 `mtproto_im_message` 行号读取投影消息（已删除的跳过），顺序与输入一致。 */
+  async readProjectedByMessageIds(
+    platformSessionId: string,
+    messageIds: readonly number[],
+  ): Promise<ProjectedMessage[]> {
+    const unique = [...new Set(messageIds)]
+    if (!unique.length) return []
+    const rows = await this._database.get('mtproto_im_message', {
+      id: { $in: unique }, platformSessionId, deleted: false,
+    })
+    const byId = new Map(rows.map((row) => [row.id, row]))
+    return this._hydrateProjectedRows(unique.flatMap((id) => {
+      const row = byId.get(id)
+      return row ? [row] : []
+    }))
+  }
+
+  /**
+   * 在本地投影过的消息中搜索，结果按 `(timestamp, id)` 倒序。
+   *
+   * 不依赖文本索引：沿 `(conversationId, timestamp)` 或 `(platformSessionId, timestamp)` 索引倒序扫描，
+   * 对 `searchText` 做字面量子串匹配，取满 `limit + 1` 行即停止，多取的一行只用于判断是否还有更多。
+   */
+  async searchMessages(platformSessionId: string, query: MessageSearchQuery): Promise<MessageSearchResult> {
+    const where = await this._searchPredicate(platformSessionId, query)
+    if (!where) return { messages: [], hasMore: false }
+    const limit = clampDatabaseLimit(query.limit)
+    const rows = await this._database.select('mtproto_im_message', where)
+      .orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(limit + 1).execute()
+    const page = rows.slice(0, limit)
+    const hydrated = await this._hydrateProjectedRows(page)
+    return {
+      messages: hydrated.map((item, index) => ({
+        ...item, messageId: page[index].id, searchKinds: page[index].searchKinds ?? 0,
+      })),
+      hasMore: rows.length > limit,
+    }
+  }
+
+  /** 与 `searchMessages` 同条件的消息条数（按逻辑消息计）；需要扫完整个范围，只在首页调用。 */
+  async countSearchMessages(platformSessionId: string, query: Omit<MessageSearchQuery, 'limit'>): Promise<number> {
+    const where = await this._searchPredicate(platformSessionId, { ...query, limit: 0, before: undefined })
+    if (!where) return 0
+    return this._database.eval('mtproto_im_message', (row) => $.count(row.id), where)
+  }
+
+  /**
+   * 列出满足条件的全部 Telegram 分片（不含正文），按 Telegram 消息 ID 倒序。
+   * 用于共享媒体计数、日历与滚动条位置；按分片精确判定媒体类别。
+   */
+  async searchPartIndex(
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit' | 'before'>,
+  ): Promise<SearchPartIndexEntry[]> {
+    const where = await this._searchPredicate(platformSessionId, { ...query, limit: 0 })
+    if (!where) return []
+    const rows = await this._database.get('mtproto_im_message', where, ['id', 'timestamp', 'searchKinds'])
+    const output: SearchPartIndexEntry[] = []
+    for (let offset = 0; offset < rows.length; offset += SEARCH_INDEX_CHUNK) {
+      const chunk = rows.slice(offset, offset + SEARCH_INDEX_CHUNK)
+      const messageIds = chunk.map((row) => row.id)
+      const [parts, media] = await Promise.all([
+        this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } },
+          ['messageId', 'mediaId', 'ordinal', 'tlMessageId']),
+        query.kinds
+          ? this._database.get('mtproto_im_media', { messageId: { $in: messageIds } },
+              ['id', 'kind', 'mimeType', 'voice'])
+          : Promise.resolve([] as Pick<IMMediaRow, 'id' | 'kind' | 'mimeType' | 'voice'>[]),
+      ])
+      const rowsById = new Map(chunk.map((row) => [row.id, row]))
+      const mediaById = new Map(media.map((item) => [item.id, item]))
+      for (const part of parts) {
+        const row = rowsById.get(part.messageId)
+        if (!row) continue
+        if (query.kinds) {
+          const partMedia = part.mediaId === null ? undefined : mediaById.get(part.mediaId)
+          if (!partMatchesSearchKinds(row.searchKinds ?? 0, { ordinal: part.ordinal, media: partMedia }, query.kinds)) {
+            continue
+          }
+        } else if (part.ordinal !== 0) {
+          continue
+        }
+        output.push({ tlMessageId: part.tlMessageId, timestamp: row.timestamp, messageId: row.id })
+      }
+    }
+    return output.sort((left, right) => right.tlMessageId - left.tlMessageId)
+  }
+
+  private async _searchPredicate(
+    platformSessionId: string,
+    query: MessageSearchQuery,
+  ): Promise<Query.Expr<IMMessageRow> | undefined> {
+    let conversationIds: number[] | undefined
+    if (query.platformConversationIds) {
+      if (!query.platformConversationIds.length) return
+      const conversations = await this._database.get('mtproto_im_conversation', {
+        platformSessionId,
+        platformConversationId: { $in: [...new Set(query.platformConversationIds)] },
+      }, ['id'])
+      if (!conversations.length) return
+      conversationIds = conversations.map((conversation) => conversation.id)
+    }
+    const and: Query.Expr<IMMessageRow>[] = query.terms.map((term) => ({
+      searchText: { $regex: escapeRegExpLiteral(term) },
+    }))
+    if (query.before) {
+      and.push({
+        $or: [
+          { timestamp: { $lt: query.before.timestamp } },
+          { timestamp: query.before.timestamp, id: { $lt: query.before.messageId } },
+        ],
+      })
+    }
+    const timestamp: Query.FieldExpr<number> = {}
+    if (query.minTimestamp !== undefined) timestamp.$gt = query.minTimestamp
+    if (query.maxTimestamp !== undefined) timestamp.$lt = query.maxTimestamp
+    // searchKinds 为空的旧行尚未建立搜索字段，统一排除；系统提示只在通话记录过滤中出现。
+    const kinds: Query.FieldExpr<number | null> = { $exists: true }
+    if (query.kinds) kinds.$bitsAnySet = query.kinds
+    if (!(query.kinds && query.kinds & SEARCH_KIND.PHONE_CALL)) kinds.$bitsAllClear = SEARCH_KIND.SERVICE
+    return {
+      platformSessionId,
+      deleted: false,
+      searchKinds: kinds,
+      ...(conversationIds
+        ? { conversationId: conversationIds.length === 1 ? conversationIds[0] : { $in: conversationIds } }
+        : {}),
+      ...(query.senderUserId !== undefined ? { senderUserId: query.senderUserId } : {}),
+      ...(Object.keys(timestamp).length ? { timestamp } : {}),
+      ...(and.length ? { $and: and } : {}),
+    } as Query.Expr<IMMessageRow>
+  }
+
+  /** 提及判定所需的上下文：账号自身 ID、会话类型、回复目标是否为自己发出的消息。 */
+  private async _searchContext(
+    database: Database,
+    session: Pick<PlatformSession, 'userId'>,
+    conversation: Pick<IMConversationRow, 'id' | 'kind'>,
+    source: Pick<IMMessage, 'replyToId' | 'outgoing'>,
+  ): Promise<MessageSearchContext> {
+    let repliesToSelf = false
+    if (source.replyToId && conversation.kind !== 'direct' && !source.outgoing) {
+      const [alias] = await database.get('mtproto_im_message_alias', {
+        conversationId: conversation.id, platformMessageId: source.replyToId,
+      }, ['messageId'])
+      if (alias) {
+        const [target] = await database.get('mtproto_im_message', { id: alias.messageId }, ['outgoing'])
+        repliesToSelf = target?.outgoing === true
+      }
+    }
+    return {
+      selfUserId: session.userId,
+      conversationKind: conversation.kind as IMConversation['kind'],
+      repliesToSelf,
+    }
+  }
+
+  /**
+   * 为旧数据补齐搜索字段，按行号升序每批处理 `batchSize` 行。
+   * 返回本批处理的行数，0 表示已全部完成。
+   */
+  async rebuildSearchFields(batchSize = 1000): Promise<number> {
+    const rows = await this._database.select('mtproto_im_message', { searchKinds: null })
+      .orderBy('id').limit(clampDatabaseLimit(batchSize)).execute()
+    if (!rows.length) return 0
+    const sessionIds = [...new Set(rows.map((row) => row.platformSessionId))]
+    const conversationIds = [...new Set(rows.map((row) => row.conversationId))]
+    const [sessions, conversations] = await Promise.all([
+      this._database.get('mtproto_platform_session', { id: { $in: sessionIds } }, ['id', 'userId']),
+      this._database.get('mtproto_im_conversation', { id: { $in: conversationIds } }, ['id', 'kind']),
+    ])
+    const selfIds = new Map(sessions.map((row) => [row.id, row.userId]))
+    const conversationsById = new Map(conversations.map((row) => [row.id, row]))
+    await this._write(() => this._database.withTransaction(async (database) => {
+      for (const row of rows) {
+        const message = {
+          content: hydrateMessageContent(row.content),
+          outgoing: row.outgoing,
+          replyToId: storedReplyToId(row.metadata),
+        } as IMMessage
+        const conversation = conversationsById.get(row.conversationId) ?? { id: row.conversationId, kind: 'direct' }
+        const context = await this._searchContext(
+          database, { userId: selfIds.get(row.platformSessionId) ?? '' }, conversation, message,
+        )
+        await database.set('mtproto_im_message', { id: row.id, searchKinds: null }, {
+          searchText: messageSearchText(message),
+          searchKinds: messageSearchKinds(message, context),
+        })
+      }
+    }), 'search-rebuild')
+    return rows.length
+  }
+  private async _hydrateProjectedRows(rows: readonly IMMessageRow[]): Promise<ProjectedMessage[]> {
     if (!rows.length) return []
     const messageIds = rows.map((row) => row.id)
     const senderUserIds = [...new Set(rows.map((row) => row.senderUserId))]
@@ -1251,37 +1533,19 @@ export class MessageStore {
     const messages = await this._database.get('mtproto_im_message', {
       conversationId: conversation.id, deleted: false, timestamp: oldest.timestamp,
     })
-    const [part] = await this._database.select('mtproto_tl_message_part', {
+    // 同一秒内可能有多条消息，先按 messageId 取回首条分片再比较 tlMessageId，
+    // 这样不必维护「会话维度 + tlMessageId 有序」的索引。
+    const parts = await this._database.get('mtproto_tl_message_part', {
       platformSessionId,
-      conversationId: conversation.id,
       messageId: { $in: messages.map((message) => message.id) },
       ordinal: 0,
-    }).orderBy('tlMessageId').limit(1).execute()
-    return part?.tlMessageId
-  }
-
-  async getNewestTlMessageId(
-    platformSessionId: string,
-    platformConversationId: string,
-  ): Promise<number | undefined> {
-    const [conversation] = await this._database.get('mtproto_im_conversation', {
-      platformSessionId, platformConversationId,
     })
-    if (!conversation) return
-    const [newest] = await this._database.select('mtproto_im_message', {
-      conversationId: conversation.id, deleted: false,
-    }).orderBy('timestamp', 'desc').limit(1).execute()
-    if (!newest) return
-    const messages = await this._database.get('mtproto_im_message', {
-      conversationId: conversation.id, deleted: false, timestamp: newest.timestamp,
-    })
-    const [part] = await this._database.select('mtproto_tl_message_part', {
-      platformSessionId,
-      conversationId: conversation.id,
-      messageId: { $in: messages.map((message) => message.id) },
-      ordinal: 0,
-    }).orderBy('tlMessageId', 'desc').limit(1).execute()
-    return part?.tlMessageId
+    return parts.reduce<number | undefined>(
+      (smallest, part) => smallest === undefined || part.tlMessageId < smallest
+        ? part.tlMessageId
+        : smallest,
+      undefined,
+    )
   }
 
   async getMedia(platformSessionId: string, mediaId: number): Promise<StoredMedia | undefined> {

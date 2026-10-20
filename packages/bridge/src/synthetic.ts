@@ -66,6 +66,8 @@ export function makeUser(opts: {
   username?: string | null
   phone?: string | null
   premium?: boolean
+  botAttachMenu?: boolean
+  attachMenuEnabled?: boolean
   photo?: tl.TypeUserProfilePhoto
 }): tl.RawUser {
   return {
@@ -77,6 +79,11 @@ export function makeUser(opts: {
     // 客户端仅在该值非负时初始化 bot 信息并展示 bot UI。
     botInfoVersion: opts.bot ? (opts.botInfoVersion ?? 0) : undefined,
     premium: opts.premium,
+    // 附件菜单 bot 的两个标记：`bot_attach_menu` 声明 bot 提供附件菜单条目，
+    // `attach_menu_enabled` 表示该条目已为用户安装。桌面端解析 `attachMenuBots`
+    // 时按前者过滤，缺了就把条目整条丢掉。
+    botAttachMenu: opts.botAttachMenu,
+    attachMenuEnabled: opts.attachMenuEnabled,
     contact: opts.contact,
     mutualContact: opts.mutualContact,
     id: opts.id,

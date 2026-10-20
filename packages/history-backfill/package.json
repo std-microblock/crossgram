@@ -1,0 +1,48 @@
+{
+  "name": "@mtproto-relay/history-backfill",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./client/index.ts"
+  },
+  "cordis": {
+    "public": [
+      "dist"
+    ],
+    "service": {
+      "required": [
+        "historySync",
+        "webui"
+      ]
+    },
+    "webui": {
+      "framework": "react",
+      "entry": "client/index.ts",
+      "pages": [
+        {
+          "path": "/history-backfill",
+          "title": "History backfill",
+          "icon": "clock",
+          "group": "Observe"
+        }
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@mtproto-relay/bridge": "workspace:*",
+    "cordis": "^4.0.0-rc.5",
+    "cordis-webui-react": "workspace:*"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "schemastery": "^3.18.0"
+  }
+}

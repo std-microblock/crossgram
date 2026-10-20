@@ -59,10 +59,6 @@ const requests: Record<string, tl.RpcMethod> = {
     _: 'messages.getSavedDialogs', offsetDate: 0, offsetId: 0,
     offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
   },
-  'messages.getSearchResultsPositions': {
-    _: 'messages.getSearchResultsPositions', peer: self,
-    filter: { _: 'inputMessagesFilterPhotoVideo' }, offsetId: 0, limit: 100,
-  },
   'messages.getSponsoredMessages': { _: 'messages.getSponsoredMessages', peer: self },
   'messages.readReactions': { _: 'messages.readReactions', peer: self },
   'messages.reportReadMetrics': { _: 'messages.reportReadMetrics', peer: self, metrics: [] },

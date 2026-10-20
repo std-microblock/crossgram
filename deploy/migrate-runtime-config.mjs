@@ -31,38 +31,60 @@ const requiredPlugins = [
 ]
 
 const LEGACY_WEBUI_ENGINE = '@cordisjs/plugin-webui'
-const WEBUI_ENGINE = 'cordis-webui-solidjs'
+const LEGACY_REACT_ENGINE = 'cordis-webui-solidjs'
+const WEBUI_ENGINE = 'cordis-webui-react'
 const LEGACY_WEBUI_MONITOR = '@cordisjs/plugin-server-webui'
-const WEBUI_MONITOR = 'cordis-webui-solidjs/server'
+const LEGACY_REACT_MONITOR = 'cordis-webui-solidjs/server'
+const WEBUI_MONITOR = 'cordis-webui-react/server'
 
 /**
- * Point the WebUI group at the Solid implementation. The engine keeps its entry id and any
+ * Point the WebUI group at the React implementation. The engine keeps its entry id and any
  * configuration, and the server monitor (the successor of `plugin-server-webui`) is added
- * once right after it. Idempotent: running it against an already migrated config is a no-op.
+ * once right after it. The earlier Solid engine is renamed as well, so re-running the
+ * migration on an already migrated config stays a no-op.
  */
 export function migrateWebuiPlugin(source) {
   let next = renameEntry(source, LEGACY_WEBUI_ENGINE, WEBUI_ENGINE)
+  next = renameEntry(next, LEGACY_REACT_ENGINE, WEBUI_ENGINE)
   next = renameEntry(next, LEGACY_WEBUI_MONITOR, WEBUI_MONITOR)
+  next = renameEntry(next, LEGACY_REACT_MONITOR, WEBUI_MONITOR)
   if (!hasEntry(next, WEBUI_ENGINE) || hasEntry(next, WEBUI_MONITOR)) return next
   const lines = next.split('\n')
-  const engineName = lines.findIndex((line) => line.trim() === `name: '${WEBUI_ENGINE}'`)
+  const engineName = lines.findIndex((line) => entryName(line) === WEBUI_ENGINE)
   if (engineName < 0) return next
   let itemStart = engineName
   while (itemStart > 0 && !lines[itemStart].trimStart().startsWith('- id:')) itemStart--
   const indent = /^\s*/.exec(lines[itemStart])?.[0] ?? ''
-  lines.splice(engineName + 1, 0, `${indent}- id: webui-server-monitor`, `${indent}  name: '${WEBUI_MONITOR}'`)
+  let itemEnd = findPluginItemEnd(lines, itemStart, indent)
+  while (itemEnd > itemStart && lines[itemEnd - 1]?.trim() === '') itemEnd--
+  lines.splice(itemEnd, 0, `${indent}- id: webui-server-monitor`, `${indent}  name: '${WEBUI_MONITOR}'`)
   return lines.join('\n')
+}
+
+/**
+ * Runtime configs written by hand or by older installers may use an unquoted
+ * YAML scalar (`name: cordis-webui-solidjs`); accept both forms.
+ */
+function entryName(line) {
+  const match = /^\s*(?:-\s*)?name:\s*(.+?)\s*$/.exec(line)
+  if (!match) return undefined
+  return match[1].replace(/^['"]|['"]$/g, '')
 }
 
 function renameEntry(source, from, to) {
   return source
     .split('\n')
-    .map((line) => (line.trim() === `name: '${from}'` ? line.replace(`'${from}'`, `'${to}'`) : line))
+    .map((line) => {
+      if (entryName(line) !== from) return line
+      const match = /^(\s*(?:-\s*)?name:\s*)([^\s#]+)/.exec(line)
+      if (!match) return line
+      return line.replace(match[2], `'${to}'`)
+    })
     .join('\n')
 }
 
 function hasEntry(source, name) {
-  return source.split('\n').some((line) => line.trim() === `name: '${name}'`)
+  return source.split('\n').some((line) => entryName(line) === name)
 }
 
 export function migrateRuntimeConfig(source) {

@@ -21,7 +21,12 @@ import { isLocalOnlyConversation, isRequestInboxConversation } from './request-i
 import { RecentPromiseCache } from './recent-promise-cache.js'
 import { BoundedMap } from './bounded-map.js'
 import { makeUser } from './synthetic.js'
-import { toUser, type MessageStore, type ProjectedMessage } from './message-store.js'
+import {
+  toUser, type MessageStore, type ProjectedMessage, type SearchedMessage, type SearchPartIndexEntry,
+} from './message-store.js'
+import {
+  filterSearchKinds, messageSearchKinds, messageSearchText, normalizeSearchTerms, partMatchesSearchKinds,
+} from './message-search.js'
 import { PlatformDataService } from './platform-manager.js'
 import type { PlatformEventDeliveryOptions, PlatformEventPublishResult } from './platform-manager.js'
 import type { IMMediaRow, IMUserRow, TlMessagePartRow } from './models.js'
@@ -116,11 +121,43 @@ interface MaterializedMessage {
   unreadMention?: boolean
 }
 
-interface SearchCursorState {
-  upstreamCursor?: string
-  exhausted: boolean
-  pending: MaterializedMessage[]
+interface LocalSearchOptions {
+  /** 限定的平台会话 ID；缺省时跨全部会话。 */
+  conversationIds?: string[]
+  q: string
+  filter: tl.TypeMessagesFilter
+  fromId?: tl.TypeInputPeer
+  minDate: number
+  maxDate: number
+  offsetId: number
+  /** 全局搜索时 `offsetId` 所属的会话。 */
+  anchorPeerId?: string
+  /** 全局搜索的 `offsetRate`（上一页最后一条的时间戳）。 */
+  offsetRate?: number
+  addOffset: number
+  limit: number
+  maxId: number
+  minId: number
+  /** 计算精确总数（需扫完整个范围），否则返回下界估计。 */
+  exactCount: boolean
 }
+
+interface LocalSearchResult {
+  page: MaterializedMessage[]
+  count: number
+  exact: boolean
+  hasMore: boolean
+  sliced: boolean
+}
+
+/** 单次搜索最多向数据库取几批，防止极稀疏的过滤条件扫完整个账号。 */
+const SEARCH_SCAN_ROUNDS = 10
+const SEARCH_BATCH_MIN = 20
+const SEARCH_BATCH_MAX = 100
+const CALENDAR_PERIOD_LIMIT = 100
+const POSITIONS_LIMIT = 1_000
+/** 日历按 UTC+8 的自然日分组：QQ 用户几乎都在该时区，客户端按本地日期摆放时不会把同一天拆成两格。 */
+const CALENDAR_UTC_OFFSET_SECONDS = 8 * 60 * 60
 
 interface ResolvedMediaUpload {
   media: IMMediaInput
@@ -255,7 +292,6 @@ export class DialogRpc {
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
   private readonly _memberPages = new Map<string, MemberPageState>()
   private readonly _pendingMemberPages = new Map<string, Promise<void>>()
-  private readonly _searchCursors = new Map<string, SearchCursorState>()
   private readonly _reactionRefreshFailures = new Map<string, number>()
   private _folderEditQueue = Promise.resolve()
   private readonly _actions: PlatformMessageActions
@@ -790,20 +826,398 @@ export class DialogRpc {
     return this._conversation(this._resolvePeer(peer))
   }
 
+  /**
+   * `messages.search`：只在本地投影过的消息中搜索，不再请求上游平台。
+   * 支持关键词（多词 AND）、`fromId`、`minDate`/`maxDate`、`offsetId`/`addOffset`/`maxId`/`minId`、
+   * 各类共享媒体过滤、`MyMentions`，以及空 peer + `PhoneCalls` 的通话记录。
+   */
   async search(req: tl.messages.RawSearchRequest): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    if (req.peer._ === 'inputPeerEmpty') {
+      const result = await this._localSearch({
+        q: req.q, filter: req.filter, fromId: req.fromId,
+        minDate: req.minDate, maxDate: req.maxDate,
+        offsetId: req.offsetId, addOffset: req.addOffset, limit: req.limit,
+        maxId: req.maxId, minId: req.minId, exactCount: false,
+      })
+      return this._searchResponse(result, [])
+    }
+    const peerId = req.topMsgId
+      ? await this._resolveMentionConversation(req.peer, req.topMsgId)
+      : this._resolvePeer(req.peer)
+    const conversation = this._conversation(peerId)
+    if (!this._store) return this._searchLoadedHistory(req, peerId, conversation)
+    const result = await this._localSearch({
+      conversationIds: [peerId],
+      q: req.q, filter: req.filter, fromId: req.fromId,
+      minDate: req.minDate, maxDate: req.maxDate,
+      offsetId: req.offsetId, addOffset: req.addOffset, limit: req.limit,
+      maxId: req.maxId, minId: req.minId,
+      exactCount: req.offsetId === 0 && req.addOffset <= 0 && req.maxId === 0,
+    })
+    return this._searchResponse(result, [conversation])
+  }
+
+  /** `messages.searchGlobal`：跨会话搜索，`offsetRate` 是上一页最后一条的时间戳。 */
+  async searchGlobal(req: tl.messages.RawSearchGlobalRequest): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    if (!this._store) return { _: 'messages.messages', messages: [], topics: [], chats: [], users: [this._makeSelfUser()] }
+    const kindFilter = req.groupsOnly || req.usersOnly || req.broadcastsOnly
+    const conversationIds = kindFilter
+      ? (await this._store.listConversations(this._session.platformSessionId))
+          .filter((conversation) => {
+            const kind = this._conversationSearchKind(conversation)
+            return (req.groupsOnly && kind === 'group')
+              || (req.usersOnly && kind === 'user')
+              || (req.broadcastsOnly && kind === 'broadcast')
+          })
+          .map((conversation) => conversation.id)
+      : undefined
+    let anchorPeerId: string | undefined
+    if (req.offsetId > 0 && req.offsetPeer._ !== 'inputPeerEmpty') {
+      try {
+        anchorPeerId = this._resolvePeer(req.offsetPeer)
+      } catch {
+        anchorPeerId = undefined
+      }
+    }
+    const result = await this._localSearch({
+      conversationIds,
+      q: req.q, filter: req.filter,
+      minDate: req.minDate ?? 0,
+      // offsetRate 由上一页最后一条消息的时间戳给出；没有可用锚点时退化为时间上界。
+      maxDate: req.maxDate ?? 0,
+      offsetId: req.offsetId, anchorPeerId, offsetRate: req.offsetRate,
+      addOffset: 0, limit: req.limit, maxId: 0, minId: 0, exactCount: false,
+    })
+    return this._searchResponse(result, [], true)
+  }
+
+  /** `messages.searchSentMedia`：自己发过的媒体（发送面板「最近发送」）。 */
+  async searchSentMedia(req: tl.messages.RawSearchSentMediaRequest): Promise<tl.messages.TypeMessages> {
+    await this._hydratePeers()
+    if (!this._store) return { _: 'messages.messages', messages: [], topics: [], chats: [], users: [this._makeSelfUser()] }
+    const result = await this._localSearch({
+      q: req.q, filter: req.filter, fromId: { _: 'inputPeerSelf' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: req.limit,
+      maxId: 0, minId: 0, exactCount: false,
+    })
+    return this._searchResponse({ ...result, sliced: false }, [])
+  }
+
+  async getSearchCounters(
+    req: tl.messages.RawGetSearchCountersRequest,
+  ): Promise<tl.messages.RawSearchCounter[]> {
+    await this._hydratePeers()
+    if (!this._store || req.peer._ === 'inputPeerEmpty') {
+      return req.filters.map((filter) => ({ _: 'messages.searchCounter', filter, count: 0 }))
+    }
+    const peerId = req.topMsgId
+      ? await this._resolveMentionConversation(req.peer, req.topMsgId)
+      : this._resolvePeer(req.peer)
+    const counters: tl.messages.RawSearchCounter[] = []
+    for (const filter of req.filters) {
+      const index = await this._searchIndex(peerId, filter)
+      counters.push({ _: 'messages.searchCounter', filter, count: index?.length ?? 0 })
+    }
+    return counters
+  }
+
+  /**
+   * `messages.getSearchResultsCalendar`：按天汇总共享媒体，供客户端日历视图使用。
+   * 从 `offsetId`（或 `offsetDate`）往更早方向返回最多 100 天，每天附带当天最新的一条消息。
+   */
+  async getSearchResultsCalendar(
+    req: tl.messages.RawGetSearchResultsCalendarRequest,
+  ): Promise<tl.messages.RawSearchResultsCalendar> {
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
-    if (req.filter._ === 'inputMessagesFilterPinned') return this._emptyMessages(conversation)
-    if (this._platform.searchMessages && !isLocalOnlyConversation(conversation)) {
-      return this._searchPlatform(req, peerId, conversation)
+    const index = (await this._searchIndex(peerId, req.filter)) ?? []
+    const startIndex = calendarStartIndex(index, req.offsetId, req.offsetDate)
+    const periods: tl.RawSearchResultsCalendarPeriod[] = []
+    const representatives: SearchPartIndexEntry[] = []
+    let current: { day: number, period: tl.RawSearchResultsCalendarPeriod } | undefined
+    for (const entry of index.slice(startIndex)) {
+      const day = calendarDayStart(entry.timestamp)
+      if (current?.day !== day) {
+        if (periods.length >= CALENDAR_PERIOD_LIMIT) break
+        current = {
+          day,
+          period: {
+            _: 'searchResultsCalendarPeriod', date: day,
+            minMsgId: entry.tlMessageId, maxMsgId: entry.tlMessageId, count: 0,
+          },
+        }
+        periods.push(current.period)
+        representatives.push(entry)
+      }
+      current.period.count++
+      current.period.minMsgId = Math.min(current.period.minMsgId, entry.tlMessageId)
+      current.period.maxMsgId = Math.max(current.period.maxMsgId, entry.tlMessageId)
     }
+    const oldest = index.at(-1)
+    const page = await this._materializeIndexEntries(representatives, req.filter)
+    const users = await this._messageSenders(page.map((item) => item.source))
+    const projected = await this._projectMessages(page)
+    return {
+      _: 'messages.searchResultsCalendar',
+      count: index.length,
+      minDate: oldest?.timestamp ?? 0,
+      minMsgId: oldest?.tlMessageId ?? 0,
+      ...(startIndex > 0 ? { offsetIdOffset: startIndex } : {}),
+      periods,
+      messages: projected.messages,
+      chats: uniqueChats([
+        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
+        ...projected.chats,
+      ]),
+      users: uniqueUsers([...users, this._makeSelfUser()]),
+    }
+  }
+
+  /** `messages.getSearchResultsPositions`：共享媒体滚动条用的「消息 ID → 序号」映射。 */
+  async getSearchResultsPositions(
+    req: tl.messages.RawGetSearchResultsPositionsRequest,
+  ): Promise<tl.messages.RawSearchResultsPositions> {
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    const index = (await this._searchIndex(peerId, req.filter)) ?? []
+    const start = req.offsetId > 0
+      ? index.findIndex((entry) => entry.tlMessageId < req.offsetId)
+      : 0
+    const positions = start < 0
+      ? []
+      : index.slice(start, start + Math.max(0, Math.min(req.limit, POSITIONS_LIMIT))).map((entry, offset) => ({
+          _: 'searchResultPosition' as const,
+          msgId: entry.tlMessageId,
+          date: entry.timestamp,
+          offset: start + offset,
+        }))
+    return { _: 'messages.searchResultsPositions', count: index.length, positions }
+  }
+
+  /** 共享媒体类过滤器的完整分片索引；`undefined` 表示该过滤器本地无结果。 */
+  private async _searchIndex(
+    peerId: string,
+    filter: tl.TypeMessagesFilter,
+  ): Promise<SearchPartIndexEntry[] | undefined> {
+    if (!this._store) return
+    const kinds = filterSearchKinds(filter)
+    if (kinds === null) return
+    const entries = await this._store.searchPartIndex(this._session.platformSessionId, {
+      platformConversationIds: [peerId], terms: [], kinds: kinds || undefined,
+    })
+    if (filter._ !== 'inputMessagesFilterPhoneCalls' || !filter.missed) return entries
+    const missed = new Set((await this._store.readProjectedByMessageIds(
+      this._session.platformSessionId, entries.map((entry) => entry.messageId),
+    )).filter(({ source }) => isMissedCall(source)).map(({ parts }) => parts[0]?.messageId))
+    return entries.filter((entry) => missed.has(entry.messageId))
+  }
+
+  private async _materializeIndexEntries(
+    entries: readonly SearchPartIndexEntry[],
+    filter: tl.TypeMessagesFilter,
+  ): Promise<MaterializedMessage[]> {
+    if (!this._store || !entries.length) return []
+    const projected = await this._store.readProjectedByMessageIds(
+      this._session.platformSessionId, entries.map((entry) => entry.messageId),
+    )
+    const wanted = new Set(entries.map((entry) => entry.tlMessageId))
+    const items = await this._materializeProjected(projected, (part) => wanted.has(part.tlMessageId))
+    return items.filter((item) => wanted.has(item.tlId) && (filter._ !== 'inputMessagesFilterEmpty' || item.ordinal === 0))
+  }
+
+  private async _localSearch(options: LocalSearchOptions): Promise<LocalSearchResult> {
+    const empty: LocalSearchResult = { page: [], count: 0, sliced: false, exact: true, hasMore: false }
+    if (!this._store) return empty
+    const kinds = filterSearchKinds(options.filter)
+    if (kinds === null) return empty
+    const missedCallsOnly = options.filter._ === 'inputMessagesFilterPhoneCalls' && options.filter.missed === true
+    let senderUserId: number | undefined
+    if (options.fromId) {
+      senderUserId = this._searchSenderUserId(options.fromId)
+      if (senderUserId === undefined) return empty
+    }
+    const query = {
+      platformConversationIds: options.conversationIds,
+      terms: normalizeSearchTerms(options.q),
+      senderUserId,
+      minTimestamp: options.minDate > 0 ? options.minDate : undefined,
+      maxTimestamp: options.maxDate > 0 ? options.maxDate : undefined,
+      kinds: kinds || undefined,
+    }
+    const singleConversation = options.conversationIds?.length === 1 ? options.conversationIds[0] : undefined
+    // Telegram 消息 ID 只在单个会话内有序，`offsetId`/`maxId`/`minId` 只用于会话内搜索。
+    const upperTlId = singleConversation
+      ? Math.min(...[options.offsetId, options.maxId].filter((id) => id > 0), Number.POSITIVE_INFINITY)
+      : Number.POSITIVE_INFINITY
+    const lowerTlId = singleConversation && options.minId > 0 ? options.minId : 0
+    let before: { timestamp: number, messageId: number } | undefined
+    const anchorConversation = singleConversation ?? options.anchorPeerId
+    if (options.offsetId > 0 && anchorConversation) {
+      const anchor = await this._store.findProjectedByTlId(
+        this._session.platformSessionId, options.offsetId, anchorConversation,
+      )
+      const anchorMessageId = anchor?.parts[0]?.messageId
+      if (anchor && anchorMessageId !== undefined) {
+        // 会话内搜索把锚点消息本身也纳入扫描，由分片 ID 过滤剔除，避免相册剩余分片被跳过。
+        before = {
+          timestamp: anchor.source.timestamp,
+          messageId: singleConversation ? anchorMessageId + 1 : anchorMessageId,
+        }
+      }
+    }
+    if (!before && !singleConversation && options.offsetRate && options.offsetRate > 0) {
+      before = { timestamp: options.offsetRate + 1, messageId: 0 }
+    }
+    const limit = clampLimit(options.limit)
+    const start = Math.max(0, options.addOffset)
+    const needed = start + limit
+    const collected: MaterializedMessage[] = []
+    let cursor = before
+    let hasMore = true
+    for (let round = 0; round < SEARCH_SCAN_ROUNDS && hasMore && (collected.length < needed || needed === 0); round++) {
+      const batch = Math.min(SEARCH_BATCH_MAX, Math.max(SEARCH_BATCH_MIN, needed - collected.length + 1))
+      const result = await this._store.searchMessages(this._session.platformSessionId, {
+        ...query, before: cursor, limit: batch,
+      })
+      hasMore = result.hasMore
+      const last = result.messages.at(-1)
+      if (last) cursor = { timestamp: last.source.timestamp, messageId: last.messageId }
+      const items = await this._materializeProjected(result.messages, (part, message) => {
+        if (part.tlMessageId >= upperTlId || part.tlMessageId <= lowerTlId) return false
+        if (missedCallsOnly && !isMissedCall(message.source)) return false
+        if (!kinds) return part.ordinal === 0
+        const media = part.mediaId === null ? undefined : message.media.find((entry) => entry.id === part.mediaId)
+        return partMatchesSearchKinds((message as SearchedMessage).searchKinds, { ordinal: part.ordinal, media }, kinds)
+      })
+      collected.push(...await this._visibleMessages(items))
+      if (needed === 0) break
+    }
+    const page = collected.slice(start, start + limit)
+    const more = collected.length > start + limit || hasMore
+    let count: number
+    let exact = false
+    if (options.exactCount || limit === 0) {
+      count = kinds
+        ? (await this._store.searchPartIndex(this._session.platformSessionId, query)).length
+        : await this._store.countSearchMessages(this._session.platformSessionId, query)
+      exact = true
+    } else {
+      count = start + page.length + (more ? 1 : 0)
+    }
+    return {
+      page,
+      count,
+      exact,
+      hasMore: more,
+      sliced: more || start > 0 || options.offsetId > 0 || options.maxId > 0 || limit === 0 || count > page.length,
+    }
+  }
+
+  /** `fromId` 对应的 `mtproto_im_user` 行号（与 Telegram 用户 ID 相同）。 */
+  private _searchSenderUserId(peer: tl.TypeInputPeer): number | undefined {
+    if (peer._ === 'inputPeerSelf') return this._selfId
+    if (peer._ === 'inputPeerUser' || peer._ === 'inputPeerUserFromMessage') {
+      return this._tlToUser.has(peer.userId) ? peer.userId : undefined
+    }
+    return undefined
+  }
+
+  private _conversationSearchKind(conversation: IMConversation): 'user' | 'group' | 'broadcast' {
+    if (conversation.kind === 'direct') return 'user'
+    return this._isTelegramChannel(conversation) && conversation.kind === 'channel' ? 'broadcast' : 'group'
+  }
+
+  private async _materializeProjected(
+    projected: readonly ProjectedMessage[],
+    accept: (part: TlMessagePartRow, message: ProjectedMessage) => boolean,
+  ): Promise<MaterializedMessage[]> {
+    const output: MaterializedMessage[] = []
+    for (const message of projected) {
+      const parts = message.parts.slice().sort((left, right) => right.tlMessageId - left.tlMessageId)
+      for (const part of parts) {
+        if (!accept(part, message)) continue
+        const item: MaterializedMessage = {
+          source: message.source,
+          tlId: part.tlMessageId,
+          ordinal: part.ordinal,
+          storedMessageId: part.messageId,
+          groupedId: part.groupedId ?? undefined,
+          media: message.media.find((entry) => entry.id === part.mediaId),
+          mediaRows: message.media,
+        }
+        this._rememberMessage(item)
+        output.push(item)
+      }
+    }
+    if (!output.length) return output
+    // 投影消息实体与表情回应前，先将数据库中的用户映射同步到当前实例。
+    await this._syncStoredUsers([
+      ...new Set(output.map(({ source }) => source.conversationId)),
+      ...output.flatMap(({ source }) => messageReferencedUserIds(source)),
+    ])
+    await this._rememberReplyTargets(output.map((item) => item.source))
+    return output
+  }
+
+  private async _searchResponse(
+    result: LocalSearchResult,
+    baseConversations: readonly IMConversation[],
+    global = false,
+  ): Promise<tl.messages.TypeMessages> {
+    const { page } = result
+    const conversations = new Map(baseConversations.map((conversation) => [conversation.id, conversation]))
+    for (const item of page) {
+      if (!conversations.has(item.source.conversationId)) {
+        conversations.set(item.source.conversationId, this._conversation(item.source.conversationId))
+      }
+    }
+    const peerUsers = await Promise.all([...conversations.values()]
+      .filter((conversation) => conversation.kind === 'direct')
+      .map((conversation) => this._getPeerUser(conversation.id, conversation.title)))
+    const senders = await this._messageSenders(page.map((item) => item.source))
+    const projected = await this._projectMessages(page)
+    const chats = uniqueChats([
+      ...[...conversations.values()].flatMap((conversation) => {
+        if (conversation.kind === 'direct') return []
+        const parent = conversation.parentId ? this._conversation(conversation.parentId) : undefined
+        return parent ? [this._makeChat(parent), this._makeChat(conversation)] : [this._makeChat(conversation)]
+      }),
+      ...projected.chats,
+    ])
+    const users = uniqueUsers([...peerUsers, ...senders, this._makeSelfUser()])
+    if (!result.sliced) {
+      return { _: 'messages.messages', messages: projected.messages, topics: [], chats, users }
+    }
+    const last = page.at(-1)
+    return {
+      _: 'messages.messagesSlice',
+      ...(result.exact ? {} : { inexact: true }),
+      count: result.count,
+      ...(global && result.hasMore && last ? { nextRate: last.source.timestamp } : {}),
+      messages: projected.messages,
+      topics: [],
+      chats,
+      users,
+    } as tl.messages.RawMessagesSlice
+  }
+
+  /** 无持久化存储（纯内存模式）时退化为在已加载的历史窗口内过滤。 */
+  private async _searchLoadedHistory(
+    req: tl.messages.RawSearchRequest,
+    peerId: string,
+    conversation: IMConversation,
+  ): Promise<tl.messages.TypeMessages> {
+    const kinds = filterSearchKinds(req.filter)
+    if (kinds === null) return this._emptyMessages(conversation)
     const requestedLimit = clampLimit(req.limit)
     const all = await this._loadHistory(peerId, {
       offsetId: req.offsetId, offsetDate: req.maxDate, addOffset: req.addOffset,
       limit: Math.max(1, requestedLimit), maxId: req.maxId, minId: req.minId,
     })
-    const query = req.q.toLocaleLowerCase()
+    const terms = normalizeSearchTerms(req.q)
     const visible = await this._visibleMessages(all)
     const filtered = visible.filter((item) => {
       if (req.offsetId > 0 && item.tlId >= req.offsetId) return false
@@ -811,53 +1225,29 @@ export class DialogRpc {
       if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
       if (req.maxId > 0 && item.tlId >= req.maxId) return false
       if (req.minId > 0 && item.tlId <= req.minId) return false
-      if (query && !messageText(item.source).toLocaleLowerCase().includes(query)) return false
-      return matchesMessageFilter(item, req.filter)
+      if (req.fromId && this._searchSenderUserId(req.fromId) !== (
+        item.source.outgoing ? this._selfId : this._userToTl.get(item.source.senderId)
+      )) return false
+      const text = messageSearchText(item.source)
+      if (!terms.every((term) => text.includes(term))) return false
+      if (!kinds) return item.ordinal === 0
+      return partMatchesSearchKinds(
+        messageSearchKinds(item.source, {
+          selfUserId: this._session.userId, conversationKind: conversation.kind,
+        }),
+        { ordinal: item.ordinal, media: item.media },
+        kinds,
+      )
     })
     const start = Math.max(0, req.addOffset)
     const page = filtered.slice(start, start + requestedLimit)
-    const users = await this._messageSenders(page.map((item) => item.source))
-    const count = filtered.length
-    const sliced = requestedLimit === 0 ? count > 0 : page.length < count || start > 0
-    const projected = await this._projectMessages(page)
-    return {
-      _: sliced ? 'messages.messagesSlice' : 'messages.messages',
-      ...(sliced ? { count } : {}),
-      messages: projected.messages, topics: [],
-      chats: uniqueChats([
-        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
-        ...projected.chats,
-      ]),
-      users: uniqueUsers([...users, this._makeSelfUser()]),
-    } as unknown as tl.messages.TypeMessages
-  }
-
-  async getSearchCounters(
-    req: tl.messages.RawGetSearchCountersRequest,
-  ): Promise<tl.messages.RawSearchCounter[]> {
-    if (req.peer._ === 'inputPeerSelf') {
-      return req.filters.map((filter) => ({ _: 'messages.searchCounter', filter, count: 0 }))
-    }
-    const counters: tl.messages.RawSearchCounter[] = []
-    for (const filter of req.filters) {
-      if (!supportsSharedMediaFilter(filter)) {
-        counters.push({ _: 'messages.searchCounter', filter, count: 0 })
-        continue
-      }
-      const result = await this.search({
-        _: 'messages.search', peer: req.peer, savedPeerId: req.savedPeerId,
-        topMsgId: req.topMsgId, q: '', filter,
-        minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 0,
-        maxId: 0, minId: 0, hash: Long.ZERO,
-      })
-      const count = result._ === 'messages.messagesSlice' || result._ === 'messages.channelMessages'
-        ? result.count
-        : result._ === 'messages.messages'
-          ? result.messages.length
-          : 0
-      counters.push({ _: 'messages.searchCounter', inexact: count > 0 || undefined, filter, count })
-    }
-    return counters
+    return this._searchResponse({
+      page,
+      count: filtered.length,
+      exact: true,
+      hasMore: start + page.length < filtered.length,
+      sliced: requestedLimit === 0 ? filtered.length > 0 : page.length < filtered.length || start > 0,
+    }, [conversation])
   }
 
   async getUnreadMentions(
@@ -929,159 +1319,6 @@ export class DialogRpc {
       ptsCount: published?.ptsCount ?? 0,
       offset: 0,
     }
-  }
-
-  private async _searchPlatform(
-    req: tl.messages.RawSearchRequest,
-    peerId: string,
-    conversation: IMConversation,
-  ): Promise<tl.messages.TypeMessages> {
-    const fromUserId = req.fromId?._ === 'inputPeerSelf'
-      ? this._session.userId
-      : req.fromId?._ === 'inputPeerUser'
-        ? this._tlToUser.get(req.fromId.userId)
-        : undefined
-    const fingerprint = JSON.stringify([
-      peerId, req.q, req.filter._, fromUserId ?? '', req.minDate, req.maxDate,
-    ])
-    const cursorState = req.offsetId > 0
-      ? this._searchCursors.get(`${fingerprint}:${req.offsetId}`)
-      : undefined
-    let maxTimestamp = req.maxDate > 0 ? req.maxDate : undefined
-    if (req.offsetId > 0 && !cursorState) {
-      const stored = this._store
-        ? await this._store.findProjectedByTlId(this._session.platformSessionId, req.offsetId, peerId)
-        : undefined
-      const anchorTimestamp = stored?.source.timestamp
-      if (anchorTimestamp !== undefined) {
-        maxTimestamp = Math.min(maxTimestamp ?? anchorTimestamp, anchorTimestamp)
-      }
-    }
-    const requestedLimit = clampLimit(req.limit)
-    const start = Math.max(0, req.addOffset)
-    const target = Math.max(1, requestedLimit + start)
-    // 无附加过滤条件时 QQ 原生搜索已按关键词过滤，按需请求条数即可；有 bridge 侧过滤条件时拉满 200 条以防稀疏命中漏结果。
-    const upstreamPageLimit = req.filter._ === 'inputMessagesFilterEmpty' &&
-      !req.fromId && req.minDate === 0 && req.maxDate === 0
-      ? Math.min(200, target)
-      : 200
-    const candidates = cursorState?.pending.slice() ?? []
-    let upstreamCursor = cursorState?.upstreamCursor
-    let exhausted = cursorState?.exhausted ?? false
-    const normalizedQuery = req.q.toLocaleLowerCase()
-    for (
-      let requestCount = 0;
-      candidates.length < target && !exhausted && requestCount < 100;
-      requestCount++
-    ) {
-      const query = {
-        query: req.q,
-        cursor: upstreamCursor,
-        limit: upstreamPageLimit,
-        fromUserId,
-        minTimestamp: req.minDate > 0 ? req.minDate : undefined,
-        maxTimestamp,
-        mediaKind: searchMediaKind(req.filter),
-      } as const
-      const upstream = this._data
-        ? await this._data.searchMessages(peerId, query)
-        : await this._platform.searchMessages!(this._session, { id: peerId }, query)
-      const materialized = await this._materializeSearchMessages(peerId, upstream.messages)
-      const visible = await this._visibleMessages(materialized)
-      candidates.push(...visible.filter((item) => {
-        if (req.offsetId > 0 && !cursorState && item.tlId >= req.offsetId) return false
-        if (req.minDate > 0 && item.source.timestamp <= req.minDate) return false
-        if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
-        if (req.maxId > 0 && item.tlId >= req.maxId) return false
-        if (req.minId > 0 && item.tlId <= req.minId) return false
-        if (normalizedQuery && !messageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
-        return matchesMessageFilter(item, req.filter)
-      }))
-      upstreamCursor = upstream.nextCursor
-      if (!upstreamCursor) exhausted = true
-    }
-    const page = candidates.slice(start, start + requestedLimit)
-    const pending = candidates.slice(start + page.length)
-    const hasMore = pending.length > 0 || Boolean(upstreamCursor)
-    if (page.length && hasMore) {
-      this._rememberSearchCursor(`${fingerprint}:${page.at(-1)!.tlId}`, {
-        upstreamCursor, exhausted, pending,
-      })
-    }
-    const users = await this._messageSenders(page.map((item) => item.source))
-    const count = exhausted
-      ? candidates.length
-      : Math.max(1, start + page.length + (hasMore ? 1 : 0))
-    const sliced = Boolean(
-      hasMore || cursorState || req.offsetId > 0 || start > 0 || requestedLimit === 0 && count > 0,
-    )
-    const projected = await this._projectMessages(page)
-    return {
-      _: sliced ? 'messages.messagesSlice' : 'messages.messages',
-      ...(sliced ? { count } : {}),
-      messages: projected.messages, topics: [],
-      chats: uniqueChats([
-        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
-        ...projected.chats,
-      ]),
-      users: uniqueUsers([...users, this._makeSelfUser()]),
-    } as unknown as tl.messages.TypeMessages
-  }
-
-  private _rememberSearchCursor(key: string, state: SearchCursorState): void {
-    this._searchCursors.set(key, state)
-    while (this._searchCursors.size > 1024) {
-      const oldest = this._searchCursors.keys().next().value as string | undefined
-      if (!oldest) break
-      this._searchCursors.delete(oldest)
-    }
-  }
-
-  private async _materializeSearchMessages(
-    peerId: string,
-    messages: readonly IMMessage[],
-  ): Promise<MaterializedMessage[]> {
-    if (this._store) {
-      const output: MaterializedMessage[] = []
-      for (const source of messages) {
-        const projected = await this._store.findProjectedByPlatformId(
-          this._session.platformSessionId, peerId, source.id,
-        )
-        if (!projected) continue
-        for (const part of projected.parts) {
-          const item: MaterializedMessage = {
-            source: projected.source,
-            tlId: part.tlMessageId,
-            ordinal: part.ordinal,
-            storedMessageId: part.messageId,
-            groupedId: part.groupedId ?? undefined,
-            media: projected.media.find((entry) => entry.id === part.mediaId),
-            mediaRows: projected.media,
-          }
-          this._rememberMessage(item)
-          output.push(item)
-        }
-      }
-      // 投影消息实体与表情回应前，先将数据库中的用户映射同步到当前实例。
-      await this._syncStoredUsers([
-        peerId,
-        ...output.flatMap(({ source }) => messageReferencedUserIds(source)),
-      ])
-      await this._rememberReplyTargets(output.map((item) => item.source))
-      return output
-    }
-    for (const source of messages.slice().sort((left, right) => left.timestamp - right.timestamp)) {
-      this._messageId(peerId, source.id)
-    }
-    return messages.map((source) => {
-      const item: MaterializedMessage = {
-        source,
-        tlId: telegramMessageId(source) ?? this._messageId(peerId, source.id),
-        ordinal: 0,
-      }
-      this._rememberMessage(item)
-      return item
-    })
   }
 
   async readHistory(
@@ -3003,7 +3240,11 @@ export class DialogRpc {
     }
     const conversation = this._conversation(peerId)
     const result = await this._store!.setReactions(this._session, conversation, target, updated)
-    await this._reactions!.markUsed(peerId, newlySelected)
+    // `add_to_recent` 只在用户从回应面板里主动挑选时置位；没置位（双击快速回应、气泡内联条）
+    // 只刷新最近列表里已有的记录，不新增条目。
+    const recentChanged = await this._reactions!.markUsed(peerId, newlySelected, {
+      append: Boolean(req.addToRecent),
+    })
     const update: tl.RawUpdateMessageReactions = {
       _: 'updateMessageReactions',
       peer: this._conversationPeer(conversation),
@@ -3015,7 +3256,7 @@ export class DialogRpc {
         (id) => this._userId(id),
       ),
     }
-    const recentUpdate: tl.TypeUpdate[] = newlySelected.length
+    const recentUpdate: tl.TypeUpdate[] = recentChanged
       ? [{ _: 'updateRecentReactions' }]
       : []
     return {
@@ -6193,63 +6434,30 @@ function rangesOverlap(
   return left.offset < right.offset + right.length && right.offset < left.offset + left.length
 }
 
-function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessagesFilter): boolean {
-  if (filter._ === 'inputMessagesFilterEmpty') return true
-  const media = item.media
-  const animatedImage = isAnimatedImageMime(media?.mimeType)
-  const video = media?.kind === 'file' && media.mimeType?.startsWith('video/') === true
-  const voice = media?.kind === 'file' && media.voice === true
-  const music = media?.kind === 'file' && !voice && media.mimeType?.startsWith('audio/') === true
-  if (filter._ === 'inputMessagesFilterPhotos') return media?.kind === 'image' && !animatedImage
-  if (filter._ === 'inputMessagesFilterVideo') return video
-  if (filter._ === 'inputMessagesFilterPhotoVideo') {
-    return media?.kind === 'image' && !animatedImage || video
-  }
-  if (filter._ === 'inputMessagesFilterDocument') {
-    return media?.kind === 'file' && !video && !voice && !music && !animatedImage
-  }
-  if (filter._ === 'inputMessagesFilterUrl') return item.ordinal === 0 && messageHasLink(item.source)
-  if (filter._ === 'inputMessagesFilterGif') return Boolean(media && animatedImage)
-  if (filter._ === 'inputMessagesFilterVoice') return voice
-  if (filter._ === 'inputMessagesFilterMusic') return music
-  if (filter._ === 'inputMessagesFilterRoundVoice') return voice
-  return false
+
+
+
+
+function calendarDayStart(timestamp: number): number {
+  const local = timestamp + CALENDAR_UTC_OFFSET_SECONDS
+  return local - (((local % 86_400) + 86_400) % 86_400) - CALENDAR_UTC_OFFSET_SECONDS
 }
 
-function searchMediaKind(filter: tl.TypeMessagesFilter): 'image' | 'file' | undefined {
-  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterGif') return 'image'
-  if (
-    filter._ === 'inputMessagesFilterVideo'
-    || filter._ === 'inputMessagesFilterDocument'
-    || filter._ === 'inputMessagesFilterVoice'
-    || filter._ === 'inputMessagesFilterMusic'
-    || filter._ === 'inputMessagesFilterRoundVoice'
-    || filter._ === 'inputMessagesFilterRoundVideo'
-  ) return 'file'
-  return undefined
+/** 日历从 `offsetId` 之前（或 `offsetDate` 之前）的第一条开始。 */
+function calendarStartIndex(
+  index: readonly SearchPartIndexEntry[],
+  offsetId: number,
+  offsetDate: number,
+): number {
+  if (offsetId <= 0 && offsetDate <= 0) return 0
+  const found = index.findIndex((entry) =>
+    (offsetId <= 0 || entry.tlMessageId < offsetId) && (offsetDate <= 0 || entry.timestamp < offsetDate))
+  return found < 0 ? index.length : found
 }
 
-function supportsSharedMediaFilter(filter: tl.TypeMessagesFilter): boolean {
-  return filter._ === 'inputMessagesFilterPhotos'
-    || filter._ === 'inputMessagesFilterVideo'
-    || filter._ === 'inputMessagesFilterPhotoVideo'
-    || filter._ === 'inputMessagesFilterDocument'
-    || filter._ === 'inputMessagesFilterUrl'
-    || filter._ === 'inputMessagesFilterGif'
-    || filter._ === 'inputMessagesFilterVoice'
-    || filter._ === 'inputMessagesFilterMusic'
-    || filter._ === 'inputMessagesFilterRoundVoice'
-}
-
-function messageHasLink(message: IMMessage): boolean {
-  return message.content.parts.some((part) => {
-    if (part.type === 'card') return Boolean(cardUrl(part.card))
-    if (part.type !== 'text') return false
-    if (part.entities?.some((entity) =>
-      entity.type === 'text-link' || entity.type === 'conversation-link')) return true
-    return Boolean(withAutoLinkEntities(part.text)?.some((entity) =>
-      entity._ === 'messageEntityUrl' || entity._ === 'messageEntityTextUrl'))
-  })
+function isMissedCall(message: IMMessage): boolean {
+  const action = message.content.serviceAction
+  return action?.type === 'phone-call' && !action.duration && message.outgoing !== true
 }
 
 export function peerTlSeed(platformSessionId: string, platformPeerId: string): string {

@@ -25,7 +25,7 @@
     "schema:test": "node --test scripts/sync-telegram-schemas.test.mjs",
     "skill:test": "node --test .agents/skills/inspect-relay/scripts/*.test.mjs",
     "test:unit": "yarn test:unit:vitest && yarn test:unit:node",
-    "test:unit:vitest": "vitest run && yarn test:webui:solid '--exclude=**/*.e2e.test.ts'",
+    "test:unit:vitest": "vitest run && yarn test:webui:react '--exclude=**/*.e2e.test.ts'",
     "test:unit:node": "node --test scripts/sync-telegram-schemas.test.mjs scripts/check-commit-message.unit.test.mjs .agents/skills/inspect-relay/scripts/probe-relay.unit.test.mjs",
     "test:e2e": "yarn test:e2e:commit-message && yarn test:e2e:mtproto",
     "test:e2e:commit-message": "node --test scripts/check-commit-message.e2e.test.mjs",
@@ -36,11 +36,11 @@
     "mtproto:e2e": "tsx packages/mtproto-e2e-client/src/cli.ts",
     "typecheck": "tsc --project tsconfig.test.json --pretty false",
     "prepare": "husky",
-    "test:e2e:webui": "yarn build:webui && yarn test:webui:solid && vitest run --config vitest.mtproto-e2e.config.mts packages/mtproto-debug/src/capture-api.e2e.test.ts packages/test-suite/src/webui-backpressure.e2e.test.ts --maxWorkers=1",
-    "typecheck:webui": "yarn typecheck:webui:solid",
+    "test:e2e:webui": "yarn build:webui && yarn test:webui:react && vitest run --config vitest.mtproto-e2e.config.mts packages/mtproto-debug/src/capture-api.e2e.test.ts packages/test-suite/src/webui-backpressure.e2e.test.ts --maxWorkers=1",
+    "typecheck:webui": "yarn typecheck:webui:react",
     "build:webui": "node --import tsx scripts/build-webui.mjs",
-    "test:webui:solid": "vitest run --config vitest.webui-solid.config.mts",
-    "typecheck:webui:solid": "tsc -p packages/cordis-webui-solidjs/tsconfig.json --pretty false"
+    "test:webui:react": "vitest run --config vitest.webui-react.config.mts",
+    "typecheck:webui:react": "tsc -p packages/cordis-webui-react/tsconfig.json --pretty false"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

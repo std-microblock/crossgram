@@ -1,0 +1,156 @@
+/* Base layer for the Crossgram React WebUI.
+ *
+ * Vendored from deepseek-harness `packages/client/ui-theme/src/styles`
+ * (base.css, focus.css, corner-shape.css, scrollbar.css) and adapted to a
+ * browser-only app whose tokens live in tokens.css. */
+
+:root {
+  /* Base variables referenced by the token sheets and component CSS. */
+  --dsw-font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,
+    sans-serif;
+  --ds-font-family-code:
+    'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono',
+    Menlo, Courier, 'PingFang SC', 'Microsoft YaHei';
+  --ds-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ds-transition-duration: 0.2s;
+  --ds-transition-duration-fast: 0.1s;
+  --ds-transition-duration-slow: 0.3s;
+  --dsw-radius-xs: 4px;
+  --dsw-radius-sm: 8px;
+  --dsw-radius-md: 12px;
+  --dsw-radius-lg: 16px;
+  --dsw-radius-xl: 20px;
+  --dsw-radius-panel: 28px;
+
+  /* DSH elevation materials: the first shadow layer is the hairline stroke. */
+  --dsw-elevation-stroke-color: rgba(0, 0, 0, 0.08);
+  --dsw-elevation-panel:
+    0 0 0 0.5px var(--dsw-elevation-stroke-color),
+    0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  --dsw-elevation-prominent:
+    0 0 0 0.5px var(--dsw-elevation-stroke-color),
+    0 16px 48px rgba(0, 0, 0, 0.16), 0 4px 12px rgba(0, 0, 0, 0.08);
+  --dsw-elevation-soft:
+    0 0 0 0.5px var(--dsw-elevation-stroke-color),
+    0 10px 40px rgba(0, 0, 0, 0.1);
+
+  --dsw-focus-ring-width: 2px;
+
+  color-scheme: light dark;
+  font-family: var(--dsw-font-family);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
+}
+
+:root[data-appearance='dark'] {
+  --dsw-elevation-stroke-color: rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-appearance='system'] {
+    --dsw-elevation-stroke-color: rgba(255, 255, 255, 0.08);
+  }
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scrollbar-gutter: stable;
+}
+
+body {
+  margin: 0;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Box sizing lives in the theme's reset layer so component rules can opt out
+ * (icon tiles use content-box padding). An unlayered rule here would win over
+ * every layered component rule. */
+
+/* The fallback names the colour and the standard width, never the style: a
+ * control that disables its outline keeps `none` and paints nothing. */
+:focus-visible {
+  outline-color: var(
+    --dsw-focus-ring-color,
+    var(--dsw-alias-state-business-primary)
+  );
+  outline-width: var(--dsw-focus-ring-width);
+  outline-style: solid;
+  outline-offset: 2px;
+}
+
+html[data-input-modality='pointer'] body :focus-visible:not(:read-write) {
+  --dsw-focus-ring-color: transparent;
+  outline-color: transparent;
+}
+
+@supports (corner-shape: superellipse(1.5)) {
+  :root {
+    --dsw-corner-shape: superellipse(1.5);
+  }
+
+  *,
+  *::before,
+  *::after {
+    corner-shape: var(--dsw-corner-shape);
+  }
+}
+
+/* Scrollbar skin: the sole consumer of the four --dsw-alias-scrollbar-* tokens. */
+body {
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l1);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l1);
+  --dsh-scrollbar-thumb-border: 0px;
+  --dsh-scrollbar-track-margin: 0px;
+  --dsh-scrollbar-width: 5px;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  body,
+  body * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--dsh-scrollbar-thumb) transparent;
+  }
+}
+
+::-webkit-scrollbar {
+  width: var(--dsh-scrollbar-width);
+  height: var(--dsh-scrollbar-width);
+}
+
+::-webkit-scrollbar-track {
+  margin-block: var(--dsh-scrollbar-track-margin);
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: var(--dsh-scrollbar-thumb-border) solid transparent;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsh-scrollbar-thumb);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--dsh-scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -48,7 +48,7 @@ async function server() {
     if (fullApp) {
         const [{ default: Database }, { default: SQLite }, { default: Http }, { default: WebUI }, bridge, mergedForward, resources, platform, { default: UpdateStore }] = await Promise.all([
             import('@cordisjs/plugin-database'), import('@cordisjs/plugin-database-sqlite'),
-            import('@cordisjs/plugin-server'), import('cordis-webui-solidjs'),
+            import('@cordisjs/plugin-server'), import('cordis-webui-react'),
             import('../packages/bridge/src/index.js'), import('../packages/merged-forward/src/index.js'),
             import('../packages/telegram-resources/src/index.js'), import('../packages/platform-static/src/index.js'),
             import('../packages/update-store-database/src/index.js'),

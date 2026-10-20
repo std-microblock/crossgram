@@ -43,7 +43,6 @@ async function createRequestRpc(
   const getHistory = vi.fn(async () => ({ messages: [] }))
   const getUser = vi.fn(async () => null)
   const getConversation = vi.fn(async () => null)
-  const searchMessages = vi.fn(async () => ({ messages: [] }))
   const clickInlineButton = vi.fn()
   const mutations = {
     sendMessage: vi.fn(), editMessage: vi.fn(), deleteMessages: vi.fn(),
@@ -64,7 +63,7 @@ async function createRequestRpc(
     async forwardMessages() { return mutations.forwardMessages() },
     async setMessageReactions(...args: any[]) { return mutations.setMessageReactions(...args) },
     async markRead(...args: any[]) { return mutations.markRead(...args) },
-    resolveRequest, getMessage, getHistory, getUser, getConversation, searchMessages, clickInlineButton,
+    resolveRequest, getMessage, getHistory, getUser, getConversation, clickInlineButton,
   }
   const store = new MessageStore(ctx.database)
   let failLocalDelivery = options.failLocalDeliveryOnce ?? false
@@ -97,7 +96,7 @@ async function createRequestRpc(
     const localEvents: IMEvent[] = []
     return { rpc: createRpc(localEvents), localEvents }
   }
-  return { rpc, createSiblingRpc, peers, platform, database: ctx.database, store, resolveRequest, localEvents, getMessage, getHistory, getUser, getConversation, searchMessages, clickInlineButton, mutations }
+  return { rpc, createSiblingRpc, peers, platform, database: ctx.database, store, resolveRequest, localEvents, getMessage, getHistory, getUser, getConversation, clickInlineButton, mutations }
 }
 
 async function seedPendingRequest(store: MessageStore): Promise<IMRequest> {
@@ -237,7 +236,7 @@ describe('request inbox read-only boundary', () => {
   })
 
   it('searches persisted inbox projections without upstream search or synthetic IDs', async () => {
-    const { rpc, store, searchMessages } = await createRequestRpc(undefined, { history: true })
+    const { rpc, store, getHistory } = await createRequestRpc(undefined, { history: true })
     await seedPendingRequest(store)
     await store.ingestRequest(session, {
       id: 'newer-request-1', kind: 'friend', state: 'pending', createdAt: 101,
@@ -248,6 +247,7 @@ describe('request inbox read-only boundary', () => {
       requester: { id: 'carol', firstName: 'Carol' },
     })
     const target = await inboxCallbackTarget(rpc, store)
+    getHistory.mockClear()
 
     const result = await rpc.search({
       _: 'messages.search', peer: target.peer, q: 'Alice', filter: { _: 'inputMessagesFilterEmpty' },
@@ -255,7 +255,7 @@ describe('request inbox read-only boundary', () => {
     })
 
     expect(result).toMatchObject({ _: 'messages.messages', messages: [{ _: 'message', message: expect.stringContaining('Alice') }] })
-    expect(searchMessages).not.toHaveBeenCalled()
+    expect(getHistory).not.toHaveBeenCalled()
     expect(JSON.stringify(result)).not.toContain('bridge:request:')
   })
 

@@ -7,7 +7,15 @@ export default defineConfig({
   plugins: [unyaml(), jsToTsPlugin()],
   test: {
     include: ['packages/**/*.test.ts', 'deploy/**/*.test.ts'],
-    exclude: [...configDefaults.exclude, 'packages/**/*e2e.test.ts', 'packages/cordis-webui-solidjs/**', 'packages/bridge/client/**', 'packages/mtproto-debug/client/**', 'packages/mtproto-statistics/client/**'],
+    exclude: [
+      ...configDefaults.exclude,
+      'packages/**/*e2e.test.ts',
+      'packages/cordis-webui-react/**',
+      'packages/bridge/client/**',
+      'packages/history-backfill/client/**',
+      'packages/mtproto-debug/client/**',
+      'packages/mtproto-statistics/client/**',
+    ],
     pool: 'threads',
     testTimeout: 30_000,
   },

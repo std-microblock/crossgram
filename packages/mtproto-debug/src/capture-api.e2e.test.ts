@@ -1,6 +1,6 @@
 import { Context } from 'cordis'
 import Server from '@cordisjs/plugin-server'
-import WebUI from 'cordis-webui-solidjs'
+import WebUI from 'cordis-webui-react'
 import { describe, expect, it } from 'vitest'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import * as debug from './index.js'

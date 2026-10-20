@@ -9,8 +9,8 @@ import { MessageStore, type DeleteResult, type IngestResult, type ReactionResult
 import { isLocalOnlyConversation, requestInboxConversation, requestInboxMessage } from './request-inbox.js'
 import { jsonContains, jsonEquals } from './stable-json.js'
 import type {
-  IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage, IMMessageSearchPage,
-  IMMessageSearchQuery, IMPlatform, PlatformSession,
+  IMConversation, IMDialog, IMDialogPage, IMEvent, IMHistoryPage, IMHistoryQuery, IMMessage,
+  IMPlatform, PlatformSession,
   Unsubscribe,
 } from './platform.js'
 
@@ -598,6 +598,16 @@ export interface PlatformEventDeliveryOptions {
 
 export type PlatformEventPublishResult = tl.RawUpdates | void
 
+export interface HistoryBackfillPage {
+  /** 上游返回的消息条数（已过滤撤回、灰条）。 */
+  fetched: number
+  /** 其中首次写入本地的条数。 */
+  inserted: number
+  /** 本页最早的一条，用作下一次按锚点回填的起点。 */
+  oldest?: { id: string, timestamp: number }
+  coverage?: { minSequence: string, maxSequence: string }
+}
+
 export class PlatformDataService {
   private readonly _dialogPageLoads = new Map<string, Promise<IMDialogPage>>()
   private readonly _historyLoads = new Map<string, Promise<IMMessage[]>>()
@@ -916,25 +926,35 @@ export class PlatformDataService {
     return messages
   }
 
-  async searchMessages(
-    conversationId: string,
-    query: IMMessageSearchQuery,
-  ): Promise<IMMessageSearchPage> {
-    if (!this._platform.searchMessages) return { messages: [] }
+  /**
+   * 后台回填：直接向上游读取一页并按历史分配写入，不发布 update、不改未读数。
+   * 只接受带锚点的查询（`before` 或 `beforeSequence`），避免误把最新页当作回填结果。
+   */
+  async backfillHistory(conversationId: string, query: IMHistoryQuery): Promise<HistoryBackfillPage> {
+    if (!query.before && !query.beforeSequence) throw new Error('history backfill requires an anchor')
+    if (!this._platform.capabilities.history || !this._platform.getHistory) {
+      return { fetched: 0, inserted: 0 }
+    }
     let conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
     if (!conversation) {
       await this.getDialogs()
       conversation = await this._store.getConversation(this._session.platformSessionId, conversationId)
     }
     conversation ??= { id: conversationId, kind: 'direct', title: conversationId }
-    const page = await this._platform.searchMessages(this._session, { id: conversationId }, query)
-    await this._store.ingestMany(
-      this._session,
-      conversation,
-      page.messages.slice().sort((left, right) => right.timestamp - left.timestamp),
-      { allocation: 'history' },
-    )
-    return page
+    if (isLocalOnlyConversation(conversation)) return { fetched: 0, inserted: 0 }
+    const page = await this._platform.getHistory(this._session, { id: conversationId }, query)
+    const ordered = page.messages.slice().sort((left, right) =>
+      left.timestamp - right.timestamp || left.id.localeCompare(right.id))
+    const results = ordered.length
+      ? await this._store.ingestMany(this._session, conversation, ordered, { allocation: 'history' })
+      : []
+    const oldest = ordered[0]
+    return {
+      fetched: ordered.length,
+      inserted: results.filter((result) => result.created).length,
+      ...(oldest ? { oldest: { id: oldest.id, timestamp: oldest.timestamp } } : {}),
+      ...(page.coverage ? { coverage: page.coverage } : {}),
+    }
   }
 
   async getMessage(conversationId: string, messageId: string): Promise<IMMessage | null> {

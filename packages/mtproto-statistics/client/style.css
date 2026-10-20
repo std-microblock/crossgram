@@ -38,30 +38,33 @@
     width: 100%;
     height: 58px;
   }
-  .spark-fill {
-    fill: var(--primary);
-    opacity: 0.1;
+  .stat-spark .recharts-wrapper {
+    outline: none;
   }
-  .spark-line {
-    stroke: var(--primary);
-    stroke-width: 1.6;
-    fill: none;
-    vector-effect: non-scaling-stroke;
+  .chart-tooltip {
+    display: grid;
+    gap: 2px;
+    padding: 6px 9px;
+    border: 0.5px solid var(--outline-variant);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--on-surface);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 0.08);
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .chart-tooltip strong {
+    font-weight: 500;
+  }
+  .chart-tooltip span {
+    color: var(--on-surface-muted);
   }
   .tone-tertiary {
     background: var(--tertiary-container);
   }
-  .tone-tertiary .spark-line {
-    stroke: var(--on-tertiary-container);
-  }
-  .tone-tertiary .spark-fill {
-    fill: var(--on-tertiary-container);
-  }
-  .tone-error .spark-line {
-    stroke: var(--error);
-  }
-  .tone-error .spark-fill {
-    fill: var(--error);
+  .tone-error {
+    background: var(--error-container, var(--surface-container));
   }
   .stats-two-columns {
     display: grid;
@@ -79,48 +82,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .distribution-bars {
-    display: grid;
-    gap: 20px;
-  }
-  .distribution-row > div:first-child {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    font-size: 12px;
-  }
-  .distribution-row > div:first-child > span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .distribution-row strong {
-    white-space: nowrap;
-    font-weight: 550;
-  }
-  .distribution-row small {
-    font-size: 10px;
-    color: var(--muted);
-    margin-left: 5px;
-  }
-  .distribution-track {
-    height: 9px;
-    border-radius: 9px;
-    overflow: hidden;
-    background: var(--surface-container);
-    margin-top: 8px;
-  }
-  .distribution-track span {
-    display: block;
-    height: 100%;
-    background: var(--primary);
-    border-radius: 9px;
-  }
-  .distribution-track .distribution-tone-1 {
-    background: var(--on-tertiary-container);
-  }
-  .distribution-track .distribution-tone-2 {
-    background: var(--muted);
+  .distribution-chart .recharts-wrapper {
+    outline: none;
   }
   @media (max-width: 760px) {
     .stats-metrics {

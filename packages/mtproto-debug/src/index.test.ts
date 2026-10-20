@@ -10,6 +10,7 @@ describe('MTProto debug Cordis entry', () => {
     let data!: MtprotoDebugData
     let files!: { routes?: string[] }
     let apiRoute!: { path: string, callback: (req: any, res: any) => Promise<void> }
+    const routes: Array<{ method: string, path: string }> = []
 
     const ctx = {
       mtproto: {},
@@ -22,7 +23,14 @@ describe('MTProto debug Cordis entry', () => {
       },
       server: {
         get(path: string, callback: (req: any, res: any) => Promise<void>) {
-          apiRoute = { path, callback }
+          routes.push({ method: 'get', path })
+          if (path === '/api/mtproto-debug/events') apiRoute = { path, callback }
+        },
+        post(path: string) {
+          routes.push({ method: 'post', path })
+        },
+        delete(path: string) {
+          routes.push({ method: 'delete', path })
         },
       },
       throttle: (callback: () => void) => callback,
@@ -41,6 +49,14 @@ describe('MTProto debug Cordis entry', () => {
     apply(ctx as never, { maxEvents: 2 })
     expect(files.routes).toEqual(['/mtproto-debug'])
     expect(apiRoute.path).toBe('/api/mtproto-debug/events')
+    expect(data.recordingsApiPath).toBe('/api/mtproto-debug/recordings')
+    expect(routes).toEqual([
+      { method: 'get', path: '/api/mtproto-debug/events' },
+      { method: 'get', path: '/api/mtproto-debug/recordings' },
+      { method: 'post', path: '/api/mtproto-debug/recordings' },
+      { method: 'get', path: '/api/mtproto-debug/recordings/:id' },
+      { method: 'delete', path: '/api/mtproto-debug/recordings/:id' },
+    ])
     expect(data.capturing).toBe(true)
     expect(listeners.size).toBe(1)
 
@@ -105,7 +121,11 @@ describe('MTProto debug Cordis entry', () => {
           return { mutate: (callback: (target: MtprotoDebugData) => void) => callback(data) }
         },
       },
-      server: { get: () => undefined },
+      server: {
+        get: () => undefined,
+        post: () => undefined,
+        delete: () => undefined,
+      },
       throttle: (callback: () => void) => callback,
       on: (_name: string, listener: (event: MtprotoDebugEvent) => void) => {
         listeners.add(listener)

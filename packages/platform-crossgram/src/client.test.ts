@@ -518,12 +518,12 @@ describe('QQNTClient streaming transport', () => {
     }])
   })
 
-  it('forwards message search filters and opaque cursors', async () => {
+  it('forwards sequence history requests and returns the raw sequence range', async () => {
     let requestUrl = ''
     server = createServer((request, response) => {
       requestUrl = request.url ?? ''
       response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify({ messages: [], nextCursor: 'next' }))
+      response.end(JSON.stringify({ messages: [], sequenceRange: { min: '40', max: '42' } }))
     })
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
@@ -531,11 +531,9 @@ describe('QQNTClient streaming transport', () => {
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
 
-    await expect(client.searchMessages('group/1', {
-      q: '测试 key', cursor: 'opaque', limit: 25, fromUserId: 'sender',
-      minTimestamp: 10, maxTimestamp: 20, mediaKind: 'image',
-    })).resolves.toEqual({ messages: [], nextCursor: 'next' })
-    expect(requestUrl).toBe('/conversations/group%2F1/search?q=%E6%B5%8B%E8%AF%95+key&cursor=opaque&limit=25&fromUserId=sender&minTimestamp=10&maxTimestamp=20&mediaKind=image')
+    await expect(client.getHistory('group/1', { beforeSeq: '42', limit: 25 }))
+      .resolves.toEqual({ messages: [], sequenceRange: { min: '40', max: '42' } })
+    expect(requestUrl).toBe('/conversations/group%2F1/history?beforeSeq=42&limit=25')
   })
 
   it('forwards group-file folder pagination', async () => {

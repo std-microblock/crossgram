@@ -3011,6 +3011,7 @@ describe('bridge login e2e', () => {
         reaction: [
           { _: 'reactionEmoji', emoticon: '👍' },
         ],
+        addToRecent: true,
       }, 188)
       expect(reacted).toMatchObject({
         _: 'updates',
@@ -3044,6 +3045,7 @@ describe('bridge login e2e', () => {
         peer: { _: 'inputPeerChannel', channelId: group.id, accessHash: Long.ZERO },
         msgId: reactionMessage.id,
         reaction: [{ _: 'reactionEmoji', emoticon: '❤️' }],
+        addToRecent: true,
       }, 1_188)
       expect(heartReacted).toMatchObject({
         _: 'updates',
@@ -3628,8 +3630,7 @@ describe('bridge login e2e', () => {
       async getDialogs() {
         return { dialogs: [{ conversation, unreadCount: 0, lastMessage }] }
       },
-      async getHistory() { return { messages: [lastMessage] } },
-      async searchMessages() { return { messages: [searchMessage] } },
+      async getHistory() { return { messages: [lastMessage, searchMessage] } },
       async getUser(_session, id) {
         return id === 'alice' ? { id, firstName: 'Alice' }
           : id === 'carol' ? { id, firstName: 'Carol' }
@@ -3661,12 +3662,17 @@ describe('bridge login e2e', () => {
         offsetDate: 0, offsetId: 0, offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
       }, 6)
       const chat = dialogs.chats.find((item: any) => item.title === conversation.title)
+      const peer = { _: 'inputPeerChannel', channelId: chat.id, accessHash: Long.ZERO }
+      // 搜索只看本地投影：先打开会话把历史拉进库里。
+      await callRpc(client, key, sid, {
+        _: 'messages.getHistory', peer, offsetId: 0, offsetDate: 0, addOffset: 0, limit: 20,
+        maxId: 0, minId: 0, hash: Long.ZERO,
+      }, 8)
       const searched = await callRpc(client, key, sid, {
-        _: 'messages.search',
-        peer: { _: 'inputPeerChannel', channelId: chat.id, accessHash: Long.ZERO },
+        _: 'messages.search', peer,
         q: 'gpt', filter: { _: 'inputMessagesFilterEmpty' }, minDate: 0, maxDate: 0,
         offsetId: 0, addOffset: 0, limit: 20, maxId: 0, minId: 0, hash: Long.ZERO,
-      }, 8)
+      }, 10)
 
       expect(searched.messages).toHaveLength(1)
       expect(searched.messages[0]).toMatchObject({
@@ -3680,7 +3686,7 @@ describe('bridge login e2e', () => {
       const users = await callRpc(client, key, sid, {
         _: 'users.getUsers',
         id: [{ _: 'inputUser', userId: mentionedUserId, accessHash: Long.ZERO }],
-      }, 10)
+      }, 12)
       expect(users).toMatchObject([{ _: 'user', id: mentionedUserId, firstName: 'Carol' }])
     } finally {
       client?.close()
@@ -4861,6 +4867,127 @@ describe('bridge login e2e', () => {
       expect(mobilePush).toMatchObject({
         _: 'updates',
         updates: [{ _: 'updateNewChannelMessage', message: { message: 'to both devices' } }],
+      })
+    } finally {
+      mobile?.close()
+      desktop?.close()
+      await stop()
+    }
+  }, 15000)
+
+  it('broadcasts the recent-reaction refresh to the other authorized device', async () => {
+    let handler: ((event: bridge.IMEvent) => void | Promise<void>) | undefined
+    const platformId = 'reaction-recent-e2e'
+    const available: bridge.IMReactionDefinition[] = [
+      { key: 'like', presentation: { type: 'emoji', emoticon: '👍' } },
+      { key: 'fire', presentation: { type: 'emoji', emoticon: '🔥' } },
+    ]
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: true, channels: true, subchannels: true },
+        reactions: { read: true, write: true, events: false, actorList: false, maxSelected: 20 },
+      },
+      async subscribe(_session, next) {
+        handler = next
+        return () => { handler = undefined }
+      },
+      async getDialogs() { return { dialogs: [] } },
+      async getHistory() { return { messages: [] } },
+      async sendMessage() { throw new Error('unused') },
+      async getUser(_session, id) { return { id, firstName: id } },
+      async getAvailableReactions() { return { available, reactions: [], maxSelected: 20 } },
+      async setMessageReactions(_session, _target, keys) {
+        return {
+          available,
+          reactions: keys.map((key) => ({ key, count: 1, selected: true })),
+          maxSelected: 20,
+        }
+      },
+    }
+    const { ctx, port, pubKey, stop } = await startApp({
+      platform: { id: platformId, adapter: platform },
+    })
+    let desktop: TestClient | undefined
+    let mobile: TestClient | undefined
+    try {
+      await ctx.database.create('mtproto_platform_session', {
+        id: 'reaction-ps', platformId, userId: 'self', credentials: {},
+        metadata: { firstName: 'Reaction User' }, active: true, createdAt: new Date(),
+      })
+      await ctx.database.create('mtproto_auth_session', {
+        id: 'reaction-auth', virtualPhone: '88800791', totpSecret: '33'.repeat(20),
+        platformId, platformSessionId: 'reaction-ps',
+      })
+      const signIn = async (client: TestClient, sid: Long, base: number) => {
+        const key = await doClientHandshake(client, pubKey)
+        const code = await callRpc(client, key, sid, {
+          _: 'auth.sendCode', phoneNumber: '+88800791', apiId: 1, apiHash: 'x', settings: { _: 'codeSettings' },
+        }, base)
+        await callRpc(client, key, sid, {
+          _: 'auth.signIn', phoneNumber: '88800791', phoneCodeHash: code.phoneCodeHash,
+          phoneCode: bridge.generateLoginCode('33'.repeat(20)),
+        }, base + 2)
+        await expect(callRpc(client, key, sid, { _: 'updates.getState' }, base + 4))
+          .resolves.toMatchObject({ _: 'updates.state' })
+        return key
+      }
+
+      const desktopSid = new Long(0x7777aaaa, 0x7aaa, false)
+      const mobileSid = new Long(0x8888bbbb, 0x8bbb, false)
+      desktop = await TestClient.connect(port)
+      const desktopKey = await signIn(desktop, desktopSid, 500)
+      mobile = await TestClient.connect(port)
+      const mobileKey = await signIn(mobile, mobileSid, 520)
+
+      const conversation: bridge.IMConversation = { id: 'reaction-group', kind: 'group', title: 'Reaction Group' }
+      await handler!({
+        type: 'message',
+        conversation,
+        message: {
+          id: 'reaction-1', conversationId: conversation.id, senderId: 'self',
+          timestamp: 1_800_000_500, content: { parts: [{ type: 'text', text: 'react to me' }] },
+        },
+      })
+      const desktopPush = await readPush(desktop, desktopKey)
+      const mobileMessagePush = await readPush(mobile, mobileKey)
+      expect((mobileMessagePush.updates[0] as any).message.message).toBe('react to me')
+      const reactionMessage = (desktopPush.updates[0] as any).message
+      const peer = {
+        _: 'inputPeerChannel', channelId: reactionMessage.peerId.channelId, accessHash: Long.ZERO,
+      }
+
+      // 桌面端从回应面板里挑 👍：本端在 RPC 结果里拿到刷新通知，手机端靠账号级广播拿到同一条通知。
+      await expect(callRpc(desktop, desktopKey, desktopSid, {
+        _: 'messages.sendReaction', peer, msgId: reactionMessage.id, addToRecent: true,
+        reaction: [{ _: 'reactionEmoji', emoticon: '👍' }],
+      }, 540)).resolves.toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateMessageReactions' }, { _: 'updateRecentReactions' }],
+      })
+      await expect(readPush(mobile, mobileKey)).resolves.toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateRecentReactions' }],
+      })
+      await expect(callRpc(mobile, mobileKey, mobileSid, {
+        _: 'messages.getRecentReactions', limit: 50, hash: Long.ZERO,
+      }, 542)).resolves.toMatchObject({
+        reactions: [{ _: 'reactionEmoji', emoticon: '👍' }],
+      })
+
+      // 不带 add_to_recent 的回应（双击快速回应）不写入最近使用，也不广播刷新。
+      await expect(callRpc(desktop, desktopKey, desktopSid, {
+        _: 'messages.sendReaction', peer, msgId: reactionMessage.id,
+        reaction: [{ _: 'reactionEmoji', emoticon: '🔥' }],
+      }, 544)).resolves.toMatchObject({
+        _: 'updates',
+        updates: [{ _: 'updateMessageReactions' }],
+      })
+      await expect(callRpc(mobile, mobileKey, mobileSid, {
+        _: 'messages.getRecentReactions', limit: 50, hash: Long.ZERO,
+      }, 546)).resolves.toMatchObject({
+        reactions: [{ _: 'reactionEmoji', emoticon: '👍' }],
       })
     } finally {
       mobile?.close()

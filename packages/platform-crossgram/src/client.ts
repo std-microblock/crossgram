@@ -318,20 +318,13 @@ export class QQNTClient {
     afterId?: string
     aroundUnreadSeq?: string
     latest?: number
-  } = {}): Promise<{ messages: WireMessage[], nextCursor?: string }> {
+    beforeSeq?: string
+  } = {}): Promise<{
+    messages: WireMessage[]
+    nextCursor?: string
+    sequenceRange?: { min: string, max: string }
+  }> {
     return this.revalidatedJson(`/conversations/${encodeURIComponent(id)}/history${queryString(query)}`)
-  }
-
-  searchMessages(id: string, query: {
-    q: string
-    cursor?: string
-    limit?: number
-    fromUserId?: string
-    minTimestamp?: number
-    maxTimestamp?: number
-    mediaKind?: 'image' | 'file'
-  }): Promise<{ messages: WireMessage[], nextCursor?: string }> {
-    return this.json(`/conversations/${encodeURIComponent(id)}/search${queryString(query)}`)
   }
 
   getGroupFiles(id: string, query: {

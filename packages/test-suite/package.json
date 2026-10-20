@@ -33,7 +33,7 @@
     "@mtproto-relay/update-store-memory": "workspace:*",
     "@satorijs/core": "^4.6.0",
     "cordis": "4.0.0-rc.7",
-    "cordis-webui-solidjs": "workspace:*",
+    "cordis-webui-react": "workspace:*",
     "long": "^5.3.2",
     "node-telegram-bot-api": "^1.2.0"
   }

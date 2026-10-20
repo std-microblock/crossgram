@@ -1,0 +1,204 @@
+@layer components {
+  .backfill-progress {
+    display: grid;
+    gap: 8px;
+    margin: 4px 0 14px;
+  }
+  .backfill-progress-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--dsw-alias-label-secondary);
+  }
+  .backfill-progress-head strong {
+    color: var(--dsw-alias-label-primary);
+    font-size: 13px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .backfill-progress p {
+    margin: 0;
+    font-size: 11.5px;
+  }
+  .progress-track {
+    height: 8px;
+    border-radius: 999px;
+    corner-shape: round;
+    background: var(--dsw-alias-interactive-bg-hover-solid);
+    overflow: hidden;
+  }
+  .progress-track > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--webui-accent);
+    transition: width 240ms ease;
+  }
+  .progress-track.small {
+    height: 4px;
+  }
+  .backfill-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px 20px;
+    margin: 0 0 14px;
+    padding: 12px 14px;
+    border-radius: var(--radius-lg);
+    background: var(--dsw-alias-interactive-bg-hover-solid);
+  }
+  .backfill-stats dt {
+    font-size: 11px;
+    color: var(--dsw-alias-label-tertiary);
+  }
+  .backfill-stats dd {
+    margin: 3px 0 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--dsw-alias-label-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .backfill-stats small {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--dsw-alias-label-tertiary);
+  }
+  .backfill-cell-progress {
+    display: grid;
+    gap: 4px;
+    min-width: 140px;
+  }
+  .backfill-cell-progress small {
+    font-size: 11px;
+    color: var(--dsw-alias-label-tertiary);
+  }
+  .timeline {
+    list-style: none;
+    display: grid;
+    margin: 10px 0 0;
+    padding: 0;
+  }
+  .timeline-item {
+    position: relative;
+    display: grid;
+    grid-template-columns: 118px minmax(0, 1fr);
+    gap: 14px;
+    padding: 0 0 14px 18px;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 15px;
+    bottom: 0;
+    width: 1px;
+    background: var(--dsw-alias-border-l3);
+  }
+  .timeline-item:last-child {
+    padding-bottom: 0;
+  }
+  .timeline-item:last-child::before {
+    display: none;
+  }
+  .timeline-dot {
+    position: absolute;
+    left: 0;
+    top: 5px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    corner-shape: round;
+    background: var(--webui-accent);
+    box-shadow: 0 0 0 3px
+      color-mix(in srgb, var(--webui-accent) 14%, transparent);
+  }
+  .timeline-item.failed .timeline-dot {
+    background: var(--dsw-alias-state-error-primary);
+    box-shadow: 0 0 0 3px
+      color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);
+  }
+  .timeline-item time {
+    padding-top: 2px;
+    font-size: 11px;
+    color: var(--dsw-alias-label-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+  .timeline-body {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .timeline-body strong {
+    font-size: 13px;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+  .timeline-body small {
+    font-size: 11.5px;
+    color: var(--dsw-alias-label-tertiary);
+    overflow-wrap: anywhere;
+  }
+  .timeline-error {
+    color: var(--dsw-alias-state-error-primary) !important;
+  }
+  @media (max-width: 560px) {
+    .timeline-item {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 3px;
+      padding-left: 16px;
+    }
+    .backfill-stats {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 760px) {
+    /* Keep the conversation, its progress and the retry action; the rest is
+       available on wider screens instead of forcing a horizontal pan. */
+    .history-backfill .table-scroll table th:nth-child(2),
+    .history-backfill .table-scroll table td:nth-child(2),
+    .history-backfill .table-scroll table th:nth-child(4),
+    .history-backfill .table-scroll table td:nth-child(4),
+    .history-backfill .table-scroll table th:nth-child(5),
+    .history-backfill .table-scroll table td:nth-child(5),
+    .history-backfill .table-scroll table th:nth-child(6),
+    .history-backfill .table-scroll table td:nth-child(6),
+    .history-backfill .table-scroll table th:nth-child(7),
+    .history-backfill .table-scroll table td:nth-child(7) {
+      display: none;
+    }
+    .history-backfill .table-scroll table {
+      min-width: 0;
+      width: 100%;
+      table-layout: fixed;
+    }
+    .history-backfill .table-scroll th,
+    .history-backfill .table-scroll td {
+      padding: 8px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .history-backfill .table-scroll th:nth-child(3),
+    .history-backfill .table-scroll td:nth-child(3) {
+      width: 36%;
+    }
+    .history-backfill .table-scroll th:nth-child(8),
+    .history-backfill .table-scroll td:nth-child(8) {
+      width: 76px;
+    }
+    .history-backfill .table-scroll td .button {
+      min-height: 30px;
+      padding: 0 8px;
+      font-size: 11px;
+    }
+    .history-backfill .table-scroll th {
+      font-size: 10px;
+      letter-spacing: 0.04em;
+    }
+    .history-backfill .backfill-cell-progress {
+      min-width: 0;
+    }
+  }
+}

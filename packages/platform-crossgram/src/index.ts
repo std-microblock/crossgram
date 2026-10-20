@@ -12,7 +12,7 @@ import {
   type IMDirectDownload, type IMDownloadOptions, type IMEvent, type IMHistoryPage, type IMHistoryQuery, type IMMedia, type IMMessage, type IMMessageInput, type IMMessageTarget,
   type IMMediaInput, type IMMediaUploadPreparation, type IMMediaUploadProbe,
   type IMMessageBundle, type IMMessageSnapshot, type JsonObject, type JsonValue,
-  type IMMessageSearchPage, type IMMessageSearchQuery, type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMSticker, type IMTextEntity, type IMTransferOptions,
+  type IMPageQuery, type IMPlatform, type IMReactionActorPage, type IMReactionActorPageRequest, type IMReactionContext, type IMReactionResource, type IMReactionTarget, type IMReadTarget, type IMRequest, type IMRequestAction, type IMRequestPage, type IMRequestQuery, type IMSticker, type IMTextEntity, type IMTransferOptions,
   type IMUser, type IMUserPage, type PlatformCapabilities, type PlatformSession, type Unsubscribe,
   type VoiceCallMediaProvider, type VoiceWorkerCall, type VoiceWorkerMediaEndpoint,
 } from '@mtproto-relay/bridge'
@@ -40,6 +40,9 @@ import type {
 
 /** 支持的最低 qqnt-bridge 协议版本；更高版本的增量能力在各自调用处按需检查。 */
 const MIN_PROTOCOL_VERSION = 19
+/** /history 支持 beforeSeq 与 sequenceRange 的最低 bridge 协议版本。 */
+export const SEQUENCE_HISTORY_PROTOCOL_VERSION = 36
+const PROTOCOL_PROBE_TTL_MS = 5 * 60_000
 /** 单次戳一戳请求的最大连击数。 */
 const QQ_POKE_MAX_COUNT = 10
 
@@ -169,7 +172,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   readonly capabilities: PlatformCapabilities = {
     history: true,
     readState: { markRead: true, events: false },
-    search: true,
+    // 群聊 msgSeq 连续；协议 36 起 /history 支持 beforeSeq 并返回原始 sequenceRange。
+    sequenceHistory: 'group',
     send: {
       text: true,
       images: true,
@@ -888,6 +892,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     conversation: IMConversationRef,
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<QQMediaLocator>> {
+    if (query.beforeSequence !== undefined) return this.getHistoryBySequence(session, conversation, query)
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
     if (isFilteredConversationId(conversation.id)) return { messages: [] }
     const response = await this.client.getHistory(
@@ -913,70 +918,52 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
-  async searchMessages(
+  private protocolProbe?: { version: number, checkedAt: number }
+
+  /** 读取并短暂缓存 bridge 协议版本，用于按版本启用新增的历史接口。 */
+  async bridgeProtocolVersion(): Promise<number> {
+    const cached = this.protocolProbe
+    if (cached && Date.now() - cached.checkedAt < PROTOCOL_PROBE_TTL_MS) return cached.version
+    const status = await this.client.status()
+    const version = Number.isInteger(status.protocolVersion) ? status.protocolVersion : 0
+    this.protocolProbe = { version, checkedAt: Date.now() }
+    return version
+  }
+
+  /**
+   * 按 msgSeq 向更早方向读取一页，供服务端回填历史空洞。
+   * 旧版 bridge 会忽略 beforeSeq 并返回最新一页，因此先校验协议版本，不满足时直接报错而不是返回错误的数据。
+   */
+  private async getHistoryBySequence(
     session: PlatformSession,
     conversation: IMConversationRef,
-    query: IMMessageSearchQuery,
-  ): Promise<IMMessageSearchPage<QQMediaLocator>> {
+    query: IMHistoryQuery,
+  ): Promise<IMHistoryPage<QQMediaLocator>> {
+    if (!/^\d+$/.test(query.beforeSequence ?? '') || query.beforeSequence === '0') {
+      throw new Error(`invalid beforeSequence: ${query.beforeSequence}`)
+    }
     if (isFilteredConversationId(conversation.id)) return { messages: [] }
-    if (isFilteredConversationId(conversation.id)) return { messages: [] }
-    if (query.mediaKind === 'file' && this.isGroupConversation(conversation.id)) {
-      const page = await this.listGroupFiles(session, conversation, {
-        cursor: query.cursor,
-        limit: query.limit,
-      })
-      const normalized = query.query.trim().toLocaleLowerCase()
-      const files = page.items.filter((item) => item.type === 'file').filter((file) => {
-        if (normalized && !file.name.toLocaleLowerCase().includes(normalized)) return false
-        if (query.fromUserId && file.uploaderId !== query.fromUserId) return false
-        if (query.minTimestamp && file.uploadTime <= query.minTimestamp) return false
-        if (query.maxTimestamp && file.uploadTime >= query.maxTimestamp) return false
-        return true
-      })
-      return {
-        messages: files.map((file) => ({
-          id: `qq-group-file:${file.id}`,
-          conversationId: conversation.id,
-          senderId: file.uploaderId || session.userId,
-          sender: {
-            id: file.uploaderId || session.userId,
-            firstName: file.uploaderName || file.uploaderId || 'QQ',
-            username: file.uploaderId || undefined,
-          },
-          timestamp: file.uploadTime,
-          outgoing: false,
-          metadata: { qqGroupFileId: file.id, qqGroupFileParentId: file.parentId },
-          content: {
-            parts: [
-              { type: 'text' as const, text: file.name },
-              { type: 'media' as const, media: file.media },
-            ],
-          },
-        })),
-        nextCursor: page.nextCursor,
-        total: page.total,
-      }
+    const version = await this.bridgeProtocolVersion()
+    if (version < SEQUENCE_HISTORY_PROTOCOL_VERSION) {
+      throw new Error(`QQNT bridge protocol ${version} does not support sequence history; protocol ${SEQUENCE_HISTORY_PROTOCOL_VERSION} is required`)
     }
     const reactionWarmup = this.ensureReactionCatalog().catch(() => undefined)
-    const response = await this.client.searchMessages(
-      await this.wireConversationId(session, conversation.id), {
-      q: query.query,
-      cursor: query.cursor,
+    const response = await this.client.getHistory(await this.wireConversationId(session, conversation.id), {
+      beforeSeq: query.beforeSequence,
       limit: query.limit,
-      fromUserId: query.fromUserId,
-      minTimestamp: query.minTimestamp,
-      maxTimestamp: query.maxTimestamp,
-      mediaKind: query.mediaKind,
     })
     await waitAtMost(reactionWarmup, REACTION_CATALOG_GRACE_MS)
     if (response.messages.some(wireMessageHasQQFace)) await reactionWarmup
+    const range = response.sequenceRange
     return {
       messages: await Promise.all(this.collapseSplitOutgoingMessages(response.messages)
         .filter((message) => !this.isFilteredGrayTip(message)).map((message) =>
-        this.prepareRequestedMessage(
-          session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
-        ))),
-      nextCursor: response.nextCursor,
+          this.prepareRequestedMessage(
+            session, this.conversationFor(conversation.id), this.mapMessage(message, conversation.id),
+          ))),
+      ...(range && /^\d+$/.test(range.min) && /^\d+$/.test(range.max)
+        ? { coverage: { minSequence: range.min, maxSequence: range.max } }
+        : {}),
     }
   }
 

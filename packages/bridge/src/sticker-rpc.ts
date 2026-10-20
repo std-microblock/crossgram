@@ -561,7 +561,9 @@ export class StickerRpc {
 
   private async _resolveInputDocument(input: tl.TypeInputDocument): Promise<ResolvedSticker> {
     if (input._ !== 'inputDocument') throw new RpcError(400, 'DOCUMENT_INVALID')
-    const resolved = await this._resolveDocument(input.id.toNumber())
+    // 客户端发送贴纸时会把 document 的 file reference 一起带回来，它是贴纸身份的自描述载荷；
+    // 只按 id 查内存投影会让重启后（或投影版本轮换后）的旧贴纸一律变成「发不出去」。
+    const resolved = await this._resolveDocument(input.id.toNumber(), input.fileReference)
     if (!resolved) throw new RpcError(400, 'DOCUMENT_INVALID')
     return resolved
   }
@@ -607,9 +609,12 @@ export class StickerRpc {
         return
       }
       const stickerId = body.slice(providerPrefix.length, versionSeparator)
-      if (!stickerId || this._documentId(providerId, stickerId) !== id) return
+      if (!stickerId) return
+      // 这里不再要求 id 与当前投影算出的 document id 相等：file reference 本身已经携带贴纸身份，
+      // 而投影版本轮换或 provider 把别名归一（QQ 收藏表情的 md5/resId 两种形态）之后，
+      // 客户端缓存的旧 document id 仍然必须能发送和下载，否则一次版本升级就会让旧贴纸永久「发不出去」。
       const sticker = await provider.getSticker(this._context(), stickerId)
-      if (!sticker || sticker.stickerId !== stickerId) return
+      if (!sticker) return
       const resolved = { providerId, provider, sticker: { ...sticker, providerId } }
       this._documents.set(id, resolved)
       return resolved

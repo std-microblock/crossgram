@@ -1,0 +1,6 @@
+enabled: 启动时是否开启空闲回填（可在 WebUI 页面随时开关，运行时开关不写回配置）。
+idleAfterMs: 账号最近多久没有客户端操作才算空闲。
+intervalMs: 两次上游历史请求之间的最小间隔，另加最多 50% 的随机抖动。
+pageSize: 每次向上游请求的消息条数。
+dailyRequestCap: 每个账号每天（UTC）最多发出的回填请求数。
+maxAgeDays: 向更早方向追溯的最大天数，0 表示不限。

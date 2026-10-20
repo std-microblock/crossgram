@@ -77,7 +77,7 @@
   label: WebUI
   config:
     - id: webui-core
-      name: 'cordis-webui-solidjs'
+      name: 'cordis-webui-react'
     - id: database-webui
       name: '@cordisjs/plugin-database-webui'
     - id: http-webui
@@ -92,3 +92,12 @@
     historySeconds: 900
     topMethods: 40
     topIps: 100
+- id: history-backfill
+  name: '@mtproto-relay/history-backfill'
+  config:
+    enabled: true
+    idleAfterMs: 60000
+    intervalMs: 3000
+    pageSize: 50
+    dailyRequestCap: 3000
+    maxAgeDays: 180

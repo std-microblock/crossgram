@@ -1,3 +1,4 @@
 platformId: 要导出的已配置 IM 平台会话对应的 Cordis 注册 ID。
 platform: 导出 Bot 使用的 Satori 平台名；默认使用适配器的平台类型。
 maxMediaBytes: 每个出站 Satori 媒体流允许读取的最大字节数。
+userIdSpace: 导出的用户 ID 空间；uin 优先使用数字 QQ 号（默认），uid 始终使用 NT UID。

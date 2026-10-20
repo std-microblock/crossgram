@@ -6,8 +6,11 @@ export default defineConfig({
   root: import.meta.dirname,
   plugins: [unyaml(), jsToTsPlugin()],
   test: {
-    include: ['packages/**/*.e2e.test.{ts,tsx}', 'packages/**/e2e.test.{ts,tsx}'],
-    exclude: ['packages/cordis-webui-solidjs/**'],
+    include: [
+      'packages/**/*.e2e.test.{ts,tsx}',
+      'packages/**/e2e.test.{ts,tsx}',
+    ],
+    exclude: ['packages/cordis-webui-react/**'],
     setupFiles: ['vitest.plugins-tsx.mts'],
     pool: 'threads',
     testTimeout: 30_000,

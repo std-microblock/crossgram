@@ -27,14 +27,14 @@ describe('Crossgram Linux deployment', () => {
     expect(stages.every((stage) => stage.startsWith('100755 '))).toBe(true)
   })
 
-  it('selects the Solid WebUI in both checked-in application configs', () => {
+  it('selects the React WebUI in both checked-in application configs', () => {
     for (const file of ['app.yml', 'deploy/app.production.yml']) {
       const source = readFileSync(join(root, file), 'utf8')
-      expect(source, file).toContain("name: 'cordis-webui-solidjs'")
+      expect(source, file).toContain("name: 'cordis-webui-react'")
       expect(source, file).not.toContain("'@cordisjs/plugin-webui'")
       expect(source, file).not.toContain('@cordisjs/plugin-server-webui')
     }
-    expect(readFileSync(join(root, 'app.yml'), 'utf8')).toContain("name: 'cordis-webui-solidjs/server'")
+    expect(readFileSync(join(root, 'app.yml'), 'utf8')).toContain("name: 'cordis-webui-react/server'")
   })
 
   it('runs as an unprivileged hardened systemd service with persistent state', () => {
@@ -61,8 +61,9 @@ describe('Crossgram Linux deployment', () => {
     expect(config).toContain('results: /var/lib/crossgram/debug-results')
     expect(config).toContain('verifierSecret: ${TELEGRAM_BOT_TOKEN_VERIFIER_SECRET}')
     expect(config).toContain("name: '@mtproto-relay/mtproto-statistics'")
+    expect(config).toContain("name: '@mtproto-relay/history-backfill'")
     expect(config).toContain("name: '@mtproto-relay/update-store-database'")
-    expect(config).toContain("name: 'cordis-webui-solidjs'")
+    expect(config).toContain("name: 'cordis-webui-react'")
     expect(config).not.toContain("'@cordisjs/plugin-webui'")
     expect(config).not.toContain('@cordisjs/plugin-server-webui')
     expect(config).toContain("name: '@cordisjs/plugin-loader-webui'")
@@ -233,7 +234,7 @@ describe('Crossgram Linux deployment', () => {
     }
   })
 })
-  it('migrates the WebUI group to the Solid engine exactly once', () => {
+  it('migrates the WebUI group to the React engine exactly once', () => {
     const source = `- id: bridge
   name: '@mtproto-relay/bridge'
 - id: webui
@@ -250,8 +251,8 @@ describe('Crossgram Linux deployment', () => {
         requestLimit: 100
 `
     const migrated = migrateWebuiPlugin(source)
-    expect(migrated).toContain("      name: 'cordis-webui-solidjs'")
-    expect(migrated).toContain("      name: 'cordis-webui-solidjs/server'")
+    expect(migrated).toContain("      name: 'cordis-webui-react'")
+    expect(migrated).toContain("      name: 'cordis-webui-react/server'")
     expect(migrated).not.toContain('@cordisjs/plugin-webui')
     expect(migrated).not.toContain('@cordisjs/plugin-server-webui')
     // The renamed entry keeps its id and the monitor keeps its configuration.
@@ -260,10 +261,17 @@ describe('Crossgram Linux deployment', () => {
     // Deeper indentation is preserved for a config nested one level further down.
     const nested = `- id: group\n  name: '@cordisjs/plugin-group'\n  config:\n    - id: webui\n      name: '@cordisjs/plugin-webui'\n`
     expect(migrateWebuiPlugin(nested)).toBe(
-      `- id: group\n  name: '@cordisjs/plugin-group'\n  config:\n    - id: webui\n      name: 'cordis-webui-solidjs'\n    - id: webui-server-monitor\n      name: 'cordis-webui-solidjs/server'\n`,
+      `- id: group\n  name: '@cordisjs/plugin-group'\n  config:\n    - id: webui\n      name: 'cordis-webui-react'\n    - id: webui-server-monitor\n      name: 'cordis-webui-react/server'\n`,
     )
     // Idempotent, and a config without any WebUI entry is left alone.
     expect(migrateWebuiPlugin(migrated)).toBe(migrated)
     expect(migrateWebuiPlugin("- id: bridge\n  name: '@mtproto-relay/bridge'\n")).toBe("- id: bridge\n  name: '@mtproto-relay/bridge'\n")
+    // Hand-written runtime configs may use unquoted scalars, and the engine's
+    // own config must stay with the engine instead of moving to the monitor.
+    const unquoted = `- id: webui\n  name: cordis-webui-solidjs\n  config:\n    sessionExpiry: 604800000\n`
+    const renamed = migrateWebuiPlugin(unquoted)
+    expect(renamed).toBe(
+      `- id: webui\n  name: 'cordis-webui-react'\n  config:\n    sessionExpiry: 604800000\n- id: webui-server-monitor\n  name: 'cordis-webui-react/server'\n`,
+    )
   })
 

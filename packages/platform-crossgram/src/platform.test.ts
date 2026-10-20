@@ -978,71 +978,40 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
-  it('maps native message-search pages and forwards every filter', async () => {
+  it('loads history by sequence and keeps the raw sequence range as coverage', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
-    platform.client.searchMessages = vi.fn(async () => ({
-      nextCursor: 'native-next',
+    platform.client.status = vi.fn(async () => ({ ready: true, protocolVersion: 36 })) as never
+    platform.client.getHistory = vi.fn(async () => ({
       messages: [{
-        id: 'found', conversationId: '2:group', senderId: 'alice', timestamp: 10, outgoing: false,
-        parts: [{ type: 'text' as const, text: 'needle' }],
+        id: 'seq-41', conversationId: '2:group', senderId: 'alice', timestamp: 10, outgoing: false,
+        parts: [{ type: 'text' as const, text: 'older' }],
       }],
+      sequenceRange: { min: '38', max: '42' },
     }))
 
-    await expect(platform.searchMessages(session, { id: '2:group' }, {
-      query: 'needle', cursor: 'native-cursor', limit: 30, fromUserId: 'alice',
-      minTimestamp: 5, maxTimestamp: 20, mediaKind: 'image',
-    })).resolves.toMatchObject({
-      messages: [{ id: 'found', content: { parts: [{ type: 'text', text: 'needle' }] } }],
-      nextCursor: 'native-next',
-    })
-    expect(platform.client.searchMessages).toHaveBeenCalledWith('2:group', {
-      q: 'needle', cursor: 'native-cursor', limit: 30, fromUserId: 'alice',
-      minTimestamp: 5, maxTimestamp: 20, mediaKind: 'image',
-    })
+    await expect(platform.getHistory(session, { id: '2:group' }, { beforeSequence: '42', limit: 5 }))
+      .resolves.toMatchObject({
+        messages: [{ id: 'seq-41', content: { parts: [{ type: 'text', text: 'older' }] } }],
+        coverage: { minSequence: '38', maxSequence: '42' },
+      })
+    expect(platform.client.getHistory).toHaveBeenCalledWith('2:group', { beforeSeq: '42', limit: 5 })
   })
 
-  it('projects QQ group files into Telegram document-search messages', async () => {
+  it('refuses sequence history on bridges that would silently return the latest page', async () => {
     const platform = new QQNTPlatform()
-    platform.client.searchMessages = vi.fn()
-    platform.client.getGroupFiles = vi.fn(async () => ({
-      total: 2,
-      nextCursor: '2',
-      items: [{
-        type: 'folder' as const, id: 'folder', parentId: '', name: '资料',
-        createTime: 1, modifyTime: 2, creatorId: '1', creatorName: 'Alice', fileCount: 1,
-      }, {
-        type: 'file' as const, id: 'uuid', parentId: '', name: 'manual.pdf', size: 9,
-        uploadTime: 100, modifyTime: 110, downloadCount: 4, uploaderId: '42', uploaderName: 'Bob',
-        busId: 102,
-        media: {
-          id: 'group-file:uuid', kind: 'file' as const, name: 'manual.pdf', size: 9,
-          locator: {
-            messageId: 'group-file:uuid', elementId: 'element', chatType: 2 as const,
-            peerUid: 'group', kind: 'file' as const, fileName: 'manual.pdf',
-            fileSize: '9', fileUuid: 'uuid', fileBizId: 102,
-          },
-        },
-      }],
-    }))
+    platform.client.status = vi.fn(async () => ({ ready: true, protocolVersion: 35 })) as never
+    platform.client.getHistory = vi.fn()
 
-    await expect(platform.searchMessages(session, { id: '2:group' }, {
-      query: 'manual', cursor: '0', limit: 20, mediaKind: 'file',
-    })).resolves.toMatchObject({
-      total: 2,
-      nextCursor: '2',
-      messages: [{
-        id: 'qq-group-file:uuid', senderId: '42', timestamp: 100,
-        content: { parts: [
-          { type: 'text', text: 'manual.pdf' },
-          { type: 'media', media: { name: 'manual.pdf', locator: { fileUuid: 'uuid' } } },
-        ] },
-      }],
-    })
-    expect(platform.client.getGroupFiles).toHaveBeenCalledWith('2:group', { cursor: '0', limit: 20 })
-    expect(platform.client.searchMessages).not.toHaveBeenCalled()
+    await expect(platform.getHistory(session, { id: '2:group' }, { beforeSequence: '42' }))
+      .rejects.toThrow('does not support sequence history')
+    await expect(platform.getHistory(session, { id: '2:group' }, { beforeSequence: 'x' }))
+      .rejects.toThrow('invalid beforeSequence')
+    expect(platform.client.getHistory).not.toHaveBeenCalled()
+    expect(platform.capabilities.sequenceHistory).toBe('group')
+    expect('search' in platform.capabilities).toBe(false)
+    expect('searchMessages' in platform).toBe(false)
   })
-
 
   it('maps QQ wire serviceAction into IMMessage.content.serviceAction', async () => {
     const platform = new QQNTPlatform()
@@ -1107,7 +1076,7 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
-  it('filters reaction gray tips from history, search, direct lookup, and dialog previews by default', async () => {
+  it('filters reaction gray tips from history, sequence history, direct lookup, and dialog previews by default', async () => {
     const platform = new QQNTPlatform()
     const reactionTip = {
       id: 'reaction-tip', conversationId: '2:group', senderId: 'alice', timestamp: 2, outgoing: false,
@@ -1119,7 +1088,7 @@ describe('QQNTPlatform mapping', () => {
     }
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))
     platform.client.getHistory = vi.fn(async () => ({ messages: [reactionTip, memberTip] }))
-    platform.client.searchMessages = vi.fn(async () => ({ messages: [reactionTip] }))
+    platform.client.status = vi.fn(async () => ({ ready: true, protocolVersion: 36 })) as never
     platform.client.getMessage = vi.fn(async () => reactionTip)
     platform.client.getDialogs = vi.fn(async () => ({ conversations: [{
       id: '2:group', kind: 'group' as const, title: 'Group', peerUid: 'group', peerUin: 'group',
@@ -1129,8 +1098,8 @@ describe('QQNTPlatform mapping', () => {
     await expect(platform.getHistory(session, { id: '2:group' })).resolves.toMatchObject({
       messages: [{ id: 'member-tip' }],
     })
-    await expect(platform.searchMessages(session, { id: '2:group' }, { query: '回应' }))
-      .resolves.toMatchObject({ messages: [] })
+    await expect(platform.getHistory(session, { id: '2:group' }, { beforeSequence: '9' }))
+      .resolves.toMatchObject({ messages: [{ id: 'member-tip' }] })
     await expect(platform.getMessage(session, { id: '2:group' }, 'reaction-tip')).resolves.toBeNull()
     await expect(platform.getDialogs(session)).resolves.toMatchObject({
       dialogs: [{ lastMessage: undefined, readInboxMaxMessage: { id: 'member-tip' } }],
@@ -1433,7 +1402,7 @@ describe('QQNTPlatform mapping', () => {
     })
     await expect(platform.getConversation(session, '0')).resolves.toBeNull()
     await expect(platform.getHistory(session, { id: '0' })).resolves.toEqual({ messages: [] })
-    await expect(platform.searchMessages(session, { id: '0' }, { query: 'ignored' })).resolves.toEqual({ messages: [] })
+    await expect(platform.getHistory(session, { id: '0' }, { beforeSequence: '1' })).resolves.toEqual({ messages: [] })
     await expect(platform.getMessage(session, { id: '0' }, 'ghost')).resolves.toBeNull()
     await expect(platform.markRead(session, {
       conversationId: '0', messageId: 'ghost',

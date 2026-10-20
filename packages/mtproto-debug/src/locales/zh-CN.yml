@@ -1,3 +1,6 @@
 maxEvents: 内存中保留的已解码 MTProto 事件数量上限。
 initiallyPaused: 启动后保持暂停，等待用户手动开始捕获。
 apiPath: 查询已解码 MTProto 抓包事件的只读 HTTP JSON 接口路径。
+recordingsPath: 保存的抓包录制（JSON 文件）存放目录。
+recordingsApiPath: 保存、列出、下载和删除抓包录制的 HTTP 接口路径。
+maxRecordings: 磁盘上保留的录制数量上限，超出时淘汰最旧的录制。

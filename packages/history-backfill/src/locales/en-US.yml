@@ -1,0 +1,6 @@
+enabled: Start backfilling on boot (toggle any time from the WebUI page; the runtime switch is not written back).
+idleAfterMs: How long an account must go without client activity before it counts as idle.
+intervalMs: Minimum gap between two upstream history requests, plus up to 50% random jitter.
+pageSize: Messages requested from upstream per call.
+dailyRequestCap: Maximum backfill requests per account per UTC day.
+maxAgeDays: How far back to walk history, in days; 0 means unlimited.

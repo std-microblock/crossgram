@@ -20,7 +20,7 @@
       ]
     },
     "webui": {
-      "framework": "solid",
+      "framework": "react",
       "entry": "client/index.ts",
       "pages": [
         {
@@ -54,7 +54,7 @@
     "@cordisjs/plugin-database": "^4.0.0",
     "@cordisjs/plugin-server": "^1.6.0",
     "cordis": "^4.0.0-rc.5",
-    "cordis-webui-solidjs": "workspace:*"
+    "cordis-webui-react": "workspace:*"
   },
   "dependencies": {
     "@mtcute/core": "^0.32.1",
@@ -72,7 +72,9 @@
     "@fuman/io": "^0.0.21",
     "@fuman/utils": "^0.0.21",
     "@mtcute/node": "^0.32.1",
-    "happy-dom": "^20.11.2",
-    "solid-js": "^1.9.9"
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "happy-dom": "^20.11.2"
   }
 }
