@@ -1197,6 +1197,103 @@ describe('QQNTClient streaming transport', () => {
     expect(second.toString()).toBe('efgh')
   })
 
+  describe('共享直链刷新等待取消', () => {
+    const locator = {
+      messageId: 'image', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'image' as const, fileName: 'photo.jpg', fileUuid: 'image-uuid',
+    }
+
+    it('已取消的下载不发起直链请求', async () => {
+      const fetch = vi.fn()
+      const client = new QQNTClient({ fetch })
+      const controller = new AbortController()
+      const reason = new Error('归档已取消')
+      controller.abort(reason)
+
+      await expect(collect(client.downloadFile(locator, { signal: controller.signal }))).rejects.toBe(reason)
+      expect(fetch).not.toHaveBeenCalled()
+    })
+
+    it('直链请求永不返回时仍立即取消下载并移除监听', async () => {
+      const fetch = vi.fn(() => new Promise<Response>(() => {}))
+      const client = new QQNTClient({ fetch })
+      const controller = new AbortController()
+      const add = vi.spyOn(controller.signal, 'addEventListener')
+      const remove = vi.spyOn(controller.signal, 'removeEventListener')
+      const reason = new Error('图片归档超时')
+      const download = collect(client.downloadFile(locator, { signal: controller.signal }))
+      const rejected = expect(download).rejects.toBe(reason)
+
+      controller.abort(reason)
+      await rejected
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(add).toHaveBeenCalledTimes(1)
+      expect(remove).toHaveBeenCalledExactlyOnceWith('abort', add.mock.calls[0]![1])
+    }, 1_000)
+
+    it('取消一个调用不取消其他调用共享的请求', async () => {
+      const lookup = Promise.withResolvers<Response>()
+      const fetch = vi.fn(() => lookup.promise)
+      const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', token: 'bridge-token', fetch })
+      const controller = new AbortController()
+      const other = new AbortController()
+      const first = collect(client.downloadFile(locator, { signal: controller.signal }))
+      const second = client.resolveFileUrl(locator, other.signal)
+      const reason = new Error('首个调用超时')
+      const rejected = expect(first).rejects.toBe(reason)
+
+      controller.abort(reason)
+      await rejected
+      const direct = { url: 'https://cdn.qq.example/image', expiresAt: Date.now() + 60_000 }
+      lookup.resolve(Response.json(direct))
+
+      await expect(second).resolves.toEqual(direct)
+      await expect(client.resolveFileUrl(locator)).resolves.toEqual(direct)
+      expect(fetch).toHaveBeenCalledExactlyOnceWith('http://bridge.invalid/v1/files/direct-url', {
+        method: 'POST',
+        headers: { authorization: 'Bearer bridge-token', 'content-type': 'application/json' },
+        body: JSON.stringify(locator),
+      })
+    }, 1_000)
+
+    it.each(['成功', '失败'] as const)('直链请求%s后移除调用方监听', async (outcome) => {
+      const lookup = Promise.withResolvers<Response>()
+      const client = new QQNTClient({ fetch: vi.fn(() => lookup.promise) })
+      const controller = new AbortController()
+      const add = vi.spyOn(controller.signal, 'addEventListener')
+      const remove = vi.spyOn(controller.signal, 'removeEventListener')
+      const pending = client.resolveFileUrl(locator, controller.signal)
+      const direct = { url: 'https://cdn.qq.example/image', expiresAt: Date.now() + 60_000 }
+      const error = new Error('直链请求失败')
+
+      if (outcome === '成功') {
+        lookup.resolve(Response.json(direct))
+        await expect(pending).resolves.toEqual(direct)
+      } else {
+        lookup.reject(error)
+        await expect(pending).rejects.toBe(error)
+      }
+
+      expect(add).toHaveBeenCalledTimes(1)
+      expect(remove).toHaveBeenCalledExactlyOnceWith('abort', add.mock.calls[0]![1])
+    })
+
+    it('调用取消后共享请求再失败不会产生未处理拒绝', async () => {
+      const lookup = Promise.withResolvers<Response>()
+      const client = new QQNTClient({ fetch: vi.fn(() => lookup.promise) })
+      const controller = new AbortController()
+      const pending = client.resolveFileUrl(locator, controller.signal)
+      const reason = new Error('图片归档超时')
+      const rejected = expect(pending).rejects.toBe(reason)
+
+      controller.abort(reason)
+      await rejected
+      lookup.reject(new Error('直链请求稍后失败'))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }, 1_000)
+  })
+
   it('reuses a file direct URL until the bridge-provided expiry and then refreshes it', async () => {
     let now = 1_800_000_000_000
     vi.spyOn(Date, 'now').mockImplementation(() => now)

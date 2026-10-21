@@ -1,8 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { ConnectionContext } from 'cordis-webui-react/client'
+import { setSessionToken } from 'cordis-webui-react/session'
 import type {
+  ImageStorageResult,
   BotDashboardData,
   CrossGramServerConfig,
   PlatformAccountDashboardData,
@@ -11,6 +20,7 @@ import type {
 import AccountsPage from './accounts.js'
 import BotsPage from './bots.js'
 import StickersPage from './stickers.js'
+import StoragePage from './storage.js'
 
 /**
  * Minimal stand-in for the WebSocket connection: `useChannel` subscribes through
@@ -41,7 +51,13 @@ function fakeConnection(entryId: string, value: unknown, methods: string[]) {
     }),
     subscribe: () => () => {},
     getSnapshot: () => state,
-    rpc: vi.fn(async () => {}),
+    rpc: vi.fn(
+      async (
+        _entryId: string,
+        _method: string,
+        _args: unknown[],
+      ): Promise<unknown> => undefined,
+    ),
     push(next: unknown) {
       current = { value: next, ready: true }
       for (const listen of listeners) listen()
@@ -60,6 +76,7 @@ function mount(connection: FakeConnection, page: ReactElement) {
 
 afterEach(() => {
   cleanup()
+  setSessionToken(null)
   vi.restoreAllMocks()
 })
 
@@ -325,5 +342,281 @@ describe('sticker collections page', () => {
       target: { value: 'zzz' },
     })
     expect(container.textContent).toContain('No matching collections')
+  })
+})
+
+describe('image storage page', () => {
+  function storageResult(
+    title = 'Stored group',
+    count = 1,
+    bytes = 1024,
+  ): ImageStorageResult {
+    return {
+      count,
+      bytes,
+      pendingCount: 0,
+      groups: bytes
+        ? [
+            {
+              platformSessionId: 's1',
+              conversationId: 'group-1',
+              conversationTitle: title,
+              count,
+              bytes,
+            },
+          ]
+        : [],
+      totalGroups: 26,
+      page: 1,
+      pageSize: 25,
+    }
+  }
+
+  function storageConnection() {
+    return fakeConnection(
+      'page',
+      {
+        imageStorageEnabled: false,
+        stickerAccounts: [
+          { platformSessionId: 's1', displayName: 'Main QQ', userId: '42' },
+        ],
+      },
+      ['getImageStorage', 'deleteImageStorage'],
+    )
+  }
+
+  it('commits conversation text on blur, resets pagination, and ignores superseded filter responses', async () => {
+    setSessionToken('member')
+    const connection = storageConnection()
+    connection.rpc.mockResolvedValue(storageResult())
+    const { container, getByRole, getByLabelText } = mount(
+      connection,
+      <StoragePage entryId="page" path="/image-storage" />,
+    )
+    await waitFor(() => expect(container.textContent).toContain('Stored group'))
+    fireEvent.click(getByRole('button', { name: 'Next page' }))
+    await waitFor(() => expect(container.textContent).toContain('Page 2 of 2'))
+    fireEvent.change(getByLabelText('Account'), { target: { value: 's1' } })
+    await waitFor(() => expect(container.textContent).toContain('Page 1 of 2'))
+    expect(connection.rpc).toHaveBeenLastCalledWith('page', 'getImageStorage', [
+      {
+        platformSessionId: 's1',
+        groupBy: 'conversation',
+        page: 1,
+        pageSize: 25,
+      },
+      'member',
+    ])
+
+    const first = Promise.withResolvers<ImageStorageResult>(),
+      latest = Promise.withResolvers<ImageStorageResult>(),
+      input = getByLabelText(
+        'Conversation ID (group or private)',
+      ) as HTMLInputElement,
+      beforeTyping = connection.rpc.mock.calls.length
+    connection.rpc
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(latest.promise)
+    fireEvent.change(input, { target: { value: 'old' } })
+    expect(input.disabled).toBe(false)
+    expect(connection.rpc).toHaveBeenCalledTimes(beforeTyping)
+    fireEvent.blur(input)
+    expect(connection.rpc).toHaveBeenLastCalledWith('page', 'getImageStorage', [
+      {
+        platformSessionId: 's1',
+        conversationId: 'old',
+        groupBy: 'conversation',
+        page: 1,
+        pageSize: 25,
+      },
+      'member',
+    ])
+    expect(container.textContent).not.toContain('Stored group')
+    expect(input.disabled).toBe(false)
+    fireEvent.change(input, { target: { value: ' new ' } })
+    fireEvent.blur(input)
+    expect(connection.rpc).toHaveBeenLastCalledWith('page', 'getImageStorage', [
+      {
+        platformSessionId: 's1',
+        conversationId: 'new',
+        groupBy: 'conversation',
+        page: 1,
+        pageSize: 25,
+      },
+      'member',
+    ])
+    await act(async () => latest.resolve(storageResult('Newest group', 2)))
+    expect(container.textContent).toContain('Newest group')
+    await act(async () => first.resolve(storageResult('Obsolete group', 99)))
+    expect(container.textContent).toContain('Newest group')
+    expect(container.textContent).not.toContain('Obsolete group')
+  })
+
+  it('clears old rows and confirmation on token switch and logout, including late responses', async () => {
+    setSessionToken('first-member')
+    const connection = storageConnection()
+    connection.rpc.mockResolvedValue(storageResult('First member group'))
+    const { container, getByRole, queryByRole } = mount(
+      connection,
+      <StoragePage entryId="page" path="/image-storage" />,
+    )
+    await waitFor(() =>
+      expect(container.textContent).toContain('First member group'),
+    )
+    fireEvent.click(getByRole('button', { name: 'Delete filtered copies' }))
+    const first = Promise.withResolvers<ImageStorageResult>(),
+      second = Promise.withResolvers<ImageStorageResult>()
+    connection.rpc
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    fireEvent.click(getByRole('button', { name: 'Refresh' }))
+    act(() => {
+      setSessionToken('second-member')
+      window.dispatchEvent(new Event('focus'))
+    })
+    expect(queryByRole('dialog')).toBeNull()
+    expect(container.textContent).not.toContain('First member group')
+    expect(connection.rpc).toHaveBeenLastCalledWith('page', 'getImageStorage', [
+      { groupBy: 'conversation', page: 1, pageSize: 25 },
+      'second-member',
+    ])
+    await act(async () =>
+      second.resolve(storageResult('Second member group', 2)),
+    )
+    fireEvent.click(getByRole('button', { name: 'Delete filtered copies' }))
+    await act(async () =>
+      first.resolve(storageResult('Late first member group', 99)),
+    )
+    expect(container.textContent).toContain('Second member group')
+    expect(container.textContent).not.toContain('Late first member group')
+    expect(getByRole('dialog').textContent).toContain('2 images')
+
+    const late = Promise.withResolvers<ImageStorageResult>()
+    connection.rpc
+      .mockReturnValueOnce(late.promise)
+      .mockRejectedValueOnce(new Error('Sign in required'))
+    fireEvent.click(getByRole('button', { name: 'Refresh' }))
+    act(() => {
+      setSessionToken(null)
+      window.dispatchEvent(new Event('storage'))
+    })
+    expect(queryByRole('dialog')).toBeNull()
+    expect(container.textContent).not.toContain('Second member group')
+    await waitFor(() =>
+      expect(getByRole('alert').textContent).toContain('Sign in required'),
+    )
+    await act(async () =>
+      late.resolve(storageResult('Late second member group', 88)),
+    )
+    expect(queryByRole('dialog')).toBeNull()
+    expect(queryByRole('button', { name: 'Delete filtered copies' })).toBeNull()
+    expect(container.textContent).not.toContain('Late second member group')
+    expect(connection.rpc).toHaveBeenLastCalledWith('page', 'getImageStorage', [
+      { groupBy: 'conversation', page: 1, pageSize: 25 },
+      undefined,
+    ])
+  })
+
+  it('does not leak a late deletion error after switching away from and back to a token', async () => {
+    setSessionToken('member')
+    const connection = storageConnection()
+    connection.rpc.mockResolvedValue(storageResult())
+    const { container, getByRole, queryByRole } = mount(
+      connection,
+      <StoragePage entryId="page" path="/image-storage" />,
+    )
+    await waitFor(() => expect(container.textContent).toContain('Stored group'))
+    fireEvent.click(getByRole('button', { name: 'Delete filtered copies' }))
+    const deletion = Promise.withResolvers<ImageStorageResult>()
+    connection.rpc.mockReturnValueOnce(deletion.promise)
+    fireEvent.click(
+      within(getByRole('dialog')).getByRole('button', {
+        name: 'Delete copies',
+      }),
+    )
+    act(() => {
+      setSessionToken('other-member')
+      window.dispatchEvent(new Event('storage'))
+    })
+    expect(queryByRole('dialog')).toBeNull()
+    await waitFor(() => expect(container.textContent).toContain('Stored group'))
+    act(() => {
+      setSessionToken('member')
+      window.dispatchEvent(new Event('focus'))
+    })
+    await waitFor(() => expect(container.textContent).toContain('Stored group'))
+    await act(async () => deletion.reject(new Error('Obsolete deletion error')))
+    expect(queryByRole('alert')).toBeNull()
+    expect(queryByRole('dialog')).toBeNull()
+    expect(container.textContent).toContain('Stored group')
+    fireEvent.click(getByRole('button', { name: 'Delete filtered copies' }))
+    expect(getByRole('dialog').textContent).toContain('1 images')
+  })
+
+  it('allows preview-only cleanup, cancellation, error retry, and deletion with the latest token', async () => {
+    setSessionToken('member')
+    const connection = storageConnection()
+    connection.rpc.mockResolvedValue(storageResult('Preview only', 0, 200))
+    const { container, getByRole, queryByRole } = mount(
+      connection,
+      <StoragePage entryId="page" path="/image-storage" />,
+    )
+    await waitFor(() => expect(container.textContent).toContain('Preview only'))
+    const remove = getByRole('button', {
+      name: 'Delete filtered copies',
+    }) as HTMLButtonElement
+    expect(remove.disabled).toBe(false)
+    fireEvent.click(remove)
+    expect(getByRole('dialog').textContent).toContain(
+      '0 images · 200 B (200 bytes)',
+    )
+    fireEvent.click(
+      within(getByRole('dialog')).getByRole('button', { name: 'Cancel' }),
+    )
+    expect(
+      connection.rpc.mock.calls.some(
+        (call) => call[1] === 'deleteImageStorage',
+      ),
+    ).toBe(false)
+
+    fireEvent.click(remove)
+    setSessionToken('fresh-member')
+    connection.rpc.mockRejectedValueOnce(new Error('Storage deletion failed'))
+    fireEvent.click(
+      within(getByRole('dialog')).getByRole('button', {
+        name: 'Delete copies',
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        within(getByRole('dialog')).getByRole('alert').textContent,
+      ).toContain('Storage deletion failed'),
+    )
+    expect(connection.rpc).toHaveBeenLastCalledWith(
+      'page',
+      'deleteImageStorage',
+      [{}, 'fresh-member'],
+    )
+    connection.rpc.mockResolvedValue(storageResult('', 0, 0))
+    fireEvent.click(
+      within(getByRole('dialog')).getByRole('button', {
+        name: 'Delete copies',
+      }),
+    )
+    await waitFor(() => expect(queryByRole('dialog')).toBeNull())
+    await waitFor(() =>
+      expect(container.textContent).toContain('No stored images in this range'),
+    )
+    expect(
+      (
+        getByRole('button', {
+          name: 'Delete filtered copies',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true)
+    expect(connection.rpc).toHaveBeenLastCalledWith('page', 'getImageStorage', [
+      { groupBy: 'conversation', page: 1, pageSize: 25 },
+      'fresh-member',
+    ])
   })
 })

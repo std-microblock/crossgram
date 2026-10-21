@@ -131,6 +131,13 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
           sourcePlugin: 'test-provider',
         })),
         botUpdatedAt: Date.now(),
+        imageStorageEnabled: false,
+        async getImageStorage() {
+          return { count: 0, bytes: 0, pendingCount: 0, groups: [], totalGroups: 0, page: 1, pageSize: 25 }
+        },
+        async deleteImageStorage() {
+          return { count: 0, bytes: 0 }
+        },
         async refresh() {
           entry.mutate((value) => {
             value.accounts = value.accounts.map((account) => ({ ...account }))

@@ -156,6 +156,22 @@ export interface IMMediaRow {
   locator: JsonValue
 }
 
+export interface ImageStorageRow {
+  id: string
+  platformId: string
+  platformSessionId: string
+  messageId: number
+  platformMediaId: string
+  isPreview: boolean
+  conversationId: string
+  conversationTitle: string
+  date: string
+  timestamp: number
+  media: JsonValue
+  state: 'pending' | 'ready' | 'failed' | 'deleting' | 'deleted'
+  bytes: number
+}
+
 export interface TlMessagePartRow {
   id: number
   platformSessionId: string
@@ -305,6 +321,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_im_message_alias: IMMessageAliasRow
     mtproto_message_mention: MessageMentionRow
     mtproto_im_media: IMMediaRow
+    mtproto_image_storage: ImageStorageRow
     mtproto_tl_message_part: TlMessagePartRow
     mtproto_id_counter: IdCounterRow
     mtproto_message_id_epoch: MessageIdEpochRow
@@ -429,6 +446,20 @@ export function defineModels(ctx: Context): void {
     primary: 'id', autoInc: true,
     unique: [['messageId', 'ordinal', 'platformMediaId']],
     // 媒体查询一律是 messageId = / IN (...)，unique 的左前缀已经覆盖，无需单列索引。
+  })
+
+  ctx.model.extend('mtproto_image_storage', {
+    id: 'string', platformId: 'string', platformSessionId: 'string', messageId: 'unsigned',
+    platformMediaId: 'text', isPreview: { type: 'boolean', initial: false },
+    conversationId: 'text', conversationTitle: 'text', date: 'string',
+    timestamp: 'integer', media: 'json', state: 'string',
+    bytes: { type: 'decimal', precision: 20, scale: 0 },
+  }, {
+    primary: 'id',
+    indexes: [
+      ['platformSessionId', 'messageId'], ['platformSessionId', 'state'],
+      ['platformSessionId', 'conversationId', 'date'], ['date', 'state'],
+    ],
   })
 
   ctx.model.extend('mtproto_tl_message_part', {
