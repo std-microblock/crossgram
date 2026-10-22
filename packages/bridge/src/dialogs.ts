@@ -293,6 +293,12 @@ export class DialogRpc {
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
   private readonly _memberPages = new Map<string, MemberPageState>()
   private readonly _pendingMemberPages = new Map<string, Promise<void>>()
+  /**
+   * 平台成员列表不返回禁言状态，所以这里记住经 Telegram 下发的成员禁言（`untilDate`，秒），
+   * 供 `channels.getParticipant(s)` 把成员投影成受限成员。键是 `conversationId\0userId`；
+   * 进程重启后丢失，QQ 一侧设置的禁言也不会出现在这里。
+   */
+  private readonly _memberMutes = new Map<string, number>()
   private readonly _reactionRefreshFailures = new Map<string, number>()
   private _folderEditQueue = Promise.resolve()
   private readonly _actions: PlatformMessageActions
@@ -2215,7 +2221,7 @@ export class DialogRpc {
     if (!member) throw new RpcError(400, 'USER_NOT_PARTICIPANT')
     return {
       _: 'channels.channelParticipant',
-      participant: this._makeChannelParticipant(member),
+      participant: this._makeChannelParticipant(conversation.id, member),
       chats: [this._makeChat(conversation)], users: [this._makeMemberUser(member)],
     }
   }
@@ -2238,7 +2244,7 @@ export class DialogRpc {
           || offset + page.members.length + (page.nextCursor ? 1 : 0))
       return {
         _: 'channels.channelParticipants', count,
-        participants: page.members.map((member) => this._makeChannelParticipant(member)),
+        participants: page.members.map((member) => this._makeChannelParticipant(conversation.id, member)),
         chats: [this._makeChat(conversation)],
         users: page.members.map((member) => this._makeMemberUser(member)),
       }
@@ -2258,7 +2264,7 @@ export class DialogRpc {
     members = members.slice(offset, offset + limit)
     return {
       _: 'channels.channelParticipants', count: total,
-      participants: members.map((member) => this._makeChannelParticipant(member)),
+      participants: members.map((member) => this._makeChannelParticipant(conversation.id, member)),
       chats: [this._makeChat(conversation)], users: members.map((member) => this._makeMemberUser(member)),
     }
   }
@@ -2322,15 +2328,27 @@ export class DialogRpc {
     const now = Math.floor(Date.now() / 1000)
     const action: IMConversationMemberModeration = rights.viewMessages
       ? { type: 'kick', rejectAddRequest: rights.untilDate === 0 }
-      : rights.sendMessages && (rights.untilDate === 0 || rights.untilDate > now)
+      : restrictsSending(rights) && (rights.untilDate === 0 || rights.untilDate > now)
         ? { type: 'mute', untilDate: rights.untilDate || 0x7fff_ffff }
         : { type: 'unmute' }
     await this._platform.moderateConversationMember(
       this._session, { id: conversation.id }, targetId, action,
     )
+    const muteKey = memberMuteKey(conversation.id, targetId)
+    if (action.type === 'mute') this._memberMutes.set(muteKey, action.untilDate)
+    else this._memberMutes.delete(muteKey)
     this._memberPages.delete(conversation.id)
+    // 踢人不在这里推送成员变化：平台的成员列表随后会把这个人去掉。
+    const memberUpdates: tl.TypeUpdate[] = action.type === 'kick'
+      ? []
+      : [{
+          _: 'updateChannelParticipant', channelId: this._peerId(conversation.id), date: now,
+          actorId: this._selfId, userId: this._userId(targetId),
+          newParticipant: this._makeChannelParticipant(conversation.id, target), qts: 0,
+        }]
     return {
-      _: 'updates', updates: [], users: [this._makeMemberUser(target)],
+      _: 'updates', updates: memberUpdates,
+      users: [this._makeMemberUser(target)],
       chats: [this._makeChat(conversation)], date: now, seq: 0,
     }
   }
@@ -5782,7 +5800,10 @@ export class DialogRpc {
       : this._makePeerUser(member.user)
   }
 
-  private _makeChannelParticipant(member: IMConversationMember<any>): tl.TypeChannelParticipant {
+  private _makeChannelParticipant(
+    conversationId: string,
+    member: IMConversationMember<any>,
+  ): tl.TypeChannelParticipant {
     const self = member.user.id === this._session.userId
     const userId = self ? this._selfId : this._userId(member.user.id)
     if (member.role === 'owner') {
@@ -5802,6 +5823,14 @@ export class DialogRpc {
       return {
         _: 'channelParticipantSelf', userId, inviterId: this._selfId,
         date: member.joinedAt ?? 0, rank: member.title,
+      }
+    }
+    const muteUntil = this._memberMutes.get(memberMuteKey(conversationId, member.user.id))
+    if (muteUntil && muteUntil > Math.floor(Date.now() / 1000)) {
+      return {
+        _: 'channelParticipantBanned', peer: { _: 'peerUser', userId },
+        kickedBy: this._selfId, date: member.joinedAt ?? 0,
+        bannedRights: makeMemberMuteRights(muteUntil), rank: member.title,
       }
     }
     return { _: 'channelParticipant', userId, date: member.joinedAt ?? 0, rank: member.title }
@@ -6582,6 +6611,41 @@ export function makeDefaultBannedRights(readOnly = false): tl.RawChatBannedRight
     } : {}),
     untilDate: 0,
   }
+}
+
+/** 单个成员的禁言在 Telegram 里是「禁止全部可禁用操作」的 `chatBannedRights`，`untilDate` 为 0 表示永久。 */
+function makeMemberMuteRights(untilDate: number): tl.RawChatBannedRights {
+  const rights = makeDefaultBannedRights(true)
+  return { ...rights, untilDate }
+}
+
+/**
+ * 判断这组 `chatBannedRights` 是否禁止了发言。现代客户端（Telegram Desktop 及其衍生）不再设置旧的
+ * `sendMessages` 位，而是把「禁止发言」拆成 `sendPlain` + 各媒体位（`sendPhotos`、`sendVideos`…），
+ * 只看 `sendMessages` 会把一次禁言当成解除禁言下发。
+ */
+function restrictsSending(rights: tl.RawChatBannedRights): boolean {
+  return Boolean(
+    rights.sendMessages
+    || rights.sendMedia
+    || rights.sendPlain
+    || rights.sendPhotos
+    || rights.sendVideos
+    || rights.sendRoundvideos
+    || rights.sendAudios
+    || rights.sendVoices
+    || rights.sendDocs
+    || rights.sendStickers
+    || rights.sendGifs
+    || rights.sendGames
+    || rights.sendInline
+    || rights.embedLinks
+    || rights.sendPolls,
+  )
+}
+
+function memberMuteKey(conversationId: string, userId: string): string {
+  return `${conversationId}\u0000${userId}`
 }
 
 function hasAdminRights(rights: tl.RawChatAdminRights): boolean {
