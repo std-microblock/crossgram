@@ -27,6 +27,7 @@ const requests: Record<string, tl.RpcMethod> = {
     _: 'contacts.getTopPeers', correspondents: true, botsInline: true,
     offset: 0, limit: 20, hash: Long.ZERO,
   },
+  'contacts.getStatuses': { _: 'contacts.getStatuses' },
   'bots.getBotRecommendations': {
     _: 'bots.getBotRecommendations', bot: { _: 'inputUserSelf' },
   },

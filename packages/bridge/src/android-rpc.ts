@@ -38,6 +38,10 @@ export const androidRpcHandlers: Readonly<Record<string, AndroidRpcHandler>> = {
   'contacts.getTopPeers': () => ({
     _: 'contacts.topPeers', categories: [], chats: [], users: [],
   } as unknown as tl.TlObject),
+  // Android 打开会话列表时会拉一次在线状态，并把 `needGetStatuses` 标记留到拿到列表为止：
+  // 回 500 会让它每次刷新都重试同一条请求（生产抓包里 20 秒两次）。
+  // QQ 侧没有可靠的 presence，返回空列表让它按「无状态」处理。
+  'contacts.getStatuses': () => bareVector([]),
   'bots.getBotRecommendations': () => ({
     _: 'users.users', users: [],
   } as unknown as tl.TlObject),
