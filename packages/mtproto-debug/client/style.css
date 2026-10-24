@@ -111,7 +111,8 @@
   }
   /* The icon overlays the input, so it is positioned rather than laid out by
      the row: without an explicit `top` its static position puts it at the top
-     edge of the field instead of on the text baseline. */
+     edge of the field instead of on the text baseline. The input reserves room
+     for it in `@layer utilities`, at the end of this file. */
   .capture-search .icon.capture-search-icon {
     position: absolute;
     top: 50%;
@@ -121,9 +122,6 @@
     pointer-events: none;
     transform: translateY(-50%);
   }
-  /* The icon overlays the input, so the input needs room for it. The padding
-     itself is set in `@layer utilities` (see the end of this file) because the
-     workbench utilities rule pins search inputs to 8px of padding. */
   .capture-select {
     height: 26px;
     padding: 0 6px;
