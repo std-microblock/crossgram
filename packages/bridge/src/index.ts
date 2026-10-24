@@ -232,6 +232,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   // 放弃投递会破坏客户端 pts 连续性，非 debug 级别也必须记录告警。
   const updateTrace = (format: string, ...args: unknown[]) => {
     if (format.startsWith('abandoned update delivery')) bridgeLogger.warn(format, ...args)
+    // 频道重置意味着这台设备的本地消息会被清空重建，量不大但值得在默认级别留痕。
+    else if (format.startsWith('channel difference reset')) bridgeLogger.info(format, ...args)
     else bridgeLogger.debug(format, ...args)
   }
   const authTransfers = new AuthTransferStore()
