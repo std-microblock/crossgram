@@ -135,6 +135,26 @@ describe('React statistics with the real collector and runtime sampler', () => {
           .first()
           .evaluate((element) => getComputedStyle(element).height),
       ).toBe('58px')
+      // Every chart sample carries the moment it was observed: the page states the
+      // window it is showing and the sparkline tooltip names the hovered sample.
+      await expect
+        .poll(
+          () => page.locator('.statistics-dashboard > p.muted').innerText(),
+          { timeout: 5000 },
+        )
+        .toMatch(/\d{2}:\d{2}:\d{2}/)
+      await page.locator('.stat-spark').first().hover()
+      await expect
+        .poll(
+          async () =>
+            page
+              .locator('.chart-tooltip')
+              .first()
+              .innerText()
+              .catch(() => ''),
+          { timeout: 5000 },
+        )
+        .toMatch(/\d{2}:\d{2}:\d{2}/)
       await page.getByRole('tab', { name: 'RPC', exact: true }).click()
       const methods = page.getByLabel('RPC methods', { exact: true })
       await expect.poll(() => methods.locator('tbody tr').count()).toBe(25)

@@ -20,7 +20,11 @@ import {
   formatMs,
   formatPercent,
   formatTimestamp,
+  sampleUnit,
+  sampleWindow,
   uptime,
+  type SampleValue,
+  type SeriesRange,
 } from './statistics-model.js'
 type Tab = 'overview' | 'rpc' | 'network' | 'files' | 'runtime'
 const tabs: { id: Tab; label: string }[] = [
@@ -88,8 +92,9 @@ export function StatisticsDashboard(props: {
   const [range, setRange] = useState<keyof StatisticsSeries>('seconds')
   const snapshot = props.snapshot,
     points = props.series?.[range] ?? []
-  const values = (key: keyof StatisticsPoint) =>
-    points.map((point) => point[key])
+  /** Build a chart series that keeps each sample's timestamp next to its value. */
+  const spark = (pick: (point: StatisticsPoint) => number): SampleValue[] =>
+    points.map((point) => ({ at: point.at, value: Number(pick(point)) }))
   const runtime = snapshot.runtime
   return (
     <div className="stack statistics-dashboard">
@@ -127,31 +132,27 @@ export function StatisticsDashboard(props: {
         </label>
       </div>
       <p className="muted">
-        Updated {formatTimestamp(snapshot.updatedAt)} · {points.length} samples
-        · only this page subscribes to statistics
+        Updated {formatTimestamp(snapshot.updatedAt)} · {points.length}{' '}
+        {sampleUnit(range)}s · {sampleWindow(points, range)} · only this page
+        subscribes to statistics
       </p>
       {tab === 'overview' ? (
         <>
           <div className="stats-metrics">
             <Metric
-              label={
-                'RPC calls / ' +
-                (range === 'seconds'
-                  ? 'sample'
-                  : range === 'minutes'
-                    ? 'minute'
-                    : 'hour')
-              }
+              label={'RPC calls / ' + sampleUnit(range)}
               value={formatNumber(points.at(-1)?.rpcCount ?? 0)}
               detail={formatNumber(snapshot.rpc.count) + ' total calls'}
-              values={values('rpcCount')}
+              series={spark((point) => point.rpcCount)}
+              range={range}
               format={formatNumber}
             />
             <Metric
               label="RPC P90"
               value={formatMs(snapshot.rpc.p90Ms)}
               detail={'P99 ' + formatMs(snapshot.rpc.p99Ms)}
-              values={values('rpcP90Ms')}
+              series={spark((point) => point.rpcP90Ms)}
+              range={range}
               format={formatMs}
               tone="tertiary"
             />
@@ -170,9 +171,10 @@ export function StatisticsDashboard(props: {
                 formatBytes(snapshot.traffic.sentBytesPerSecond) +
                 '/s'
               }
-              values={points.map(
+              series={spark(
                 (point) => point.receivedBytes + point.sentBytes,
               )}
+              range={range}
               format={(value) => formatBytes(value) + '/s'}
             />
             <Metric
@@ -182,7 +184,8 @@ export function StatisticsDashboard(props: {
                 formatNumber(snapshot.totalConnections) +
                 ' lifetime connections'
               }
-              values={values('activeConnections')}
+              series={spark((point) => point.activeConnections)}
+              range={range}
               format={formatNumber}
             />
             <Metric
@@ -193,7 +196,8 @@ export function StatisticsDashboard(props: {
                 runtime.eventLoopUtilization.toFixed(1) +
                 '%'
               }
-              values={values('cpuPercent')}
+              series={spark((point) => point.cpuPercent)}
+              range={range}
               format={(value) => value.toFixed(1) + '%'}
               tone="tertiary"
             />
@@ -206,7 +210,8 @@ export function StatisticsDashboard(props: {
                 ' / ' +
                 formatBytes(runtime.heapTotalBytes)
               }
-              values={values('rssBytes')}
+              series={spark((point) => point.rssBytes)}
+              range={range}
               format={formatBytes}
             />
           </div>
@@ -229,7 +234,8 @@ export function StatisticsDashboard(props: {
               label="Average RPC latency"
               value={formatMs(snapshot.rpc.averageMs)}
               detail={formatNumber(snapshot.rpc.count) + ' calls'}
-              values={values('rpcP90Ms')}
+              series={spark((point) => point.rpcP90Ms)}
+              range={range}
             />
             <Metric
               label="P50 / P90"
@@ -239,7 +245,8 @@ export function StatisticsDashboard(props: {
                 formatMs(snapshot.rpc.p90Ms)
               }
               detail={'P95 ' + formatMs(snapshot.rpc.p95Ms)}
-              values={values('rpcP90Ms')}
+              series={spark((point) => point.rpcP90Ms)}
+              range={range}
             />
             <Metric
               label="P99 / maximum"
@@ -249,14 +256,16 @@ export function StatisticsDashboard(props: {
                 formatMs(snapshot.rpc.maxMs)
               }
               detail="Tail latency"
-              values={values('rpcP99Ms')}
+              series={spark((point) => point.rpcP99Ms)}
+              range={range}
               tone="tertiary"
             />
             <Metric
               label="RPC error rate"
               value={formatPercent(snapshot.rpc.errorRate)}
               detail={formatNumber(snapshot.rpc.errors) + ' errors'}
-              values={values('rpcErrors')}
+              series={spark((point) => point.rpcErrors)}
+              range={range}
               tone="error"
             />
           </div>
@@ -362,13 +371,15 @@ export function StatisticsDashboard(props: {
                 formatBytes(snapshot.traffic.receivedBytesPerSecond) + '/s'
               }
               detail={formatBytes(snapshot.traffic.receivedBytes) + ' received'}
-              values={values('receivedBytes')}
+              series={spark((point) => point.receivedBytes)}
+              range={range}
             />
             <Metric
               label="Send rate"
               value={formatBytes(snapshot.traffic.sentBytesPerSecond) + '/s'}
               detail={formatBytes(snapshot.traffic.sentBytes) + ' sent'}
-              values={values('sentBytes')}
+              series={spark((point) => point.sentBytes)}
+              range={range}
             />
             <Metric
               label="Packet processing P90"
@@ -378,14 +389,16 @@ export function StatisticsDashboard(props: {
                 ' packets · ' +
                 formatBytes(snapshot.packets.bytes)
               }
-              values={values('packetP90Ms')}
+              series={spark((point) => point.packetP90Ms)}
+              range={range}
               tone="tertiary"
             />
             <Metric
               label="Connections"
               value={String(snapshot.activeConnections)}
               detail={snapshot.totalConnections + ' total'}
-              values={values('activeConnections')}
+              series={spark((point) => point.activeConnections)}
+              range={range}
             />
           </div>
           <StatsTable
@@ -501,13 +514,15 @@ export function StatisticsDashboard(props: {
               runtime.eventLoopUtilization.toFixed(1) +
               '%'
             }
-            values={values('cpuPercent')}
+            series={spark((point) => point.cpuPercent)}
+            range={range}
           />
           <Metric
             label="RSS"
             value={formatBytes(runtime.rssBytes)}
             detail={'Heap ' + formatBytes(runtime.heapUsedBytes)}
-            values={values('rssBytes')}
+            series={spark((point) => point.rssBytes)}
+            range={range}
           />
           <Metric
             label="Cgroup memory"
@@ -520,7 +535,8 @@ export function StatisticsDashboard(props: {
                 ? formatBytes(runtime.cgroupMemoryMaxBytes)
                 : 'unlimited / unavailable')
             }
-            values={values('cgroupMemoryCurrentBytes')}
+            series={spark((point) => point.cgroupMemoryCurrentBytes)}
+            range={range}
           />
           <Metric
             label="Cgroup anonymous memory"
@@ -531,7 +547,8 @@ export function StatisticsDashboard(props: {
               ' · kernel ' +
               formatBytes(runtime.cgroupKernelBytes)
             }
-            values={values('cgroupAnonBytes')}
+            series={spark((point) => point.cgroupAnonBytes)}
+            range={range}
           />
           <Metric
             label="Swap"
@@ -544,7 +561,8 @@ export function StatisticsDashboard(props: {
                 ? formatBytes(runtime.cgroupMemoryHighBytes)
                 : 'unlimited / unavailable')
             }
-            values={values('cgroupSwapBytes')}
+            series={spark((point) => point.cgroupSwapBytes)}
+            range={range}
             tone="tertiary"
           />
           <Metric
@@ -560,7 +578,8 @@ export function StatisticsDashboard(props: {
               ' · available ' +
               formatBytes(runtime.heapAvailableBytes)
             }
-            values={values('heapUsedBytes')}
+            series={spark((point) => point.heapUsedBytes)}
+            range={range}
           />
           <Metric
             label="Event-loop delay P99"
@@ -571,26 +590,30 @@ export function StatisticsDashboard(props: {
               ' · P90 ' +
               formatMs(runtime.eventLoopDelayP90Ms)
             }
-            values={values('eventLoopDelayP99Ms')}
+            series={spark((point) => point.eventLoopDelayP99Ms)}
+            range={range}
             tone="tertiary"
           />
           <Metric
             label="Garbage collection"
             value={formatMs(runtime.gcDurationMs)}
             detail={runtime.gcCount + ' collections in the current interval'}
-            values={values('gcDurationMs')}
+            series={spark((point) => point.gcDurationMs)}
+            range={range}
           />
           <Metric
             label="External memory"
             value={formatBytes(runtime.externalBytes)}
             detail="Native allocations tied to JavaScript objects"
-            values={values('externalBytes')}
+            series={spark((point) => point.externalBytes)}
+            range={range}
           />
           <Metric
             label="Array buffers"
             value={formatBytes(runtime.arrayBuffersBytes)}
             detail="Buffer and typed-array backing stores"
-            values={values('arrayBuffersBytes')}
+            series={spark((point) => point.arrayBuffersBytes)}
+            range={range}
           />
           <Metric
             label="V8 malloc"
@@ -616,7 +639,8 @@ function Metric(props: {
   label: string
   value: string
   detail?: string
-  values?: number[]
+  series?: SampleValue[]
+  range?: SeriesRange
   tone?: ChartTone
   format?: (value: number) => string
 }) {
@@ -626,7 +650,8 @@ function Metric(props: {
       <strong>{props.value}</strong>
       <p>{props.detail}</p>
       <Sparkline
-        values={props.values}
+        series={props.series}
+        range={props.range}
         tone={props.tone}
         label={props.label}
         format={props.format}

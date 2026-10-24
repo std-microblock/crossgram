@@ -11,13 +11,18 @@ import {
   YAxis,
 } from 'recharts'
 import { formatNumber } from 'cordis-webui-react/components'
-import { formatPercent } from './statistics-model.js'
+import {
+  formatPercent,
+  timedSeries,
+  type SampleValue,
+  type SeriesRange,
+} from './statistics-model.js'
 
 export type ChartTone = 'primary' | 'secondary' | 'tertiary' | 'error'
 
 interface TooltipPayload {
   value?: number | string
-  payload?: { label?: string }
+  payload?: { label?: string, time?: string, at?: number }
 }
 
 interface ChartColors {
@@ -88,18 +93,22 @@ function SparkTooltip(props: {
   payload?: TooltipPayload[]
   format?: (value: number) => string
 }) {
-  if (!props.active || !props.payload?.length) return null
-  const value = Number(props.payload[0]?.value ?? 0)
+  const item = props.payload?.[0]
+  if (!props.active || !item) return null
+  const value = Number(item.value ?? 0)
+  const time = item.payload?.time
   return (
     <div className="chart-tooltip">
-      {props.format ? props.format(value) : formatNumber(value)}
+      {time ? <strong>{time}</strong> : null}
+      <span>{props.format ? props.format(value) : formatNumber(value)}</span>
     </div>
   )
 }
 
 /** A compact trend line for a metric card. */
 export function Sparkline(props: {
-  values?: number[]
+  series?: SampleValue[]
+  range?: SeriesRange
   tone?: ChartTone
   label: string
   format?: (value: number) => string
@@ -107,8 +116,8 @@ export function Sparkline(props: {
   const colors = useChartColors()
   const gradient = 'spark-' + useId().replace(/[^a-zA-Z0-9_-]/g, '')
   const data = useMemo(
-    () => (props.values ?? []).map((value, index) => ({ index, value })),
-    [props.values],
+    () => timedSeries(props.series, props.range),
+    [props.series, props.range],
   )
   if (!data.length) return null
   const color = colors.tone[props.tone ?? 'primary']
