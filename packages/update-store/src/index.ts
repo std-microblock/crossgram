@@ -37,6 +37,13 @@ export interface UpdateStoreBackend {
   remove(eventKey: string): Promise<void>
   getPending(platformSessionId: string): Promise<UpdateDelivery[]>
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number): Promise<UpdateDelivery[]>
+  /**
+   * 该 scope 下保留的最早一条 delivery（`pts` 最小）。
+   *
+   * 客户端拿它的 `pts - ptsCount` 判断自己有没有掉出保留窗口：早于这个值的 pts 对应更新已经被清理，
+   * 服务端无法再连续补齐，只能按契约让客户端重建频道状态。
+   */
+  getFirst(platformSessionId: string, scope: string): Promise<UpdateDelivery | undefined>
   getSince(platformSessionId: string, date: number, limit: number): Promise<UpdateDelivery[]>
   getChangedChannelScopes(platformSessionId: string, date: number): Promise<ChannelScopeUpdate[]>
   prune(platformSessionId: string, scope: string): Promise<void>
@@ -60,6 +67,10 @@ export abstract class UpdateStore extends Service implements UpdateStoreBackend 
     pts: number,
     limit: number,
   ): Promise<UpdateDelivery[]>
+  abstract getFirst(
+    platformSessionId: string,
+    scope: string,
+  ): Promise<UpdateDelivery | undefined>
   abstract getSince(
     platformSessionId: string,
     date: number,

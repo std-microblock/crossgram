@@ -1406,11 +1406,15 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       (await requireBridgeSession(rpc)).session.platformSessionId,
       req as tl.updates.RawGetDifferenceRequest,
     ))
-  rpc.register('updates.getChannelDifference', async (rpc, req) =>
-    updates.getChannelDifference(
-      (await requireBridgeSession(rpc)).session.platformSessionId,
+  rpc.register('updates.getChannelDifference', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    return updates.getChannelDifference(
+      state.session.platformSessionId,
       req as tl.updates.RawGetChannelDifferenceRequest,
-    ))
+      // 客户端落后到无法连续补齐时让它重建该频道，而不是逐页灌几千条陈旧更新。
+      (channelId, latestPts) => state.dialogs.channelDifferenceTooLong(channelId, latestPts),
+    )
+  })
 
   // 官方 Telegram Android 仍会发送无参 `#800fd57d` 形式的 `langpack.getLanguages`，返回空列表可保留客户端内置语言包。
   rpc.register('langpack.getLanguages', async () => bareVector([]))

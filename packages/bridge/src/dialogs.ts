@@ -562,6 +562,39 @@ export class DialogRpc {
     return this._peerDialogsResult(materialized, archive)
   }
 
+  /**
+   * 客户端落后到无法连续补齐频道更新时，按 `updates.channelDifferenceTooLong` 的契约让它重建该频道。
+   *
+   * 官方服务端对「从该 pts 起的更新已被删除」的回答就是这一条：客户端收到后清空本地频道消息、
+   * 用返回的 dialog（含最新 pts、top message、未读与已读边界）覆盖本地状态，再按历史重新加载。
+   * 相比把几千条陈旧更新逐页灌进去，这既不会丢消息，也不会让用户翻历史时被反复拉到底部。
+   */
+  async channelDifferenceTooLong(
+    channelId: number,
+    latestPts?: number,
+  ): Promise<tl.updates.RawChannelDifferenceTooLong | undefined> {
+    const peerId = this._tlToPeer.get(channelId)
+    if (!peerId) return undefined
+    const [stored] = this._store
+      ? await this._store.readDialogs(this._session.platformSessionId, [peerId])
+      : []
+    const dialog = stored
+      ?? (await this._loadDialogs({ limit: 100 })).find((item) => item.conversation.id === peerId)
+    if (!dialog) return undefined
+    const materialized = await this._materializeDialog(dialog)
+    const pts = latestPts ?? materialized.dialog.pts
+    // 没有 pts 的对话（非频道）无法用它重置状态，交回 RPC 层按旧行为处理。
+    if (pts === undefined) return undefined
+    return {
+      _: 'updates.channelDifferenceTooLong',
+      final: true,
+      dialog: { ...materialized.dialog, pts },
+      messages: materialized.message ? [materialized.message] : [],
+      chats: materialized.chat ? [materialized.chat] : [],
+      users: materialized.users,
+    }
+  }
+
   private async _materializePeerDialogs(
     selected: readonly IMDialog[],
     archivedPeerIds: ReadonlySet<string>,

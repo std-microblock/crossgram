@@ -1725,6 +1725,14 @@ export class MessageStore {
     )
   }
 
+  /** 该频道保留窗口中最旧的 delivery；`pts - ptsCount` 之前的更新已被清理。 */
+  async getFirstUpdateDelivery(platformSessionId: string, channelId?: number) {
+    return this._updateStore.getFirst(
+      platformSessionId,
+      channelId === undefined ? ACCOUNT_UPDATE_SCOPE : channelUpdateScope(channelId),
+    )
+  }
+
   async getChannelUpdateDeliveriesSince(platformSessionId: string, date: number, limit: number) {
     return (await this._updateStore.getSince(platformSessionId, date, limit))
       .filter((delivery) => delivery.scope.startsWith('channel:'))

@@ -51,6 +51,18 @@ describe('MemoryUpdateStore', () => {
     expect((await store.getPending('a')).map((row) => row.eventKey)).toEqual(['a-channel', 'a-2'])
   })
 
+  it('reports the oldest retained row of a scope so readers can detect a pruned window', async () => {
+    const store = new MemoryUpdateStore(new Context(), { retention: 2 })
+    expect(await store.getFirst('a', 'account')).toBeUndefined()
+    await store.create(delivery('a-1', 'a', 2))
+    await store.create(delivery('a-2', 'a', 3))
+    await store.create(delivery('a-3', 'a', 4))
+
+    // `a-1` 被保留策略清理后，窗口起点前进到 `a-2`：早于 `a-2.pts - ptsCount` 的 pts 已无法连续补齐。
+    expect((await store.getFirst('a', 'account'))?.eventKey).toBe('a-2')
+    expect(await store.getFirst('a', 'channel:10')).toBeUndefined()
+  })
+
   it('removes a reserved delivery and its scope index entry', async () => {
     const store = new MemoryUpdateStore(new Context(), { retention: 10 })
     await store.create(delivery('a-1', 'a', 2))

@@ -35,6 +35,15 @@ const PENDING_CHANNEL_POLL_TIMEOUT_SECONDS = 1
 // 这里只镜像一页，未覆盖到的变更频道再各自补一条最新消息，确保客户端在处理 updateChannelTooLong 前已知晓对应会话。
 const CHANNEL_MIRROR_PAGE = 100
 
+/**
+ * 频道差量允许连续补齐的最大落后条数。
+ *
+ * 超过这个量级时「一条条补齐」对客户端是灾难：每页 100 条会各触发一次会话刷新和滚动到底，
+ * 打开群之后要连续收几分钟的陈旧消息（生产实测 3600 条落后 ⇒ 20 秒内 28 页、2546 条消息、
+ * 182 次 upload.getFile），期间用户往上翻会被反复拉回底部。此时应让它重建频道状态后按历史加载。
+ */
+const CHANNEL_DIFFERENCE_MAX_PENDING = 1_000
+
 const PENDING_DELIVERY_WAIT_MS = 1_500
 const PENDING_DELIVERY_POLL_MS = 50
 
@@ -1176,9 +1185,45 @@ export class UpdateManager {
     return { _: 'updates.difference', ...difference, state }
   }
 
+  /**
+   * 判断能否从客户端的 `pts` 连续补齐该频道的更新。
+   *
+   * `updates.channelDifferenceTooLong` 的契约语义是「从该 pts 起的更新已被删除」，三种情况都属于此：
+   * - 客户端 pts 早于保留窗口（或中间缺口）：对应 delivery 已被清理，继续返回窗口内最旧的一页，
+   *   客户端会把 pts 静默跳到页尾，等于永久丢掉这段消息。
+   * - 客户端 pts 超过服务端最新 pts：本地状态比服务端新，只能重建。
+   * - 落后条数超过 {@link CHANNEL_DIFFERENCE_MAX_PENDING}：虽然连续可补，但逐页灌进去代价过大。
+   */
+  private _channelResetReason(
+    pts: number,
+    latestPts: number,
+    deliveries: readonly UpdateDelivery[],
+  ): 'client-ahead' | 'pruned' | 'backlog' | undefined {
+    if (pts > latestPts) return 'client-ahead'
+    if (pts === latestPts) return undefined
+    let cursor = pts
+    for (const delivery of deliveries) {
+      // `ptsCount` 为 0 的更新（例如频道已读内容）不推进 pts，可以跳过。
+      if (delivery.ptsCount <= 0) continue
+      if (delivery.pts - delivery.ptsCount !== cursor) return 'pruned'
+      cursor = delivery.pts
+    }
+    if (!deliveries.length) return 'pruned'
+    if (latestPts - pts > CHANNEL_DIFFERENCE_MAX_PENDING) return 'backlog'
+    return undefined
+  }
+
   async getChannelDifference(
     platformSessionId: string,
     request: tl.updates.RawGetChannelDifferenceRequest,
+    /**
+     * 客户端落后太多时构造 `updates.channelDifferenceTooLong`（需要 dialog 物化，由 RPC 层提供）。
+     * 缺省时退回逐条补齐的旧行为，但那段更新会缺失。
+     */
+    buildTooLong?: (
+      channelId: number,
+      latestPts: number,
+    ) => Promise<tl.updates.RawChannelDifferenceTooLong | undefined>,
   ): Promise<tl.updates.TypeChannelDifference> {
     if (request.channel._ !== 'inputChannel') throw new RpcError(400, 'CHANNEL_INVALID')
     const channelId = request.channel.channelId
@@ -1186,6 +1231,21 @@ export class UpdateManager {
     const deliveries = await this._withoutAbandonedDeliveries(
       await this._store.getUpdateDeliveriesAfter(platformSessionId, request.pts, 101, channelId),
     )
+    const resetReason = this._channelResetReason(request.pts, state.pts, deliveries)
+    if (resetReason) {
+      const reset = await buildTooLong?.(channelId, state.pts)
+      if (reset) {
+        this._onTrace?.(
+          'channel difference reset channel=%d pts=%d latestPts=%d reason=%s',
+          channelId, request.pts, state.pts, resetReason,
+        )
+        return reset
+      }
+      this._onTrace?.(
+        'channel difference gap without reset channel=%d pts=%d latestPts=%d reason=%s',
+        channelId, request.pts, state.pts, resetReason,
+      )
+    }
     if (!deliveries.length) {
       return {
         _: 'updates.channelDifferenceEmpty', final: true, pts: state.pts,

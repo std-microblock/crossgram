@@ -114,6 +114,13 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
     return rows.map(decodeRow)
   }
 
+  async getFirst(platformSessionId: string, scope: string): Promise<UpdateDelivery | undefined> {
+    const [row] = await this._database.select('mtproto_update_delivery', {
+      platformSessionId, scope,
+    }).orderBy('pts').orderBy('messageId').limit(1).execute()
+    return row ? decodeRow(row) : undefined
+  }
+
   async getSince(platformSessionId: string, date: number, limit: number): Promise<UpdateDelivery[]> {
     const rows = await this._database.select('mtproto_update_delivery', {
       platformSessionId, date: { $gte: date },
@@ -213,6 +220,9 @@ export class DatabaseUpdateStore extends UpdateStore {
   getPending(platformSessionId: string) { return this._backend.getPending(platformSessionId) }
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number) {
     return this._backend.getAfter(platformSessionId, scope, pts, limit)
+  }
+  getFirst(platformSessionId: string, scope: string) {
+    return this._backend.getFirst(platformSessionId, scope)
   }
   getSince(platformSessionId: string, date: number, limit: number) {
     return this._backend.getSince(platformSessionId, date, limit)

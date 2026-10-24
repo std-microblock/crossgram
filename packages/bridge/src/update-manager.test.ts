@@ -107,6 +107,44 @@ function roundTrip<T>(object: T): T {
   return new TlBinaryReader(__tlReaderMap, bytes).object() as T
 }
 
+function channelDifferenceRequest(
+  channelId: number,
+  pts: number,
+  limit = 100,
+): tl.updates.RawGetChannelDifferenceRequest {
+  return {
+    _: 'updates.getChannelDifference',
+    channel: { _: 'inputChannel', channelId, accessHash: Long.ZERO },
+    filter: { _: 'channelMessagesFilterEmpty' },
+    pts,
+    limit,
+  }
+}
+
+/** 客户端落后太多时 `DialogRpc.channelDifferenceTooLong` 应当给出的形状。 */
+function makeTooLongResponse(channelId: number, latestPts: number): tl.updates.RawChannelDifferenceTooLong {
+  return {
+    _: 'updates.channelDifferenceTooLong',
+    final: true,
+    dialog: {
+      _: 'dialog',
+      peer: { _: 'peerChannel', channelId },
+      topMessage: 7,
+      readInboxMaxId: 7,
+      readOutboxMaxId: 7,
+      unreadCount: 0,
+      unreadMentionsCount: 0,
+      unreadReactionsCount: 0,
+      unreadPollVotesCount: 0,
+      notifySettings: { _: 'peerNotifySettings' },
+      pts: latestPts,
+    },
+    messages: [],
+    chats: [],
+    users: [],
+  }
+}
+
 describe('UpdateManager', () => {
   it('hydrates only referenced users when broadcasting to several devices', async () => {
     const { ctx, store, manager, sent } = await createHarness()
@@ -167,6 +205,98 @@ describe('UpdateManager', () => {
     await store.setUpdatePayload('pagination-2', { _: 'updates', updates: [], users: [], chats: [], date: pending!.date, seq: pending!.seq })
     expect(await manager.getChannelDifference(session.platformSessionId, { ...request, pts: 3 }))
       .toMatchObject({ final: true, pts: 4, timeout: 30 })
+  })
+
+  it('asks the client to reset a channel whose updates fell out of the retained window', async () => {
+    // 每个频道只保留两条 delivery：更旧的更新被清理后，客户端手上的 pts 已经补不上连续的一段。
+    const { store, manager } = await createHarness(2)
+    const channelId = 4321
+    for (let index = 0; index < 4; index++) {
+      const key = `retained-${index}`
+      const delivery = await store.prepareUpdateDelivery(key, session.platformSessionId, 1, 100 + index, channelId)
+      await store.setUpdatePayload(key, {
+        _: 'updates', updates: [], users: [], chats: [], date: delivery.date, seq: delivery.seq,
+      })
+    }
+    const buildTooLong = vi.fn(async (requestedChannel: number, latestPts: number) =>
+      makeTooLongResponse(requestedChannel, latestPts))
+
+    const result = await manager.getChannelDifference(
+      session.platformSessionId,
+      channelDifferenceRequest(channelId, 1),
+      buildTooLong,
+    )
+
+    expect(result._).toBe('updates.channelDifferenceTooLong')
+    expect(buildTooLong).toHaveBeenCalledWith(channelId, 5)
+  })
+
+  it('keeps streaming a contiguous window instead of asking for a reset', async () => {
+    const { store, manager } = await createHarness()
+    const channelId = 4322
+    for (let index = 0; index < 3; index++) {
+      const key = `contiguous-${index}`
+      const delivery = await store.prepareUpdateDelivery(key, session.platformSessionId, 1, 100 + index, channelId)
+      await store.setUpdatePayload(key, {
+        _: 'updates', updates: [], users: [], chats: [], date: delivery.date, seq: delivery.seq,
+      })
+    }
+    const buildTooLong = vi.fn(async (requestedChannel: number, latestPts: number) =>
+      makeTooLongResponse(requestedChannel, latestPts))
+
+    const result = await manager.getChannelDifference(
+      session.platformSessionId,
+      channelDifferenceRequest(channelId, 1),
+      buildTooLong,
+    )
+
+    expect(result).toMatchObject({ _: 'updates.channelDifference', final: true, pts: 4 })
+    expect(buildTooLong).not.toHaveBeenCalled()
+  })
+
+  it('asks for a reset once the backlog exceeds one catch-up window', async () => {
+    const { store, manager } = await createHarness()
+    const channelId = 4323
+    const delivery = await store.prepareUpdateDelivery(
+      'backlog', session.platformSessionId, 1_002, 100, channelId,
+    )
+    await store.setUpdatePayload('backlog', {
+      _: 'updates', updates: [], users: [], chats: [], date: delivery.date, seq: delivery.seq,
+    })
+    const buildTooLong = vi.fn(async (requestedChannel: number, latestPts: number) =>
+      makeTooLongResponse(requestedChannel, latestPts))
+
+    const result = await manager.getChannelDifference(
+      session.platformSessionId,
+      channelDifferenceRequest(channelId, 1),
+      buildTooLong,
+    )
+
+    // 连续可补，但逐页灌 1000+ 条会让客户端长时间「加载中」，并反复把视图拉到底部。
+    expect(result._).toBe('updates.channelDifferenceTooLong')
+    expect(buildTooLong).toHaveBeenCalledWith(channelId, 1_003)
+  })
+
+  it('asks for a reset when the client pts is newer than the relay journal', async () => {
+    const { store, manager } = await createHarness()
+    const channelId = 4324
+    const delivery = await store.prepareUpdateDelivery(
+      'client-ahead', session.platformSessionId, 1, 100, channelId,
+    )
+    await store.setUpdatePayload('client-ahead', {
+      _: 'updates', updates: [], users: [], chats: [], date: delivery.date, seq: delivery.seq,
+    })
+    const buildTooLong = vi.fn(async (requestedChannel: number, latestPts: number) =>
+      makeTooLongResponse(requestedChannel, latestPts))
+
+    const result = await manager.getChannelDifference(
+      session.platformSessionId,
+      channelDifferenceRequest(channelId, 5),
+      buildTooLong,
+    )
+
+    expect(result._).toBe('updates.channelDifferenceTooLong')
+    expect(buildTooLong).toHaveBeenCalledWith(channelId, 2)
   })
 
   it('routes live messages through the shared Cordis projection waterfall', async () => {

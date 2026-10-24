@@ -94,6 +94,13 @@ export class MemoryUpdateStoreBackend implements UpdateStoreBackend {
       .map((delivery) => clone(delivery)!)
   }
 
+  /** 保留窗口中最旧的一条 delivery：`pts - ptsCount` 之前的更新已被清理。 */
+  async getFirst(platformSessionId: string, scope: string): Promise<UpdateDelivery | undefined> {
+    const [first] = this._rows(platformSessionId, scope)
+      .sort((left, right) => left.pts - right.pts || left.messageId - right.messageId)
+    return clone(first)
+  }
+
   async getSince(platformSessionId: string, date: number, limit: number): Promise<UpdateDelivery[]> {
     return [...this._byEventKey.values()]
       .filter((delivery) => delivery.platformSessionId === platformSessionId && delivery.date >= date)
@@ -168,6 +175,9 @@ export class MemoryUpdateStore extends UpdateStore {
   getPending(platformSessionId: string) { return this._backend.getPending(platformSessionId) }
   getAfter(platformSessionId: string, scope: string, pts: number, limit: number) {
     return this._backend.getAfter(platformSessionId, scope, pts, limit)
+  }
+  getFirst(platformSessionId: string, scope: string) {
+    return this._backend.getFirst(platformSessionId, scope)
   }
   getSince(platformSessionId: string, date: number, limit: number) {
     return this._backend.getSince(platformSessionId, date, limit)

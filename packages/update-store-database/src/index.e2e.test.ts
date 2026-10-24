@@ -95,6 +95,10 @@ describe('DatabaseUpdateStore', () => {
       .toEqual(['a-channel'])
     expect((await second.updateStore.getPending('a')).map((row) => row.eventKey))
       .toEqual(['a-channel', 'a-2'])
+    // 保留窗口的起点要能被读者查到：早于它的 pts 已经无法连续补齐。
+    expect((await second.updateStore.getFirst('a', 'account'))?.eventKey).toBe('a-2')
+    expect((await second.updateStore.getFirst('a', 'channel:10'))?.eventKey).toBe('a-channel')
+    expect(await second.updateStore.getFirst('a', 'channel:99')).toBeUndefined()
 
     await second.updateStore.claim('a-3', 1_700_000_000)
     expect(await second.updateStore.get('a-3')).toMatchObject({ claimedAt: 1_700_000_000 })
