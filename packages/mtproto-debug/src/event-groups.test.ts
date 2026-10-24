@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  completeEventGroup,
   countGroupedEvents,
   filterEventGroups,
   getRpcResultMetrics,
@@ -43,6 +44,48 @@ describe('MTProto RPC event grouping', () => {
       { event: otherConnectionResult },
       { event: call, result: earlyResult },
     ])
+  })
+
+  it('attaches a fetched result that the visible window filtered out', () => {
+    const call = event(1, { messageId: '0x50', name: 'messages.getHistory' })
+    const result = event(2, {
+      direction: 'server->client',
+      name: 'rpc_result -> messages.messages',
+      requestMessageId: '0x50',
+    })
+    // Only the call survived the filter, so the group came back unpaired.
+    const [group] = groupRpcEvents([call])
+
+    expect(completeEventGroup(group, result)).toEqual({ event: call, result })
+    expect(completeEventGroup(group)).toBe(group)
+  })
+
+  it('turns a filtered response into the result of its fetched request', () => {
+    const call = event(1, { messageId: '0x60', name: 'messages.getHistory' })
+    const result = event(2, {
+      direction: 'server->client',
+      name: 'rpc_result -> messages.messages',
+      requestMessageId: '0x60',
+    })
+    const [group] = groupRpcEvents([result])
+
+    expect(completeEventGroup(group, call)).toEqual({ event: call, result })
+  })
+
+  it('never pairs events across connections, ids or an existing result', () => {
+    const call = event(1, { messageId: '0x70' })
+    const group = { event: call }
+    const otherConnection = event(2, {
+      connectionId: 'conn-2',
+      requestMessageId: '0x70',
+    })
+    const otherCall = event(3, { messageId: '0x99' })
+    const alreadyPaired = { event: call, result: event(4, { requestMessageId: '0x70' }) }
+
+    expect(completeEventGroup(group, otherConnection)).toBe(group)
+    expect(completeEventGroup(group, otherCall)).toBe(group)
+    expect(completeEventGroup(group, call)).toBe(group)
+    expect(completeEventGroup(alreadyPaired, event(5, { requestMessageId: '0x70' }))).toBe(alreadyPaired)
   })
 
   it('matches filter terms across both halves of a correlated RPC pair', () => {

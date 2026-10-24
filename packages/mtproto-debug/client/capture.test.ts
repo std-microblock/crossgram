@@ -241,4 +241,55 @@ describe('capture transport', () => {
     await vi.advanceTimersByTimeAsync(200)
     expect(transport.mock.calls.length).toBeGreaterThan(count)
   })
+  it('fetches the counterpart a filter hides, from both sides of the pair', async () => {
+    const call: CapturedMtprotoEvent = {
+      ...event(1),
+      name: 'messages.getHistory',
+      messageId: '0x10',
+    }
+    const reply: CapturedMtprotoEvent = {
+      ...event(2),
+      direction: 'server->client',
+      name: 'rpc_result -> messages.messages',
+      requestMessageId: '0x10',
+    }
+    rows = [call, reply]
+    const { capture, setFilters } = harness()
+    await vi.advanceTimersByTimeAsync(0)
+    // The direction filter leaves the request behind; the result is hidden.
+    setFilters({ direction: 'client->server' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(capture.events.map((row) => row.id)).toEqual([1])
+    await capture.loadPair(capture.events[0])
+    const lookup = new URL(transport.mock.calls.at(-1)![0])
+    expect(lookup.searchParams.get('requestMessageId')).toBe('0x10')
+    expect(lookup.searchParams.get('connectionId')).toBe('test')
+    // The lookup must ignore the window filter and carry full payloads.
+    expect(lookup.searchParams.get('direction')).toBeNull()
+    expect(lookup.searchParams.get('grep')).toBeNull()
+    expect(lookup.searchParams.get('summary')).toBeNull()
+    expect(capture.pairs.get(1)?.id).toBe(2)
+    expect(capture.pairs.get(1)?.payload).toEqual({ secret: 'payload-2' })
+    // The same lookup from the response side asks for the call by message id.
+    await capture.loadPair(reply)
+    expect(
+      new URL(transport.mock.calls.at(-1)![0]).searchParams.get('messageId'),
+    ).toBe('0x10')
+    expect(capture.pairs.get(2)?.id).toBe(1)
+    // A new filter is a new window, so the fetched counterparts go with it.
+    setFilters({})
+    await vi.advanceTimersByTimeAsync(200)
+    expect(capture.pairs.size).toBe(0)
+  })
+  it('keeps the window usable when the counterpart lookup fails', async () => {
+    const call: CapturedMtprotoEvent = { ...event(1), messageId: '0x20' }
+    rows = [call]
+    const { capture } = harness()
+    await vi.advanceTimersByTimeAsync(0)
+    transport.mockResolvedValueOnce(new Response('gone', { status: 404 }))
+    await capture.loadPair(capture.events[0])
+    expect(capture.pairs.size).toBe(0)
+    expect(capture.error).toBe('')
+    expect(capture.events.map((row) => row.id)).toEqual([1])
+  })
 })

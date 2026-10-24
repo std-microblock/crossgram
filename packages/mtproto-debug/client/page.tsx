@@ -7,7 +7,11 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import type { CapturedMtprotoEvent, MtprotoDebugData } from '../src/types.js'
-import { getRpcResultMetrics, groupRpcEvents } from '../src/event-groups.js'
+import {
+  completeEventGroup,
+  getRpcResultMetrics,
+  groupRpcEvents,
+} from '../src/event-groups.js'
 import { useRpc, type PageProps } from 'cordis-webui-react/client'
 import { Icon } from 'cordis-webui-react/icons'
 import {
@@ -49,7 +53,7 @@ export default function CapturePage(props: PageProps) {
   const [flash, setFlash] = useState('')
   const [menu, setMenu] = useState<SaveMenu>()
   const [moreOpen, setMoreOpen] = useState(false)
-  const [clearOpen, setClearOpen] = useState(false)
+  const [clearArmed, setClearArmed] = useState(false)
   const [saveOpen, setSaveOpen] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
   const [logName, setLogName] = useState('')
@@ -59,6 +63,7 @@ export default function CapturePage(props: PageProps) {
   const list = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const moreRef = useRef<HTMLDivElement>(null)
+  const clearRef = useRef<HTMLButtonElement>(null)
   const capture = useCapturePages(
     rpc.data.apiPath,
     filters,
@@ -104,9 +109,15 @@ export default function CapturePage(props: PageProps) {
     const group = groups.get(id)
     if (!group) return
     setExpanded(id)
+    // A row that is itself an RPC result opens on its own payload; the request
+    // stays one tab away once the counterpart is available.
+    setPane(group.event.requestMessageId ? 'result' : 'event')
     capture.keepDetails([id, ...(group.result ? [group.result.id] : [])])
     void capture.loadDetails(group.event)
     if (group.result) void capture.loadDetails(group.result)
+    // Without a result in the window the other half is missing, not absent:
+    // fetch it so the inspector can still switch between request and result.
+    else void capture.loadPair(group.event)
   }
   const rawLink = (id: number) => {
     const url = new URL(sameOriginPath(rpc.data.apiPath))
@@ -225,6 +236,28 @@ export default function CapturePage(props: PageProps) {
       window.removeEventListener('keydown', key)
     }
   }, [moreOpen])
+  useEffect(() => {
+    if (!clearArmed) return
+    // The clear button is always on screen, so its armed state is deliberately
+    // short-lived: it drops on a timer, on Escape and as soon as the operator
+    // reaches for anything else.
+    const timer = setTimeout(() => setClearArmed(false), 5000)
+    const outside = (event: PointerEvent) => {
+      if (!clearRef.current?.contains(event.target as Node)) {
+        setClearArmed(false)
+      }
+    }
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setClearArmed(false)
+    }
+    window.addEventListener('pointerdown', outside)
+    window.addEventListener('keydown', key)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('pointerdown', outside)
+      window.removeEventListener('keydown', key)
+    }
+  }, [clearArmed])
   const copy = async (label: string, value: string) => {
     try {
       await copyText(value)
@@ -272,6 +305,22 @@ export default function CapturePage(props: PageProps) {
     logs.clear()
     setLogsOpen(true)
     void refreshLogs()
+  }
+  // Clearing is destructive but frequent while debugging, so it lives on the
+  // toolbar with the confirmation in the button itself: the first click arms
+  // it, the second one drops the buffer.
+  const clearBuffer = () => {
+    if (!clearArmed) {
+      setClearArmed(true)
+      return
+    }
+    setClearArmed(false)
+    void action.run(async () => {
+      await rpc.data.clear()
+      select(undefined)
+      setNewCount(0)
+      await capture.load('latest')
+    })
   }
   const total = capture.snapshot?.total ?? 0
   const shown = capture.events.length
@@ -322,12 +371,17 @@ export default function CapturePage(props: PageProps) {
     menuGroup?.result &&
     (capture.details.get(menuGroup.result.id) ?? menuGroup.result)
   const selected = expanded === undefined ? undefined : groups.get(expanded)
-  const result = selected?.result
+  // The pair can live outside the window: a direction/grep filter or a page
+  // boundary hides one half of the RPC, so `capture.pairs` supplies it.
+  const selectedGroup = selected
+    ? completeEventGroup(selected, capture.pairs.get(selected.event.id))
+    : undefined
+  const result = selectedGroup?.result
   const detail =
     pane === 'result' && result
       ? (capture.details.get(result.id) ?? result)
-      : selected
-        ? (capture.details.get(selected.event.id) ?? selected.event)
+      : selectedGroup
+        ? (capture.details.get(selectedGroup.event.id) ?? selectedGroup.event)
         : undefined
   const filtered = !!chips.length || !!filters.direction || !!filters.phase || !!filters.grep
   return (
@@ -413,6 +467,31 @@ export default function CapturePage(props: PageProps) {
                   </span>
                 ) : null}
               </button>
+              <button
+                ref={clearRef}
+                className={
+                  'button ' + (clearArmed ? 'danger capture-clear-armed' : 'outlined')
+                }
+                disabled={!rpc.ready || !total || action.busy}
+                aria-label={clearArmed ? 'Confirm clear buffer' : 'Clear buffer'}
+                title={
+                  total
+                    ? clearArmed
+                      ? 'Click again to drop all ' +
+                        total.toLocaleString() +
+                        ' buffered events'
+                      : 'Drop all ' +
+                        total.toLocaleString() +
+                        ' buffered events'
+                    : 'Nothing to clear yet'
+                }
+                onClick={clearBuffer}
+              >
+                <Icon name="trash" size={13} />
+                <span className="capture-label">
+                  {clearArmed ? 'Confirm clear' : 'Clear'}
+                </span>
+              </button>
               <div className="capture-more" ref={moreRef}>
                 <button
                   className="icon-button"
@@ -425,17 +504,6 @@ export default function CapturePage(props: PageProps) {
                 </button>
                 {moreOpen ? (
                   <div className="capture-menu capture-menu-right" role="menu">
-                    <button
-                      className="capture-menu-item"
-                      role="menuitem"
-                      disabled={!total}
-                      onClick={() => {
-                        setMoreOpen(false)
-                        setClearOpen(true)
-                      }}
-                    >
-                      Clear capture buffer…
-                    </button>
                     <button
                       className="capture-menu-item"
                       role="menuitem"
@@ -752,7 +820,7 @@ export default function CapturePage(props: PageProps) {
                 </button>
               ) : null}
             </div>
-            {selected && detail ? (
+            {selectedGroup && detail ? (
               <section
                 className="capture-inspector"
                 aria-label="Captured event details"
@@ -775,20 +843,20 @@ export default function CapturePage(props: PageProps) {
                       {detail.connectionId || 'no connection'}
                     </span>
                     {getRpcResultMetrics(
-                      selected.event,
-                      selected.result,
+                      selectedGroup.event,
+                      selectedGroup.result,
                     ) ? (
                       <span>
                         {formatMs(
                           getRpcResultMetrics(
-                            selected.event,
-                            selected.result,
+                            selectedGroup.event,
+                            selectedGroup.result,
                           )!.durationMs,
                         )}
                       </span>
                     ) : null}
                   </div>
-                  {selected.result ? (
+                  {selectedGroup.result ? (
                     <div
                       className="segmented capture-panes"
                       role="tablist"
@@ -808,8 +876,8 @@ export default function CapturePage(props: PageProps) {
                         className={pane === 'result' ? 'selected' : undefined}
                         onClick={() => {
                           setPane('result')
-                          if (selected.result)
-                            void capture.loadDetails(selected.result)
+                          if (selectedGroup.result)
+                            void capture.loadDetails(selectedGroup.result)
                         }}
                       >
                         Result
@@ -1044,41 +1112,6 @@ export default function CapturePage(props: PageProps) {
                   }}
                 >
                   Save current buffer
-                </button>
-              </div>
-            </Modal>
-          ) : null}
-          {clearOpen ? (
-            <Modal
-              title="Clear capture buffer?"
-              onClose={() => setClearOpen(false)}
-            >
-              <p>
-                Drops the {total.toLocaleString()} buffered events. Connected
-                clients stay connected and capture keeps running.
-              </p>
-              <div className="toolbar">
-                <button
-                  className="button danger"
-                  disabled={action.busy}
-                  onClick={() =>
-                    void action.run(async () => {
-                      await rpc.data.clear()
-                      select(undefined)
-                      setClearOpen(false)
-                      setNewCount(0)
-                      await capture.load('latest')
-                    })
-                  }
-                >
-                  {action.busy ? 'Clearing…' : 'Clear capture'}
-                </button>
-                <button
-                  className="button outlined"
-                  disabled={action.busy}
-                  onClick={() => setClearOpen(false)}
-                >
-                  Cancel
                 </button>
               </div>
             </Modal>

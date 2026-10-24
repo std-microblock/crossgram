@@ -1149,6 +1149,12 @@
   }
   .modal-content {
     display: grid;
+    /* A single auto track is floored by its widest child's min-content size, so
+       one unbreakable string (a file name, a long id) would push the whole
+       dialog wider than its box and turn it into a horizontally scrolling
+       pane. `minmax(0, 1fr)` keeps the track at the dialog width and lets the
+       children truncate or scroll themselves instead. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 18px;
     padding: 22px;
   }

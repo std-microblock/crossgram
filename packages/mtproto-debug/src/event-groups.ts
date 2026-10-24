@@ -66,6 +66,31 @@ export function groupRpcEvents(events: CapturedMtprotoEvent[]): EventGroup[] {
   return groups
 }
 
+/**
+ * Attach the counterpart of a selected event that the visible window does not
+ * contain, so the inspector keeps offering both halves of an RPC. The pair has
+ * to match the same connection and message id that `groupRpcEvents` pairs on,
+ * otherwise a stray event from another connection would be shown as the result.
+ */
+export function completeEventGroup(
+  group: EventGroup,
+  partner?: CapturedMtprotoEvent,
+): EventGroup {
+  if (!partner || group.result || partner.id === group.event.id) return group
+  if (partner.connectionId !== group.event.connectionId) return group
+  if (
+    partner.requestMessageId &&
+    partner.requestMessageId === group.event.messageId
+  )
+    return { event: group.event, result: partner }
+  if (
+    group.event.requestMessageId &&
+    group.event.requestMessageId === partner.messageId
+  )
+    return { event: partner, result: group.event }
+  return group
+}
+
 export function filterEventGroups(
   groups: EventGroup[],
   filter: string,

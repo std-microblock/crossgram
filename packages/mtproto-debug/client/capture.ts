@@ -34,9 +34,17 @@ export interface CaptureController {
   readonly error: string
   readonly live: boolean
   readonly details: ReadonlyMap<number, CapturedMtprotoEvent>
+  /**
+   * Counterparts fetched from outside the visible window, keyed by the row they
+   * complete. A filter (or a page boundary) can hide one half of an RPC pair;
+   * the inspected event still shows its other half from here.
+   */
+  readonly pairs: ReadonlyMap<number, CapturedMtprotoEvent>
   /** Reload the window (or page it with `older`/`newer`); `follow` appends. */
   load(mode?: CaptureMode): Promise<void>
   loadDetails(event: CapturedMtprotoEvent): Promise<void>
+  /** Fetch the hidden request/response counterpart of an event, if there is one. */
+  loadPair(event: CapturedMtprotoEvent): Promise<void>
   /** Only these ids keep their fetched payload across the next window change. */
   keepDetails(ids: number[]): void
   /** Follow server-pushed revisions, or stop following entirely. */
@@ -56,12 +64,16 @@ export function useCapturePages(
   const [details, setDetailsState] = useState<
     Map<number, CapturedMtprotoEvent>
   >(() => new Map())
+  const [pairs, setPairsState] = useState<
+    Map<number, CapturedMtprotoEvent>
+  >(() => new Map())
   const eventsRef = useRef(events),
     snapshotRef = useRef(snapshot),
     loadingRef = useRef(loading),
     errorRef = useRef(error),
     liveRef = useRef(live),
-    detailsRef = useRef(details)
+    detailsRef = useRef(details),
+    pairsRef = useRef(pairs)
   const setEvents = useCallback((next: CapturedMtprotoEvent[]) => {
     eventsRef.current = next
     setEventsState(next)
@@ -99,6 +111,20 @@ export function useCapturePages(
     },
     [],
   )
+  const setPairs = useCallback(
+    (
+      next:
+        | Map<number, CapturedMtprotoEvent>
+        | ((
+            value: Map<number, CapturedMtprotoEvent>,
+          ) => Map<number, CapturedMtprotoEvent>),
+    ) => {
+      const value = typeof next === 'function' ? next(pairsRef.current) : next
+      pairsRef.current = value
+      setPairsState(value)
+    },
+    [],
+  )
   // Always read the latest inputs from async callbacks and timers.
   const endpointRef = useRef(endpoint),
     filtersRef = useRef(filters),
@@ -107,7 +133,8 @@ export function useCapturePages(
   filtersRef.current = filters
   enabledRef.current = enabled
   const controllers = useRef(new Set<AbortController>()),
-    detailJobs = useRef(new Map<number, Promise<void>>())
+    detailJobs = useRef(new Map<number, Promise<void>>()),
+    pairJobs = useRef(new Map<number, Promise<void>>())
   const active = useRef(true),
     generation = useRef(0),
     initial = useRef(true)
@@ -323,6 +350,50 @@ export function useCapturePages(
     },
     [request, setDetails, setError],
   )
+  /**
+   * Fetch the other half of an RPC pair when the window does not hold it: the
+   * operator may be looking at a direction/`grep` filter, at a page boundary, or
+   * at a response whose request has already been dropped from the buffer. The
+   * query deliberately carries none of the window filters and asks for full
+   * payloads, so the inspector can show the counterpart exactly like a paired
+   * row. Failures stay silent: the visible window is still valid without it.
+   */
+  const loadPair = useCallback(
+    async (event: CapturedMtprotoEvent): Promise<void> => {
+      if (!event.messageId && !event.requestMessageId) return
+      const pending = pairJobs.current.get(event.id)
+      if (pending) return pending
+      const task = (async () => {
+        const params = new URLSearchParams({ limit: '4' })
+        if (event.requestMessageId) params.set('messageId', event.requestMessageId)
+        else params.set('requestMessageId', event.messageId!)
+        if (event.connectionId) params.set('connectionId', event.connectionId)
+        try {
+          const result = await request(params, true)
+          if (!active.current) return
+          const partner = event.requestMessageId
+            ? result.events.find(
+                (item) =>
+                  item.messageId === event.requestMessageId &&
+                  !item.requestMessageId,
+              )
+            : result.events.find(
+                (item) => item.requestMessageId === event.messageId,
+              )
+          if (!partner || partner.id === event.id) return
+          setPairs((value) => new Map(value).set(event.id, partner))
+        } catch {
+          // A counterpart that is already gone (or too large to preview) only
+          // costs the second pane; it is not a capture error.
+        }
+      })()
+      pairJobs.current.set(event.id, task)
+      await task
+      if (pairJobs.current.get(event.id) === task)
+        pairJobs.current.delete(event.id)
+    },
+    [request, setPairs],
+  )
   const filtersKey = JSON.stringify(filters)
   useEffect(() => {
     cancel()
@@ -330,6 +401,7 @@ export function useCapturePages(
     if (!enabled || !endpoint) return
     setEvents([])
     setDetails(new Map())
+    setPairs(new Map())
     wantedDetails.current.clear()
     cursor.current = undefined
     setSnapshot(undefined)
@@ -350,6 +422,7 @@ export function useCapturePages(
     setDetails,
     setError,
     setEvents,
+    setPairs,
     setSnapshot,
   ])
   useEffect(() => {
@@ -401,8 +474,12 @@ export function useCapturePages(
     get details() {
       return detailsRef.current
     },
+    get pairs() {
+      return pairsRef.current
+    },
     load,
     loadDetails,
+    loadPair,
     keepDetails,
     setLive: setLiveMode,
   }

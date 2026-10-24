@@ -69,6 +69,11 @@
     align-items: center;
     gap: 6px;
   }
+  /* The clear button confirms in place; the ring keeps the armed state legible
+     even when the toolbar collapses the labels to icons. */
+  .capture-actions .button.capture-clear-armed {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 35%, transparent);
+  }
   .capture-count {
     min-width: 16px;
     height: 16px;
@@ -104,16 +109,21 @@
     flex: 1 1 190px;
     min-width: 0;
   }
+  /* The icon overlays the input, so it is positioned rather than laid out by
+     the row: without an explicit `top` its static position puts it at the top
+     edge of the field instead of on the text baseline. */
   .capture-search .icon.capture-search-icon {
     position: absolute;
+    top: 50%;
     left: 8px;
     z-index: 1;
     color: var(--on-surface-muted);
     pointer-events: none;
+    transform: translateY(-50%);
   }
-  .capture-search input[type='search'] {
-    padding-left: 26px;
-  }
+  /* The icon overlays the input, so the input needs room for it. The padding
+     itself is set in `@layer utilities` (see the end of this file) because the
+     workbench utilities rule pins search inputs to 8px of padding. */
   .capture-select {
     height: 26px;
     padding: 0 6px;
@@ -763,6 +773,17 @@
     .capture-footer-tail {
       display: none;
     }
+  }
+}
+
+/* The workbench shell pins the padding of every search input
+   (`.workbench input[type='search']`) in the `utilities` layer, which outranks
+   everything in `components`. The filter box draws its search icon over the
+   input, so the inset has to be re-stated in the same layer and out-specify
+   that rule; without it the placeholder runs straight under the icon. */
+@layer utilities {
+  .workbench .workbench-toolbar .capture-search input[type='search'] {
+    padding-left: 26px;
   }
 }
 

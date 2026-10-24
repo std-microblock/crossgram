@@ -275,6 +275,51 @@ describe('React capture with the real MTProto capture backend', () => {
       expect(
         await page.getByText('EXAMPLE_ERROR', { exact: false }).isVisible(),
       ).toBe(true)
+      // A direction filter hides the other half of the pair, so the inspector
+      // fetches it back instead of dropping the request/result switch.
+      await page.getByLabel('Direction').selectOption('client->server')
+      await expect
+        .poll(() =>
+          page
+            .locator('.capture-row-header strong')
+            .filter({ hasText: 'rpc_result' })
+            .count(),
+        )
+        .toBe(0)
+      await page
+        .locator('.capture-row-header')
+        .filter({ hasText: 'messages.getHistory' })
+        .click()
+      await page
+        .getByRole('tablist', { name: 'Captured event sections' })
+        .waitFor()
+      expect(
+        await page.locator('.capture-inspector-name').textContent(),
+      ).toContain('messages.getHistory')
+      await page.getByRole('tab', { name: 'Result', exact: true }).click()
+      await expect
+        .poll(() => page.locator('.capture-inspector-name').textContent())
+        .toContain('rpc_result')
+      // Selecting the response itself opens on its own payload, with the
+      // request it belongs to one tab away.
+      await page.getByLabel('Direction').selectOption('server->client')
+      await page
+        .locator('.capture-row-header')
+        .filter({ hasText: 'rpc_result' })
+        .first()
+        .click()
+      await page
+        .getByRole('tablist', { name: 'Captured event sections' })
+        .waitFor()
+      await expect
+        .poll(() => page.locator('.capture-inspector-name').textContent())
+        .toContain('rpc_result')
+      await page.getByRole('tab', { name: 'Request', exact: true }).click()
+      await expect
+        .poll(() => page.locator('.capture-inspector-name').textContent())
+        .toContain('messages.getHistory')
+      await page.getByLabel('Direction').selectOption('')
+      await page.locator('.capture-row').first().waitFor()
       await page.evaluate(() => {
         ;(document.activeElement as HTMLElement)?.blur()
         window.scrollTo(0, 0)
@@ -364,17 +409,24 @@ describe('React capture with the real MTProto capture backend', () => {
           () => document.documentElement.scrollWidth <= innerWidth,
         ),
       ).toBe(true)
-      await page
-        .getByRole('button', { name: 'More capture actions' })
-        .click()
-      await page.getByRole('menuitem', { name: 'Clear capture buffer…' }).click()
-      const clearDialog = page.getByRole('dialog', {
-        name: 'Clear capture buffer?',
+      // Clearing the buffer lives on the toolbar and confirms in place: the
+      // first click arms the button, the second one drops the events.
+      const clearButton = page.getByRole('button', {
+        name: 'Clear buffer',
+        exact: true,
       })
-      await clearDialog.waitFor()
-      await clearDialog
-        .getByRole('button', { name: 'Clear capture', exact: true })
-        .click()
+      const clearConfirm = page.getByRole('button', {
+        name: 'Confirm clear buffer',
+        exact: true,
+      })
+      await clearButton.click()
+      await clearConfirm.waitFor()
+      expect(await page.locator('.capture-row').count()).toBeGreaterThan(0)
+      // Backing out of the confirmation leaves the buffer untouched.
+      await page.keyboard.press('Escape')
+      await expect.poll(() => clearConfirm.count()).toBe(0)
+      await clearButton.click()
+      await clearConfirm.click()
       await page.getByRole('heading', { name: 'Nothing captured yet' }).waitFor()
       // Nothing is buffered anymore, so saving a log is disabled.
       expect(
