@@ -11,7 +11,7 @@ import {
   type MessageProjectionInput,
   type MessageProjectionResult,
 } from '@mtproto-relay/bridge'
-import type { ServerRpcContext } from '@mtproto-relay/mtproto'
+import { RpcError, type ServerRpcContext } from '@mtproto-relay/mtproto'
 
 export const name = 'merged-forward-viewer'
 export const inject = ['mtproto', 'mtprotoBridge']
@@ -59,10 +59,15 @@ export interface BundleAddress {
 }
 
 /**
- * 合并转发虚拟群 ID 的起始值。高于普通 peer 与 `stableId`（< 2^31），避免与普通会话冲突；
- * 同时高于旧版 2^31 基址，使客户端缓存的旧版哈希消息 ID 自动失效。
+ * 合并转发虚拟群 ID 的起始值。高于普通 peer 与 `stableId`（< 2^31），避免与普通会话冲突。
  */
 const BUNDLE_CHAT_ID_BASE = 2 ** 32
+/**
+ * 曾经的起始值。基址从 2^31 抬到 2^32 之前发出的转发链接是 `2^31 + row * 1024 + pathCode`，
+ * 它们还留在客户端的消息缓存里，点开时只带得回一个 `chatId`，所以只在旧基址区间里按旧公式兜底。
+ * 旧基址有效期内容量最大约 1.4M 行（产出 ID < 2^32），新旧区间因此互不相交。
+ */
+const LEGACY_BUNDLE_CHAT_ID_BASE = 2 ** 31
 const BUNDLE_PATH_CODES = 1024
 /** TDLib 客户端接受的普通群（basic chat）最大 ID 上限。 */
 const MAX_BUNDLE_CHAT_ID = 999_999_999_999
@@ -79,7 +84,16 @@ export function encodeBundleChatId(address: BundleAddress): number | undefined {
 
 export function decodeBundleChatId(chatId: number): BundleAddress | undefined {
   if (!Number.isSafeInteger(chatId) || chatId > MAX_BUNDLE_CHAT_ID) return
-  const relative = chatId - BUNDLE_CHAT_ID_BASE
+  // 先按现行基址解码：现行 ID 用旧基址的公式也能算出「合法」的行号，反过来的顺序会把
+  // 每条新链接都误读成一条更旧的行。旧基址区间在现行基址下相对值为负，自然落到兜底分支。
+  const current = decodeBundleChatIdAt(BUNDLE_CHAT_ID_BASE, chatId)
+  if (current) return current
+  if (chatId < LEGACY_BUNDLE_CHAT_ID_BASE || chatId >= BUNDLE_CHAT_ID_BASE) return
+  return decodeBundleChatIdAt(LEGACY_BUNDLE_CHAT_ID_BASE, chatId)
+}
+
+function decodeBundleChatIdAt(base: number, chatId: number): BundleAddress | undefined {
+  const relative = chatId - base
   const storedMessageId = Math.floor(relative / BUNDLE_PATH_CODES)
   if (storedMessageId <= 0) return
   const path = decodeBundlePath(relative % BUNDLE_PATH_CODES)
@@ -159,22 +173,31 @@ export class MergedForwardProjection {
     }
   }
 
-  remember(platformSessionId: string, bundle: IMMessageBundle, address?: BundleAddress): BundleRecord {
+  /**
+   * 记录虚拟群。`chatId` 显式给出时优先使用：旧基址链接重建出的记录必须回显客户端请求的 ID，
+   * 否则响应里的 peer 会和用户点开的链接指向两个不同的群。缺省时按地址重新编码。
+   */
+  remember(
+    platformSessionId: string,
+    bundle: IMMessageBundle,
+    address?: BundleAddress,
+    chatId?: number,
+  ): BundleRecord {
     const encoded = address ? encodeBundleChatId(address) : undefined
-    const chatId = encoded ?? bundleChatId(bundle)
+    const id = chatId ?? encoded ?? bundleChatId(bundle)
     const records = this._records.get(platformSessionId) ?? new Map<number, BundleRecord>()
-    const existing = records.get(chatId)
+    const existing = records.get(id)
     if (existing?.bundle.id === bundle.id) {
       existing.bundle = bundle
-      records.delete(chatId)
-      records.set(chatId, existing)
+      records.delete(id)
+      records.set(id, existing)
       return existing
     }
     const record: BundleRecord = {
-      platformSessionId, chatId, bundle,
+      platformSessionId, chatId: id, bundle,
       ...(encoded !== undefined ? { address: { storedMessageId: address!.storedMessageId, path: [...address!.path] } } : {}),
     }
-    records.set(chatId, record)
+    records.set(id, record)
     this._records.set(platformSessionId, records)
     this.evict(records)
     return record
@@ -196,8 +219,19 @@ export class MergedForwardProjection {
     return this._records.get(platformSessionId)?.get(chatId)
   }
 
-  /** 查找虚拟群对应的转发记录；未命中缓存时根据 `chatId` 编码的地址从落库消息重建。 */
-  async lookup(state: BundleSessionState, chatId: number): Promise<BundleRecord | undefined> {
+  /**
+   * 查找虚拟群对应的转发记录；未命中缓存时根据 `chatId` 编码的地址从落库消息重建。
+   * `strict` 只由 `contacts.resolveUsername` 使用：重建遇到 DB/平台接口的瞬时错误时向上抛，
+   * 让 RPC 回一个可重试的错误，而不是伪装成「这个用户名不存在」被客户端记成死链。
+   * 默认的宽松模式把这些错误收敛成 `undefined`，因为复用它的 `messages.getHistory` 等分支
+   * 靠 `undefined` 表示「不是合并转发 peer，请走默认实现」。
+   */
+  async lookup(
+    state: BundleSessionState,
+    chatId: number,
+    options: { strict?: boolean } = {},
+  ): Promise<BundleRecord | undefined> {
+    const strict = options.strict ?? false
     const platformSessionId = state.session.platformSessionId
     const cached = this.resolve(platformSessionId, chatId)
     if (cached) return cached
@@ -205,17 +239,22 @@ export class MergedForwardProjection {
     if (!address || !state.dialogs?.readStoredMessage) return
     const key = `${platformSessionId}\u0000${chatId}`
     const running = this._rebuilds.get(key)
-    if (running) return running
-    const pending = this.rebuild(state, address)
-      .catch(() => undefined)
+    if (running) return strict ? running : running.catch(() => undefined)
+    // 去重表里保留原始 Promise，由各调用方自己决定吞掉还是抛出瞬时错误。
+    const pending = this.rebuild(state, address, chatId)
       .finally(() => {
         if (this._rebuilds.get(key) === pending) this._rebuilds.delete(key)
       })
     this._rebuilds.set(key, pending)
-    return pending
+    return strict ? pending : pending.catch(() => undefined)
   }
 
-  private async rebuild(state: BundleSessionState, address: BundleAddress): Promise<BundleRecord | undefined> {
+  /** 重建时只有「行不存在 / 该行不含这个 bundle」才是真的失效链接，其它异常属于暂时失败。 */
+  private async rebuild(
+    state: BundleSessionState,
+    address: BundleAddress,
+    chatId?: number,
+  ): Promise<BundleRecord | undefined> {
     const source = await state.dialogs!.readStoredMessage!(address.storedMessageId)
     if (!source) return
     let bundle = bundleParts(source.content.parts)[address.path[0]!]
@@ -226,16 +265,20 @@ export class MergedForwardProjection {
       bundle = nestedBundles(await this.loadSnapshots(state, parent))[address.path[depth]!]
     }
     if (!bundle) return
-    return this.remember(state.session.platformSessionId, bundle, address)
+    return this.remember(state.session.platformSessionId, bundle, address, chatId)
   }
 
   records(platformSessionId: string): Iterable<BundleRecord> {
     return this._records.get(platformSessionId)?.values() ?? []
   }
 
-  async resolveUsername(state: BundleSessionState, username: string): Promise<BundleRecord | undefined> {
+  async resolveUsername(
+    state: BundleSessionState,
+    username: string,
+    options: { strict?: boolean } = {},
+  ): Promise<BundleRecord | undefined> {
     const match = /^bridge(?:bundle|chat)_(\d+)$/i.exec(username)
-    return match ? this.lookup(state, Number(match[1])) : undefined
+    return match ? this.lookup(state, Number(match[1]), options) : undefined
   }
 
   private addressOf(input: MessageProjectionInput, bundle: IMMessageBundle, ordinal: number): BundleAddress | undefined {
@@ -630,9 +673,21 @@ async function routeMergedForwardRpc(
     const req = request as tl.contacts.RawResolveUsernameRequest
     if (!/^bridge(?:bundle|chat)_\d+$/i.test(req.username)) return
     const state = await resolveState()
-    const record = await projection.resolveUsername(state, req.username)
+    let record: BundleRecord | undefined
+    try {
+      record = await projection.resolveUsername(state, req.username, { strict: true })
+    } catch (error) {
+      // 重建失败是暂时性的（DB 抖动、QQ 归档接口失败）。把它当成「用户名不存在」会让客户端
+      // 把链接永久记成死链，用户点开毫无反应；回一个可重试的服务端错误，客户端会再敲一次。
+      ctx.logger.warn(
+        'merged-forward resolveUsername failed username=%s error=%s', req.username, String(error),
+      )
+      throw new RpcError(500, 'MERGED_FORWARD_UNAVAILABLE')
+    }
     if (!record) return
-    const snapshots = await projection.loadSnapshots(state, record)
+    // 参与者数量与头像只是装饰：归档/媒体接口失败时退化为 1 人与空头像，聊天记录本体
+    // 仍然由随后的 messages.getHistory 提供，不该被装饰拖垮整个链接。
+    const snapshots = await projection.loadSnapshots(state, record).catch(() => [])
     return {
       _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: record.chatId },
       chats: [projection.makeChat(record, snapshots, await projection.loadAvatar(state, record))],
@@ -738,35 +793,89 @@ async function routeMergedForwardRpc(
   if (request._ === 'messages.getMessages') {
     const state = await resolveState()
     const req = request as tl.messages.RawGetMessagesRequest
-    const bundles = await Promise.all(
-      [...projection.records(state.session.platformSessionId)]
-        .map((record) => projection.materialize(state, record)),
+    // 只有内存里的转发记录能回答：`messages.getMessages` 不带 peer，冷缓存时无从判断该 ID 属于
+    // 哪一份聊天记录，也就无法从落库消息重建。
+    const projected = await Promise.all(
+      [...projection.records(state.session.platformSessionId)].map(async (record) => ({
+        chatId: record.chatId,
+        bundle: await projection.materialize(state, record),
+      })),
     )
-    const virtualById = new Map(bundles.flatMap((bundle) => bundle.messages.map((message) => [message.id, message])))
+    const index = collectVirtualMessages(
+      projected.map(({ chatId, bundle }) => ({ chatId, messages: bundle.messages })),
+    )
     const requestedIds = req.id.map(inputMessageId)
-    const ordinaryInputs = req.id.filter((input) => !virtualById.has(inputMessageId(input)))
-    if (ordinaryInputs.length === req.id.length) return
+    // 认领 = 有记录声称拥有这个 ID（不论唯一还是重号）；重号的不能猜，也不能交给默认实现。
+    const claimed = new Set(requestedIds.filter((id) => index.messages.has(id) || index.ambiguous.has(id)))
+    if (!claimed.size) return
+    for (const id of claimed) {
+      const chatIds = index.ambiguous.get(id)
+      if (chatIds) {
+        // 重号时回 messageEmpty，绝不把别的转发会话的消息交出去；日志留痕便于事后定位。
+        ctx.logger.warn(
+          'merged-forward messages.getMessages ambiguous id=%d chats=%s', id, chatIds.join(','),
+        )
+      }
+    }
+    const ordinaryInputs = req.id.filter((input) => !claimed.has(inputMessageId(input)))
     const ordinary = ordinaryInputs.length
       ? await state.dialogs.getMessages({ ...req, id: ordinaryInputs })
       : undefined
     const ordinaryMessages = ordinary && ordinary._ !== 'messages.messagesNotModified'
       ? ordinary.messages
       : []
-    const byId = new Map([...ordinaryMessages, ...virtualById.values()].map((message) => [message.id, message]))
+    const byId = new Map([...ordinaryMessages, ...index.messages.values()].map((message) => [message.id, message]))
     return {
       _: 'messages.messages',
       messages: requestedIds.map((id) => byId.get(id) ?? { _: 'messageEmpty', id }),
       topics: [],
       chats: uniqueById([
         ...(ordinary && ordinary._ !== 'messages.messagesNotModified' ? ordinary.chats : []),
-        ...bundles.flatMap((bundle) => bundle.chats),
+        ...projected.flatMap(({ bundle }) => bundle.chats),
       ]),
       users: uniqueById([
         ...(ordinary && ordinary._ !== 'messages.messagesNotModified' ? ordinary.users : []),
-        ...bundles.flatMap((bundle) => bundle.users),
+        ...projected.flatMap(({ bundle }) => bundle.users),
       ]),
     }
   }
+}
+
+/** 聊天记录虚拟消息的归属索引：只有唯一属主的 ID 可以回答，重号的 ID 只能拒答。 */
+export interface VirtualMessageIndex {
+  /** 消息 ID → 唯一属主的那条消息 */
+  messages: Map<number, tl.TypeMessage>
+  /** 消息 ID → 所有声称拥有它的虚拟群 ID（至少两个） */
+  ambiguous: Map<number, number[]>
+}
+
+/**
+ * 按消息 ID 归档若干聊天记录投影出的消息。
+ * 聊天记录的消息 ID 是**会话局部**编号（每个会话都从 1000 开始按归档顺序递增），不同转发之间
+ * 必然重号；而 `messages.getMessages` 的请求里没有 peer，无法据此反查会话。所以只有「恰好一个
+ * 记录拥有这个 ID」时才敢认领，重号的归入 `ambiguous` 交给调用方拒答，避免把 A 会话的消息当成
+ * B 会话的回复/网页预览/媒体来源。
+ */
+export function collectVirtualMessages(
+  owners: Iterable<{ chatId: number, messages: readonly tl.TypeMessage[] }>,
+): VirtualMessageIndex {
+  const held = new Map<number, { message: tl.TypeMessage, chatIds: number[] }>()
+  for (const { chatId, messages } of owners) {
+    for (const message of messages) {
+      const entry = held.get(message.id)
+      if (!entry) {
+        held.set(message.id, { message, chatIds: [chatId] })
+      } else if (!entry.chatIds.includes(chatId)) {
+        entry.chatIds.push(chatId)
+      }
+    }
+  }
+  const index: VirtualMessageIndex = { messages: new Map(), ambiguous: new Map() }
+  for (const [id, entry] of held) {
+    if (entry.chatIds.length === 1) index.messages.set(id, entry.message)
+    else index.ambiguous.set(id, entry.chatIds)
+  }
+  return index
 }
 
 function transcriptDialog(chatId: number): tl.RawDialog {

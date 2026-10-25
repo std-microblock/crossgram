@@ -7,6 +7,7 @@ import {
   type PlatformSession,
 } from '@mtproto-relay/bridge'
 import {
+  collectVirtualMessages,
   makeMergedForwardProvider,
   snapshotPreview,
   transcriptMessageId,
@@ -220,5 +221,45 @@ describe('merged-forward projection', () => {
     expect(ids).toEqual([...ids].sort((left, right) => left - right))
     expect(new Set(ids).size).toBe(ids.length)
     expect(ids[0]).toBeGreaterThan(1)
+  })
+})
+
+describe('merged-forward virtual message ownership', () => {
+  const virtual = (id: number, text: string) => ({
+    _: 'message' as const, id, peerId: { _: 'peerChat' as const, chatId: 1 }, date: 1, message: text,
+  }) as never
+
+  it('claims a local message id only when exactly one transcript projected it', () => {
+    const index = collectVirtualMessages([
+      { chatId: 11, messages: [virtual(1000, 'a0'), virtual(2000, 'a1')] },
+      { chatId: 22, messages: [virtual(1000, 'b0'), virtual(2000, 'b1'), virtual(3000, 'b2')] },
+    ])
+    // 2000 与 1000 都被两份转发投影过，只有 3000 是唯一的：能回答的就只有它。
+    expect([...index.messages.keys()]).toEqual([3000])
+    expect(index.ambiguous.get(1000)).toEqual([11, 22])
+    expect(index.ambiguous.get(2000)).toEqual([11, 22])
+    // 谁都没投影过的 ID 既不认领也不算歧义，交给默认实现。
+    expect(index.messages.has(999)).toBe(false)
+    expect(index.ambiguous.has(999)).toBe(false)
+  })
+
+  it('reports an id that two transcripts share as ambiguous instead of answering with one of them', () => {
+    // 聊天记录的 ID 是会话局部编号（每个会话都从 1000 起），`messages.getMessages` 又不带 peer，
+    // 所以重号时既不能按 ID 猜会话，也不能让其中一份「赢」。
+    const index = collectVirtualMessages([
+      { chatId: 11, messages: [virtual(1000, 'a0')] },
+      { chatId: 22, messages: [virtual(1000, 'b0')] },
+    ])
+    expect(index.messages.size).toBe(0)
+    expect([...index.ambiguous]).toEqual([[1000, [11, 22]]])
+  })
+
+  it('answers ids a single transcript holds even when other transcripts exist', () => {
+    const index = collectVirtualMessages([
+      { chatId: 11, messages: [virtual(1000, 'a0')] },
+      { chatId: 22, messages: [virtual(1000, 'b0'), virtual(2000, 'b1')] },
+    ])
+    expect(index.messages.get(2000)).toMatchObject({ id: 2000, message: 'b1' })
+    expect(index.ambiguous.has(2000)).toBe(false)
   })
 })

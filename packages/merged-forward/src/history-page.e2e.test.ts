@@ -244,22 +244,24 @@ describe('merged-forward transcript history pages', () => {
     expect(nestedPage.messages.map((message) => message._ === 'message' ? message.message : ''))
       .toEqual(['n2', 'n1', 'n0'])
 
-    // A link cached under the address scheme that preceded ordered message ids
-    // must not resolve: the client would otherwise reach a transcript and mix
-    // it with the pages it already stored under unordered ids.  It falls
-    // through to the ordinary username route instead.
+    // 客户端缓存里还留着基址为 2^31 的旧链接（`2^31 + row * 1024 + pathCode`）。旧基址产出的 ID
+    // 全部低于新基址，两个区间互不相交，所以旧链接仍要解析成同一份聊天记录，而不是落到默认的
+    // USERNAME_NOT_OCCUPIED 让客户端把链接记成死链。
     const [storedOuter] = await ctx.database.get('mtproto_im_message', {
       primaryPlatformMessageId: outerMessage.id,
     })
-    const retiredChatId = 2 ** 31 + storedOuter!.id * 1024
-    const fallback: tl.RpcMethod[] = []
-    ctx.mtproto.register('contacts.resolveUsername', async (_rpc, request) => {
-      fallback.push(request)
-      return { _: 'contacts.resolvedPeer', peer: { _: 'peerUser', userId: 1 }, chats: [], users: [] }
+    const legacyChatId = 2 ** 31 + storedOuter!.id * 1024
+    await expect(ctx.mtproto.dispatch(rpc, {
+      _: 'contacts.resolveUsername', username: `bridgebundle_${legacyChatId}`,
+    } as never)).resolves.toMatchObject({
+      _: 'contacts.resolvedPeer', peer: { _: 'peerChat', chatId: legacyChatId },
+      chats: [{ _: 'chat', id: legacyChatId, title: bundle.title }],
     })
-    await ctx.mtproto.dispatch(rpc, {
-      _: 'contacts.resolveUsername', username: `bridgebundle_${retiredChatId}`,
-    } as never)
-    expect(fallback).toHaveLength(1)
+    // 旧 ID 与新 ID 指向同一份历史，分页结果必须一致。
+    const legacyPage = await ctx.mtproto.dispatch(rpc, historyRequest({
+      _: 'inputPeerChat', chatId: legacyChatId,
+    }) as never) as tl.messages.RawMessagesSlice
+    expect(legacyPage.messages.map((message) => message._ === 'message' ? message.id : 0))
+      .toEqual([8000, 7000, 6000, 5000, 4000, 3000, 2000, 1000])
   })
 })

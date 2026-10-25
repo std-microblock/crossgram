@@ -12,6 +12,7 @@ import {
   decodeBundleChatId,
   encodeBundleChatId,
   makeMergedForwardProvider,
+  type BundleAddress,
   type BundleSessionState,
 } from './index.js'
 
@@ -133,23 +134,41 @@ describe('merged-forward durable bundle addresses', () => {
     expect(encodeBundleChatId({ storedMessageId: 1e10, path: [0] })).toBeUndefined()
   })
 
-  it('never decodes ordinary peer ids, process-local ids or a retired scheme', () => {
+  it('never decodes ordinary peer ids or ids that are not a bundle address', () => {
     for (const chatId of [1, 42, 0x7fffffff, stableId('merged-forward-chat:bundle:outer')]) {
       expect(decodeBundleChatId(chatId), String(chatId)).toBeUndefined()
     }
-    // The scheme that preceded ordered message ids: a client still holding one
-    // of those ids must not find a transcript it would then mix with the
-    // pages it already cached.
-    for (const chatId of [2 ** 31, 2 ** 31 + 1023, 2 ** 31 + 1_406_235 * 1024]) {
-      expect(decodeBundleChatId(chatId), String(chatId)).toBeUndefined()
-    }
-    // ... and the current scheme starts above every id that one produced, so
-    // the two ranges can never overlap.
-    for (const chatId of [2 ** 32 - 1024, 2 ** 32 - 1, 2 ** 32]) {
+    // 两个基址的下界本身都只是「第 0 行」，不构成地址。
+    for (const chatId of [2 ** 31, 2 ** 31 + 1023, 2 ** 32, 2 ** 32 + 1023]) {
       expect(decodeBundleChatId(chatId), String(chatId)).toBeUndefined()
     }
     expect(decodeBundleChatId(1_000_000_000_000)).toBeUndefined()
     expect(decodeBundleChatId(1.5)).toBeUndefined()
+  })
+
+  it('still decodes links minted under the retired 2^31 base without confusing the two ranges', () => {
+    // 基址从 2^31 抬到 2^32 之前发出的链接只差一个基址，客户端缓存里的旧消息仍然带着它。
+    const legacyChatId = (address: BundleAddress) => 2 ** 31 + encodeBundleChatId(address)! - 2 ** 32
+    const cases: BundleAddress[] = [
+      { storedMessageId: 1, path: [0] },
+      { storedMessageId: 1_406_235, path: [0] },
+      { storedMessageId: 4242, path: [1] },
+      { storedMessageId: 4242, path: [0, 0] },
+    ]
+    for (const address of cases) {
+      const chatId = legacyChatId(address)
+      // 旧基址有效期内的最大行号仍让 ID 停在新基址以下：两个区间互不相交。
+      expect(chatId, JSON.stringify(address)).toBeGreaterThanOrEqual(2 ** 31)
+      expect(chatId, JSON.stringify(address)).toBeLessThan(2 ** 32)
+      expect(decodeBundleChatId(chatId), String(chatId)).toEqual(address)
+    }
+    // 同一条地址的两种编码解回同一个行号与路径，且现行链接不会被旧公式抢先解释
+    // （现行 ID 减掉旧基址也是一个「合法」的旧行号，解码顺序因此必须现行优先）。
+    for (const address of cases) {
+      const current = encodeBundleChatId(address)!
+      expect(decodeBundleChatId(current)).toEqual(address)
+      expect(current - legacyChatId(address)).toBe(2 ** 31)
+    }
   })
 
   it('addresses stored bundles by their message row and keeps unstored ones process-local', async () => {
@@ -225,6 +244,61 @@ describe('merged-forward durable bundle addresses', () => {
     const failing = state(adapter, vi.fn(async () => { throw new Error('database offline') }))
     await expect(projection.lookup(failing,
       encodeBundleChatId({ storedMessageId: 4242, path: [0] })!)).resolves.toBeUndefined()
+  })
+
+  it('reports genuine dead links as undefined in strict mode too', async () => {
+    const adapter = platform()
+    const projection = makeMergedForwardProvider()
+    const dead = [
+      // 行已被删除
+      encodeBundleChatId({ storedMessageId: 1, path: [0] })!,
+      // 该行没有第 6 个 bundle
+      encodeBundleChatId({ storedMessageId: 4242, path: [5] })!,
+      // 该 bundle 里没有嵌套转发
+      encodeBundleChatId({ storedMessageId: 4242, path: [1, 0] })!,
+      // 根本不是 bundle 地址
+      12345,
+    ]
+    for (const chatId of dead) {
+      await expect(projection.lookup(state(adapter), chatId), String(chatId)).resolves.toBeUndefined()
+      await expect(projection.lookup(state(adapter), chatId, { strict: true }), String(chatId))
+        .resolves.toBeUndefined()
+    }
+  })
+
+  it('lets transient rebuild failures escape only in strict mode', async () => {
+    const adapter = platform()
+    const projection = makeMergedForwardProvider()
+    const chatId = encodeBundleChatId({ storedMessageId: 4242, path: [0] })!
+
+    // 宽松模式：DB 抖动仍表示「这不是合并转发的 peer」，messages.getHistory 等分支据此回退默认实现。
+    const offline = state(adapter, vi.fn(async () => { throw new Error('database offline') }))
+    await expect(projection.lookup(offline, chatId)).resolves.toBeUndefined()
+    // 严格模式（contacts.resolveUsername）：瞬时错误必须冒泡，交给 RPC 变成可重试错误，
+    // 否则客户端会把它当成 USERNAME_NOT_OCCUPIED 把链接永久记成死链。
+    await expect(projection.lookup(offline, chatId, { strict: true })).rejects.toThrow('database offline')
+
+    // 嵌套转发的父级归档加载失败同样属于瞬时错误。
+    const brokenArchive = platform(vi.fn(async () => { throw new Error('qq archive timeout') }))
+    const nestedId = encodeBundleChatId({ storedMessageId: 4242, path: [0, 0] })!
+    await expect(projection.lookup(state(brokenArchive), nestedId)).resolves.toBeUndefined()
+    await expect(projection.lookup(state(brokenArchive), nestedId, { strict: true }))
+      .rejects.toThrow('qq archive timeout')
+    await expect(projection.resolveUsername(state(brokenArchive), `bridgebundle_${nestedId}`, { strict: true }))
+      .rejects.toThrow('qq archive timeout')
+  })
+
+  it('rebuilds a transcript from a legacy deep link under the id the client asked for', async () => {
+    const adapter = platform()
+    const current = state(adapter)
+    const projection = makeMergedForwardProvider()
+    // 旧基址的编码与现行方案只差基址，客户端缓存里的链接正是这一个。
+    const legacyId = 2 ** 31 + encodeBundleChatId({ storedMessageId: 4242, path: [1] })! - 2 ** 32
+    const record = await projection.resolveUsername(current, `bridgebundle_${legacyId}`, { strict: true })
+    expect(record).toMatchObject({ chatId: legacyId, bundle: { id: secondBundle.id } })
+    // 回显请求的 ID 很重要：客户端拿 resolvedPeer 里的 chatId 去取历史，换 ID 就等于换了会话。
+    expect(record?.chatId).toBe(legacyId)
+    expect(current.dialogs.readStoredMessage).toHaveBeenCalledWith(4242)
   })
 
   it('deduplicates concurrent rebuilds and bounds the cache without losing links', async () => {
