@@ -24,6 +24,7 @@ CrossGram 是基于 [cordis](https://github.com/cordiverse/cordis) 与 [mtcute](
 | Matrix | `@mtproto-relay/platform-matrix` | Matrix Client-Server API | 仅支持未加密房间 |
 | Satori | `@mtproto-relay/platform-satori` | Satori 适配器 | 能力取决于底层 Satori adaptor |
 | 微信 | `@mtproto-relay/platform-wechat` | Windows ComWeChat HTTP API | 仅接收文本消息与基础会话 |
+| 飞书/Lark | `@mtproto-relay/platform-lark` | 开放平台自建应用（OAuth 用户授权 + WS 长连接） | 用户身份收发；群聊需 `im:message.group_msg` 敏感权限 |
 | Static | `@mtproto-relay/platform-static` | 内存模拟数据 | 测试与参考实现 |
 
 > [!CAUTION]
@@ -61,6 +62,7 @@ CrossGram 是基于 [cordis](https://github.com/cordiverse/cordis) 与 [mtcute](
 - [Discord 适配器](packages/platform-discord/README.md)
 - [Matrix 适配器](packages/platform-matrix/README.md)
 - [微信适配器](packages/platform-wechat/README.md)
+- [飞书/Lark 适配器](packages/platform-lark/README.md)
 
 ### Satori 接入
 

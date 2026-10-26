@@ -1,0 +1,6 @@
+appId: App ID of the Lark custom app.
+appSecret: App Secret of the Lark custom app.
+baseUrl: Open platform base URL; https://open.feishu.cn (default) or https://open.larksuite.com.
+publicUrl: Public base URL for the OAuth callback (e.g. https://relay.example.com); defaults to the built-in HTTP server.
+proxy: Optional HTTP(S) proxy for Lark API and media requests, e.g. http://127.0.0.1:7890.
+requestTimeoutMs: Maximum wait for regular Lark HTTP requests in milliseconds.

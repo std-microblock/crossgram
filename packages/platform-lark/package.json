@@ -1,0 +1,24 @@
+{
+  "name": "@mtproto-relay/platform-lark",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {},
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@cordisjs/plugin-database": "^4.0.0",
+    "@larksuiteoapi/node-sdk": "^1.76.0",
+    "@mtproto-relay/bridge": "workspace:*",
+    "schemastery": "^3.18.0",
+    "undici": "^8.10.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  },
+  "scripts": {
+    "test": "vitest run --config ../../vitest.config.mts packages/platform-lark"
+  }
+}

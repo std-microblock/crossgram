@@ -1,0 +1,6 @@
+appId: 飞书/Lark 自建应用的 App ID。
+appSecret: 飞书/Lark 自建应用的 App Secret。
+baseUrl: 开放平台 API 地址；飞书为 https://open.feishu.cn（默认），Lark 国际版为 https://open.larksuite.com。
+publicUrl: OAuth 回调使用的公网基地址（如 https://relay.example.com）；缺省使用内置 HTTP 服务地址。
+proxy: 可选的 HTTP(S) 代理，用于 Lark API 和媒体请求，例如 http://127.0.0.1:7890。
+requestTimeoutMs: Lark 普通 HTTP 请求的最大等待时间（毫秒）。

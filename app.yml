@@ -94,6 +94,14 @@
     proxy: http://127.0.0.1:7890
     syncTimeoutMs: 30000
     requestTimeoutMs: 30000
+- id: lark
+  name: '@mtproto-relay/platform-lark'
+  disabled: true
+  config:
+    appId: ${LARK_APP_ID}
+    appSecret: ${LARK_APP_SECRET}
+    # baseUrl: https://open.larksuite.com # Lark 国际版
+    # publicUrl: https://relay.example.com # OAuth 回调公网地址
 - id: wechat
   name: '@mtproto-relay/platform-wechat'
   disabled: true
