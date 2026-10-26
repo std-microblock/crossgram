@@ -160,9 +160,15 @@ describe('merged-forward transcript tail', () => {
     // 同一条请求再来一次（客户端确实会这么做）仍然是空页，循环就此结束。
     expect(await page({ offsetId: 7001, addOffset: -50, limit: 50 })).toMatchObject({ ids: [], count: 7 })
 
-    // 深链锚点（最早那条，id 1000）本身被当作 offset_id 且不带偏移时，要给出从锚点开始的首页，
-    // 而不是空页——否则点开链接后窗口里什么都没有。
-    expect(await page({ offsetId: 1000, limit: 3 })).toMatchObject({ ids: [3000, 2000, 1000], count: 7 })
+    // 反方向同理：tdesktop 往更早方向预加载（`loadMessagesUp`）用 offset_id = minMsgId、
+    // add_offset = 0，落到最早一条时也必须是空页，否则同样是 20ms 一次重拉，并把视图反复拽回
+    // 底部（生产实测 2840 次，用户看到的就是「一直跳到最下面、划不上去」）。
+    expect(await page({ offsetId: 1000, limit: 3 })).toMatchObject({ ids: [], count: 7 })
+    expect(await page({ offsetId: 1000, limit: 3 })).toMatchObject({ ids: [], count: 7 })
+    // 深链开窗走的是负偏移（offset_id = anchor, add_offset = -limit/2），仍然给出含锚点那一页。
+    expect(await page({ offsetId: 1000, addOffset: -25, limit: 50 })).toMatchObject({
+      ids: [7000, 6000, 5000, 4000, 3000, 2000, 1000], count: 7,
+    })
     // 哨兵语义不变。
     expect(await page({ offsetId: 1, limit: 1 })).toMatchObject({ ids: [1000], count: 7 })
   })

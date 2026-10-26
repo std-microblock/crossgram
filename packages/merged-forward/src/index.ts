@@ -1051,7 +1051,6 @@ export function selectTranscriptPage(
   // `offsetId = 1` 是客户端「从历史开头读」的哨兵（旧版深链不带锚点），它低于所有聊天记录 ID。
   if (request.offsetId === kFirstMessageOffsetId) return firstPage(filtered, limit)
   const newest = filtered[0]!.id
-  const oldest = filtered[filtered.length - 1]!.id
   if (request.offsetId > newest) {
     // 「往更新的方向」要一页却已经越过最新一条时，聊天记录不会再增长，正确回答是空页。
     // 反例就是 tdesktop 的 `HistoryWidget::loadMessagesDown()`（offset_id = maxId + 1,
@@ -1062,9 +1061,11 @@ export function selectTranscriptPage(
     // 单条消息的转录锚点就是最新一条，这里回空页会让窗口里什么都没有。
     return filtered.slice(0, limit)
   }
-  // 深链锚点就是最早那条消息时，客户端会直接拿 `offset_id = anchor`（不带偏移）来开窗；
-  // `offsetId` 是排他游标，按它算会得到空页——与哨兵同义，回「从锚点开始的首页」。
-  if (request.addOffset === 0 && request.offsetId === oldest) return firstPage(filtered, limit)
+  // `add_offset = 0` 且 `offset_id` 已经落在最早一条上时，按排他游标算就是「没有更早的消息」，
+  // 必须回空页：tdesktop 往更早方向预加载（`loadMessagesUp`）同样只在拿到空 slice 时才把
+  // `loadedAtTop` 置上；回一页重复消息会让它 20ms 一次重拉，并把视图不断拽回底部——生产实测
+  // 2840 次，就是用户看到的「一直跳到最后面、划不上去」。深链开窗用的是
+  // `offset_id = anchor, add_offset = -limit/2`（负偏移），不落到这条分支。
   const start = pageStart(filtered, request)
   return filtered.slice(start, start + limit)
 }

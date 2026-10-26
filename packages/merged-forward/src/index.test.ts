@@ -348,12 +348,17 @@ describe('merged-forward transcript pagination', () => {
     expect(page({ offsetId: 5001, addOffset: -2, maxId: 5000 })).toEqual([])
   })
 
-  it('starts from the anchor page when the offset id is the oldest message itself', () => {
-    // 深链锚点就是最早一条消息（id 1000）：客户端直接拿它当 offsetId 且不带偏移。
-    // offsetId 是排他游标，按它算会得到空页，这里要与哨兵同义——回「从锚点开始的首页」。
-    expect(page({ offsetId: 1000, limit: 2 })).toEqual([2000, 1000])
-    expect(page({ offsetId: 1000 })).toEqual([7000, 6000, 5000, 4000, 3000, 2000, 1000])
-    // 带负偏移的锚点跳转走原路径：窗口尾部对齐到锚点之后的位置。
+  it('answers an empty page once an older-direction request reaches the oldest message', () => {
+    // tdesktop 往更早方向预加载（`loadMessagesUp`）用 offset_id = minMsgId、add_offset = 0；
+    // 聊天记录没有更早的消息时必须回空页，它才会置上 loadedAtTop 并停止重拉——否则会 20ms 一次
+    // 请求同一页，并把视图反复拽回底部（生产实测 2840 次，表现为「一直跳到最下面、划不上去」）。
+    expect(page({ offsetId: 1000 })).toEqual([])
+    expect(page({ offsetId: 1000, limit: 2 })).toEqual([])
+    // 低于最早一条的游标同理（排他游标之下什么都没有）。
+    expect(page({ offsetId: 500 })).toEqual([])
+    // 深链开窗带的是负偏移（offset_id = anchor, add_offset = -limit/2），走常规路径：
+    // 窗口尾部对齐到锚点之后，仍然给出含锚点的那一页。
     expect(page({ offsetId: 1000, addOffset: -3, limit: 2 })).toEqual([3000, 2000])
+    expect(page({ offsetId: 1000, addOffset: -25, limit: 50 })).toEqual([7000, 6000, 5000, 4000, 3000, 2000, 1000])
   })
 })
