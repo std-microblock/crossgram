@@ -988,6 +988,56 @@ describe('rich-media projection', () => {
     })
   })
 
+  it('omits a zero-byte native preview instead of borrowing the original byte size', async () => {
+    const { store, peerId } = await createStore()
+    const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-zero-byte-preview-'))
+    disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
+    const photo: IMMessage = {
+      ...album,
+      id: 'zero-byte-preview-photo',
+      content: {
+        parts: [{
+          type: 'media',
+          media: {
+            id: 'wide-photo', kind: 'image', name: 'wide.jpg', mimeType: 'image/jpeg',
+            size: 1_420_825, width: 1_939, height: 1_123, locator: { remote: 'wide-photo' },
+            preview: {
+              mimeType: 'image/jpeg', size: 0, width: 1_280, height: 741,
+              locator: { remote: 'wide-preview' },
+            },
+          },
+        }],
+      },
+    }
+    const rpc = new DialogRpc({
+      ...platform, async getHistory() { return { messages: [photo] } },
+    }, session, store, new UploadManager(uploadPath))
+    const result = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const message = result.messages.find((item) => item._ === 'message'
+      && item.media?._ === 'messageMediaPhoto') as tl.RawMessage
+    const media = message.media as tl.RawMessageMediaPhoto
+    if (media.photo?._ !== 'photo') throw new Error('expected photo')
+
+    // thumbFileSize=0 时预览字节数未知：不能把原图大小当成 `m` 档位的声明大小，
+    // 否则客户端会按原图大小去拉预览，短响应被当成文件结束，之后每次打开都从半截续传。
+    expect(media.photo.sizes).toMatchObject([
+      { _: 'photoSize', type: 'y', w: 1_280, h: 741, size: 1_420_825 },
+      { _: 'photoSize', type: 'w', w: 1_939, h: 1_123, size: 1_420_825 },
+    ])
+
+    // 老客户端仍会按 `m` 请求缩略图：此时必须给原图字节（与声明大小一致），而不是 720 预览。
+    const preview = await rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: {
+        _: 'inputPhotoFileLocation', id: media.photo.id, accessHash: media.photo.accessHash,
+        fileReference: media.photo.fileReference, thumbSize: 'm',
+      },
+      offset: 0, limit: 1024,
+    })
+    if (preview._ !== 'upload.file') throw new Error('expected upload.file')
+    expect(new TextDecoder().decode(preview.bytes)).toBe('wide-photo')
+  })
+
   it('preserves a giant zero-byte-preview image as an original document', () => {
     const media = makeTlMessageMedia({
       id: 19_857,
@@ -1226,7 +1276,7 @@ describe('rich-media projection', () => {
     if (file._ === 'upload.file') expect(new TextDecoder().decode(file.bytes)).toBe('fresh-avatar')
   })
 
-  it('maps unavailable platform media to Telegram file-reference expiry', async () => {
+  it('maps unavailable platform media to a terminal Telegram error', async () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-expired-media-'))
     disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
@@ -1248,7 +1298,7 @@ describe('rich-media projection', () => {
         fileReference: media.photo.fileReference, thumbSize: 'x',
       },
       offset: 0, limit: 1024,
-    })).rejects.toMatchObject({ code: 400, text: 'FILE_REFERENCE_EXPIRED' })
+    })).rejects.toMatchObject({ code: 400, text: 'MEDIA_EMPTY' })
   })
 
   it('restores a persisted group avatar without reloading dialogs after restart', async () => {

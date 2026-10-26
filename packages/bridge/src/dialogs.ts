@@ -3362,7 +3362,11 @@ export class DialogRpc {
         size += accepted.length
       }
     } catch (error) {
-      if (error instanceof IMMediaUnavailableError) throw new RpcError(400, 'FILE_REFERENCE_EXPIRED')
+      // 上游（QQ CDN）已经没有这份字节了：直链过期、文件被删、locator 根本没有可下载的远端身份。
+      // 这些都不是「引用过期，刷新后重试就能好」，而 crossgram 下发的 file_reference 又是恒定值，
+      // 报 FILE_REFERENCE_EXPIRED 只会让客户端刷新引用后重试同一份不存在的文件（线上实测同一张图
+      // 一分钟内打几十次请求）。这里直接给终止性错误，客户端会把媒体标成失败并停止重试。
+      if (error instanceof IMMediaUnavailableError) throw new RpcError(400, 'MEDIA_EMPTY')
       throw error
     }
     const bytes = new Uint8Array(size)
@@ -7279,7 +7283,13 @@ function shouldServeMediaPreview(
   return isDownloadablePreview(media.preview)
 }
 
-/** QQNT 报告 `thumbFileSize=0` 时 720p 预览仍可下载；回退使用原图大小作为上限，避免 Telegram 拒绝 0 字节 `PhotoSize`。 */
+/**
+ * `m` 档位声明的字节数必须是 `getFile` 真实会发出的字节数，否则客户端按声明大小去拉，
+ * 拿到短响应后会把「文件到此为止」写进缓存，再打开时又从半截处续传，永远补不齐。
+ *
+ * QQNT 常见 `thumbFileSize=0`（预览本身可下载但大小未知）。此时不能拿原图字节数冒充预览大小，
+ * 只能不下发 `m` 档位：客户端回到 `i` 微缩图 + 原图档位，每个档位的声明大小仍然精确。
+ */
 function projectedPhotoPreviewSize<T extends {
   size?: number | null
   preview?: { size: number, width: number, height: number } | null
@@ -7288,8 +7298,6 @@ function projectedPhotoPreviewSize<T extends {
   if (!preview || !Number.isSafeInteger(preview.width) || preview.width <= 0
     || !Number.isSafeInteger(preview.height) || preview.height <= 0) return
   if (Number.isSafeInteger(preview.size) && preview.size > 0) return preview.size
-  const originalSize = media.size
-  if (Number.isSafeInteger(originalSize) && originalSize > 0) return originalSize
 }
 
 function isDownloadablePreview<T extends { size: number }>(

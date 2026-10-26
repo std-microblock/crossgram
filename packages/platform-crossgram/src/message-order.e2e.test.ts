@@ -1744,7 +1744,7 @@ describe('QQNT remote media routing E2E', () => {
 })
 
 describe('QQNT history media without placeholder edits E2E', () => {
-  it('serves a zero-size native preview without downloading the original during history', async () => {
+  it('serves a zero-size native preview as the original instead of advertising a bogus size', async () => {
     const ctx = new Context()
     const fibers = [
       ctx.plugin(Database),
@@ -1805,19 +1805,21 @@ describe('QQNT history media without placeholder edits E2E', () => {
       }
       if (request.method === 'GET' && request.url === '/cdn/history.jpg') {
         imageRequests++
-        if (request.headers.range === 'bytes=0-1') {
-          response.writeHead(206, {
-            'content-type': 'image/jpeg', 'content-length': '2',
-            'content-range': `bytes 0-1/${jpeg.length}`, 'accept-ranges': 'bytes',
-          })
-          response.end(jpeg.subarray(0, 2))
-          return
+        const match = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range ?? '')
+        const start = match ? Number(match[1]) : 0
+        const end = Math.min(jpeg.length - 1, match?.[2] ? Number(match[2]) : jpeg.length - 1)
+        const probe = start === 0 && end === 1
+        if (!probe) {
+          imageRequested.resolve()
+          await releaseImage.promise
         }
-        imageRequested.resolve()
-        await releaseImage.promise
-        response.setHeader('content-type', 'image/jpeg')
-        response.setHeader('content-length', String(jpeg.length))
-        response.end(jpeg)
+        const bytes = jpeg.subarray(start, end + 1)
+        response.writeHead(match ? 206 : 200, {
+          'content-type': 'image/jpeg', 'content-length': String(bytes.length),
+          ...(match ? { 'content-range': `bytes ${start}-${end}/${jpeg.length}` } : {}),
+          'accept-ranges': 'bytes',
+        })
+        response.end(bytes)
         return
       }
       response.writeHead(404).end('not found')
@@ -1894,43 +1896,39 @@ describe('QQNT history media without placeholder edits E2E', () => {
       throw new Error('expected projected photo')
     }
     expect(projected.photo.sizes).toMatchObject([
-      { _: 'photoSize', type: 'm', w: 1280, h: 579, size: jpeg.length },
-      { _: 'photoSize', type: 'y', w: 2560, h: 1157, size: jpeg.length },
-      { _: 'photoSize', type: 'w', w: 2832, h: 1280, size: jpeg.length },
+      { _: 'photoSize', type: 'y', w: 1_280, h: 579, size: jpeg.length },
+      { _: 'photoSize', type: 'w', w: 2_832, h: 1_280, size: jpeg.length },
     ])
+    // 历史投影只读元数据，不下载原图。
+    expect(previewRequests).toBe(0)
+    expect(imageRequests).toBe(0)
     const uploadPath = await mkdtemp(join(tmpdir(), 'qqnt-native-preview-download-'))
     temporaryDirectories.push(uploadPath)
     const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
-    const previewLocation = {
+    // QQNT 没给出 720 预览的字节数（thumbFileSize=0）。这种预览不能按原图大小下发，
+    // 否则客户端按声明大小拉到短响应后会把「文件到此为止」写进缓存、之后每次打开都从半截续传。
+    // 所以 `m` 档位不再下发，老客户端硬要 `m` 时回落到原图字节（声明大小 == 实际字节数）。
+    const legacyThumbLocation = {
       _: 'inputPhotoFileLocation' as const, id: projected.photo.id, accessHash: projected.photo.accessHash,
       fileReference: projected.photo.fileReference, thumbSize: 'm',
     }
-    const previewDirect = await rpc.getFileUrl(previewLocation)
-    expect(JSON.parse(previewDirect.data)).toMatchObject({
-      url: expect.stringContaining('/cdn/history-720.jpg'), supportsRange: true,
-    })
-    expect(directUrlRequests).toBe(1)
-    expect(previewRequests).toBe(1)
-    const previewFile = await rpc.getFile({
-      _: 'upload.getFile', precise: false, cdnSupported: false,
-      location: previewLocation,
-      offset: 0, limit: 1024 * 1024,
-    })
-    if (previewFile._ !== 'upload.file') throw new Error('expected native preview file')
-    expect(Buffer.from(previewFile.bytes)).toEqual(Buffer.from(nativePreview))
-    expect(previewRequests).toBe(2)
-
-    expect(directUrlRequests).toBe(1)
-    expect(imageRequests).toBe(0)
-    await expect(platform.resolveMediaUrl(session, original!.media as any)).resolves.toMatchObject({
+    const legacyDirect = await rpc.getFileUrl(legacyThumbLocation)
+    expect(JSON.parse(legacyDirect.data)).toMatchObject({
       url: expect.stringContaining('/cdn/history.jpg'), supportsRange: true,
     })
-    expect(directUrlRequests).toBe(2)
-    expect(imageRequests).toBe(1)
+    expect(previewRequests).toBe(0)
     const download = collect(platform.downloadMedia(session, original!.media as any))
     await imageRequested.promise
     releaseImage.resolve()
     await expect(download).resolves.toEqual(jpeg)
+    const legacyFile = await rpc.getFile({
+      _: 'upload.getFile', precise: false, cdnSupported: false,
+      location: legacyThumbLocation,
+      offset: 0, limit: 1024 * 1024,
+    })
+    if (legacyFile._ !== 'upload.file') throw new Error('expected original bytes for a legacy thumbnail request')
+    expect(Buffer.from(legacyFile.bytes)).toEqual(jpeg)
+    expect(previewRequests).toBe(0)
     const refreshedHistory = await platform.getHistory(session, conversation)
     const refreshed = await store.ingest(
       session, conversation, refreshedHistory.messages[0], { allocation: 'history' },
