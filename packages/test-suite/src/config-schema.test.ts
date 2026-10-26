@@ -40,7 +40,7 @@ const cases = [
   ]],
   ['qqnt', qqntConfig, [
     'endpoint', 'webSocketEndpoint', 'token', 'grayTipFilters',
-    'generatePreviews', 'previewConcurrency',
+    'generatePreviews', 'previewConcurrency', 'timeouts',
   ]],
   ['discord', discordConfig, ['token', 'includeBots', 'proxy', 'downloadChunkSize']],
   ['matrix', matrixConfig, ['homeserver', 'accessToken', 'userId', 'proxy', 'syncTimeoutMs', 'requestTimeoutMs']],

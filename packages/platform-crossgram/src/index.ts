@@ -26,6 +26,9 @@ import { QQVoiceMedia } from './voice-media.js'
 import { QQBridgePcmTransport } from './qq-bridge-pcm-transport.js'
 import { defineLegacyQQMediaSchema } from './legacy-media-schema.js'
 import { defineQQMediaPreviewModel, mediaPreviewKey, QQMediaPreviewer } from './media-preview.js'
+import {
+  DEFAULT_QQNT_CLIENT_TIMEOUTS, isQQNTUpstreamTimeout,
+} from './upstream-timeout.js'
 import { extractRemoteVideoFrame, type RemoteVideoFrameExtractor } from './video-frame.js'
 import { migrateLegacyQQMessageMedia } from './raw-media-migration.js'
 import { migrateLegacyQQGroupAliasUsers } from './user-name-migration.js'
@@ -63,6 +66,21 @@ export const Config = z.object({
   grayTipFilters: z.array(z.string()).default(DEFAULT_GRAY_TIP_FILTERS),
   generatePreviews: z.boolean().default(false),
   previewConcurrency: z.natural().min(1).max(8).default(2),
+  /** 上游 IO 的有界超时预算；缺省值见 `upstream-timeout.ts`。 */
+  timeouts: z.object({
+    bridgeMs: z.natural()
+      .description('bridge JSON RPC（含响应体）的总超时；bridge 不回包时按这条预算失败。')
+      .default(DEFAULT_QQNT_CLIENT_TIMEOUTS.bridgeMs),
+    connectMs: z.natural()
+      .description('直连 QQ CDN 的建连 + 首包（响应头）超时。')
+      .default(DEFAULT_QQNT_CLIENT_TIMEOUTS.connectMs),
+    bodyStallMs: z.natural()
+      .description('直连 QQ CDN 流式 body 两帧之间允许的最长停顿，收到数据即重新计时。')
+      .default(DEFAULT_QQNT_CLIENT_TIMEOUTS.bodyStallMs),
+    longBridgeMs: z.natural()
+      .description('bridge 侧长任务（语音转写等）的总超时。')
+      .default(DEFAULT_QQNT_CLIENT_TIMEOUTS.longBridgeMs),
+  }).description('QQ 富媒体与 bridge 上游 IO 的有界超时预算；不允许为 0，否则会退化成无界等待。'),
 }).i18n({
   'en-US': enUS,
   'zh-CN': zhCN,
@@ -1521,6 +1539,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         yield chunk
       }
     } catch (error) {
+      // 上游超时是暂时性故障：既不能当成越界 EOF 静默结束，也不能标成「媒体已失效」。
+      if (isQQNTUpstreamTimeout(error)) throw error
       // Telegram 会继续请求下一分片以探测 EOF；QQNT 对越界 Range 返回 HTTP 400 而非空响应。
       if ((options.offset ?? 0) > 0 && isQQNTDownloadPastEnd(error)) return
       if (isQQNTMediaUnavailable(error)) {
@@ -1532,6 +1552,12 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
   }
 
+  /**
+   * 解析直链供 `crossgram.getFileUrl` 使用。
+   *
+   * 上游超时等错误原样抛出（由 RPC 层降级成 `MEDIA_DIRECT_URL_UNAVAILABLE`，
+   * 客户端随后走 MTProto 中转），绝不在此吞掉——否则客户端拿不到直链也拿不到错误。
+   */
   async resolveMediaUrl(
     _session: PlatformSession,
     media: IMMedia<QQMediaLocator>,

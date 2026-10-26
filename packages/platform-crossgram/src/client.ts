@@ -19,6 +19,11 @@ import type {
 } from './protocol.js'
 import { QQHighwayUploadWriter, uploadHighway, type QQMediaUploadPlan } from './highway.js'
 import { Sha1CompressionState } from './sha1-state.js'
+import {
+  BoundedResponse, bridgeRequestTimedOutError, nativeMediaBodyStalledError, nativeMediaTimedOutError,
+  resolveQQNTClientTimeouts, UpstreamDeadline,
+  type QQNTClientTimeouts, type UpstreamBodyReader,
+} from './upstream-timeout.js'
 
 export interface QQNTClientOptions {
   endpoint?: string
@@ -27,6 +32,8 @@ export interface QQNTClientOptions {
   fetch?: typeof globalThis.fetch
   unrangedCachePath?: string
   videoThumbnail?: VideoThumbnailGenerator
+  /** 上游 IO 的超时预算；缺省值见 `upstream-timeout.ts`，0 / 负数 / NaN 会退回默认值。 */
+  timeouts?: Partial<QQNTClientTimeouts>
 }
 
 export interface GeneratedVideoThumbnail {
@@ -144,6 +151,7 @@ export class QQNTClient {
   private readonly unrangedFileLoads = new Map<string, Promise<CachedUnrangedFile>>()
   private readonly unrangedCachePath: string
   private readonly videoThumbnail: VideoThumbnailGenerator
+  private readonly timeouts: QQNTClientTimeouts
   private unrangedFileBytes = 0
   private readonly directRangeBlocks = new Map<string, CachedDirectRangeBlock>()
   private readonly directRangeBlockLoads = new Map<string, Promise<CachedDirectRangeBlock>>()
@@ -156,6 +164,7 @@ export class QQNTClient {
     this.webSocketEndpoint = options.webSocketEndpoint ?? `${this.endpoint}/events/ws`
     this.token = options.token
     this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.timeouts = resolveQQNTClientTimeouts(options.timeouts)
     this.videoThumbnail = options.videoThumbnail ?? (async (source, signal) => {
       try {
         return await extractVideoThumbnail(source, signal)
@@ -250,16 +259,18 @@ export class QQNTClient {
 
   async mediaLease(callId: string): Promise<QQNTMediaLease> {
     try {
-      const response = await this.fetchImpl(`${this.endpoint}/calls/media-lease`, {
+      const bounded = await this.openBridge('/calls/media-lease', {
         method: 'POST',
         headers: this.headers({ 'content-type': 'application/json' }),
         body: JSON.stringify({ callId }),
       })
-      if (!response.ok) {
-        await discardResponseBody(response)
-        throw new Error('media lease request rejected')
+      try {
+        if (!bounded.ok) throw new Error('media lease request rejected')
+        return parseMediaLease(await bounded.json())
+      } finally {
+        await bounded.discard()
+        bounded.dispose()
       }
-      return parseMediaLease(await response.json())
     } catch {
       throw new Error('QQNT media lease request failed')
     }
@@ -267,16 +278,17 @@ export class QQNTClient {
 
   async controlCall(callId: string, operation: 'accept' | 'reject' | 'hangup'): Promise<void> {
     try {
-      const response = await this.fetchImpl(`${this.endpoint}/calls/control`, {
+      const bounded = await this.openBridge('/calls/control', {
         method: 'POST',
         headers: this.headers({ 'content-type': 'application/json' }),
         body: JSON.stringify({ callId, operation }),
       })
-      if (!response.ok) {
-        await discardResponseBody(response)
-        throw new Error('call control rejected')
+      try {
+        if (!bounded.ok) throw new Error('call control rejected')
+      } finally {
+        await bounded.discard()
+        bounded.dispose()
       }
-      await discardResponseBody(response)
     } catch {
       throw new Error('QQNT call control failed')
     }
@@ -451,7 +463,7 @@ export class QQNTClient {
     if (limit === 0) return
     const ranged = offset > 0 || limit !== undefined
     const end = limit === undefined ? '' : String(offset + limit - 1)
-    const response = await this.fetchImpl(`${this.endpoint}/stickers/asset`, {
+    const bounded = await this.openBridge('/stickers/asset', {
       method: 'POST',
       headers: this.headers({
         'content-type': 'application/json',
@@ -460,39 +472,43 @@ export class QQNTClient {
       body: JSON.stringify(reference),
       signal: options.signal,
     })
-    if (response.status === 416 && offset > 0) {
-      await discardResponseBody(response)
-      return
-    }
-    if (!response.ok) throw new Error(await responseError(response))
-    if (!response.body) throw new Error('QQNT sticker response has no body')
-    const reader = response.body.getReader()
-    let skipped = response.status === 206 ? offset : 0
-    let remaining = limit ?? Number.POSITIVE_INFINITY
     let completed = false
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) {
-          completed = true
-          return
-        }
-        if (!value?.length) continue
-        if (skipped + value.length <= offset) {
+      if (bounded.status === 416 && offset > 0) {
+        await bounded.discard()
+        return
+      }
+      if (!bounded.ok) throw new Error(await bridgeBoundedError(bounded))
+      const reader = bounded.stream()
+      if (!reader) throw new Error('QQNT sticker response has no body')
+      let skipped = bounded.status === 206 ? offset : 0
+      let remaining = limit ?? Number.POSITIVE_INFINITY
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) {
+            completed = true
+            return
+          }
+          if (!value?.length) continue
+          if (skipped + value.length <= offset) {
+            skipped += value.length
+            continue
+          }
+          const start = Math.max(0, offset - skipped)
+          const accepted = value.subarray(start, start + remaining)
           skipped += value.length
-          continue
+          if (!accepted.length) continue
+          remaining -= accepted.length
+          yield accepted
+          if (remaining <= 0) return
         }
-        const start = Math.max(0, offset - skipped)
-        const accepted = value.subarray(start, start + remaining)
-        skipped += value.length
-        if (!accepted.length) continue
-        remaining -= accepted.length
-        yield accepted
-        if (remaining <= 0) return
+      } finally {
+        if (!completed) await reader.cancel()
+        reader.releaseLock()
       }
     } finally {
-      if (!completed) await reader.cancel().catch(() => undefined)
-      reader.releaseLock()
+      bounded.dispose()
     }
   }
 
@@ -578,16 +594,22 @@ export class QQNTClient {
     media: WireUploadMedia,
     signal?: AbortSignal,
   ): Promise<QQMediaUploadPlan> {
-    const response = await this.fetchImpl(`${this.endpoint}/uploads/prepare`, {
+    // 上传预检是媒体链路的入口 RPC：bridge 不回包时要尽快失败，而不是让整条发送永远挂着。
+    const bounded = await this.openBridge('/uploads/prepare', {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ conversationId, media }),
       signal,
     })
-    if (response.status === 422) {
-      throw new QQNTMessageSendRejectedError(await responseErrorDetail(response))
+    try {
+      if (bounded.status === 422) {
+        throw new QQNTMessageSendRejectedError(await bridgeBoundedErrorDetail(bounded))
+      }
+      return await boundedJson<QQMediaUploadPlan>(bounded)
+    } finally {
+      await bounded.discard()
+      bounded.dispose()
     }
-    return responseJson(response)
   }
 
   /** bridge 协议 >= 35 支持图文混排元素保序；旧版退化为单段文本后接全部媒体的扁平结构。 */
@@ -779,16 +801,20 @@ export class QQNTClient {
   }
 
   async getMessage(conversationId: string, messageId: string): Promise<WireMessage | null> {
-    const response = await this.fetchImpl(`${this.endpoint}/messages/get`, {
+    const bounded = await this.openBridge('/messages/get', {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ conversationId, messageId }),
     })
-    if (response.status === 404) {
-      await discardResponseBody(response)
-      return null
+    try {
+      if (bounded.status === 404) {
+        await bounded.discard()
+        return null
+      }
+      return await boundedJson<WireMessage>(bounded)
+    } finally {
+      bounded.dispose()
     }
-    return responseJson(response)
   }
 
   async getMultiForwardMessages(locator: WireMultiForwardLocator): Promise<WireMessage[]> {
@@ -896,12 +922,13 @@ export class QQNTClient {
   async transcribeVoice(locator: QQMediaLocator, signal?: AbortSignal): Promise<{ transcript: string }> {
     if (this.bridgeProtocol === undefined) await this.status()
     if (this.bridgeProtocol! < 32) throw new Error('QQNT bridge protocol 32 is required for voice transcription')
+    // 语音转写是 bridge 侧的长任务，用更长的预算，避免把正常转写误判成卡死。
     return this.json('/messages/voice/transcribe', false, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify(locator),
       signal,
-    })
+    }, this.timeouts.longBridgeMs)
   }
 
   async *downloadFile(
@@ -920,106 +947,122 @@ export class QQNTClient {
     const end = limit === undefined ? '' : String(offset + limit - 1)
     const rangeHeaders = ranged ? { range: `bytes=${offset}-${end}` } : {}
     const avatarUrl = qqAvatarUrl(locator)
-    let response: Response
     let directKey: string | undefined
     let direct: DirectUrl | undefined
-    if (locator.filePath && !avatarUrl) {
-      response = await this.fetchImpl(`${this.endpoint}/files/asset`, {
-        method: 'POST',
-        headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
-        body: JSON.stringify(locator),
-        signal: options.signal,
-      })
-      if (!response.ok && response.status === 404 && hasDirectUrlIdentity(locator)) {
-        await discardResponseBody(response)
-        directKey = directUrlIdentity(locator)
-        direct = await this.resolveFileUrl(locator, options.signal)
-        const cached = ranged && direct.supportsRange === false
-          ? await this.cachedUnrangedFile(locator, directKey, direct.url)
+    // `owned` 兜底释放本次请求占用的连接与定时器：任何分支抛错或提前 return 都走 finally。
+    let owned: BoundedResponse | undefined
+    let response: BoundedResponse
+    try {
+      if (locator.filePath && !avatarUrl) {
+        owned = await this.openBridge('/files/asset', {
+          method: 'POST',
+          headers: this.headers({ 'content-type': 'application/json', ...rangeHeaders }),
+          body: JSON.stringify(locator),
+          signal: options.signal,
+        })
+        const asset = owned
+        if (!asset.ok && asset.status === 404 && hasDirectUrlIdentity(locator)) {
+          // 本地路径失效：先释放 bridge 的 404 响应，再改走 QQ 直链。
+          await asset.discard()
+          asset.dispose()
+          owned = undefined
+          directKey = directUrlIdentity(locator)
+          direct = await this.resolveFileUrl(locator, options.signal)
+          const cached = ranged && direct.supportsRange === false
+            ? await this.cachedUnrangedFile(locator, directKey, direct.url)
+            : undefined
+          if (cached) {
+            yield* this.readCachedUnrangedFile(cached, offset, limit, options)
+            return
+          }
+          if (limit !== undefined && direct.supportsRange === true) {
+            const bytes = await this.cachedDirectRange(locator, directKey, direct.url, offset, limit, options.signal)
+            await options.onChunk?.(bytes.length)
+            if (bytes.length) yield bytes
+            return
+          }
+          owned = await this.fetchDirectUrlWithRefresh(locator, directKey, direct.url, {
+            headers: direct.supportsRange === false ? {} : rangeHeaders,
+            signal: options.signal,
+          })
+          if (!owned.ok) throw await nativeBoundedFailure(owned)
+          if (!owned.response.body) throw new Error('QQNT native media response has no body')
+          response = owned
+        } else {
+          if (!asset.ok) throw await bridgeBoundedFailure(asset)
+          if (!asset.response.body) throw new Error('QQNT media asset response has no body')
+          response = asset
+        }
+      } else if (avatarUrl || hasDirectUrlIdentity(locator)) {
+        directKey = avatarUrl ? undefined : directUrlIdentity(locator)
+        direct = avatarUrl ? undefined : await this.resolveFileUrl(locator, options.signal)
+        const directUrl = avatarUrl ?? direct!.url
+        const cached = directKey && ranged && direct?.supportsRange === false
+          ? await this.cachedUnrangedFile(locator, directKey, directUrl)
           : undefined
         if (cached) {
           yield* this.readCachedUnrangedFile(cached, offset, limit, options)
           return
         }
-        if (limit !== undefined && direct.supportsRange === true) {
-          const bytes = await this.cachedDirectRange(locator, directKey, direct.url, offset, limit, options.signal)
+        if (directKey && limit !== undefined && direct?.supportsRange === true) {
+          const bytes = await this.cachedDirectRange(locator, directKey, directUrl, offset, limit, options.signal)
           await options.onChunk?.(bytes.length)
           if (bytes.length) yield bytes
           return
         }
-        response = await this.fetchDirectUrlWithRefresh(locator, directKey, direct.url, {
-          headers: direct.supportsRange === false ? {} : rangeHeaders,
+        owned = await this.fetchDirectUrlWithRefresh(locator, directKey, directUrl, {
+          headers: direct?.supportsRange === false ? {} : rangeHeaders,
           signal: options.signal,
         })
-        if (!response.ok) throw new Error(await nativeResponseError(response))
-        if (!response.body) throw new Error('QQNT native media response has no body')
+        if (!owned.ok) throw await nativeBoundedFailure(owned)
+        if (!owned.response.body) throw new Error('QQNT native media response has no body')
+        response = owned
       } else {
-        if (!response.ok) throw new Error(await responseError(response))
-        if (!response.body) throw new Error('QQNT media asset response has no body')
+        throw new Error('QQNT media locator has no remote direct-link identity')
       }
-    } else if (avatarUrl || hasDirectUrlIdentity(locator)) {
-      directKey = avatarUrl ? undefined : directUrlIdentity(locator)
-      direct = avatarUrl ? undefined : await this.resolveFileUrl(locator, options.signal)
-      const directUrl = avatarUrl ?? direct!.url
-      const cached = directKey && ranged && direct?.supportsRange === false
-        ? await this.cachedUnrangedFile(locator, directKey, directUrl)
-        : undefined
-      if (cached) {
+      if (directKey && ranged && response.status === 200) {
+        // 这次全量响应交给后台落盘缓存，所有权随之移交，后续分片只读本地文件。
+        const cached = await this.cacheUnrangedResponse(directKey, response)
+        owned = undefined
+        this.markDirectRangeSupport(directKey, false)
+        this.rememberUnrangedFile(directKey, cached)
         yield* this.readCachedUnrangedFile(cached, offset, limit, options)
         return
       }
-      if (directKey && limit !== undefined && direct?.supportsRange === true) {
-        const bytes = await this.cachedDirectRange(locator, directKey, directUrl, offset, limit, options.signal)
-        await options.onChunk?.(bytes.length)
-        if (bytes.length) yield bytes
-        return
-      }
-      response = await this.fetchDirectUrlWithRefresh(locator, directKey, directUrl, {
-        headers: direct?.supportsRange === false ? {} : rangeHeaders,
-        signal: options.signal,
-      })
-      if (!response.ok) throw new Error(await nativeResponseError(response))
-      if (!response.body) throw new Error('QQNT native media response has no body')
-    } else {
-      throw new Error('QQNT media locator has no remote direct-link identity')
-    }
-    if (directKey && ranged && response.status === 200) {
-      const cached = await this.cacheUnrangedResponse(directKey, response)
-      this.markDirectRangeSupport(directKey, false)
-      this.rememberUnrangedFile(directKey, cached)
-      yield* this.readCachedUnrangedFile(cached, offset, limit, options)
-      return
-    }
-    if (directKey && response.status === 206) this.markDirectRangeSupport(directKey, true)
-    const reader = response.body.getReader()
-    // 兼容忽略 Range 并返回 200 全量响应的 CDN，在本地做切片。
-    let skipped = response.status === 206 ? offset : 0
-    let remaining = limit ?? Number.POSITIVE_INFINITY
-    let completed = false
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) {
-          completed = true
-          break
-        }
-        if (!value?.length) continue
-        if (skipped + value.length <= offset) {
+      if (directKey && response.status === 206) this.markDirectRangeSupport(directKey, true)
+      const reader = response.stream()
+      if (!reader) throw new Error('QQNT native media response has no body')
+      // 兼容忽略 Range 并返回 200 全量响应的 CDN，在本地做切片。
+      let skipped = response.status === 206 ? offset : 0
+      let remaining = limit ?? Number.POSITIVE_INFINITY
+      let completed = false
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) {
+            completed = true
+            break
+          }
+          if (!value?.length) continue
+          if (skipped + value.length <= offset) {
+            skipped += value.length
+            continue
+          }
+          const start = Math.max(0, offset - skipped)
+          const accepted = value.subarray(start, start + remaining)
           skipped += value.length
-          continue
+          if (!accepted.length) continue
+          remaining -= accepted.length
+          await options.onChunk?.(accepted.length)
+          yield accepted
+          if (remaining <= 0) return
         }
-        const start = Math.max(0, offset - skipped)
-        const accepted = value.subarray(start, start + remaining)
-        skipped += value.length
-        if (!accepted.length) continue
-        remaining -= accepted.length
-        await options.onChunk?.(accepted.length)
-        yield accepted
-        if (remaining <= 0) return
+      } finally {
+        if (!completed) await reader.cancel()
+        reader.releaseLock()
       }
     } finally {
-      if (!completed) await reader.cancel().catch(() => undefined)
-      reader.releaseLock()
+      owned?.dispose()
     }
   }
 
@@ -1038,7 +1081,7 @@ export class QQNTClient {
     if (limit === 0) return
     const ranged = offset > 0 || limit !== undefined
     const end = limit === undefined ? '' : String(offset + limit - 1)
-    const response = await this.fetchImpl(`${this.endpoint}/reactions/asset`, {
+    const bounded = await this.openBridge('/reactions/asset', {
       method: 'POST',
       headers: this.headers({
         'content-type': 'application/json',
@@ -1047,36 +1090,40 @@ export class QQNTClient {
       body: JSON.stringify({ reactionKey }),
       signal: options.signal,
     })
-    if (!response.ok) throw new Error(await responseError(response))
-    if (!response.body) throw new Error('QQ reaction asset response has no body')
-    const reader = response.body.getReader()
-    let skipped = response.status === 206 ? offset : 0
-    let remaining = limit ?? Number.POSITIVE_INFINITY
     let completed = false
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) {
-          completed = true
-          break
-        }
-        if (!value?.length) continue
-        if (skipped + value.length <= offset) {
+      if (!bounded.ok) throw new Error(await bridgeBoundedError(bounded))
+      const reader = bounded.stream()
+      if (!reader) throw new Error('QQ reaction asset response has no body')
+      let skipped = bounded.status === 206 ? offset : 0
+      let remaining = limit ?? Number.POSITIVE_INFINITY
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) {
+            completed = true
+            break
+          }
+          if (!value?.length) continue
+          if (skipped + value.length <= offset) {
+            skipped += value.length
+            continue
+          }
+          const start = Math.max(0, offset - skipped)
+          const accepted = value.subarray(start, start + remaining)
           skipped += value.length
-          continue
+          if (!accepted.length) continue
+          remaining -= accepted.length
+          await options.onChunk?.(accepted.length)
+          yield accepted
+          if (remaining <= 0) return
         }
-        const start = Math.max(0, offset - skipped)
-        const accepted = value.subarray(start, start + remaining)
-        skipped += value.length
-        if (!accepted.length) continue
-        remaining -= accepted.length
-        await options.onChunk?.(accepted.length)
-        yield accepted
-        if (remaining <= 0) return
+      } finally {
+        if (!completed) await reader.cancel()
+        reader.releaseLock()
       }
     } finally {
-      if (!completed) await reader.cancel().catch(() => undefined)
-      reader.releaseLock()
+      bounded.dispose()
     }
   }
 
@@ -1097,33 +1144,44 @@ export class QQNTClient {
     return resolved
   }
 
-  /** 请求缓存直链；若 QQ 返回密钥过期的可重试错误码，则重新解析直链并重试一次。 */
+  /**
+   * 请求缓存直链；若 QQ 返回密钥过期的可重试错误码，则重新解析直链并重试一次。
+   *
+   * 返回的 `BoundedResponse` 可能被调用方交给后台任务继续读取（全量落盘缓存），
+   * 因此所有权随返回值移交，由调用方负责 `dispose()`。
+   */
   private async fetchDirectUrlWithRefresh(
     locator: QQMediaLocator,
     identity: string | undefined,
     url: string,
     init: { headers?: Record<string, string>, signal?: AbortSignal },
-  ): Promise<Response> {
-    const request = (target: string) => this.fetchImpl(target, {
+  ): Promise<BoundedResponse> {
+    const request = (target: string) => this.openUpstream(target, {
       headers: init.headers, signal: init.signal, redirect: 'follow',
     })
-    let response = await request(url)
-    if (response.ok || response.status !== 400 || !identity) return response
-    const text = await response.text()
-    if (!RETRYABLE_DIRECT_URL_RETCODE.test(text)) {
-      throw new Error(`QQNT native media ${response.status}: ${text || response.statusText}`)
+    let bounded = await request(url)
+    if (bounded.ok || bounded.status !== 400 || !identity) return bounded
+    try {
+      const text = await bounded.text()
+      if (!RETRYABLE_DIRECT_URL_RETCODE.test(text)) {
+        throw new Error(`QQNT native media ${bounded.status}: ${text || bounded.statusText}`)
+      }
+    } finally {
+      bounded.dispose()
     }
     this.directUrls.delete(identity)
     const fresh = await this.resolveFileUrl(locator, init.signal)
-    response = await request(fresh.url)
-    if (response.ok) return response
+    bounded = await request(fresh.url)
+    if (bounded.ok) return bounded
     if (locator.imageSpec === undefined || locator.imageSpec === 0) {
-      throw new Error(await nativeResponseError(response))
+      throw await nativeBoundedFailure(bounded)
     }
     // 部分 720 缩略图即使刷新签名也会被 QQ DFS 拒绝，回退为原图并缓存到该缩略图键下。
+    await bounded.discard()
+    bounded.dispose()
     const original = await this.resolveFileUrl({ ...locator, imageSpec: 0 }, init.signal)
     const fallback = await request(original.url)
-    if (!fallback.ok) throw new Error(await nativeResponseError(fallback))
+    if (!fallback.ok) throw await nativeBoundedFailure(fallback)
     this.rememberDirectUrl(identity, { ...original, supportsRange: fresh.supportsRange })
     return fallback
   }
@@ -1145,21 +1203,24 @@ export class QQNTClient {
     url: string,
     signal?: AbortSignal,
   ): Promise<{ size: number, mimeType?: string } | undefined> {
+    let bounded: BoundedResponse | undefined
     try {
-      const response = await this.fetchImpl(url, {
+      bounded = await this.openUpstream(url, {
         headers: { 'accept-encoding': 'identity', range: 'bytes=0-1' },
         redirect: 'follow',
         signal,
       })
-      const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim() || undefined
-      const range = /^bytes\s+\d+-\d+\/(\d+)$/i.exec(response.headers.get('content-range') ?? '')
-      const length = response.headers.get('content-length')
+      const mimeType = bounded.header('content-type')?.split(';')[0]?.trim() || undefined
+      const range = /^bytes\s+\d+-\d+\/(\d+)$/i.exec(bounded.header('content-range') ?? '')
+      const length = bounded.header('content-length')
       const size = range ? Number(range[1]) : length ? Number.parseInt(length, 10) : undefined
-      await discardResponseBody(response)
       if (size === undefined || !Number.isSafeInteger(size) || size <= 0) return undefined
       return { size, ...(mimeType ? { mimeType } : {}) }
     } catch {
       return undefined
+    } finally {
+      await bounded?.discard()
+      bounded?.dispose()
     }
   }
 
@@ -1248,45 +1309,49 @@ export class QQNTClient {
     size: number,
     signal?: AbortSignal,
   ): Promise<CachedDirectRangeBlock> {
-    const response = await this.fetchDirectUrlWithRefresh(locator, identity, url, {
+    const bounded = await this.fetchDirectUrlWithRefresh(locator, identity, url, {
       headers: { 'accept-encoding': 'identity', range: `bytes=${start}-${start + size - 1}` },
       signal,
     })
-    if (response.status === 416) {
-      const contentRange = response.headers.get('content-range') ?? ''
-      const match = /^bytes\s+\*\/(\d+)$/i.exec(contentRange)
-      const fileSize = match ? Number(match[1]) : Number.NaN
-      if (Number.isSafeInteger(fileSize) && start >= fileSize) {
-        await discardResponseBody(response)
-        return { start, bytes: new Uint8Array() }
+    try {
+      if (bounded.status === 416) {
+        const contentRange = bounded.header('content-range') ?? ''
+        const match = /^bytes\s+\*\/(\d+)$/i.exec(contentRange)
+        const fileSize = match ? Number(match[1]) : Number.NaN
+        if (Number.isSafeInteger(fileSize) && start >= fileSize) {
+          return { start, bytes: new Uint8Array() }
+        }
       }
+      if (!bounded.ok) throw new Error(await nativeBoundedError(bounded))
+      if (bounded.status !== 206) {
+        throw new Error('QQNT direct media origin stopped honoring byte ranges')
+      }
+      const contentRange = bounded.header('content-range') ?? ''
+      if (!new RegExp(`^bytes\\s+${start}-`, 'i').test(contentRange)) {
+        throw new Error('QQNT direct media origin returned a mismatched byte range')
+      }
+      return { start, bytes: await bounded.bytes() }
+    } finally {
+      await bounded.discard()
+      bounded.dispose()
     }
-    if (!response.ok) throw new Error(await nativeResponseError(response))
-    if (response.status !== 206) {
-      await discardResponseBody(response)
-      throw new Error('QQNT direct media origin stopped honoring byte ranges')
-    }
-    const contentRange = response.headers.get('content-range') ?? ''
-    if (!new RegExp(`^bytes\\s+${start}-`, 'i').test(contentRange)) {
-      await discardResponseBody(response)
-      throw new Error('QQNT direct media origin returned a mismatched byte range')
-    }
-    return { start, bytes: new Uint8Array(await response.arrayBuffer()) }
   }
 
   private async probeDirectRange(url: string, signal?: AbortSignal): Promise<boolean> {
+    let bounded: BoundedResponse | undefined
     try {
-      const response = await this.fetchImpl(url, {
-        // 部分 QQ 多媒体 URL 对单字节 `0-0` 探测返回空体 200，对多字节范围才正常返回 206，故探测 2 字节。
+      // 部分 QQ 多媒体 URL 对单字节 `0-0` 探测返回空体 200，对多字节范围才正常返回 206，故探测 2 字节。
+      bounded = await this.openUpstream(url, {
         headers: { 'accept-encoding': 'identity', range: 'bytes=0-1' },
         signal,
         redirect: 'follow',
       })
-      const supported = response.status === 206 && /^bytes\s+0-1\//i.test(response.headers.get('content-range') ?? '')
-      await discardResponseBody(response)
-      return supported
+      return bounded.status === 206 && /^bytes\s+0-1\//i.test(bounded.header('content-range') ?? '')
     } catch {
       return false
+    } finally {
+      await bounded?.discard()
+      bounded?.dispose()
     }
   }
 
@@ -1320,15 +1385,19 @@ export class QQNTClient {
     key: string,
     url: string,
   ): Promise<CachedUnrangedFile> {
-    const response = await this.fetchDirectUrlWithRefresh(locator, key, url, {
+    const bounded = await this.fetchDirectUrlWithRefresh(locator, key, url, {
       headers: { 'accept-encoding': 'identity' },
     })
-    if (!response.ok) throw new Error(await nativeResponseError(response))
-    return this.cacheUnrangedResponse(key, response)
+    if (!bounded.ok) throw await nativeBoundedFailure(bounded)
+    return await this.cacheUnrangedResponse(key, bounded)
   }
 
-  private async cacheUnrangedResponse(key: string, response: Response): Promise<CachedUnrangedFile> {
-    if (!response.body) throw new Error('QQNT native media response has no body')
+  /**
+   * 把单次全量响应交给后台落盘缓存。成功返回后 `bounded` 的所有权移交给
+   * `populateUnrangedFile`（由它负责 dispose）；抛错时仍由调用方释放。
+   */
+  private async cacheUnrangedResponse(key: string, bounded: BoundedResponse): Promise<CachedUnrangedFile> {
+    if (!bounded.response.body) throw new Error('QQNT native media response has no body')
     await mkdir(this.unrangedCachePath, { recursive: true })
     const digest = createHash('sha256').update(key).digest('hex')
     const path = join(this.unrangedCachePath, digest)
@@ -1338,19 +1407,21 @@ export class QQNTClient {
       path, size: 0, complete: false, accounted: false, waiters: new Set(),
     }
     // 后台继续消费单次全量响应写入磁盘，后续 `upload.getFile` 分片只需等待对应偏移落盘即可。
-    void this.populateUnrangedFile(key, cached, response, file)
+    void this.populateUnrangedFile(key, cached, bounded, file)
     return cached
   }
 
   private async populateUnrangedFile(
     key: string,
     cached: CachedUnrangedFile,
-    response: Response,
+    bounded: BoundedResponse,
     file: FileHandle,
   ): Promise<void> {
-    const reader = response.body!.getReader()
+    let reader: UpstreamBodyReader | undefined
     let completed = false
     try {
+      reader = bounded.stream()
+      if (!reader) throw new Error('QQNT native media response has no body')
       while (true) {
         const { done, value } = await reader.read()
         if (done) {
@@ -1370,8 +1441,9 @@ export class QQNTClient {
     } catch (error) {
       cached.error = error
     } finally {
-      if (!completed) await reader.cancel().catch(() => undefined)
-      reader.releaseLock()
+      if (!completed) await reader?.cancel()
+      reader?.releaseLock()
+      bounded.dispose()
       await file.close().catch(() => undefined)
       cached.complete = true
       notifyUnrangedFileWaiters(cached)
@@ -1489,45 +1561,104 @@ export class QQNTClient {
 
   private async revalidatedJson<T>(path: string, init: RequestInit = {}): Promise<T> {
     const cached = this.revalidatedJsonResponses.get(path)
-    const response = await this.fetchImpl(`${this.endpoint}${path}`, {
+    const bounded = await this.openBridge(path, {
       ...init,
       headers: this.headers(cached ? { 'if-none-match': cached.etag } : {}),
     })
-    if (response.status === 304) {
-      await discardResponseBody(response)
-      if (!cached) throw new Error('QQNT bridge returned 304 without a cached response')
-      this.revalidatedJsonResponses.delete(path)
-      this.revalidatedJsonResponses.set(path, cached)
-      return cached.value as T
-    }
-    const value = await responseJson<T>(response)
-    const etag = response.headers.get('etag')
-    if (etag) {
-      this.revalidatedJsonResponses.delete(path)
-      this.revalidatedJsonResponses.set(path, { etag, value })
-      if (this.revalidatedJsonResponses.size > MAX_REVALIDATED_JSON_RESPONSES) {
-        this.revalidatedJsonResponses.delete(this.revalidatedJsonResponses.keys().next().value!)
+    try {
+      if (bounded.status === 304) {
+        await bounded.discard()
+        if (!cached) throw new Error('QQNT bridge returned 304 without a cached response')
+        this.revalidatedJsonResponses.delete(path)
+        this.revalidatedJsonResponses.set(path, cached)
+        return cached.value as T
       }
-    } else {
-      this.revalidatedJsonResponses.delete(path)
+      const value = await boundedJson<T>(bounded)
+      const etag = bounded.header('etag')
+      if (etag) {
+        this.revalidatedJsonResponses.delete(path)
+        this.revalidatedJsonResponses.set(path, { etag, value })
+        if (this.revalidatedJsonResponses.size > MAX_REVALIDATED_JSON_RESPONSES) {
+          this.revalidatedJsonResponses.delete(this.revalidatedJsonResponses.keys().next().value!)
+        }
+      } else {
+        this.revalidatedJsonResponses.delete(path)
+      }
+      return value
+    } finally {
+      bounded.dispose()
     }
-    return value
   }
 
+  /**
+   * 打开一个 bridge 请求：首包与响应体都受 `timeoutMs` 预算约束，
+   * 同时尊重调用方 signal。返回的对象必须在 finally 里 `dispose()`。
+   */
+  private async openBridge(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs = this.timeouts.bridgeMs,
+  ): Promise<BoundedResponse> {
+    const deadline = new UpstreamDeadline(init.signal ?? undefined)
+    deadline.arm(timeoutMs, () => bridgeRequestTimedOutError(timeoutMs))
+    try {
+      const response = await this.fetchImpl(`${this.endpoint}${path}`, {
+        ...init,
+        headers: init.headers ?? this.headers(),
+        signal: deadline.signal,
+      })
+      deadline.disarm()
+      return new BoundedResponse(
+        response, deadline, timeoutMs, () => bridgeRequestTimedOutError(timeoutMs),
+      )
+    } catch (error) {
+      deadline.dispose()
+      throw deadline.translate(error)
+    }
+  }
+
+  /**
+   * 打开一个直连 QQ CDN 等上游的请求：建连 + 首包受 `connectMs` 约束，
+   * 之后的 body 由 `BoundedResponse` 的停顿看门狗逐帧约束。
+   * 返回的对象必须在 finally 里 `dispose()`（或按调用点的所有权说明移交）。
+   */
+  private async openUpstream(url: string, init: RequestInit = {}): Promise<BoundedResponse> {
+    const deadline = new UpstreamDeadline(init.signal ?? undefined)
+    const connectMs = this.timeouts.connectMs
+    deadline.arm(connectMs, () => nativeMediaTimedOutError(connectMs))
+    try {
+      const response = await this.fetchImpl(url, { ...init, signal: deadline.signal })
+      deadline.disarm()
+      return new BoundedResponse(
+        response, deadline, this.timeouts.bodyStallMs,
+        () => nativeMediaBodyStalledError(this.timeouts.bodyStallMs),
+      )
+    } catch (error) {
+      deadline.dispose()
+      throw deadline.translate(error)
+    }
+  }
+
+  /**
+   * bridge JSON RPC：整体预算 `timeoutMs`（含响应体）。
+   * 超时抛 `QQNT bridge request timed out after …ms`，调用方 signal 仍然可中断。
+   */
   private async json<T>(
     path: string,
     nullable404 = false,
     init: RequestInit = {},
+    timeoutMs = this.timeouts.bridgeMs,
   ): Promise<T> {
-    const response = await this.fetchImpl(`${this.endpoint}${path}`, {
-      ...init,
-      headers: init.headers ?? this.headers(),
-    })
-    if (nullable404 && response.status === 404) {
-      await discardResponseBody(response)
-      return null as T
+    const bounded = await this.openBridge(path, init, timeoutMs)
+    try {
+      if (nullable404 && bounded.status === 404) {
+        await bounded.discard()
+        return null as T
+      }
+      return await boundedJson<T>(bounded)
+    } finally {
+      bounded.dispose()
     }
-    return responseJson(response)
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
@@ -1951,40 +2082,80 @@ async function responseJson<T>(response: Response): Promise<T> {
   return await response.json() as T
 }
 
-async function discardResponseBody(response: Response): Promise<void> {
-  if (!response.body || response.bodyUsed) return
-  await response.body.cancel().catch(() => undefined)
-}
-
 function notifyUnrangedFileWaiters(cached: CachedUnrangedFile): void {
   const waiters = [...cached.waiters]
   cached.waiters.clear()
   for (const wake of waiters) wake()
 }
 
-async function responseError(response: Response): Promise<string> {
-  const text = await response.text()
+/** 有界 bridge 响应：非 2xx 时读错误体并抛出可识别的 bridge 错误。 */
+async function boundedJson<T>(bounded: BoundedResponse): Promise<T> {
+  if (!bounded.ok) throw new Error(await bridgeBoundedError(bounded))
+  return await bounded.json<T>()
+}
+
+/**
+ * 读 bridge 错误体、释放连接，返回可直接 throw 的错误。
+ *
+ * 错误体本身也要走 body 停顿看门狗：上游卡在「回了响应头但不回 body」时，
+ * 读错误信息这一步同样不能无界等待。
+ */
+async function bridgeBoundedFailure(bounded: BoundedResponse): Promise<Error> {
+  try {
+    return new Error(await bridgeBoundedError(bounded))
+  } finally {
+    bounded.dispose()
+  }
+}
+
+async function nativeBoundedFailure(bounded: BoundedResponse): Promise<Error> {
+  try {
+    return new Error(await nativeBoundedError(bounded))
+  } finally {
+    bounded.dispose()
+  }
+}
+
+async function bridgeBoundedError(bounded: BoundedResponse): Promise<string> {
+  return bridgeErrorText(bounded.status, bounded.statusText, await bounded.text())
+}
+
+async function bridgeBoundedErrorDetail(bounded: BoundedResponse): Promise<string> {
+  return bridgeErrorDetail(bounded.status, bounded.statusText, await bounded.text())
+}
+
+async function nativeBoundedError(bounded: BoundedResponse): Promise<string> {
+  return nativeMediaErrorText(bounded.status, bounded.statusText, await bounded.text())
+}
+
+function bridgeErrorText(status: number, statusText: string, text: string): string {
   try {
     const body = JSON.parse(text) as { error?: unknown }
-    return `QQNT bridge ${response.status}: ${typeof body.error === 'string' ? body.error : text}`
+    return `QQNT bridge ${status}: ${typeof body.error === 'string' ? body.error : text}`
   } catch {
-    return `QQNT bridge ${response.status}: ${text || response.statusText}`
+    return `QQNT bridge ${status}: ${text || statusText}`
   }
+}
+
+function bridgeErrorDetail(status: number, statusText: string, text: string): string {
+  try {
+    const body = JSON.parse(text) as { error?: unknown }
+    return typeof body.error === 'string' ? body.error : text || statusText
+  } catch {
+    return text || statusText
+  }
+}
+
+function nativeMediaErrorText(status: number, statusText: string, text: string): string {
+  return `QQNT native media ${status}: ${text || statusText}`
+}
+
+async function responseError(response: Response): Promise<string> {
+  return bridgeErrorText(response.status, response.statusText, await response.text())
 }
 
 async function responseErrorDetail(response: Response): Promise<string> {
-  const text = await response.text()
-  try {
-    const body = JSON.parse(text) as { error?: unknown }
-    return typeof body.error === 'string' ? body.error : text || response.statusText
-  } catch {
-    return text || response.statusText
-  }
-}
-
-async function nativeResponseError(response: Response): Promise<string> {
-  const text = await response.text()
-  return `QQNT native media ${response.status}: ${text || response.statusText}`
+  return bridgeErrorDetail(response.status, response.statusText, await response.text())
 }
 
 export function qqAvatarUrl(locator: QQMediaLocator): string | undefined {

@@ -14,6 +14,24 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(chunks)
 }
 
+/** 监听本地测试服务器并给出可直接作为 endpoint 的基址。 */
+async function listen(server: Server): Promise<string> {
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('missing address')
+  return `http://127.0.0.1:${address.port}`
+}
+
+/** 等服务端观察到连接被关闭：abort 是异步传播的，不能立刻断言。 */
+async function waitUntil(predicate: () => boolean, timeout = 2_000): Promise<void> {
+  const deadline = Date.now() + timeout
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition did not become true')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
 function highwayResponse(): Buffer {
   return Buffer.from([0x28, 0, 0, 0, 0, 0, 0, 0, 0, 0x29])
 }
@@ -47,6 +65,8 @@ describe('QQNTClient streaming transport', () => {
     vi.restoreAllMocks()
     if (!server) return
     server.close()
+    // 卡死用的测试服务器可能留着半截响应，强制断开避免 afterEach 等不到 close。
+    server.closeAllConnections()
     await once(server, 'close')
   })
 
@@ -1979,5 +1999,148 @@ describe('QQNTClient streaming transport', () => {
   it('derives the WebSocket endpoint from the HTTP endpoint when no override is configured', () => {
     expect(new QQNTClient({ endpoint: 'https://bridge.example/v1/' }).webSocketEndpoint)
       .toBe('https://bridge.example/v1/events/ws')
+  })
+
+  it('rejects a bridge RPC that never answers and aborts its socket', async () => {
+    let openedSockets = 0
+    let closedSockets = 0
+    server = createServer((request) => {
+      // bridge 收下了请求就再也不回响应头：线上卡死的一张图正是这个形态。
+      openedSockets++
+      request.socket.once('close', () => { closedSockets++ })
+    })
+    const endpoint = await listen(server)
+    const client = new QQNTClient({ endpoint, timeouts: { bridgeMs: 150 } })
+    const locator = {
+      messageId: 'bridge-hang', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'file' as const, fileName: 'document.bin', fileUuid: 'bridge-hang-uuid',
+    }
+    const started = Date.now()
+
+    await expect(collect(client.downloadFile(locator)))
+      .rejects.toThrow('QQNT bridge request timed out after 150ms')
+
+    expect(Date.now() - started).toBeLessThan(2_000)
+    // 超时必须真的释放底层连接，否则 Telegram 那侧重试会把套接字越攒越多。
+    await waitUntil(() => closedSockets === 1)
+    expect(openedSockets).toBe(1)
+  })
+
+  it('rejects a direct CDN request that never sends response headers', async () => {
+    let cdnSockets = 0
+    let closedCdnSockets = 0
+    server = createServer(async (request, response) => {
+      if (request.url === '/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/cdn/never-answers`,
+          expiresAt: Date.now() + 60_000,
+        }))
+        return
+      }
+      if (request.url === '/cdn/never-answers') {
+        cdnSockets++
+        request.socket.once('close', () => { closedCdnSockets++ })
+        return // QQ CDN 建连成功却永不回首包
+      }
+      response.writeHead(500).end()
+    })
+    const endpoint = await listen(server)
+    const client = new QQNTClient({ endpoint, timeouts: { connectMs: 150 } })
+    const locator = {
+      messageId: 'cdn-hang', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'image' as const, fileName: 'photo.jpg', fileUuid: 'cdn-hang-uuid',
+    }
+
+    await expect(collect(client.downloadFile(locator)))
+      .rejects.toThrow('QQNT native media request timed out after 150ms')
+
+    await waitUntil(() => closedCdnSockets === 1)
+    expect(cdnSockets).toBe(1)
+  })
+
+  it('rejects a direct CDN body that stalls after the first chunk', async () => {
+    let closedCdnSockets = 0
+    server = createServer(async (request, response) => {
+      if (request.url === '/files/direct-url') {
+        for await (const _chunk of request) { /* drain locator */ }
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('missing address')
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/cdn/stalls`,
+          expiresAt: Date.now() + 60_000,
+        }))
+        return
+      }
+      if (request.url === '/cdn/stalls') {
+        request.socket.once('close', () => { closedCdnSockets++ })
+        response.writeHead(200, { 'content-type': 'application/octet-stream' })
+        response.write('first-chunk')
+        return // 有响应头、有一帧数据，然后彻底不动
+      }
+      response.writeHead(500).end()
+    })
+    const endpoint = await listen(server)
+    const client = new QQNTClient({
+      endpoint, timeouts: { connectMs: 5_000, bodyStallMs: 150 },
+    })
+    const locator = {
+      messageId: 'cdn-stall', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'file' as const, fileName: 'video.mp4', fileUuid: 'cdn-stall-uuid',
+    }
+
+    await expect(collect(client.downloadFile(locator)))
+      .rejects.toThrow('QQNT native media body stalled for 150ms')
+
+    await waitUntil(() => closedCdnSockets === 1)
+  })
+
+  it('rejects a bridge media body that stalls after the first chunk', async () => {
+    let closedSockets = 0
+    server = createServer((request, response) => {
+      if (request.url !== '/files/asset') {
+        response.writeHead(500).end()
+        return
+      }
+      request.socket.once('close', () => { closedSockets++ })
+      response.writeHead(200, { 'content-type': 'image/jpeg' })
+      response.write('partial-jpeg')
+    })
+    const endpoint = await listen(server)
+    const client = new QQNTClient({ endpoint, timeouts: { bridgeMs: 150 } })
+    const locator = {
+      messageId: 'asset-stall', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'image' as const, fileName: 'photo.jpg', filePath: '/cache/photo.jpg',
+    }
+
+    await expect(collect(client.downloadFile(locator)))
+      .rejects.toThrow('QQNT bridge request timed out after 150ms')
+
+    await waitUntil(() => closedSockets === 1)
+  })
+
+  it('keeps the caller abort reason when a stalled upstream is also timing out', async () => {
+    let closedSockets = 0
+    server = createServer((request) => {
+      request.socket.once('close', () => { closedSockets++ })
+    })
+    const endpoint = await listen(server)
+    const client = new QQNTClient({ endpoint, timeouts: { bridgeMs: 30_000 } })
+    const controller = new AbortController()
+    const reason = new Error('telegram requester went away')
+    const locator = {
+      messageId: 'abort-hang', elementId: 'element', chatType: 2 as const, peerUid: 'group',
+      kind: 'image' as const, fileName: 'photo.jpg', filePath: '/cache/photo.jpg',
+    }
+
+    const pending = collect(client.downloadFile(locator, { signal: controller.signal }))
+    setTimeout(() => controller.abort(reason), 50)
+
+    await expect(pending).rejects.toThrow('telegram requester went away')
+    await waitUntil(() => closedSockets === 1)
   })
 })
