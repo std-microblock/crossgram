@@ -9,6 +9,8 @@ import {
 import {
   collectVirtualMessages,
   makeMergedForwardProvider,
+  searchTranscript,
+  selectTranscriptPage,
   snapshotPreview,
   transcriptMessageId,
 } from './index.js'
@@ -261,5 +263,97 @@ describe('merged-forward virtual message ownership', () => {
     ])
     expect(index.messages.get(2000)).toMatchObject({ id: 2000, message: 'b1' })
     expect(index.ambiguous.has(2000)).toBe(false)
+  })
+})
+
+describe('merged-forward transcript search', () => {
+  const virtual = (id: number, text: string) => ({
+    _: 'message' as const, id, peerId: { _: 'peerChat' as const, chatId: 1 }, date: 1, message: text,
+  }) as never
+  const ids = (messages: readonly { id: number }[]) => messages.map((message) => message.id)
+
+  it('matches message text as a case-insensitive substring without word boundaries', () => {
+    const messages = [
+      virtual(1000, '神tm扔水里看米哈游'),
+      virtual(2000, 'HELLO MixedCase'),
+      virtual(3000, '查看聊天记录'),
+    ]
+    expect(ids(searchTranscript(messages, '米哈游'))).toEqual([1000])
+    // 中文关键字之间没有空格：靠 `\b` 之类的 ASCII 词边界是匹配不到的。
+    expect(ids(searchTranscript(messages, '扔水里'))).toEqual([1000])
+    expect(ids(searchTranscript(messages, 'mixedcase'))).toEqual([2000])
+    expect(ids(searchTranscript(messages, 'MIHAYOU'))).toEqual([])
+  })
+
+  it('treats an empty query as every message and never matches messages without text', () => {
+    const messages = [
+      virtual(1000, 'a'),
+      { _: 'messageEmpty', id: 2000 } as never,
+      virtual(3000, 'b'),
+    ]
+    // 部分客户端用空 query 配合游标做范围翻页，此时「全部命中」。
+    expect(ids(searchTranscript(messages, ''))).toEqual([1000, 2000, 3000])
+    expect(ids(searchTranscript(messages, '   '))).toEqual([1000, 2000, 3000])
+    // 有 query 时没有文本的消息不参与匹配。
+    expect(ids(searchTranscript(messages, 'a'))).toEqual([1000])
+  })
+})
+
+describe('merged-forward transcript pagination', () => {
+  /** 投影输出的顺序是最新在前：7000..1000。 */
+  const transcript = Array.from({ length: 7 }, (_, index) => ({
+    _: 'message' as const,
+    id: (7 - index) * 1000,
+    peerId: { _: 'peerChat' as const, chatId: 1 },
+    date: 100 + (6 - index),
+    message: `m${6 - index}`,
+  })) as never[]
+
+  const page = (
+    overrides: { offsetId?: number, addOffset?: number, maxId?: number, minId?: number, limit?: number } = {},
+  ) => selectTranscriptPage(transcript, {
+    offsetId: 0, addOffset: 0, maxId: 0, minId: 0, limit: 100, ...overrides,
+  }).map((message) => message.id)
+
+  it('answers the newest page for the first screen and the oldest page for the start sentinel', () => {
+    expect(page({ limit: 3 })).toEqual([7000, 6000, 5000])
+    // `offsetId = 1` 是客户端「从历史开头读」的哨兵，任何时候都回最早一页。
+    expect(page({ offsetId: 1, limit: 1 })).toEqual([1000])
+    expect(page({ offsetId: 1, limit: 2 })).toEqual([2000, 1000])
+  })
+
+  it('returns the page that contains an anchor requested as anchor + 1', () => {
+    expect(page({ offsetId: 3001, limit: 2 })).toEqual([3000, 2000])
+    expect(page({ offsetId: 7001, limit: 2 })).toEqual([7000, 6000])
+  })
+
+  it('keeps the max/min bounds and the positive add_offset skip', () => {
+    expect(page({ maxId: 5000 })).toEqual([4000, 3000, 2000, 1000])
+    expect(page({ minId: 5000 })).toEqual([7000, 6000])
+    expect(page({ maxId: 7000, minId: 3000 })).toEqual([6000, 5000, 4000])
+    // offsetId 排他（从第一条 < offsetId 的消息开始），addOffset 为正时向更旧的消息跳。
+    expect(page({ offsetId: 6000, limit: 2 })).toEqual([5000, 4000])
+    expect(page({ offsetId: 6000, addOffset: 1, limit: 2 })).toEqual([4000, 3000])
+    expect(page({ maxId: 1000 })).toEqual([])
+    expect(page({ limit: 0 })).toEqual([])
+  })
+
+  it('answers an empty page once a newer-direction request passes the newest message', () => {
+    // tdesktop 的 `HistoryWidget::loadMessagesDown()`：offset_id = maxId + 1, add_offset = -loadCount。
+    // 聊天记录不会再增长，正确答案是空页；回一页重复消息会让客户端 20ms 一次无限重拉。
+    expect(page({ offsetId: 7001, addOffset: -50, limit: 50 })).toEqual([])
+    // 重复发送同样的请求仍是空页，客户端第一次就能把 loadedAtBottom 置上。
+    expect(page({ offsetId: 7001, addOffset: -50, limit: 50 })).toEqual([])
+    // minId/maxId 收紧窗口后「越过最新」按收紧后的最新一条算。
+    expect(page({ offsetId: 5001, addOffset: -2, maxId: 5000 })).toEqual([])
+  })
+
+  it('starts from the anchor page when the offset id is the oldest message itself', () => {
+    // 深链锚点就是最早一条消息（id 1000）：客户端直接拿它当 offsetId 且不带偏移。
+    // offsetId 是排他游标，按它算会得到空页，这里要与哨兵同义——回「从锚点开始的首页」。
+    expect(page({ offsetId: 1000, limit: 2 })).toEqual([2000, 1000])
+    expect(page({ offsetId: 1000 })).toEqual([7000, 6000, 5000, 4000, 3000, 2000, 1000])
+    // 带负偏移的锚点跳转走原路径：窗口尾部对齐到锚点之后的位置。
+    expect(page({ offsetId: 1000, addOffset: -3, limit: 2 })).toEqual([3000, 2000])
   })
 })

@@ -202,11 +202,10 @@ describe('merged-forward transcript history pages', () => {
     expect(await page({ maxId: 7000, minId: 3000 })).toMatchObject({
       ids: [6000, 5000, 4000], texts: ['m5', 'm4', 'm3'],
     })
-    // A client that already knows the newest message asks for what comes after
-    // it (offset id = newest + 1, negative offset): it must receive the newest
-    // page again, never an arbitrary subset of the transcript.
+    // 已经越过最新一条的「向更新方向」请求必须回空页：tdesktop 的 loadMessagesDown 只有拿到
+    // 空 slice 才会把 loadedAtBottom 置上，回一页重复消息会让它无限重拉（窗口永远打不开）。
     expect(await page({ offsetId: 8001, addOffset: -3, limit: 3 })).toMatchObject({
-      ids: [8000, 7000, 6000], texts: ['m7', 'm6', 'm5'],
+      ids: [], texts: [], count: 8,
     })
     // The deep link anchors at the first message, so the window a client opens
     // around that anchor has to contain it.

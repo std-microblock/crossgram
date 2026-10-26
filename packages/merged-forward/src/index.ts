@@ -739,14 +739,36 @@ async function routeMergedForwardRpc(
       }
     }
     const bundle = await projection.materialize(state, record)
-    const history = request as tl.messages.RawGetHistoryRequest
-    // 兼容旧版不带首条消息锚点的深链：客户端用 `offsetId = 1` 显式请求最旧一页。
-    const page = history.offsetId === kFirstMessageOffsetId
-      ? firstPage(selectWithinBounds(bundle.messages, history), history.limit)
-      : selectHistory(bundle.messages, history)
     return {
       _: 'messages.messagesSlice', count: bundle.messages.length,
-      messages: page, topics: [], chats: bundle.chats, users: bundle.users,
+      messages: selectTranscriptPage(bundle.messages, request as tl.messages.RawGetHistoryRequest),
+      topics: [], chats: bundle.chats, users: bundle.users,
+    }
+  }
+  if (request._ === 'messages.search') {
+    const req = request as tl.messages.RawSearchRequest
+    if (req.peer._ !== 'inputPeerChat') return
+    // 只认「全部消息」这一个 filter：媒体/链接/文件等筛选需要真实索引，交回默认实现，
+    // 免得给出一份看起来可信、实则被错误筛选过的结果。
+    if (req.filter._ !== 'inputMessagesFilterEmpty') return
+    // 按发送者/话题/收藏夹筛选同样需要索引，我们给不出正确结果时不猜，宁可回落。
+    if (req.fromId || req.topMsgId || req.savedPeerId || req.savedReaction) return
+    const state = await resolveState()
+    const record = await projection.lookup(state, req.peer.chatId)
+    if (!record) return
+    // 和 `messages.getHistory` 用同一份投影：客户端按锚点定位、再在会话里搜索时，
+    // 两边看到的消息与 ID 必须完全一致。
+    const bundle = await projection.materialize(state, record)
+    const matches = searchTranscript(bundle.messages, req.q).filter((message) => {
+      // 搜索面板总会带上 min/max date（未筛选时为 0）；带了范围却不按范围回答，就会越界返回。
+      if (req.minDate > 0 && messageDate(message) < req.minDate) return false
+      if (req.maxDate > 0 && messageDate(message) > req.maxDate) return false
+      return true
+    })
+    return {
+      _: 'messages.messagesSlice', count: matches.length,
+      messages: selectTranscriptPage(matches, req), topics: [],
+      chats: bundle.chats, users: bundle.users,
     }
   }
   if (request._ === 'messages.getPeerDialogs') {
@@ -999,6 +1021,13 @@ function avatarStorageFileType(bytes: Uint8Array): tl.storage.TypeFileType {
 
 const kFirstMessageOffsetId = 1
 
+/**
+ * 与 peer 无关的分页游标：`messages.getHistory` 与 `messages.search` 都带这几个字段，
+ * 客户端也用它俩共用一套 `offset_id` / `add_offset` / `max_id` / `min_id` 语义翻页。
+ */
+type TranscriptCursor = Pick<tl.messages.RawGetHistoryRequest,
+  'offsetId' | 'addOffset' | 'maxId' | 'minId' | 'limit'>
+
 function firstPage(
   messages: readonly tl.TypeMessage[],
   limit: number,
@@ -1007,18 +1036,42 @@ function firstPage(
   return messages.slice(Math.max(0, messages.length - count))
 }
 
-function selectHistory(
+/**
+ * 取聊天记录的一页。
+ * 语义与客户端的 `offset_id` / `add_offset` / `max_id` / `min_id` 一致，`messages.getHistory`
+ * 与 `messages.search` 共用这一份，避免两条路由的分页口径漂移。
+ */
+export function selectTranscriptPage(
   messages: readonly tl.TypeMessage[],
-  request: tl.messages.RawGetHistoryRequest,
+  request: TranscriptCursor,
 ): tl.TypeMessage[] {
   const filtered = selectWithinBounds(messages, request)
+  const limit = Math.max(0, request.limit)
+  if (!filtered.length) return []
+  // `offsetId = 1` 是客户端「从历史开头读」的哨兵（旧版深链不带锚点），它低于所有聊天记录 ID。
+  if (request.offsetId === kFirstMessageOffsetId) return firstPage(filtered, limit)
+  const newest = filtered[0]!.id
+  const oldest = filtered[filtered.length - 1]!.id
+  if (request.offsetId > newest) {
+    // 「往更新的方向」要一页却已经越过最新一条时，聊天记录不会再增长，正确回答是空页。
+    // 反例就是 tdesktop 的 `HistoryWidget::loadMessagesDown()`（offset_id = maxId + 1,
+    // add_offset = -loadCount）：它只有拿到空 slice 才会把 `loadedAtBottom` 置上，
+    // 回一页重复消息会让它 20ms 一次无限重拉，窗口永远 activate 不了。
+    if (request.addOffset < 0) return []
+    // 例外是 add_offset = 0 的锚点跳转（`offset_id = anchor + 1`）：客户端要的是「含锚点的那一页」。
+    // 单条消息的转录锚点就是最新一条，这里回空页会让窗口里什么都没有。
+    return filtered.slice(0, limit)
+  }
+  // 深链锚点就是最早那条消息时，客户端会直接拿 `offset_id = anchor`（不带偏移）来开窗；
+  // `offsetId` 是排他游标，按它算会得到空页——与哨兵同义，回「从锚点开始的首页」。
+  if (request.addOffset === 0 && request.offsetId === oldest) return firstPage(filtered, limit)
   const start = pageStart(filtered, request)
-  return filtered.slice(start, start + Math.max(0, request.limit))
+  return filtered.slice(start, start + limit)
 }
 
 function selectWithinBounds(
   messages: readonly tl.TypeMessage[],
-  request: tl.messages.RawGetHistoryRequest,
+  request: TranscriptCursor,
 ): tl.TypeMessage[] {
   let filtered = [...messages]
   if (request.maxId > 0) filtered = filtered.filter((message) => message.id < request.maxId)
@@ -1032,7 +1085,7 @@ function selectWithinBounds(
  */
 function pageStart(
   filtered: readonly tl.TypeMessage[],
-  request: tl.messages.RawGetHistoryRequest,
+  request: TranscriptCursor,
 ): number {
   let start = 0
   if (request.offsetId > 0) {
@@ -1040,6 +1093,23 @@ function pageStart(
     start = below < 0 ? filtered.length : below
   }
   return Math.max(0, start + request.addOffset)
+}
+
+/**
+ * 合并转发会话内的搜索匹配：大小写不敏感的子串匹配，只看消息文本。
+ * 不做词边界切分——中文关键字之间没有空格，`\b` 这类 ASCII 规则会把「米哈游」当成一个整词，
+ * 客户端（tdesktop 的 `Data::SearchController`）在这里期待的就是子串行为。
+ * 空 query 视为全部命中，因为部分客户端会用它配合 `max_id` / `min_id` 做范围翻页。
+ */
+export function searchTranscript(
+  messages: readonly tl.TypeMessage[],
+  query: string,
+): tl.TypeMessage[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return [...messages]
+  // 只有 `message` 带文本；`messageEmpty` 与 `messageService`（服务动作）没有可匹配的内容。
+  return messages.filter((message) =>
+    message._ === 'message' && message.message.toLowerCase().includes(needle))
 }
 
 function inputMessageId(input: tl.TypeInputMessage): number {
