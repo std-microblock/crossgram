@@ -950,10 +950,23 @@ export class DialogRpc {
     const peerId = req.topMsgId
       ? await this._resolveMentionConversation(req.peer, req.topMsgId)
       : this._resolvePeer(req.peer)
+    // 客户端一次会问 9 个过滤器的条数。逐个过滤器各扫一遍整个会话（线上 16 万条消息的群
+    // 每次 4~5 秒）会把数据库读到饱和，同一连接上的 getHistory 因此拿不到结果；
+    // 这里把掩码并成一次扫描再按掩码裁剪。
+    const kindsList = req.filters.map((filter) => filterSearchKinds(filter))
+    const masks = [...new Set(kindsList.filter((kinds): kinds is number => kinds !== null))]
+    const indexes = masks.length
+      ? await this._store.searchPartIndexMany(this._session.platformSessionId, {
+          platformConversationIds: [peerId], terms: [],
+        }, masks)
+      : []
+    const entriesByKinds = new Map(masks.map((mask, index) => [mask, indexes[index]]))
     const counters: tl.messages.RawSearchCounter[] = []
-    for (const filter of req.filters) {
-      const index = await this._searchIndex(peerId, filter)
-      counters.push({ _: 'messages.searchCounter', filter, count: index?.length ?? 0 })
+    for (const [position, filter] of req.filters.entries()) {
+      const kinds = kindsList[position]
+      const entries = kinds === null ? undefined : entriesByKinds.get(kinds)
+      const filtered = entries ? await this._filterMissedCalls(entries, filter) : undefined
+      counters.push({ _: 'messages.searchCounter', filter, count: filtered?.length ?? 0 })
     }
     return counters
   }
@@ -1043,7 +1056,15 @@ export class DialogRpc {
     const entries = await this._store.searchPartIndex(this._session.platformSessionId, {
       platformConversationIds: [peerId], terms: [], kinds: kinds || undefined,
     })
-    if (filter._ !== 'inputMessagesFilterPhoneCalls' || !filter.missed) return entries
+    return this._filterMissedCalls(entries, filter)
+  }
+
+  /** 通话记录过滤器可以只要未接来电：先取到候选分片，再按投影内容筛掉已接的。 */
+  private async _filterMissedCalls(
+    entries: readonly SearchPartIndexEntry[],
+    filter: tl.TypeMessagesFilter,
+  ): Promise<SearchPartIndexEntry[]> {
+    if (filter._ !== 'inputMessagesFilterPhoneCalls' || !filter.missed || !this._store) return [...entries]
     const missed = new Set((await this._store.readProjectedByMessageIds(
       this._session.platformSessionId, entries.map((entry) => entry.messageId),
     )).filter(({ source }) => isMissedCall(source)).map(({ parts }) => parts[0]?.messageId))

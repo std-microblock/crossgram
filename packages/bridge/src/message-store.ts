@@ -23,8 +23,8 @@ import {
 import type { MessageProjectionPipeline, MessageProjectionPlan } from './message-projection.js'
 import { jsonContains, jsonEquals } from './stable-json.js'
 import {
-  escapeRegExpLiteral, messageSearchKinds, messageSearchText, partMatchesSearchKinds, SEARCH_KIND,
-  type MessageSearchContext,
+  escapeRegExpLiteral, mediaSearchKind, messageSearchKinds, messageSearchText, partKindsMatchSearchKinds,
+  SEARCH_KIND, type MessageSearchContext,
 } from './message-search.js'
 
 export interface MessageSearchQuery {
@@ -64,7 +64,45 @@ export interface SearchPartIndexEntry {
   messageId: number
 }
 
+/**
+ * 分片级索引的原始行：额外带上判定媒体类别所需的上下文，
+ * 好让一次扫描的结果能被多个 `kinds` 掩码复用。
+ */
+interface SearchPartIndexRow extends SearchPartIndexEntry {
+  ordinal: number
+  /** 该分片自身媒体对应的 `SEARCH_KIND` 位（分片没有媒体时为 0）。 */
+  partKind: number
+  /** 整条消息的 `SEARCH_KIND` 位掩码。 */
+  messageKinds: number
+}
+
+/** 一次分片索引扫描的结果；同一份数据会被裁成多个 `kinds` 掩码的子集。 */
+interface SearchPartIndexCacheEntry {
+  /** 该次扫描覆盖的平台会话；为空表示整个账号。 */
+  conversationIds: readonly string[]
+  /** 扫描时下推到 SQL 的掩码；`0` 表示没有按媒体类别过滤。 */
+  mask: number
+  /** 结果落地的时间，用于 TTL；未落地时为 0。 */
+  settledAt: number
+  rows?: SearchPartIndexRow[]
+  /** 在飞行中的同一次扫描，用来合并同一轮打开会话里的重复请求。 */
+  pending?: Promise<SearchPartIndexRow[]>
+}
+
 const SEARCH_INDEX_CHUNK = 500
+/**
+ * 分片索引缓存的存活时间。
+ *
+ * 客户端打开一个会话会同时发 `messages.getSearchCounters`（一次 9 个过滤器）、
+ * `messages.getSearchResultsPositions`（另外几个）与若干 `messages.search`，
+ * 它们共享同一批「消息 → 分片」数据；而每次全量扫描在线上 16 万条消息的群里要 4~5 秒，
+ * 十几个过滤器叠起来足以把数据库读到饱和，让同一条连接上的 `messages.getHistory` 拿不到连接。
+ * 缓存按「会话 + 其余查询条件」保存一份扫描结果，写入侧再按会话精确失效。
+ */
+const SEARCH_INDEX_CACHE_TTL = 30_000
+const SEARCH_INDEX_CACHE_LIMIT = 8
+/** 单次结果超过这么多条分片就不再留在内存里：这台机器本来就吃紧，宁可下次重扫。 */
+const SEARCH_INDEX_CACHE_MAX_ROWS = 40_000
 
 export interface IngestResult {
   message: IMMessageRow
@@ -166,6 +204,8 @@ export class MessageStore {
   private static readonly _writeTails = new WeakMap<Database, Promise<void>>()
   private _revision = 0
   private _peerRevision = 0
+  /** 共享媒体分片索引的短期缓存，见 `SEARCH_INDEX_CACHE_TTL`。 */
+  private readonly _partIndexCache = new Map<string, SearchPartIndexCacheEntry>()
 
   constructor(
     private readonly _database: Database,
@@ -320,6 +360,7 @@ export class MessageStore {
       }
       return results
     }), options.allocation === 'history' ? 'history-ingest' : 'ingest', true)
+    this._invalidateSearchPartIndex(conversation.id)
     return results
   }
 
@@ -398,6 +439,7 @@ export class MessageStore {
       }
       return messages
     }), 'dialog-ingest', true)
+    for (const dialog of dialogs) this._invalidateSearchPartIndex(dialog.conversation.id)
   }
 
   private async _ingestMessage(
@@ -610,6 +652,7 @@ export class MessageStore {
         tlMessageIds,
       }
     }), 'message-delete', true)
+    this._invalidateSearchPartIndex(conversation.id)
     return {
       changed: deleted.changed,
       messageIds: deleted.messageIds,
@@ -936,38 +979,160 @@ export class MessageStore {
     platformSessionId: string,
     query: Omit<MessageSearchQuery, 'limit' | 'before'>,
   ): Promise<SearchPartIndexEntry[]> {
-    const where = await this._searchPredicate(platformSessionId, { ...query, limit: 0 })
+    const [entries] = await this.searchPartIndexMany(platformSessionId, query, [query.kinds ?? 0])
+    return entries
+  }
+
+  /**
+   * 一次扫描同时给出多个 `kinds` 掩码的分片索引，返回值顺序与 `masks` 一一对应。
+   *
+   * 共享媒体页会一口气问 9 个过滤器的条数，再分别问滚动条位置；逐个过滤器各扫一遍全表是
+   * 这类会话打不开的直接原因。这里把掩码并成一次扫描，再在内存里裁成各自的结果。
+   */
+  async searchPartIndexMany(
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit' | 'before'>,
+    masks: readonly number[],
+  ): Promise<SearchPartIndexEntry[][]> {
+    const wanted = [...new Set(masks)]
+    if (!wanted.length) return []
+    const rows = await this._searchPartIndexRows(platformSessionId, query, wanted)
+    // `0` 表示「不按媒体类别过滤」，要求把一条媒体都没有的消息也算进来；
+    // 下推过类别的那次扫描覆盖不到这些行，需要单独再扫一次（客户端不会把它们混在同一批里）。
+    const unfiltered = wanted.includes(0) && wanted.some((mask) => mask !== 0)
+      ? await this._loadSearchPartIndexRows(platformSessionId, query, 0)
+      : undefined
+    return wanted.map((mask) => (mask === 0 && unfiltered ? unfiltered : rows)
+      .filter((row) => (mask === 0
+        ? row.ordinal === 0
+        : partKindsMatchSearchKinds(row.messageKinds, row.ordinal, row.partKind, mask)))
+      .map(({ tlMessageId, timestamp, messageId }) => ({ tlMessageId, timestamp, messageId })))
+  }
+
+  /** 拿到（或复用缓存里的）分片索引原始行；同一次请求的并发方共享同一个 promise。 */
+  private async _searchPartIndexRows(
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit' | 'before'>,
+    masks: readonly number[],
+  ): Promise<SearchPartIndexRow[]> {
+    const mask = masks.filter((value) => value !== 0).reduce((total, value) => total | value, 0)
+    const key = this._searchIndexCacheKey(platformSessionId, query)
+    const cached = this._partIndexCache.get(key)
+    if (cached && this._searchIndexCovers(cached.mask, mask)) {
+      if (cached.pending) return cached.pending
+      if (cached.rows && Date.now() - cached.settledAt < SEARCH_INDEX_CACHE_TTL) return cached.rows
+    }
+    const entry: SearchPartIndexCacheEntry = {
+      conversationIds: [...(query.platformConversationIds ?? [])],
+      mask,
+      settledAt: 0,
+    }
+    entry.pending = this._loadSearchPartIndexRows(platformSessionId, query, mask)
+    this._partIndexCache.set(key, entry)
+    this._trimSearchIndexCache()
+    try {
+      const rows = await entry.pending
+      entry.pending = undefined
+      if (rows.length > SEARCH_INDEX_CACHE_MAX_ROWS) {
+        // 这一份太大，只服务本次请求；已在等待的调用方拿到的还是同一个 promise。
+        if (this._partIndexCache.get(key) === entry) this._partIndexCache.delete(key)
+        return rows
+      }
+      entry.rows = rows
+      entry.settledAt = Date.now()
+      return rows
+    } catch (error) {
+      if (this._partIndexCache.get(key) === entry) this._partIndexCache.delete(key)
+      throw error
+    }
+  }
+
+  private async _loadSearchPartIndexRows(
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit' | 'before'>,
+    mask: number,
+  ): Promise<SearchPartIndexRow[]> {
+    const where = await this._searchPredicate(platformSessionId, {
+      ...query, kinds: mask || undefined, limit: 0,
+    })
     if (!where) return []
     const rows = await this._database.get('mtproto_im_message', where, ['id', 'timestamp', 'searchKinds'])
-    const output: SearchPartIndexEntry[] = []
+    const output: SearchPartIndexRow[] = []
     for (let offset = 0; offset < rows.length; offset += SEARCH_INDEX_CHUNK) {
       const chunk = rows.slice(offset, offset + SEARCH_INDEX_CHUNK)
       const messageIds = chunk.map((row) => row.id)
+      // 媒体类别一定要取：同一份扫描结果会被裁成多个 `kinds` 掩码复用，
+      // 少取一次媒体就少了一整类结果。
       const [parts, media] = await Promise.all([
         this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } },
           ['messageId', 'mediaId', 'ordinal', 'tlMessageId']),
-        query.kinds
-          ? this._database.get('mtproto_im_media', { messageId: { $in: messageIds } },
-              ['id', 'kind', 'mimeType', 'voice'])
-          : Promise.resolve([] as Pick<IMMediaRow, 'id' | 'kind' | 'mimeType' | 'voice'>[]),
+        this._database.get('mtproto_im_media', { messageId: { $in: messageIds } },
+          ['id', 'kind', 'mimeType', 'voice']),
       ])
       const rowsById = new Map(chunk.map((row) => [row.id, row]))
       const mediaById = new Map(media.map((item) => [item.id, item]))
       for (const part of parts) {
         const row = rowsById.get(part.messageId)
         if (!row) continue
-        if (query.kinds) {
-          const partMedia = part.mediaId === null ? undefined : mediaById.get(part.mediaId)
-          if (!partMatchesSearchKinds(row.searchKinds ?? 0, { ordinal: part.ordinal, media: partMedia }, query.kinds)) {
-            continue
-          }
-        } else if (part.ordinal !== 0) {
-          continue
-        }
-        output.push({ tlMessageId: part.tlMessageId, timestamp: row.timestamp, messageId: row.id })
+        output.push({
+          tlMessageId: part.tlMessageId,
+          timestamp: row.timestamp,
+          messageId: row.id,
+          ordinal: part.ordinal,
+          partKind: mediaSearchKind(part.mediaId === null ? undefined : mediaById.get(part.mediaId)),
+          messageKinds: row.searchKinds ?? 0,
+        })
       }
     }
     return output.sort((left, right) => right.tlMessageId - left.tlMessageId)
+  }
+
+  /**
+   * 缓存里的扫描结果能否回答 `mask`。
+   *
+   * 下推的掩码越大结果越全，所以「缓存掩码包含请求掩码」时可以复用；
+   * 没有下推类别过滤（缓存掩码为 `0`）的那次扫描本身就是全集，能回答任何掩码。
+   * 反过来不行：只扫过照片的缓存回答不了「照片或视频」。
+   */
+  private _searchIndexCovers(cachedMask: number, mask: number): boolean {
+    if (cachedMask === 0) return true
+    if (mask === 0) return false
+    return (cachedMask & mask) === mask
+  }
+
+  private _searchIndexCacheKey(
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit' | 'before'>,
+  ): string {
+    return JSON.stringify([
+      platformSessionId,
+      query.platformConversationIds ? [...query.platformConversationIds].sort() : null,
+      [...query.terms].sort(),
+      query.senderUserId ?? null,
+      query.minTimestamp ?? null,
+      query.maxTimestamp ?? null,
+    ])
+  }
+
+  private _trimSearchIndexCache(): void {
+    while (this._partIndexCache.size > SEARCH_INDEX_CACHE_LIMIT) {
+      const oldest = this._partIndexCache.keys().next().value
+      if (oldest === undefined) break
+      this._partIndexCache.delete(oldest)
+    }
+  }
+
+  /** 会话里的消息变了以后丢掉它的分片索引，下次重新扫描。 */
+  private _invalidateSearchPartIndex(platformConversationId: string): void {
+    for (const [key, entry] of this._partIndexCache) {
+      if (!entry.conversationIds.length || entry.conversationIds.includes(platformConversationId)) {
+        this._partIndexCache.delete(key)
+      }
+    }
+  }
+
+  private _clearSearchPartIndex(): void {
+    this._partIndexCache.clear()
   }
 
   private async _searchPredicate(
@@ -1072,6 +1237,7 @@ export class MessageStore {
         })
       }
     }), 'search-rebuild')
+    this._clearSearchPartIndex()
     return rows.length
   }
   private async _hydrateProjectedRows(rows: readonly IMMessageRow[]): Promise<ProjectedMessage[]> {

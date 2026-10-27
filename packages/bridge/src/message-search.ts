@@ -153,9 +153,22 @@ export function partMatchesSearchKinds(
   part: { ordinal: number, media?: SearchMedia | null },
   kinds: number,
 ): boolean {
+  return partKindsMatchSearchKinds(messageKinds, part.ordinal, mediaSearchKind(part.media), kinds)
+}
+
+/**
+ * 与 `partMatchesSearchKinds` 等价，但分片类别由调用方预先算好。
+ * 共享媒体索引一次扫描要把同一批分片喂给多个过滤器，先把 `mediaSearchKind` 缓存下来可以少算几遍。
+ */
+export function partKindsMatchSearchKinds(
+  messageKinds: number,
+  ordinal: number,
+  partKind: number,
+  kinds: number,
+): boolean {
   if (!kinds) return true
-  if (kinds & mediaSearchKind(part.media)) return true
-  return part.ordinal === 0 && Boolean(kinds & messageKinds & MESSAGE_LEVEL_KINDS)
+  if (kinds & partKind) return true
+  return ordinal === 0 && Boolean(kinds & messageKinds & MESSAGE_LEVEL_KINDS)
 }
 
 /**
