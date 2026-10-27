@@ -62,6 +62,21 @@ describe('bridge models', () => {
     expect(reactionOptions.indexes ?? []).not.toContainEqual('messageId')
   })
 
+  it('declares the covering index that lets shared-media scans stay index-only', () => {
+    const extend = vi.fn()
+    defineModels({ model: { extend } } as never)
+    const messageOptions = extend.mock.calls.find(([table]) => table === 'mtproto_im_message')![2]
+
+    // 共享媒体（计数 / 滚动条 / 日历）一次要读出会话里所有带媒体类别的消息。
+    // 索引必须把查询里出现的列全部覆盖（conversationId / deleted / searchKinds / timestamp / id），
+    // 否则 PostgreSQL 会退回「按会话逐行回表」甚至全表顺序扫描 1.9 GB。
+    expect(messageOptions.indexes).toContainEqual({
+      name: 'mtproto_im_message_media_index',
+      keys: { conversationId: 'asc', deleted: 'asc', searchKinds: 'asc', timestamp: 'asc', id: 'asc' },
+    })
+    expect(Buffer.byteLength('mtproto_im_message_media_index')).toBeLessThanOrEqual(63)
+  })
+
   it('keys platform message identity by conversation instead of repeating the session id', () => {
     const extend = vi.fn()
     defineModels({ model: { extend } } as never)

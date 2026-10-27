@@ -215,6 +215,24 @@ describe('shared media part index', () => {
     expect(counts.messageScans).toBe(scans + 1)
   })
 
+  it('does not leak messages from another session that reuses the same platform conversation id', async () => {
+    const { store } = await setup([media('photo', BASE + 10, [image('p1')])])
+    // 单会话查询不再带 platformSessionId（它会挡住覆盖索引），隔离完全依赖会话行号；
+    // 这里用两个平台会话下的同名会话把它钉住。
+    const otherSession = { ...session, platformSessionId: 'index-session-other' }
+    await store.ingestMany(otherSession, alice, [media('photo-2', BASE + 20, [image('p2')])], {
+      allocation: 'history',
+    })
+
+    const ours = await store.searchPartIndex(session.platformSessionId, { ...query, kinds: SEARCH_KIND.PHOTO })
+    const theirs = await store.searchPartIndex(otherSession.platformSessionId, {
+      ...query, kinds: SEARCH_KIND.PHOTO,
+    })
+    expect(ours).toHaveLength(1)
+    expect(theirs).toHaveLength(1)
+    expect(ours[0].messageId).not.toBe(theirs[0].messageId)
+  })
+
   it('keeps the shared media counters working off one scan for the whole filter list', async () => {
     const { ctx, store, reference, counts } = await setup([
       media('album', BASE + 10, [image('p1'), image('p2'), file('doc', 'application/pdf')]),

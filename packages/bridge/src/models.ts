@@ -415,7 +415,17 @@ export function defineModels(ctx: Context): void {
     // senderUserId 只在会话扫描中作为附加过滤条件（from: 搜索），不单独建索引。
     // 搜索不建文本索引：会话内搜索沿 (conversationId, timestamp) 倒序扫描，
     // 全局搜索沿 (platformSessionId, timestamp) 倒序扫描，searchText 子串匹配，凑够一页即停。
-    indexes: [['conversationId', 'timestamp'], ['platformSessionId', 'timestamp']],
+    indexes: [
+      ['conversationId', 'timestamp'],
+      ['platformSessionId', 'timestamp'],
+      // 共享媒体（标签页计数、滚动条位置、日历）要一次读出会话里全部带媒体类别的消息。
+      // 只有把读到的列都放进索引，规划器才会选 index-only scan；否则它要么按 19 万行逐行回表、
+      // 要么干脆全表顺序扫描 1.9 GB（线上 16 万条消息的群实测 4 秒/次）。
+      {
+        name: 'mtproto_im_message_media_index',
+        keys: { conversationId: 'asc', deleted: 'asc', searchKinds: 'asc', timestamp: 'asc', id: 'asc' },
+      },
+    ],
   })
 
   ctx.model.extend('mtproto_im_request', {

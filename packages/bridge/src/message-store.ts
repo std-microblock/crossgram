@@ -1168,7 +1168,10 @@ export class MessageStore {
     if (query.kinds) kinds.$bitsAnySet = query.kinds
     if (!(query.kinds && query.kinds & SEARCH_KIND.PHONE_CALL)) kinds.$bitsAllClear = SEARCH_KIND.SERVICE
     return {
-      platformSessionId,
+      // 会话行号（`mtproto_im_conversation.id`）是全局唯一行号，单会话查询再带上 32 字节的
+      // `platformSessionId` 是多余的；而 `mtproto_im_message_media_index` 里没有这一列，
+      // 带上它 PostgreSQL 就无法 index-only scan，只能按 19 万行逐行回表。
+      ...(conversationIds?.length === 1 ? {} : { platformSessionId }),
       deleted: false,
       searchKinds: kinds,
       ...(conversationIds
