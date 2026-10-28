@@ -188,7 +188,7 @@ describe('DatabaseUpdateStore', () => {
     })
 
     // 上限 >= 4 × 批量余量(512) 才走「攒一批再裁」，小上限仍保持一条不多的严格语义。
-    // 摊销的可见特征：到了上限之后再插满一批才一次裁掉 513 条，而不是每条插完就裁一条。
+    // 摊销的可见特征：到了上限之后要再攒满一批才一次裁回上限，而不是每条插完就裁一条。
     const retention = 2048
     const backend = new DatabaseUpdateStoreBackend(ctx.database, { retention, retentionSeconds: 0 })
     const insert = async (from: number, count: number) => {
@@ -201,16 +201,12 @@ describe('DatabaseUpdateStore', () => {
     await insert(0, retention)
     expect(await countRows()).toBe(retention)
 
-    // 第 retention+1 条触发一次批量裁剪：直接裁到 retention - 512。
-    await insert(retention, 1)
-    expect(await countRows()).toBe(retention - 512)
+    // 512 条余量之内不修剪：旧实现这里每条都会裁一次。
+    await insert(retention, 512)
+    expect(await countRows()).toBe(retention + 512)
 
-    // 之后 512 条以内只增不裁（旧实现这里每条都会裁一次）。
-    await insert(retention + 1, 499)
-    expect(await countRows()).toBe(retention - 512 + 499)
-
-    // 攒满 513 条后再次整批裁剪。
-    await insert(retention + 500, 14)
-    expect(await countRows()).toBe(retention - 512)
+    // 攒满一批后一次裁回正好上限——保留窗口任何时候都不低于 retention。
+    await insert(retention + 512, 1)
+    expect(await countRows()).toBe(retention)
   })
 })

@@ -197,15 +197,16 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
     const count = known === undefined
       ? await this._countScope(database, platformSessionId, scope)
       : known + 1
-    if (count <= this._retention) {
+    // 小上限（测试或小规模部署）保持「一条不多」的严格语义，只有大上限才留批量余量。
+    const slack = this._retention >= 4 * PRUNE_BATCH_SLACK ? PRUNE_BATCH_SLACK : 0
+    // 留出余量再裁，裁回正好上限：保留窗口任何时候都不会低于 `retention`，
+    // 否则客户端刚好落在被裁掉那一段时会收到多余的「频道重建」（difference reset）。
+    if (count <= this._retention + slack) {
       this._scopeCounts.set(key, count)
       return
     }
-    // 小上限（测试或小规模部署）保持「一条不多」的严格语义，只有大上限才留批量余量。
-    const slack = this._retention >= 4 * PRUNE_BATCH_SLACK ? PRUNE_BATCH_SLACK : 0
-    const keep = Math.max(0, this._retention - slack)
-    await this._pruneTo(database, platformSessionId, scope, keep)
-    this._scopeCounts.set(key, keep)
+    await this._pruneTo(database, platformSessionId, scope, this._retention)
+    this._scopeCounts.set(key, this._retention)
   }
 
   /** 只保留最新的 `keep` 条：一次索引偏移取到临界 `messageId`，再一条 DELETE 清掉更早的。 */
