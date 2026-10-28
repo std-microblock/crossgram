@@ -213,6 +213,11 @@ export class MessageStore {
     string,
     { value: number, at: number, conversationIds: readonly string[] }
   >()
+  /** 搜索页结果的短期缓存（同一个键由 `_searchPageCacheKey` 定义）。 */
+  private readonly _searchPageCache = new Map<
+    string,
+    { value: MessageSearchResult, at: number, conversationIds: readonly string[] }
+  >()
 
   constructor(
     private readonly _database: Database,
@@ -956,6 +961,11 @@ export class MessageStore {
    * 对 `searchText` 做字面量子串匹配，取满 `limit + 1` 行即停止，多取的一行只用于判断是否还有更多。
    */
   async searchMessages(platformSessionId: string, query: MessageSearchQuery): Promise<MessageSearchResult> {
+    // 罕见词的一次搜索要把整个会话扫一遍（线上 16.7 万条消息，热起来也要一秒多），
+    // 而客户端在等应答时会按 1.5 秒的重发间隔再问一遍、切标签页也会重问——按完整查询缓存一小段时间。
+    const cacheKey = this._searchPageCacheKey(platformSessionId, query)
+    const cached = this._searchPageCache.get(cacheKey)
+    if (cached && Date.now() - cached.at < SEARCH_INDEX_CACHE_TTL) return cached.value
     const where = await this._searchPredicate(platformSessionId, query)
     if (!where) return { messages: [], hasMore: false }
     const limit = clampDatabaseLimit(query.limit)
@@ -963,12 +973,25 @@ export class MessageStore {
       .orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(limit + 1).execute()
     const page = rows.slice(0, limit)
     const hydrated = await this._hydrateProjectedRows(page)
-    return {
+    const result: MessageSearchResult = {
       messages: hydrated.map((item, index) => ({
         ...item, messageId: page[index].id, searchKinds: page[index].searchKinds ?? 0,
       })),
       hasMore: rows.length > limit,
     }
+    this._searchPageCache.set(cacheKey, {
+      value: result, at: Date.now(), conversationIds: [...(query.platformConversationIds ?? [])],
+    })
+    while (this._searchPageCache.size > SEARCH_INDEX_CACHE_LIMIT) {
+      const oldest = this._searchPageCache.keys().next().value
+      if (oldest === undefined) break
+      this._searchPageCache.delete(oldest)
+    }
+    return result
+  }
+
+  private _searchPageCacheKey(platformSessionId: string, query: MessageSearchQuery): string {
+    return JSON.stringify([this._countCacheKey(platformSessionId, query), query.limit])
   }
 
   /** 与 `searchMessages` 同条件的消息条数（按逻辑消息计）；需要扫完整个范围，只在首页调用。 */
@@ -1169,23 +1192,19 @@ export class MessageStore {
     }
   }
 
-  /** 会话里的消息变了以后丢掉它的分片索引与计数缓存，下次重新扫描。 */
+  /** 会话里的消息变了以后丢掉它的分片索引与搜索缓存，下次重新扫描。 */
   private _invalidateSearchPartIndex(platformConversationId: string): void {
-    for (const [key, entry] of this._partIndexCache) {
-      if (!entry.conversationIds.length || entry.conversationIds.includes(platformConversationId)) {
-        this._partIndexCache.delete(key)
-      }
-    }
-    for (const [key, entry] of this._countCache) {
-      if (!entry.conversationIds.length || entry.conversationIds.includes(platformConversationId)) {
-        this._countCache.delete(key)
-      }
-    }
+    const stale = (conversationIds: readonly string[]): boolean =>
+      !conversationIds.length || conversationIds.includes(platformConversationId)
+    for (const [key, entry] of this._partIndexCache) if (stale(entry.conversationIds)) this._partIndexCache.delete(key)
+    for (const [key, entry] of this._countCache) if (stale(entry.conversationIds)) this._countCache.delete(key)
+    for (const [key, entry] of this._searchPageCache) if (stale(entry.conversationIds)) this._searchPageCache.delete(key)
   }
 
   private _clearSearchPartIndex(): void {
     this._partIndexCache.clear()
     this._countCache.clear()
+    this._searchPageCache.clear()
   }
 
   private async _searchPredicate(
