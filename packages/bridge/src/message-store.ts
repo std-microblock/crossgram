@@ -90,6 +90,8 @@ interface SearchPartIndexCacheEntry {
 }
 
 const SEARCH_INDEX_CHUNK = 500
+/** 分片/媒体取用同时发起的批数：单批约 80 毫秒，串行 41 批要 3 秒多。 */
+const SEARCH_INDEX_CHUNK_CONCURRENCY = 3
 /**
  * 分片索引缓存的存活时间。
  *
@@ -206,6 +208,11 @@ export class MessageStore {
   private _peerRevision = 0
   /** 共享媒体分片索引的短期缓存，见 `SEARCH_INDEX_CACHE_TTL`。 */
   private readonly _partIndexCache = new Map<string, SearchPartIndexCacheEntry>()
+  /** 文本搜索精确计数的短期缓存（同一个键由 `_countCacheKey` 定义）。 */
+  private readonly _countCache = new Map<
+    string,
+    { value: number, at: number, conversationIds: readonly string[] }
+  >()
 
   constructor(
     private readonly _database: Database,
@@ -966,9 +973,36 @@ export class MessageStore {
 
   /** 与 `searchMessages` 同条件的消息条数（按逻辑消息计）；需要扫完整个范围，只在首页调用。 */
   async countSearchMessages(platformSessionId: string, query: Omit<MessageSearchQuery, 'limit'>): Promise<number> {
+    // 精确计数要扫完整个会话的 `searchText`（线上 16 万条消息约 1.2 秒）。客户端在等应答时
+    // 会按 1.5 秒的重发间隔再问一遍，切标签页也会重问，所以短缓存直接决定搜索的手感。
+    const key = this._countCacheKey(platformSessionId, query)
+    const cached = this._countCache.get(key)
+    if (cached && Date.now() - cached.at < SEARCH_INDEX_CACHE_TTL) return cached.value
     const where = await this._searchPredicate(platformSessionId, { ...query, limit: 0, before: undefined })
     if (!where) return 0
-    return this._database.eval('mtproto_im_message', (row) => $.count(row.id), where)
+    const value = await this._database.eval('mtproto_im_message', (row) => $.count(row.id), where)
+    this._countCache.set(key, {
+      value, at: Date.now(), conversationIds: [...(query.platformConversationIds ?? [])],
+    })
+    while (this._countCache.size > SEARCH_INDEX_CACHE_LIMIT) {
+      const oldest = this._countCache.keys().next().value
+      if (oldest === undefined) break
+      this._countCache.delete(oldest)
+    }
+    return value
+  }
+
+  private _countCacheKey(platformSessionId: string, query: Omit<MessageSearchQuery, 'limit'>): string {
+    return JSON.stringify([
+      platformSessionId,
+      query.platformConversationIds ? [...query.platformConversationIds].sort() : null,
+      [...query.terms].sort(),
+      query.senderUserId ?? null,
+      query.minTimestamp ?? null,
+      query.maxTimestamp ?? null,
+      query.kinds ?? 0,
+      query.before ? [query.before.timestamp, query.before.messageId] : null,
+    ])
   }
 
   /**
@@ -1057,33 +1091,46 @@ export class MessageStore {
     })
     if (!where) return []
     const rows = await this._database.get('mtproto_im_message', where, ['id', 'timestamp', 'searchKinds'])
-    const output: SearchPartIndexRow[] = []
+    const chunks: Array<typeof rows> = []
     for (let offset = 0; offset < rows.length; offset += SEARCH_INDEX_CHUNK) {
-      const chunk = rows.slice(offset, offset + SEARCH_INDEX_CHUNK)
-      const messageIds = chunk.map((row) => row.id)
-      // 媒体类别一定要取：同一份扫描结果会被裁成多个 `kinds` 掩码复用，
-      // 少取一次媒体就少了一整类结果。
-      const [parts, media] = await Promise.all([
-        this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } },
-          ['messageId', 'mediaId', 'ordinal', 'tlMessageId']),
-        this._database.get('mtproto_im_media', { messageId: { $in: messageIds } },
-          ['id', 'kind', 'mimeType', 'voice']),
-      ])
-      const rowsById = new Map(chunk.map((row) => [row.id, row]))
-      const mediaById = new Map(media.map((item) => [item.id, item]))
-      for (const part of parts) {
-        const row = rowsById.get(part.messageId)
-        if (!row) continue
-        output.push({
-          tlMessageId: part.tlMessageId,
-          timestamp: row.timestamp,
-          messageId: row.id,
-          ordinal: part.ordinal,
-          partKind: mediaSearchKind(part.mediaId === null ? undefined : mediaById.get(part.mediaId)),
-          messageKinds: row.searchKinds ?? 0,
-        })
+      chunks.push(rows.slice(offset, offset + SEARCH_INDEX_CHUNK))
+    }
+    const output: SearchPartIndexRow[] = []
+    // 分片与媒体的取用是「按 500 个 id 一批」的随机读；串行执行时 41 批要 3 秒上下，
+    // 限并发几批就能把这段压到亚秒，同时不至于把只有 10 条连接的连接池占满。
+    let cursor = 0
+    const worker = async (): Promise<void> => {
+      while (cursor < chunks.length) {
+        const chunk = chunks[cursor++]!
+        const messageIds = chunk.map((row) => row.id)
+        // 媒体类别一定要取：同一份扫描结果会被裁成多个 `kinds` 掩码复用，
+        // 少取一次媒体就少了一整类结果。
+        const [parts, media] = await Promise.all([
+          this._database.get('mtproto_tl_message_part', { messageId: { $in: messageIds } },
+            ['messageId', 'mediaId', 'ordinal', 'tlMessageId']),
+          this._database.get('mtproto_im_media', { messageId: { $in: messageIds } },
+            ['id', 'kind', 'mimeType', 'voice']),
+        ])
+        const rowsById = new Map(chunk.map((row) => [row.id, row]))
+        const mediaById = new Map(media.map((item) => [item.id, item]))
+        for (const part of parts) {
+          const row = rowsById.get(part.messageId)
+          if (!row) continue
+          output.push({
+            tlMessageId: part.tlMessageId,
+            timestamp: row.timestamp,
+            messageId: row.id,
+            ordinal: part.ordinal,
+            partKind: mediaSearchKind(part.mediaId === null ? undefined : mediaById.get(part.mediaId)),
+            messageKinds: row.searchKinds ?? 0,
+          })
+        }
       }
     }
+    await Promise.all(Array.from(
+      { length: Math.min(SEARCH_INDEX_CHUNK_CONCURRENCY, chunks.length) },
+      worker,
+    ))
     return output.sort((left, right) => right.tlMessageId - left.tlMessageId)
   }
 
@@ -1122,17 +1169,23 @@ export class MessageStore {
     }
   }
 
-  /** 会话里的消息变了以后丢掉它的分片索引，下次重新扫描。 */
+  /** 会话里的消息变了以后丢掉它的分片索引与计数缓存，下次重新扫描。 */
   private _invalidateSearchPartIndex(platformConversationId: string): void {
     for (const [key, entry] of this._partIndexCache) {
       if (!entry.conversationIds.length || entry.conversationIds.includes(platformConversationId)) {
         this._partIndexCache.delete(key)
       }
     }
+    for (const [key, entry] of this._countCache) {
+      if (!entry.conversationIds.length || entry.conversationIds.includes(platformConversationId)) {
+        this._countCache.delete(key)
+      }
+    }
   }
 
   private _clearSearchPartIndex(): void {
     this._partIndexCache.clear()
+    this._countCache.clear()
   }
 
   private async _searchPredicate(

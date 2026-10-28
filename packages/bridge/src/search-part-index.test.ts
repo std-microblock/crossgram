@@ -50,12 +50,18 @@ function media(id: string, timestamp: number, media: IMMedia[]): IMMessage {
 
 /** 统计访问 `mtproto_im_message` 的次数：一次全量扫描就是一次，用来验证「一次扫描回答多个过滤器」。 */
 function countingDatabase(database: Database) {
-  const counts = { messageScans: 0, partQueries: 0 }
+  const counts = { messageScans: 0, partQueries: 0, countQueries: 0 }
   const proxy = new Proxy(database, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver)
       if (typeof value !== 'function') return value
       const bound = value.bind(target)
+      if (property === 'eval') {
+        return (...rest: unknown[]) => {
+          counts.countQueries++
+          return (bound as (...args: unknown[]) => unknown)(...rest)
+        }
+      }
       if (property !== 'get') return bound
       return (table: string, ...rest: unknown[]) => {
         if (table === 'mtproto_im_message') counts.messageScans++
@@ -231,6 +237,32 @@ describe('shared media part index', () => {
     expect(ours).toHaveLength(1)
     expect(theirs).toHaveLength(1)
     expect(ours[0].messageId).not.toBe(theirs[0].messageId)
+  })
+
+  it('caches the exact text-search count so client retries do not rescan the conversation', async () => {
+    const { store, counts } = await setup([
+      text('t1', BASE + 1, 'hello relay'),
+      text('t2', BASE + 2, 'relay again'),
+      text('t3', BASE + 3, 'nothing here'),
+    ])
+    const searchQuery = { platformConversationIds: [alice.id], terms: ['relay'] }
+
+    expect(await store.countSearchMessages(session.platformSessionId, searchQuery)).toBe(2)
+    expect(counts.countQueries).toBe(1)
+
+    // 客户端在等应答时会按 1.5 秒重发同一条搜索，切标签页也会重问：都必须命中缓存。
+    expect(await store.countSearchMessages(session.platformSessionId, searchQuery)).toBe(2)
+    expect(counts.countQueries).toBe(1)
+
+    // 换一个词就要重新数。
+    expect(await store.countSearchMessages(session.platformSessionId, { ...searchQuery, terms: ['again'] }))
+      .toBe(1)
+    expect(counts.countQueries).toBe(2)
+
+    // 会话里进了新消息，旧计数作废。
+    await store.ingestMany(session, alice, [text('t4', BASE + 4, 'relay too')], { allocation: 'live' })
+    expect(await store.countSearchMessages(session.platformSessionId, searchQuery)).toBe(3)
+    expect(counts.countQueries).toBe(3)
   })
 
   it('keeps the shared media counters working off one scan for the whole filter list', async () => {
