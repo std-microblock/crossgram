@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { UpdateStoreBackend } from '@mtproto-relay/update-store'
 import type { Database as DatabaseService } from '@cordisjs/plugin-database'
-import DatabaseUpdateStore from './index.js'
+import DatabaseUpdateStore, { DatabaseUpdateStoreBackend, defineModel } from './index.js'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -169,5 +169,48 @@ describe('DatabaseUpdateStore', () => {
 
     expect(await store.pruneExpired(600_000)).toBe(0)
     expect(await updateStore.get('old')).toBeDefined()
+  })
+
+  it('amortizes the retention trim instead of walking the index on every insert', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'crossgram-update-store-'))
+    cleanups.push(() => rm(directory, { recursive: true, force: true }))
+    const ctx = new Context()
+    const database = ctx.plugin(Database)
+    const sqlite = ctx.plugin(SQLiteDriver, { path: pathToFileURL(join(directory, 'updates.sqlite')).href })
+    await Promise.all([database, sqlite])
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    defineModel(ctx)
+    await ctx.database.prepared()
+    cleanups.push(async () => {
+      await sqlite.dispose()
+      await database.dispose()
+      await ctx.fiber.dispose()
+    })
+
+    // 上限 >= 4 × 批量余量(512) 才走「攒一批再裁」，小上限仍保持一条不多的严格语义。
+    // 摊销的可见特征：到了上限之后再插满一批才一次裁掉 513 条，而不是每条插完就裁一条。
+    const retention = 2048
+    const backend = new DatabaseUpdateStoreBackend(ctx.database, { retention, retentionSeconds: 0 })
+    const insert = async (from: number, count: number) => {
+      for (let index = 0; index < count; index++) {
+        await backend.create(delivery(`k-${from + index}`, 'a', from + index + 2))
+      }
+    }
+    const countRows = async () => (await ctx.database.get('mtproto_update_delivery', { platformSessionId: 'a' })).length
+
+    await insert(0, retention)
+    expect(await countRows()).toBe(retention)
+
+    // 第 retention+1 条触发一次批量裁剪：直接裁到 retention - 512。
+    await insert(retention, 1)
+    expect(await countRows()).toBe(retention - 512)
+
+    // 之后 512 条以内只增不裁（旧实现这里每条都会裁一次）。
+    await insert(retention + 1, 499)
+    expect(await countRows()).toBe(retention - 512 + 499)
+
+    // 攒满 513 条后再次整批裁剪。
+    await insert(retention + 500, 14)
+    expect(await countRows()).toBe(retention - 512)
   })
 })

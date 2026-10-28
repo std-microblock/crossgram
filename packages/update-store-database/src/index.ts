@@ -51,10 +51,21 @@ const RETENTION_SWEEP_INTERVAL_MS = 5 * 60 * 1000
 
 const DEFAULT_RETENTION_SECONDS = 3 * 24 * 3600
 
+/**
+ * 条数上限一次裁掉多少条余量。
+ *
+ * 修剪要靠 `OFFSET retention` 找到临界 `messageId`，而这条查询的代价与条数成正比
+ * （线上 10,000 条 / 6,000+ 次回表 / 约 100 毫秒）。每条插入都修剪一次等于给写入路径
+ * 常态加一成数据库负载；按批修剪把它摊到几百条一次。
+ */
+const PRUNE_BATCH_SLACK = 512
+
 export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
   private readonly _database: Database
   private readonly _retention: number
   private readonly _retentionSeconds: number
+  /** 每个 scope 已知的条数；`undefined` 表示本进程还没数过，需要先播种。 */
+  private readonly _scopeCounts = new Map<string, number>()
 
   constructor(database: Database, config: Config = {}) {
     this._database = database
@@ -79,7 +90,7 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
       if (existing) return decodeRow(existing)
 
       const row = await database.create('mtproto_update_delivery', encodeNewRow(delivery))
-      await this._prune(database, delivery.platformSessionId, delivery.scope)
+      await this._trim(database, delivery.platformSessionId, delivery.scope)
       return decodeRow(row)
     })
   }
@@ -154,23 +165,74 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
   }
 
   async prune(platformSessionId: string, scope: string): Promise<void> {
-    await this._database.withTransaction((database) => this._prune(database, platformSessionId, scope))
+    await this._database.withTransaction(async (database) => {
+      const key = this._scopeKey(platformSessionId, scope)
+      this._scopeCounts.delete(key)
+      if (!this._retention) {
+        await database.remove('mtproto_update_delivery', { platformSessionId, scope })
+        return
+      }
+      await this._pruneTo(database, platformSessionId, scope, this._retention)
+      this._scopeCounts.set(key, await this._countScope(database, platformSessionId, scope))
+    })
   }
 
-  private async _prune(database: Database, platformSessionId: string, scope: string): Promise<void> {
+  /**
+   * 插入后的条数检查：只在真正超过上限时做一次批量裁剪。
+   *
+   * 旧实现每条插入都跑一次 `OFFSET retention`。线上这个 scope 常年贴着 10,000 条上限，
+   * 那条查询要回表 6,000+ 次、约 100 毫秒（实测），也就是热频道每条消息都给数据库加一百毫秒；
+   * 连接池只有 10 条，前台 RPC 于是排队——同一个 `messages.search` 实测从 1 秒级退化到 56~92 秒。
+   * 这里改成「超过上限才裁、一次裁掉一批」，把这份代价摊到几百条插入一次。
+   */
+  private async _trim(database: Database, platformSessionId: string, scope: string): Promise<void> {
+    const key = this._scopeKey(platformSessionId, scope)
     if (!this._retention) {
       await database.remove('mtproto_update_delivery', { platformSessionId, scope })
+      this._scopeCounts.delete(key)
       return
     }
+    const known = this._scopeCounts.get(key)
+    // 播种查询在插入之后执行，已经包含刚写进去的这一条。
+    const count = known === undefined
+      ? await this._countScope(database, platformSessionId, scope)
+      : known + 1
+    if (count <= this._retention) {
+      this._scopeCounts.set(key, count)
+      return
+    }
+    // 小上限（测试或小规模部署）保持「一条不多」的严格语义，只有大上限才留批量余量。
+    const slack = this._retention >= 4 * PRUNE_BATCH_SLACK ? PRUNE_BATCH_SLACK : 0
+    const keep = Math.max(0, this._retention - slack)
+    await this._pruneTo(database, platformSessionId, scope, keep)
+    this._scopeCounts.set(key, keep)
+  }
 
-    // 通过单次索引偏移定位超出条数上限的临界 `messageId`，避免读取 payload。
+  /** 只保留最新的 `keep` 条：一次索引偏移取到临界 `messageId`，再一条 DELETE 清掉更早的。 */
+  private async _pruneTo(
+    database: Database,
+    platformSessionId: string,
+    scope: string,
+    keep: number,
+  ): Promise<void> {
     const [oldestOverflow] = await database.select('mtproto_update_delivery', {
       platformSessionId, scope,
-    }).orderBy('messageId', 'desc').offset(this._retention).limit(1).execute(['messageId'])
+    }).orderBy('messageId', 'desc').offset(keep).limit(1).execute(['messageId'])
     if (!oldestOverflow) return
     await database.remove('mtproto_update_delivery', {
       platformSessionId, scope, messageId: { $lte: oldestOverflow.messageId },
     })
+  }
+
+  private _scopeKey(platformSessionId: string, scope: string): string {
+    return `${platformSessionId}\u0000${scope}`
+  }
+
+  /** 播种内存计数：只读索引，不碰 payload。 */
+  private async _countScope(database: Database, platformSessionId: string, scope: string): Promise<number> {
+    return await database.eval('mtproto_update_delivery', (row) => $.count(row.messageId), {
+      platformSessionId, scope,
+    }) as number
   }
 
   /** 全表清理超过保留时长的 delivery（弥补单 scope 条数上限无法清理静默频道旧记录的问题）。 */
