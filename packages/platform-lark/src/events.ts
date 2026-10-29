@@ -1,3 +1,4 @@
+import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
 import type { LarkMessageReceiveEvent, LarkMessageRecalledEvent } from './types.js'
 
 /** SDK 解包后 header 与 event 已平铺合并（见 EventDispatcher.parse）。 */
@@ -19,6 +20,8 @@ export interface LarkEventPumpOptions {
   appSecret: string
   /** 开放平台地址（SDK 默认连 Lark 国际版，飞书应用必须显式指定）。 */
   baseUrl: string
+  /** 可选 HTTP(S) 代理：endpoint 发现与 WS 数据通道都走它（国际版在国内网络的必要配置）。 */
+  proxy?: string
   /** 测试注入伪造 WS 客户端。 */
   createWsClient?: (options: { appId: string, appSecret: string }) => LarkWsClientLike
   createEventDispatcher?: () => {
@@ -46,12 +49,20 @@ export class LarkEventPump {
 
   async start(): Promise<void> {
     const { WSClient, EventDispatcher, LoggerLevel } = await import('@larksuiteoapi/node-sdk')
+    const { HttpsProxyAgent } = await import('https-proxy-agent')
+    const proxyExtras = this.options.proxy
+      ? {
+        httpInstance: createProxyHttpInstance(this.options.proxy),
+        agent: new HttpsProxyAgent(this.options.proxy),
+      }
+      : {}
     const createWsClient = this.options.createWsClient
       ?? ((opts: { appId: string, appSecret: string }) => new WSClient({
         appId: opts.appId,
         appSecret: opts.appSecret,
         domain: this.options.baseUrl,
         loggerLevel: LoggerLevel.warn,
+        ...proxyExtras,
       }) as unknown as LarkWsClientLike)
     const createDispatcher = this.options.createEventDispatcher
       ?? (() => new EventDispatcher({}))
@@ -82,4 +93,32 @@ export class LarkEventPump {
     this.wsClient?.close()
     this.wsClient = undefined
   }
+}
+
+/** SDK 的 endpoint 发现走 httpInstance.request（axios 风格）；代理模式下用 undici 实现。 */
+function createProxyHttpInstance(proxy: string) {
+  const dispatcher = new UndiciProxyAgent(proxy)
+  const request = async (options: {
+    method?: string
+    url: string
+    data?: unknown
+    headers?: Record<string, string>
+    timeout?: number
+  }): Promise<unknown> => {
+    const headers: Record<string, string> = { ...(options.headers ?? {}) }
+    let body: string | undefined
+    if (options.data !== undefined) {
+      headers['content-type'] = 'application/json'
+      body = typeof options.data === 'string' ? options.data : JSON.stringify(options.data)
+    }
+    const response = await undiciFetch(options.url, {
+      method: options.method ?? 'POST',
+      headers,
+      body,
+      dispatcher,
+      signal: AbortSignal.timeout(options.timeout ?? 15_000),
+    })
+    return response.json()
+  }
+  return { request } as unknown as import('@larksuiteoapi/node-sdk').HttpInstance
 }

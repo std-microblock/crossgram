@@ -12,6 +12,7 @@
     "@cordisjs/plugin-database": "^4.0.0",
     "@larksuiteoapi/node-sdk": "^1.76.0",
     "@mtproto-relay/bridge": "workspace:*",
+    "https-proxy-agent": "^9.1.0",
     "schemastery": "^3.18.0",
     "undici": "^8.10.0"
   },

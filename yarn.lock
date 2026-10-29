@@ -2071,6 +2071,7 @@ __metadata:
     "@cordisjs/plugin-database": "npm:^4.0.0"
     "@larksuiteoapi/node-sdk": "npm:^1.76.0"
     "@mtproto-relay/bridge": "workspace:*"
+    https-proxy-agent: "npm:^9.1.0"
     schemastery: "npm:^3.18.0"
     undici: "npm:^8.10.0"
     vitest: "npm:^4.1.10"
