@@ -26,10 +26,12 @@ interface RequestOptions {
   query?: Record<string, string | number | undefined>
   jsonBody?: unknown
   formBody?: FormData
-  /** Bearer user_access_token；缺省用 tenant_access_token。 */
-  userToken?: string
+  /** Bearer token：user 模式为 user_access_token，bot 模式为 tenant_access_token。 */
+  token?: string
   /** 凭据接口自身不带 Bearer（否则递归获取 tenant token）。 */
   skipAuth?: boolean
+  /** tenant_access_token 接口响应无 code/data 包装。 */
+  unwrap?: boolean
   signal?: AbortSignal
 }
 
@@ -40,6 +42,7 @@ export class LarkClient {
   private readonly requestTimeoutMs: number
   private readonly fetch: typeof globalThis.fetch
   private readonly proxyDispatcher?: UndiciProxyAgent
+  private tenantToken?: { token: string, expiresAt: number }
 
   constructor(options: LarkClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
@@ -100,19 +103,42 @@ export class LarkClient {
     })
   }
 
-  getUserInfo(userToken: string, signal?: AbortSignal): Promise<LarkUserInfo> {
-    return this.request('/open-apis/authen/v1/user_info', { userToken, signal })
+  getUserInfo(token: string, signal?: AbortSignal): Promise<LarkUserInfo> {
+    return this.request('/open-apis/authen/v1/user_info', { token, signal })
   }
 
-  getChats(userToken: string, options: { pageSize?: number, pageToken?: string } = {}) {
+  /** bot 模式身份：应用信息（open_id 即 bot 身份）。 */
+  async getBotInfo(): Promise<{ open_id?: string, app_name?: string, avatar_url?: string }> {
+    // bot/v3/info 为老接口，响应无 code/data 包装
+    const body = await this.request<{ open_id?: string, app_name?: string, avatar_url?: string }>(
+      '/open-apis/bot/v3/info',
+      { token: await this.getTenantAccessToken() },
+    )
+    return body
+  }
+
+  /** 应用身份 token（bot 模式收发）；缓存至过期前 5 分钟。 */
+  async getTenantAccessToken(): Promise<string> {
+    const now = Date.now()
+    if (this.tenantToken && this.tenantToken.expiresAt > now + 300_000) return this.tenantToken.token
+    // 该接口响应无 code/data 包装，且自身不携带 Bearer
+    const body = await this.request<{ tenant_access_token: string, expire: number }>(
+      '/open-apis/auth/v3/tenant_access_token/internal',
+      { method: 'POST', jsonBody: { app_id: this.appId, app_secret: this.appSecret }, unwrap: false, skipAuth: true },
+    )
+    this.tenantToken = { token: body.tenant_access_token, expiresAt: now + body.expire * 1000 }
+    return this.tenantToken.token
+  }
+
+  getChats(token: string, options: { pageSize?: number, pageToken?: string } = {}) {
     return this.request<{ items?: LarkChat[], has_more?: boolean, page_token?: string }>(
       '/open-apis/im/v1/chats',
-      { userToken, query: { page_size: options.pageSize, page_token: options.pageToken } },
+      { token, query: { page_size: options.pageSize, page_token: options.pageToken } },
     )
   }
 
-  async getChat(userToken: string, chatId: string): Promise<LarkChat | null> {
-    const body = await this.request<LarkChat>(`/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`, { userToken })
+  async getChat(token: string, chatId: string): Promise<LarkChat | null> {
+    const body = await this.request<LarkChat>(`/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`, { token })
       .catch((error: unknown) => {
         if (error instanceof LarkApiError && CHAT_UNAVAILABLE_CODES.has(error.code)) return null
         throw error
@@ -121,7 +147,7 @@ export class LarkClient {
   }
 
   sendMessage(
-    userToken: string,
+    token: string,
     message: { receiveId: string, msgType: string, content: string, replyToMessageId?: string },
     signal?: AbortSignal,
   ): Promise<{ message_id: string }> {
@@ -134,15 +160,15 @@ export class LarkClient {
         content: message.content,
         ...(message.replyToMessageId ? { reply_to_message_id: message.replyToMessageId } : {}),
       },
-      userToken,
+      token,
       signal,
     })
   }
 
-  async getMessage(userToken: string, messageId: string): Promise<LarkMessage | null> {
+  async getMessage(token: string, messageId: string): Promise<LarkMessage | null> {
     const raw = await this.request<LarkMessage>(
       `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`,
-      { userToken },
+      { token },
     ).catch((error: unknown) => {
       if (error instanceof LarkApiError && MESSAGE_UNAVAILABLE_CODES.has(error.code)) return null
       throw error
@@ -151,7 +177,7 @@ export class LarkClient {
   }
 
   async listMessages(
-    userToken: string,
+    token: string,
     options: {
       containerId: string
       startTime?: number
@@ -165,7 +191,7 @@ export class LarkClient {
     const body = await this.request<{ items?: LarkMessage[], has_more?: boolean, page_token?: string }>(
       '/open-apis/im/v1/messages',
       {
-        userToken,
+        token,
         query: {
           container_id_type: 'chat',
           container_id: options.containerId,
@@ -185,15 +211,15 @@ export class LarkClient {
     }
   }
 
-  recallMessage(userToken: string, messageId: string): Promise<void> {
+  recallMessage(token: string, messageId: string): Promise<void> {
     return this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
       method: 'DELETE',
-      userToken,
+      token,
     })
   }
 
   async uploadImage(
-    userToken: string,
+    token: string,
     source: AsyncIterable<Uint8Array>,
     options: { signal?: AbortSignal } = {},
   ): Promise<string> {
@@ -203,14 +229,14 @@ export class LarkClient {
     const body = await this.request<{ image_key: string }>('/open-apis/im/v1/images', {
       method: 'POST',
       formBody: form,
-      userToken,
+      token,
       signal: options.signal,
     })
     return body.image_key
   }
 
   async uploadFile(
-    userToken: string,
+    token: string,
     source: AsyncIterable<Uint8Array>,
     options: { fileName: string, signal?: AbortSignal },
   ): Promise<string> {
@@ -221,14 +247,14 @@ export class LarkClient {
     const body = await this.request<{ file_key: string }>('/open-apis/im/v1/files', {
       method: 'POST',
       formBody: form,
-      userToken,
+      token,
       signal: options.signal,
     })
     return body.file_key
   }
 
   async uploadAudio(
-    userToken: string,
+    token: string,
     source: AsyncIterable<Uint8Array>,
     options: { fileName: string, signal?: AbortSignal },
   ): Promise<string> {
@@ -239,14 +265,14 @@ export class LarkClient {
     const body = await this.request<{ file_key: string }>('/open-apis/im/v1/audios', {
       method: 'POST',
       formBody: form,
-      userToken,
+      token,
       signal: options.signal,
     })
     return body.file_key
   }
 
   downloadResource(
-    userToken: string,
+    token: string,
     messageId: string,
     fileKey: string,
     type: 'image' | 'file',
@@ -254,7 +280,7 @@ export class LarkClient {
   ): Promise<Response> {
     return this.rawRequest(
       `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/resources/${encodeURIComponent(fileKey)}`,
-      { query: { type }, userToken, signal },
+      { query: { type }, token, signal },
     )
   }
 
@@ -297,8 +323,8 @@ export class LarkClient {
     const headers = new Headers()
     if (!options.skipAuth) {
       // 全部业务接口以 user_access_token 调用（app 态仅用于 WS 事件长连接握手）
-      if (!options.userToken) throw new Error(`Lark request without user token: ${path}`)
-      headers.set('authorization', `Bearer ${options.userToken}`)
+      if (!options.token) throw new Error(`Lark request without user token: ${path}`)
+      headers.set('authorization', `Bearer ${options.token}`)
     }
     let body: BodyInit | undefined
     if (options.jsonBody !== undefined) {

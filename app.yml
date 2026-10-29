@@ -101,7 +101,9 @@
     appId: ${LARK_APP_ID}
     appSecret: ${LARK_APP_SECRET}
     # baseUrl: https://open.larksuite.com # Lark 国际版
-    # publicUrl: https://relay.example.com # OAuth 回调公网地址
+    # mode: user # 用户身份收发（默认 bot）
+    # publicUrl: https://relay.example.com # user 模式：OAuth 回调公网地址
+    # pollIntervalMs: 60000 # user 模式：轮询间隔
 - id: wechat
   name: '@mtproto-relay/platform-wechat'
   disabled: true

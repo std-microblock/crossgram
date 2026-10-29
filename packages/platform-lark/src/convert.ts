@@ -1,5 +1,5 @@
 import type {
-  IMConversation, IMMedia, IMMessageInput, IMMessageInputPart, IMMessagePart, IMTextEntity, IMUser,
+  IMConversation, IMMedia, IMMessage, IMMessageInput, IMMessageInputPart, IMMessagePart, IMTextEntity, IMUser,
 } from '@mtproto-relay/bridge'
 import { larkSenderOpenId, larkMessageTimestamp, larkMessageType, type LarkChat, type LarkMediaLocator, type LarkMessage, type LarkMention } from './types.js'
 
@@ -261,6 +261,23 @@ export function toSenderUser(message: LarkMessage, fallbackName?: string): IMUse
   const openId = larkSenderOpenId(message.sender)
   if (!openId) return undefined
   return { id: openId, firstName: fallbackName ?? openId }
+}
+
+/** 事件与轮询共用的消息投影；deleted/空内容返回 null。 */
+export function toIncomingMessage(message: LarkMessage, selfId: string): IMMessage<LarkMediaLocator> | null {
+  if (message.deleted) return null
+  const senderOpenId = larkSenderOpenId(message.sender)
+  const { parts, replyToId } = parseLarkMessage(message)
+  if (!parts.length) return null
+  return {
+    id: message.message_id,
+    conversationId: message.chat_id,
+    senderId: senderOpenId ?? 'unknown',
+    content: { parts },
+    timestamp: larkMessageTimestamp(message),
+    outgoing: senderOpenId === selfId,
+    ...(replyToId ? { replyToId } : {}),
+  }
 }
 
 export function messageTimestamp(message: LarkMessage): number {

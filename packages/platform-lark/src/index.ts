@@ -9,8 +9,9 @@ import type {
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { LarkClient } from './client.js'
-import { buildSendPlan, parseLarkMessage, toConversation, toSenderUser } from './convert.js'
+import { buildSendPlan, parseLarkMessage, toConversation, toIncomingMessage, toSenderUser } from './convert.js'
 import { LarkEventPump, type LarkReceiveEventData, type LarkRecalledEventData } from './events.js'
+import { LarkPoller } from './poller.js'
 import { TokenStore, type LarkCredentialBackend } from './token-store.js'
 import type { LarkMediaLocator, LarkMessage } from './types.js'
 import { larkSenderOpenId, larkMessageTimestamp } from './types.js'
@@ -21,8 +22,12 @@ export interface Config {
   appId: string
   appSecret: string
   baseUrl: string
+  /** bot：应用身份收发（WS 事件 + tenant token）；user：用户身份收发（轮询 + user_access_token）。 */
+  mode: 'bot' | 'user'
   /** OAuth 回调的公网基地址；缺省用内置 server 的 baseUrl。 */
   publicUrl?: string
+  /** user 模式轮询间隔（毫秒）。 */
+  pollIntervalMs: number
   proxy?: string
   requestTimeoutMs?: number
   /** Test-only HTTP transport injection. */
@@ -37,7 +42,9 @@ export const Config = z.object({
   appId: z.string().required(),
   appSecret: z.string().role('secret').required(),
   baseUrl: z.string().default('https://open.feishu.cn'),
+  mode: z.union(['bot', 'user']).default('bot'),
   publicUrl: z.string(),
+  pollIntervalMs: z.natural().min(5_000).default(60_000),
   proxy: z.string().role('secret'),
   requestTimeoutMs: z.natural().min(1).default(30_000),
 }).i18n({
@@ -85,9 +92,6 @@ export function apply(ctx: Context, config: Config): void {
     requestTimeoutMs: config.requestTimeoutMs,
     ...(config.fetch ? { fetch: config.fetch } : {}),
   })
-  const tokens = new TokenStore(new DatabaseCredentialBackend(ctx.database, id), { client, logger })
-  const redirectUri = `${(config.publicUrl ?? ctx.server.baseUrl).replace(/\/+$/, '')}/lark/${id}/oauth/callback`
-  const pending = new Map<string, OAuthPending>()
 
   let unregister: (() => void) | undefined
   let stopped = false
@@ -96,6 +100,31 @@ export function apply(ctx: Context, config: Config): void {
     unregister?.()
     void client.close()
   })
+
+  const registerLark = (tokens?: TokenStore) => {
+    if (stopped || unregister) return
+    const platform = new LarkPlatform(client, {
+      mode: config.mode,
+      appId: config.appId,
+      appSecret: config.appSecret,
+      pollIntervalMs: config.pollIntervalMs,
+      getToken: tokens ? () => tokens.getFreshUserToken() : () => client.getTenantAccessToken(),
+      ...(tokens ? { tokens } : {}),
+      ...(config.createWsClient ? { createWsClient: config.createWsClient } : {}),
+      ...(config.createEventDispatcher ? { createEventDispatcher: config.createEventDispatcher } : {}),
+    }, logger)
+    unregister = ctx.imPlatform.register(platform, id)
+  }
+
+  if (config.mode === 'bot') {
+    registerLark()
+    return
+  }
+
+  // ---- user 模式：OAuth 授权流程 ----
+  const tokens = new TokenStore(new DatabaseCredentialBackend(ctx.database, id), { client, logger })
+  const redirectUri = `${(config.publicUrl ?? ctx.server.baseUrl).replace(/\/+$/, '')}/lark/${id}/oauth/callback`
+  const pending = new Map<string, OAuthPending>()
 
   const authorizeUrl = () => {
     const state = randomUUID()
@@ -109,17 +138,6 @@ export function apply(ctx: Context, config: Config): void {
     }
     if (reason) logger.warn('%s', reason)
     logger.info('Lark 账号未授权，请在浏览器打开并授权：\n%s', authorizeUrl())
-  }
-
-  const registerLark = () => {
-    if (stopped || unregister) return
-    const platform = new LarkPlatform(client, tokens, {
-      appId: config.appId,
-      appSecret: config.appSecret,
-      ...(config.createWsClient ? { createWsClient: config.createWsClient } : {}),
-      ...(config.createEventDispatcher ? { createEventDispatcher: config.createEventDispatcher } : {}),
-    }, logger)
-    unregister = ctx.imPlatform.register(platform, id)
   }
 
   ctx.server.get(`/lark/${id}/oauth/callback`, async (req, res) => {
@@ -136,7 +154,7 @@ export function apply(ctx: Context, config: Config): void {
       const exchange = await client.exchangeCode(code, redirectUri)
       const info = await client.getUserInfo(exchange.access_token)
       await tokens.adopt(exchange, info.open_id, info.name)
-      registerLark()
+      registerLark(tokens)
       res.headers.set('content-type', 'text/html; charset=utf-8')
       res.body = '<!doctype html><meta charset="utf-8"><p>授权成功，返回 CrossGram 即可。</p>'
       logger.info('Lark 账号授权成功：%s', info.name ?? info.open_id)
@@ -148,7 +166,7 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   void tokens.restore().then((state) => {
-    if (state) registerLark()
+    if (state) registerLark(tokens)
     else logAuthorizeHint()
   }).catch((error: unknown) => {
     logAuthorizeHint(String(error))
@@ -156,8 +174,14 @@ export function apply(ctx: Context, config: Config): void {
 }
 
 interface LarkPlatformDeps {
+  mode: 'bot' | 'user'
   appId: string
   appSecret: string
+  pollIntervalMs: number
+  /** bot 模式为 tenant_access_token，user 模式为 user_access_token。 */
+  getToken: () => Promise<string>
+  /** user 模式必填。 */
+  tokens?: TokenStore
   createWsClient?: Config['createWsClient']
   createEventDispatcher?: Config['createEventDispatcher']
 }
@@ -183,15 +207,15 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   }
 
   private readonly client: LarkClient
-  private readonly tokens: TokenStore
   private readonly deps: LarkPlatformDeps
   private readonly logger?: { info: (format: string, ...args: unknown[]) => void, warn: (format: string, ...args: unknown[]) => void }
   private readonly chatCache = new Map<string, { conversation: IMConversation<LarkMediaLocator>, at: number }>()
   private activePump?: LarkEventPump
+  private activePoller?: LarkPoller
+  private selfId?: string
 
-  constructor(client: LarkClient, tokens: TokenStore, deps: LarkPlatformDeps, logger?: LarkPlatform['logger']) {
+  constructor(client: LarkClient, deps: LarkPlatformDeps, logger?: LarkPlatform['logger']) {
     this.client = client
-    this.tokens = tokens
     this.deps = deps
     this.logger = logger
   }
@@ -199,23 +223,56 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   async stop(): Promise<void> {
     await this.activePump?.close()
     this.activePump = undefined
+    await this.activePoller?.close()
+    this.activePoller = undefined
+  }
+
+  private requireSelfId(): string {
+    if (!this.selfId) throw new Error('Lark platform is not provisioned yet')
+    return this.selfId
+  }
+
+  /** user 模式可不经 getAccount 从凭据恢复自身身份。 */
+  private async ensureSelfId(): Promise<string> {
+    if (this.selfId) return this.selfId
+    const state = await this.deps.tokens?.restore()
+    if (state) {
+      this.selfId = state.openId
+      return this.selfId
+    }
+    throw new Error('Lark platform is not provisioned yet')
   }
 
   async getAccount(): Promise<IMPlatformAccount<LarkMediaLocator>> {
-    const state = await this.tokens.restore()
+    if (this.deps.mode === 'bot') {
+      const bot = await this.client.getBotInfo()
+      if (!bot.open_id) throw new Error('Lark 应用未开启机器人能力（应用功能 → 机器人）')
+      this.selfId = bot.open_id
+      return {
+        credentials: {},
+        user: {
+          id: bot.open_id,
+          firstName: bot.app_name || 'Lark Bot',
+          metadata: { openId: bot.open_id, mode: 'bot' },
+        },
+      }
+    }
+    const tokens = this.deps.tokens!
+    const state = await tokens.restore()
     if (!state) {
       throw new Error('Lark 账号未授权：请先在日志中找到授权链接完成 OAuth 授权')
     }
-    const token = await this.tokens.getFreshUserToken()
+    const token = await tokens.getFreshUserToken()
     const info = await this.client.getUserInfo(token)
+    this.selfId = info.open_id
     return {
       // 必须整份返回当前快照：provision 会用它覆盖 mtproto_platform_session.credentials
-      credentials: this.tokens.requireSnapshot() as unknown as JsonObject,
+      credentials: tokens.requireSnapshot() as unknown as JsonObject,
       user: {
         id: info.open_id,
         firstName: info.name ?? info.en_name ?? info.open_id,
         ...(info.union_id ? { username: info.union_id } : {}),
-        metadata: { openId: info.open_id },
+        metadata: { openId: info.open_id, mode: 'user' },
       },
     }
   }
@@ -224,11 +281,27 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     _session: PlatformSession,
     handler: (event: IMEvent<LarkMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
-    const state = await this.tokens.restore()
-    if (!state) throw new Error('Lark account is not authorized')
-    const selfOpenId = state.openId
+    if (!this.selfId) {
+      const account = await this.getAccount()
+      this.selfId = account.user.id
+    }
+    if (this.deps.mode === 'user') {
+      const poller = new LarkPoller({
+        client: this.client,
+        getToken: this.deps.getToken,
+        selfId: this.selfId,
+        pollIntervalMs: this.deps.pollIntervalMs,
+        logger: this.logger,
+      })
+      this.activePoller = poller
+      await poller.start((event) => handler(event))
+      return async () => {
+        if (this.activePoller === poller) this.activePoller = undefined
+        await poller.close()
+      }
+    }
     const pump = new LarkEventPump({
-      onMessage: (data) => this.handleReceive(handler, selfOpenId, data),
+      onMessage: (data) => this.handleReceive(handler, this.selfId!, data),
       onRecalled: (data) => this.handleRecalled(handler, data),
     }, {
       appId: this.deps.appId,
@@ -325,7 +398,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   ): Promise<IMConversation<LarkMediaLocator>> {
     const cached = this.chatCache.get(chatId)
     if (cached && Date.now() - cached.at < 10 * 60_000) return cached.conversation
-    const token = await this.tokens.getFreshUserToken()
+    const token = await this.deps.getToken()
     const chat = await this.client.getChat(token, chatId).catch(() => null)
     const kind = chat?.chat_type === 'p2p' || (!chat && chatType === 'p2p') ? 'direct' : 'group'
     const conversation = toConversation(chat, chatId, {
@@ -337,7 +410,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   }
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<LarkMediaLocator>> {
-    const token = await this.tokens.getFreshUserToken()
+    const token = await this.deps.getToken()
     const response = await this.client.getChats(token, {
       pageSize: query.limit ?? 20,
       pageToken: query.cursor,
@@ -357,7 +430,8 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     conversation: IMConversationRef,
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<LarkMediaLocator>> {
-    const token = await this.tokens.getFreshUserToken()
+    const token = await this.deps.getToken()
+    await this.ensureSelfId()
     // after 锚点向前翻页用升序；默认从最新往回翻用降序
     const ascending = Boolean(query.after) || (query.cursor !== undefined && query.cursor.startsWith('asc:'))
     const cursor = query.cursor?.replace(/^asc:/, '')
@@ -378,19 +452,8 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   }
 
   private projectHistoryMessage(message: LarkMessage): IMMessage<LarkMediaLocator>[] {
-    if (message.deleted) return []
-    const senderOpenId = larkSenderOpenId(message.sender)
-    const { parts, replyToId } = parseLarkMessage(message)
-    if (!parts.length) return []
-    return [{
-      id: message.message_id,
-      conversationId: message.chat_id,
-      senderId: senderOpenId ?? 'unknown',
-      content: { parts },
-      timestamp: larkMessageTimestamp(message),
-      outgoing: senderOpenId === this.tokens.openId,
-      ...(replyToId ? { replyToId } : {}),
-    }]
+    const projected = toIncomingMessage(message, this.requireSelfId())
+    return projected ? [projected] : []
   }
 
   async getMessage(
@@ -398,7 +461,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     conversation: IMConversationRef,
     messageId: string,
   ): Promise<IMMessage<LarkMediaLocator> | null> {
-    const token = await this.tokens.getFreshUserToken()
+    const token = await this.deps.getToken()
     const message = await this.client.getMessage(token, messageId)
     if (!message) return null
     const projected = this.projectHistoryMessage({ ...message, chat_id: message.chat_id || conversation.id })
@@ -413,7 +476,8 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   ): Promise<IMMessage<LarkMediaLocator>> {
     const plan = buildSendPlan(content)
     if (!plan.length) throw new Error('Lark cannot send an empty message')
-    const token = await this.tokens.getFreshUserToken()
+    const token = await this.deps.getToken()
+    await this.ensureSelfId()
     const sourceIds: string[] = []
     for (let index = 0; index < plan.length; index++) {
       const item = plan[index]!
@@ -468,7 +532,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       id: sourceIds[0]!,
       sourceIds,
       conversationId: conversation.id,
-      senderId: this.tokens.openId,
+      senderId: this.requireSelfId(),
       content: { parts: echoParts(content) },
       timestamp: sentTimestamp,
       outgoing: true,
@@ -481,7 +545,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     _conversation: IMConversationRef,
     messageIds: readonly string[],
   ): Promise<void> {
-    const token = await this.tokens.getFreshUserToken()
+    const token = await this.deps.getToken()
     for (const messageId of new Set(messageIds)) {
       await this.client.recallMessage(token, messageId)
     }
@@ -496,7 +560,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     if (!locator?.fileKey || !locator.messageId) {
       throw new Error(`Lark media has no resource locator: ${media.id}`)
     }
-    const token = await this.tokens.getFreshUserToken()
+    const token = await this.deps.getToken()
     const response = await this.client.downloadResource(token, locator.messageId, locator.fileKey, locator.type, options.signal)
     if (!response.body) throw new Error(`Lark media response has no body: ${media.id}`)
     let skipped = 0

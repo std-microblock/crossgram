@@ -6,6 +6,7 @@ import { LarkPlatform } from './index.js'
 import { TokenStore, type LarkCredentialBackend } from './token-store.js'
 
 const SELF_OPEN_ID = 'ou_self'
+const BOT_OPEN_ID = 'ou_bot'
 
 const session: PlatformSession = {
   platformSessionId: 'lark-session',
@@ -16,12 +17,12 @@ const session: PlatformSession = {
 }
 
 describe('LarkPlatform', () => {
-  it('subscribes, resolves conversation details, and marks own messages outgoing', async () => {
-    const harness = await createHarness(async (url) => {
-      if (url.pathname.endsWith(`/im/v1/chats/oc_group`)) {
+  it('bot mode: subscribes via WS pump, resolves conversations, marks own messages outgoing', async () => {
+    const harness = await createBotHarness(async (url) => {
+      if (url.pathname === '/open-apis/im/v1/chats/oc_group') {
         return json({ code: 0, data: { chat_id: 'oc_group', name: '测试群', chat_type: 'group', member_count: 3 } })
       }
-      throw new Error(`unexpected request: ${url}`)
+      return defaultBotRoutes(url)
     })
     const events: IMEvent[] = []
     const unsubscribe = await harness.platform.subscribe(session, (event) => {
@@ -32,8 +33,9 @@ describe('LarkPlatform', () => {
         message_id: 'om_1', chat_id: 'oc_group', chat_type: 'group', message_type: 'text',
         content: JSON.stringify({ text: 'hello @_user_1' }),
         create_time: '1700000000',
-        mentions: [{ key: '@_user_1', id: { open_id: 'ou_self' }, name: '我自己' }],
+        mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '我自己' }],
       },
+      sender: { sender_id: { open_id: BOT_OPEN_ID } },
     }))
     await harness.dispatchReceive(receiveEvent({
       message: {
@@ -49,15 +51,15 @@ describe('LarkPlatform', () => {
       type: 'message',
       conversation: { id: 'oc_group', kind: 'group', title: '测试群' },
       message: {
-        id: 'om_1', senderId: SELF_OPEN_ID, outgoing: true,
+        id: 'om_1', senderId: BOT_OPEN_ID, outgoing: true,
         content: { parts: [{ type: 'text', text: 'hello @我自己' }] },
       },
     })
     expect(events[1]).toMatchObject({ type: 'message', message: { id: 'om_2', outgoing: false } })
   })
 
-  it('emits message-delete on recall events', async () => {
-    const harness = await createHarness()
+  it('bot mode: emits message-delete on recall events', async () => {
+    const harness = await createBotHarness((url) => defaultBotRoutes(url))
     const events: IMEvent[] = []
     const unsubscribe = await harness.platform.subscribe(session, (event) => {
       events.push(event)
@@ -73,11 +75,20 @@ describe('LarkPlatform', () => {
     })
   })
 
-  it('sends mixed content with uploads first and reply on the first message', async () => {
+  it('bot mode: getAccount reports the bot identity', async () => {
+    const harness = await createBotHarness((url) => defaultBotRoutes(url))
+    await expect(harness.platform.getAccount()).resolves.toMatchObject({
+      credentials: {},
+      user: { id: BOT_OPEN_ID, firstName: 'TestBot' },
+    })
+  })
+
+  it('user mode: sends mixed content with uploads first and reply on the first message', async () => {
     const calls: Array<{ path: string, method: string, body?: unknown }> = []
-    const harness = await createHarness(async (url, init) => {
+    const harness = await createUserHarness(async (url, init) => {
       const body = typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body
       calls.push({ path: url.pathname, method: init?.method ?? 'GET', body })
+      if (url.pathname === '/open-apis/authen/v1/user_info') return json({ code: 0, data: { open_id: SELF_OPEN_ID, name: '我' } })
       if (url.pathname.endsWith('/im/v1/images')) return json({ code: 0, data: { image_key: 'img_v2_up' } })
       if (url.pathname.endsWith('/im/v1/messages')) {
         return json({ code: 0, data: { message_id: `om_sent_${calls.length}` } })
@@ -102,10 +113,13 @@ describe('LarkPlatform', () => {
     expect(sendCalls[2]!.body).toMatchObject({ msg_type: 'text', content: JSON.stringify({ text: '收尾' }) })
     // 回复引用只挂在第一条消息上
     expect(sendCalls[1]!.body).not.toHaveProperty('reply_to_message_id')
+    // user 模式发送携带 user_access_token
+    expect(sent.senderId).toBe(SELF_OPEN_ID)
   })
 
-  it('pages dialogs and history in descending order by default', async () => {
-    const harness = await createHarness(async (url) => {
+  it('user mode: pages dialogs and history in descending order by default', async () => {
+    const harness = await createUserHarness(async (url) => {
+      if (url.pathname === '/open-apis/authen/v1/user_info') return json({ code: 0, data: { open_id: SELF_OPEN_ID, name: '我' } })
       if (url.pathname.endsWith('/im/v1/chats')) {
         return json({
           code: 0,
@@ -145,8 +159,9 @@ describe('LarkPlatform', () => {
     })
   })
 
-  it('slices media downloads by offset and limit', async () => {
-    const harness = await createHarness(async (url) => {
+  it('user mode: slices media downloads by offset and limit', async () => {
+    const harness = await createUserHarness(async (url) => {
+      if (url.pathname === '/open-apis/authen/v1/user_info') return json({ code: 0, data: { open_id: SELF_OPEN_ID, name: '我' } })
       if (url.pathname.includes('/resources/')) {
         expect(url.searchParams.get('type')).toBe('image')
         return new Response(new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]))
@@ -171,28 +186,10 @@ interface Harness {
   dispatchRecalled(data: { event_id?: string, message_id: string, chat_id: string }): Promise<void>
 }
 
-async function createHarness(fetch?: typeof globalThis.fetch): Promise<Harness> {
-  const client = new LarkClient({
-    baseUrl: 'https://open.feishu.cn',
-    appId: 'cli_test',
-    appSecret: 'secret',
-    ...(fetch ? { fetch } : {}),
-  })
-  const backend: LarkCredentialBackend = {
-    load: async () => ({
-      userAccessToken: 'u-self',
-      userAccessTokenExpiresAt: Date.now() + 3_600_000,
-      refreshToken: 'r-self',
-      refreshTokenExpiresAt: Date.now() + 3_600_000,
-      openId: SELF_OPEN_ID,
-    }),
-    persist: async () => {},
-  }
-  const tokens = new TokenStore(backend, { client })
+function basePlatform(client: LarkClient, deps: ConstructorParameters<typeof LarkPlatform>[1]) {
   let handlers: Record<string, (data: never) => unknown> = {}
-  const platform = new LarkPlatform(client, tokens, {
-    appId: 'cli_test',
-    appSecret: 'secret',
+  const platform = new LarkPlatform(client, {
+    ...deps,
     createWsClient: () => ({
       start: async () => {},
       close: () => {},
@@ -206,20 +203,71 @@ async function createHarness(fetch?: typeof globalThis.fetch): Promise<Harness> 
   })
   return {
     platform,
-    dispatchReceive: async (data) => {
-      const handler = handlers['im.message.receive_v1']!
-      await handler(data as never)
+    dispatchReceive: async (data: LarkReceiveEventData) => {
+      await handlers['im.message.receive_v1']!(data as never)
     },
-    dispatchRecalled: async (data) => {
-      const handler = handlers['im.message.message-recalled_v1']!
-      await handler(data as never)
+    dispatchRecalled: async (data: { event_id?: string, message_id: string, chat_id: string }) => {
+      await handlers['im.message.message-recalled_v1']!(data as never)
     },
   }
 }
 
+/** bot 模式：tenant token + botInfo 公共路由（未匹配路径兜底抛错）。 */
+function defaultBotRoutes(url: URL): Response {
+  if (url.pathname === '/open-apis/auth/v3/tenant_access_token/internal') {
+    return json({ tenant_access_token: 't-tenant', expire: 7200 })
+  }
+  if (url.pathname === '/open-apis/bot/v3/info') {
+    return json({ open_id: BOT_OPEN_ID, app_name: 'TestBot' })
+  }
+  if (url.pathname.startsWith('/open-apis/im/v1/chats/')) {
+    return json({ code: 230002, msg: 'Bot is not in the chat' }, { status: 400 })
+  }
+  throw new Error(`unexpected request: ${url}`)
+}
+
+async function createBotHarness(handler: (url: URL) => Response | Promise<Response>): Promise<Harness> {
+  const client = new LarkClient({
+    baseUrl: 'https://open.feishu.cn',
+    appId: 'cli_test',
+    appSecret: 'secret',
+    fetch: async (input) => handler(new URL(String(input))),
+  })
+  return basePlatform(client, {
+    mode: 'bot',
+    appId: 'cli_test',
+    appSecret: 'secret',
+    pollIntervalMs: 60_000,
+    getToken: () => client.getTenantAccessToken(),
+  })
+}
+
+async function createUserHarness(fetch: typeof globalThis.fetch): Promise<Harness> {
+  const client = new LarkClient({ baseUrl: 'https://open.feishu.cn', appId: 'cli_test', appSecret: 'secret', fetch })
+  const backend: LarkCredentialBackend = {
+    load: async () => ({
+      userAccessToken: 'u-self',
+      userAccessTokenExpiresAt: Date.now() + 3_600_000,
+      refreshToken: 'r-self',
+      refreshTokenExpiresAt: Date.now() + 3_600_000,
+      openId: SELF_OPEN_ID,
+    }),
+    persist: async () => {},
+  }
+  const tokens = new TokenStore(backend, { client })
+  return basePlatform(client, {
+    mode: 'user',
+    appId: 'cli_test',
+    appSecret: 'secret',
+    pollIntervalMs: 60_000,
+    getToken: () => tokens.getFreshUserToken(),
+    tokens,
+  })
+}
+
 function receiveEvent(overrides: Partial<LarkReceiveEventData> = {}): LarkReceiveEventData {
   return {
-    sender: { sender_id: { open_id: SELF_OPEN_ID }, sender_type: 'user' },
+    sender: { sender_id: { open_id: BOT_OPEN_ID }, sender_type: 'user' },
     message: {
       message_id: 'om_default',
       chat_id: 'oc_group',
