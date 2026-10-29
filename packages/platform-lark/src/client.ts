@@ -109,12 +109,12 @@ export class LarkClient {
 
   /** bot 模式身份：应用信息（open_id 即 bot 身份）。 */
   async getBotInfo(): Promise<{ open_id?: string, app_name?: string, avatar_url?: string }> {
-    // bot/v3/info 为老接口，响应无 code/data 包装
-    const body = await this.request<{ open_id?: string, app_name?: string, avatar_url?: string }>(
+    // bot/v3/info 的信息嵌套在顶层 bot 字段（code=0 与常规包装不同）
+    const body = await this.request<{ bot?: { open_id?: string, app_name?: string, avatar_url?: string } }>(
       '/open-apis/bot/v3/info',
       { token: await this.getTenantAccessToken() },
     )
-    return body
+    return body.bot ?? {}
   }
 
   /** 应用身份 token（bot 模式收发）；缓存至过期前 5 分钟。 */

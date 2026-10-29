@@ -218,7 +218,7 @@ function defaultBotRoutes(url: URL): Response {
     return json({ tenant_access_token: 't-tenant', expire: 7200 })
   }
   if (url.pathname === '/open-apis/bot/v3/info') {
-    return json({ open_id: BOT_OPEN_ID, app_name: 'TestBot' })
+    return json({ code: 0, bot: { open_id: BOT_OPEN_ID, app_name: 'TestBot' } })
   }
   if (url.pathname.startsWith('/open-apis/im/v1/chats/')) {
     return json({ code: 230002, msg: 'Bot is not in the chat' }, { status: 400 })
