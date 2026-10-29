@@ -17,6 +17,8 @@ export interface LarkWsClientLike {
 export interface LarkEventPumpOptions {
   appId: string
   appSecret: string
+  /** 开放平台地址（SDK 默认连 Lark 国际版，飞书应用必须显式指定）。 */
+  baseUrl: string
   /** 测试注入伪造 WS 客户端。 */
   createWsClient?: (options: { appId: string, appSecret: string }) => LarkWsClientLike
   createEventDispatcher?: () => {
@@ -48,6 +50,7 @@ export class LarkEventPump {
       ?? ((opts: { appId: string, appSecret: string }) => new WSClient({
         appId: opts.appId,
         appSecret: opts.appSecret,
+        domain: this.options.baseUrl,
         loggerLevel: LoggerLevel.warn,
       }) as unknown as LarkWsClientLike)
     const createDispatcher = this.options.createEventDispatcher

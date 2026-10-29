@@ -237,6 +237,7 @@ async function createBotHarness(handler: (url: URL) => Response | Promise<Respon
     mode: 'bot',
     appId: 'cli_test',
     appSecret: 'secret',
+    baseUrl: 'https://open.feishu.cn',
     pollIntervalMs: 60_000,
     getToken: () => client.getTenantAccessToken(),
   })
@@ -259,6 +260,7 @@ async function createUserHarness(fetch: typeof globalThis.fetch): Promise<Harnes
     mode: 'user',
     appId: 'cli_test',
     appSecret: 'secret',
+    baseUrl: 'https://open.feishu.cn',
     pollIntervalMs: 60_000,
     getToken: () => tokens.getFreshUserToken(),
     tokens,

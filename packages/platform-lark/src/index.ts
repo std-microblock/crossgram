@@ -107,6 +107,7 @@ export function apply(ctx: Context, config: Config): void {
       mode: config.mode,
       appId: config.appId,
       appSecret: config.appSecret,
+      baseUrl: config.baseUrl,
       pollIntervalMs: config.pollIntervalMs,
       getToken: tokens ? () => tokens.getFreshUserToken() : () => client.getTenantAccessToken(),
       ...(tokens ? { tokens } : {}),
@@ -177,6 +178,7 @@ interface LarkPlatformDeps {
   mode: 'bot' | 'user'
   appId: string
   appSecret: string
+  baseUrl: string
   pollIntervalMs: number
   /** bot 模式为 tenant_access_token，user 模式为 user_access_token。 */
   getToken: () => Promise<string>
@@ -306,6 +308,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     }, {
       appId: this.deps.appId,
       appSecret: this.deps.appSecret,
+      baseUrl: this.deps.baseUrl,
       ...(this.deps.createWsClient ? { createWsClient: this.deps.createWsClient } : {}),
       ...(this.deps.createEventDispatcher ? { createEventDispatcher: this.deps.createEventDispatcher } : {}),
     }, this.logger)
