@@ -317,6 +317,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     }, this.logger)
     this.activePump = pump
     await pump.start()
+    this.logger?.info('Lark WS 事件通道已建立（bot 模式）')
     return async () => {
       if (this.activePump === pump) this.activePump = undefined
       await pump.close()
