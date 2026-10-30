@@ -331,13 +331,19 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
    */
   private async probeGroupMessageScope(): Promise<void> {
     try {
+      // TODO: 诊断期直打 stdout（绕过 logger），定位探测无声挂起
+      console.error('[lark-probe] step0 enter')
       const token = await this.deps.getToken()
+      console.error('[lark-probe] step1 token')
       const chats = await this.client.getChats(token, { pageSize: 1 })
+      console.error('[lark-probe] step2 chats=', chats.items?.length ?? 0)
       const chat = chats.items?.[0]
       if (!chat) return
       await this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' })
+      console.error('[lark-probe] step3 list ok')
       this.logger?.info('Lark 群消息可见性：全量（im:message.group_msg 生效）')
     } catch (error) {
+      console.error('[lark-probe] caught', String(error).slice(0, 120))
       if (error instanceof LarkApiError && error.code === 230027) {
         this.logger?.warn(
           'Lark 群消息可见性：仅 @机器人（im:message.group_msg 未生效或待管理员审批）——群内未 @ 机器人的消息不会被桥接；可先开通 im:message.group_at_msg:readonly 保证 @ 消息可达',
