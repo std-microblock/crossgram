@@ -83,6 +83,27 @@ describe('LarkPlatform', () => {
     })
   })
 
+  it('bot mode: warns at-bot-only visibility when group_msg is not granted', async () => {
+    const warnings: string[] = []
+    const harness = await createBotHarness((url) => {
+      if (url.pathname === '/open-apis/im/v1/chats') {
+        return json({ code: 0, data: { items: [{ chat_id: 'oc_1', chat_type: 'group' }], has_more: false } })
+      }
+      if (url.pathname === '/open-apis/im/v1/messages' && url.searchParams.get('container_id')) {
+        return json({ code: 230027, msg: 'no permission' }, { status: 403 })
+      }
+      return defaultBotRoutes(url)
+    }, {
+      info: () => {},
+      warn: (format: string) => {
+        warnings.push(format)
+      },
+    })
+    const unsubscribe = await harness.platform.subscribe(session, () => {})
+    await vi.waitFor(() => expect(warnings.join('\n')).toContain('仅 @机器人'))
+    await unsubscribe()
+  })
+
   it('user mode: sends mixed content with uploads first and reply on the first message', async () => {
     const calls: Array<{ path: string, method: string, body?: unknown }> = []
     const harness = await createUserHarness(async (url, init) => {
@@ -186,7 +207,11 @@ interface Harness {
   dispatchRecalled(data: { event_id?: string, message_id: string, chat_id: string }): Promise<void>
 }
 
-function basePlatform(client: LarkClient, deps: ConstructorParameters<typeof LarkPlatform>[1]) {
+function basePlatform(
+  client: LarkClient,
+  deps: ConstructorParameters<typeof LarkPlatform>[1],
+  logger?: ConstructorParameters<typeof LarkPlatform>[2],
+) {
   let handlers: Record<string, (data: never) => unknown> = {}
   const platform = new LarkPlatform(client, {
     ...deps,
@@ -200,7 +225,7 @@ function basePlatform(client: LarkClient, deps: ConstructorParameters<typeof Lar
         return {}
       },
     }),
-  })
+  }, logger)
   return {
     platform,
     dispatchReceive: async (data: LarkReceiveEventData) => {
@@ -226,7 +251,10 @@ function defaultBotRoutes(url: URL): Response {
   throw new Error(`unexpected request: ${url}`)
 }
 
-async function createBotHarness(handler: (url: URL) => Response | Promise<Response>): Promise<Harness> {
+async function createBotHarness(
+  handler: (url: URL) => Response | Promise<Response>,
+  logger?: ConstructorParameters<typeof LarkPlatform>[2],
+): Promise<Harness> {
   const client = new LarkClient({
     baseUrl: 'https://open.feishu.cn',
     appId: 'cli_test',
@@ -240,7 +268,7 @@ async function createBotHarness(handler: (url: URL) => Response | Promise<Respon
     baseUrl: 'https://open.feishu.cn',
     pollIntervalMs: 60_000,
     getToken: () => client.getTenantAccessToken(),
-  })
+  }, logger)
 }
 
 async function createUserHarness(fetch: typeof globalThis.fetch): Promise<Harness> {

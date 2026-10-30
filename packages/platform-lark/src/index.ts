@@ -8,7 +8,7 @@ import type {
   IMTransferOptions, JsonObject, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
-import { LarkClient } from './client.js'
+import { LarkApiError, LarkClient } from './client.js'
 import { buildSendPlan, parseLarkMessage, toConversation, toIncomingMessage, toSenderUser } from './convert.js'
 import { LarkEventPump, type LarkReceiveEventData, type LarkRecalledEventData } from './events.js'
 import { LarkPoller } from './poller.js'
@@ -318,9 +318,33 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     this.activePump = pump
     await pump.start()
     this.logger?.info('Lark WS 事件通道已建立（bot 模式）')
+    void this.probeGroupMessageScope()
     return async () => {
       if (this.activePump === pump) this.activePump = undefined
       await pump.close()
+    }
+  }
+
+  /**
+   * 探测 im:message.group_msg（收全量群消息的敏感权限）是否生效：拉一个 bot 所在群的历史。
+   * 未生效时服务端只推 @机器人 消息，桥接不完整——打出明确提示；探测失败不阻断订阅。
+   */
+  private async probeGroupMessageScope(): Promise<void> {
+    try {
+      const token = await this.deps.getToken()
+      const chats = await this.client.getChats(token, { pageSize: 1 })
+      const chat = chats.items?.[0]
+      if (!chat) return
+      await this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' })
+      this.logger?.info('Lark 群消息可见性：全量（im:message.group_msg 生效）')
+    } catch (error) {
+      if (error instanceof LarkApiError && error.code === 230027) {
+        this.logger?.warn(
+          'Lark 群消息可见性：仅 @机器人（im:message.group_msg 未生效或待管理员审批）——群内未 @ 机器人的消息不会被桥接；可先开通 im:message.group_at_msg:readonly 保证 @ 消息可达',
+        )
+        return
+      }
+      this.logger?.warn('Lark 群消息可见性探测失败: %s', String(error))
     }
   }
 

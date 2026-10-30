@@ -32,7 +32,8 @@
 
    **bot 模式**：
    - `im:message:send_as_bot`（以应用的身份发消息）
-   - `im:message.group_msg`（获取群组中所有消息，**敏感权限**，需管理员审批——收全量群消息的硬前提；仅收 @机器人 消息可改用 `im:message.group_at_msg:readonly`）
+   - `im:message.group_at_msg:readonly`（接收 @机器人 消息，普通权限即开即用）
+   - `im:message.group_msg`（获取群组中所有消息，**敏感权限**，需管理员审批——收全量群消息的硬前提；未生效时适配器启动会提示"仅 @机器人"可见，群内其他消息不被桥接）
    - `im:message.p2p_msg:readonly`（单聊接收）
    - `im:resource`（上传/下载图片、文件）
    - `im:chat:readonly`（会话列表/群详情）
