@@ -214,6 +214,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   private readonly deps: LarkPlatformDeps
   private readonly logger?: { info: (format: string, ...args: unknown[]) => void, warn: (format: string, ...args: unknown[]) => void }
   private readonly chatCache = new Map<string, { conversation: IMConversation<LarkMediaLocator>, at: number }>()
+  private groupMessageScope?: { full: boolean, checkedAt: number }
   private activePump?: LarkEventPump
   private activePoller?: LarkPoller
   private selfId?: string
@@ -327,25 +328,32 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
 
   /**
    * 探测 im:message.group_msg（收全量群消息的敏感权限）是否生效：拉一个 bot 所在群的历史。
-   * 未生效时服务端只推 @机器人 消息，桥接不完整——打出明确提示；探测失败不阻断订阅。
+   * 结果缓存 5 分钟（审批通过后无需重启即可生效）；探测失败不阻断订阅。
    */
-  private async probeGroupMessageScope(): Promise<void> {
+  private async probeGroupMessageScope(): Promise<boolean | undefined> {
+    if (this.groupMessageScope && Date.now() - this.groupMessageScope.checkedAt < 5 * 60_000) {
+      return this.groupMessageScope.full
+    }
     try {
       const token = await this.deps.getToken()
       const chats = await this.client.getChats(token, { pageSize: 1 })
       const chat = chats.items?.[0]
-      if (!chat) return
+      if (!chat) return undefined
       await this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' })
+      this.groupMessageScope = { full: true, checkedAt: Date.now() }
       this.logger?.info('Lark 群消息可见性：全量（im:message.group_msg 生效）')
+      return true
     } catch (error) {
       if (error instanceof LarkApiError && error.code === 230027) {
+        this.groupMessageScope = { full: false, checkedAt: Date.now() }
         // info 而非 warn：是状态告知；且此环境 warn 级静默
         this.logger?.info(
           'Lark 群消息可见性：仅 @机器人（im:message.group_msg 未生效或待管理员审批）——群内未 @ 机器人的消息不会被桥接；可先开通 im:message.group_at_msg:readonly 保证 @ 消息可达',
         )
-        return
+        return false
       }
       this.logger?.info('Lark 群消息可见性探测失败: %s', String(error))
+      return undefined
     }
   }
 
@@ -462,6 +470,13 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     conversation: IMConversationRef,
     query: IMHistoryQuery = {},
   ): Promise<IMHistoryPage<LarkMediaLocator>> {
+    // bot 拉群历史需要 im:message.group_msg（无"仅 @ 消息"的历史接口）；已知无权限时快速失败
+    if (this.deps.mode === 'bot') {
+      const full = await this.probeGroupMessageScope()
+      if (full === false) {
+        throw new Error('Lark 群历史需要 im:message.group_msg 权限（当前仅 @机器人 可见）')
+      }
+    }
     const token = await this.deps.getToken()
     await this.ensureSelfId()
     // after 锚点向前翻页用升序；默认从最新往回翻用降序

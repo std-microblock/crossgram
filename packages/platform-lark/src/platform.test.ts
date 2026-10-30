@@ -104,6 +104,28 @@ describe('LarkPlatform', () => {
     await unsubscribe()
   })
 
+  it('bot mode: getHistory fails fast when group_msg is known to be missing', async () => {
+    const messageRequests: string[] = []
+    const harness = await createBotHarness((url) => {
+      if (url.pathname === '/open-apis/im/v1/chats') {
+        return json({ code: 0, data: { items: [{ chat_id: 'oc_1', chat_type: 'group' }], has_more: false } })
+      }
+      if (url.pathname === '/open-apis/im/v1/messages' && url.searchParams.get('container_id')) {
+        messageRequests.push(url.searchParams.get('page_size') === '1' ? 'probe' : 'history')
+        return json({ code: 230027, msg: 'no permission' }, { status: 403 })
+      }
+      return defaultBotRoutes(url)
+    })
+    // 预热探测缓存（subscribe 触发）
+    const unsubscribe = await harness.platform.subscribe(session, () => {})
+    await vi.waitFor(() => expect(messageRequests).toContain('probe'))
+    // 已知无权限：getHistory 直接清晰报错，不再发起注定失败的 history 请求
+    await expect(harness.platform.getHistory(session, { id: 'oc_1' }, { limit: 20 }))
+      .rejects.toThrow(/im:message\.group_msg/)
+    expect(messageRequests).not.toContain('history')
+    await unsubscribe()
+  })
+
   it('user mode: sends mixed content with uploads first and reply on the first message', async () => {
     const calls: Array<{ path: string, method: string, body?: unknown }> = []
     const harness = await createUserHarness(async (url, init) => {
