@@ -3,8 +3,9 @@ import type { Database } from '@cordisjs/plugin-database'
 import type { Context } from 'cordis'
 import z from 'schemastery'
 import type {
-  IMConversation, IMConversationRef, IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage,
-  IMHistoryQuery, IMMedia, IMMessage, IMMessageInput, IMPageQuery, IMPlatform, IMPlatformAccount,
+  IMConversation, IMConversationMemberPage, IMConversationRef, IMDialogPage, IMDownloadOptions,
+  IMEvent, IMHistoryPage, IMHistoryQuery, IMConversationPermissions, IMMedia, IMMessage,
+  IMMessageInput, IMPageQuery, IMPlatform, IMPlatformAccount,
   IMTransferOptions, JsonObject, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
@@ -54,6 +55,24 @@ export const Config = z.object({
 
 export const name = 'im-platform-lark'
 export const inject = ['imPlatform', 'server', 'database', 'model']
+
+const OWNER_PERMISSIONS: IMConversationPermissions = {
+  manageConversation: true,
+  manageMembers: true,
+  deleteAnyMessage: true,
+  editAnyMessage: true,
+  pinMessages: true,
+  inviteMembers: true,
+  manageAdministrators: true,
+}
+const MEMBER_PERMISSIONS: IMConversationPermissions = {
+  manageConversation: false,
+  manageMembers: false,
+  deleteAnyMessage: false,
+  editAnyMessage: false,
+  pinMessages: false,
+  inviteMembers: true,
+}
 
 interface OAuthPending {
   state: string
@@ -203,6 +222,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       maxMedia: 9,
     },
     conversations: { groups: true, channels: false, subchannels: false },
+    members: { list: true, administrators: false, permissions: false },
     messageActions: {
       delete: { own: { supported: true }, others: { supported: false } },
       edit: { mode: 'unsupported' },
@@ -447,6 +467,45 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     })
     this.chatCache.set(chatId, { conversation, at: Date.now() })
     return conversation
+  }
+
+  async getConversation(
+    _session: PlatformSession,
+    conversationId: string,
+  ): Promise<IMConversation<LarkMediaLocator> | null> {
+    const token = await this.deps.getToken()
+    const chat = await this.client.getChat(token, conversationId).catch(() => null)
+    if (chat) {
+      const resolved = toConversation(chat, conversationId, { kind: 'group' })
+      this.chatCache.set(conversationId, { conversation: resolved, at: Date.now() })
+      return resolved
+    }
+    return this.chatCache.get(conversationId)?.conversation ?? null
+  }
+
+  async getConversationMembers(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    query: IMPageQuery = {},
+  ): Promise<IMConversationMemberPage<LarkMediaLocator>> {
+    const token = await this.deps.getToken()
+    const chat = await this.client.getChat(token, conversation.id).catch(() => null)
+    const response = await this.client.getChatMembers(token, conversation.id, {
+      pageSize: Math.min(query.limit ?? 20, 100),
+      pageToken: query.cursor,
+    })
+    const ownerId = chat?.owner_id
+    return {
+      members: (response.items ?? []).map((member) => ({
+        user: { id: member.member_id, firstName: member.name ?? member.member_id },
+        role: member.member_id === ownerId ? 'owner' : 'member',
+        permissions: member.member_id === ownerId
+          ? OWNER_PERMISSIONS
+          : MEMBER_PERMISSIONS,
+      })),
+      total: response.member_total,
+      nextCursor: response.has_more ? response.page_token : undefined,
+    }
   }
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<LarkMediaLocator>> {

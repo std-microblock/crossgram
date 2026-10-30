@@ -146,6 +146,17 @@ export class LarkClient {
     return body ?? null
   }
 
+  getChatMembers(
+    token: string,
+    chatId: string,
+    options: { pageSize?: number, pageToken?: string } = {},
+  ): Promise<{ items?: Array<{ member_id: string, name?: string }>, has_more?: boolean, page_token?: string, member_total?: number }> {
+    return this.request(
+      `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members`,
+      { token, query: { member_id_type: 'open_id', page_size: options.pageSize, page_token: options.pageToken } },
+    )
+  }
+
   sendMessage(
     token: string,
     message: { receiveId: string, msgType: string, content: string, replyToMessageId?: string },

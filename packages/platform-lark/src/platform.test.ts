@@ -104,6 +104,47 @@ describe('LarkPlatform', () => {
     await unsubscribe()
   })
 
+  it('bot mode: getConversationMembers maps owner and paginates', async () => {
+    const harness = await createBotHarness((url) => {
+      if (url.pathname === '/open-apis/im/v1/chats/oc_1') {
+        return json({ code: 0, data: { chat_id: 'oc_1', name: '群一', chat_type: 'group', owner_id: 'ou_owner' } })
+      }
+      if (url.pathname === '/open-apis/im/v1/chats/oc_1/members') {
+        return json({
+          code: 0,
+          data: {
+            items: [
+              { member_id: 'ou_owner', name: '群主', member_id_type: 'open_id' },
+              { member_id: 'ou_peer', name: '成员', member_id_type: 'open_id' },
+            ],
+            member_total: 2,
+            has_more: true,
+            page_token: 'pt_2',
+          },
+        })
+      }
+      return defaultBotRoutes(url)
+    })
+    const page = await harness.platform.getConversationMembers(session, { id: 'oc_1' }, { limit: 20 })
+    expect(page.total).toBe(2)
+    expect(page.nextCursor).toBe('pt_2')
+    expect(page.members[0]).toMatchObject({ user: { id: 'ou_owner', firstName: '群主' }, role: 'owner' })
+    expect(page.members[1]).toMatchObject({ user: { id: 'ou_peer' }, role: 'member' })
+    expect(page.members[0]!.permissions.manageMembers).toBe(true)
+    expect(page.members[1]!.permissions.manageMembers).toBe(false)
+  })
+
+  it('bot mode: getConversation resolves and caches chat details', async () => {
+    const harness = await createBotHarness((url) => {
+      if (url.pathname === '/open-apis/im/v1/chats/oc_1') {
+        return json({ code: 0, data: { chat_id: 'oc_1', name: '详情群', chat_type: 'group', member_count: 7 } })
+      }
+      return defaultBotRoutes(url)
+    })
+    const conversation = await harness.platform.getConversation(session, "oc_1")
+    expect(conversation).toMatchObject({ id: 'oc_1', kind: 'group', title: '详情群' })
+  })
+
   it('bot mode: getHistory fails fast when group_msg is known to be missing', async () => {
     const messageRequests: string[] = []
     const harness = await createBotHarness((url) => {
