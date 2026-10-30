@@ -146,6 +146,15 @@ export class LarkClient {
     return body ?? null
   }
 
+  /** 单个用户信息（头像/名字）；contact 接口对成员逐个查询，调用方需自行限流。 */
+  async getUser(token: string, openId: string): Promise<{ name?: string, avatar?: { avatar_240?: string, avatar_640?: string } }> {
+    const body = await this.request<{ user?: { name?: string, avatar?: { avatar_240?: string, avatar_640?: string } } }>(
+      `/open-apis/contact/v3/users/${encodeURIComponent(openId)}`,
+      { token, query: { user_id_type: 'open_id' } },
+    )
+    return body.user ?? {}
+  }
+
   getChatMembers(
     token: string,
     chatId: string,

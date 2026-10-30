@@ -225,7 +225,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     },
     conversations: { groups: true, channels: false, subchannels: false },
     members: { list: true, administrators: false, permissions: false },
-    avatars: { users: false, conversations: true },
+    avatars: { users: true, conversations: true },
     messageActions: {
       delete: { own: { supported: true }, others: { supported: false } },
       edit: { mode: 'unsupported' },
@@ -248,6 +248,8 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   private groupMessageScope?: { full: boolean, checkedAt: number }
   /** 消息表情回复状态：messageId → emojiKey → 操作者条目（bot 条目带 reaction_id 供撤回）。 */
   private readonly reactionState = new Map<string, Map<string, Array<{ operatorId: string, isBot: boolean, reactionId?: string }>>>()
+  /** 用户头像缓存（openId → media 或 null=无/查询失败）；contact 接口逐个查询，命中缓存不再请求。 */
+  private readonly userAvatarCache = new Map<string, IMMedia<LarkMediaLocator> | null>()
   private activePump?: LarkEventPump
   private activePoller?: LarkPoller
   private selfId?: string
@@ -406,7 +408,11 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     const message = this.toLarkMessage(raw, data)
     const senderOpenId = larkSenderOpenId(message.sender)
     const conversation = await this.resolveConversation(message.chat_id, raw.chat_type, senderOpenId)
-    const sender = toSenderUser(message, data.sender.sender_type === 'app' ? 'Lark 应用' : undefined)
+    let sender = toSenderUser(message, data.sender.sender_type === 'app' ? 'Lark 应用' : undefined)
+    if (sender) {
+      const senderAvatar = await this.resolveUserAvatar(sender.id).catch(() => null)
+      if (senderAvatar) sender = { ...sender, avatar: senderAvatar }
+    }
     const { parts, replyToId } = parseLarkMessage(message)
     await handler({
       type: 'message',
@@ -637,6 +643,22 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     return this.chatCache.get(conversationId)?.conversation ?? null
   }
 
+/** 查询用户头像（240px 够用）；带缓存，调用方串行即自然控流。 */
+  private async resolveUserAvatar(openId: string): Promise<IMMedia<LarkMediaLocator> | null> {
+    if (this.userAvatarCache.has(openId)) return this.userAvatarCache.get(openId) ?? null
+    try {
+      const token = await this.deps.getToken()
+      const user = await this.client.getUser(token, openId)
+      const url = user.avatar?.avatar_240
+      const media = url ? avatarMedia(url, `${openId}-avatar`) : null
+      this.userAvatarCache.set(openId, media)
+      return media
+    } catch {
+      this.userAvatarCache.set(openId, null)
+      return null
+    }
+  }
+
   async getConversationMembers(
     _session: PlatformSession,
     conversation: IMConversationRef,
@@ -649,11 +671,20 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       pageToken: query.cursor,
     })
     const ownerId = chat?.owner_id
-    const members = (response.items ?? []).map((member) => ({
-      user: { id: member.member_id, firstName: member.name ?? member.member_id },
-      role: member.member_id === ownerId ? ('owner' as const) : ('member' as const),
-      permissions: member.member_id === ownerId ? OWNER_PERMISSIONS : MEMBER_PERMISSIONS,
-    }))
+    const members = []
+    for (const member of response.items ?? []) {
+      // contact 接口逐个查头像，串行 + 缓存即控流
+      const avatar = await this.resolveUserAvatar(member.member_id)
+      members.push({
+        user: {
+          id: member.member_id,
+          firstName: member.name ?? member.member_id,
+          ...(avatar ? { avatar } : {}),
+        },
+        role: member.member_id === ownerId ? ('owner' as const) : ('member' as const),
+        permissions: member.member_id === ownerId ? OWNER_PERMISSIONS : MEMBER_PERMISSIONS,
+      })
+    }
     // 飞书 members API 不含机器人自身；bot 模式下补上，客户端才能看到完整成员
     if (this.deps.mode === 'bot' && this.selfId) {
       if (!members.some((member) => member.user.id === this.selfId)) {

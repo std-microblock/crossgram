@@ -175,6 +175,32 @@ describe('LarkPlatform', () => {
     await unsubscribe()
   })
 
+  it('bot mode: member avatars resolved via contact api and cached', async () => {
+    let contactCalls = 0
+    const harness = await createBotHarness((url) => {
+      if (url.pathname === '/open-apis/im/v1/chats/oc_1') {
+        return json({ code: 0, data: { chat_id: 'oc_1', name: '群一', chat_type: 'group' } })
+      }
+      if (url.pathname === '/open-apis/im/v1/chats/oc_1/members') {
+        return json({ code: 0, data: { items: [
+          { member_id: 'ou_owner', name: '群主' },
+          { member_id: 'ou_peer', name: '成员' },
+        ], member_total: 2 } })
+      }
+      if (url.pathname.startsWith('/open-apis/contact/v3/users/')) {
+        contactCalls++
+        return json({ code: 0, data: { user: { name: 'x', avatar: { avatar_240: `https://cdn.example/${url.pathname.split('/').pop()}.png` } } } })
+      }
+      return defaultBotRoutes(url)
+    })
+    const first = await harness.platform.getConversationMembers(session, { id: 'oc_1' })
+    expect(contactCalls).toBe(2)
+    expect(first.members[0]).toMatchObject({ user: { avatar: { locator: { url: 'https://cdn.example/ou_owner.png' } } } })
+    // 第二次拉取命中缓存，不再请求 contact
+    await harness.platform.getConversationMembers(session, { id: 'oc_1' })
+    expect(contactCalls).toBe(2)
+  })
+
   it('bot mode: getConversation resolves and caches chat details', async () => {
     const harness = await createBotHarness((url) => {
       if (url.pathname === '/open-apis/im/v1/chats/oc_1') {
