@@ -321,6 +321,11 @@ export class LarkClient {
     )
   }
 
+  /** 下载公网 CDN 资源（头像等签名 URL），无需鉴权头。 */
+  downloadUrl(url: string, signal?: AbortSignal): Promise<Response> {
+    return this.rawRequest(url, { skipAuth: true, signal })
+  }
+
   private async request<T>(path: string, options: RequestOptions & { unwrap?: boolean } = {}): Promise<T> {
     return this.rawJson<T>(path, { ...options, unwrap: options.unwrap ?? true })
   }

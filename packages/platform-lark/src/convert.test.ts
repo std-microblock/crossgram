@@ -158,9 +158,10 @@ describe('buildSendPlan', () => {
 describe('toConversation', () => {
   it('uses chat details for groups and falls back for p2p', () => {
     expect(toConversation({
-      chat_id: 'oc_1', name: '群名', chat_type: 'group', member_count: 5,
+      chat_id: 'oc_1', name: '群名', chat_type: 'group', member_count: 5, avatar: 'https://cdn.example/a.jpg',
     }, 'oc_1', { kind: 'group' })).toMatchObject({
       id: 'oc_1', kind: 'group', title: '群名', selfRole: 'member', metadata: { memberCount: 5 },
+      avatar: { kind: 'image', locator: { url: 'https://cdn.example/a.jpg' } },
     })
     expect(toConversation(null, 'oc_2', { kind: 'direct', title: 'ou_peer' })).toEqual({
       id: 'oc_2', kind: 'direct', title: 'ou_peer',

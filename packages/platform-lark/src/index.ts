@@ -11,7 +11,7 @@ import type {
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { LarkApiError, LarkClient } from './client.js'
-import { buildSendPlan, parseLarkMessage, toConversation, toIncomingMessage, toSenderUser } from './convert.js'
+import { avatarMedia, buildSendPlan, parseLarkMessage, toConversation, toIncomingMessage, toSenderUser } from './convert.js'
 import { LARK_EMOJI_MAP, emoticonToLarkKey, larkKeyToEmoticon } from './emoji.js'
 import { LarkEventPump, type LarkReactionEventData, type LarkReceiveEventData, type LarkRecalledEventData } from './events.js'
 import { LarkPoller } from './poller.js'
@@ -225,6 +225,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     },
     conversations: { groups: true, channels: false, subchannels: false },
     members: { list: true, administrators: false, permissions: false },
+    avatars: { users: false, conversations: true },
     messageActions: {
       delete: { own: { supported: true }, others: { supported: false } },
       edit: { mode: 'unsupported' },
@@ -292,6 +293,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
         user: {
           id: bot.open_id,
           firstName: bot.app_name || 'Lark Bot',
+          ...(bot.avatar_url ? { avatar: avatarMedia(bot.avatar_url, `${bot.open_id}-avatar`) } : {}),
           metadata: { openId: bot.open_id, mode: 'bot' },
         },
       }
@@ -311,6 +313,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
         id: info.open_id,
         firstName: info.name ?? info.en_name ?? info.open_id,
         ...(info.union_id ? { username: info.union_id } : {}),
+        ...(info.avatar_url ? { avatar: avatarMedia(info.avatar_url, `${info.open_id}-avatar`) } : {}),
         metadata: { openId: info.open_id, mode: 'user' },
       },
     }
@@ -833,11 +836,20 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     options: IMDownloadOptions = {},
   ): AsyncIterable<Uint8Array> {
     const locator = media.locator
-    if (!locator?.fileKey || !locator.messageId) {
+    if (!locator) {
       throw new Error(`Lark media has no resource locator: ${media.id}`)
     }
-    const token = await this.deps.getToken()
-    const response = await this.client.downloadResource(token, locator.messageId, locator.fileKey, locator.type, options.signal)
+    let response: Response
+    if (locator.url) {
+      // CDN 直链资源（群头像）
+      response = await this.client.downloadUrl(locator.url, options.signal)
+    } else {
+      if (!locator.fileKey || !locator.messageId) {
+        throw new Error(`Lark media has no resource locator: ${media.id}`)
+      }
+      const token = await this.deps.getToken()
+      response = await this.client.downloadResource(token, locator.messageId, locator.fileKey, locator.type, options.signal)
+    }
     if (!response.body) throw new Error(`Lark media response has no body: ${media.id}`)
     let skipped = 0
     let emitted = 0

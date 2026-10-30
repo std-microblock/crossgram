@@ -284,6 +284,22 @@ describe('LarkPlatform', () => {
     })
   })
 
+  it('downloads avatar url resources without message context', async () => {
+    const harness = await createBotHarness((url) => {
+      if (url.href === 'https://cdn.example/avatar.jpg') {
+        return new Response(new Uint8Array([9, 8, 7]))
+      }
+      return defaultBotRoutes(url)
+    })
+    const chunks: number[] = []
+    for await (const chunk of harness.platform.downloadMedia(session, {
+      id: 'avatar', kind: 'image', locator: { url: 'https://cdn.example/avatar.jpg' },
+    })) {
+      chunks.push(...chunk)
+    }
+    expect(chunks).toEqual([9, 8, 7])
+  })
+
   it('user mode: slices media downloads by offset and limit', async () => {
     const harness = await createUserHarness(async (url) => {
       if (url.pathname === '/open-apis/authen/v1/user_info') return json({ code: 0, data: { open_id: SELF_OPEN_ID, name: '我' } })

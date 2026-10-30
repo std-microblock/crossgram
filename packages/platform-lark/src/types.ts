@@ -1,8 +1,10 @@
 /** Lark 媒体定位器：下载走 `im/v1/messages/{message_id}/resources/{file_key}`。 */
 export interface LarkMediaLocator {
-  messageId: string
-  fileKey: string
-  type: 'image' | 'file'
+  messageId?: string
+  fileKey?: string
+  type?: 'image' | 'file'
+  /** CDN 直链资源（群头像等签名 URL），下载时不走消息资源接口。 */
+  url?: string
 }
 
 export interface LarkTokenResponse {

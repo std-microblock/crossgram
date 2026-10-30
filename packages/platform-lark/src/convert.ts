@@ -323,7 +323,13 @@ export function toConversation(
         metadata: { memberCount: chat.member_count, external: chat.external },
       }
       : {}),
+    ...(chat.avatar ? { avatar: avatarMedia(chat.avatar, chatId) } : {}),
   }
+}
+
+/** 群头像：CDN 签名 URL，走 downloadMedia 的 url 分支。 */
+export function avatarMedia(url: string, id: string): IMMedia<LarkMediaLocator> {
+  return { id, kind: 'image', mimeType: 'image/jpeg', locator: { url } }
 }
 
 export function toSenderUser(message: LarkMessage, fallbackName?: string): IMUser<LarkMediaLocator> | undefined {
