@@ -30,6 +30,7 @@ export async function startApp(options: {
   platform?: { id: string, adapter: bridge.IMPlatform }
   botApi?: boolean
   wsPort?: number
+  wsPath?: string
 } = {}) {
   const rsaKey = options.rsaKey ?? generateRsaKeyPair()
   addPublicKey(crypto, rsaKey.publicKeyPem, false)
@@ -43,6 +44,7 @@ export async function startApp(options: {
       port: 0, host: '127.0.0.1', rsaKey, log,
       authKeyStorePath: options.authKeyStorePath,
       ...(options.wsPort !== undefined ? { wsPort: options.wsPort } : {}),
+      ...(options.wsPath !== undefined ? { wsPath: options.wsPath } : {}),
     }),
     ctx.plugin(DatabaseUpdateStore, { retention: 10_000 }),
     ctx.plugin(bridge, options.bridgeConfig ?? {}),

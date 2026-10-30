@@ -334,11 +334,14 @@ export class Mtproto extends Service {
       // 仅在宿主同时启用了 HTTP server 服务时注册同源 WebSocket 路由
       this.ctx.inject(['server'], (ctx) => {
         const wsServer = (ctx as unknown as { server: WsCapableServer }).server
-        const path = this.config.wsPath!
-        wsServer.ws(path, async (req, accept) => {
+        const handleWs = async (req: { _req: IncomingMessage }, accept: () => Promise<WebSocket>) => {
           const ws = await accept()
           this._handleConnection(new WebSocketBridge(ws, req._req))
-        })
+        }
+        // Web 客户端会按 test/premium 会话在路径后追加 _test/_premium 后缀
+        for (const path of [this.config.wsPath!, `${this.config.wsPath!}_test`, `${this.config.wsPath!}_premium`]) {
+          wsServer.ws(path, handleWs)
+        }
       })
     }
 
