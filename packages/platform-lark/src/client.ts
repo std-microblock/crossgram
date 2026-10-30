@@ -295,7 +295,8 @@ export class LarkClient {
     let attempt = 0
     while (true) {
       try {
-        const response = await this.rawRequest(path, options)
+        // shortcut: 代理链路半死时 undici 的 AbortSignal 偶发不触发，race 硬超时保证请求必然 settle
+        const response = await withHardTimeout(this.rawRequest(path, options), this.requestTimeoutMs + 5_000)
         const body = await response.json().catch(() => null)
         const payload = body as { code?: number, msg?: string, data?: T } | null
         if (payload && typeof payload.code === 'number' && payload.code !== 0) {
@@ -366,6 +367,15 @@ async function toBlob(source: AsyncIterable<Uint8Array>, type: string): Promise<
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function withHardTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`Lark request hard timeout after ${ms}ms`)), ms).unref()
+    }),
+  ])
 }
 
 function normalizeHttpProxy(input?: string): string | undefined {

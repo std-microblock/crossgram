@@ -335,14 +335,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       const chats = await this.client.getChats(token, { pageSize: 1 })
       const chat = chats.items?.[0]
       if (!chat) return
-      // shortcut: 进程内该请求偶发永久挂起（进程外同栈正常，疑似 undici 代理池与 SDK WS 的交互），race 兜底保证提示必然落地
-      const timeout = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('probe timeout')), 10_000).unref()
-      })
-      await Promise.race([
-        this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' }),
-        timeout,
-      ])
+      await this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' })
       this.logger?.info('Lark 群消息可见性：全量（im:message.group_msg 生效）')
     } catch (error) {
       if (error instanceof LarkApiError && error.code === 230027) {
