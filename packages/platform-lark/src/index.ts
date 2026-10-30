@@ -6,12 +6,14 @@ import type {
   IMConversation, IMConversationMemberPage, IMConversationRef, IMDialogPage, IMDownloadOptions,
   IMEvent, IMHistoryPage, IMHistoryQuery, IMConversationPermissions, IMMedia, IMMessage,
   IMMessageInput, IMPageQuery, IMPlatform, IMPlatformAccount,
+  IMMessageTarget, IMReactionContext, IMReactionDefinition, IMReactionSummary,
   IMTransferOptions, JsonObject, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { LarkApiError, LarkClient } from './client.js'
 import { buildSendPlan, parseLarkMessage, toConversation, toIncomingMessage, toSenderUser } from './convert.js'
-import { LarkEventPump, type LarkReceiveEventData, type LarkRecalledEventData } from './events.js'
+import { LARK_EMOJI_MAP, emoticonToLarkKey, larkKeyToEmoticon } from './emoji.js'
+import { LarkEventPump, type LarkReactionEventData, type LarkReceiveEventData, type LarkRecalledEventData } from './events.js'
 import { LarkPoller } from './poller.js'
 import { TokenStore, type LarkCredentialBackend } from './token-store.js'
 import type { LarkMediaLocator, LarkMessage } from './types.js'
@@ -228,16 +230,27 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       edit: { mode: 'unsupported' },
       forward: { mode: 'unsupported', preservesAuthor: false },
     },
+    reactions: { read: true, write: true, events: true, actorList: false, maxSelected: 1 },
   }
+
+  /** Telegram 侧可选表情列表（仅映射表内的语义确定项）。 */
+  private static readonly AVAILABLE_REACTIONS: IMReactionDefinition[] = LARK_EMOJI_MAP.map(([key, emoticon]) => ({
+    key: emoticon,
+    title: key,
+    presentation: { type: 'emoji', emoticon },
+  }))
 
   private readonly client: LarkClient
   private readonly deps: LarkPlatformDeps
   private readonly logger?: { info: (format: string, ...args: unknown[]) => void, warn: (format: string, ...args: unknown[]) => void }
   private readonly chatCache = new Map<string, { conversation: IMConversation<LarkMediaLocator>, at: number }>()
   private groupMessageScope?: { full: boolean, checkedAt: number }
+  /** 消息表情回复状态：messageId → emojiKey → 操作者条目（bot 条目带 reaction_id 供撤回）。 */
+  private readonly reactionState = new Map<string, Map<string, Array<{ operatorId: string, isBot: boolean, reactionId?: string }>>>()
   private activePump?: LarkEventPump
   private activePoller?: LarkPoller
   private selfId?: string
+  private botName?: string
 
   constructor(client: LarkClient, deps: LarkPlatformDeps, logger?: LarkPlatform['logger']) {
     this.client = client
@@ -273,6 +286,7 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       const bot = await this.client.getBotInfo()
       if (!bot.open_id) throw new Error('Lark 应用未开启机器人能力（应用功能 → 机器人）')
       this.selfId = bot.open_id
+      this.botName = bot.app_name
       return {
         credentials: {},
         user: {
@@ -328,6 +342,8 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     const pump = new LarkEventPump({
       onMessage: (data) => this.handleReceive(handler, this.selfId!, data),
       onRecalled: (data) => this.handleRecalled(handler, data),
+      onReactionCreated: (data) => this.handleReactionEvent(handler, data, true),
+      onReactionDeleted: (data) => this.handleReactionEvent(handler, data, false),
     }, {
       appId: this.deps.appId,
       appSecret: this.deps.appSecret,
@@ -420,6 +436,141 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     })
   }
 
+  private async handleReactionEvent(
+    handler: (event: IMEvent<LarkMediaLocator>) => void | Promise<void>,
+    data: LarkReactionEventData,
+    created: boolean,
+  ): Promise<void> {
+    const messageId = data.message_id
+    const emojiKey = data.reaction?.emoji_key
+    const operatorId = data.operator?.operator_id?.open_id
+    if (!messageId || !emojiKey || !data.chat_id) return
+    // 首个事件到达时用列表 API 初始化该消息的完整状态（含他人已有 reaction 与 bot 自己的 reaction_id）
+    if (!this.reactionState.has(messageId)) {
+      await this.syncReactionState(messageId).catch(() => {
+        this.reactionState.set(messageId, new Map())
+      })
+    }
+    const state = this.reactionState.get(messageId)!
+    const entries = state.get(emojiKey) ?? []
+    if (created && operatorId) {
+      const isBot = data.operator?.operator_type === 'app' || operatorId === this.selfId
+      entries.push({ operatorId, isBot })
+    } else {
+      // 删除事件不含 reaction_id，按操作者撤一条
+      const index = operatorId
+        ? entries.findIndex((entry) => entry.operatorId === operatorId)
+        : -1
+      if (index >= 0) entries.splice(index, 1)
+      else entries.pop()
+    }
+    if (entries.length) state.set(emojiKey, entries)
+    else state.delete(emojiKey)
+
+    const context = this.buildReactionContext(state)
+    if (!context) return
+    const conversation = await this.resolveConversation(data.chat_id, undefined, operatorId)
+    await handler({
+      type: 'message-reactions',
+      eventId: data.event_id ?? `${messageId}:${emojiKey}:${created ? 'add' : 'del'}`,
+      conversation,
+      target: { conversationId: data.chat_id, messageId, targetId: messageId },
+      context,
+      timestamp: Math.floor(Date.now() / 1000),
+    })
+  }
+
+  /** 拉取某消息的完整 reaction 状态（初始化用；bot 自己的条目记录 reaction_id）。 */
+  private async syncReactionState(messageId: string): Promise<void> {
+    const token = await this.deps.getToken()
+    const state = new Map<string, Array<{ operatorId: string, isBot: boolean, reactionId?: string }>>()
+    let pageToken: string | undefined
+    do {
+      const page = await this.client.listReactions(token, messageId)
+      for (const item of page.items ?? []) {
+        const key = item.reaction_type?.emoji_type
+        if (!key) continue
+        const operatorId = item.operator?.operator_id ?? 'unknown'
+        const isBot = item.operator?.operator_type === 'app'
+        const entries = state.get(key) ?? []
+        if (isBot && item.reaction_id) entries.push({ operatorId, isBot, reactionId: item.reaction_id })
+        else entries.push({ operatorId, isBot })
+        state.set(key, entries)
+      }
+      pageToken = page.has_more ? page.page_token : undefined
+    } while (pageToken)
+    this.reactionState.set(messageId, state)
+  }
+
+  private buildReactionContext(state: Map<string, Array<{ operatorId: string, isBot: boolean, reactionId?: string }>>): IMReactionContext | null {
+    const summaries: IMReactionSummary[] = []
+    for (const [emojiKey, entries] of state) {
+      const emoticon = larkKeyToEmoticon(emojiKey)
+      const key = emoticon ?? `[${emojiKey}]`
+      const botEntry = entries.find((entry) => entry.isBot)
+      summaries.push({
+        key,
+        count: entries.length,
+        selected: Boolean(botEntry),
+        recentActors: entries.slice(-5).map((entry) => ({ userId: entry.operatorId })),
+      })
+    }
+    if (!summaries.length) return null
+    return {
+      available: LarkPlatform.AVAILABLE_REACTIONS,
+      reactions: summaries,
+      maxSelected: 1,
+    }
+  }
+
+  async setMessageReactions(
+    _session: PlatformSession,
+    target: IMMessageTarget,
+    reactionKeys: readonly string[],
+  ): Promise<IMReactionContext> {
+    const messageId = target.targetId ?? target.messageId
+    if (!messageId) throw new Error('Lark reaction target has no message id')
+    const token = await this.deps.getToken()
+    if (!this.reactionState.has(messageId)) {
+      await this.syncReactionState(messageId).catch(() => {
+        this.reactionState.set(messageId, new Map())
+      })
+    }
+    const state = this.reactionState.get(messageId)!
+    const desired = new Map<string, string>()
+    for (const emoticon of reactionKeys) {
+      const key = emoticonToLarkKey(emoticon)
+      if (key) desired.set(emoticon, key)
+    }
+    // 撤掉 bot 已加但不在目标集合里的
+    for (const [emojiKey, entries] of state) {
+      const botEntries = entries.filter((entry) => entry.isBot && entry.reactionId)
+      if (!botEntries.length) continue
+      const emoticon = larkKeyToEmoticon(emojiKey)
+      if (emoticon && desired.has(emoticon)) continue
+      for (const entry of botEntries) {
+        await this.client.deleteReaction(token, messageId, entry.reactionId!).catch(() => {})
+        entries.splice(entries.indexOf(entry), 1)
+      }
+      if (!entries.length) state.delete(emojiKey)
+    }
+    // 补上目标集合里 bot 还没加的
+    for (const [emoticon, emojiKey] of desired) {
+      const entries = state.get(emojiKey) ?? []
+      if (entries.some((entry) => entry.isBot)) continue
+      try {
+        const added = await this.client.addReaction(token, messageId, emojiKey)
+        entries.push({ operatorId: this.requireSelfId(), isBot: true, reactionId: added.reaction_id })
+        state.set(emojiKey, entries)
+      } catch (error) {
+        // 已存在等幂等错误吞掉；其余报告
+        if (error instanceof LarkApiError && error.code === 230027) continue
+        throw error
+      }
+    }
+    return this.buildReactionContext(state) ?? { available: LarkPlatform.AVAILABLE_REACTIONS, reactions: [], maxSelected: 1 }
+  }
+
   /** REST 与事件消息统一成 LarkMessage（事件 message_type / REST msg_type 字段名差异在此消化）。 */
   private toLarkMessage(
     raw: {
@@ -495,14 +646,28 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       pageToken: query.cursor,
     })
     const ownerId = chat?.owner_id
+    const members = (response.items ?? []).map((member) => ({
+      user: { id: member.member_id, firstName: member.name ?? member.member_id },
+      role: member.member_id === ownerId ? ('owner' as const) : ('member' as const),
+      permissions: member.member_id === ownerId ? OWNER_PERMISSIONS : MEMBER_PERMISSIONS,
+    }))
+    // 飞书 members API 不含机器人自身；bot 模式下补上，客户端才能看到完整成员
+    if (this.deps.mode === 'bot' && this.selfId) {
+      if (!members.some((member) => member.user.id === this.selfId)) {
+        members.push({
+          user: { id: this.selfId, firstName: this.botName ?? this.selfId },
+          role: 'member',
+          permissions: MEMBER_PERMISSIONS,
+        })
+      }
+      return {
+        members,
+        total: (response.member_total ?? members.length) + 1,
+        nextCursor: response.has_more ? response.page_token : undefined,
+      }
+    }
     return {
-      members: (response.items ?? []).map((member) => ({
-        user: { id: member.member_id, firstName: member.name ?? member.member_id },
-        role: member.member_id === ownerId ? 'owner' : 'member',
-        permissions: member.member_id === ownerId
-          ? OWNER_PERMISSIONS
-          : MEMBER_PERMISSIONS,
-      })),
+      members,
       total: response.member_total,
       nextCursor: response.has_more ? response.page_token : undefined,
     }
@@ -593,6 +758,9 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       let payload: string
       if (item.kind === 'text') {
         msgType = 'text'
+        payload = item.content
+      } else if (item.kind === 'post') {
+        msgType = 'post'
         payload = item.content
       } else {
         const media = item.media.media

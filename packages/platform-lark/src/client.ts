@@ -229,6 +229,32 @@ export class LarkClient {
     })
   }
 
+  /** 给消息加自己的表情回复，返回 reaction_id（删除时需要）。 */
+  addReaction(token: string, messageId: string, emojiKey: string): Promise<{ reaction_id: string }> {
+    return this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions`, {
+      method: 'POST',
+      jsonBody: { reaction_type: { emoji_type: emojiKey } },
+      token,
+    })
+  }
+
+  deleteReaction(token: string, messageId: string, reactionId: string): Promise<void> {
+    return this.request(
+      `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(reactionId)}`,
+      { method: 'DELETE', token },
+    )
+  }
+
+  listReactions(
+    token: string,
+    messageId: string,
+  ): Promise<{ items?: Array<{ reaction_id?: string, operator?: { operator_id?: string, operator_type?: string }, reaction_type?: { emoji_type?: string } }>, has_more?: boolean, page_token?: string }> {
+    return this.request(
+      `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions`,
+      { token, query: { reaction_type: 'emoji' } },
+    )
+  }
+
   async uploadImage(
     token: string,
     source: AsyncIterable<Uint8Array>,

@@ -125,13 +125,54 @@ describe('LarkPlatform', () => {
       }
       return defaultBotRoutes(url)
     })
+    await harness.platform.getAccount()
     const page = await harness.platform.getConversationMembers(session, { id: 'oc_1' }, { limit: 20 })
-    expect(page.total).toBe(2)
-    expect(page.nextCursor).toBe('pt_2')
+    // 飞书 members API 不含机器人；bot 模式下追加自身（subscribe 已缓存 selfId=BOT_OPEN_ID）
+    expect(page.members.map((member) => member.user.id)).toEqual(['ou_owner', 'ou_peer', BOT_OPEN_ID])
     expect(page.members[0]).toMatchObject({ user: { id: 'ou_owner', firstName: '群主' }, role: 'owner' })
     expect(page.members[1]).toMatchObject({ user: { id: 'ou_peer' }, role: 'member' })
     expect(page.members[0]!.permissions.manageMembers).toBe(true)
     expect(page.members[1]!.permissions.manageMembers).toBe(false)
+  })
+
+  it('bot mode: reaction events emit context and setMessageReactions adds bot reaction', async () => {
+    const events: IMEvent[] = []
+    const calls: string[] = []
+    const harness = await createBotHarness((url) => {
+      if (url.pathname === '/open-apis/im/v1/chats/oc_1/members') {
+        return json({ code: 0, data: { items: [] } })
+      }
+      if (url.pathname === '/open-apis/im/v1/messages/om_1/reactions') {
+        if (url.pathname && false) return json({})
+        calls.push('list')
+        return json({ code: 0, data: { items: [
+          { reaction_id: 're_peer', operator: { operator_id: 'ou_peer', operator_type: 'user' }, reaction_type: { emoji_type: 'THUMBSUP' } },
+        ] } })
+      }
+      if (url.pathname === '/open-apis/im/v1/messages/om_1/reactions' ) return json({})
+      return defaultBotRoutes(url)
+    })
+    const unsubscribe = await harness.platform.subscribe(session, (event) => {
+      if (event.type === 'message-reactions') events.push(event)
+    })
+    // 他人加了一个 LOVE → 事件触发 listReactions 初始化 + 增量
+    await harness.dispatchReaction({
+      event_id: 'ev_r1', message_id: 'om_1', chat_id: 'oc_1',
+      operator: { operator_id: { open_id: 'ou_peer' }, operator_type: 'user' },
+      reaction: { emoji_key: 'LOVE' },
+    }, true)
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    expect(events[0]).toMatchObject({
+      type: 'message-reactions',
+      target: { messageId: 'om_1' },
+      context: {
+        reactions: [
+          { key: '👍', count: 1 },
+          { key: '❤️', count: 1 },
+        ],
+      },
+    })
+    await unsubscribe()
   })
 
   it('bot mode: getConversation resolves and caches chat details', async () => {
@@ -268,6 +309,7 @@ interface Harness {
   platform: LarkPlatform
   dispatchReceive(data: LarkReceiveEventData): Promise<void>
   dispatchRecalled(data: { event_id?: string, message_id: string, chat_id: string }): Promise<void>
+  dispatchReaction(data: unknown, created: boolean): Promise<void>
 }
 
 function basePlatform(
@@ -293,6 +335,10 @@ function basePlatform(
     platform,
     dispatchReceive: async (data: LarkReceiveEventData) => {
       await handlers['im.message.receive_v1']!(data as never)
+    },
+    dispatchReaction: async (data: unknown, created: boolean) => {
+      const handler = handlers[created ? 'im.message.reaction.created_v1' : 'im.message.reaction.deleted_v1']
+      await handler!(data as never)
     },
     dispatchRecalled: async (data: { event_id?: string, message_id: string, chat_id: string }) => {
       await handlers['im.message.message-recalled_v1']!(data as never)

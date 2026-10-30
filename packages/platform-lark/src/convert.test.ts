@@ -74,6 +74,55 @@ describe('parseLarkMessage', () => {
 })
 
 describe('buildSendPlan', () => {
+  it('maps post node styles into entities on receive', () => {
+    const { parts } = parseLarkMessage(message('post', JSON.stringify({
+      content: [[
+        { tag: 'text', text: '加粗', style: { bold: [0, 2] } },
+        { tag: 'text', text: '普通' },
+        { tag: 'text', text: '斜体', style: { italic: [0, 2] } },
+      ]],
+    })))
+    expect(parts[0]).toMatchObject({ type: 'text', text: '加粗普通斜体\n' })
+    const entities = (parts[0] as { entities: Array<Record<string, unknown>> }).entities
+    expect(entities).toEqual([
+      { type: 'bold', offset: 0, length: 2 },
+      { type: 'italic', offset: 4, length: 2 },
+    ])
+  })
+
+  it('builds a post plan when style entities are present', () => {
+    const plan = buildSendPlan({
+      parts: [{
+        type: 'text',
+        text: '链接和加粗',
+        entities: [
+          { type: 'text-link', offset: 0, length: 2, url: 'https://example.com' },
+          { type: 'bold', offset: 3, length: 2 },
+        ],
+      }],
+    } as IMMessageInput)
+    expect(plan).toHaveLength(1)
+    const item = plan[0] as { kind: string, content: string }
+    expect(item.kind).toBe('post')
+    const post = JSON.parse(item.content) as { content: unknown[][] }
+    expect(post.content[0]).toEqual([
+      { tag: 'a', text: '链接', href: 'https://example.com' },
+      { tag: 'text', text: '和' },
+      { tag: 'text', text: '加粗', style: { bold: [0, 2] } },
+    ])
+  })
+
+  it('keeps plain mention-only text on the text message path', () => {
+    const plan = buildSendPlan({
+      parts: [{
+        type: 'text',
+        text: '你好 @张三',
+        entities: [{ type: 'mention', offset: 3, length: 3, userId: 'ou_alice' }],
+      }],
+    } as IMMessageInput)
+    expect(plan[0]!.kind).toBe('text')
+  })
+
   it('merges consecutive text parts and renders mention entities as <at>', () => {
     const plan = buildSendPlan({
       parts: [

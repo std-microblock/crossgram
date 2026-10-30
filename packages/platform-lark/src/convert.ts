@@ -3,9 +3,10 @@ import type {
 } from '@mtproto-relay/bridge'
 import { larkSenderOpenId, larkMessageTimestamp, larkMessageType, type LarkChat, type LarkMediaLocator, type LarkMessage, type LarkMention } from './types.js'
 
-/** 单条发送计划项；text 的 content 已是 Lark JSON 字符串，媒体项由调用方上传后组包。 */
+/** 单条发送计划项；text/post 的 content 已是 Lark JSON 字符串，媒体项由调用方上传后组包。 */
 export type LarkSendPlanItem =
   | { kind: 'text', content: string }
+  | { kind: 'post', content: string }
   | { kind: 'image', media: IMMessageInputPart & { type: 'media' } }
   | { kind: 'audio', media: IMMessageInputPart & { type: 'media' } }
   | { kind: 'file', media: IMMessageInputPart & { type: 'media' } }
@@ -121,7 +122,11 @@ function postParts(post: Record<string, unknown>, messageId: string): IMMessageP
       const node = raw as Record<string, unknown>
       switch (node.tag) {
         case 'text': {
-          if (typeof node.text === 'string' && node.text) text += node.text
+          if (typeof node.text === 'string' && node.text) {
+            const base = text.length
+            text += node.text
+            entities.push(...nodeStyleEntities(node, base))
+          }
           break
         }
         case 'a': {
@@ -167,6 +172,25 @@ function postParts(post: Record<string, unknown>, messageId: string): IMMessageP
   return parts
 }
 
+/** post text 节点的 style 区间（如 {"bold":[0,2]}）转 IMTextEntity。 */
+function nodeStyleEntities(node: Record<string, unknown>, base: number): IMTextEntity[] {
+  const style = node.style
+  if (!style || typeof style !== 'object') return []
+  const entities: IMTextEntity[] = []
+  const types: Array<[string, IMTextEntity['type']]> = [
+    ['bold', 'bold'],
+    ['italic', 'italic'],
+    ['underline', 'underline'],
+    ['strikethrough', 'strikethrough'],
+  ]
+  for (const [key, type] of types) {
+    const range = (style as Record<string, unknown>)[key]
+    if (!Array.isArray(range) || typeof range[0] !== 'number' || typeof range[1] !== 'number') continue
+    entities.push({ type: type as 'bold', offset: base + range[0], length: Math.max(0, range[1] - range[0]) })
+  }
+  return entities
+}
+
 function imagePart(fileKey: string, messageId: string): IMMessagePart<LarkMediaLocator> {
   return { type: 'media', media: imageMedia(fileKey, messageId) }
 }
@@ -187,17 +211,33 @@ function fileMedia(fileKey: string, messageId: string, name?: string): IMMedia<L
 export function buildSendPlan(input: IMMessageInput): LarkSendPlanItem[] {
   const plan: LarkSendPlanItem[] = []
   let pendingText = ''
-  const flushText = () => {
-    if (!pendingText) return
-    plan.push({ kind: 'text', content: JSON.stringify({ text: pendingText }) })
+  let pendingPostParagraphs: unknown[][] = []
+  let pendingHasStyle = false
+  const flush = () => {
+    if (pendingHasStyle) {
+      plan.push({ kind: 'post', content: JSON.stringify({ content: pendingPostParagraphs }) })
+    } else if (pendingText) {
+      plan.push({ kind: 'text', content: JSON.stringify({ text: pendingText }) })
+    }
     pendingText = ''
+    pendingPostParagraphs = []
+    pendingHasStyle = false
   }
   for (const part of input.parts) {
     if (part.type === 'text') {
-      if (pendingText) pendingText += '\n'
-      pendingText += renderEntities(part.text, part.entities ?? [])
+      const styled = (part.entities ?? []).some((entity) => entity.type !== 'mention')
+      if (styled) {
+        // 带样式实体（粗体/链接等）走 post 富文本；mention 之外的纯文本仍走 text 消息
+        if (pendingText) pendingPostParagraphs.push([{ tag: 'text', text: pendingText }])
+        pendingText = ''
+        pendingHasStyle = true
+        pendingPostParagraphs.push(postNodes(part.text, part.entities ?? []))
+      } else {
+        if (pendingText) pendingText += '\n'
+        pendingText += renderEntities(part.text, part.entities ?? [])
+      }
     } else if (part.type === 'media') {
-      flushText()
+      flush()
       if (part.media.kind === 'image') plan.push({ kind: 'image', media: part })
       else if (part.media.voice) plan.push({ kind: 'audio', media: part })
       else plan.push({ kind: 'file', media: part })
@@ -205,8 +245,37 @@ export function buildSendPlan(input: IMMessageInput): LarkSendPlanItem[] {
       throw new Error('Lark native stickers are not supported')
     }
   }
-  flushText()
+  flush()
   return plan
+}
+
+/** 把文本+实体切成飞书 post 节点序列（样式节点、链接、@）。 */
+function postNodes(text: string, entities: IMTextEntity[]): unknown[] {
+  const sorted = [...entities].sort((left, right) => left.offset - right.offset)
+  const nodes: unknown[] = []
+  let consumed = 0
+  const pushPlain = (piece: string) => {
+    if (!piece) return
+    const last = nodes[nodes.length - 1] as { tag: string, text?: string } | undefined
+    if (last?.tag === 'text' && !('style' in last)) last.text += piece
+    else nodes.push({ tag: 'text', text: piece })
+  }
+  for (const entity of sorted) {
+    if (entity.type === 'mention') continue
+    const start = Math.max(consumed, entity.offset)
+    const end = Math.min(text.length, entity.offset + entity.length)
+    if (start >= end) continue
+    pushPlain(text.slice(consumed, start))
+    const piece = text.slice(start, end)
+    if (entity.type === 'text-link') {
+      nodes.push({ tag: 'a', text: piece, href: entity.url })
+    } else {
+      nodes.push({ tag: 'text', text: piece, style: { [entity.type]: [0, piece.length] } })
+    }
+    consumed = end
+  }
+  pushPlain(text.slice(consumed))
+  return nodes
 }
 
 /** 把 mention 实体渲染为 Lark 文本语法 <at user_id="..."/>，其余实体原样保留文本。 */

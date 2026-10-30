@@ -5,9 +5,20 @@ import type { LarkMessageReceiveEvent, LarkMessageRecalledEvent } from './types.
 export type LarkReceiveEventData = LarkMessageReceiveEvent & { event_id?: string }
 export type LarkRecalledEventData = LarkMessageRecalledEvent & { event_id?: string }
 
+export interface LarkReactionEventData {
+  event_id?: string
+  message_id?: string
+  chat_id?: string
+  operator?: { operator_id?: { open_id?: string }, operator_type?: string }
+  reaction?: { emoji_key?: string }
+  action_time?: string
+}
+
 export interface LarkEventSink {
   onMessage(data: LarkReceiveEventData): Promise<void>
   onRecalled(data: LarkRecalledEventData): Promise<void>
+  onReactionCreated?(data: LarkReactionEventData): Promise<void>
+  onReactionDeleted?(data: LarkReactionEventData): Promise<void>
 }
 
 export interface LarkWsClientLike {
@@ -74,6 +85,16 @@ export class LarkEventPump {
       'im.message.message-recalled_v1': (data: never) => {
         this.enqueue(() => this.sink.onRecalled(data as unknown as LarkRecalledEventData))
       },
+      ...(this.sink.onReactionCreated ? {
+        'im.message.reaction.created_v1': (data: never) => {
+          this.enqueue(() => this.sink.onReactionCreated!(data as unknown as LarkReactionEventData))
+        },
+      } : {}),
+      ...(this.sink.onReactionDeleted ? {
+        'im.message.reaction.deleted_v1': (data: never) => {
+          this.enqueue(() => this.sink.onReactionDeleted!(data as unknown as LarkReactionEventData))
+        },
+      } : {}),
     })
     this.wsClient = createWsClient({ appId: this.options.appId, appSecret: this.options.appSecret })
     await this.wsClient.start({ eventDispatcher: dispatcher })
