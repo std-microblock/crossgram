@@ -331,13 +331,18 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
    */
   private async probeGroupMessageScope(): Promise<void> {
     try {
-      this.logger?.info('Lark 群消息可见性探测开始')
       const token = await this.deps.getToken()
       const chats = await this.client.getChats(token, { pageSize: 1 })
-      this.logger?.info('Lark 群消息可见性探测: chats=%d', chats.items?.length ?? 0)
       const chat = chats.items?.[0]
       if (!chat) return
-      await this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' })
+      // shortcut: 进程内该请求偶发永久挂起（进程外同栈正常，疑似 undici 代理池与 SDK WS 的交互），race 兜底保证提示必然落地
+      const timeout = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('probe timeout')), 10_000).unref()
+      })
+      await Promise.race([
+        this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' }),
+        timeout,
+      ])
       this.logger?.info('Lark 群消息可见性：全量（im:message.group_msg 生效）')
     } catch (error) {
       if (error instanceof LarkApiError && error.code === 230027) {
