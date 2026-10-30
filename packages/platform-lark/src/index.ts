@@ -452,7 +452,8 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<LarkMediaLocator>> {
     const token = await this.deps.getToken()
     const response = await this.client.getChats(token, {
-      pageSize: query.limit ?? 20,
+      // 飞书 chats 接口 page_size 上限 100
+      pageSize: Math.min(query.limit ?? 20, 100),
       pageToken: query.cursor,
     })
     return {
@@ -485,7 +486,8 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
     const response = await this.client.listMessages(token, {
       containerId: conversation.id,
       sortType: ascending ? 'ByCreateTimeAsc' : 'ByCreateTimeDesc',
-      pageSize: query.limit ?? 20,
+      // 飞书上限 50；客户端常请求 100，超出会被 99992402 拒绝，翻页由 cursor 补足
+      pageSize: Math.min(query.limit ?? 20, 50),
       pageToken: cursor,
       ...(query.before && !query.cursor ? { endTime: query.before.timestamp } : {}),
       ...(query.after && !query.cursor ? { startTime: query.after.timestamp } : {}),
