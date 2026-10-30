@@ -331,8 +331,10 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
    */
   private async probeGroupMessageScope(): Promise<void> {
     try {
+      this.logger?.info('Lark 群消息可见性探测开始')
       const token = await this.deps.getToken()
       const chats = await this.client.getChats(token, { pageSize: 1 })
+      this.logger?.info('Lark 群消息可见性探测: chats=%d', chats.items?.length ?? 0)
       const chat = chats.items?.[0]
       if (!chat) return
       await this.client.listMessages(token, { containerId: chat.chat_id, pageSize: 1, sortType: 'ByCreateTimeDesc' })
