@@ -83,8 +83,8 @@ describe('LarkPlatform', () => {
     })
   })
 
-  it('bot mode: warns at-bot-only visibility when group_msg is not granted', async () => {
-    const warnings: string[] = []
+  it('bot mode: reports at-bot-only visibility when group_msg is not granted', async () => {
+    const notices: string[] = []
     const harness = await createBotHarness((url) => {
       if (url.pathname === '/open-apis/im/v1/chats') {
         return json({ code: 0, data: { items: [{ chat_id: 'oc_1', chat_type: 'group' }], has_more: false } })
@@ -94,13 +94,13 @@ describe('LarkPlatform', () => {
       }
       return defaultBotRoutes(url)
     }, {
-      info: () => {},
-      warn: (format: string) => {
-        warnings.push(format)
+      info: (format: string) => {
+        notices.push(format)
       },
+      warn: () => {},
     })
     const unsubscribe = await harness.platform.subscribe(session, () => {})
-    await vi.waitFor(() => expect(warnings.join('\n')).toContain('仅 @机器人'))
+    await vi.waitFor(() => expect(notices.join('\n')).toContain('仅 @机器人'))
     await unsubscribe()
   })
 
