@@ -6750,7 +6750,20 @@ export function stableId(value: string): number {
 export function makeTlCardPreview(
   card: import('./platform.js').IMMessageCard,
   dcId = 1,
-): tl.RawMessageMediaWebPage {
+): tl.TypeMessageMedia {
+  if (card.location) {
+    return {
+      _: 'messageMediaVenue',
+      geo: {
+        _: 'geoPoint', lat: card.location.lat, long: card.location.lng,
+        accessHash: Long.ZERO,
+      },
+      title: card.title,
+      address: card.description ?? '',
+      provider: 'QQ',
+      venueId: '', venueType: '',
+    }
+  }
   const url = cardUrl(card) ?? 'https://im.qq.com/'
   let displayUrl = card.source || card.title
   try {

@@ -339,6 +339,13 @@ export interface IMMessageCard {
   thumbnailUrl?: string
   /** Official group-invite cards: the adapter turns this into an accept button. */
   groupInvite?: IMMessageGroupInvite
+  /** 位置卡片坐标，投影为 Telegram 原生 venue。 */
+  location?: IMMessageLocation
+}
+
+export interface IMMessageLocation {
+  lat: number
+  lng: number
 }
 
 /** Parameters of an official group-invite card, resolved by the protocol side. */

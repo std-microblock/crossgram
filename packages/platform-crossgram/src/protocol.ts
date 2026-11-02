@@ -280,6 +280,13 @@ export interface WireCard {
   thumbnailUrl?: string
   /** Official group-invite cards (bizsrc=qun.invite): accepts the invite server-side. */
   groupInvite?: WireGroupInvite
+  /** Location cards (com.tencent.map LocationShare) carry coordinates. */
+  location?: WireLocation
+}
+
+export interface WireLocation {
+  lat: number
+  lng: number
 }
 
 /** Parameters of an official "邀请你加入群聊" card's mqqapi jump link. */

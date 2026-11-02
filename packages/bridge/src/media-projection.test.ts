@@ -613,6 +613,37 @@ describe('rich-media projection', () => {
     )).resolves.toMatchObject({ source: { replyToId: album.id } })
   })
 
+  it('projects location cards with coordinates as native Telegram venues', async () => {
+    const { store, peerId } = await createStore()
+    const card: IMMessage = {
+      id: 'location-card', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_011,
+      content: { parts: [{ type: 'card', card: {
+        kind: 'location',
+        title: '如家精选酒店(上海陆家嘴羽山路源深体育中心地铁站店)',
+        description: '上海市浦东新区羽山路166号',
+        location: { lat: 31.230254, lng: 121.539386 },
+      } }] },
+    }
+    const result = await new DialogRpc({
+      ...platform, async getHistory() { return { messages: [card] } },
+    }, session, store).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const message = result.messages[0] as tl.RawMessage
+
+    expect(message).toMatchObject({
+      _: 'message',
+      message: '位置',
+      media: {
+        _: 'messageMediaVenue',
+        geo: { _: 'geoPoint', lat: 31.230254, long: 121.539386 },
+        title: '如家精选酒店(上海陆家嘴羽山路源深体育中心地铁站店)',
+        address: '上海市浦东新区羽山路166号',
+        provider: 'QQ',
+      },
+    })
+    expect(message.entities).toBeUndefined()
+    expect(() => wireRoundTrip(result)).not.toThrow()
+  })
+
   it('projects structured platform cards as serializable Telegram WebPage previews', async () => {
     const { store, peerId } = await createStore()
     const card: IMMessage = {
