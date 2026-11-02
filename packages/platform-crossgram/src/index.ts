@@ -1200,25 +1200,39 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     content: IMMessageInput,
     options: IMTransferOptions = {},
   ): Promise<IMMessage<QQMediaLocator>> {
-    const resolvedMentionUsers = new Map<string, Promise<string | undefined>>()
+    type ResolvedMentionUser = Awaited<ReturnType<QQNTClient['getUser']>>
+    const resolvedMentionUsers = new Map<string, Promise<ResolvedMentionUser>>()
+    const resolveMentionUser = (userId: string) => {
+      let pending = resolvedMentionUsers.get(userId)
+      if (!pending) {
+        pending = this.client.getUser(userId).catch(() => null)
+        resolvedMentionUsers.set(userId, pending)
+      }
+      return pending
+    }
     const textParts: WireTextPart[] = []
     for (const part of content.parts) {
       if (part.type !== 'text') continue
       const entities: NonNullable<WireTextPart['entities']> = []
+      // Telegram 客户端按用户名补全提及时插入的文本是「@QQ号」；QQ 端艾特的显示
+      // 完全取发送文本，落屏前改写成「@昵称」，并顺移同段后续实体的偏移。
+      const renames: Array<{
+        offset: number, oldLength: number, text: string,
+        entity: Extract<NonNullable<WireTextPart['entities']>[number], { type: 'mention' }>,
+      }> = []
       for (const entity of part.entities ?? []) {
         if (entity.type === 'mention') {
-          let numericId = entity.numericId
-          if (!numericId) {
-            let pending = resolvedMentionUsers.get(entity.userId)
-            if (!pending) {
-              pending = this.client.getUser(entity.userId)
-                .then((user) => user?.numericId)
-                .catch(() => undefined)
-              resolvedMentionUsers.set(entity.userId, pending)
-            }
-            numericId = await pending
+          const user = await resolveMentionUser(entity.userId)
+          const numericId = entity.numericId ?? user?.numericId
+          const outgoing: Extract<NonNullable<WireTextPart['entities']>[number], { type: 'mention' }> = { ...entity, numericId }
+          entities.push(outgoing)
+          const name = user?.name?.trim()
+          if (name && name !== numericId
+            && entity.offset >= 0 && entity.length > 0
+            && entity.offset + entity.length <= part.text.length
+            && part.text.slice(entity.offset, entity.offset + entity.length) !== `@${name}`) {
+            renames.push({ offset: entity.offset, oldLength: entity.length, text: `@${name}`, entity: outgoing })
           }
-          entities.push({ ...entity, numericId })
           continue
         }
         if (entity.type === 'conversation-link') continue
@@ -1229,7 +1243,22 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           faceId: match[1], faceType: 1,
         })
       }
-      textParts.push({ type: 'text', text: part.text, entities: entities.length ? entities : undefined })
+      let text = part.text
+      if (renames.length) {
+        const sorted = [...renames].sort((left, right) => left.offset - right.offset)
+        for (let index = sorted.length - 1; index >= 0; index--) {
+          const rename = sorted[index]!
+          text = text.slice(0, rename.offset) + rename.text + text.slice(rename.offset + rename.oldLength)
+        }
+        for (const entity of entities as Array<{ offset: number }>) {
+          const shift = sorted
+            .filter((rename) => rename.offset < entity.offset)
+            .reduce((total, rename) => total + rename.text.length - rename.oldLength, 0)
+          entity.offset += shift
+        }
+        for (const rename of renames) rename.entity.length = rename.text.length
+      }
+      textParts.push({ type: 'text', text, entities: entities.length ? entities : undefined })
     }
     const mediaParts = content.parts.filter((part) => part.type === 'media')
     const stickerParts = content.parts.filter((part) => part.type === 'sticker')

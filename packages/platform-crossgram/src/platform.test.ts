@@ -2166,6 +2166,80 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('rewrites numeric-username mentions into nicknames and shifts later entities', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getUser = vi.fn(async (id) => id === 'u_yuzu'
+      ? { id, numericId: '12345678', name: '柚子' }
+      : { id, numericId: '87654321', name: '小马' })
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent', conversationId: '2:group', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [],
+    }))
+
+    await platform.sendMessage(session, { id: '2:group' }, {
+      parts: [{
+        type: 'text', text: '@12345678 和 @87654321 打起来了',
+        entities: [
+          { type: 'mention', offset: 0, length: 9, userId: 'u_yuzu' },
+          { type: 'mention', offset: 12, length: 9, userId: 'u_pony' },
+        ],
+      }],
+    })
+
+    const call = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(call[1]).toEqual([{
+      type: 'text', text: '@柚子 和 @小马 打起来了',
+      entities: [
+        { type: 'mention', offset: 0, length: 3, userId: 'u_yuzu', numericId: '12345678' },
+        { type: 'mention', offset: 6, length: 3, userId: 'u_pony', numericId: '87654321' },
+      ],
+    }])
+  })
+
+  it('keeps the mention text when the profile falls back to the numeric id', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getUser = vi.fn(async (id) => ({ id, numericId: '12345678', name: '12345678' }))
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent', conversationId: '2:group', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [],
+    }))
+
+    await platform.sendMessage(session, { id: '2:group' }, {
+      parts: [{
+        type: 'text', text: 'hey @12345678',
+        entities: [{ type: 'mention', offset: 4, length: 9, userId: 'u_yuzu' }],
+      }],
+    })
+
+    const call = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(call[1]).toEqual([{
+      type: 'text', text: 'hey @12345678',
+      entities: [{ type: 'mention', offset: 4, length: 9, userId: 'u_yuzu', numericId: '12345678' }],
+    }])
+  })
+
+  it('keeps the mention text when the profile lookup fails', async () => {
+    const platform = new QQNTPlatform()
+    platform.client.getUser = vi.fn(async () => null)
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent', conversationId: '2:group', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [],
+    }))
+
+    await platform.sendMessage(session, { id: '2:group' }, {
+      parts: [{
+        type: 'text', text: 'hey @12345678',
+        entities: [{ type: 'mention', offset: 4, length: 9, userId: 'u_yuzu' }],
+      }],
+    })
+
+    const call = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(call[1]).toEqual([{
+      type: 'text', text: 'hey @12345678',
+      entities: [{ type: 'mention', offset: 4, length: 9, userId: 'u_yuzu' }],
+    }])
+  })
+
   it('publishes the exact size and version of a relayed QQ face sticker', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))

@@ -105,6 +105,22 @@ describe.skipIf(!enabled)('QQNTPlatform live E2E', () => {
     }
   }, 90_000)
 
+  it('delivers a group mention that renders as the QQ nickname instead of the numeric id', async () => {
+    const mentioned = await platform.client.getUser(directTarget)
+    if (!mentioned?.name) throw new Error('e2e mention target profile is unavailable')
+    const target = await platform.client.resolveConversation('group', groupTargets[0])
+    const sent = await platform.sendMessage(session, { id: target.id }, {
+      parts: [{
+        type: 'text', text: `@${directTarget} [IMPlatform e2e mention]`,
+        entities: [{ type: 'mention', offset: 0, length: directTarget.length + 1, userId: mentioned.id }],
+      }],
+    })
+    const part = sent.content.parts[0]
+    if (part?.type !== 'text') throw new Error('e2e mention echo is not a text part')
+    expect(part.text).toContain(`@${mentioned.name}`)
+    expect(part.text).not.toContain(`@${directTarget}`)
+  }, 60_000)
+
   it('streams unique images through IMPlatform only to the approved private and group chats', async () => {
     const targets = [
       await platform.client.resolveConversation('direct', directTarget),
