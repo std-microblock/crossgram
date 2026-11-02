@@ -341,6 +341,8 @@ export interface IMMessageCard {
   groupInvite?: IMMessageGroupInvite
   /** 位置卡片坐标，投影为 Telegram 原生 venue。 */
   location?: IMMessageLocation
+  /** ark 卡片原始 JSON，适配新卡片类型时在消费侧提取字段即可。 */
+  raw?: Record<string, unknown>
 }
 
 export interface IMMessageLocation {

@@ -282,6 +282,8 @@ export interface WireCard {
   groupInvite?: WireGroupInvite
   /** Location cards (com.tencent.map LocationShare) carry coordinates. */
   location?: WireLocation
+  /** Original ark JSON, so new card kinds can be adapted without touching qqnt-bridge. */
+  raw?: Record<string, unknown>
 }
 
 export interface WireLocation {
