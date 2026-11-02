@@ -155,7 +155,10 @@ export class MergedForwardProjection {
   private readonly _avatars = new Map<string, SessionAvatars>()
   private readonly _photoIds = new Set<string>()
 
-  constructor(private readonly _dcId = 1) {}
+  constructor(
+    private readonly _dcId = 1,
+    private readonly _warn?: (format: string, ...args: unknown[]) => void,
+  ) {}
 
   makeBundleUser(state: BridgeSessionState, snapshot: IMMessageSnapshot): tl.RawUser {
     const id = bundleUserId(state, snapshot.senderId)
@@ -323,7 +326,11 @@ export class MergedForwardProjection {
         input.session.platformSessionId, part.bundle, this.addressOf(input, part.bundle, ordinal),
       )
       records.set(part.bundle.id, record)
-      const snapshots = await this.loadSnapshots(input, record)
+      // 转发内容读不到（如 QQ 本地数据已丢失）时只降级这张卡片，不能让整页历史跟着失败。
+      const snapshots = await this.loadSnapshots(input, record).catch((error: unknown) => {
+        this._warn?.('merged-forward bundle load failed bundle=%s error=%s', record.bundle.id, error)
+        return [] as IMMessageSnapshot[]
+      })
       if (!record.bundle.preview?.trim()) {
         const preview = snapshotPreview(snapshots)
         if (preview) record.bundle = { ...record.bundle, preview }
@@ -602,12 +609,17 @@ export class MergedForwardProjection {
   }
 }
 
-export function makeMergedForwardProvider(dcId = 1): MergedForwardProjection {
-  return new MergedForwardProjection(dcId)
+export function makeMergedForwardProvider(
+  dcId = 1,
+  warn?: (format: string, ...args: unknown[]) => void,
+): MergedForwardProjection {
+  return new MergedForwardProjection(dcId, warn)
 }
 
 export function apply(ctx: Context): void {
-  const projection = new MergedForwardProjection(ctx.mtprotoBridge.dcId)
+  const projection = new MergedForwardProjection(
+    ctx.mtprotoBridge.dcId, (format, ...args) => ctx.logger.warn(format, ...args),
+  )
   ctx.on('bridge/message/project', (input, next) => projection.project(input, next))
   ctx.on('mtproto/rpc', async function (
     this: ServerRpcContext,
@@ -817,15 +829,15 @@ async function routeMergedForwardRpc(
     const req = request as tl.messages.RawGetMessagesRequest
     // 只有内存里的转发记录能回答：`messages.getMessages` 不带 peer，冷缓存时无从判断该 ID 属于
     // 哪一份聊天记录，也就无法从落库消息重建。
+    // 某份转发内容读不到时跳过它，不能连累普通消息和其它转发的查询。
     const projected = await Promise.all(
       [...projection.records(state.session.platformSessionId)].map(async (record) => ({
         chatId: record.chatId,
-        bundle: await projection.materialize(state, record),
+        bundle: await projection.materialize(state, record).catch(() => undefined),
       })),
     )
-    const index = collectVirtualMessages(
-      projected.map(({ chatId, bundle }) => ({ chatId, messages: bundle.messages })),
-    )
+    const index = collectVirtualMessages(projected.flatMap(({ chatId, bundle }) =>
+      bundle ? [{ chatId, messages: bundle.messages }] : []))
     const requestedIds = req.id.map(inputMessageId)
     // 认领 = 有记录声称拥有这个 ID（不论唯一还是重号）；重号的不能猜，也不能交给默认实现。
     const claimed = new Set(requestedIds.filter((id) => index.messages.has(id) || index.ambiguous.has(id)))
@@ -853,11 +865,11 @@ async function routeMergedForwardRpc(
       topics: [],
       chats: uniqueById([
         ...(ordinary && ordinary._ !== 'messages.messagesNotModified' ? ordinary.chats : []),
-        ...projected.flatMap(({ bundle }) => bundle.chats),
+        ...projected.flatMap(({ bundle }) => bundle?.chats ?? []),
       ]),
       users: uniqueById([
         ...(ordinary && ordinary._ !== 'messages.messagesNotModified' ? ordinary.users : []),
-        ...projected.flatMap(({ bundle }) => bundle.users),
+        ...projected.flatMap(({ bundle }) => bundle?.users ?? []),
       ]),
     }
   }
