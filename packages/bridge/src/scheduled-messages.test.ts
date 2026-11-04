@@ -264,10 +264,11 @@ async function createRpcFixture(platformSessionId: string) {
     },
     async getContacts() { return { users: [{ id: 'alice', firstName: 'Alice' }] } },
   } as unknown as IMPlatform
-  const rpc = new DialogRpc(
-    platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined, undefined, 1, undefined,
-    undefined, undefined, undefined, undefined, scheduled,
+  const rpc = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        authenticatedSelfId: 1,
+        scheduled: scheduled,
+    }
   )
   await rpc.getContacts()
   const peer = { _: 'inputPeerUser' as const, userId: rpc.peerTlId('alice'), accessHash: Long.ZERO }

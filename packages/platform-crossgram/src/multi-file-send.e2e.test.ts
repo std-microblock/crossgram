@@ -136,7 +136,9 @@ describe('QQNT multiple file send E2E', () => {
     const uploads = new UploadManager(uploadPath)
     await uploads.savePart(session.platformSessionId, '101', 0, Uint8Array.of(1, 2))
     await uploads.savePart(session.platformSessionId, '102', 0, Uint8Array.of(3, 4, 5))
-    const rpc = new DialogRpc(platform, session, store, uploads)
+    const rpc = new DialogRpc(platform, session, store, {
+        uploads: uploads,
+      })
 
     const result = await rpc.sendMultiMedia({
       _: 'messages.sendMultiMedia',

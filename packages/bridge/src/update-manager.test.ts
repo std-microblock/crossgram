@@ -543,7 +543,10 @@ describe('UpdateManager', () => {
     const harness = await createHarness(undefined, targetPlatform)
     const ingested = await harness.store.ingest(session, conversation, message)
     const reactions = new ReactionRpc(targetPlatform, session)
-    const rpc = new DialogRpc(targetPlatform, session, harness.store, undefined, undefined, 1, undefined, reactions)
+    const rpc = new DialogRpc(targetPlatform, session, harness.store, {
+        dcId: 1,
+        reactions: reactions,
+      })
 
     const response = await rpc.getChannelMessages({
       _: 'channels.getMessages',
@@ -1077,15 +1080,15 @@ describe('UpdateManager', () => {
     // before the native forward HTTP request resolves, but has not published a
     // durable update yet. The RPC path must force that unchanged row through.
     await store.ingest(session, targetConversation, forwardedOutput)
-    const rpc = new DialogRpc(
-      targetPlatform, session, store,
-      undefined, undefined, 1, undefined, undefined, undefined,
-      async (localSession, event, options) => {
+    const rpc = new DialogRpc(targetPlatform, session, store, {
+        dcId: 1,
+        onLocalEvent: async (localSession, event, options) => {
         if (event.type !== 'message') return
         const result = await store.ingest(localSession, event.conversation, event.message)
         return manager.publish(localSession, { event, result }, options)
       },
-      '0011223344556677',
+        authKeyId: '0011223344556677',
+    }
     )
     const requester = {} as ServerConnection
 

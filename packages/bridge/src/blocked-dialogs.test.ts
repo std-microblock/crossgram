@@ -75,10 +75,11 @@ async function createHarness(mode: BlockedContentMode) {
   await ctx.database.prepared()
   const store = new MessageStore(ctx.database)
   const blocked = new BlockedPeerStore(ctx.database, mode)
-  const rpc = new DialogRpc(
-    platform, session, store, undefined, undefined, 1, undefined,
-    new ReactionRpc(platform, session, 1, ctx.database),
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, blocked,
+  const rpc = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        reactions: new ReactionRpc(platform, session, 1, ctx.database),
+        blockedPeers: blocked,
+    }
   )
   disposals.push(async () => {
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())

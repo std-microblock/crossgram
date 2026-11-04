@@ -77,10 +77,10 @@ function makeContext(): ServerRpcContext {
 }
 
 function createDialog(settings: NotificationSettingsStore, targetPlatform: IMPlatform = platform): DialogRpc {
-  return new DialogRpc(
-    targetPlatform, session, undefined, undefined, undefined, 1,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-    settings,
+  return new DialogRpc(targetPlatform, session, undefined, {
+        dcId: 1,
+        notificationSettings: settings,
+    }
   )
 }
 
@@ -535,10 +535,10 @@ describe('notification settings RPC e2e', () => {
       async getDialogs() { return { dialogs: [] } },
       async getHistory() { return { messages: [] } },
     }
-    const dialogs = new DialogRpc(
-      targetPlatform, session, store, undefined, undefined, 1,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      new NotificationSettingsStore(ctx.database, true),
+    const dialogs = new DialogRpc(targetPlatform, session, store, {
+        dcId: 1,
+        notificationSettings: new NotificationSettingsStore(ctx.database, true),
+    }
     )
     const rpcHarness = rpcHarnessFor(dialogs)
     const peer = {
@@ -560,10 +560,10 @@ describe('notification settings RPC e2e', () => {
     await expect(roundTripRpc(rpcHarness, { _: 'account.getNotifySettings', peer }))
       .resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
 
-    const resumedDialogs = new DialogRpc(
-      targetPlatform, session, store, undefined, undefined, 1,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      new NotificationSettingsStore(ctx.database, true),
+    const resumedDialogs = new DialogRpc(targetPlatform, session, store, {
+        dcId: 1,
+        notificationSettings: new NotificationSettingsStore(ctx.database, true),
+    }
     )
     await expect(roundTripRpc(rpcHarnessFor(resumedDialogs), {
       _: 'account.getNotifySettings', peer,

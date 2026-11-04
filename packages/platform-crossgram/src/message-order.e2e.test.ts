@@ -368,15 +368,15 @@ describe('QQNT same-second message ordering E2E', () => {
         complete.promise,
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('QQNT sidecar E2E timed out')), 5_000)),
       ])
-      const rpc = new DialogRpc(
-        platform, replySession, store,
-        undefined, undefined, 1, undefined, undefined, undefined,
-        async (_session, event, options) => {
+      const rpc = new DialogRpc(platform, replySession, store, {
+        dcId: 1,
+        onLocalEvent: async (_session, event, options) => {
           if (event.type !== 'message-delete') return
           const result = await store.deleteMessages(replySession, event.conversation, event.messageIds)
           return await manager.publish(replySession, { event, result }, options) as tl.RawUpdates | undefined
         },
-        '0011223344556677',
+        authKeyId: '0011223344556677',
+    }
       )
       await rpc.getDialogs({
         _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
@@ -1904,7 +1904,9 @@ describe('QQNT history media without placeholder edits E2E', () => {
     expect(imageRequests).toBe(0)
     const uploadPath = await mkdtemp(join(tmpdir(), 'qqnt-native-preview-download-'))
     temporaryDirectories.push(uploadPath)
-    const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
+    const rpc = new DialogRpc(platform, session, store, {
+        uploads: new UploadManager(uploadPath),
+      })
     // QQNT 没给出 720 预览的字节数（thumbFileSize=0）。这种预览不能按原图大小下发，
     // 否则客户端按声明大小拉到短响应后会把「文件到此为止」写进缓存、之后每次打开都从半截续传。
     // 所以 `m` 档位不再下发，老客户端硬要 `m` 时回落到原图字节（声明大小 == 实际字节数）。

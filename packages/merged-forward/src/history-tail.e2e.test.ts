@@ -88,12 +88,10 @@ async function startRelay() {
   await mtproto
   const pipeline = new MessageProjectionPipeline(ctx)
   const store = new MessageStore(ctx.database, undefined, undefined, undefined, pipeline)
-  const dialogs = new DialogRpc(
-    platform, session, store,
-    undefined, undefined, 1,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined, undefined,
-    pipeline,
+  const dialogs = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        messageProjection: pipeline,
+    }
   )
   const bridge = ctx.plugin((scope) => {
     new MtprotoBridgeService(scope, async () => ({

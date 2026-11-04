@@ -129,10 +129,14 @@ async function createHarness(failSends = 0, systemPeerProvider?: SystemPeerProvi
   const peerId = (await store.upsertUser(session, { id: conversation.id, firstName: conversation.title })).id
   const systemPeers = systemPeerProvider ? new SystemPeerService(ctx) : undefined
   if (systemPeers && systemPeerProvider) systemPeers.register(systemPeerProvider)
-  const rpc = new DialogRpc(platform, session, store, uploads, (_session, event) => {
+  const rpc = new DialogRpc(platform, session, store, {
+        uploads: uploads,
+        onTransferProgress: (_session, event) => {
     progress.push({ mediaIndex: event.mediaIndex, transferredBytes: event.transferredBytes })
-  }, 1, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-  undefined, undefined, undefined, systemPeers)
+  },
+        dcId: 1,
+        systemPeers: systemPeers,
+      })
   disposals.push(async () => {
     await rm(directory, { recursive: true, force: true })
     for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
@@ -715,7 +719,9 @@ describe('media send streaming', () => {
     }) as tl.upload.RawFile
     expect(new TextDecoder().decode(preview.bytes)).toBe('document')
 
-    const resumed = new DialogRpc(platform, session, store, uploads)
+    const resumed = new DialogRpc(platform, session, store, {
+        uploads: uploads,
+      })
     const sent = await resumed.sendMedia({
       _: 'messages.sendMedia', peer: peer(peerId), randomId: Long.fromNumber(77), message: 'two-stage',
       media: {
@@ -800,7 +806,10 @@ describe('media send streaming', () => {
 
   it('stages photos with the configured media DC and sends them by reference', async () => {
     const { platform, uploads, store, consumed, inputs, peerId } = await createHarness()
-    const rpc = new DialogRpc(platform, session, store, uploads, undefined, 5)
+    const rpc = new DialogRpc(platform, session, store, {
+        uploads: uploads,
+        dcId: 5,
+      })
     const png = new Uint8Array(24)
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     new DataView(png.buffer).setUint32(16, 1096)

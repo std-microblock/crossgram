@@ -216,11 +216,12 @@ async function createRpc(
     store,
     localEvents,
     localDeliveryOptions,
-    rpc: new DialogRpc(
-      selectedPlatform, session, store,
-      undefined, undefined, 1, undefined, reactions,
-      undefined, onLocalEvent, '0011223344556677',
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    rpc: new DialogRpc(selectedPlatform, session, store, {
+        dcId: 1,
+        reactions: reactions,
+        onLocalEvent: onLocalEvent,
+        authKeyId: '0011223344556677',
+      }
     ),
   }
 }

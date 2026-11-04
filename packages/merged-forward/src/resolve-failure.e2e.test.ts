@@ -86,12 +86,10 @@ afterEach(async () => {
 })
 
 function makeDialogs(store: MessageStore, pipeline: MessageProjectionPipeline): DialogRpc {
-  return new DialogRpc(
-    platform, session, store,
-    undefined, undefined, 1,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined, undefined,
-    pipeline,
+  return new DialogRpc(platform, session, store, {
+        dcId: 1,
+        messageProjection: pipeline,
+    }
   )
 }
 
