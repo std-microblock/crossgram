@@ -137,10 +137,10 @@ describe('crossgram feature advertisement', () => {
       resolve: vi.fn(async (_session: PlatformSession, conversationId: string) =>
         conversationId === 'alice' ? { id: 'bridge:request-inbox' } : undefined),
     } as unknown as SystemPeerService
-    const rpc = new DialogRpc(
-      platform, session,
-      undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, systemPeers,
+    const rpc = new DialogRpc(platform, session, undefined, {
+        dcId: 1,
+        systemPeers: systemPeers,
+    }
     )
     await materialize(rpc)
 

@@ -85,11 +85,12 @@ async function createRequestRpc(
     async (requestSession, request) => { await peers.emit(requestSession, { type: 'request', request, delivery: 'recovery' }) },
     options.onError,
   ))
-  const createRpc = (localEvents: IMEvent[]) => new DialogRpc(
-    platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
-    async (_session, event) => deliver(session, event), undefined, undefined,
-    options.drafts ? { list: async () => [], save: async () => {}, remove: async () => {} } as any : undefined,
-    undefined, undefined, undefined, undefined, undefined, peers,
+  const createRpc = (localEvents: IMEvent[]) => new DialogRpc(platform, session, store, {
+        dcId: 1,
+        onLocalEvent: async (_session, event) => deliver(session, event),
+        drafts: options.drafts ? { list: async () => [], save: async () => {}, remove: async () => {} } as any : undefined,
+        systemPeers: peers,
+    }
   )
   const rpc = createRpc(localEvents)
   const createSiblingRpc = () => {
@@ -582,10 +583,11 @@ describe('request inbox callbacks', () => {
       createRequestResolver(registry),
       async (requestSession, request) => { await peers.emit(requestSession, { type: 'request', request, delivery: 'recovery' }) },
     ))
-    const rpc = new DialogRpc(
-      platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
-      (eventSession, event, options) => subscriptions.ingestLocalEvent(eventSession, event, options),
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, peers,
+    const rpc = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        onLocalEvent: (eventSession, event, options) => subscriptions.ingestLocalEvent(eventSession, event, options),
+        systemPeers: peers,
+    }
     )
     await seedPendingRequest(store)
     const target = await inboxCallbackTarget(rpc, store)

@@ -125,9 +125,12 @@ describe('bridge-local drafts', () => {
       },
     }
     const publish = vi.fn(async () => {})
-    const rpc = new DialogRpc(
-      platform, session, store, undefined, undefined, 1, undefined, undefined, undefined, undefined,
-      'source-auth-key', undefined, drafts, publish,
+    const rpc = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        authKeyId: 'source-auth-key',
+        drafts: drafts,
+        onDraftUpdate: publish,
+    }
     )
     const initial = await rpc.getDialogs(getDialogsRequest()) as tl.messages.RawDialogs
     const peerId = rpc.peerTlId('alice')
@@ -156,9 +159,11 @@ describe('bridge-local drafts', () => {
       entities: [{ _: 'messageEntityItalic', offset: 0, length: 5 }],
     })
 
-    const resumed = new DialogRpc(
-      platform, session, store, undefined, undefined, 1, undefined, undefined, undefined, undefined,
-      'resumed-auth-key', undefined, drafts,
+    const resumed = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        authKeyId: 'resumed-auth-key',
+        drafts: drafts,
+    }
     )
     const all = await resumed.getAllDrafts() as tl.RawUpdates
     expect(all.updates).toEqual([
@@ -236,9 +241,13 @@ describe('bridge-local rich drafts', () => {
       async getUser(_session, id) { return { id, firstName: id === 'self' ? 'Self' : 'Alice' } },
       async sendMessage() { throw new Error('a rich draft never sends') },
     }
-    const rpc = new DialogRpc(
-      platform, session, store, uploads, undefined, 1, undefined, undefined, undefined, undefined,
-      'source-auth-key', undefined, drafts, async () => {},
+    const rpc = new DialogRpc(platform, session, store, {
+        uploads: uploads,
+        dcId: 1,
+        authKeyId: 'source-auth-key',
+        drafts: drafts,
+        onDraftUpdate: async () => {},
+    }
     )
     disposals.push(async () => { await rm(directory, { recursive: true, force: true }) })
     await rpc.getDialogs(getDialogsRequest())

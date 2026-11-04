@@ -39,11 +39,11 @@ function makeProjectionRpc(
   systemPeers?: SystemPeerService,
   messageProjection?: MessageProjectionPipeline,
 ): DialogRpc {
-  return new DialogRpc(
-    platform, session,
-    undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, systemPeers,
-    messageProjection,
+  return new DialogRpc(platform, session, undefined, {
+        dcId: 1,
+        systemPeers: systemPeers,
+        messageProjection: messageProjection,
+    }
   )
 }
 
@@ -1043,10 +1043,11 @@ describe('DialogRpc', () => {
   it('maps Telegram read boundaries back to opaque platform messages', async () => {
     const platform = new DialogTestPlatform()
     const localEvents: Array<{ event: import('./platform.js').IMEvent, options: unknown }> = []
-    const rpc = new DialogRpc(
-      platform, session, undefined, undefined, undefined, 1, undefined, undefined, undefined,
-      async (_session, event, options) => { localEvents.push({ event, options }) },
-      'source-auth-key',
+    const rpc = new DialogRpc(platform, session, undefined, {
+        dcId: 1,
+        onLocalEvent: async (_session, event, options) => { localEvents.push({ event, options }) },
+        authKeyId: 'source-auth-key',
+    }
     )
     const peer = { _: 'inputPeerUser' as const, userId: peerStableId('alice'), accessHash: Long.ZERO }
     const history = await rpc.getHistory(getHistoryRequest(peer.userId)) as tl.messages.RawMessages
@@ -1603,7 +1604,10 @@ describe('DialogRpc', () => {
       }] },
     })
     const reactions = new ReactionRpc(platform, session)
-    const rpc = new DialogRpc(platform, session, undefined, undefined, undefined, 1, undefined, reactions)
+    const rpc = new DialogRpc(platform, session, undefined, {
+        dcId: 1,
+        reactions: reactions,
+      })
     await rpc.getDialogs(getDialogsRequest())
     const aliceId = rpc.peerTlId('alice')
     const history = await rpc.getHistory(getHistoryRequest(aliceId)) as tl.messages.RawMessages
@@ -1792,8 +1796,7 @@ describe('DialogRpc', () => {
   })
 
   it('bounds the per-device message indexes when the store can answer a miss', () => {
-    const indexed = new DialogRpc(
-      new DialogTestPlatform(), session, {} as MessageStore,
+    const indexed = new DialogRpc(new DialogTestPlatform(), session, {} as MessageStore
     ) as unknown as DialogMessageIndexes
     for (const map of [indexed._messageToTl, indexed._tlToMessage, indexed._messageOutgoingByTl]) {
       expect(map.limit).toBeGreaterThan(0)
@@ -1802,8 +1805,7 @@ describe('DialogRpc', () => {
   })
 
   it('keeps the per-device message indexes complete without a durable store', () => {
-    const indexed = new DialogRpc(
-      new DialogTestPlatform(), session,
+    const indexed = new DialogRpc(new DialogTestPlatform(), session
     ) as unknown as DialogMessageIndexes
     for (const map of [indexed._messageToTl, indexed._tlToMessage, indexed._messageOutgoingByTl]) {
       expect(map.limit).toBe(Number.POSITIVE_INFINITY)

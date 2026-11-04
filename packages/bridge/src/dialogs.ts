@@ -252,6 +252,37 @@ export interface CrossgramFeatures {
 }
 
 /** 单个授权会话的对话与历史消息 RPC 处理器，负责 Telegram 数字 ID 与平台字符串 ID 的双向映射。 */
+export interface DialogRpcOptions {
+  uploads?: UploadManager
+  onTransferProgress?: (session: PlatformSession, progress: IMTransferProgress) => void | Promise<void>
+  dcId?: number
+  stickers?: StickerRpc
+  reactions?: ReactionRpc
+  resources?: TelegramResourceService
+  onLocalEvent?: (
+    session: PlatformSession,
+    event: IMEvent,
+    options?: PlatformEventDeliveryOptions,
+  ) => Promise<PlatformEventPublishResult>
+  authKeyId?: string
+  onTrace?: (format: string, ...args: unknown[]) => void
+  drafts?: DraftStore
+  onDraftUpdate?: (
+    session: PlatformSession,
+    update: tl.RawUpdateDraftMessage,
+    excludeAuthKeyId?: string,
+  ) => Promise<void>
+  notificationSettings?: NotificationSettingsStore
+  authenticatedSelfId?: number
+  blockedPeers?: BlockedPeerStore
+  dialogFolders?: DialogFolderStore
+  systemPeers?: SystemPeerService
+  messageProjection?: MessageProjectionPipeline
+  sendEchoes?: SendEchoes
+  scheduled?: ScheduledMessageStore
+  onScheduledChange?: () => void
+}
+
 export class DialogRpc {
   private static readonly PEER_HYDRATION_TTL_MS = 5_000
   private static readonly REACTION_REFRESH_FAILURE_COOLDOWN_MS = 30_000
@@ -300,40 +331,59 @@ export class DialogRpc {
   private _peersHydratedPeerRevision = -1
   private _peerHydration?: Promise<void>
   private _userHydration?: Promise<void>
+  private readonly _uploads?: UploadManager
+  private readonly _onTransferProgress?: (session: PlatformSession, progress: IMTransferProgress) => void | Promise<void>
+  private readonly _dcId: number = 1
+  private readonly _stickers?: StickerRpc
+  private readonly _reactions?: ReactionRpc
+  private readonly _resources?: TelegramResourceService
+  private readonly _onLocalEvent?: DialogRpcOptions['onLocalEvent']
+  private readonly _authKeyId?: string
+  private readonly _onTrace?: DialogRpcOptions['onTrace']
+  private readonly _drafts?: DraftStore
+  private readonly _onDraftUpdate?: DialogRpcOptions['onDraftUpdate']
+  private readonly _notificationSettings?: NotificationSettingsStore
+  private readonly _authenticatedSelfId?: number
+  private readonly _blockedPeers?: BlockedPeerStore
+  private readonly _dialogFolders?: DialogFolderStore
+  private readonly _systemPeers?: SystemPeerService
+  private readonly _messageProjection?: MessageProjectionPipeline
+  private readonly _sendEchoes?: SendEchoes
+  private readonly _scheduled?: ScheduledMessageStore
+  private readonly _onScheduledChange?: () => void
 
   constructor(
     private readonly _platform: IMPlatform<any>,
     private readonly _session: PlatformSession,
     store?: MessageStore,
-    private readonly _uploads?: UploadManager,
-    private readonly _onTransferProgress?: (session: PlatformSession, progress: IMTransferProgress) => void | Promise<void>,
-    private readonly _dcId = 1,
-    private readonly _stickers?: StickerRpc,
-    private readonly _reactions?: ReactionRpc,
-    private readonly _resources?: TelegramResourceService,
-    private readonly _onLocalEvent?: (
-      session: PlatformSession,
-      event: IMEvent,
-      options?: PlatformEventDeliveryOptions,
-    ) => Promise<PlatformEventPublishResult>,
-    private readonly _authKeyId?: string,
-    private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
-    private readonly _drafts?: DraftStore,
-    private readonly _onDraftUpdate?: (
-      session: PlatformSession,
-      update: tl.RawUpdateDraftMessage,
-      excludeAuthKeyId?: string,
-    ) => Promise<void>,
-    private readonly _notificationSettings?: NotificationSettingsStore,
-    private readonly _authenticatedSelfId?: number,
-    private readonly _blockedPeers?: BlockedPeerStore,
-    private readonly _dialogFolders?: DialogFolderStore,
-    private readonly _systemPeers?: SystemPeerService,
-    private readonly _messageProjection?: MessageProjectionPipeline,
-    private readonly _sendEchoes?: SendEchoes,
-    private readonly _scheduled?: ScheduledMessageStore,
-    private readonly _onScheduledChange?: () => void,
+    options: DialogRpcOptions = {},
   ) {
+    const {
+      uploads, onTransferProgress, dcId = 1, stickers, reactions, resources,
+      onLocalEvent, authKeyId, onTrace, drafts, onDraftUpdate,
+      notificationSettings, authenticatedSelfId, blockedPeers, dialogFolders,
+      systemPeers, messageProjection, sendEchoes, scheduled, onScheduledChange,
+    } = options
+    this._uploads = uploads
+    this._onTransferProgress = onTransferProgress
+    this._dcId = dcId
+    this._stickers = stickers
+    this._reactions = reactions
+    this._resources = resources
+    this._onLocalEvent = onLocalEvent
+    this._authKeyId = authKeyId
+    this._onTrace = onTrace
+    this._drafts = drafts
+    this._onDraftUpdate = onDraftUpdate
+    this._notificationSettings = notificationSettings
+    this._authenticatedSelfId = authenticatedSelfId
+    this._blockedPeers = blockedPeers
+    this._dialogFolders = dialogFolders
+    this._systemPeers = systemPeers
+    this._messageProjection = messageProjection
+    this._sendEchoes = sendEchoes
+    this._scheduled = scheduled
+    this._onScheduledChange = onScheduledChange
     this._actions = new PlatformMessageActions(_platform, _session)
     // 有 `MessageStore` 时淘汰旧条目并由数据库兜底；无存储模式不可淘汰，避免重用已分配的 ID。
     const messageIndexLimit = store ? MAX_CACHED_MESSAGE_INDEX_ENTRIES : Number.POSITIVE_INFINITY
@@ -343,8 +393,8 @@ export class DialogRpc {
     if (store) {
       this._store = store
       this._data = new PlatformDataService(
-        _platform, _session, store, _onTrace, undefined,
-        _onLocalEvent ? (event, options) => _onLocalEvent(_session, event, options) : undefined,
+        _platform, _session, store, onTrace, undefined,
+        onLocalEvent ? (event, options) => onLocalEvent(_session, event, options) : undefined,
       )
     }
   }

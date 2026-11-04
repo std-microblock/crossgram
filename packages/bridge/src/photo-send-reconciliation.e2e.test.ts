@@ -132,7 +132,9 @@ describe('photo send reconciliation RPC e2e', () => {
     const store = new MessageStore(ctx.database)
     const peerId = (await store.upsertUser(session, { id: conversation.id, firstName: conversation.title })).id
     const uploads = new UploadManager(directory)
-    const dialogs = new DialogRpc(platform, session, store, uploads)
+    const dialogs = new DialogRpc(platform, session, store, {
+        uploads: uploads,
+      })
     const rpc = createCordisRpcTestHarness()
     rpc.register('messages.uploadMedia', async (_context, request) =>
       dialogs.uploadMedia(request as tl.messages.RawUploadMediaRequest))

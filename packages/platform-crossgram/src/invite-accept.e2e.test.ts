@@ -104,9 +104,10 @@ describe('QQNT group-invite accept E2E', () => {
     await store.upsertUser(session, { id: 'invite-room', firstName: 'Invite room' })
 
     const edits: IMEvent[] = []
-    const rpc = new DialogRpc(platform, session, store, undefined, undefined, 1,
-      undefined, undefined, undefined,
-      async (_session, event) => { edits.push(event) })
+    const rpc = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        onLocalEvent: async (_session, event) => { edits.push(event) },
+      })
 
     // getMessages hydrates the store's conversations and users first so the
     // direct peer id below resolves as a user id, not a channel one.

@@ -1660,25 +1660,28 @@ export function createSessionResolver(
       stickers: stickerRpcFor(platform, session),
       dialogs: undefined as never,
     }
-    state.dialogs = new DialogRpc(
-      platform, session, store, uploads, onTransferProgress, dcId, state.stickers,
-      reactionRpcFor(platform, session),
+    state.dialogs = new DialogRpc(platform, session, store, {
+      uploads,
+      onTransferProgress,
+      dcId,
+      stickers: state.stickers,
+      reactions: reactionRpcFor(platform, session),
       resources,
-      (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
-      options.authKeyId,
-      historyTrace,
+      onLocalEvent: (localSession, event, options) => subscriptions.ingestLocalEvent(localSession, event, options),
+      authKeyId: options.authKeyId,
+      onTrace: historyTrace,
       drafts,
       onDraftUpdate,
       notificationSettings,
-      selfRow.id,
+      authenticatedSelfId: selfRow.id,
       blockedPeers,
       dialogFolders,
       systemPeers,
-      projection,
+      messageProjection: projection,
       sendEchoes,
       scheduled,
       onScheduledChange,
-    )
+    })
     return state
   }
 

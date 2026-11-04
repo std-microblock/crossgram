@@ -71,9 +71,10 @@ describe('request inbox callback RPC e2e', () => {
       async (activeSession, request) => { await peers.emit(activeSession, { type: 'request', request, delivery: 'recovery' }) },
       onError,
     ))
-    const dialogs = new DialogRpc(
-      platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, peers,
+    const dialogs = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        systemPeers: peers,
+    }
     )
     harness.register('messages.getDialogs', async (_context, request) =>
       dialogs.getDialogs(request as tl.messages.RawGetDialogsRequest))

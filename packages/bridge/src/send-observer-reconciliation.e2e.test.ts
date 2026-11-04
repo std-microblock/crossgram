@@ -114,15 +114,15 @@ describe('sent-message observer reconciliation e2e', () => {
         return 1
       },
     )
-    const dialogs = new DialogRpc(
-      platform, session, store,
-      undefined, undefined, 1, undefined, undefined, undefined,
-      async (localSession, event, options) => {
+    const dialogs = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        onLocalEvent: async (localSession, event, options) => {
         if (event.type !== 'message') return
         const result = await store.ingest(localSession, event.conversation, event.message)
         return manager.publish(localSession, { event, result }, options)
       },
-      REQUESTER_AUTH_KEY,
+        authKeyId: REQUESTER_AUTH_KEY,
+    }
     )
     const rpc = createCordisRpcTestHarness()
     rpc.register('messages.sendMessage', async (context, request) =>
@@ -290,18 +290,17 @@ describe('sent-message observer reconciliation e2e', () => {
       1, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       sendEchoes,
     )
-    const dialogs = new DialogRpc(
-      platform, session, store,
-      undefined, undefined, 1, undefined, undefined, undefined,
-      async (localSession, event, options) => {
+    const dialogs = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        onLocalEvent: async (localSession, event, options) => {
         if (event.type !== 'message') return
         boundDuringPublish.push(sendEchoes.excludeFor(localSession, event.message))
         const result = await store.ingest(localSession, event.conversation, event.message)
         return manager.publish(localSession, { event, result }, options)
       },
-      REQUESTER_AUTH_KEY,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      sendEchoes,
+        authKeyId: REQUESTER_AUTH_KEY,
+        sendEchoes: sendEchoes,
+    }
     )
     await (dialogs as any)._hydratePeers()
     const rpc = createCordisRpcTestHarness()

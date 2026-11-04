@@ -433,7 +433,9 @@ describe('rich-media projection', () => {
     if (!rowId) throw new Error('expected persisted media row')
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-row-id-'))
     disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
-    const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
+    const rpc = new DialogRpc(platform, session, store, {
+        uploads: new UploadManager(uploadPath),
+      })
     const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const projected = (history.messages.at(-1) as tl.RawMessage).media as tl.RawMessageMediaPhoto
     if (projected.photo?._ !== 'photo') throw new Error('expected projected photo')
@@ -523,8 +525,11 @@ describe('rich-media projection', () => {
       getFileUrl: vi.fn(async () => undefined),
       getFile: vi.fn(async () => ({ bytes: Uint8Array.from([4, 5, 6]), mimeType: 'image/apng' })),
     }
-    const rpc = new DialogRpc(
-      platform, session, store, undefined, undefined, 1, sticker as never, reaction as never,
+    const rpc = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        stickers: sticker as never,
+        reactions: reaction as never,
+    }
     )
     const stickerId = Long.fromNumber(7001)
     const stickerReference = new TextEncoder().encode('bridge-sticker:qq:wave:1')
@@ -845,9 +850,10 @@ describe('rich-media projection', () => {
       reactionContext: { available: [definition], reactions: [], maxSelected: 1 },
     }
     const reactions = new ReactionRpc(platform, session)
-    const result = await new DialogRpc(
-      { ...platform, async getHistory() { return { messages: [article] } }, },
-      session, store, undefined, undefined, 1, undefined, reactions,
+    const result = await new DialogRpc({ ...platform, async getHistory() { return { messages: [article] } }, }, session, store, {
+        dcId: 1,
+        reactions: reactions,
+      }
     ).getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const message = result.messages[0] as tl.RawMessage
     const richMessage = message.richMessage!
@@ -1042,7 +1048,9 @@ describe('rich-media projection', () => {
     }
     const rpc = new DialogRpc({
       ...platform, async getHistory() { return { messages: [photo] } },
-    }, session, store, new UploadManager(uploadPath))
+    }, session, store, {
+        uploads: new UploadManager(uploadPath),
+      })
     const result = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const message = result.messages.find((item) => item._ === 'message'
       && item.media?._ === 'messageMediaPhoto') as tl.RawMessage
@@ -1147,7 +1155,9 @@ describe('rich-media projection', () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
     disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
-    const rpc = new DialogRpc(platform, session, store, new UploadManager(uploadPath))
+    const rpc = new DialogRpc(platform, session, store, {
+        uploads: new UploadManager(uploadPath),
+      })
     const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const media = (history.messages.at(-1) as tl.RawMessage).media as tl.RawMessageMediaPhoto
     if (media.photo?._ !== 'photo') throw new Error('expected photo')
@@ -1197,8 +1207,9 @@ describe('rich-media projection', () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-zero-size-preview-'))
     disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
-    const rpc = new DialogRpc(
-      zeroSizePreviewPlatform, session, store, new UploadManager(uploadPath),
+    const rpc = new DialogRpc(zeroSizePreviewPlatform, session, store, {
+        uploads: new UploadManager(uploadPath),
+    }
     )
     const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const projected = (history.messages[0] as tl.RawMessage).media as tl.RawMessageMediaDocument
@@ -1317,7 +1328,9 @@ describe('rich-media projection', () => {
         throw new IMMediaUnavailableError('upstream media expired')
       },
     }
-    const rpc = new DialogRpc(unavailablePlatform, session, store, new UploadManager(uploadPath))
+    const rpc = new DialogRpc(unavailablePlatform, session, store, {
+        uploads: new UploadManager(uploadPath),
+      })
     const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const media = (history.messages.at(-1) as tl.RawMessage).media as tl.RawMessageMediaPhoto
     if (media.photo?._ !== 'photo') throw new Error('expected photo')
@@ -1485,7 +1498,9 @@ describe('rich-media projection', () => {
     }
     const rpc = new DialogRpc({
       ...platform, async getHistory() { return { messages: [animated] } },
-    }, session, store, new UploadManager(uploadPath))
+    }, session, store, {
+        uploads: new UploadManager(uploadPath),
+      })
     const result = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
     const projected = result.messages.find((message) => message._ === 'message'
       && message.media?._ === 'messageMediaDocument'

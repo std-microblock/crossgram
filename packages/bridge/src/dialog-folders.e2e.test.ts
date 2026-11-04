@@ -70,10 +70,10 @@ function makeContext(): ServerRpcContext {
 }
 
 function createDialog(folders: DialogFolderStore, targetPlatform: IMPlatform = platform, store?: MessageStore): DialogRpc {
-  return new DialogRpc(
-    targetPlatform, session, store, undefined, undefined, 1,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, folders,
+  return new DialogRpc(targetPlatform, session, store, {
+        dcId: 1,
+        dialogFolders: folders,
+    }
   )
 }
 

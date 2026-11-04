@@ -150,10 +150,11 @@ describe('scheduled message RPC e2e', () => {
     const store = new MessageStore(ctx.database)
     const scheduled = new ScheduledMessageStore(ctx.database)
     const peerId = (await store.upsertUser(session, { id: 'peer', firstName: 'Peer' })).id
-    const dialogs = new DialogRpc(
-      platform, session, store, undefined, undefined, 1, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined, 1, undefined,
-      undefined, undefined, undefined, undefined, scheduled,
+    const dialogs = new DialogRpc(platform, session, store, {
+        dcId: 1,
+        authenticatedSelfId: 1,
+        scheduled: scheduled,
+    }
     )
     const rpc = createCordisRpcTestHarness()
     disposals.push(async () => rpc.dispose())
