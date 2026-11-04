@@ -4560,6 +4560,18 @@ export class DialogRpc {
       let anchor = anchorId
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, anchorId, peerId)
         : undefined
+      // 客户端往更新方向翻页时把「本机最大消息 ID + 1」当 `offset_id`（Telegram Desktop 的
+      // `loadMessagesDown`、TDLib 的 `get_next_server_message_id` 都是这么发的），这个 ID 本身
+      // 不是一条消息，要还原成紧挨着它下面的那条真实消息。锚点缺失时下面会退化成一整页最新
+      // 消息，客户端于是把最新一页接到本地列表末尾，中间留下永远补不上的断层。
+      const synthesizedAnchor = !anchor
+        && (request.addOffset ?? 0) < 0
+        && (request.offsetId ?? 0) > 1
+      if (synthesizedAnchor) {
+        anchor = await this._store.findProjectedBeforeTlId(
+          this._session.platformSessionId, peerId, request.offsetId,
+        )
+      }
       const anchorMs = performance.now() - anchorAt
       const fetchLimit = Math.max(1, Math.min(
         (request.limit ?? 1) + Math.abs(request.addOffset ?? 0) + 1,
@@ -4567,7 +4579,8 @@ export class DialogRpc {
       ))
       const negativeOffset = (request.addOffset ?? 0) < 0
       const readInboxMaxMessageId = this._readInboxMaxMessageIds.get(peerId)
-      const isAroundUnread = () => negativeOffset && anchor && (
+      // 只有客户端点名要的那条消息才可能是未读边界；还原出来的锚点只是它手上最新的一条。
+      const isAroundUnread = () => negativeOffset && !synthesizedAnchor && anchor && (
         anchor.source.id === readInboxMaxMessageId
         || anchor.source.sourceIds?.includes(readInboxMaxMessageId ?? '')
       )
@@ -4577,7 +4590,10 @@ export class DialogRpc {
         } else if (negativeOffset && anchor) {
           const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
           await this._data!.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
-          await this._data!.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
+          // 还原出来的锚点来自客户端已经加载过的那一段，它更早的那半边本来就在库里，不用再拉。
+          if (!synthesizedAnchor) {
+            await this._data!.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
+          }
         } else {
           await this._data!.syncHistory(peerId, {
             limit: fetchLimit,

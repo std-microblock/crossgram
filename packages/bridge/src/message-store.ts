@@ -192,6 +192,8 @@ export const ACCOUNT_UPDATE_SCOPE = 'account'
 // 发布方持有无 payload 预留记录的最大宽限期；超时后读取侧视为卡死并直接清理。
 const CLAIMED_DELIVERY_GRACE_SECONDS = 30
 const STORED_REPLY_TO_KEY = '__mtprotoRelayReplyToId'
+/** 定位「锚点下面最近一条消息」时，一次往下取多少个候选分片（撤回的分片会被跳过）。 */
+const PRECEDING_ANCHOR_CANDIDATES = 16
 
 function storedReplyToId(metadata: JsonObject): string | undefined {
   const value = metadata[STORED_REPLY_TO_KEY]
@@ -1472,6 +1474,50 @@ export class MessageStore {
       media: await this._database.select('mtproto_im_media', { messageId: row.id })
         .orderBy('ordinal').execute(),
     }
+  }
+
+  /**
+   * 会话里 `tlMessageId` 严格小于给定值的最新一条消息。
+   *
+   * 客户端往更新方向翻页时把「本机最大消息 ID + 1」当锚点（Telegram Desktop 的
+   * `loadMessagesDown`、TDLib 的 `get_next_server_message_id` 都是这样），这个 ID 本身
+   * 不是一条消息，所以锚点要靠它下面最近的一条真实消息定位。
+   */
+  async findProjectedBeforeTlId(
+    platformSessionId: string,
+    platformConversationId: string,
+    tlMessageId: number,
+  ): Promise<ProjectedMessage | undefined> {
+    if (!Number.isSafeInteger(tlMessageId) || tlMessageId <= 1) return
+    // 客户端手上的最大 ID 就是服务端下发过的 ID，减一直接命中；这条路径只有一次唯一索引查询。
+    const preceding = await this.findProjectedByTlId(
+      platformSessionId, tlMessageId - 1, platformConversationId,
+    )
+    if (preceding) return preceding
+    // 会话里最新的消息就已经在锚点下面（客户端停在很旧的位置，或它手上的最大那条被撤回了）：
+    // 一步读到最新一条即可，不用扫分片表。
+    const [newest] = await this.readProjectedHistory(
+      platformSessionId, platformConversationId, { limit: 1 },
+    )
+    const newestTlId = newest?.parts[0]?.tlMessageId
+    if (newestTlId !== undefined && newestTlId < tlMessageId) return newest
+    // 否则从锚点往下取一小批候选分片，挑出最新的、仍然存活的那条：撤回只把消息行标成
+    // deleted，分片行还在，所以候选必须按消息行的存活状态筛。
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId, platformConversationId,
+    })
+    if (!conversation) return
+    const candidates = await this._database.select('mtproto_tl_message_part', {
+      platformSessionId, conversationId: conversation.id, tlMessageId: { $lt: tlMessageId },
+    }).orderBy('tlMessageId', 'desc').limit(PRECEDING_ANCHOR_CANDIDATES).execute()
+    if (!candidates.length) return
+    const alive = await this._database.get('mtproto_im_message', {
+      id: { $in: [...new Set(candidates.map((part) => part.messageId))] }, deleted: false,
+    })
+    const aliveIds = new Set(alive.map((row) => row.id))
+    const candidate = candidates.find((part) => aliveIds.has(part.messageId))
+    if (!candidate) return
+    return this.findProjectedByTlId(platformSessionId, candidate.tlMessageId, platformConversationId)
   }
 
   async findProjectedByNativeSequence(
