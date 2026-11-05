@@ -25,6 +25,7 @@ import * as staticPlatformPlugin from '@mtproto-relay/platform-static'
 import * as telegramBotApi from '@mtproto-relay/telegram-bot-api'
 import { openE2eClient, runE2eProbe, type E2eClientEvent } from '@mtproto-relay/mtproto-e2e-client'
 import { updateToJson } from '../../bridge/src/update-json.js'
+import { MessageStore } from '../../bridge/src/message-store.js'
 import { getApiLayerReaderMap, getApiLayerWriterMap } from '../../mtproto/src/rpc/api-layer.js'
 import {
   assignStaticStickerPacksThroughDashboard, postChunked, startApp, waitForPlatformLogin,
@@ -1362,6 +1363,91 @@ describe('bridge login e2e', () => {
           file10mMd5: new Uint8Array(16), width: 0, height: 0, duration: 0,
           thumbnail: new Uint8Array(0), thumbnailWidth: 0, thumbnailHeight: 0,
         }, sub += 2, crossgramMaps)).toEqual({ _: 'boolFalse' })
+      }
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
+  it('pages desktop shared media in both directions across the legacy 30-bit sentinel', async () => {
+    const conversation: bridge.IMConversation = { id: 'media-pages', kind: 'group', title: 'Shared media pages' }
+    const messages: bridge.IMMessage[] = Array.from({ length: 125 }, (_, index) => ({
+      id: `media-${index}`, conversationId: conversation.id, senderId: 'self', timestamp: 1_790_000_000 + index,
+      content: { parts: [
+        { type: 'text', text: `media ${index}` },
+        { type: 'media', media: { id: `photo-${index}`, kind: 'image', name: `${index}.png`,
+          mimeType: 'image/png', size: 10, width: 10, height: 10, locator: { index } } },
+        { type: 'media', media: { id: `video-${index}`, kind: 'file', name: `${index}.mp4`,
+          mimeType: 'video/mp4', size: 10, width: 10, height: 10, locator: { index } } },
+        { type: 'media', media: { id: `file-${index}`, kind: 'file', name: `${index}.pdf`,
+          mimeType: 'application/pdf', size: 10, locator: { index } } },
+      ] },
+    }))
+    const platform: bridge.IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: false, images: false, files: false, mixed: false, maxTextLength: 0, maxMedia: 0 },
+        conversations: { groups: true, channels: false, subchannels: false },
+      },
+      async getAccount() { return { credentials: {}, user: { id: 'self', firstName: 'Media pages' } } },
+      async subscribe() { return () => {} },
+      async getDialogs() { return { dialogs: [{ conversation, unreadCount: 0 }] } },
+      async getHistory() { return { messages: messages.slice().reverse() } },
+      async getUser(_session, id) { return { id, firstName: 'Media pages' } },
+      async sendMessage() { throw new Error('unused') },
+    }
+    const platformId = 'media-pages-e2e'
+    const { ctx, port, pubKey, stop } = await startApp({ platform: { id: platformId, adapter: platform } })
+    let client: TestClient | undefined
+    try {
+      const login = await waitForPlatformLogin(ctx, platformId)
+      await new MessageStore(ctx.database).ingestMany({
+        ...login.session, platformSessionId: login.session.id,
+      }, conversation, messages, { allocation: 'history' })
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const sid = new Long(0x76543212, 0x4abd, false)
+      let sub = 0
+      const rpc = (request: object) => callRpc(client!, key, sid, request, sub += 2)
+      const sent = await rpc({
+        _: 'auth.sendCode', phoneNumber: '+' + login.auth.virtualPhone, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      })
+      await rpc({
+        _: 'auth.signIn', phoneNumber: login.auth.virtualPhone, phoneCodeHash: sent.phoneCodeHash,
+        phoneCode: bridge.generateLoginCode(login.auth.totpSecret),
+      })
+      const dialogs = await rpc({
+        _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+        offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+      })
+      const peer = { _: 'inputPeerChannel', channelId: dialogs.chats[0].id, accessHash: Long.ZERO }
+      for (const type of ['inputMessagesFilterPhotos', 'inputMessagesFilterVideo', 'inputMessagesFilterDocument']) {
+        const search = (offsetId: number, addOffset = 0, limit = 100) => rpc({
+          _: 'messages.search', peer, q: '', filter: { _: type }, minDate: 0, maxDate: 0,
+          offsetId, addOffset, limit, maxId: 0, minId: 0, hash: Long.ZERO,
+        })
+        expect(await search(0, 0, 0)).toMatchObject({ count: 125, messages: [] })
+        const first = await search(0x3fffffff, -50)
+        expect(first).toMatchObject({ count: 125, offsetIdOffset: 0 })
+        expect(first.messages).toHaveLength(100)
+        expect(first.messages.every((message: any) => message.id > 0x3fffffff && message.date > 0)).toBe(true)
+        const next = await search(first.messages.at(-1).id)
+        expect(next).toMatchObject({ count: 125, offsetIdOffset: 100 })
+        expect(next.messages).toHaveLength(25)
+        expect(new Set([...first.messages, ...next.messages].map((message: any) => message.id)).size).toBe(125)
+        // 抓包中不断重试的“当前最新 ID + 1，往更新方向取 100 条”必须明确返回顶部边界。
+        const newer = await search(first.messages[0].id + 1, -100)
+        expect(newer).toMatchObject({ count: 125, offsetIdOffset: 0 })
+        expect(newer.messages.map((message: any) => message.id)).toEqual(first.messages.map((message: any) => message.id))
+        const end = await search(next.messages.at(-1).id)
+        expect(end).toMatchObject({ count: 125, offsetIdOffset: 125, messages: [] })
+        if (type === 'inputMessagesFilterVideo') {
+          expect(first.messages[0].media.document.attributes).toEqual(expect.arrayContaining([
+            expect.objectContaining({ _: 'documentAttributeVideo' }),
+          ]))
+        }
       }
     } finally {
       client?.close()

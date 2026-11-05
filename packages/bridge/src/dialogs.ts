@@ -149,6 +149,8 @@ interface LocalSearchResult {
   exact: boolean
   hasMore: boolean
   sliced: boolean
+  /** 当前页在完整搜索结果中的偏移，供共享媒体客户端判断两端边界。 */
+  offsetIdOffset?: number
 }
 
 /** 单次搜索最多向数据库取几批，防止极稀疏的过滤条件扫完整个账号。 */
@@ -1154,6 +1156,35 @@ export class DialogRpc {
       kinds: kinds || undefined,
     }
     const singleConversation = options.conversationIds?.length === 1 ? options.conversationIds[0] : undefined
+    // 共享媒体的计数/位置请求已建立同一份分片索引，直接按索引取窗口，既复用扫描，
+    // 也能保留 offsetId 两侧的结果。负 addOffset 不能退化成只向旧消息扫描。
+    if (singleConversation && (kinds || options.addOffset < 0)) {
+      let offsetId = options.offsetId
+      // 抓包中的客户端用旧的 30 位上界表示共享媒体列表起点；本项目的合法 ID 可超过它。
+      // 仅在它不是实际消息锚点时兼容，不能把真实锚点或显式 maxId 一起放宽。
+      if (kinds && offsetId === 0x3fffffff && !await this._store.findProjectedByTlId(
+        this._session.platformSessionId, offsetId, singleConversation,
+      )) offsetId = 0
+      const index = (await this._filterMissedCalls(
+        await this._store.searchPartIndex(this._session.platformSessionId, query), options.filter,
+      )).filter((entry) =>
+        (options.maxId <= 0 || entry.tlMessageId < options.maxId)
+        && (options.minId <= 0 || entry.tlMessageId > options.minId))
+      // offsetId 本身不包含在向旧方向的页中；负偏移从这个插入位置往更新方向移动。
+      const olderIndex = offsetId > 0 ? index.findIndex((entry) => entry.tlMessageId < offsetId) : 0
+      const anchor = olderIndex < 0 ? index.length : olderIndex
+      const start = Math.max(0, anchor + options.addOffset)
+      const limit = clampLimit(options.limit)
+      const page = await this._visibleMessages(await this._materializeIndexEntries(
+        index.slice(start, start + limit), options.filter,
+      ))
+      return {
+        page, count: index.length, exact: true,
+        hasMore: start + limit < index.length,
+        sliced: limit === 0 || start > 0 || index.length > page.length || options.offsetId > 0,
+        offsetIdOffset: Math.min(start, index.length),
+      }
+    }
     // Telegram 消息 ID 只在单个会话内有序，`offsetId`/`maxId`/`minId` 只用于会话内搜索。
     const upperTlId = singleConversation
       ? Math.min(...[options.offsetId, options.maxId].filter((id) => id > 0), Number.POSITIVE_INFINITY)
@@ -1302,6 +1333,7 @@ export class DialogRpc {
       _: 'messages.messagesSlice',
       ...(result.exact ? {} : { inexact: true }),
       count: result.count,
+      ...(result.offsetIdOffset !== undefined ? { offsetIdOffset: result.offsetIdOffset } : {}),
       ...(global && result.hasMore && last ? { nextRate: last.source.timestamp } : {}),
       messages: projected.messages,
       topics: [],

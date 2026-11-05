@@ -216,6 +216,72 @@ describe('local message search', () => {
     for (const result of [first, second, skipped, countOnly, capped]) expect(() => roundTrip(result)).not.toThrow()
   })
 
+  it('moves negative offsets toward newer matching messages and reports both page boundaries', async () => {
+    const { rpc, peers } = await setup([[alice, Array.from({ length: 7 }, (_, index) =>
+      text(`negative-${index}`, alice, BASE + index, `needle ${index}`))]])
+    const all = await rpc.search(searchRequest(peers.alice, { q: 'needle' }))
+    const anchor = ids(all)[4]!
+    const around = await rpc.search(searchRequest(peers.alice, {
+      q: 'needle', offsetId: anchor, addOffset: -3, limit: 3,
+    }))
+    expect(texts(around)).toEqual(['needle 4', 'needle 3', 'needle 2'])
+    expect(around).toMatchObject({ count: 7, offsetIdOffset: 2 })
+    expect((around as tl.messages.RawMessagesSlice).inexact).toBeUndefined()
+
+    const newest = await rpc.search(searchRequest(peers.alice, {
+      q: 'needle', offsetId: ids(all)[0]! + 1, addOffset: -100, limit: 3,
+    }))
+    expect(texts(newest)).toEqual(['needle 6', 'needle 5', 'needle 4'])
+    expect(newest).toMatchObject({ count: 7, offsetIdOffset: 0 })
+    const beforeOldest = await rpc.search(searchRequest(peers.alice, {
+      q: 'needle', offsetId: ids(all).at(-1)!, addOffset: -2, limit: 2,
+    }))
+    expect(texts(beforeOldest)).toEqual(['needle 1', 'needle 0'])
+    expect(beforeOldest).toMatchObject({ count: 7, offsetIdOffset: 5 })
+    for (const result of [around, newest, beforeOldest]) expect(() => roundTrip(result)).not.toThrow()
+  })
+
+  it('loads shared media above the legacy 30-bit list sentinel and pages to an exact end', async () => {
+    const { rpc, peers } = await setup([[alice, Array.from({ length: 7 }, (_, index) =>
+      mediaMessage(`photo-${index}`, alice, BASE + index, [image(`image-${index}`)], `photo ${index}`))]])
+    const filter = { _: 'inputMessagesFilterPhotos' as const }
+    const first = await rpc.search(searchRequest(peers.alice, { filter, offsetId: 0x3fffffff, limit: 3 }))
+    expect(texts(first)).toEqual(['photo 6', 'photo 5', 'photo 4'])
+    expect(ids(first).every((id) => id > 0x3fffffff)).toBe(true)
+    expect(first).toMatchObject({ count: 7, offsetIdOffset: 0 })
+    const second = await rpc.search(searchRequest(peers.alice, { filter, offsetId: ids(first).at(-1)!, limit: 3 }))
+    expect(texts(second)).toEqual(['photo 3', 'photo 2', 'photo 1'])
+    expect(second).toMatchObject({ count: 7, offsetIdOffset: 3 })
+    const last = await rpc.search(searchRequest(peers.alice, { filter, offsetId: ids(second).at(-1)!, limit: 3 }))
+    expect(texts(last)).toEqual(['photo 0'])
+    expect(last).toMatchObject({ count: 7, offsetIdOffset: 6 })
+    const empty = await rpc.search(searchRequest(peers.alice, { filter, offsetId: ids(last)[0]!, limit: 3 }))
+    expect(empty).toMatchObject({ count: 7, offsetIdOffset: 7, messages: [] })
+    const bounded = await rpc.search(searchRequest(peers.alice, {
+      filter, offsetId: 0x3fffffff, maxId: ids(first)[1]!, minId: ids(second)[1]!, limit: 100,
+    }))
+    expect(texts(bounded)).toEqual(['photo 4', 'photo 3'])
+    for (const result of [first, second, last, empty, bounded]) expect(() => roundTrip(result)).not.toThrow()
+  })
+
+  it('preserves a real message anchor equal to the legacy sentinel', async () => {
+    const { ctx, rpc, peers } = await setup([[alice, [0, 1, 2].map((index) =>
+      mediaMessage(`real-${index}`, alice, BASE + index, [image(`real-image-${index}`)], `photo ${index}`))]])
+    const rows = await ctx.database.get('mtproto_tl_message_part', { platformSessionId: session.platformSessionId })
+    for (const [index, row] of rows.entries()) {
+      await ctx.database.set('mtproto_tl_message_part', { id: row.id }, { tlMessageId: 0x3ffffffe + index })
+    }
+    const page = await rpc.search(searchRequest(peers.alice, {
+      filter: { _: 'inputMessagesFilterPhotos' }, offsetId: 0x3fffffff,
+    }))
+    expect(texts(page)).toEqual(['photo 0'])
+    expect(page).toMatchObject({ count: 3, offsetIdOffset: 2 })
+    const bounded = await rpc.search(searchRequest(peers.alice, {
+      filter: { _: 'inputMessagesFilterPhotos' }, maxId: 0x3fffffff,
+    }))
+    expect(texts(bounded)).toEqual(['photo 0'])
+  })
+
   it('excludes deleted messages and service tips from text search', async () => {
     const { rpc, store, peers } = await setup([[alice, [
       text('d1', alice, BASE + 1, 'secret kept'),
