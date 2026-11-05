@@ -4639,11 +4639,17 @@ export class DialogRpc {
           await this._data!.syncHistory(peerId, { limit: fetchLimit })
         } else if (negativeOffset && anchor) {
           const sourceAnchor = { id: anchor.source.id, timestamp: anchor.source.timestamp }
-          await this._data!.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor })
+          // 两个方向各自成功即可：一个方向到底/失败不能让另一个方向的窗口一起丢掉。
           // 还原出来的锚点来自客户端已经加载过的那一段，它更早的那半边本来就在库里，不用再拉。
+          const syncs = [
+            this._data!.syncHistory(peerId, { limit: fetchLimit, after: sourceAnchor }),
+          ]
           if (!synthesizedAnchor) {
-            await this._data!.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor })
+            syncs.push(this._data!.syncHistory(peerId, { limit: fetchLimit, before: sourceAnchor }))
           }
+          const results = await Promise.allSettled(syncs)
+          const rejected = results.filter((result) => result.status === 'rejected')
+          if (rejected.length === results.length) throw rejected[0].reason
         } else {
           await this._data!.syncHistory(peerId, {
             limit: fetchLimit,
@@ -4730,7 +4736,21 @@ export class DialogRpc {
       }
 
       const upstreamAt = performance.now()
-      if (!isLocalOnlyConversation(this._conversation(peerId))) await syncHistoryWindow()
+      // 上游读不到这一页（例如 QQ 在历史边界上返回 kNoMoreMsg 被旧版 bridge 当成 500）时，
+      // 不能连已经投影过的消息一起丢掉：整页 500 会让客户端把这个会话当成「完全没有历史」。
+      // 降级成本地投影仍然能把已入库的窗口返回给客户端，用户至少能看到已有的消息。
+      let upstreamError: unknown
+      if (!isLocalOnlyConversation(this._conversation(peerId))) {
+        try {
+          await syncHistoryWindow()
+        } catch (error) {
+          upstreamError = error
+          this._onTrace?.(
+            'history upstream sync failed; serving stored window peer=%s limit=%d error=%s',
+            peerId, fetchLimit, String(error),
+          )
+        }
+      }
       const upstreamMs = performance.now() - upstreamAt
       if (anchorId && !anchor) {
         anchor = await this._store.findProjectedByTlId(
@@ -4738,6 +4758,7 @@ export class DialogRpc {
         )
       }
       const stored = await readStoredWindow()
+      if (upstreamError && !stored.history.length) throw upstreamError
       this._onTrace?.(
         'history load profile peer=%s anchorId=%d anchorFound=%s fetchLimit=%d aroundUnread=%s projected=%d materialized=%d anchorMs=%d upstreamMs=%d usersMs=%d projectionReadMs=%d materializeMs=%d repliesMs=%d totalMs=%d',
         peerId, anchorId ?? 0, Boolean(anchor), fetchLimit, Boolean(isAroundUnread()),
