@@ -648,6 +648,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       if (!assigned && assignment.automatic) throw new Error('账号固有表情包不能取消关联。')
       await setStickerPackAssignment(ctx.database, platformSessionId, providerId, packId, assigned)
       await publishStickerPacks()
+      await announceStickerPackAssigned(platformSessionId, providerId, packId, assigned)
     },
     async setLoginPassword(platformId, password) {
       const [auth] = await ctx.database.get('mtproto_auth_session', { platformId })
@@ -701,6 +702,46 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
         },
       }
     })
+
+  /**
+   * 告知目标账号已连上的客户端：表情包归属变了。
+   *
+   * assign 只写数据库时，客户端本地那份 set 和列表不会失效 —— 只有重新登录才会重新拉全量。
+   * `updateNewStickerSet` 带完整 set，客户端当场装进列表（Telegram Desktop 要求 set 带
+   * installed_date 且没有 archived）；`updateStickerSets` 再让客户端重拉 `messages.getAllStickers`。
+   */
+  const announceStickerPackAssigned = async (
+    platformSessionId: string,
+    providerId: string,
+    packId: string,
+    assigned: boolean,
+  ): Promise<void> => {
+    const binding = platforms.sessions.find((item) => item.session.platformSessionId === platformSessionId)
+    if (!binding) return
+    const bindings = await ctx.database.get('mtproto_auth_binding', { platformSessionId })
+    if (!bindings.length) return
+    const updates: tl.TypeUpdate[] = []
+    if (assigned) {
+      try {
+        const set = await stickerRpcFor(
+          registry.require(binding.session.platformId),
+          binding.session,
+        ).makeStickerSetUpdate(providerId, packId)
+        if (set) updates.push({ _: 'updateNewStickerSet', stickerset: set })
+      } catch (error) {
+        // 归属已经写进数据库了，投影失败不该让面板报错；客户端仍能靠下面的列表失效拉到新状态。
+        bridgeLogger.warn('failed to project sticker set %s/%s: %s', providerId, packId, String(error))
+      }
+    }
+    updates.push({ _: 'updateStickerSets' })
+    const date = Math.floor(Date.now() / 1000)
+    for (const row of bindings) {
+      const authKeyId = Buffer.from(row.authKeyId, 'hex')
+      for (const update of updates) {
+        ctx.mtproto.sendUpdateToAuthKey(authKeyId, { _: 'updateShort', update, date })
+      }
+    }
+  }
 
   const publishStickerPacks = async (now = Date.now()) => {
     const snapshot = await collectStickerDashboard(ctx.database, stickerProviders.registry, stickerSourceAccounts())
@@ -782,6 +823,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       }
       await setStickerPackAssignment(ctx.database, platformSessionId, providerId, packId, assigned)
       await publishStickerPacks()
+      await announceStickerPackAssigned(platformSessionId, providerId, packId, assigned)
     },
   })
 
