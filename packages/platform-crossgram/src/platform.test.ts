@@ -2334,6 +2334,66 @@ describe('QQNTPlatform mapping', () => {
     }])
   })
 
+  it('sends an upload sticker plan as a plain image because QQ has no sticker for it', async () => {
+    const platform = new QQNTPlatform({}, 'qq-provider')
+    const bytes = await sharp({
+      create: { width: 24, height: 24, channels: 4, background: { r: 10, g: 200, b: 90, alpha: 1 } },
+    }).png().toBuffer()
+    let opened = 0
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent-image', conversationId: 'u', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{ type: 'text' as const, text: 'ok' }],
+    }))
+
+    await platform.sendMessage(session, { id: 'u' }, { parts: [{
+      type: 'sticker',
+      sticker: {
+        type: 'upload', providerId: 'telegram-plugins', stickerId: 'loose-static', packId: 'plugins',
+        format: 'static', mimeType: 'image/png', width: 24, height: 24,
+        source: {
+          size: bytes.length,
+          async *stream() { opened++; yield bytes },
+        },
+      },
+    }] })
+
+    const sentParts = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![1] as Array<{
+      type: string, media?: { kind: string, name: string, mimeType?: string, width?: number }
+    }>
+    expect(sentParts).toHaveLength(1)
+    expect(sentParts[0]).toMatchObject({
+      type: 'media',
+      media: { kind: 'image', mimeType: 'image/png', width: 24, height: 24 },
+    })
+    expect(sentParts[0]!.media!.name).toMatch(/^sticker-loose-static\..+\.png$|^sticker-loose-static\.png$/)
+    // 降级发生在平台侧，贴纸字节此刻还没被读——真正的上传发生在 QQ 发送链路里。
+    expect(opened).toBe(0)
+  })
+
+  it('sends a video upload sticker plan as a file so QQ still delivers it', async () => {
+    const platform = new QQNTPlatform({}, 'qq-provider')
+    platform.client.sendMessage = vi.fn(async () => ({
+      id: 'sent-file', conversationId: 'u', senderId: 'self', timestamp: 10, outgoing: true,
+      parts: [{ type: 'text' as const, text: 'ok' }],
+    }))
+
+    await platform.sendMessage(session, { id: 'u' }, { parts: [{
+      type: 'sticker',
+      sticker: {
+        type: 'upload', providerId: 'telegram-plugins', stickerId: 'loose-video', packId: 'plugins',
+        format: 'video', mimeType: 'video/webm', width: 512, height: 512,
+        source: { size: 4, async *stream() { yield new Uint8Array(4) } },
+      },
+    }] })
+
+    const calls = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+    const mediaParts = calls
+      .flatMap((call) => call[1] as Array<{ type: string, media?: { kind: string, name: string } }>)
+      .filter((part) => part.type === 'media')
+    expect(mediaParts).toHaveLength(1)
+    expect(mediaParts[0]!.media).toMatchObject({ kind: 'file', name: 'sticker-loose-video.webm' })
+  })
+
   it('returns a sent animated sticker as untouched QQ metadata without opening the asset', async () => {
     const platform = new QQNTPlatform({}, 'qq-provider')
     const gif = await sharp({
