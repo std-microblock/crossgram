@@ -6502,7 +6502,11 @@ export class DialogRpc {
     const persisted = await this._notificationSettings?.get(
       this._session.platformSessionId, target,
     ) ?? { _: 'peerNotifySettings' as const }
-    const policy = target.type === 'peer'
+    // Only peer settings mirror QQ, and QQ only seeds the default: a peer whose
+    // mute the user changed in Telegram keeps that override. Otherwise the QQ
+    // group message mask rewrites every answer and `account.updateNotifySettings`
+    // is reverted on the very next read, which makes "Mute forever" a no-op.
+    const policy = target.type === 'peer' && persisted.muteUntil === undefined
       ? qqGroupMsgMaskPolicy(this._conversations.get(target.peerId))
       : undefined
     const merged = policy ? { ...persisted, muteUntil: policy.muteUntil } : persisted
