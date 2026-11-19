@@ -344,6 +344,15 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
         await poller.close()
       }
     }
+    // bot 模式：WS 事件泵为主通道，轮询常开补漏（WS 断线/丢事件期间的消息靠增量游标拉回，
+    // 重复投递由 bridge 的 (platformSessionId, conversationId, sourceId) 幂等摄入去重）
+    const poller = new LarkPoller({
+      client: this.client,
+      getToken: this.deps.getToken,
+      selfId: this.selfId!,
+      pollIntervalMs: this.deps.pollIntervalMs,
+      logger: this.logger,
+    })
     const pump = new LarkEventPump({
       onMessage: (data) => this.handleReceive(handler, this.selfId!, data),
       onRecalled: (data) => this.handleRecalled(handler, data),
@@ -358,11 +367,15 @@ export class LarkPlatform implements IMPlatform<LarkMediaLocator> {
       ...(this.deps.createEventDispatcher ? { createEventDispatcher: this.deps.createEventDispatcher } : {}),
     }, this.logger)
     this.activePump = pump
+    this.activePoller = poller
+    void poller.start((event) => handler(event))
     await pump.start()
-    this.logger?.info('Lark WS 事件通道已建立（bot 模式）')
+    this.logger?.info('Lark WS 事件通道已建立（bot 模式，轮询补漏开启）')
     void this.probeGroupMessageScope()
     return async () => {
       if (this.activePump === pump) this.activePump = undefined
+      if (this.activePoller === poller) this.activePoller = undefined
+      await poller.close()
       await pump.close()
     }
   }

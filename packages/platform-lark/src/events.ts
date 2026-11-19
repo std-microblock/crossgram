@@ -73,6 +73,8 @@ export class LarkEventPump {
         appSecret: opts.appSecret,
         domain: this.options.baseUrl,
         loggerLevel: LoggerLevel.warn,
+        // SDK 默认无握手超时：网络黑洞时 connect() 的 Promise 永不 settle，重连循环卡死
+        handshakeTimeoutMs: 15_000,
         ...proxyExtras,
       }) as unknown as LarkWsClientLike)
     const createDispatcher = this.options.createEventDispatcher

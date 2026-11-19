@@ -83,6 +83,45 @@ describe('LarkPlatform', () => {
     })
   })
 
+  it('bot mode: always-on poller backfills messages without WS events', async () => {
+    const harness = await createBotHarness((url) => {
+      if (url.pathname === '/open-apis/im/v1/chats') {
+        return json({ code: 0, data: { items: [{ chat_id: 'oc_poll', name: '补漏群', chat_type: 'group' }], has_more: false } })
+      }
+      if (url.pathname === '/open-apis/im/v1/messages') {
+        return json({
+          code: 0,
+          data: {
+            has_more: false,
+            items: [{
+              message_id: 'om_poll_1',
+              chat_id: 'oc_poll',
+              msg_type: 'text',
+              create_time: '1700000000',
+              deleted: false,
+              body: { content: JSON.stringify({ text: 'via poller' }) },
+              sender: { id: 'ou_peer', id_type: 'open_id', sender_type: 'user' },
+            }],
+          },
+        })
+      }
+      return defaultBotRoutes(url)
+    })
+    const events: IMEvent[] = []
+    const unsubscribe = await harness.platform.subscribe(session, (event) => {
+      events.push(event)
+    })
+    // 不 dispatch 任何 WS 事件，轮询补漏独立拉回消息（recovery 强制投递）
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    await unsubscribe()
+    expect(events[0]).toMatchObject({
+      type: 'message',
+      delivery: 'recovery',
+      conversation: { id: 'oc_poll', kind: 'group', title: '补漏群' },
+      message: { id: 'om_poll_1', outgoing: false, content: { parts: [{ type: 'text', text: 'via poller' }] } },
+    })
+  })
+
   it('bot mode: reports at-bot-only visibility when group_msg is not granted', async () => {
     const notices: string[] = []
     const harness = await createBotHarness((url) => {
@@ -224,13 +263,14 @@ describe('LarkPlatform', () => {
       }
       return defaultBotRoutes(url)
     })
-    // 预热探测缓存（subscribe 触发）
+    // 预热探测缓存（subscribe 触发；常开轮询的基线拉取同样会命中此路由）
     const unsubscribe = await harness.platform.subscribe(session, () => {})
     await vi.waitFor(() => expect(messageRequests).toContain('probe'))
     // 已知无权限：getHistory 直接清晰报错，不再发起注定失败的 history 请求
+    const historyBefore = messageRequests.filter((kind) => kind === 'history').length
     await expect(harness.platform.getHistory(session, { id: 'oc_1' }, { limit: 20 }))
       .rejects.toThrow(/im:message\.group_msg/)
-    expect(messageRequests).not.toContain('history')
+    expect(messageRequests.filter((kind) => kind === 'history').length).toBe(historyBefore)
     await unsubscribe()
   })
 
@@ -396,6 +436,13 @@ function defaultBotRoutes(url: URL): Response {
   if (url.pathname === '/open-apis/bot/v3/info') {
     return json({ code: 0, bot: { open_id: BOT_OPEN_ID, app_name: 'TestBot' } })
   }
+  // 常开轮询补漏：默认返回空会话/空消息，具体用例按需覆盖
+  if (url.pathname === '/open-apis/im/v1/chats') {
+    return json({ code: 0, data: { items: [], has_more: false } })
+  }
+  if (url.pathname === '/open-apis/im/v1/messages') {
+    return json({ code: 0, data: { items: [], has_more: false } })
+  }
   if (url.pathname.startsWith('/open-apis/im/v1/chats/')) {
     return json({ code: 230002, msg: 'Bot is not in the chat' }, { status: 400 })
   }
@@ -473,3 +520,4 @@ function byteSource(length: number): { size: number, stream: () => AsyncIterable
 function json(value: unknown, init?: ResponseInit): Response {
   return Response.json(value, init)
 }
+
