@@ -267,6 +267,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private reactionResourceWarmup?: Promise<void>
   private readonly grayTipFilters: readonly string[]
   private readonly originSessions = new Map<string, string>()
+  /** 每个会话一条发送队列的队尾，见 `queueConversationSend`。 */
+  private readonly conversationSends = new Map<string, Promise<unknown>>()
   private readonly splitOutgoingMessages = new Map<string, WireMessage>()
   private readonly multiForwardMessages = new Map<string, Promise<WireMessage[]>>()
   private readonly multiForwardPreviewJobs = new Map<string, Promise<string | undefined>>()
@@ -1195,6 +1197,38 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   }
 
   async sendMessage(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    content: IMMessageInput,
+    options: IMTransferOptions = {},
+  ): Promise<IMMessage<QQMediaLocator>> {
+    return this.queueConversationSend(conversation.id, () =>
+      this.deliverMessage(session, conversation, content, options))
+  }
+
+  /**
+   * 让同一会话的发送按发起顺序落库。
+   *
+   * QQ 的房间顺序就是落库顺序，而带媒体的消息要先传完字节才发出送消息请求
+   * （`QQNTClient.sendMessage` 里 upload 在 POST 之前）。一批消息并发发起时，
+   * 落库顺序因此变成「上传完成顺序」：带图的那条总是排到最后，相邻的纯文本也可能
+   * 互相插队。串成一条队列后，发起顺序即落库顺序。
+   */
+  private queueConversationSend<T>(conversationId: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.conversationSends.get(conversationId) ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(run)
+    this.conversationSends.set(conversationId, current)
+    // 队尾结算后清掉，避免会话表无限增长；只清自己这一环。
+    const release = () => {
+      if (this.conversationSends.get(conversationId) === current) {
+        this.conversationSends.delete(conversationId)
+      }
+    }
+    current.then(release, release)
+    return current
+  }
+
+  private async deliverMessage(
     session: PlatformSession,
     conversation: IMConversationRef,
     content: IMMessageInput,
