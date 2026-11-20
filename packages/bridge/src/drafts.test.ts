@@ -185,19 +185,87 @@ describe('bridge-local drafts', () => {
     )
     await rpc.saveDraft({ _: 'messages.saveDraft', peer, message: 'clear on send' })
 
+    // The send consumes the stored draft, but must not announce an empty one:
+    // the sending client already cleared its composer, and an empty update
+    // would re-apply a cleared draft over whatever is being typed next.
+    const publishedBeforeSend = publish.mock.calls.length
     await rpc.sendMessage({
       _: 'messages.sendMessage', peer, message: 'sent body', randomId: Long.ONE,
       clearDraft: true,
     })
     expect(sent).toHaveLength(1)
     expect(await drafts.list(session.platformSessionId)).toEqual([])
-    expect(publish).toHaveBeenLastCalledWith(
+    expect(publish.mock.calls.length).toBe(publishedBeforeSend)
+  })
+
+  it('keeps the draft started while the previous send is still in flight', async () => {
+    const database = await createDatabase()
+    const store = new MessageStore(database)
+    const drafts = new DraftStore(database)
+    let releaseSend: () => void = () => {}
+    let markSendStarted: () => void = () => {}
+    const sendGate = new Promise<void>((resolve) => { releaseSend = resolve })
+    const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve })
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: false, files: false, mixed: false, maxTextLength: 4096, maxMedia: 0 },
+        conversations: { groups: false, channels: false, subchannels: false },
+      },
+      async subscribe() { return () => {} },
+      async getDialogs() {
+        return {
+          dialogs: [{
+            conversation: { id: 'alice', kind: 'direct' as const, title: 'Alice' },
+            unreadCount: 0,
+            lastMessage: {
+              id: 'seed', conversationId: 'alice', senderId: 'alice', timestamp: 1_700_000_000,
+              content: { parts: [{ type: 'text' as const, text: 'seed' }] },
+            },
+          }],
+        }
+      },
+      async getHistory() { return { messages: [] } },
+      async getUser(_session, id) { return { id, firstName: id === 'self' ? 'Self' : 'Alice' } },
+      async sendMessage(_session, target, content) {
+        markSendStarted()
+        await sendGate
+        return {
+          id: 'sent-1', conversationId: target.id, senderId: 'self',
+          timestamp: 1_800_000_010, outgoing: true,
+          content: { parts: content.parts.flatMap((part) => part.type === 'text' ? [part] : []) },
+        }
+      },
+    }
+    const publish = vi.fn(async () => {})
+    const rpc = new DialogRpc(platform, session, store, {
+      dcId: 1,
+      authKeyId: 'source-auth-key',
+      drafts,
+      onDraftUpdate: publish,
+    })
+    await rpc.getDialogs(getDialogsRequest())
+    const peer = inputPeer(rpc.peerTlId('alice'))
+
+    await rpc.saveDraft({ _: 'messages.saveDraft', peer, message: 'first message' })
+    const sending = rpc.sendMessage({
+      _: 'messages.sendMessage', peer, message: 'first message', randomId: Long.ONE, clearDraft: true,
+    })
+    await sendStarted
+    // The slow send is still in flight while the user starts writing the next one.
+    await rpc.saveDraft({ _: 'messages.saveDraft', peer, message: 'second message' })
+    releaseSend()
+    await sending
+
+    await expect(drafts.get(session.platformSessionId, 'alice')).resolves.toMatchObject({
+      draft: { message: 'second message' },
+    })
+    expect(publish).not.toHaveBeenCalledWith(
       session,
       expect.objectContaining({
-        _: 'updateDraftMessage',
-        draft: expect.objectContaining({ _: 'draftMessageEmpty' }),
+        _: 'updateDraftMessage', draft: expect.objectContaining({ _: 'draftMessageEmpty' }),
       }),
-      'source-auth-key',
+      expect.anything(),
     )
   })
 })
