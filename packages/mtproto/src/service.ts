@@ -19,6 +19,7 @@ import {
 } from './session/auth-key-store.js'
 import { AuthKeyDataStore, authKeyIdHex } from './session/auth-key-data-store.js'
 import type { RpcHandler, RpcResult } from './rpc/protocol.js'
+import type { MtprotoClientInfo } from './rpc/context.js'
 import { invokeRpc, registerRpcRoute } from './rpc/router.js'
 import type { MtprotoConnectionScope, MtprotoTrafficSample, ServerRpcContext } from './rpc/context.js'
 import { generateRsaKeyPair, loadOrCreateRsaKeyPair, type ServerRsaKey } from './crypto/rsa-keygen.js'
@@ -130,6 +131,16 @@ export class Mtproto extends Service {
   private readonly _socketRecords = new Map<ServerTransportSocket, SocketRecord>()
   private readonly _connectionFibers = new Map<string, Fiber>()
   private readonly _authApiLayers = new Map<string, number>()
+  /**
+   * 按客户端指纹（api_id + 设备 + 版本）记住的 API layer。
+   *
+   * 媒体连接、下载连接都是新的 socket + 新的 auth key，各自的 `_apiLayer` 从 null 开始；
+   * 客户端只在“它认为这个 DC 还没 init”时才套 invokeWithLayer(initConnection(...))，
+   * 而同账号的其它连接早就协商过 layer。只按 auth key 记层的话，这些新连接会先吃一次
+   * CONNECTION_NOT_INITED —— 普通 RPC 客户端会重发，auth.importAuthorization 不会
+   * （Telegram Desktop 对 400 不重试），媒体连接就此废掉。层跟着客户端走就没有这段空窗。
+   */
+  private readonly _clientApiLayers = new Map<string, number>()
   private readonly _rpcDependencies = new RpcDependencyRegistry()
   private readonly _pqChallenges = new PqChallengeStore()
   private _connectionSeq = 0
@@ -369,6 +380,7 @@ export class Mtproto extends Service {
       this._rpcDependencies.clear()
       this._authKeyData.clear()
       this._authApiLayers.clear()
+      this._clientApiLayers.clear()
       await new Promise<void>((resolve) => {
         if (!server.listening) return resolve()
         server.close(() => resolve())
@@ -478,8 +490,8 @@ export class Mtproto extends Service {
       this._authKeyData,
       this._authKeyStore,
       debug,
-      (authKeyId, layer) => { void this._rememberApiLayer(authKeyId, layer) },
-      (authKeyId) => this._authApiLayers.get(bytesHex(authKeyId)),
+      (authKeyId, layer, clientInfo) => { void this._rememberApiLayer(authKeyId, layer, clientInfo) },
+      (authKeyId, clientInfo) => this._lookupApiLayer(authKeyId, clientInfo),
       (authKeyId, token, origin) => this._supersedeLoginToken(authKeyId, token, origin),
       this._rpcDependencies,
       this._pqChallenges,
@@ -574,11 +586,27 @@ export class Mtproto extends Service {
     socket.destroy()
   }
 
-  private async _rememberApiLayer(authKeyId: Uint8Array, layer: number): Promise<void> {
+  private async _rememberApiLayer(
+    authKeyId: Uint8Array,
+    layer: number,
+    clientInfo?: MtprotoClientInfo,
+  ): Promise<void> {
     const key = bytesHex(authKeyId)
+    const fingerprint = clientFingerprint(clientInfo)
     this._authApiLayers.set(key, layer)
+    if (fingerprint) this._clientApiLayers.set(fingerprint, layer)
+    // 同账号的其它连接（媒体、下载、刚握完手的）拿到同一层就不必再等一轮 initConnection；
+    // 这条连接自己协商的层也要顺手发给同一客户端的兄弟连接。
     for (const session of this._sessions) {
-      if (equalBytes(session.authKeyId, authKeyId)) session.applyApiLayer(layer)
+      if (equalBytes(session.authKeyId, authKeyId)) {
+        session.applyApiLayer(layer)
+      } else if (
+        session.apiLayer === null
+        && fingerprint
+        && clientFingerprint(session.clientInfo) === fingerprint
+      ) {
+        session.applyApiLayer(layer)
+      }
     }
     try {
       const stored = await this._authKeyStore.get(authKeyId)
@@ -590,11 +618,19 @@ export class Mtproto extends Service {
     }
   }
 
+  /** 先按 auth key 找层，再退回到同一客户端在别的连接上协商出的层。 */
+  private _lookupApiLayer(authKeyId: Uint8Array, clientInfo?: MtprotoClientInfo): number | undefined {
+    const layer = this._authApiLayers.get(bytesHex(authKeyId))
+    if (layer !== undefined) return layer
+    const fingerprint = clientFingerprint(clientInfo)
+    return fingerprint ? this._clientApiLayers.get(fingerprint) : undefined
+  }
+
   private _applyKnownApiLayer(session: ServerSession): void {
     if (session.apiLayer !== null) return
     const authKeyId = session.authKeyId
     if (!authKeyId) return
-    const layer = this._authApiLayers.get(bytesHex(authKeyId))
+    const layer = this._lookupApiLayer(authKeyId, session.clientInfo)
     if (layer !== undefined) session.applyApiLayer(layer)
   }
 }
@@ -620,6 +656,16 @@ function equalBytes(left: Uint8Array | null, right: Uint8Array): boolean {
     if (left[index] !== right[index]) return false
   }
   return true
+}
+
+/**
+ * 客户端指纹：同一份客户端的所有连接共享 API layer，即使它们各自的 auth key 不同。
+ *
+ * 只取 initConnection 里声明的三元组，避免把两个不同版本的同型号设备混成一条。
+ */
+function clientFingerprint(clientInfo?: MtprotoClientInfo): string | undefined {
+  if (!clientInfo) return undefined
+  return `${clientInfo.apiId}\u0000${clientInfo.deviceModel}\u0000${clientInfo.appVersion}`
 }
 
 function bytesHex(bytes: Uint8Array): string {

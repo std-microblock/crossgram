@@ -103,13 +103,39 @@ export class StickerRpc {
     const hash = catalogHash(normalized.stickers.map((sticker) =>
       `v${STICKER_PROJECTION_VERSION}:${sticker.stickerId}:${sticker.version ?? 0}`))
     if (hashMatches(req.hash, hash)) return { _: 'messages.stickerSetNotModified' }
-    const installed = (await this._installedPacks()).get(packKey(ref.providerId, ref.packId))
-    const automatic = isAutomaticallyAssociated(provider, normalized, this._session.platformId)
-    const documents = normalized.stickers.map((sticker) => this._makeDocument({
-      providerId: ref.providerId, provider, sticker,
+    return this._projectStickerSet(ref.providerId, provider, normalized)
+  }
+
+  /**
+   * 关联/内容变化后要推给客户端的完整 set。
+   *
+   * `updateNewStickerSet` 只接受 `messages.stickerSet`（客户端会丢弃 NotModified），
+   * 且 set 必须带 `installed_date`、不带 `archived`，否则 Telegram Desktop 直接忽略整条 update。
+   */
+  async makeStickerSetUpdate(
+    providerId: string,
+    packId: string,
+  ): Promise<tl.messages.RawStickerSet | undefined> {
+    this._refreshProjectionCache()
+    const provider = this._registry.entries.find(([id]) => id === providerId)?.[1]
+    if (!provider) return
+    const pack = await this._getPack(providerId, provider, packId)
+    if (!pack) return
+    return this._projectStickerSet(providerId, provider, pack)
+  }
+
+  private async _projectStickerSet(
+    providerId: string,
+    provider: IMStickerProvider,
+    pack: IMStickerPack,
+  ): Promise<tl.messages.RawStickerSet> {
+    const installed = (await this._installedPacks()).get(packKey(providerId, pack.packId))
+    const automatic = isAutomaticallyAssociated(provider, pack, this._session.platformId)
+    const documents = pack.stickers.map((sticker) => this._makeDocument({
+      providerId, provider, sticker,
     }))
     const byEmoji = new Map<string, Long[]>()
-    for (const sticker of normalized.stickers) {
+    for (const sticker of pack.stickers) {
       for (const emoji of sticker.emoji ?? ['']) {
         const list = byEmoji.get(emoji) ?? []
         list.push(Long.fromNumber(this._documentId(sticker.providerId, sticker.stickerId)))
@@ -118,7 +144,7 @@ export class StickerRpc {
     }
     return {
       _: 'messages.stickerSet',
-      set: this._makeSet(normalized, installed, automatic),
+      set: this._makeSet(pack, installed, automatic),
       packs: [...byEmoji].map(([emoticon, documents]) => ({ _: 'stickerPack', emoticon, documents })),
       keywords: [],
       documents,
