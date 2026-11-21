@@ -763,14 +763,23 @@ export class MessageStore {
       this._upsertConversation(database, session, conversation, unreadCount, new Date())))
   }
 
+  /**
+   * Lifts the stored unread counter of a conversation whose messages arrived
+   * outside a platform dialog snapshot. `onlyWhenRead` keeps a chat that
+   * already advertises unread messages untouched: its client counts the new
+   * message itself, and re-delivered backlog must not be added on top of the
+   * count the snapshot reported.
+   */
   async incrementConversationUnread(
     session: PlatformSession,
     conversation: IMConversation,
-    amount = 1,
+    options: { amount?: number, onlyWhenRead?: boolean } = {},
   ): Promise<void> {
+    const amount = options.amount ?? 1
     if (!Number.isSafeInteger(amount) || amount <= 0) throw new RangeError('amount must be a positive integer')
     await this._write(() => this._database.withTransaction(async (database) => {
       const row = await this._upsertConversation(database, session, conversation, undefined, new Date())
+      if (options.onlyWhenRead && row.unreadCount > 0) return
       await database.set('mtproto_im_conversation', { id: row.id }, {
         unreadCount: row.unreadCount + amount,
         updatedAt: new Date(),

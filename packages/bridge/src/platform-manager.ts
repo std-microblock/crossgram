@@ -427,6 +427,22 @@ export class PlatformSubscriptionManager {
       await this._store.upsertConversation(session, event.conversation)
     } else if (event.type === 'message') {
       const result = await this._store.ingest(session, event.conversation, event.message)
+      // A live inbound message is unread until the platform snapshot or the
+      // client reports it read. The stored counter is the only unread state
+      // `messages.getPeerDialogs` can answer with, and the first message of a
+      // peer the client never saw makes it ask for exactly that entry: the
+      // default zero marked the fresh chat as already read, so no badge and no
+      // unread divider appeared. Only a chat the store counts as fully read is
+      // lifted here — a chat that already advertises unread messages needs no
+      // help (its client increments locally) and re-delivered backlog must not
+      // be counted twice on top of the platform snapshot.
+      if (result.created
+        && !event.message.outgoing
+        && event.conversation.metadata?.requestInbox !== true) {
+        await this._store.incrementConversationUnread(
+          session, event.conversation, { onlyWhenRead: true },
+        )
+      }
       this._onTrace?.(
         'platform message ingested platform=%s session=%s conversation=%s message=%s created=%s changed=%s projection=%d',
         session.platformId, session.platformSessionId, event.conversation.id, event.message.id,
