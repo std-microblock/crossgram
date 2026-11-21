@@ -34,4 +34,6 @@ export interface MtprotoDebugData {
   start(): Promise<void>
   pause(): Promise<void>
   clear(): Promise<void>
+  /** 运行时改缓冲上限；淘汰最旧的整块，立即生效，不需要重启插件。 */
+  setMaxEvents(value: number): Promise<void>
 }

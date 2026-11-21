@@ -25,6 +25,14 @@ import {
 } from 'cordis-webui-react/components'
 import { useCapturePages, type CaptureFilters } from './capture.js'
 import {
+  DEFAULT_BUFFER_SIZE,
+  MAX_BUFFER_SIZE,
+  MIN_BUFFER_SIZE,
+  parseBufferSize,
+  readStoredBufferSize,
+  storeBufferSize,
+} from './buffer-size.js'
+import {
   currentLogDownloadUrl,
   deleteRecording,
   listRecordings,
@@ -44,6 +52,7 @@ type SaveMenu = { id: number, x: number, y: number }
 export default function CapturePage(props: PageProps) {
   const rpc = useRpc<MtprotoDebugData>(props.entryId)
   const action = useAction()
+  const settings = useAction()
   const save = useAction()
   const logs = useAction()
   const [filters, setFilters] = useState<CaptureFilters>({})
@@ -56,6 +65,10 @@ export default function CapturePage(props: PageProps) {
   const [clearArmed, setClearArmed] = useState(false)
   const [saveOpen, setSaveOpen] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
+  const [bufferOpen, setBufferOpen] = useState(false)
+  const [bufferDraft, setBufferDraft] = useState(
+    String(DEFAULT_BUFFER_SIZE),
+  )
   const [logName, setLogName] = useState('')
   const [savedLogs, setSavedLogs] = useState<SavedLogs>()
   const [follow, setFollow] = useState(true)
@@ -118,6 +131,29 @@ export default function CapturePage(props: PageProps) {
     // Without a result in the window the other half is missing, not absent:
     // fetch it so the inspector can still switch between request and result.
     else void capture.loadPair(group.event)
+  }
+  useEffect(() => {
+    // The size lives in this browser; re-apply it after a reload so the
+    // operator does not have to set it again every time the page opens.
+    if (!rpc.ready) return
+    const stored = readStoredBufferSize()
+    if (stored === undefined || stored === rpc.data.maxEvents) return
+    void rpc.data.setMaxEvents(stored).catch(() => {
+      // A rejected value (for example a config bound that is now lower) must
+      // not turn into an error banner on every page load.
+    })
+  }, [rpc.ready])
+  const openBufferSize = () => {
+    setBufferDraft(String(rpc.data.maxEvents))
+    setBufferOpen(true)
+  }
+  const applyBufferSize = () => {
+    void settings.run(async () => {
+      const next = parseBufferSize(bufferDraft)
+      await rpc.data.setMaxEvents(next)
+      storeBufferSize(next)
+      setBufferOpen(false)
+    })
   }
   const rawLink = (id: number) => {
     const url = new URL(sameOriginPath(rpc.data.apiPath))
@@ -404,7 +440,15 @@ export default function CapturePage(props: PageProps) {
             <span className="workbench-sub capture-metrics">
               {total.toLocaleString()} retained
               <span className="capture-dot" aria-hidden="true">·</span>
-              {maxEvents.toLocaleString()} max
+              <button
+                className="capture-max"
+                disabled={!rpc.ready}
+                aria-label="Change capture buffer size"
+                title="Events kept in memory before the oldest are dropped"
+                onClick={openBufferSize}
+              >
+                {maxEvents.toLocaleString()} max
+              </button>
               <span className="capture-dot" aria-hidden="true">·</span>
               {dropped.toLocaleString()} dropped
             </span>
@@ -918,6 +962,61 @@ export default function CapturePage(props: PageProps) {
                   : 'Scrolled back · new events are kept'}
             </span>
           </div>
+          {bufferOpen ? (
+            <Modal
+              title="Buffer size"
+              onClose={() => {
+                if (!settings.busy) setBufferOpen(false)
+              }}
+            >
+              <p className="muted">
+                How many events the server keeps in memory. The oldest are
+                dropped once the buffer is full; shrinking it drops them right
+                away. This browser remembers the value and re-applies it when
+                the page opens.
+              </p>
+              <label className="field">
+                <span>Maximum retained events</span>
+                <input
+                  type="number"
+                  aria-label="Maximum retained events"
+                  min={MIN_BUFFER_SIZE}
+                  max={MAX_BUFFER_SIZE}
+                  step={1}
+                  value={bufferDraft}
+                  disabled={settings.busy}
+                  onChange={(event) =>
+                    setBufferDraft(event.currentTarget.value)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') applyBufferSize()
+                  }}
+                />
+                <small className="field-hint">
+                  {MIN_BUFFER_SIZE.toLocaleString()}–
+                  {MAX_BUFFER_SIZE.toLocaleString()} events. The configured
+                  default is {DEFAULT_BUFFER_SIZE.toLocaleString()}.
+                </small>
+              </label>
+              <ActionError error={settings.error} />
+              <div className="toolbar">
+                <button
+                  className="button filled"
+                  disabled={settings.busy || !rpc.ready}
+                  onClick={applyBufferSize}
+                >
+                  {settings.busy ? 'Applying…' : 'Apply'}
+                </button>
+                <button
+                  className="button outlined"
+                  disabled={settings.busy}
+                  onClick={() => setBufferOpen(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </Modal>
+          ) : null}
           {saveOpen ? (
             <Modal
               title="Save log"
