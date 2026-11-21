@@ -50,7 +50,7 @@ export function appendChunkedEvents(
     chunks[head].push(...slice)
     offset += slice.length
   }
-  return evictChunks(chunks, maxEvents)
+  return trimChunkedEvents(chunks, maxEvents)
 }
 
 export function replaceChunks(
@@ -71,7 +71,8 @@ export function chunkEvents(
   return chunks
 }
 
-function evictChunks(chunks: EventChunks, maxEvents: number): number {
+/** Drop whole chunks from the front until the buffer fits `maxEvents`. Always keeps the newest chunk. */
+export function trimChunkedEvents(chunks: EventChunks, maxEvents: number): number {
   const keys = chunkKeys(chunks)
   let total = countChunkedEvents(chunks)
   let dropped = 0

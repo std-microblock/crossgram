@@ -61,6 +61,23 @@
   .capture-dot {
     opacity: 0.5;
   }
+  .capture-max {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+  }
+  .capture-max:hover:not(:disabled) {
+    color: var(--primary);
+  }
+  .capture-max:disabled {
+    cursor: default;
+    text-decoration: none;
+  }
   .capture-actions {
     gap: 6px;
   }

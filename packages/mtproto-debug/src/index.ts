@@ -3,7 +3,9 @@ import type { Request, Response } from '@cordisjs/plugin-server'
 import type { MtprotoDebugEvent } from '@mtproto-relay/mtproto'
 import z from 'schemastery'
 import { serializeDebugEvent } from './serialize.js'
-import { appendChunkedEvents, flattenChunks, replaceChunks, resolveChunkSize, type EventChunks } from './chunks.js'
+import {
+  appendChunkedEvents, flattenChunks, replaceChunks, resolveChunkSize, trimChunkedEvents, type EventChunks,
+} from './chunks.js'
 import { CaptureQueryError, parseCaptureQuery, queryCapture } from './capture-api.js'
 import {
   DEFAULT_RECORDINGS_API_PATH, DEFAULT_RECORDINGS_PATH, RecordingError, RecordingStore,
@@ -16,6 +18,10 @@ import zhCN from './locales/zh-CN.yml'
 export const name = 'mtproto-debug'
 export const inject = ['mtproto', 'server', 'webui']
 
+/** 抓包缓冲的下限/上限：页面上的输入框和配置项共用同一对边界。 */
+export const MIN_MAX_EVENTS = 100
+export const MAX_MAX_EVENTS = 20_000
+
 export interface Config {
   maxEvents?: number
   initiallyPaused?: boolean
@@ -26,7 +32,7 @@ export interface Config {
 }
 
 export const Config = z.object({
-  maxEvents: z.natural().min(100).max(20_000).default(2_000),
+  maxEvents: z.natural().min(MIN_MAX_EVENTS).max(MAX_MAX_EVENTS).default(2_000),
   initiallyPaused: z.boolean().default(false),
   apiPath: z.string().default('/api/mtproto-debug/events'),
   recordingsPath: z.string().default(DEFAULT_RECORDINGS_PATH),
@@ -38,8 +44,8 @@ export const Config = z.object({
 })
 
 export function apply(ctx: Context, config: Config = {}): void {
-  const maxEvents = config.maxEvents ?? 2_000
-  const chunkSize = resolveChunkSize(maxEvents)
+  let maxEvents = config.maxEvents ?? 2_000
+  let chunkSize = resolveChunkSize(maxEvents)
   const apiPath = normalizeApiPath(config.apiPath ?? '/api/mtproto-debug/events')
   const recordingsApiPath = normalizeApiPath(config.recordingsApiPath ?? DEFAULT_RECORDINGS_API_PATH)
   const store = new RecordingStore(
@@ -75,6 +81,20 @@ export function apply(ctx: Context, config: Config = {}): void {
         replaceChunks(chunks, [])
         value.dropped = 0
         value.revision += 1
+      })
+    },
+    async setMaxEvents(value: number) {
+      const next = normalizeMaxEvents(value)
+      // 先把攒在 pending 里的事件冲进缓冲，这样缩小时它们才参与淘汰。
+      if (flushTimer) clearTimeout(flushTimer)
+      flushTimer = undefined
+      flush()
+      maxEvents = next
+      chunkSize = resolveChunkSize(next)
+      entry.mutate((state) => {
+        state.maxEvents = next
+        state.dropped += trimChunkedEvents(chunks, next)
+        state.revision += 1
       })
     },
   }
@@ -244,7 +264,7 @@ export type { CapturedMtprotoEvent, MtprotoDebugData } from './types.js'
 export { serializeDebugEvent, toDebugJson } from './serialize.js'
 export {
   appendChunkedEvents, chunkEvents, chunkKeys, countChunkedEvents, flattenChunks,
-  MAX_CHUNK_SIZE, replaceChunks, resolveChunkSize, type EventChunks,
+  MAX_CHUNK_SIZE, replaceChunks, resolveChunkSize, trimChunkedEvents, type EventChunks,
 } from './chunks.js'
 export {
   CaptureQueryError, parseCaptureQuery, queryCapture,
@@ -258,6 +278,15 @@ export {
   type BuildRecordingDocumentInput, type CaptureRecording, type RecordingSummary,
   type SaveRecordingInput,
 } from './recordings.js'
+
+/** 页面改缓冲上限时走这里：只接受整数，范围和配置项一致。 */
+export function normalizeMaxEvents(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value))
+    throw new Error('Capture buffer size must be a whole number')
+  if (value < MIN_MAX_EVENTS || value > MAX_MAX_EVENTS)
+    throw new Error(`Capture buffer size must be between ${MIN_MAX_EVENTS} and ${MAX_MAX_EVENTS}`)
+  return value
+}
 
 function normalizeApiPath(value: string): string {
   const path = value.trim()
