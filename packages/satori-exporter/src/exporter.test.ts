@@ -201,6 +201,44 @@ describe('SatoriExporter', () => {
   })
 
 
+  it('dispatches guild-member-added for members-joined service messages', async () => {
+    const { ctx, exporter } = await createExporter()
+    const events: Session[] = []
+    ctx.on('guild-member-added', (event) => { events.push(event) })
+    const group: IMConversation = { id: 'group:42', kind: 'group', spaceId: 'guild:7', title: 'QQ Group' }
+    const direct: IMConversation = { id: 'direct:7', kind: 'direct', title: 'Alice' }
+    const joined = (id: string, members: Array<{ id: string, name?: string }>): IMMessage => ({
+      ...message(id, group.id),
+      content: {
+        parts: [],
+        serviceAction: { type: 'members-joined', text: '欢迎加入', members, actor: { id: 'u:carol', name: 'Carol' } },
+      },
+    })
+
+    exporter.handleMemberAdded(session, group, joined('replayed', [{ id: 'u:bob', name: 'Bob' }]), { created: false })
+    exporter.handleMemberAdded(session, group, { ...joined('outgoing', [{ id: 'u:bob', name: 'Bob' }]), outgoing: true, senderId: 'self' }, { created: true })
+    exporter.handleMemberAdded(session, direct, joined('directed', [{ id: 'u:bob', name: 'Bob' }]), { created: true })
+    exporter.handleMemberAdded(session, group, message('plain', group.id), { created: true })
+    exporter.handleMemberAdded(session, group, joined('joined', [{ id: 'u:bob', name: 'Bob' }, { id: 'u:dave' }]), { created: true })
+
+    await vi.waitFor(() => expect(events).toHaveLength(2))
+    expect(events.map((event) => event.event)).toMatchObject([
+      {
+        type: 'guild-member-added',
+        timestamp: 1_700_000_000_000,
+        guild: { id: group.spaceId, name: group.title },
+        member: { user: { id: 'u:bob', name: 'Bob', nick: 'Bob' }, name: 'Bob', nick: 'Bob' },
+        operator: { id: 'u:carol', name: 'Carol', nick: 'Carol' },
+      },
+      {
+        type: 'guild-member-added',
+        guild: { id: group.spaceId, name: group.title },
+        member: { user: { id: 'u:dave', name: 'u:dave', nick: 'u:dave' } },
+        operator: { id: 'u:carol' },
+      },
+    ])
+  })
+
   it('exposes the sender avatar and group card through session.author', async () => {
     const { ctx, exporter, platform } = await createExporter()
     platform.resolveMediaUrl.mockImplementation(async (_session, media) => ({

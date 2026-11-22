@@ -3,7 +3,7 @@ import { Bot, h, type Universal } from '@satorijs/core'
 import type { Context } from 'cordis'
 import {
   probeImageDimensions, providerBelongsToAccount, serviceActionText,
-  type IMConversation, type IMConversationMember, type IMMediaInput, type IMUser, type IMMessage, type IMMessageInput, type IMMessagePart,
+  type IMConversation, type IMConversationMember, type IMMediaInput, type IMServiceMember, type IMUser, type IMMessage, type IMMessageInput, type IMMessagePart,
   type IMHistoryQuery, type IMPlatform, type IMSticker, type IMStickerProvider, type IMStickerSendPlan, type IMTextEntity,
   type IngestResult, type JsonValue, type PlatformSession, type StickerProviderContext,
 } from '@mtproto-relay/bridge'
@@ -138,6 +138,30 @@ export class SatoriExporter {
         session.platformId, session.platformSessionId, conversation.id, message.id, formatError(error),
       )
     })
+  }
+  /** 入群灰条额外导出为 `guild-member-added`；`IMServiceMember` 只携带 QQ UID，数字 uin 需上游补充后才可解析。 */
+  handleMemberAdded(
+    session: PlatformSession,
+    conversation: IMConversation,
+    message: IMMessage,
+    result: Pick<IngestResult, 'created'>,
+  ): void {
+    const action = message.content.serviceAction
+    if (
+      session.platformId !== this._config.platformId
+      || session.platformSessionId !== this._session?.platformSessionId
+      || !result.created || message.outgoing || !this._bot
+      || conversation.kind === 'direct' || action?.type !== 'members-joined'
+    ) return
+    for (const member of action.members) {
+      this._bot.dispatch(this._bot.session({
+        type: 'guild-member-added',
+        timestamp: message.timestamp * 1_000,
+        guild: satoriGuild(conversation),
+        member: satoriServiceMember(member),
+        ...(action.actor ? { operator: satoriServiceMember(action.actor).user } : {}),
+      }))
+    }
   }
   handleDelete(
     session: PlatformSession,
@@ -854,6 +878,11 @@ function satoriMessageUser(message: IMMessage, avatar?: string, numeric = true):
 function satoriMessageMember(message: IMMessage, user: Universal.User): Universal.GuildMember {
   const name = message.senderTitle?.trim() || user.nick || user.name || user.id
   return { name, nick: name, ...(user.avatar ? { avatar: user.avatar } : {}) }
+}
+
+function satoriServiceMember(member: IMServiceMember): Universal.GuildMember {
+  const name = member.name?.trim() || member.id
+  return { user: { id: member.id, name, nick: name }, name, nick: name }
 }
 
 function satoriGuildMember(member: IMConversationMember, avatar?: string, numeric = true): Universal.GuildMember {

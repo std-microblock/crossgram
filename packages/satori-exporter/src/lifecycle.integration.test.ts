@@ -159,6 +159,32 @@ describe('standalone Satori exporter lifecycle', () => {
     ))
     expect(received).toEqual(['incoming:1', 'incoming:image'])
 
+    const joinedEvents: unknown[] = []
+    ctx.on('guild-member-added', (event) => { joinedEvents.push(event.event) })
+    await platform.emit({
+      type: 'message',
+      conversation: { id: 'group:42', kind: 'group', title: 'Group 42' },
+      message: {
+        id: 'incoming:joined', conversationId: 'group:42', senderId: 'bob', timestamp: 5,
+        content: {
+          parts: [],
+          serviceAction: {
+            type: 'members-joined', text: 'bob 加入群聊',
+            members: [{ id: 'u:bob', name: 'Bob' }], actor: { id: 'u:alice', name: 'Alice' },
+          },
+        },
+      },
+    })
+    await vi.waitFor(() => expect(joinedEvents).toMatchObject([
+      {
+        type: 'guild-member-added', timestamp: 5_000,
+        guild: { id: 'group:42', name: 'Group 42' },
+        member: { user: { id: 'u:bob', name: 'Bob' } },
+        operator: { id: 'u:alice', name: 'Alice' },
+      },
+    ]))
+    await vi.waitFor(() => expect(received).toEqual(['incoming:1', 'incoming:image', 'incoming:joined']))
+
     unregister()
     await vi.waitFor(() => expect(ctx.bots).toHaveLength(0))
     await expect(oldBot.createMessage('group:42', [h.text('stale')])).rejects.toThrow('not ready')

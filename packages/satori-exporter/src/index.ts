@@ -32,6 +32,7 @@ export function apply(ctx: Context, config: Config): void {
       if (committed.event.type === 'message') {
         const message = committed as Extract<CommittedPlatformEvent, { event: { type: 'message' } }>
         exporter.handleMessage(session, message.event.conversation, message.event.message, message.result)
+        exporter.handleMemberAdded(session, message.event.conversation, message.event.message, message.result)
       } else if (committed.event.type === 'message-delete') {
         const deleted = committed as Extract<CommittedPlatformEvent, { event: { type: 'message-delete' } }>
         exporter.handleDelete(session, deleted.event.conversation, deleted.event.messageIds, deleted.event.timestamp * 1_000)
