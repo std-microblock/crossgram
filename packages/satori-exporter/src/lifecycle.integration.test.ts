@@ -178,6 +178,7 @@ describe('standalone Satori exporter lifecycle', () => {
     await vi.waitFor(() => expect(joinedEvents).toMatchObject([
       {
         type: 'guild-member-added', timestamp: 5_000,
+        channel: { id: 'group:42', type: 0, name: 'Group 42' },
         guild: { id: 'group:42', name: 'Group 42' },
         member: { user: { id: 'u:bob', name: 'Bob' } },
         operator: { id: 'u:alice', name: 'Alice' },

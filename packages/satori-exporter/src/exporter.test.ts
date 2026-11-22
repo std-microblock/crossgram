@@ -226,12 +226,14 @@ describe('SatoriExporter', () => {
       {
         type: 'guild-member-added',
         timestamp: 1_700_000_000_000,
+        channel: { id: group.id, type: 0, name: group.title },
         guild: { id: group.spaceId, name: group.title },
         member: { user: { id: 'u:bob', name: 'Bob', nick: 'Bob' }, name: 'Bob', nick: 'Bob' },
         operator: { id: 'u:carol', name: 'Carol', nick: 'Carol' },
       },
       {
         type: 'guild-member-added',
+        channel: { id: group.id, type: 0, name: group.title },
         guild: { id: group.spaceId, name: group.title },
         member: { user: { id: 'u:dave', name: 'u:dave', nick: 'u:dave' } },
         operator: { id: 'u:carol' },

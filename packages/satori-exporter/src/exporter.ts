@@ -157,6 +157,8 @@ export class SatoriExporter {
       this._bot.dispatch(this._bot.session({
         type: 'guild-member-added',
         timestamp: message.timestamp * 1_000,
+        // channel 供 koishi 等下游 observeChannel 拿 channelId，缺失会触发 missing primary key
+        channel: satoriChannel(conversation),
         guild: satoriGuild(conversation),
         member: satoriServiceMember(member),
         ...(action.actor ? { operator: satoriServiceMember(action.actor).user } : {}),
