@@ -4247,6 +4247,37 @@ describe('QQNTPlatform mapping', () => {
     expect(progress).toEqual([1, 2])
   })
 
+  it('lands a burst of sends in issue order even when the media one uploads first', async () => {
+    const platform = new QQNTPlatform()
+    const landed: string[] = []
+    platform.client.sendMessage = vi.fn(async (_conversation: string, parts) => {
+      const media = parts.some((part) => part.type === 'media')
+      // 带媒体的发送要先把字节传完才发出送消息请求，这里用等待模拟上传耗时。
+      if (media) await new Promise((resolve) => setTimeout(resolve, 20))
+      landed.push(media ? 'image' : 'text')
+      return {
+        id: `sent-${landed.length}`, conversationId: '2:group', senderId: 'self', timestamp: 10,
+        outgoing: true,
+        parts: parts.map((part) => part.type === 'text' ? part : { type: 'text' as const, text: '' }),
+      }
+    })
+    const image = {
+      kind: 'image' as const, name: 'a.png', mimeType: 'image/png', size: 3,
+      source: { size: 3, async *stream() { yield new Uint8Array([1, 2, 3]) } },
+    }
+
+    await Promise.all([
+      platform.sendMessage(session, { id: '2:group' }, { parts: [
+        { type: 'text', text: 'before' },
+        { type: 'media', media: image },
+        { type: 'text', text: 'after' },
+      ] }),
+      platform.sendMessage(session, { id: '2:group' }, { parts: [{ type: 'text', text: 'next' }] }),
+    ])
+
+    expect(landed).toEqual(['image', 'text'])
+  })
+
   it('passes the message element order to the bridge', async () => {
     const platform = new QQNTPlatform()
     const image = (name: string) => ({
