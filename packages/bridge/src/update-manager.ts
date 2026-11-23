@@ -1337,7 +1337,7 @@ function committedEventSummary(committed: CommittedPlatformEvent): string {
   return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} changed=${reactions.changed} tlMessages=${reactions.tlMessageIds.length}`
 }
 
-function makeMessageEntities(
+export function makeMessageEntities(
   message: IMMessage,
   userIds: ReadonlyMap<string, number>,
   resolveDocumentId: (definition: IMReactionDefinition) => number | undefined,
@@ -1352,8 +1352,11 @@ function makeMessageEntities(
     for (const entity of part.type === 'text' ? part.entities ?? [] : []) {
       if (entity.offset < 0 || entity.length <= 0 || entity.offset + entity.length > text.length) continue
       if (entity.type === 'mention') {
+        // UTF-16 码元偏移：补充平面字符（emoji、生僻字）在 JS 下标里只算 1，Telegram 按代理对计 2。
         entities.push({
-          _: 'messageEntityMentionName', offset: base + entity.offset, length: entity.length,
+          _: 'messageEntityMentionName',
+          offset: base + utf16PrefixUnits(text, entity.offset),
+          length: utf16PrefixUnits(text, entity.offset + entity.length) - utf16PrefixUnits(text, entity.offset),
           userId: requiredUserId(userIds, entity.userId),
         })
       } else if (entity.type === 'text-link') {
@@ -1395,6 +1398,24 @@ function makeMessageEntities(
     base += text.length + (index + 1 < rendered.length ? 1 : 0)
   }
   return entities.length ? entities : undefined
+}
+
+/** `endIndex` 按码点下标计数；`slice` 可能把代理对截半，必须逐码点累计 UTF-16 码元。 */
+function utf16PrefixUnits(text: string, endIndex: number): number {
+  let units = 0
+  let index = 0
+  for (const char of text) {
+    if (index >= endIndex) break
+    units += char.codePointAt(0)! > 0xffff ? 2 : 1
+    index += 1
+  }
+  return units
+}
+
+function utf16Units(value: string): number {
+  let total = 0
+  for (const char of value) total += char.codePointAt(0)! > 0xffff ? 2 : 1
+  return total
 }
 
 function requiredUserId(userIds: ReadonlyMap<string, number>, platformUserId: string): number {

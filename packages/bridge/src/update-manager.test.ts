@@ -876,6 +876,27 @@ describe('UpdateManager', () => {
   })
 
 
+  it('converts supplementary-plane mention offsets to Telegram UTF-16 offsets in live updates', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'emoji-mentions', kind: 'group', title: 'Emoji Mentions' }
+    // 两个 emoji 各占 2 个 UTF-16 码元：mention 前缀 2 emoji + 1 空格 = 5 码元，JS 下标只算 3。
+    const text = '😀😀 @Bob 加群'
+    const message: IMMessage = {
+      id: 'emoji-mention-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_000,
+      content: { parts: [{ type: 'text', text, entities: [
+        { type: 'mention', offset: 3, length: 4, userId: 'bob' },
+      ] }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = roundTrip(sent[0].update) as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
+    expect((update.message as tl.RawMessage).entities).toEqual([
+      { _: 'messageEntityMentionName', offset: 5, length: 4, userId: expect.any(Number) },
+    ])
+  })
+
   it('includes clickable URL entities in live updates', async () => {
     const { store, manager, sent } = await createHarness()
     const conversation: IMConversation = { id: 'links', kind: 'group', title: 'Links' }
