@@ -2577,8 +2577,9 @@ export class DialogRpc {
     const existing = this._sentByRandomId.get(randomId)
     if (existing) return existing
 
+    const draft = req.clearDraft ? await this._draftBeforeSend(req.peer, req.replyTo) : undefined
     const pending = this._sendMessage(req, excludeConnection).then(async (result) => {
-      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo, draft)
       return result
     })
     this._sentByRandomId.set(randomId, pending)
@@ -2690,6 +2691,7 @@ export class DialogRpc {
 
   async sendMedia(req: SendMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
+    const draft = req.clearDraft ? await this._draftBeforeSend(req.peer, req.replyTo) : undefined
     return this._sendMediaOnce(req.randomId.toString(), async () => {
       const startedAt = performance.now()
       const resolved = await this._resolveSendMedia(req.media)
@@ -2704,7 +2706,7 @@ export class DialogRpc {
         )
         const sendMs = performance.now() - sendAt
         await this._stickers?.markUsedByRef(resolved.providerId, resolved.stickerId)
-        if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+        if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo, draft)
         this._traceSlowMediaRpc('sendMedia', {
           resolveMs, sendMs, totalMs: performance.now() - startedAt,
         })
@@ -2716,7 +2718,7 @@ export class DialogRpc {
         req.peer, { parts }, [resolved.upload], [req.randomId], req.replyTo, excludeConnection,
       )
       const sendMs = performance.now() - sendAt
-      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo, draft)
       this._traceSlowMediaRpc('sendMedia', {
         resolveMs, sendMs, totalMs: performance.now() - startedAt,
       })
@@ -2727,6 +2729,7 @@ export class DialogRpc {
   async sendMultiMedia(req: SendMultiMediaRequest, excludeConnection?: ServerConnection): Promise<tl.TypeUpdates> {
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
     const randomId = req.multiMedia.map((item) => item.randomId.toString()).join(':')
+    const draft = req.clearDraft ? await this._draftBeforeSend(req.peer, req.replyTo) : undefined
     return this._sendMediaOnce(randomId, async () => {
       if (!req.multiMedia.length) throw new RpcError(400, 'MEDIA_EMPTY')
       const resolved = await Promise.all(req.multiMedia.map((item) => this._resolveSendMedia(item.media)))
@@ -2744,7 +2747,7 @@ export class DialogRpc {
         req.replyTo,
         excludeConnection,
       )
-      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo)
+      if (req.clearDraft) await this._clearDraftAfterSend(req.peer, req.replyTo, draft)
       return updates
     })
   }
@@ -6354,14 +6357,50 @@ export class DialogRpc {
     await this._onDraftUpdate(this._session, update, this._authKeyId)
   }
 
-  private async _clearDraftAfterSend(peer: tl.TypeInputPeer, replyTo?: tl.TypeInputReplyTo): Promise<void> {
+  /**
+   * The draft a send is about to consume.
+   *
+   * The client writes the next draft as soon as the user starts typing, which
+   * can happen while a slow send is still in flight. The clear that follows the
+   * send only knows the draft captured here, so anything written afterwards
+   * survives.
+   */
+  private async _draftBeforeSend(
+    peer: tl.TypeInputPeer,
+    replyTo?: tl.TypeInputReplyTo,
+  ): Promise<StoredDraft | undefined> {
     if (!this._drafts) return
     try {
+      await this._hydratePeers()
       const scope = await this._resolveDraftScope(peer, replyTo)
+      return await this._drafts.get(this._session.platformSessionId, scope.conversationId, scope.topMsgId)
+    } catch (error) {
+      this._onTrace?.('draft snapshot before send failed: %s', String(error))
+    }
+  }
+
+  /**
+   * Drops the stored draft the send was based on, and only that one.
+   *
+   * The stored draft is compared with the snapshot taken before the send: a
+   * newer one means the user already started the next message, so it stays.
+   * Nothing is published either way: the sending client already cleared its
+   * own composer when the send started, and an empty draft pushed now would
+   * make it (or the account's other devices) re-apply a cleared draft on top
+   * of whatever is being typed.
+   */
+  private async _clearDraftAfterSend(
+    peer: tl.TypeInputPeer,
+    replyTo: tl.TypeInputReplyTo | undefined,
+    sentDraft: StoredDraft | undefined,
+  ): Promise<void> {
+    if (!this._drafts || !sentDraft) return
+    try {
+      const scope = await this._resolveDraftScope(peer, replyTo)
+      const current = await this._drafts.get(this._session.platformSessionId, scope.conversationId, scope.topMsgId)
+      if (!current) return
+      if (current.draft.date !== sentDraft.draft.date || current.draft.message !== sentDraft.draft.message) return
       await this._drafts.remove(this._session.platformSessionId, scope.conversationId, scope.topMsgId)
-      await this._publishDraft(scope.conversationId, scope.topMsgId, {
-        _: 'draftMessageEmpty', date: Math.floor(Date.now() / 1000),
-      })
     } catch (error) {
       this._onTrace?.('draft clear after send failed: %s', String(error))
     }
