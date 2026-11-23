@@ -26,6 +26,10 @@ import {
   escapeRegExpLiteral, mediaSearchKind, messageSearchKinds, messageSearchText, partKindsMatchSearchKinds,
   SEARCH_KIND, type MessageSearchContext,
 } from './message-search.js'
+import {
+  getPostgresClient, PostgresSearchBackend,
+  type PostgresPartCountGroup, type PostgresSearchParams,
+} from './postgres-search.js'
 
 export interface MessageSearchQuery {
   /** 限定会话（平台会话 ID）；缺省时在整个账号内搜索。 */
@@ -76,6 +80,57 @@ interface SearchPartIndexRow extends SearchPartIndexEntry {
   messageKinds: number
 }
 
+/**
+ * 分片级索引的紧凑列式存储（每条 22 字节，无 JS 对象与 GC 压力）。
+ * 线上 6 万条共享媒体的群只占 ~1.3 MiB，可以安全留在短期缓存里供滚动条与日历复用。
+ */
+interface CompactPartIndexRows {
+  readonly length: number
+  readonly tlMessageId: Int32Array
+  readonly timestamp: Float64Array
+  readonly messageId: Int32Array
+  readonly ordinal: Uint16Array
+  readonly partKind: Uint16Array
+  readonly messageKinds: Uint16Array
+}
+
+function packPartIndexRows(rows: readonly SearchPartIndexRow[]): CompactPartIndexRows {
+  const length = rows.length
+  const tlMessageId = new Int32Array(length)
+  const timestamp = new Float64Array(length)
+  const messageId = new Int32Array(length)
+  const ordinal = new Uint16Array(length)
+  const partKind = new Uint16Array(length)
+  const messageKinds = new Uint16Array(length)
+  for (let index = 0; index < length; index++) {
+    const row = rows[index]!
+    tlMessageId[index] = row.tlMessageId
+    timestamp[index] = row.timestamp
+    messageId[index] = row.messageId
+    ordinal[index] = row.ordinal
+    partKind[index] = row.partKind
+    messageKinds[index] = row.messageKinds
+  }
+  return { length, tlMessageId, timestamp, messageId, ordinal, partKind, messageKinds }
+}
+
+function filterPartIndexRows(rows: CompactPartIndexRows, mask: number): SearchPartIndexEntry[] {
+  const output: SearchPartIndexEntry[] = []
+  for (let index = 0; index < rows.length; index++) {
+    const matched = mask === 0
+      ? rows.ordinal[index] === 0
+      : partKindsMatchSearchKinds(rows.messageKinds[index]!, rows.ordinal[index]!, rows.partKind[index]!, mask)
+    if (matched) {
+      output.push({
+        tlMessageId: rows.tlMessageId[index]!,
+        timestamp: rows.timestamp[index]!,
+        messageId: rows.messageId[index]!,
+      })
+    }
+  }
+  return output
+}
+
 /** 一次分片索引扫描的结果；同一份数据会被裁成多个 `kinds` 掩码的子集。 */
 interface SearchPartIndexCacheEntry {
   /** 该次扫描覆盖的平台会话；为空表示整个账号。 */
@@ -84,9 +139,26 @@ interface SearchPartIndexCacheEntry {
   mask: number
   /** 结果落地的时间，用于 TTL；未落地时为 0。 */
   settledAt: number
-  rows?: SearchPartIndexRow[]
+  rows?: CompactPartIndexRows
   /** 在飞行中的同一次扫描，用来合并同一轮打开会话里的重复请求。 */
-  pending?: Promise<SearchPartIndexRow[]>
+  pending?: Promise<CompactPartIndexRows>
+}
+
+/** PostgreSQL 共享媒体 SQL `GROUP BY` 计数汇总的短期缓存项（通常仅几十行，几 KB）。 */
+interface SearchPartCountCacheEntry {
+  conversationIds: readonly string[]
+  mask: number
+  settledAt: number
+  groups?: PostgresPartCountGroup[]
+  pending?: Promise<PostgresPartCountGroup[]>
+}
+
+/** 通用搜索结果/计数缓存项，支持飞行中并发去重与失效防回写。 */
+interface SearchValueCacheEntry<T> {
+  conversationIds: readonly string[]
+  settledAt: number
+  value?: T
+  pending?: Promise<T>
 }
 
 const SEARCH_INDEX_CHUNK = 500
@@ -97,14 +169,13 @@ const SEARCH_INDEX_CHUNK_CONCURRENCY = 3
  *
  * 客户端打开一个会话会同时发 `messages.getSearchCounters`（一次 9 个过滤器）、
  * `messages.getSearchResultsPositions`（另外几个）与若干 `messages.search`，
- * 它们共享同一批「消息 → 分片」数据；而每次全量扫描在线上 16 万条消息的群里要 4~5 秒，
- * 十几个过滤器叠起来足以把数据库读到饱和，让同一条连接上的 `messages.getHistory` 拿不到连接。
- * 缓存按「会话 + 其余查询条件」保存一份扫描结果，写入侧再按会话精确失效。
+ * 它们共享同一批「消息 → 分片」数据；缓存按「会话 + 其余查询条件」保存一份扫描结果，
+ * 并发/重发请求共享同一个 in-flight promise，写入侧再按会话精确失效。
  */
 const SEARCH_INDEX_CACHE_TTL = 30_000
 const SEARCH_INDEX_CACHE_LIMIT = 8
-/** 单次结果超过这么多条分片就不再留在内存里：这台机器本来就吃紧，宁可下次重扫。 */
-const SEARCH_INDEX_CACHE_MAX_ROWS = 40_000
+/** 使用紧凑列式存储后 15 万条分片仅 ~3.3 MiB；超过上限时只服务本次请求不留在内存。 */
+const SEARCH_INDEX_CACHE_MAX_ROWS = 150_000
 
 export interface IngestResult {
   message: IMMessageRow
@@ -210,16 +281,14 @@ export class MessageStore {
   private _peerRevision = 0
   /** 共享媒体分片索引的短期缓存，见 `SEARCH_INDEX_CACHE_TTL`。 */
   private readonly _partIndexCache = new Map<string, SearchPartIndexCacheEntry>()
-  /** 文本搜索精确计数的短期缓存（同一个键由 `_countCacheKey` 定义）。 */
-  private readonly _countCache = new Map<
-    string,
-    { value: number, at: number, conversationIds: readonly string[] }
-  >()
-  /** 搜索页结果的短期缓存（同一个键由 `_searchPageCacheKey` 定义）。 */
-  private readonly _searchPageCache = new Map<
-    string,
-    { value: MessageSearchResult, at: number, conversationIds: readonly string[] }
-  >()
+  /** PostgreSQL 共享媒体聚合计数的短期缓存。 */
+  private readonly _partCountCache = new Map<string, SearchPartCountCacheEntry>()
+  /** 文本搜索精确计数的短期缓存（含飞行中并发去重，键由 `_countCacheKey` 定义）。 */
+  private readonly _countCache = new Map<string, SearchValueCacheEntry<number>>()
+  /** 搜索页结果的短期缓存（含飞行中并发去重，键由 `_searchPageCacheKey` 定义）。 */
+  private readonly _searchPageCache = new Map<string, SearchValueCacheEntry<MessageSearchResult>>()
+  /** 懒解析的 PostgreSQL 原生搜索后端；非 PostgreSQL 驱动为 `null`。 */
+  private _postgresSearch?: PostgresSearchBackend | null
 
   constructor(
     private readonly _database: Database,
@@ -957,64 +1026,105 @@ export class MessageStore {
   }
 
   /**
+   * 为 PostgreSQL 建立搜索所需的 bigram GIN 与共享媒体部分索引（并发建索引，不锁表）；
+   * 其它数据库驱动为空操作。
+   */
+  async ensureSearchIndexes(): Promise<void> {
+    await this._getPostgresSearch()?.ensureIndexes(this._onTrace)
+  }
+
+  private _getPostgresSearch(): PostgresSearchBackend | undefined {
+    if (this._postgresSearch === undefined) {
+      const client = getPostgresClient(this._database)
+      this._postgresSearch = client ? new PostgresSearchBackend(client) : null
+    }
+    return this._postgresSearch ?? undefined
+  }
+
+  /**
    * 在本地投影过的消息中搜索，结果按 `(timestamp, id)` 倒序。
    *
-   * 不依赖文本索引：沿 `(conversationId, timestamp)` 或 `(platformSessionId, timestamp)` 索引倒序扫描，
-   * 对 `searchText` 做字面量子串匹配，取满 `limit + 1` 行即停止，多取的一行只用于判断是否还有更多。
+   * PostgreSQL 侧使用 bigram GIN 索引 + 近期窗口探测（兼顾罕见词与高频词）并只拉回命中的行号；
+   * 其它驱动沿 `(conversationId, timestamp)` 或 `(platformSessionId, timestamp)` 倒序扫描，
+   * 对 `searchText` 做字面量子串匹配，取满 `limit + 1` 行即停止。
    */
   async searchMessages(platformSessionId: string, query: MessageSearchQuery): Promise<MessageSearchResult> {
-    // 罕见词的一次搜索要把整个会话扫一遍（线上 16.7 万条消息，热起来也要一秒多），
-    // 而客户端在等应答时会按 1.5 秒的重发间隔再问一遍、切标签页也会重问——按完整查询缓存一小段时间。
+    // 客户端在等应答时会按 1.5 秒的重发间隔再问一遍、切标签页也会重问；
+    // 缓存含飞行中并发去重（pending），重发共享同一个查询，写入/删除按会话精确失效。
     const cacheKey = this._searchPageCacheKey(platformSessionId, query)
-    const cached = this._searchPageCache.get(cacheKey)
-    if (cached && Date.now() - cached.at < SEARCH_INDEX_CACHE_TTL) return cached.value
-    const where = await this._searchPredicate(platformSessionId, query)
-    if (!where) return { messages: [], hasMore: false }
-    const limit = clampDatabaseLimit(query.limit)
-    const rows = await this._database.select('mtproto_im_message', where)
-      .orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(limit + 1).execute()
-    const page = rows.slice(0, limit)
-    const hydrated = await this._hydrateProjectedRows(page)
-    const result: MessageSearchResult = {
-      messages: hydrated.map((item, index) => ({
-        ...item, messageId: page[index].id, searchKinds: page[index].searchKinds ?? 0,
-      })),
-      hasMore: rows.length > limit,
-    }
-    this._searchPageCache.set(cacheKey, {
-      value: result, at: Date.now(), conversationIds: [...(query.platformConversationIds ?? [])],
-    })
-    while (this._searchPageCache.size > SEARCH_INDEX_CACHE_LIMIT) {
-      const oldest = this._searchPageCache.keys().next().value
-      if (oldest === undefined) break
-      this._searchPageCache.delete(oldest)
-    }
-    return result
+    return this._cachedSearch(
+      this._searchPageCache,
+      cacheKey,
+      [...(query.platformConversationIds ?? [])],
+      async () => {
+        const limit = clampDatabaseLimit(query.limit)
+        const pg = this._getPostgresSearch()
+        if (pg) {
+          const conversationIds = await this._resolveSearchConversationIds(
+            platformSessionId, query.platformConversationIds,
+          )
+          if (conversationIds === null) return { messages: [], hasMore: false }
+          const { ids, hasMore } = await pg.searchMessageIds(
+            this._toPostgresSearchParams(platformSessionId, query, conversationIds),
+            limit,
+          )
+          if (!ids.length) return { messages: [], hasMore: false }
+          const rows = await this._database.get('mtproto_im_message', { id: { $in: ids } })
+          const byId = new Map(rows.map((row) => [row.id, row]))
+          const page = ids.flatMap((id) => {
+            const row = byId.get(id)
+            return row ? [row] : []
+          })
+          const hydrated = await this._hydrateProjectedRows(page)
+          return {
+            messages: hydrated.map((item, index) => ({
+              ...item, messageId: page[index]!.id, searchKinds: page[index]!.searchKinds ?? 0,
+            })),
+            hasMore,
+          }
+        }
+        const where = await this._searchPredicate(platformSessionId, query)
+        if (!where) return { messages: [], hasMore: false }
+        const rows = await this._database.select('mtproto_im_message', where)
+          .orderBy('timestamp', 'desc').orderBy('id', 'desc').limit(limit + 1).execute()
+        const page = rows.slice(0, limit)
+        const hydrated = await this._hydrateProjectedRows(page)
+        return {
+          messages: hydrated.map((item, index) => ({
+            ...item, messageId: page[index]!.id, searchKinds: page[index]!.searchKinds ?? 0,
+          })),
+          hasMore: rows.length > limit,
+        }
+      },
+    )
   }
 
   private _searchPageCacheKey(platformSessionId: string, query: MessageSearchQuery): string {
     return JSON.stringify([this._countCacheKey(platformSessionId, query), query.limit])
   }
 
-  /** 与 `searchMessages` 同条件的消息条数（按逻辑消息计）；需要扫完整个范围，只在首页调用。 */
+  /** 与 `searchMessages` 同条件的消息条数（按逻辑消息计）；只在首页且未一次扫完时调用。 */
   async countSearchMessages(platformSessionId: string, query: Omit<MessageSearchQuery, 'limit'>): Promise<number> {
-    // 精确计数要扫完整个会话的 `searchText`（线上 16 万条消息约 1.2 秒）。客户端在等应答时
-    // 会按 1.5 秒的重发间隔再问一遍，切标签页也会重问，所以短缓存直接决定搜索的手感。
-    const key = this._countCacheKey(platformSessionId, query)
-    const cached = this._countCache.get(key)
-    if (cached && Date.now() - cached.at < SEARCH_INDEX_CACHE_TTL) return cached.value
-    const where = await this._searchPredicate(platformSessionId, { ...query, limit: 0, before: undefined })
-    if (!where) return 0
-    const value = await this._database.eval('mtproto_im_message', (row) => $.count(row.id), where)
-    this._countCache.set(key, {
-      value, at: Date.now(), conversationIds: [...(query.platformConversationIds ?? [])],
-    })
-    while (this._countCache.size > SEARCH_INDEX_CACHE_LIMIT) {
-      const oldest = this._countCache.keys().next().value
-      if (oldest === undefined) break
-      this._countCache.delete(oldest)
-    }
-    return value
+    const normalized = { ...query, before: undefined }
+    const key = this._countCacheKey(platformSessionId, normalized)
+    return this._cachedSearch(
+      this._countCache,
+      key,
+      [...(query.platformConversationIds ?? [])],
+      async () => {
+        const pg = this._getPostgresSearch()
+        if (pg) {
+          const conversationIds = await this._resolveSearchConversationIds(
+            platformSessionId, query.platformConversationIds,
+          )
+          if (conversationIds === null) return 0
+          return pg.countMessages(this._toPostgresSearchParams(platformSessionId, normalized, conversationIds))
+        }
+        const where = await this._searchPredicate(platformSessionId, { ...normalized, limit: 0 })
+        if (!where) return 0
+        return this._database.eval('mtproto_im_message', (row) => $.count(row.id), where)
+      },
+    )
   }
 
   private _countCacheKey(platformSessionId: string, query: Omit<MessageSearchQuery, 'limit'>): string {
@@ -1028,6 +1138,99 @@ export class MessageStore {
       query.kinds ?? 0,
       query.before ? [query.before.timestamp, query.before.messageId] : null,
     ])
+  }
+
+  /**
+   * 一次返回多个 `kinds` 掩码对应的精确分片计数，返回值顺序与 `masks` 一一对应。
+   *
+   * PostgreSQL 侧用单条 SQL `GROUP BY` 聚合只拉回几十行分组汇总并缓存（几 KB，不受大群几万条
+   * 媒体行数上限影响）；其它驱动复用 `searchPartIndexMany` 的同一份扫描缓存。
+   */
+  async countSearchPartsMany(
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit' | 'before'>,
+    masks: readonly number[],
+  ): Promise<number[]> {
+    if (!masks.length) return []
+    const pg = this._getPostgresSearch()
+    if (!pg) {
+      const uniqueMasks = [...new Set(masks)]
+      const lists = await this.searchPartIndexMany(platformSessionId, query, uniqueMasks)
+      const countByMask = new Map(uniqueMasks.map((mask, index) => [mask, lists[index]!.length]))
+      return masks.map((mask) => countByMask.get(mask) ?? 0)
+    }
+
+    const wanted = [...new Set(masks)]
+    const unionMask = wanted.filter((mask) => mask !== 0).reduce((total, mask) => total | mask, 0)
+    const hasZero = wanted.includes(0)
+    const hasNonZero = unionMask !== 0
+    const countByMask = new Map<number, number>()
+
+    if (hasNonZero) {
+      const groups = await this._searchPartCountGroups(pg, platformSessionId, query, unionMask)
+      for (const mask of wanted) {
+        if (mask === 0) continue
+        let total = 0
+        for (const group of groups) {
+          if (partKindsMatchSearchKinds(group.messageKinds, group.ordinal, group.partKind, mask)) {
+            total += group.count
+          }
+        }
+        countByMask.set(mask, total)
+      }
+    }
+    if (hasZero) {
+      const groups = await this._searchPartCountGroups(pg, platformSessionId, query, 0)
+      let total = 0
+      for (const group of groups) {
+        if (group.ordinal === 0) total += group.count
+      }
+      countByMask.set(0, total)
+    }
+
+    return masks.map((mask) => countByMask.get(mask) ?? 0)
+  }
+
+  private async _searchPartCountGroups(
+    pg: PostgresSearchBackend,
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit' | 'before'>,
+    mask: number,
+  ): Promise<PostgresPartCountGroup[]> {
+    const key = this._searchIndexCacheKey(platformSessionId, query)
+    const cached = this._partCountCache.get(key)
+    if (cached && this._searchIndexCovers(cached.mask, mask)) {
+      if (cached.pending) return cached.pending
+      if (cached.groups && Date.now() - cached.settledAt < SEARCH_INDEX_CACHE_TTL) return cached.groups
+    }
+    const entry: SearchPartCountCacheEntry = {
+      conversationIds: [...(query.platformConversationIds ?? [])],
+      mask,
+      settledAt: 0,
+    }
+    entry.pending = (async () => {
+      const conversationIds = await this._resolveSearchConversationIds(
+        platformSessionId, query.platformConversationIds,
+      )
+      if (conversationIds === null) return []
+      return pg.queryPartCountGroups(
+        this._toPostgresSearchParams(platformSessionId, { ...query, kinds: mask || undefined }, conversationIds),
+      )
+    })()
+    this._partCountCache.set(key, entry)
+    this._trimMapCache(this._partCountCache)
+    try {
+      const groups = await entry.pending
+      entry.pending = undefined
+      if (this._partCountCache.get(key) === entry) {
+        entry.groups = groups
+        entry.settledAt = Date.now()
+      }
+      return groups
+    } catch (error) {
+      if (this._partCountCache.get(key) === entry) this._partCountCache.delete(key)
+      throw error
+    }
   }
 
   /**
@@ -1061,11 +1264,7 @@ export class MessageStore {
     const unfiltered = wanted.includes(0) && wanted.some((mask) => mask !== 0)
       ? await this._loadSearchPartIndexRows(platformSessionId, query, 0)
       : undefined
-    return wanted.map((mask) => (mask === 0 && unfiltered ? unfiltered : rows)
-      .filter((row) => (mask === 0
-        ? row.ordinal === 0
-        : partKindsMatchSearchKinds(row.messageKinds, row.ordinal, row.partKind, mask)))
-      .map(({ tlMessageId, timestamp, messageId }) => ({ tlMessageId, timestamp, messageId })))
+    return wanted.map((mask) => filterPartIndexRows(mask === 0 && unfiltered ? unfiltered : rows, mask))
   }
 
   /** 拿到（或复用缓存里的）分片索引原始行；同一次请求的并发方共享同一个 promise。 */
@@ -1073,7 +1272,7 @@ export class MessageStore {
     platformSessionId: string,
     query: Omit<MessageSearchQuery, 'limit' | 'before'>,
     masks: readonly number[],
-  ): Promise<SearchPartIndexRow[]> {
+  ): Promise<CompactPartIndexRows> {
     const mask = masks.filter((value) => value !== 0).reduce((total, value) => total | value, 0)
     const key = this._searchIndexCacheKey(platformSessionId, query)
     const cached = this._partIndexCache.get(key)
@@ -1088,7 +1287,7 @@ export class MessageStore {
     }
     entry.pending = this._loadSearchPartIndexRows(platformSessionId, query, mask)
     this._partIndexCache.set(key, entry)
-    this._trimSearchIndexCache()
+    this._trimMapCache(this._partIndexCache)
     try {
       const rows = await entry.pending
       entry.pending = undefined
@@ -1097,8 +1296,10 @@ export class MessageStore {
         if (this._partIndexCache.get(key) === entry) this._partIndexCache.delete(key)
         return rows
       }
-      entry.rows = rows
-      entry.settledAt = Date.now()
+      if (this._partIndexCache.get(key) === entry) {
+        entry.rows = rows
+        entry.settledAt = Date.now()
+      }
       return rows
     } catch (error) {
       if (this._partIndexCache.get(key) === entry) this._partIndexCache.delete(key)
@@ -1110,11 +1311,22 @@ export class MessageStore {
     platformSessionId: string,
     query: Omit<MessageSearchQuery, 'limit' | 'before'>,
     mask: number,
-  ): Promise<SearchPartIndexRow[]> {
+  ): Promise<CompactPartIndexRows> {
+    const pg = this._getPostgresSearch()
+    if (pg) {
+      const conversationIds = await this._resolveSearchConversationIds(
+        platformSessionId, query.platformConversationIds,
+      )
+      if (conversationIds === null) return packPartIndexRows([])
+      const rows = await pg.loadPartIndexRows(
+        this._toPostgresSearchParams(platformSessionId, { ...query, kinds: mask || undefined }, conversationIds),
+      )
+      return packPartIndexRows(rows)
+    }
     const where = await this._searchPredicate(platformSessionId, {
       ...query, kinds: mask || undefined, limit: 0,
     })
-    if (!where) return []
+    if (!where) return packPartIndexRows([])
     const rows = await this._database.get('mtproto_im_message', where, ['id', 'timestamp', 'searchKinds'])
     const chunks: Array<typeof rows> = []
     for (let offset = 0; offset < rows.length; offset += SEARCH_INDEX_CHUNK) {
@@ -1156,7 +1368,7 @@ export class MessageStore {
       { length: Math.min(SEARCH_INDEX_CHUNK_CONCURRENCY, chunks.length) },
       worker,
     ))
-    return output.sort((left, right) => right.tlMessageId - left.tlMessageId)
+    return packPartIndexRows(output.sort((left, right) => right.tlMessageId - left.tlMessageId))
   }
 
   /**
@@ -1186,11 +1398,40 @@ export class MessageStore {
     ])
   }
 
-  private _trimSearchIndexCache(): void {
-    while (this._partIndexCache.size > SEARCH_INDEX_CACHE_LIMIT) {
-      const oldest = this._partIndexCache.keys().next().value
+  private async _cachedSearch<T>(
+    cache: Map<string, SearchValueCacheEntry<T>>,
+    key: string,
+    conversationIds: readonly string[],
+    load: () => Promise<T>,
+  ): Promise<T> {
+    const cached = cache.get(key)
+    if (cached) {
+      if (cached.pending) return cached.pending
+      if (cached.value !== undefined && Date.now() - cached.settledAt < SEARCH_INDEX_CACHE_TTL) return cached.value
+    }
+    const entry: SearchValueCacheEntry<T> = { conversationIds, settledAt: 0 }
+    entry.pending = load()
+    cache.set(key, entry)
+    this._trimMapCache(cache)
+    try {
+      const value = await entry.pending
+      entry.pending = undefined
+      if (cache.get(key) === entry) {
+        entry.value = value
+        entry.settledAt = Date.now()
+      }
+      return value
+    } catch (error) {
+      if (cache.get(key) === entry) cache.delete(key)
+      throw error
+    }
+  }
+
+  private _trimMapCache(cache: Map<string, unknown>): void {
+    while (cache.size > SEARCH_INDEX_CACHE_LIMIT) {
+      const oldest = cache.keys().next().value
       if (oldest === undefined) break
-      this._partIndexCache.delete(oldest)
+      cache.delete(oldest)
     }
   }
 
@@ -1199,30 +1440,62 @@ export class MessageStore {
     const stale = (conversationIds: readonly string[]): boolean =>
       !conversationIds.length || conversationIds.includes(platformConversationId)
     for (const [key, entry] of this._partIndexCache) if (stale(entry.conversationIds)) this._partIndexCache.delete(key)
+    for (const [key, entry] of this._partCountCache) if (stale(entry.conversationIds)) this._partCountCache.delete(key)
     for (const [key, entry] of this._countCache) if (stale(entry.conversationIds)) this._countCache.delete(key)
     for (const [key, entry] of this._searchPageCache) if (stale(entry.conversationIds)) this._searchPageCache.delete(key)
   }
 
   private _clearSearchPartIndex(): void {
     this._partIndexCache.clear()
+    this._partCountCache.clear()
     this._countCache.clear()
     this._searchPageCache.clear()
+  }
+
+  /**
+   * 将平台会话 ID 列表解析为 `mtproto_im_conversation.id`：
+   * - `undefined` 表示未限定会话（全账号搜索）
+   * - `null` 表示限定会话为空或全部不存在（调用方应直接返回空结果）
+   */
+  private async _resolveSearchConversationIds(
+    platformSessionId: string,
+    platformConversationIds?: readonly string[],
+  ): Promise<number[] | undefined | null> {
+    if (!platformConversationIds) return undefined
+    if (!platformConversationIds.length) return null
+    const conversations = await this._database.get('mtproto_im_conversation', {
+      platformSessionId,
+      platformConversationId: { $in: [...new Set(platformConversationIds)] },
+    }, ['id'])
+    if (!conversations.length) return null
+    return conversations.map((conversation) => conversation.id)
+  }
+
+  private _toPostgresSearchParams(
+    platformSessionId: string,
+    query: Omit<MessageSearchQuery, 'limit'>,
+    conversationIds?: readonly number[],
+  ): PostgresSearchParams {
+    return {
+      platformSessionId,
+      conversationIds,
+      terms: query.terms,
+      senderUserId: query.senderUserId,
+      minTimestamp: query.minTimestamp,
+      maxTimestamp: query.maxTimestamp,
+      kinds: query.kinds,
+      before: query.before,
+    }
   }
 
   private async _searchPredicate(
     platformSessionId: string,
     query: MessageSearchQuery,
   ): Promise<Query.Expr<IMMessageRow> | undefined> {
-    let conversationIds: number[] | undefined
-    if (query.platformConversationIds) {
-      if (!query.platformConversationIds.length) return
-      const conversations = await this._database.get('mtproto_im_conversation', {
-        platformSessionId,
-        platformConversationId: { $in: [...new Set(query.platformConversationIds)] },
-      }, ['id'])
-      if (!conversations.length) return
-      conversationIds = conversations.map((conversation) => conversation.id)
-    }
+    const conversationIds = await this._resolveSearchConversationIds(
+      platformSessionId, query.platformConversationIds,
+    )
+    if (conversationIds === null) return
     const and: Query.Expr<IMMessageRow>[] = query.terms.map((term) => ({
       searchText: { $regex: escapeRegExpLiteral(term) },
     }))
@@ -1239,7 +1512,11 @@ export class MessageStore {
     if (query.maxTimestamp !== undefined) timestamp.$lt = query.maxTimestamp
     // searchKinds 为空的旧行尚未建立搜索字段，统一排除；系统提示只在通话记录过滤中出现。
     const kinds: Query.FieldExpr<number | null> = { $exists: true }
-    if (query.kinds) kinds.$bitsAnySet = query.kinds
+    if (query.kinds) {
+      // 显式加上 > 0 范围条件，让 B-tree 索引直接跳过占比 90%+ 的纯文本消息（searchKinds = 0）。
+      kinds.$gt = 0
+      kinds.$bitsAnySet = query.kinds
+    }
     if (!(query.kinds && query.kinds & SEARCH_KIND.PHONE_CALL)) kinds.$bitsAllClear = SEARCH_KIND.SERVICE
     return {
       // 会话行号（`mtproto_im_conversation.id`）是全局唯一行号，单会话查询再带上 32 字节的

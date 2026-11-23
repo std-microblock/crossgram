@@ -287,6 +287,7 @@ export interface DialogRpcOptions {
 
 export class DialogRpc {
   private static readonly PEER_HYDRATION_TTL_MS = 5_000
+  private static readonly CONTACTS_SEARCH_CACHE_TTL_MS = 60_000
   private static readonly REACTION_REFRESH_FAILURE_COOLDOWN_MS = 30_000
   private readonly _peerToTl = new Map<string, number>()
   private readonly _tlToPeer = new Map<number, string>()
@@ -321,6 +322,8 @@ export class DialogRpc {
   private readonly _contactUserIds = new Set<string>()
   private _contactsHydrated = false
   private _contactsHydration?: Promise<void>
+  private _contactsCache?: { value: tl.contacts.RawContacts, at: number }
+  private _contactsPending?: Promise<tl.contacts.RawContacts>
   private readonly _topicToConversation = new Map<number, string>()
   private readonly _conversationToTopic = new Map<string, number>()
   private readonly _avatarMedia = new Map<string, IMMedia<any>>()
@@ -1002,11 +1005,25 @@ export class DialogRpc {
     const peerId = req.topMsgId
       ? await this._resolveMentionConversation(req.peer, req.topMsgId)
       : this._resolvePeer(req.peer)
-    // 客户端一次会问 9 个过滤器的条数。逐个过滤器各扫一遍整个会话（线上 16 万条消息的群
-    // 每次 4~5 秒）会把数据库读到饱和，同一连接上的 getHistory 因此拿不到结果；
-    // 这里把掩码并成一次扫描再按掩码裁剪。
+    // 客户端一次会问 9 个过滤器的条数：把掩码并成一次聚合查询（PostgreSQL 用单条 GROUP BY 只取回
+    // 几十行汇总，SQLite 复用一次分片索引扫描）再按过滤器裁剪，避免大群反复全量拉取数万条分片。
     const kindsList = req.filters.map((filter) => filterSearchKinds(filter))
     const masks = [...new Set(kindsList.filter((kinds): kinds is number => kinds !== null))]
+    const needsMissedCallFilter = req.filters.some(
+      (filter) => filter._ === 'inputMessagesFilterPhoneCalls' && filter.missed === true,
+    )
+    if (!needsMissedCallFilter) {
+      const counts = masks.length
+        ? await this._store.countSearchPartsMany(this._session.platformSessionId, {
+            platformConversationIds: [peerId], terms: [],
+          }, masks)
+        : []
+      const countByKinds = new Map(masks.map((mask, index) => [mask, counts[index] ?? 0]))
+      return req.filters.map((filter, position) => {
+        const kinds = kindsList[position]
+        return { _: 'messages.searchCounter', filter, count: kinds === null ? 0 : (countByKinds.get(kinds) ?? 0) }
+      })
+    }
     const indexes = masks.length
       ? await this._store.searchPartIndexMany(this._session.platformSessionId, {
           platformConversationIds: [peerId], terms: [],
@@ -1213,8 +1230,8 @@ export class DialogRpc {
     const needed = start + limit
     const collected: MaterializedMessage[] = []
     let cursor = before
-    let hasMore = true
-    for (let round = 0; round < SEARCH_SCAN_ROUNDS && hasMore && (collected.length < needed || needed === 0); round++) {
+    let hasMore = limit > 0
+    for (let round = 0; round < SEARCH_SCAN_ROUNDS && hasMore && collected.length < needed; round++) {
       const batch = Math.min(SEARCH_BATCH_MAX, Math.max(SEARCH_BATCH_MIN, needed - collected.length + 1))
       const result = await this._store.searchMessages(this._session.platformSessionId, {
         ...query, before: cursor, limit: batch,
@@ -1230,16 +1247,23 @@ export class DialogRpc {
         return partMatchesSearchKinds((message as SearchedMessage).searchKinds, { ordinal: part.ordinal, media }, kinds)
       })
       collected.push(...await this._visibleMessages(items))
-      if (needed === 0) break
     }
     const page = collected.slice(start, start + limit)
     const more = collected.length > start + limit || hasMore
     let count: number
     let exact = false
     if (options.exactCount || limit === 0) {
-      count = kinds
-        ? (await this._store.searchPartIndex(this._session.platformSessionId, query)).length
-        : await this._store.countSearchMessages(this._session.platformSessionId, query)
+      // 首页在无上下界裁剪且已经一次扫完（!more）的情况下，collected 已经是全量结果，
+      // 无需再跑一遍 countSearchMessages / countSearchPartsMany。
+      const exhaustedFullScope = limit > 0 && !more && start === 0
+        && options.offsetId === 0 && options.maxId === 0 && options.minId === 0
+      if (exhaustedFullScope) {
+        count = page.length
+      } else if (kinds) {
+        count = (await this._store.countSearchPartsMany(this._session.platformSessionId, query, [kinds]))[0] ?? 0
+      } else {
+        count = await this._store.countSearchMessages(this._session.platformSessionId, query)
+      }
       exact = true
     } else {
       count = start + page.length + (more ? 1 : 0)
@@ -1978,11 +2002,35 @@ export class DialogRpc {
       }))
     }
     this._contactsHydrated = true
-    return {
+    const result: tl.contacts.RawContacts = {
       _: 'contacts.contacts',
       contacts: users.map((user) => ({ _: 'contact', userId: user.id, mutual: true })),
       savedCount: users.length,
       users: uniqueUsers(users),
+    }
+    this._contactsCache = { value: result, at: Date.now() }
+    return result
+  }
+
+  /**
+   * 供 `contacts.search` 复用的短缓存联系人列表：
+   * 用户在全局搜索框连续输入时每次按键都会触发 `contacts.search`，复用近期结果并合并并发请求，
+   * 避免每个按键都拉一次上游通讯录并触发整批 `upsertUsers` 写事务。
+   */
+  private async _getCachedContacts(): Promise<tl.contacts.RawContacts> {
+    if (
+      this._contactsCache
+      && Date.now() - this._contactsCache.at < DialogRpc.CONTACTS_SEARCH_CACHE_TTL_MS
+    ) {
+      return this._contactsCache.value
+    }
+    if (this._contactsPending) return this._contactsPending
+    const pending = this.getContacts()
+    this._contactsPending = pending
+    try {
+      return await pending
+    } finally {
+      if (this._contactsPending === pending) this._contactsPending = undefined
     }
   }
 
@@ -2002,7 +2050,7 @@ export class DialogRpc {
 
   async searchContacts(req: tl.contacts.RawSearchRequest): Promise<tl.contacts.RawFound> {
     await this._hydratePeers()
-    const contacts = await this.getContacts()
+    const contacts = await this._getCachedContacts()
     const query = normalizePeerSearchQuery(req.q)
     const limit = clampLimit(req.limit)
     if (!query || limit === 0) {

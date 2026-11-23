@@ -94,7 +94,7 @@ export interface IMMessageRow {
   deleted: boolean
   platformGroupId: string | null
   metadata: JsonObject
-  /** 归一化后的可搜索文本（正文、卡片、文件名、链接），无文本索引，按会话扫描时做子串匹配。 */
+  /** 归一化后的可搜索文本（正文、卡片、文件名、链接），PostgreSQL 侧建 bigram GIN 索引加速子串搜索。 */
   searchText: string
   /** 媒体类别位掩码（见 `SEARCH_KIND`）；`null` 表示旧数据尚未建立搜索字段。 */
   searchKinds: number | null
@@ -413,8 +413,8 @@ export function defineModels(ctx: Context): void {
     // 判重键不再重复携带 32 字节的会话 id，索引键从 55 字节降到 23 字节。
     unique: [['conversationId', 'primaryPlatformMessageId']],
     // senderUserId 只在会话扫描中作为附加过滤条件（from: 搜索），不单独建索引。
-    // 搜索不建文本索引：会话内搜索沿 (conversationId, timestamp) 倒序扫描，
-    // 全局搜索沿 (platformSessionId, timestamp) 倒序扫描，searchText 子串匹配，凑够一页即停。
+    // PostgreSQL 侧由 PostgresSearchBackend 额外维护 bigram GIN 索引与共享媒体部分索引，
+    // 这里的 (conversationId, timestamp) / (platformSessionId, timestamp) 同时服务历史加载与高频词近期探测。
     indexes: [
       ['conversationId', 'timestamp'],
       ['platformSessionId', 'timestamp'],

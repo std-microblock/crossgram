@@ -8,8 +8,9 @@ import {
 /**
  * 本地消息搜索的写入侧与过滤侧共享的规则。
  *
- * 搜索不建文本索引：`mtproto_im_message.searchText` 保存归一化文本，查询时按会话索引倒序扫描并做
- * 子串匹配，凑够一页即停止；`searchKinds` 是逐条消息的媒体类别位掩码，供共享媒体过滤直接下推到 SQL。
+ * `mtproto_im_message.searchText` 保存归一化文本：PostgreSQL 侧使用 bigram GIN 表达式索引 +
+ * 近期窗口探测加速中英文子串搜索，其它驱动沿会话索引倒序扫描并做子串匹配；
+ * `searchKinds` 是逐条消息的媒体类别位掩码，供共享媒体过滤与部分索引直接下推到 SQL。
  */
 export const SEARCH_KIND = {
   PHOTO: 1,
@@ -177,4 +178,25 @@ export function partKindsMatchSearchKinds(
  */
 export function escapeRegExpLiteral(value: string): string {
   return value.replace(/[\\^$.*+?()[\]{}|/-]/gu, (char) => `\\${char}`)
+}
+
+/**
+ * 提取查询词中所有由相邻非控制/非空白字符（Unicode 码点 > 32）组成的 2-gram，
+ * 与 PostgreSQL 侧 `crossgram_search_bigrams(text)` 的规则严格一致。
+ *
+ * 任意长度 ≥ 2 且不含空白的词只要作为子串出现在 `searchText` 中，它的全部 bigram
+ * 必然都是 `crossgram_search_bigrams(searchText)` 的子集（无漏召回）；命中后再由
+ * `strpos` 做精确子串复核（无误召回）。单字符词不产出 bigram。
+ */
+export function searchTermBigrams(terms: readonly string[]): string[] {
+  const bigrams = new Set<string>()
+  for (const term of terms) {
+    const chars = Array.from(term)
+    for (let index = 0; index + 1 < chars.length; index++) {
+      const left = chars[index]!.codePointAt(0) ?? 0
+      const right = chars[index + 1]!.codePointAt(0) ?? 0
+      if (left > 32 && right > 32) bigrams.add(chars[index]! + chars[index + 1]!)
+    }
+  }
+  return [...bigrams]
 }

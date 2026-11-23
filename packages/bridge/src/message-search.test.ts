@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   escapeRegExpLiteral, filterSearchKinds, mediaSearchKind, messageSearchKinds, messageSearchText,
-  normalizeSearchTerms, partMatchesSearchKinds, SEARCH_KIND,
+  normalizeSearchTerms, partMatchesSearchKinds, SEARCH_KIND, searchTermBigrams,
 } from './message-search.js'
 import type { IMMessage } from './platform.js'
 
@@ -85,5 +85,18 @@ describe('message search fields', () => {
     const pattern = new RegExp(escapeRegExpLiteral(value))
     expect(pattern.test(`xx${value}yy`)).toBe(true)
     expect(pattern.test('aXb*c+d?e(f)g[h]i{j}k|l^m$n\\o/p-q')).toBe(false)
+  })
+
+  it('extracts deduplicated Unicode code-point bigrams matching PostgreSQL crossgram_search_bigrams', () => {
+    expect(searchTermBigrams(['测试'])).toEqual(['测试'])
+    expect(searchTermBigrams(['服务器'])).toEqual(['服务', '务器'])
+    expect(searchTermBigrams(['relay', 'a+b'])).toEqual(['re', 'el', 'la', 'ay', 'a+', '+b'])
+    expect(searchTermBigrams(['测试', '测试仪'])).toEqual(['测试', '试仪'])
+    // 单字符词不产出 bigram，含空白/控制字符的相邻对被跳过。
+    expect(searchTermBigrams(['钱', 'a', ''])).toEqual([])
+    expect(searchTermBigrams(['a b', 'x\ny'])).toEqual([])
+    // 代理对 emoji 按 Unicode 码点切分，不把 UTF-16 半个代理拆成 bigram。
+    expect(searchTermBigrams(['🎉🚀🔥'])).toEqual(['🎉🚀', '🚀🔥'])
+    expect(searchTermBigrams(['🎉'])).toEqual([])
   })
 })

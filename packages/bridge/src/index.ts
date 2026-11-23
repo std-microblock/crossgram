@@ -82,6 +82,7 @@ export {
 export * from './message-projection.js'
 export * from './history-sync.js'
 export * from './message-search.js'
+export * from './postgres-search.js'
 export * from './detached-message-projection.js'
 export * from './message-store.js'
 export * from './message-actions.js'
@@ -275,6 +276,28 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       if (timer) clearTimeout(timer)
     }
   }, 'mtproto-bridge.search-rebuild')
+  // PostgreSQL 侧在后台以 CREATE INDEX CONCURRENTLY 建立 bigram GIN 与共享媒体部分索引，
+  // 不阻塞启动和线上读写；失败时每分钟重试一次，已有有效索引时仅做一次目录查询即退出。
+  ctx.effect(() => {
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const ensure = () => {
+      if (stopped) return
+      void ctx.database.prepared()
+        .then(() => store.ensureSearchIndexes())
+        .catch((error) => {
+          bridgeLogger.warn('postgres search index setup failed: %s', String(error))
+          if (!stopped) timer = setTimeout(ensure, 60_000)
+          timer?.unref?.()
+        })
+    }
+    timer = setTimeout(ensure, 1_500)
+    timer.unref?.()
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+    }
+  }, 'mtproto-bridge.search-indexes')
   const drafts = new DraftStore(ctx.database)
   const scheduledStore = new ScheduledMessageStore(ctx.database)
   const notificationSettings = new NotificationSettingsStore(

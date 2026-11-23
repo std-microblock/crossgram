@@ -353,4 +353,118 @@ describe('shared media part index', () => {
     }
     expect(ctx).toBeTruthy()
   })
+
+  it('coalesces concurrent in-flight searchMessages and countSearchMessages retries', async () => {
+    const { store, counts } = await setup([
+      text('t1', BASE + 1, 'hello relay'),
+      text('t2', BASE + 2, 'relay again'),
+    ])
+    const pageQuery = { platformConversationIds: [alice.id], terms: ['relay'], limit: 20 }
+    const selectsBefore = counts.messageSelects
+    const [p1, p2, p3] = await Promise.all([
+      store.searchMessages(session.platformSessionId, pageQuery),
+      store.searchMessages(session.platformSessionId, pageQuery),
+      store.searchMessages(session.platformSessionId, pageQuery),
+    ])
+    expect(counts.messageSelects - selectsBefore).toBe(1)
+    expect(p1).toEqual(p2)
+    expect(p2).toEqual(p3)
+
+    const countsBefore = counts.countQueries
+    const [c1, c2, c3] = await Promise.all([
+      store.countSearchMessages(session.platformSessionId, { platformConversationIds: [alice.id], terms: ['relay'] }),
+      store.countSearchMessages(session.platformSessionId, { platformConversationIds: [alice.id], terms: ['relay'] }),
+      store.countSearchMessages(session.platformSessionId, { platformConversationIds: [alice.id], terms: ['relay'] }),
+    ])
+    expect(counts.countQueries - countsBefore).toBe(1)
+    expect([c1, c2, c3]).toEqual([2, 2, 2])
+  })
+
+  it('skips countSearchMessages when page 1 already exhausted matches, and skips searchMessages when limit is 0', async () => {
+    const { store, counts } = await setup([
+      text('t1', BASE + 1, 'rare-term alpha'),
+      text('t2', BASE + 2, 'rare-term beta'),
+      text('t3', BASE + 3, 'common-term 1'),
+      text('t4', BASE + 4, 'common-term 2'),
+      text('t5', BASE + 5, 'common-term 3'),
+    ])
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation: alice, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [] } },
+      async getUser(_session, id) { return { id, firstName: id } },
+    }
+    const rpc = new DialogRpc(platform, session, store)
+    await rpc.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    const peer = { _: 'inputPeerUser' as const, userId: rpc.peerTlId(alice.id), accessHash: Long.ZERO }
+
+    // 2 条命中 < limit 20：首屏直接拿完，不再额外跑 countSearchMessages。
+    const countQueriesBeforeRare = counts.countQueries
+    const rare = await rpc.search({
+      _: 'messages.search', peer, q: 'rare-term', filter: { _: 'inputMessagesFilterEmpty' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 20, maxId: 0, minId: 0, hash: Long.ZERO,
+    })
+    expect(rare).toMatchObject({ _: 'messages.messages', messages: [{ _: 'message' }, { _: 'message' }] })
+    expect(counts.countQueries).toBe(countQueriesBeforeRare)
+
+    // limit === 0 只求总数：不跑 searchMessages 分页读取，只查一次 count。
+    const selectsBeforeCountOnly = counts.messageSelects
+    const countQueriesBeforeCountOnly = counts.countQueries
+    const countOnly = await rpc.search({
+      _: 'messages.search', peer, q: 'common-term', filter: { _: 'inputMessagesFilterEmpty' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 0, maxId: 0, minId: 0, hash: Long.ZERO,
+    })
+    expect(countOnly).toMatchObject({ _: 'messages.messagesSlice', count: 3, messages: [] })
+    expect(counts.messageSelects).toBe(selectsBeforeCountOnly)
+    expect(counts.countQueries).toBe(countQueriesBeforeCountOnly + 1)
+  })
+
+  it('caches contacts across rapid contacts.search keystrokes while keeping explicit getContacts fresh', async () => {
+    const { store } = await setup([])
+    let contactFetches = 0
+    let contactList = [{ id: 'bob', firstName: 'Bob' }]
+    const platform: IMPlatform = {
+      capabilities: {
+        history: true,
+        send: { text: true, images: true, files: true, mixed: true, maxTextLength: 4096, maxMedia: 10 },
+        conversations: { groups: true, channels: true, subchannels: true },
+      },
+      async subscribe() { return () => {} },
+      async sendMessage() { throw new Error('unused') },
+      async getDialogs() { return { dialogs: [{ conversation: alice, unreadCount: 0 }] } },
+      async getHistory() { return { messages: [] } },
+      async getUser(_session, id) { return { id, firstName: id } },
+      async getContacts() {
+        contactFetches++
+        return { users: contactList }
+      },
+    }
+    const rpc = new DialogRpc(platform, session, store)
+    const [first, second] = await Promise.all([
+      rpc.searchContacts({ _: 'contacts.search', q: 'b', limit: 10 }),
+      rpc.searchContacts({ _: 'contacts.search', q: 'bo', limit: 10 }),
+    ])
+    const third = await rpc.searchContacts({ _: 'contacts.search', q: 'bob', limit: 10 })
+    expect(contactFetches).toBe(1)
+    expect(first.myResults).toHaveLength(1)
+    expect(second.myResults).toHaveLength(1)
+    expect(third.myResults).toHaveLength(1)
+
+    // 显式 getContacts 依然刷新上游通讯录，并更新后续 contacts.search 缓存。
+    contactList = [{ id: 'charlie', firstName: 'Charlie' }]
+    await rpc.getContacts()
+    expect(contactFetches).toBe(2)
+    const afterRefresh = await rpc.searchContacts({ _: 'contacts.search', q: 'charlie', limit: 10 })
+    expect(afterRefresh.myResults).toHaveLength(1)
+    expect(contactFetches).toBe(2)
+  })
 })
