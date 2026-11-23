@@ -331,8 +331,15 @@ export class ServerSession {
     private readonly _authKeyData: AuthKeyDataStore,
     private readonly _keyStore?: AuthKeyStore,
     private readonly _debug?: MtprotoDebugListener,
-    private readonly _onApiLayer?: (authKeyId: Uint8Array, layer: number) => void,
-    private readonly _getApiLayer?: (authKeyId: Uint8Array) => number | undefined,
+    private readonly _onApiLayer?: (
+      authKeyId: Uint8Array,
+      layer: number,
+      clientInfo?: MtprotoClientInfo,
+    ) => void,
+    private readonly _getApiLayer?: (
+      authKeyId: Uint8Array,
+      clientInfo?: MtprotoClientInfo,
+    ) => number | undefined,
     private readonly _onLoginTokenIssued?: (authKeyId: Uint8Array, token: Uint8Array, origin: ServerConnection) => void,
     private readonly _dependencyRegistry?: RpcDependencyRegistry,
     private readonly _pqChallenges = new PqChallengeStore(),
@@ -439,6 +446,11 @@ export class ServerSession {
     return this._apiLayer
   }
 
+  /** 本连接通过 initConnection 声明的客户端身份，用于跨连接共享 API layer。 */
+  get clientInfo(): MtprotoClientInfo | undefined {
+    return this._clientInfo
+  }
+
   get acceptsUpdates(): boolean {
     return this._acceptsUpdates
   }
@@ -447,6 +459,7 @@ export class ServerSession {
     return this._connection
   }
 
+  /** 采用另一条连接（同 auth key 或同客户端）已经协商出的 API layer。 */
   applyApiLayer(layer: number): void {
     this._setApiLayer(layer, false)
   }
@@ -1395,7 +1408,10 @@ export class ServerSession {
       if (unwrapped.apiLayer !== null) {
         this._setApiLayer(unwrapped.apiLayer)
       } else if (this._apiLayer === null && this._permAuthKey.ready) {
-        const inherited = this._getApiLayer?.(this._permAuthKey.id)
+        // 裸 RPC 不带 layer：先看这个 auth key 记过什么，再看同一客户端在别的连接上协商过什么。
+        // 媒体连接上的 auth.importAuthorization 往往就是这条路上的第一个请求，而客户端对它的
+        // 400 CONNECTION_NOT_INITED 不做重发，继承不到层就会把整条连接冻住。
+        const inherited = this._getApiLayer?.(this._permAuthKey.id, this._clientInfo)
         if (inherited !== undefined) this._setApiLayer(inherited, false)
       }
     }
@@ -1715,7 +1731,9 @@ export class ServerSession {
       layer === null ? 'none' : resolveApiSchemaProfile(layer) ?? 'none',
       layer === null ? 0 : resolveApiSchemaLayer(layer) ?? 0,
     )
-    if (publish && layer !== null && this._permAuthKey.ready) this._onApiLayer?.(this._permAuthKey.id, layer)
+    if (publish && layer !== null && this._permAuthKey.ready) {
+      this._onApiLayer?.(this._permAuthKey.id, layer, this._clientInfo)
+    }
     const pending = this._pendingUpdates
     this._pendingUpdates = []
     for (const { update, clientSessionId } of pending) this.sendUpdate(update, clientSessionId)

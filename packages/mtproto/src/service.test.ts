@@ -50,6 +50,7 @@ interface FakeSession {
   sendLoginTokenUpdate: ReturnType<typeof vi.fn>
   supersedeLoginToken: ReturnType<typeof vi.fn>
   apiLayer: number | null
+  clientInfo?: { apiId: number, deviceModel: string, appVersion: string }
   applyApiLayer: ReturnType<typeof vi.fn>
 }
 
@@ -264,6 +265,79 @@ describe('Mtproto durable revocation recovery', () => {
       expect(origin.connection.close).not.toHaveBeenCalled()
       expect(sibling.connection.close).not.toHaveBeenCalled()
     } finally {
+      await stop()
+    }
+  })
+})
+
+describe('Mtproto API layer memory', () => {
+  const desktop = {
+    apiId: 2040, deviceModel: 'Desktop', systemVersion: 'linux',
+    appVersion: '4.16.8', systemLangCode: 'en', langPack: '', langCode: 'en',
+  }
+
+  it('hands a negotiated layer to the same client\'s other connections', async () => {
+    const { service, stop } = await makeService()
+    try {
+      const main = fakeSession(authKeyA, fakeConnection(0), true)
+      main.apiLayer = null
+      main.clientInfo = desktop
+      // 媒体连接：新的 auth key，还没协商过层。
+      const media = fakeSession(authKeyB, fakeConnection(0), true)
+      media.apiLayer = null
+      media.clientInfo = { ...desktop }
+      // 另一个版本的客户端不该被牵连。
+      const other = fakeSession(new Uint8Array(16).fill(0x63), fakeConnection(0), true)
+      other.apiLayer = null
+      other.clientInfo = { ...desktop, appVersion: '5.0.1' }
+      const sessions = sessionsOf(service)
+      sessions.clear()
+      for (const session of [main, media, other]) sessions.add(session)
+
+      await (service as unknown as {
+        _rememberApiLayer: (
+          authKeyId: Uint8Array,
+          layer: number,
+          clientInfo?: typeof desktop,
+        ) => Promise<void>
+      })._rememberApiLayer(authKeyA, 228, desktop)
+
+      expect(main.applyApiLayer).toHaveBeenCalledWith(228)
+      expect(media.applyApiLayer).toHaveBeenCalledWith(228)
+      expect(other.applyApiLayer).not.toHaveBeenCalled()
+    } finally {
+      sessionsOf(service).clear()
+      await stop()
+    }
+  })
+
+  it('answers a bare RPC for a new key from the layer its client already used', async () => {
+    const { service, stop } = await makeService()
+    try {
+      await (service as unknown as {
+        _rememberApiLayer: (
+          authKeyId: Uint8Array,
+          layer: number,
+          clientInfo?: typeof desktop,
+        ) => Promise<void>
+      })._rememberApiLayer(authKeyA, 228, desktop)
+
+      const media = fakeSession(authKeyB, fakeConnection(0), true)
+      media.apiLayer = null
+      media.clientInfo = { ...desktop }
+
+      const sessions = sessionsOf(service)
+      sessions.clear()
+      sessions.add(media)
+
+      // 服务端在推 update / 派发裸 RPC 前都会走这条路：媒体连接靠它避开 CONNECTION_NOT_INITED。
+      ;(service as unknown as {
+        _applyKnownApiLayer: (session: FakeSession) => void
+      })._applyKnownApiLayer(media)
+
+      expect(media.applyApiLayer).toHaveBeenCalledWith(228)
+    } finally {
+      sessionsOf(service).clear()
       await stop()
     }
   })

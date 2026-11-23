@@ -213,7 +213,8 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     },
     reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
     poke: { maxCount: QQ_POKE_MAX_COUNT },
-    stickers: { native: true, upload: false, formats: ['static', 'animated', 'video'] },
+    // QQ 没有“把任意图片注册成表情”的接口：native 走表情元素，upload 计划降级成图片/文件发送。
+    stickers: { native: true, upload: true, formats: ['static', 'animated', 'video'] },
   }
 
   readonly client: QQNTClient
@@ -1262,21 +1263,34 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     }
     const mediaParts = content.parts.filter((part) => part.type === 'media')
     const stickerParts = content.parts.filter((part) => part.type === 'sticker')
-    if (stickerParts.length > 1 || stickerParts.length && mediaParts.length) {
+    if (stickerParts.length > 1 || mediaParts.length > 9) {
       throw new Error('QQNT supports either one sticker or up to nine media items per message')
     }
     const stickerPart = stickerParts[0]
     let sticker: QQStickerReference | undefined
+    let stickerMedia: QQOutboundMedia | undefined
     if (stickerPart?.type === 'sticker') {
-      if (stickerPart.sticker.type !== 'native') {
-        throw new Error('QQNT only accepts native QQ sticker send plans')
+      if (stickerPart.sticker.type === 'native') {
+        sticker = stickerPart.sticker.reference as unknown as QQStickerReference
+      } else {
+        // 第三方贴纸（QQ 里没有对应表情）没有原生引用，只能把它当图片（动态图）或文件（视频贴纸）发出去。
+        // 这样至少能发到群里，代价是对方看到的是一张图，不再是可收藏的 QQ 表情。
+        const plan = stickerPart.sticker
+        stickerMedia = {
+          kind: plan.format === 'video' ? 'file' : 'image',
+          name: `sticker-${plan.stickerId}.${stickerExtension(plan.mimeType, plan.format)}`,
+          mimeType: plan.mimeType,
+          width: plan.width,
+          height: plan.height,
+          source: plan.source,
+        }
       }
-      sticker = stickerPart.sticker.reference as unknown as QQStickerReference
     }
-    if (mediaParts.length > 9) throw new Error('QQNT supports at most nine media items per message')
+    const mediaCount = mediaParts.length + (stickerMedia ? 1 : 0)
+    if (mediaCount > 9) throw new Error('QQNT supports at most nine media items per message')
     const text = textParts.map((part) => part.text).join('\n') || undefined
     const voiceParts = mediaParts.filter((part) => part.media.voice)
-    if (voiceParts.length && (voiceParts.length !== 1 || mediaParts.length !== 1 || text || sticker || content.replyToNativeSequence)) {
+    if (voiceParts.length && (voiceParts.length !== 1 || mediaCount !== 1 || text || sticker || content.replyToNativeSequence)) {
       throw new Error('QQNT voice messages must contain exactly one voice item')
     }
     const media: QQOutboundMedia[] = mediaParts.map((part, index) => ({
@@ -1293,7 +1307,9 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     let mediaCursor = 0
     const parts: QQSendPart[] = content.parts.flatMap((part): QQSendPart[] => part.type === 'text'
       ? [textParts[textCursor++]!]
-      : part.type === 'media' ? [{ type: 'media', media: media[mediaCursor++]! }] : [])
+      : part.type === 'media'
+        ? [{ type: 'media', media: media[mediaCursor++]! }]
+        : stickerMedia ? [{ type: 'media', media: stickerMedia }] : [])
     const originRequestId = randomUUID()
     this.originSessions.set(originRequestId, session.platformSessionId)
     try {
@@ -2731,6 +2747,25 @@ function fileVideoMimeType(name: string | undefined): string | undefined {
   if (extension === 'flv') return 'video/x-flv'
   if (extension === 'asf') return 'video/x-ms-asf'
   if (extension === 'mod') return 'video/mod'
+}
+
+/**
+ * 贴纸降级发送时的文件后缀。
+ *
+ * QQ 只按后缀/mime 判断能不能出图，第三方贴纸的 mime 五花八门，这里收敛成它认识的几种；
+ * 认不出时按格式给 png（静态/动图）或 webm（视频贴纸，走文件）。
+ */
+function stickerExtension(mimeType: string, format: string): string {
+  const known: Record<string, string> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/apng': 'apng',
+    'image/webp': 'webp',
+    'application/x-tgsticker': 'tgs',
+    'video/webm': 'webm',
+  }
+  return known[mimeType.toLowerCase()] ?? (format === 'video' ? 'webm' : 'png')
 }
 
 function isOrdinaryQQFile(media: Pick<QQOutboundMedia, 'kind' | 'name' | 'mimeType'>): boolean {

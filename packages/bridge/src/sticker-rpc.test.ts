@@ -27,6 +27,30 @@ describe('StickerRpc', () => {
     expect(registry.revisionFor('first')).toBe('1:1')
   })
 
+  it('projects an assigned pack as a complete updateNewStickerSet payload', async () => {
+    const { rpc } = stickerHarness()
+
+    const set = await rpc.makeStickerSetUpdate('qq:stickers', '11690')
+
+    expect(set?._).toBe('messages.stickerSet')
+    expect(set?.set).toMatchObject({
+      _: 'stickerSet', title: 'QQ Pack', count: 1,
+      // Telegram Desktop 丢弃没有 installed_date 或带 archived 的 updateNewStickerSet。
+      installedDate: Math.floor(new Date('2025-01-01T00:00:00Z').getTime() / 1000),
+      archived: undefined,
+    })
+    expect(set?.documents).toHaveLength(1)
+    expect(set?.packs).toEqual([expect.objectContaining({ _: 'stickerPack' })])
+  })
+
+  it('has no set payload when the pack or provider is gone', async () => {
+    const { rpc, provider } = stickerHarness()
+    provider.getPack = vi.fn(async () => null)
+
+    await expect(rpc.makeStickerSetUpdate('qq:stickers', 'missing-pack')).resolves.toBeUndefined()
+    await expect(rpc.makeStickerSetUpdate('unknown:provider', '11690')).resolves.toBeUndefined()
+  })
+
   it.each([
     ['GIF', 'image/gif', 'market:11690:gif-wave'],
     ['APNG', 'image/apng', 'market:11690:apng-wave'],
