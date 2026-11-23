@@ -134,6 +134,50 @@ export class UpdateManager {
    * 补全系统提示中涉及的群成员资料并落库分配 Telegram userId。
    * 刚入群等尚未发过消息的成员可能还没有本地记录；拉取资料失败时回退到提示自带的昵称。
    */
+  /**
+   * 补全正文 mention 实体引用的用户并落库分配 Telegram userId，使其随 update 下发，
+   * 客户端点击 mention 才能解析出用户并打开 profile。
+   */
+  private async _hydrateMentionUsers(
+    session: PlatformSession,
+    message: IMMessage,
+    covered: Iterable<string> = [],
+  ): Promise<{ ids: Map<string, number>, users: tl.RawUser[] }> {
+    const known = new Set(covered)
+    const ids = new Set(message.content.parts.flatMap((part) => part.type === 'text' ? part.entities ?? [] : [])
+      .flatMap((entity) => entity.type === 'mention' ? [entity.userId] : [])
+      .filter((id) => id && id !== session.userId && !known.has(id)))
+    if (!ids.size) return { ids: new Map(), users: [] }
+    const platform = this._registry.require(session.platformId)
+    const profiles = await Promise.all([...ids].map(async (id) => {
+      try {
+        const profile = await platform.getUser?.(session, id)
+        if (profile) return profile
+      } catch (error) {
+        this._onTrace?.(
+          'mention user profile lookup failed platform=%s session=%s user=%s error=%s',
+          session.platformId, session.platformSessionId, id, String(error),
+        )
+      }
+      const stored = await this._store.getUser(session.platformId, id)
+      return stored ? toUser(stored) : { id, firstName: id }
+    }))
+    const rows = await this._store.upsertUsers(session, profiles)
+    return {
+      ids: new Map(rows.map((row) => [row.platformUserId, row.id])),
+      users: rows.map((row) => {
+        const user = toUser(row)
+        return makeUser({
+          id: row.id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          username: user.username,
+          photo: user.avatar ? makeUpdateAvatar(user.avatar.id, this._dcId, 'user') : undefined,
+        })
+      }),
+    }
+  }
+
   private async _hydrateServiceActionMembers(
     session: PlatformSession,
     message: IMMessage,
@@ -694,6 +738,8 @@ export class UpdateManager {
     for (const [id, tlId] of reactionUsers.ids) userIds.set(id, tlId)
     const noticeUsers = await this._hydrateServiceActionMembers(session, visibleMessage, userIds.keys())
     for (const [id, tlId] of noticeUsers.ids) userIds.set(id, tlId)
+    const mentionUsers = await this._hydrateMentionUsers(session, visibleMessage, userIds.keys())
+    for (const [id, tlId] of mentionUsers.ids) userIds.set(id, tlId)
     let pts = delivery.pts - delivery.ptsCount
     const addedTlMessageIds = new Set(result.addedTlMessageIds)
     const updates: tl.TypeUpdate[] = []
@@ -894,7 +940,7 @@ export class UpdateManager {
       photo: self.avatar ? makeUpdateAvatar(self.avatar.id, this._dcId, 'user') : undefined,
     })
     const users = uniqueUpdateUsers(senderRow.id === selfRow.id
-      ? [selfUser, ...reactionUsers.users, ...noticeUsers.users]
+      ? [selfUser, ...reactionUsers.users, ...noticeUsers.users, ...mentionUsers.users]
       : [selfUser, makeUser({
           id: senderRow.id,
           bot: sender.metadata?.bot === true || undefined,
@@ -902,7 +948,7 @@ export class UpdateManager {
           lastName: sender.lastName,
           username: sender.username,
           photo: sender.avatar ? makeUpdateAvatar(sender.avatar.id, this._dcId, 'user') : undefined,
-        }), ...reactionUsers.users, ...noticeUsers.users])
+        }), ...reactionUsers.users, ...noticeUsers.users, ...mentionUsers.users])
     const chats = [
       ...(displayConversation.kind === 'direct'
         ? []

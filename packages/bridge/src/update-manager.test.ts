@@ -172,7 +172,8 @@ describe('UpdateManager', () => {
     const read = vi.spyOn(store, 'readUsers')
     await manager.publish(session, { event: { type: 'message', conversation, message }, result })
     expect(scan).not.toHaveBeenCalled()
-    expect(read).toHaveBeenCalledWith(session.platformId, ['bob', 'carol'])
+    // bob 由 _hydrateMentionUsers 预先解析，fallback 只需补投影中间件引入的 carol。
+    expect(read).toHaveBeenCalledWith(session.platformId, ['carol'])
     expect(sent).toHaveLength(2)
     for (const push of sent) expect(push.update).toMatchObject({ updates: [{ message: { entities: [
       { _: 'messageEntityMentionName', userId: bob.id }, { _: 'messageEntityMentionName', userId: carol.id },
@@ -895,6 +896,26 @@ describe('UpdateManager', () => {
     expect((update.message as tl.RawMessage).entities).toEqual([
       { _: 'messageEntityMentionName', offset: 5, length: 4, userId: expect.any(Number) },
     ])
+  })
+
+  it('ships mention users inside the update payload so clients can resolve profile links', async () => {
+    const { store, manager, sent } = await createHarness()
+    const conversation: IMConversation = { id: 'mention-users', kind: 'group', title: 'Mention Users' }
+    const message: IMMessage = {
+      id: 'mention-user-live', conversationId: conversation.id, senderId: 'alice', timestamp: 1_800_000_004,
+      content: { parts: [{ type: 'text', text: 'welcome @Bob', entities: [
+        { type: 'mention', offset: 8, length: 4, userId: 'bob' },
+      ] }] },
+    }
+    const result = await store.ingest(session, conversation, message)
+    await manager.publish(session, { event: { type: 'message', conversation, message }, result })
+
+    const payload = roundTrip(sent[0].update) as tl.RawUpdates
+    const update = payload.updates[0] as tl.RawUpdateNewChannelMessage
+    const entity = (update.message as tl.RawMessage).entities?.[0]
+    const mentionedId = (entity as tl.RawMessageEntityMentionName | undefined)?.userId
+    expect(mentionedId).toBeTypeOf('number')
+    expect(payload.users.map((user) => user.id)).toContain(mentionedId)
   })
 
   it('includes clickable URL entities in live updates', async () => {
