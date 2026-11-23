@@ -407,7 +407,7 @@ export interface WireRequest {
   id: string
   kind: WireRequestKind
   status: WireRequestStatus
-  requester: { id: string, name?: string }
+  requester: { id: string, name?: string, /** QQ 等级与数字 QQ 号（fetchUserDetailInfo 拉取），帮助判断是否小号。 */ level?: number, uin?: string }
   group?: { id: string, name?: string }
   message?: string
   timestamp?: string | number

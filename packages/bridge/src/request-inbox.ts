@@ -1,4 +1,4 @@
-import type { IMConversation, IMMessage, IMPlatform, IMRequest, IMRequestAction, IMUser, PlatformSession } from './platform.js'
+import type { IMConversation, IMMessage, IMPlatform, IMRequest, IMRequestAction, IMTextEntity, IMUser, PlatformSession } from './platform.js'
 import type { MessageStore } from './message-store.js'
 import type { PlatformRegistry } from './platform-manager.js'
 import {
@@ -38,7 +38,7 @@ export function requestInboxMessage(request: IMRequest): IMMessage {
     senderId: REQUEST_INBOX_SENDER_ID,
     sender: requestInboxSender(),
     content: {
-      parts: [{ type: 'text', text: requestInboxText(request) }],
+      parts: [{ type: 'text', text: requestInboxText(request), entities: requesterEntities(request) }],
       ...(request.state === 'pending' ? {
         inlineKeyboard: {
           rows: [{ buttons: [
@@ -178,12 +178,19 @@ export class RequestInboxSystemPeerProvider implements SystemPeerProvider {
 }
 
 function requestInboxText(request: IMRequest): string {
-  const requester = request.requester.firstName || request.requester.id
+  const requester = `${request.requester.firstName || request.requester.id}${requesterSuffix(request)}`
   const lines = [
     request.kind === 'friend' ? '好友申请' : '入群申请',
     `申请人：${requester}`,
   ]
-  if (request.kind === 'group-join') lines.push(`目标群：${request.group?.title ?? request.group?.id ?? '未知群'}`)
+  if (request.kind === 'group-join') {
+    const group = request.group
+    lines.push(`目标群：${(group?.title ?? group?.id ?? '未知群') + (group && /^\d+$/u.test(group.id) && group.title ? ` (${group.id})` : '')}`)
+  }
+  if (typeof request.metadata?.qqRequesterLevel === 'number') {
+    const badge = qqLevelBadge(request.metadata.qqRequesterLevel)
+    lines.push(`QQ 等级：${request.metadata.qqRequesterLevel}${badge ? `（${badge}）` : ''}`)
+  }
   if (request.metadata?.qqRequestSource === 'doubt') {
     lines.push('QQ 已过滤')
     if (typeof request.metadata.qqRequestReason === 'string' && request.metadata.qqRequestReason.trim()) {
@@ -193,6 +200,31 @@ function requestInboxText(request: IMRequest): string {
   lines.push(`验证信息：${request.message || '无'}`)
   lines.push(`状态：${request.state === 'pending' ? '待处理' : request.state === 'accepted' ? '已接受' : '已拒绝'}`)
   return lines.join('\n')
+}
+
+export /** QQ 等级图标：4 星=1 月，4 月=1 日，4 日=1 皇冠；0 级或解析失败时只显示数字。 */
+function qqLevelBadge(level: number): string {
+  if (!Number.isInteger(level) || level <= 0) return ''
+  const counts = [
+    [Math.floor(level / 64), '👑'],
+    [Math.floor(level % 64 / 16), '☀️'],
+    [Math.floor(level % 16 / 4), '🌙'],
+    [level % 4, '⭐'],
+  ] as const
+  return counts.map(([count, icon]) => icon.repeat(count)).join('')
+}
+
+export /** 申请人昵称后的数字 QQ 号后缀（uid 不可读时无后缀）。 */
+function requesterSuffix(request: IMRequest): string {
+  const qq = request.requester.metadata?.qq
+  return typeof qq === 'string' && /^\d+$/u.test(qq) ? ` (${qq})` : ''
+}
+
+/** 申请人昵称（含数字后缀）上的 mention，投影为 Telegram 用户 profile 链接。 */
+function requesterEntities(request: IMRequest): IMTextEntity[] | undefined {
+  const offset = `申请人：`.length
+  const length = (request.requester.firstName || request.requester.id).length + requesterSuffix(request).length
+  return length > 0 ? [{ type: 'mention', offset, length, userId: request.requester.id }] : undefined
 }
 
 export function requestTimestamp(value: IMRequest['createdAt']): number {

@@ -184,6 +184,21 @@ describe('request inbox timestamps', () => {
     expect(message.content.parts).toEqual([{
       type: 'text',
       text: '好友申请\n申请人：Alice\nQQ 已过滤\n风险提示：疑似营销账号\n验证信息：无\n状态：待处理',
+      entities: [{ type: 'mention', offset: 4, length: 5, userId: 'alice' }],
+    }])
+  })
+
+  it('shows the requester QQ level with crown/sun/moon/star icons on group-join requests', () => {
+    const message = requestInboxMessage({
+      id: 'leveled-request', kind: 'group-join', state: 'pending',
+      requester: { id: 'bob', firstName: 'Bob', metadata: { qq: '1234567' } },
+      group: { id: '123456', kind: 'group', title: 'Group' },
+      metadata: { qqRequesterLevel: 58 },
+    })
+    expect(message.content.parts).toEqual([{
+      type: 'text',
+      text: '入群申请\n申请人：Bob (1234567)\n目标群：Group (123456)\nQQ 等级：58（☀️☀️☀️🌙🌙⭐⭐）\n验证信息：无\n状态：待处理',
+      entities: [{ type: 'mention', offset: 4, length: 13, userId: 'bob' }],
     }])
   })
 
@@ -195,6 +210,7 @@ describe('request inbox timestamps', () => {
     })
     expect(message.content.parts).toEqual([{
       type: 'text', text: '好友申请\n申请人：Alice\nQQ 已过滤\n验证信息：无\n状态：待处理',
+      entities: [{ type: 'mention', offset: 4, length: 5, userId: 'alice' }],
     }])
   })
 })

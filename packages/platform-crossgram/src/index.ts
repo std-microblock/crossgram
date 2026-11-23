@@ -2663,6 +2663,7 @@ function mapRequest(input: WireRequest): IMRequest<QQMediaLocator> {
     requester: {
       id: input.requester.id,
       firstName: input.requester.name ?? input.requester.id,
+      ...(input.requester.uin ? { metadata: qqUserMetadata({ numericId: input.requester.uin }) } : {}),
     },
     group: input.group ? {
       id: input.group.id,
@@ -2671,10 +2672,11 @@ function mapRequest(input: WireRequest): IMRequest<QQMediaLocator> {
     } : undefined,
     message: input.message,
     createdAt: input.timestamp,
-    ...(input.source || input.reason ? {
+    ...(input.source || input.reason || input.requester.level !== undefined ? {
       metadata: {
         ...(input.source ? { qqRequestSource: input.source } : {}),
         ...(input.reason ? { qqRequestReason: input.reason } : {}),
+        ...(input.requester.level !== undefined ? { qqRequesterLevel: input.requester.level } : {}),
       },
     } : {}),
   }
