@@ -220,11 +220,12 @@ function requesterSuffix(request: IMRequest): string {
   return typeof qq === 'string' && /^\d+$/u.test(qq) ? ` (${qq})` : ''
 }
 
-/** 申请人昵称（含数字后缀）上的 mention，投影为 Telegram 用户 profile 链接。 */
+/** 申请人昵称上的 mention，投影为 Telegram 用户 profile 链接；偏移相对整条收件箱消息文本（含首行标题与换行）。 */
 function requesterEntities(request: IMRequest): IMTextEntity[] | undefined {
-  const offset = `申请人：`.length
-  const length = (request.requester.firstName || request.requester.id).length + requesterSuffix(request).length
-  return length > 0 ? [{ type: 'mention', offset, length, userId: request.requester.id }] : undefined
+  const name = request.requester.firstName || request.requester.id
+  if (!name) return undefined
+  const offset = (request.kind === 'friend' ? '好友申请' : '入群申请').length + 1 + `申请人：`.length
+  return [{ type: 'mention', offset, length: name.length, userId: request.requester.id }]
 }
 
 export function requestTimestamp(value: IMRequest['createdAt']): number {

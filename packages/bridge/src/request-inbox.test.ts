@@ -184,7 +184,7 @@ describe('request inbox timestamps', () => {
     expect(message.content.parts).toEqual([{
       type: 'text',
       text: '好友申请\n申请人：Alice\nQQ 已过滤\n风险提示：疑似营销账号\n验证信息：无\n状态：待处理',
-      entities: [{ type: 'mention', offset: 4, length: 5, userId: 'alice' }],
+      entities: [{ type: 'mention', offset: 9, length: 5, userId: 'alice' }],
     }])
   })
 
@@ -198,7 +198,7 @@ describe('request inbox timestamps', () => {
     expect(message.content.parts).toEqual([{
       type: 'text',
       text: '入群申请\n申请人：Bob (1234567)\n目标群：Group (123456)\nQQ 等级：58（☀️☀️☀️🌙🌙⭐⭐）\n验证信息：无\n状态：待处理',
-      entities: [{ type: 'mention', offset: 4, length: 13, userId: 'bob' }],
+      entities: [{ type: 'mention', offset: 9, length: 3, userId: 'bob' }],
     }])
   })
 
@@ -210,7 +210,7 @@ describe('request inbox timestamps', () => {
     })
     expect(message.content.parts).toEqual([{
       type: 'text', text: '好友申请\n申请人：Alice\nQQ 已过滤\n验证信息：无\n状态：待处理',
-      entities: [{ type: 'mention', offset: 4, length: 5, userId: 'alice' }],
+      entities: [{ type: 'mention', offset: 9, length: 5, userId: 'alice' }],
     }])
   })
 })
