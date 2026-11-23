@@ -10,7 +10,7 @@ import {
   isBareVector, type RpcResult, type ServerRpcContext,
 } from '@mtproto-relay/mtproto'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
-import { DialogRpc, stableId } from './dialogs.js'
+import { DialogRpc, peerTlSeed, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { MUTE_FOREVER, NotificationSettingsStore } from './notification-settings.js'
@@ -226,7 +226,7 @@ describe('notification settings RPC e2e', () => {
     ]))
   })
 
-  it('mirrors QQ group message masks in peer notify settings and dialog materialization', async () => {
+  it('mirrors QQ group message masks unless the user muted the chat in Telegram', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
     await Promise.all(fibers)
@@ -258,7 +258,7 @@ describe('notification settings RPC e2e', () => {
     })
     const peer = (id: string) => ({
       _: 'inputNotifyPeer' as const,
-      peer: { _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE },
+      peer: { _: 'inputPeerChannel' as const, channelId: stableId(peerTlSeed(session.platformSessionId, id)), accessHash: Long.ONE },
     })
 
     await expect(roundTripRpc(rpcHarness, {
@@ -270,9 +270,12 @@ describe('notification settings RPC e2e', () => {
       settings: { _: 'inputPeerNotifySettings', muteUntil: 123 },
     })).resolves.toEqual({ _: 'boolTrue' })
 
+    // The user muted mask-notify in Telegram, so the Telegram override answers
+    // instead of the QQ "receive and notify" mask; without it the mute would be
+    // reverted on the very next read.
     await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-notify'),
-    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
     await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('mask-assistant'),
     })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
@@ -318,11 +321,11 @@ describe('notification settings RPC e2e', () => {
         (dialog.peer as tl.RawPeerChannel).channelId,
         dialog.notifySettings.muteUntil,
       ]))
-    expect(muteUntilByPeer.get(stableId('peer:mask-notify'))).toBe(0)
-    expect(muteUntilByPeer.get(stableId('peer:mask-assistant'))).toBe(MUTE_FOREVER)
-    expect(muteUntilByPeer.get(stableId('peer:mask-receive'))).toBe(MUTE_FOREVER)
-    expect(muteUntilByPeer.get(stableId('peer:mask-unspecified'))).toBe(123)
-    expect(muteUntilByPeer.get(stableId('peer:mask-shield'))).toBe(MUTE_FOREVER)
+    expect(muteUntilByPeer.get(stableId(peerTlSeed(session.platformSessionId, 'mask-notify')))).toBe(MUTE_FOREVER)
+    expect(muteUntilByPeer.get(stableId(peerTlSeed(session.platformSessionId, 'mask-assistant')))).toBe(MUTE_FOREVER)
+    expect(muteUntilByPeer.get(stableId(peerTlSeed(session.platformSessionId, 'mask-receive')))).toBe(MUTE_FOREVER)
+    expect(muteUntilByPeer.get(stableId(peerTlSeed(session.platformSessionId, 'mask-unspecified')))).toBe(123)
+    expect(muteUntilByPeer.get(stableId(peerTlSeed(session.platformSessionId, 'mask-shield')))).toBe(MUTE_FOREVER)
   })
 
   it('round-trips group defaults and durable per-chat overrides through TL and SQLite', async () => {
@@ -350,7 +353,7 @@ describe('notification settings RPC e2e', () => {
 
     const peer = {
       _: 'inputNotifyPeer' as const,
-      peer: { _: 'inputPeerChannel' as const, channelId: stableId('peer:group-1'), accessHash: Long.ONE },
+      peer: { _: 'inputPeerChannel' as const, channelId: stableId(peerTlSeed(session.platformSessionId, 'group-1')), accessHash: Long.ONE },
     }
     await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer,
@@ -379,7 +382,7 @@ describe('notification settings RPC e2e', () => {
       _: 'updates',
       updates: [{
         _: 'updateNotifySettings',
-        peer: { _: 'notifyPeer', peer: { _: 'peerChannel', channelId: stableId('peer:group-1') } },
+        peer: { _: 'notifyPeer', peer: { _: 'peerChannel', channelId: stableId(peerTlSeed(session.platformSessionId, 'group-1')) } },
         notifySettings: { _: 'peerNotifySettings', muteUntil: 0 },
       }],
     })
@@ -396,7 +399,7 @@ describe('notification settings RPC e2e', () => {
       // resetting drops the override and re-inherits the group defaults
       {
         _: 'updateNotifySettings',
-        peer: { _: 'notifyPeer', peer: { _: 'peerChannel', channelId: stableId('peer:group-1') } },
+        peer: { _: 'notifyPeer', peer: { _: 'peerChannel', channelId: stableId(peerTlSeed(session.platformSessionId, 'group-1')) } },
         notifySettings: expect.objectContaining({
           _: 'peerNotifySettings', muteUntil: MUTE_FOREVER,
         }),
@@ -451,7 +454,7 @@ describe('notification settings RPC e2e', () => {
     })
     const peer = (id: string) => ({
       _: 'inputNotifyPeer' as const,
-      peer: { _: 'inputPeerChannel' as const, channelId: stableId(`peer:${id}`), accessHash: Long.ONE },
+      peer: { _: 'inputPeerChannel' as const, channelId: stableId(peerTlSeed(session.platformSessionId, id)), accessHash: Long.ONE },
     })
 
     // mute → mask 4 (receive without notification)
@@ -493,9 +496,9 @@ describe('notification settings RPC e2e', () => {
     })).resolves.toEqual({ _: 'boolTrue' })
     expect(maskCalls.length).toBe(callsBeforePlain)
 
-    // return to mask 1 (unmute) so the overlay reflects muteUntil 0 before the
-    // failure scenario, then verify a failed mute does not block the TG response
-    // nor flip the overlay (the previous successful mask stays in effect).
+    // return to mask 1 (unmute) before the failure scenario, then verify a failed
+    // writeback neither blocks the TG response nor loses the Telegram mute: the
+    // stored override answers even while the QQ mask still says "notify".
     await expect(roundTripRpc(rpcHarness, {
       _: 'account.updateNotifySettings', peer: peer('qq-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
@@ -510,10 +513,11 @@ describe('notification settings RPC e2e', () => {
       _: 'account.updateNotifySettings', peer: peer('qq-group'),
       settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
     })).resolves.toEqual({ _: 'boolTrue' })
-    // overlay is unchanged (still mask 1) because the platform call failed
+    // the mute lives in the notification-settings row, so a failed QQ writeback
+    // keeps it instead of falling back to the mask
     await expect(roundTripRpc(rpcHarness, {
       _: 'account.getNotifySettings', peer: peer('qq-group'),
-    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: 0 })
+    })).resolves.toMatchObject({ _: 'peerNotifySettings', muteUntil: MUTE_FOREVER })
     maskFailure = undefined
   })
 
