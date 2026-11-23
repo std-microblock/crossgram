@@ -115,6 +115,74 @@ describe('MTProto debug Cordis entry', () => {
     expect(listeners.size).toBe(0)
   })
 
+  it('applies a new buffer size from the page and trims the retained window', async () => {
+    const listeners = new Set<(event: MtprotoDebugEvent) => void>()
+    const cleanups: Array<() => void> = []
+    let data!: MtprotoDebugData
+    let apiRoute!: { callback: (req: any, res: any) => Promise<void> }
+    const ctx = {
+      mtproto: {},
+      webui: {
+        addEntry: (_files: unknown, value: MtprotoDebugData) => {
+          data = value
+          return { mutate: (callback: (target: MtprotoDebugData) => void) => callback(data) }
+        },
+      },
+      server: {
+        get(path: string, callback: (req: any, res: any) => Promise<void>) {
+          if (path === '/api/mtproto-debug/events') apiRoute = { callback }
+        },
+        post: () => undefined,
+        delete: () => undefined,
+      },
+      throttle: (callback: () => void) => callback,
+      on(_name: string, listener: (event: MtprotoDebugEvent) => void) {
+        listeners.add(listener)
+        const dispose = () => listeners.delete(listener)
+        cleanups.push(dispose)
+        return dispose
+      },
+      effect(callback: () => () => void) {
+        cleanups.push(callback())
+      },
+    }
+
+    apply(ctx as never, { maxEvents: 400 })
+    const emit = (name: string) => {
+      const event: MtprotoDebugEvent = {
+        direction: 'client->server', phase: 'message', connectionId: 'conn-1',
+        timestamp: Date.now(), payload: { _: name },
+      }
+      for (const listener of listeners) listener(event)
+    }
+    for (let index = 0; index < 500; index++) emit('call.' + index)
+
+    // Shrinking flushes the pending batch first, then drops whole chunks from
+    // the front, so the retained window never keeps more than the new cap.
+    await data.setMaxEvents(100)
+    expect(data.maxEvents).toBe(100)
+    expect(data.dropped).toBe(400)
+
+    const response = { headers: new Headers(), status: 200, body: undefined as unknown,
+      json(value: unknown) { this.body = value } }
+    const retained = async () => {
+      await apiRoute.callback({ query: new URLSearchParams() }, response)
+      return (response.body as { total: number, events: Array<{ name: string }> })
+    }
+    expect((await retained()).total).toBe(100)
+
+    emit('after.shrink')
+    expect((await retained()).total).toBeLessThanOrEqual(100)
+    expect(data.dropped).toBeGreaterThan(400)
+
+    await expect(data.setMaxEvents(50)).rejects.toThrow(/between 100 and 20000/)
+    await expect(data.setMaxEvents(1.5)).rejects.toThrow(/whole number/)
+    await expect(data.setMaxEvents('200' as unknown as number)).rejects.toThrow(/whole number/)
+    expect(data.maxEvents).toBe(100)
+
+    cleanups.forEach(cleanup => cleanup())
+  })
+
   it('can start in a paused state without retaining traffic', () => {
     const listeners = new Set<(event: MtprotoDebugEvent) => void>()
     let data!: MtprotoDebugData

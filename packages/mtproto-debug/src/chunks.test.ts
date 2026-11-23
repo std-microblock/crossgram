@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   appendChunkedEvents, chunkEvents, chunkKeys, countChunkedEvents,
-  flattenChunks, MAX_CHUNK_SIZE, replaceChunks, resolveChunkSize,
+  flattenChunks, MAX_CHUNK_SIZE, replaceChunks, resolveChunkSize, trimChunkedEvents,
 } from './chunks.js'
 import type { EventChunks } from './chunks.js'
 import type { CapturedMtprotoEvent } from './types.js'
@@ -78,6 +78,15 @@ describe('chunked capture buffer', () => {
     const retained = ids(chunks)
     expect(retained[retained.length - 1]).toBe(next)
     expect(retained).toEqual(retained.map((_, index) => retained[0] + index))
+  })
+
+  it('trims an existing buffer down to a smaller cap in whole chunks', () => {
+    const chunks = chunkEvents([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(event), 2)
+    expect(trimChunkedEvents(chunks, 4)).toBe(6)
+    expect(ids(chunks)).toEqual([7, 8, 9, 10])
+    // Growing the cap keeps everything and reports nothing dropped.
+    expect(trimChunkedEvents(chunks, 100)).toBe(0)
+    expect(ids(chunks)).toEqual([7, 8, 9, 10])
   })
 
   it('round-trips a flat list and resets in place', () => {
